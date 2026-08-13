@@ -722,6 +722,7 @@ struct NavigationProtocolTests {
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
         await testOfflineMapPollerRetriesTransientFailure()
         await testOfflineMapPollerStopsOnTerminalAndCancellation()
+        testOfflineMapJobFailureMessages()
         testOfflineMapCreateJobURLRequest()
         testOfflineMapListJobsURLRequest()
         testOfflineMapInventoryMutationURLRequests()
@@ -5659,6 +5660,37 @@ struct NavigationProtocolTests {
             "Re-estimating after retry…",
             "retry pending state has explicit copy"
         )
+        let retryWithStaleAvailableEstimate = decode(
+            """
+            {
+              "jobId": "estimate-retry-stale",
+              "status": "queued",
+              "attempts": 2,
+              "createdAt": "2026-08-10T00:00:00Z",
+              "preparationEstimate": {
+                "schemaVersion": 1,
+                "modelVersion": "map-preparation-v1",
+                "revision": 4,
+                "state": "available",
+                "generatedAt": "2026-08-10T01:00:00Z",
+                "attempt": 1,
+                "basedOnPhase": "building_complexity",
+                "confidence": "medium",
+                "remaining": {"lowerSeconds": 60, "upperSeconds": 120},
+                "basis": ["baseline_profile"],
+                "sampleCount": 24
+              }
+            }
+            """
+        )
+        assertEqual(
+            OfflineMapPreparationEstimatePresentation.presentation(
+                for: retryWithStaleAvailableEstimate,
+                now: now
+            )?.value,
+            "Re-estimating after retry…",
+            "newly claimed retry suppresses the previous attempt's stale estimate"
+        )
         let malformed = decode(
             """
             {
@@ -6003,6 +6035,40 @@ struct NavigationProtocolTests {
             excludedJobIds: ["job-regenerated", "job-running", "job-cached-old"]
         )
         assertEqual(none, nil, "terminal and ready-without-map jobs are not recoverable")
+
+        guard let legacyRetry = offlineMapJob(
+            jobId: "job-legacy-retry",
+            status: "failed",
+            errorCode: "map_build_failed",
+            attempts: 1,
+            maxAttempts: 3,
+            createdAt: "2026-07-12T09:00:00Z",
+            updatedAt: "2026-07-12T09:00:00Z",
+            clientInstallationId: "installation-mine"
+        ) else {
+            assert(false, "legacy retry recovery fixture should decode")
+            return
+        }
+        let legacySelection = OfflineMapJobRecoverySelector.select(
+            jobs: [legacyRetry],
+            clientInstallationId: "installation-mine",
+            now: Date(timeIntervalSince1970: 1_783_846_805)
+        )
+        assertEqual(
+            legacySelection?.jobId,
+            "job-legacy-retry",
+            "recovery discovers an old worker's transient failed-to-queued job"
+        )
+        let staleLegacySelection = OfflineMapJobRecoverySelector.select(
+            jobs: [legacyRetry],
+            clientInstallationId: "installation-mine",
+            now: Date(timeIntervalSince1970: 1_783_846_840)
+        )
+        assertEqual(
+            staleLegacySelection,
+            nil,
+            "recovery does not repeatedly adopt a permanent legacy-shaped failure"
+        )
 
     }
 
@@ -7571,11 +7637,90 @@ struct NavigationProtocolTests {
 
     @MainActor
     static func testOfflineMapPollerStopsOnTerminalAndCancellation() async {
-        guard let failed = offlineMapJob(status: "failed", error: "conversion failed"),
-              let running = offlineMapJob(status: "converting_features") else {
+        guard let failed = offlineMapJob(
+            status: "failed",
+            error: "selected building scope exceeds policy; jobId=failed-job",
+            errorCode: "building_scope_exceeded"
+        ),
+              let running = offlineMapJob(status: "converting_features"),
+              let exhausted = offlineMapJob(
+                status: "failed",
+                error: "worker failed; jobId=exhausted-job",
+                errorCode: "map_build_failed"
+              ),
+              let cancelled = offlineMapJob(status: "cancelled"),
+              let expired = offlineMapJob(status: "expired"),
+              let legacyRetryFailure = offlineMapJob(
+                status: "failed",
+                error: "temporary worker failure; jobId=legacy-retry-job",
+                errorCode: "map_build_failed",
+                attempts: 1,
+                maxAttempts: 3
+              ),
+              let queued = offlineMapJob(status: "queued", attempts: 1, maxAttempts: 3),
+              let ready = offlineMapJob(status: "ready", mapId: "map-ready") else {
             assert(false, "terminal poller test jobs should decode")
             return
         }
+
+        var legacyRetryFetchCount = 0
+        let legacyRetryResult = try? await OfflineMapJobPoller.waitForReady(
+            jobId: "legacy-retry-job",
+            pollIntervalNanoseconds: 0,
+            fetch: { _ in
+                legacyRetryFetchCount += 1
+                switch legacyRetryFetchCount {
+                case 1...3: return legacyRetryFailure
+                case 4: return queued
+                default: return ready
+                }
+            },
+            sleep: { _ in },
+            onUpdate: { _ in },
+            onRetry: {}
+        )
+        assertEqual(
+            legacyRetryResult?.mapId,
+            "map-ready",
+            "poller tolerates the old worker's transient failed-to-queued transition"
+        )
+        assertEqual(
+            legacyRetryFetchCount,
+            5,
+            "poller tolerates repeated legacy failures within the bounded grace window"
+        )
+
+        var inlineFailureFetchCount = 0
+        var inlineFailureClock: TimeInterval = 0
+        do {
+            _ = try await OfflineMapJobPoller.waitForReady(
+                jobId: "inline-failed-job",
+                pollIntervalNanoseconds: 0,
+                fetch: { _ in
+                    inlineFailureFetchCount += 1
+                    return legacyRetryFailure
+                },
+                sleep: { _ in },
+                onUpdate: { _ in },
+                onRetry: {},
+                legacyFailedGraceSeconds: 1,
+                monotonicNow: {
+                    defer { inlineFailureClock += 2 }
+                    return inlineFailureClock
+                }
+            )
+            assert(false, "repeated legacy-shaped failure should be terminal")
+        } catch OfflineMapPlatformError.mapJobFailed {
+            assertEqual(
+                inlineFailureFetchCount,
+                2,
+                "inline failure stops when the compatibility grace window ends"
+            )
+        } catch {
+            assert(false, "repeated legacy-shaped failure should use platform error")
+        }
+
+        assert(exhausted.isTerminal, "a failed final attempt is terminal")
 
         do {
             _ = try await OfflineMapJobPoller.waitForReady(
@@ -7587,11 +7732,78 @@ struct NavigationProtocolTests {
                 onRetry: {}
             )
             assert(false, "terminal map job should throw")
-        } catch OfflineMapPlatformError.serverStatus(let status, let body) {
-            assertEqual(status, 409, "terminal map job uses conflict status")
-            assert(body.contains("conversion failed"), "terminal map job preserves server error")
+        } catch OfflineMapPlatformError.mapJobFailed(let code, let message) {
+            assertEqual(code, "building_scope_exceeded", "terminal map job preserves typed server code")
+            assert(message.contains("selected building scope"), "terminal map job preserves diagnostic detail")
+            let displayMessage = OfflineMapPlatformError
+                .mapJobFailed(code: code, message: message)
+                .localizedDescription
+            assert(
+                displayMessage.contains("Choose a smaller area"),
+                "building scope failure provides an actionable recovery"
+            )
+            assert(
+                !displayMessage.contains("jobId="),
+                "building scope failure hides internal diagnostics from the user"
+            )
         } catch {
             assert(false, "terminal map job should use platform error")
+        }
+
+        do {
+            _ = try await OfflineMapJobPoller.waitForReady(
+                jobId: "exhausted-job",
+                pollIntervalNanoseconds: 0,
+                fetch: { _ in exhausted },
+                sleep: { _ in },
+                onUpdate: { _ in },
+                onRetry: {}
+            )
+            assert(false, "exhausted map job should throw")
+        } catch OfflineMapPlatformError.mapJobFailed(let code, _) {
+            assertEqual(code, "map_build_failed", "exhausted map job preserves its stable code")
+        } catch {
+            assert(false, "exhausted map job should use platform error")
+        }
+
+        do {
+            _ = try await OfflineMapJobPoller.waitForReady(
+                jobId: "cancelled-job",
+                pollIntervalNanoseconds: 0,
+                fetch: { _ in cancelled },
+                sleep: { _ in },
+                onUpdate: { _ in },
+                onRetry: {}
+            )
+            assert(false, "cancelled map job should throw")
+        } catch OfflineMapPlatformError.mapJobCancelled {
+            assert(
+                OfflineMapPlatformError.mapJobCancelled.localizedDescription
+                    .contains("was cancelled"),
+                "cancelled map job explains what happened"
+            )
+        } catch {
+            assert(false, "cancelled map job should use its typed platform error")
+        }
+
+        do {
+            _ = try await OfflineMapJobPoller.waitForReady(
+                jobId: "expired-job",
+                pollIntervalNanoseconds: 0,
+                fetch: { _ in expired },
+                sleep: { _ in },
+                onUpdate: { _ in },
+                onRetry: {}
+            )
+            assert(false, "expired map job should throw")
+        } catch OfflineMapPlatformError.mapJobExpired {
+            assert(
+                OfflineMapPlatformError.mapJobExpired.localizedDescription
+                    .contains("Start a new download"),
+                "expired map job provides the recovery action"
+            )
+        } catch {
+            assert(false, "expired map job should use its typed platform error")
         }
 
         do {
@@ -7611,12 +7823,51 @@ struct NavigationProtocolTests {
         }
     }
 
+    static func testOfflineMapJobFailureMessages() {
+        let internalDiagnostic = "internal details; jobId=failed-job; /private/server/path"
+        let expectations: [(String?, String)] = [
+            ("building_scope_exceeded", "Choose a smaller area"),
+            ("building_source_snapshot_changed", "Retry the same area"),
+            ("source_cache_unavailable", "temporarily unavailable"),
+            ("building_relation_incomplete", "Adjust the selected area slightly"),
+            ("building_calibration_unavailable", "3D building data could not be prepared"),
+            ("building_scope_policy_invalid", "temporarily misconfigured"),
+            ("map_build_failed", "after several attempts"),
+            ("map_stream_format_invalid", "generated map data was invalid"),
+            ("map_stream_build_failed", "could not be prepared"),
+            ("map_stream_signing_failed", "secured for download"),
+            ("artifact_storage_failed", "stored for download"),
+            ("future_failure_code", "couldn't build this map"),
+            (nil, "couldn't build this map"),
+        ]
+
+        for (code, recoveryText) in expectations {
+            let codeLabel = code ?? "missing code"
+            let displayMessage = OfflineMapPlatformError
+                .mapJobFailed(code: code, message: internalDiagnostic)
+                .localizedDescription
+            assert(
+                displayMessage.contains(recoveryText),
+                "\(codeLabel) provides actionable recovery guidance"
+            )
+            assert(
+                !displayMessage.contains("jobId=") &&
+                    !displayMessage.contains("/private/server/path"),
+                "\(codeLabel) hides internal diagnostics from the user"
+            )
+        }
+    }
+
     static func offlineMapJob(
         jobId: String? = nil,
         status: String,
         mapId: String? = nil,
         error: String? = nil,
+        errorCode: String? = nil,
+        attempts: Int? = nil,
+        maxAttempts: Int? = nil,
         createdAt: String? = nil,
+        updatedAt: String? = nil,
         clientInstallationId: String? = nil,
         clientRequestId: String? = nil,
         installOnDevice: Bool? = nil
@@ -7624,7 +7875,11 @@ struct NavigationProtocolTests {
         var payload: [String: Any] = ["jobId": jobId ?? "job-\(status)", "status": status]
         if let mapId { payload["mapId"] = mapId }
         if let error { payload["error"] = error }
+        if let errorCode { payload["errorCode"] = errorCode }
+        if let attempts { payload["attempts"] = attempts }
+        if let maxAttempts { payload["maxAttempts"] = maxAttempts }
         if let createdAt { payload["createdAt"] = createdAt }
+        if let updatedAt { payload["updatedAt"] = updatedAt }
         if let clientInstallationId { payload["clientInstallationId"] = clientInstallationId }
         if let clientRequestId { payload["clientRequestId"] = clientRequestId }
         if let installOnDevice { payload["installOnDevice"] = installOnDevice }

@@ -296,7 +296,11 @@ struct OfflineMapJob: Decodable, Equatable {
     let jobId: String
     let status: String
     let createdAt: String?
+    let updatedAt: String?
     let error: String?
+    let errorCode: String?
+    let attempts: Int?
+    let maxAttempts: Int?
     let mapId: String?
     let packPath: String?
     let geometry: OfflineMapJobGeometry?
@@ -314,7 +318,12 @@ struct OfflineMapJob: Decodable, Equatable {
     let lastDownloadedAt: String?
 
     var isTerminal: Bool {
-        ["ready", "failed", "expired", "cancelled"].contains(status)
+        return ["ready", "failed", "expired", "cancelled"].contains(status)
+    }
+
+    var mayBeLegacyRetryTransition: Bool {
+        guard status == "failed", let attempts, let maxAttempts else { return false }
+        return attempts >= 0 && maxAttempts > 0 && attempts < maxAttempts
     }
 }
 
@@ -441,15 +450,47 @@ enum OfflineMapJobRecoverySelector {
     static func select(
         jobs: [OfflineMapJob],
         clientInstallationId: String,
-        excludedJobIds: Set<String> = []
+        excludedJobIds: Set<String> = [],
+        legacyFailedGraceSeconds: TimeInterval = 30,
+        now: Date = Date()
     ) -> OfflineMapJob? {
         jobs
             .filter { job in
                 guard job.clientInstallationId == clientInstallationId else { return false }
                 guard !excludedJobIds.contains(job.jobId) else { return false }
-                return job.status == "ready" ? job.mapId != nil : !job.isTerminal
+                return job.status == "ready"
+                    ? job.mapId != nil
+                    : !job.isTerminal || isRecentLegacyRetryTransition(
+                        job,
+                        graceSeconds: legacyFailedGraceSeconds,
+                        now: now
+                    )
             }
             .max { ($0.createdAt ?? "") < ($1.createdAt ?? "") }
+    }
+
+    private static func isRecentLegacyRetryTransition(
+        _ job: OfflineMapJob,
+        graceSeconds: TimeInterval,
+        now: Date
+    ) -> Bool {
+        guard job.mayBeLegacyRetryTransition,
+              let updatedAt = job.updatedAt,
+              let updated = serverDate(updatedAt) else {
+            return false
+        }
+        let age = now.timeIntervalSince(updated)
+        return age >= 0 && age < graceSeconds
+    }
+
+    private static func serverDate(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) {
+            return date
+        }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
     }
 }
 
@@ -765,7 +806,21 @@ struct OfflineMapPreparationEstimatePresentation: Equatable {
         let title = job.status == "queued"
             ? "Estimated Preparation"
             : "Estimated Remaining"
+        if job.status == "queued", job.errorCode != nil {
+            return Self(
+                title: title,
+                value: "Re-estimating after retry…"
+            )
+        }
         if let estimate = job.preparationEstimate {
+            if let jobAttempt = job.attempts,
+               let estimateAttempt = estimate.attempt,
+               jobAttempt != estimateAttempt {
+                return Self(
+                    title: title,
+                    value: "Re-estimating after retry…"
+                )
+            }
             if let range = estimate.validRemainingRange {
                 return Self(
                     title: title,
@@ -940,6 +995,9 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
         supportedRendererFormatVersions: [Int],
         message: String
     )
+    case mapJobCancelled
+    case mapJobExpired
+    case mapJobFailed(code: String?, message: String)
     case serverStatus(Int, String)
 
     var errorDescription: String? {
@@ -974,6 +1032,37 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             return "Map server returned an invalid response"
         case .unsupportedRendererTarget(_, _, let message):
             return message
+        case .mapJobCancelled:
+            return "This map download was cancelled. Start a new download when you're ready."
+        case .mapJobExpired:
+            return "This map download expired. Start a new download to build it again."
+        case .mapJobFailed(let code, _):
+            switch code {
+            case "building_scope_exceeded":
+                return "This selection is too large for 3D buildings. Choose a smaller area and try again. The processing limit includes the required buffer, and water inside the selection counts."
+            case "building_source_snapshot_changed":
+                return "Map data changed while your map was being built. Retry the same area."
+            case "source_cache_unavailable":
+                return "Map data for this area is temporarily unavailable. Try again later."
+            case "building_relation_incomplete":
+                return "Some buildings could not be included completely. Adjust the selected area slightly and try again."
+            case "building_calibration_unavailable":
+                return "3D building data could not be prepared. Try again later."
+            case "building_scope_policy_invalid":
+                return "The map service is temporarily misconfigured. Try again later."
+            case "map_build_failed":
+                return "We couldn't build this map after several attempts. Try again. If it keeps failing, report the problem."
+            case "map_stream_format_invalid":
+                return "The generated map data was invalid. Try again. If it keeps failing, report the problem."
+            case "map_stream_build_failed":
+                return "The map file could not be prepared. Try again later."
+            case "map_stream_signing_failed":
+                return "The map file could not be secured for download. Try again later."
+            case "artifact_storage_failed":
+                return "The finished map could not be stored for download. Try again later."
+            default:
+                return "We couldn't build this map. Try again. If it keeps failing, report the problem."
+            }
         case .serverStatus(let status, let body):
             return "Map server returned \(status): \(body)"
         }
