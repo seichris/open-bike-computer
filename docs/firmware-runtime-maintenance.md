@@ -29,9 +29,13 @@ normal build updates the accepted closure.
 5. Approve the `firmware-runtime-publication` environment only after human
    review. Configure that GitHub environment with required reviewers before the
    next refresh. Only the post-approval job receives `contents: write`.
-6. Enable GitHub repository immutable releases before publication. The
-   publisher fails before creating a release unless that repository setting is
-   active.
+6. Enable GitHub repository immutable releases before publication. Configure
+   the `FIRMWARE_RELEASE_PREFLIGHT_APP_ID` repository variable and
+   `FIRMWARE_RELEASE_PREFLIGHT_APP_PRIVATE_KEY` repository secret for a GitHub
+   App installed only on this repository with `Administration: read`. The
+   publisher mints a short-lived, repository-scoped token and fails before
+   creating a release unless GitHub reports that the setting is active. Its
+   normal `GITHUB_TOKEN` retains only the separate publication permissions.
 7. The publisher requires the Git tag to be absent, creates a draft prerelease
    and a lightweight tag at the exact reviewed generator commit, proves that
    binding, uploads the exact create-only 11-asset set without `--clobber`, and verifies
@@ -45,9 +49,10 @@ normal build updates the accepted closure.
    alone never changes ordinary builds.
 
 Create-only publication and server-side immutable releases are both mandatory.
-The repository currently has to be configured once by an administrator before
-the next runtime or product release; this workflow never weakens the repository
-setting or silently falls back to a mutable release.
+The repository setting and narrowly scoped preflight GitHub App are one-time
+administrator configuration for runtime and product releases. A missing App
+configuration, failed preflight, mutable published release, or changed asset
+fails the workflow; it never silently falls back to mutable publication.
 
 ## Performance and rollback
 

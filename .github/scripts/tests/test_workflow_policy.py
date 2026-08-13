@@ -329,6 +329,13 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_release_publishes_signed_factory_flash_bundles(self) -> None:
         release = workflow_source("firmware-release.yml")
+        immutable_preflight = (
+            REPO_ROOT
+            / ".github"
+            / "actions"
+            / "require-immutable-releases"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("--factory-output-dir dist", release)
         self.assertNotIn("tools/package_factory_firmware.py", release)
@@ -344,9 +351,20 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("--draft", release)
         self.assertIn("tools/verify_github_release_assets.py", release)
         self.assertIn("already exists; refusing to replace assets", release)
-        self.assertIn("immutable-releases", release)
+        self.assertIn(
+            "uses: ./.github/actions/require-immutable-releases", release
+        )
         self.assertIn("--require-immutable", release)
         self.assertIn("X-GitHub-Api-Version: 2026-03-10", release)
+        self.assertIn(
+            "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
+            immutable_preflight,
+        )
+        self.assertIn("permission-administration: read", immutable_preflight)
+        self.assertIn(
+            "repositories: ${{ github.event.repository.name }}", immutable_preflight
+        )
+        self.assertIn("/immutable-releases", immutable_preflight)
         self.assertIn("--require-hashes --only-binary=:all: --no-deps", release)
         self.assertIn("tools/firmware-signing-requirements.txt", release)
         self.assertNotIn("pip install --upgrade cryptography", release)
@@ -427,7 +445,9 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("verify-staged", publish)
         self.assertIn("tools/verify_github_release_assets.py", publish)
         self.assertIn("already exists; refusing to replace it", publish)
-        self.assertIn("immutable-releases", publish)
+        self.assertIn(
+            "uses: ./.github/actions/require-immutable-releases", publish
+        )
         self.assertIn("--require-immutable", publish)
         self.assertIn("Runtime tag ${release_tag} already exists", publish)
         self.assertIn("runtime release tag does not bind", publish)
