@@ -58,6 +58,33 @@ nonisolated enum RideActivityPolicy {
     }
 }
 
+nonisolated enum LocationAuthorizationRemediation: Equatable {
+    case requestInApp
+    case openSettings
+    case none
+}
+
+nonisolated enum LocationAuthorizationRemediationPolicy {
+    static func action(
+        for status: CLAuthorizationStatus
+    ) -> LocationAuthorizationRemediation {
+        switch status {
+        case .notDetermined:
+            .requestInApp
+        case .restricted, .denied:
+            .openSettings
+        case .authorizedAlways:
+            .none
+#if !os(macOS)
+        case .authorizedWhenInUse:
+            .none
+#endif
+        @unknown default:
+            .openSettings
+        }
+    }
+}
+
 nonisolated enum RideIdleTimerController {
     static func update(
         isNavigating: Bool,
