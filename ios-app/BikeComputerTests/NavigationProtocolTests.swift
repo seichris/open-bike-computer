@@ -13113,8 +13113,46 @@ struct NavigationProtocolTests {
                 knownDeviceCount: 0,
                 isExplicitBikeComputerSetup: false
             ),
+            "Add a Bicino Bike Computer",
+            "empty settings presents the bike-computer setup title"
+        )
+        assertEqual(
+            BikeComputerSettingsPresentationPolicy.settingsLinkTitle(
+                knownDeviceCount: 0
+            ),
+            "Add a Bicino Bike Computer!",
+            "empty settings presents a clear add-device action"
+        )
+        assertEqual(
+            BikeComputerSettingsPresentationPolicy.settingsLinkTitle(
+                knownDeviceCount: 1
+            ),
             "My Bike Computer",
-            "combined settings keeps sensors discoverable without a bike computer"
+            "registered settings keeps the existing singular title"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldPromoteSettingsLink(
+                knownDeviceCount: 0
+            ),
+            "the add-device action is promoted only for an empty registry"
+        )
+        assert(
+            !BikeComputerSettingsPresentationPolicy.shouldPromoteSettingsLink(
+                knownDeviceCount: 1
+            ),
+            "a registered bike computer keeps the settings link in its usual position"
+        )
+        assert(
+            !BikeComputerSettingsPresentationPolicy.shouldShowDeviceScreens(
+                knownDeviceCount: 0
+            ),
+            "an empty registry replaces unavailable device screens"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldShowDeviceScreens(
+                knownDeviceCount: 1
+            ),
+            "a registered bike computer keeps device screen settings"
         )
         assert(
             !BikeComputerSettingsPresentationPolicy.shouldStartDiscovery(

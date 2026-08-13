@@ -77,7 +77,9 @@ struct BikeComputersSettingsView: View {
                         handleConnectNewBikeComputer()
                     } label: {
                         Label(
-                            "Connect a new Bike Computer",
+                            bleManager.knownDevices.isEmpty
+                                ? "Search Nearby"
+                                : "Connect a new Bike Computer",
                             systemImage: "plus.circle"
                         )
                     }
@@ -193,8 +195,11 @@ struct BikeComputersSettingsView: View {
         Section {
             if bleManager.knownDevices.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Label("No Bike Computers", systemImage: "bicycle")
-                    Text("Add a nearby device and choose a name for it.")
+                    Label("Add your Bicino One", systemImage: "bicycle")
+                    Text(
+                        "Your Bicino One will appear automatically when it’s "
+                            + "nearby, or you can search for it here."
+                    )
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -329,32 +334,24 @@ private struct KnownBikeComputerRow: View {
     let device: KnownBikeComputerDevice
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "bicycle.circle.fill")
-                .font(.title2)
-                .foregroundStyle(bleManager.isConnected(to: device) ? Color.green : Color.accentColor)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(device.name)
-                Text("Device \(device.shortIdentifier)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            if bleManager.isConnected(to: device) {
-                Text("Connected")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-            } else if bleManager.hasObservedIdentityMismatch(for: device) {
-                Text("Needs Setup")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            } else if bleManager.activeDeviceID == device.deviceID {
-                Text("Current")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+        let isConnected = bleManager.isConnected(to: device)
+
+        HStack(spacing: 10) {
+            Image(
+                systemName: isConnected
+                    ? "antenna.radiowaves.left.and.right"
+                    : "antenna.radiowaves.left.and.right.slash"
+            )
+            .frame(width: 24)
+            .foregroundStyle(isConnected ? Color.primary : Color.secondary)
+            .accessibilityHidden(true)
+
+            Text(device.name)
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            "\(device.name), \(isConnected ? "Connected" : "Not connected")"
+        )
     }
 }
 

@@ -512,6 +512,23 @@ enum BikeComputerSettingsDiscoveryLifecyclePolicy {
 }
 
 enum BikeComputerSettingsPresentationPolicy {
+    static func settingsLinkTitle(knownDeviceCount: Int) -> String {
+        if knownDeviceCount == 0 {
+            return "Add a Bicino Bike Computer!"
+        }
+        return knownDeviceCount > 1
+            ? "My Bike Computers"
+            : "My Bike Computer"
+    }
+
+    static func shouldPromoteSettingsLink(knownDeviceCount: Int) -> Bool {
+        knownDeviceCount == 0
+    }
+
+    static func shouldShowDeviceScreens(knownDeviceCount: Int) -> Bool {
+        knownDeviceCount > 0
+    }
+
     static func title(
         knownDeviceCount: Int,
         isExplicitBikeComputerSetup: Bool
@@ -520,6 +537,9 @@ enum BikeComputerSettingsPresentationPolicy {
             return BikeComputersMenuPolicy.title(
                 knownDeviceCount: knownDeviceCount
             )
+        }
+        if knownDeviceCount == 0 {
+            return "Add a Bicino Bike Computer"
         }
         return knownDeviceCount > 1
             ? "My Bike Computers"
