@@ -621,10 +621,12 @@ lock automatically.
 The current release
 [`firmware-runtime-2026-08-10-1`](https://github.com/seichris/open-bike-computer/releases/tag/firmware-runtime-2026-08-10-1)
 is a public prerelease with 11 server-digested assets. At this revision, GitHub
-reports `immutable: false`. Local content verification still fails closed if an
-asset changes. The implemented publishers therefore refuse to create the next
-runtime or product release until an administrator enables the repository's
-immutable-release control.
+reports that legacy release as `immutable: false`; enabling the repository
+control does not retroactively freeze it. Local content verification still
+fails closed if an asset changes. New runtime and product publishers require a
+repository-scoped, `Administration: read` GitHub App to verify the enabled
+control before creating a release, then require `immutable: true` after
+publication.
 
 ## Implemented focused maintenance work
 
@@ -642,10 +644,12 @@ no live resolver or automatic lock update.
    only after environment approval.
    The publisher also rejects any pre-existing release tag and proves the new
    lightweight tag resolves to the exact reviewed generator commit.
-3. Both runtime and product-release publication require repository immutable
-   releases before creating anything, upload without `--clobber`, verify the
-   draft inventory before publication, then require `immutable: true` and
-   reverify every server-reported size/SHA-256 for the retained receipt.
+3. Both runtime and product-release publication use a short-lived token from a
+   single-repository, `Administration: read` GitHub App to require immutable
+   releases before creating anything. They upload without `--clobber`, verify
+   the draft inventory before publication, then require `immutable: true` and
+   reverify every server-reported size/SHA-256 for the retained receipt. The
+   built-in publication token never receives repository-administration access.
 4. One strict tracked `publication-v1.json` owns the prospective lock-set ID and
    release tag. Changing it is an ordinary review commit; there is no `latest`
    selector.
@@ -926,11 +930,12 @@ medians: 4,636 ms for `linux-x86_64-cp313` on `ubuntu-24.04` and 2,197 ms for
 
 Only these external or deliberately broader decisions remain:
 
-1. **Repository controls:** GitHub currently reports immutable releases as
-   disabled. An administrator must enable them before the next runtime or
-   product release. The publisher intentionally fails before creating a
-   release until this is done. The `firmware-runtime-publication` environment
-   must likewise be configured with required human reviewers before use.
+1. **Repository controls:** GitHub immutable releases are enabled. Maintainers
+   must retain the single-repository preflight GitHub App with only
+   `Administration: read`, its Actions variable/secret, and required human
+   reviewers on the `firmware-runtime-publication` environment. Publishers
+   fail before creating a release if the App or setting is unavailable and
+   fail again unless the published release is reported immutable.
 2. **Additional host targets:** add none until a concrete supported-developer
    or release requirement pays for native generation and continuing CI.
 3. **Initial host bootstrap trust:** keep it explicit in the mandatory claim;

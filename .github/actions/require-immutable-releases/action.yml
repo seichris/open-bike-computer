@@ -1,0 +1,33 @@
+name: Require immutable GitHub releases
+description: Fail before publication unless GitHub reports immutable releases enabled
+
+inputs:
+  app-id:
+    description: GitHub App ID for the repository-scoped Administration-read preflight
+    required: true
+  private-key:
+    description: Private key for the repository-scoped Administration-read GitHub App
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Mint repository-scoped preflight token
+      id: preflight-token
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: ${{ github.repository_owner }}
+        repositories: ${{ github.event.repository.name }}
+        permission-administration: read
+    - name: Require immutable releases before publication
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.preflight-token.outputs.token }}
+      run: |
+        set -euo pipefail
+        if [ "$(gh api -H "X-GitHub-Api-Version: 2026-03-10" "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq .enabled)" != true ]; then
+          echo "Repository immutable releases must be enabled before publication" >&2
+          exit 1
+        fi

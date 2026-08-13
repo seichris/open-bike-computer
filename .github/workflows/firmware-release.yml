@@ -125,13 +125,14 @@ jobs:
               --private-key-base64 "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" \
               --output "release-assets/${target}.factory-release.json"
           done
+      - name: Require immutable releases
+        uses: ./.github/actions/require-immutable-releases
+        with:
+          app-id: ${{ vars.FIRMWARE_RELEASE_PREFLIGHT_APP_ID }}
+          private-key: ${{ secrets.FIRMWARE_RELEASE_PREFLIGHT_APP_PRIVATE_KEY }}
       - name: Publish GitHub release assets
         run: |
           set -euo pipefail
-          if [ "$(gh api -H "X-GitHub-Api-Version: 2026-03-10" "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq .enabled)" != true ]; then
-            echo "Repository immutable releases must be enabled before publication" >&2
-            exit 1
-          fi
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             echo "Release ${GITHUB_REF_NAME} already exists; refusing to replace assets" >&2
             exit 1
