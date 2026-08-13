@@ -84,11 +84,7 @@ struct SettingsView: View {
 
                 if !locationAuthorized {
                     Section {
-                        Button {
-                            if let url = URL(string: UIApplication.openSettingsURLString) {
-                                openURL(url)
-                            }
-                        } label: {
+                        Button(action: remediateLocationAuthorization) {
                             Label("Enable Location Access", systemImage: "location")
                         }
                     } footer: {
@@ -235,6 +231,22 @@ struct SettingsView: View {
     private var locationAuthorized: Bool {
         locationAuthorizationStatus == .authorizedAlways ||
             locationAuthorizationStatus == .authorizedWhenInUse
+    }
+
+    private func remediateLocationAuthorization() {
+        switch LocationAuthorizationRemediationPolicy.action(
+            for: locationAuthorizationStatus
+        ) {
+        case .requestInApp:
+            onRequestLocationAuthorization()
+        case .openSettings:
+            guard let url = URL(string: UIApplication.openSettingsURLString) else {
+                return
+            }
+            openURL(url)
+        case .none:
+            break
+        }
     }
 }
 

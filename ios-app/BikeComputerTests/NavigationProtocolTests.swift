@@ -605,6 +605,7 @@ struct NavigationProtocolTests {
         testRouteTransportTypes()
         testMapTrackingPolicy()
         testDeveloperLocationOverride()
+        testLocationAuthorizationRemediationPolicy()
         testRideActivityPolicy()
         testRideDetectionLocationStatusResolver()
         testDeviceGPSPacketBuilder()
@@ -17065,6 +17066,42 @@ struct NavigationProtocolTests {
         assertEqual(overridden.horizontalAccuracy, 4, "override should preserve accuracy")
         assertEqual(overridden.course, 72, "override should preserve course")
         assertEqual(overridden.speed, 8, "override should preserve speed")
+    }
+
+    static func testLocationAuthorizationRemediationPolicy() {
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.action(
+                for: .notDetermined
+            ),
+            .requestInApp,
+            "first-use location access presents the native permission prompt"
+        )
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.action(for: .denied),
+            .openSettings,
+            "denied location access directs the user to Apple Settings"
+        )
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.action(for: .restricted),
+            .openSettings,
+            "restricted location access directs the user to Apple Settings"
+        )
+#if !os(macOS)
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.action(
+                for: .authorizedWhenInUse
+            ),
+            .none,
+            "authorized location access needs no remediation"
+        )
+#endif
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.action(
+                for: .authorizedAlways
+            ),
+            .none,
+            "always-authorized location access needs no remediation"
+        )
     }
 
     static func testNavigationEngineIgnoresLiveLocationFarFromRouteStart() {
