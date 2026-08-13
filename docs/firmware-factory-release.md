@@ -129,3 +129,14 @@ release to be immutable and re-verifies the exact asset inventory before
 retaining its receipt. An existing release tag or asset, disabled immutable
 release setting, or mutable published release is a hard failure; recovery uses
 a new tag rather than `--clobber`.
+
+If publication succeeds but the same job stops before GitHub Pages deployment,
+run **Firmware Release** manually from the default branch with the immutable
+release tag in `release_tag`. This recovery path never signs, rebuilds,
+uploads, edits, or replaces release assets. It downloads the complete
+published inventory,
+requires the repository verifier and GitHub release attestation to accept the
+immutable release, verifies every downloaded asset against that attestation,
+and deploys only the two exact signed OTA manifests. A mutable, incomplete, or
+unattested release fails closed. This manual path is for OTA Pages recovery
+only; failed or partial asset publication still requires a new release tag.
