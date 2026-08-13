@@ -66,12 +66,28 @@ struct OfflineMapOnboardingView: View {
     private var artwork: some View {
         switch step {
         case .welcome:
-            Image("BicinoLogo")
-                .resizable()
-                .scaledToFit()
-                .foregroundStyle(Color.bicinoBrandRed)
-                .frame(width: 88, height: 64)
-                .accessibilityLabel("Bicino")
+            VStack(spacing: 14) {
+                Image("BicinoOneSettingsPromo")
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 170)
+                    .clipped()
+                    .clipShape(
+                        RoundedRectangle(
+                            cornerRadius: 14,
+                            style: .continuous
+                        )
+                    )
+                    .accessibilityHidden(true)
+
+                Image("BicinoLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(Color.bicinoBrandRed)
+                    .frame(width: 88, height: 64)
+                    .accessibilityLabel("Bicino")
+            }
 
         case .download:
             Image(systemName: "map.circle")
