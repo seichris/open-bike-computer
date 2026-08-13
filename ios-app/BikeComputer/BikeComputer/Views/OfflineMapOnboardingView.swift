@@ -2,7 +2,7 @@
 //  OfflineMapOnboardingView.swift
 //  BikeComputer
 //
-//  Guided current-location map install flow.
+//  First-run welcome and guided current-location map install flow.
 //
 
 import CoreLocation
@@ -11,14 +11,10 @@ import UIKit
 
 struct OfflineMapOnboardingView: View {
     @ObservedObject var manager: OfflineMapManager
-    @ObservedObject var bleManager: BLEManager
     let step: OfflineMapOnboardingStep
     let location: CLLocation?
     let isLocationAuthorized: Bool
     let onRequestLocation: () -> Void
-    let onSkipLocation: () -> Void
-    let onConnectDevice: () -> Void
-    let onCheckDeviceMaps: () -> Void
     let onChooseArea: () -> Void
     let onClose: () -> Void
 
@@ -36,18 +32,10 @@ struct OfflineMapOnboardingView: View {
                 .accessibilityLabel("Close")
 
                 Spacer()
-
-                if step == .location {
-                    Button("Skip", action: onSkipLocation)
-                        .font(.subheadline.weight(.semibold))
-                }
             }
 
             VStack(spacing: 18) {
-                Image(systemName: step.symbol)
-                    .font(.system(size: 42, weight: .semibold))
-                    .foregroundColor(.accentColor)
-                    .frame(height: 48)
+                artwork
 
                 Text(step.title)
                     .font(.title2.weight(.semibold))
@@ -75,53 +63,33 @@ struct OfflineMapOnboardingView: View {
     }
 
     @ViewBuilder
+    private var artwork: some View {
+        switch step {
+        case .welcome:
+            Image("BicinoLogo")
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(Color.bicinoBrandRed)
+                .frame(width: 88, height: 64)
+                .accessibilityLabel("Bicino")
+
+        case .download:
+            Image(systemName: "map.circle")
+                .font(.system(size: 42, weight: .semibold))
+                .foregroundColor(.accentColor)
+                .frame(height: 48)
+        }
+    }
+
+    @ViewBuilder
     private var actionContent: some View {
         switch step {
-        case .location:
-            VStack(spacing: 10) {
-                Button(action: onRequestLocation) {
-                    Label("Enable Location", systemImage: "location")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button {
-                    if let url = URL(string: UIApplication.openSettingsURLString) {
-                        openURL(url)
-                    }
-                } label: {
-                    Text("Open iPhone Settings")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
+        case .welcome:
+            Button(action: onClose) {
+                Text("Get Started")
+                    .frame(maxWidth: .infinity)
             }
-
-        case .device:
-            VStack(spacing: 10) {
-                Button(action: onConnectDevice) {
-                    Label("Connect Bike Computer", systemImage: "bicycle")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-
-                Text(bleManager.centralStateDescription)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-        case .checkingDevice:
-            VStack(spacing: 12) {
-                ProgressView()
-                Text("Checking map storage…")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                Button(action: onCheckDeviceMaps) {
-                    Label("Check Again", systemImage: "arrow.clockwise")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-            }
+            .buttonStyle(.borderedProminent)
 
         case .download:
             VStack(spacing: 12) {
@@ -153,13 +121,6 @@ struct OfflineMapOnboardingView: View {
                         .multilineTextAlignment(.center)
                 }
             }
-
-        case .storageUnavailable:
-            Button(action: onCheckDeviceMaps) {
-                Label("Check Again", systemImage: "arrow.clockwise")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
         }
     }
 
@@ -185,48 +146,29 @@ struct OfflineMapOnboardingView: View {
 }
 
 private extension OfflineMapOnboardingStep {
-    var symbol: String {
-        switch self {
-        case .location:
-            return "location.circle"
-        case .device:
-            return "antenna.radiowaves.left.and.right.circle"
-        case .checkingDevice:
-            return "externaldrive.badge.questionmark"
-        case .download:
-            return "map.circle"
-        case .storageUnavailable:
-            return "sdcard"
-        }
-    }
-
     var title: String {
         switch self {
-        case .location:
-            return "Enable Location"
-        case .device:
-            return "Connect Your Bike Computer"
-        case .checkingDevice:
-            return "Checking Your Bike Computer"
+        case .welcome:
+            return "Welcome to Bicino"
         case .download:
             return "Download Map"
-        case .storageUnavailable:
-            return "Insert an SD Card"
         }
     }
 
     var message: String {
         switch self {
-        case .location:
-            return "Bicino needs your current location to prepare the right offline map."
-        case .device:
-            return "Connect your Bike Computer before downloading its first map."
-        case .checkingDevice:
-            return "The app is checking whether your Bike Computer already has a map."
+        case .welcome:
+            return "Plan your rides, connect your Bicino One, or turn your iPhone into a cycling computer."
         case .download:
             return "Choose an area to download to your Bike Computer."
-        case .storageUnavailable:
-            return "Insert an SD card in your Bike Computer, then check again."
         }
     }
+}
+
+private extension Color {
+    static let bicinoBrandRed = Color(
+        red: 1,
+        green: 55.0 / 255.0,
+        blue: 46.0 / 255.0
+    )
 }

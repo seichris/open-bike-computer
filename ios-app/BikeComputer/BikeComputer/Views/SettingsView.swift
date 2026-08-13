@@ -76,6 +76,14 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             Form {
+                if shouldPromoteBikeComputerSettings {
+                    BicinoOneStoreSection()
+
+                    Section {
+                        bikeComputerSettingsLink
+                    }
+                }
+
                 if !locationAuthorized {
                     Section {
                         Button {
@@ -91,9 +99,14 @@ struct SettingsView: View {
                 }
 
                 MainFirmwareUpdateSection(manager: firmwareUpdateManager)
-                DeviceScreensSettingsSection(
-                    offlineMapManager: offlineMapManager
-                )
+                if BikeComputerSettingsPresentationPolicy
+                    .shouldShowDeviceScreens(
+                        knownDeviceCount: bleManager.knownDevices.count
+                    ) {
+                    DeviceScreensSettingsSection(
+                        offlineMapManager: offlineMapManager
+                    )
+                }
                 SavedMapsSettingsSection(
                     manager: offlineMapManager,
                     focusedPackFilename: $focusedSavedMapFilename
@@ -113,21 +126,8 @@ struct SettingsView: View {
                 SavedRoutesSettingsSection(routeLibrary: routeLibrary)
 
                 Section {
-                    NavigationLink {
-                        BikeComputersSettingsView(
-                            sensorStore: cyclingSensorStore,
-                            sensorDetectionCoordinator:
-                                cyclingSensorDetectionCoordinator
-                        )
-                    } label: {
-                        Label(
-                            BikeComputerSettingsPresentationPolicy.title(
-                                knownDeviceCount:
-                                    bleManager.knownDevices.count,
-                                isExplicitBikeComputerSetup: false
-                            ),
-                            systemImage: "bicycle"
-                        )
+                    if !shouldPromoteBikeComputerSettings {
+                        bikeComputerSettingsLink
                     }
 
                     NavigationLink {
@@ -186,6 +186,29 @@ struct SettingsView: View {
         }
     }
 
+    private var shouldPromoteBikeComputerSettings: Bool {
+        BikeComputerSettingsPresentationPolicy.shouldPromoteSettingsLink(
+            knownDeviceCount: bleManager.knownDevices.count
+        )
+    }
+
+    private var bikeComputerSettingsLink: some View {
+        NavigationLink {
+            BikeComputersSettingsView(
+                sensorStore: cyclingSensorStore,
+                sensorDetectionCoordinator:
+                    cyclingSensorDetectionCoordinator
+            )
+        } label: {
+            Label(
+                BikeComputerSettingsPresentationPolicy.settingsLinkTitle(
+                    knownDeviceCount: bleManager.knownDevices.count
+                ),
+                systemImage: "bicycle"
+            )
+        }
+    }
+
     private var appVersionText: String {
         let version = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
@@ -209,6 +232,48 @@ struct SettingsView: View {
     private var locationAuthorized: Bool {
         locationAuthorizationStatus == .authorizedAlways ||
             locationAuthorizationStatus == .authorizedWhenInUse
+    }
+}
+
+private struct BicinoOneStoreSection: View {
+    private static let storeURL = URL(string: "https://bicino.com")!
+
+    var body: some View {
+        Section {
+            Link(destination: Self.storeURL) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Image("BicinoOneSettingsPromo")
+                        .resizable()
+                        .scaledToFill()
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 180)
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Get your Bicino One")
+                                .font(.headline)
+                            Text("Plan on your iPhone. Ride with Bicino One.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer(minLength: 8)
+
+                        Image(systemName: "arrow.up.right")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Get your Bicino One")
+            .accessibilityHint("Opens bicino.com")
+        }
     }
 }
 
