@@ -8,6 +8,11 @@ on:
         required: false
         default: all
         type: string
+      firmware_hardware:
+        description: Firmware hardware families to build
+        required: false
+        default: "175"
+        type: string
   push:
     branches:
       - main
@@ -57,6 +62,15 @@ on:
           - firmware
           - ios
           - map
+      firmware_hardware:
+        description: Firmware hardware families to build
+        required: true
+        default: "175"
+        type: choice
+        options:
+          - "175"
+          - "206"
+          - all
 
 permissions:
   contents: read
@@ -64,7 +78,8 @@ permissions:
 concurrency:
   group: >-
     ${{ github.workflow }}-${{ github.event_name }}-${{
-    github.event.pull_request.number || github.ref }}-${{ inputs.scope || 'auto' }}
+    github.event.pull_request.number || github.ref }}-${{ inputs.scope || 'auto' }}-${{
+    inputs.firmware_hardware || '175' }}
   cancel-in-progress: true
 
 jobs:
@@ -74,6 +89,7 @@ jobs:
     outputs:
       firmware_build: ${{ steps.components.outputs.firmware_build }}
       firmware_host: ${{ steps.components.outputs.firmware_host }}
+      firmware_targets: ${{ steps.components.outputs.firmware_targets }}
       ios: ${{ steps.components.outputs.ios }}
       map_backend: ${{ steps.components.outputs.map_backend }}
       osm: ${{ steps.components.outputs.osm }}
@@ -107,6 +123,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '0000000000000000000000000000000000000000' }}
           CI_SCOPE: ${{ github.ref_type == 'tag' && 'all' || inputs.scope || 'auto' }}
           EVENT_NAME: ${{ github.event_name }}
+          FIRMWARE_HARDWARE: ${{ inputs.firmware_hardware || '175' }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: >-
           python3 .github/scripts/changed_components.py
@@ -114,6 +131,7 @@ jobs:
           --base "$BASE_SHA"
           --head "$HEAD_SHA"
           --scope "$CI_SCOPE"
+          --firmware-hardware "$FIRMWARE_HARDWARE"
           >> "$GITHUB_OUTPUT"
 
   esp32:
@@ -124,11 +142,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - WAVESHARE_AMOLED_175
-          - WAVESHARE_AMOLED_175_PRODUCTION
-          - WAVESHARE_AMOLED_206
-          - WAVESHARE_AMOLED_206_PRODUCTION
+        target: ${{ fromJSON(needs.changes.outputs.firmware_targets) }}
     defaults:
       run:
         working-directory: esp32

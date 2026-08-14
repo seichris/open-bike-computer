@@ -23,6 +23,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
     with:
       scope: all
+      firmware_hardware: all
 
   diagnostics:
     name: Validate diagnostic firmware

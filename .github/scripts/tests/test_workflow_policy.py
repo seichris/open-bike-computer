@@ -274,12 +274,22 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual((), tuple(violations))
 
     def test_default_and_diagnostic_firmware_matrices_stay_separate(self) -> None:
-        default_targets = matrix_targets(workflow_source("ci.yml"))
+        general_ci = workflow_source("ci.yml")
+        router = (REPO_ROOT / ".github/scripts/changed_components.py").read_text(
+            encoding="utf-8"
+        )
         diagnostic_targets = matrix_targets(
             workflow_source("firmware-diagnostics.yml")
         )
 
-        self.assertEqual(CORE_FIRMWARE_TARGETS, default_targets)
+        self.assertEqual(set(), matrix_targets(general_ci))
+        self.assertIn(
+            "target: ${{ fromJSON(needs.changes.outputs.firmware_targets) }}",
+            general_ci,
+        )
+        for target in CORE_FIRMWARE_TARGETS:
+            with self.subTest(target=target):
+                self.assertIn(f'"{target}"', router)
         self.assertEqual(DIAGNOSTIC_FIRMWARE_TARGETS, diagnostic_targets)
 
     def test_feature_branch_pushes_do_not_duplicate_pull_request_ci(self) -> None:
@@ -294,6 +304,7 @@ class WorkflowPolicyTests(unittest.TestCase):
 
         self.assertIn("github.event_name", general_ci)
         self.assertIn("inputs.scope || 'auto'", general_ci)
+        self.assertIn("inputs.firmware_hardware || '175'", general_ci)
 
     def test_firmware_build_and_host_routing_stay_independent(self) -> None:
         general_ci = workflow_source("ci.yml")
@@ -311,6 +322,10 @@ class WorkflowPolicyTests(unittest.TestCase):
             changes,
         )
         self.assertIn(
+            "firmware_targets: ${{ steps.components.outputs.firmware_targets }}",
+            changes,
+        )
+        self.assertIn(
             "if: needs.changes.outputs.firmware_build == 'true'",
             esp32,
         )
@@ -320,6 +335,18 @@ class WorkflowPolicyTests(unittest.TestCase):
         )
         self.assertIn("FIRMWARE_BUILD_CHANGED", gate)
         self.assertIn("FIRMWARE_HOST_CHANGED", gate)
+
+    def test_206_firmware_ci_is_explicitly_dispatched(self) -> None:
+        general_ci = workflow_source("ci.yml")
+        instructions = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+        self.assertEqual(2, general_ci.count('default: "175"'))
+        self.assertIn('          - "206"', general_ci)
+        self.assertIn("--firmware-hardware \"$FIRMWARE_HARDWARE\"", general_ci)
+        self.assertIn("gh workflow run ci.yml", instructions)
+        self.assertIn("firmware_hardware=206", instructions)
+        self.assertIn("previous_run_id", instructions)
+        self.assertIn("gh run watch", instructions)
 
     def test_partial_manual_runs_do_not_publish_the_protected_gate(self) -> None:
         general_ci = workflow_source("ci.yml")
@@ -341,6 +368,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn('      - "v*"', diagnostic_ci)
         self.assertIn('      - "v*"', release)
         self.assertIn("uses: ./.github/workflows/ci.yml", release)
+        self.assertIn("firmware_hardware: all", release)
         self.assertIn(
             "uses: ./.github/workflows/firmware-diagnostics.yml", release
         )

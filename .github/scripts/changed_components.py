@@ -4,12 +4,23 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 from collections.abc import Iterable, Sequence
 
 
 COMPONENTS = ("firmware_build", "firmware_host", "ios", "map_backend", "osm")
+FIRMWARE_TARGETS = {
+    "175": (
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_175_PRODUCTION",
+    ),
+    "206": (
+        "WAVESHARE_AMOLED_206",
+        "WAVESHARE_AMOLED_206_PRODUCTION",
+    ),
+}
 FULL_CI_PATHS = {
     ".github/scripts/changed_components.py",
     ".github/workflows/ci.yml",
@@ -161,6 +172,17 @@ def select_scope(scope: str) -> dict[str, bool] | None:
     raise ValueError(f"unsupported CI scope: {scope}")
 
 
+def select_firmware_targets(hardware: str) -> tuple[str, ...]:
+    """Return the explicitly selected core firmware build environments."""
+
+    if hardware == "all":
+        return FIRMWARE_TARGETS["175"] + FIRMWARE_TARGETS["206"]
+    try:
+        return FIRMWARE_TARGETS[hardware]
+    except KeyError as error:
+        raise ValueError(f"unsupported firmware hardware: {hardware}") from error
+
+
 def _validated_sha(value: str, label: str) -> str:
     if not SHA_PATTERN.fullmatch(value):
         raise ValueError(f"{label} must be a 40-character Git SHA")
@@ -235,6 +257,11 @@ def main() -> int:
         choices=("auto", "all", "firmware", "ios", "map"),
         default="auto",
     )
+    parser.add_argument(
+        "--firmware-hardware",
+        choices=("175", "206", "all"),
+        default="175",
+    )
     args = parser.parse_args()
 
     try:
@@ -248,6 +275,11 @@ def main() -> int:
     for component in COMPONENTS:
         value = "true" if selected[component] else "false"
         print(f"{component}={value}")
+    firmware_targets = json.dumps(
+        select_firmware_targets(args.firmware_hardware),
+        separators=(",", ":"),
+    )
+    print(f"firmware_targets={firmware_targets}")
     return 0
 
 

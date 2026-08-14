@@ -223,6 +223,31 @@ class ChangedComponentsTests(unittest.TestCase):
 
         self.assertTrue(all(selected.values()))
 
+    def test_firmware_hardware_selection_is_explicit(self) -> None:
+        targets_175 = (
+            "WAVESHARE_AMOLED_175",
+            "WAVESHARE_AMOLED_175_PRODUCTION",
+        )
+        targets_206 = (
+            "WAVESHARE_AMOLED_206",
+            "WAVESHARE_AMOLED_206_PRODUCTION",
+        )
+
+        self.assertEqual(
+            targets_175,
+            changed_components.select_firmware_targets("175"),
+        )
+        self.assertEqual(
+            targets_206,
+            changed_components.select_firmware_targets("206"),
+        )
+        self.assertEqual(
+            targets_175 + targets_206,
+            changed_components.select_firmware_targets("all"),
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported firmware hardware"):
+            changed_components.select_firmware_targets("unknown")
+
     def test_map_scope_runs_only_map_components(self) -> None:
         selected = changed_components.select_scope("map")
 

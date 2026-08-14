@@ -265,6 +265,43 @@ embedded Git/profile identity; it does not contain those SHA-256 values or prove
 on-device byte equality. Flash readback or a runtime image digest is required
 for that stronger claim.
 
+### GitHub firmware CI
+
+Automatic pull-request and `main` CI intentionally build only the 1.75-inch
+ordinary and production firmware profiles. The aggregate gate therefore does
+not prove that 2.06-inch firmware compiles.
+
+When the user explicitly asks in a Codex task to run 2.06 CI, dispatch the
+manual firmware scope for the current branch and wait for the exact run:
+
+```sh
+branch="$(git branch --show-current)"
+previous_run_id="$(gh run list --workflow ci.yml --branch "$branch" \
+  --event workflow_dispatch --limit 1 --json databaseId \
+  --jq '.[0].databaseId // empty')"
+gh workflow run ci.yml --ref "$branch" \
+  -f scope=firmware \
+  -f firmware_hardware=206
+for attempt in {1..30}; do
+  run_id="$(gh run list --workflow ci.yml --branch "$branch" \
+    --event workflow_dispatch --limit 1 --json databaseId \
+    --jq '.[0].databaseId // empty')"
+  if [[ -n "$run_id" && "$run_id" != "$previous_run_id" ]]; then
+    break
+  fi
+  sleep 2
+done
+[[ -n "$run_id" && "$run_id" != "$previous_run_id" ]]
+gh run watch "$run_id" --exit-status
+```
+
+Use `firmware_hardware=all` only when the user requests both boards or when a
+release/full-qualification workflow requires them. A manual 2.06 CI run builds
+both `WAVESHARE_AMOLED_206` and `WAVESHARE_AMOLED_206_PRODUCTION`; it does not
+flash or otherwise touch a physical device. Report 2.06 validation only after
+the dispatched run completes successfully. Tagged firmware releases always
+request `all` and continue to qualify both board families.
+
 ### Firmware release and factory-image qualification
 
 When firmware is requested from current or latest GitHub `main`, fetch
