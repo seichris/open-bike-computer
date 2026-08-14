@@ -13,6 +13,7 @@ on:
       - main
     paths:
       - ".dockerignore"
+      - ".github/actions/**"
       - ".github/scripts/**"
       - ".github/workflows/ci.yml"
       - ".github/workflows/firmware-diagnostics.yml"
@@ -71,7 +72,8 @@ jobs:
     name: Select CI components
     runs-on: ubuntu-latest
     outputs:
-      firmware: ${{ steps.components.outputs.firmware }}
+      firmware_build: ${{ steps.components.outputs.firmware_build }}
+      firmware_host: ${{ steps.components.outputs.firmware_host }}
       ios: ${{ steps.components.outputs.ios }}
       map_backend: ${{ steps.components.outputs.map_backend }}
       osm: ${{ steps.components.outputs.osm }}
@@ -117,7 +119,7 @@ jobs:
   esp32:
     name: ESP32 (${{ matrix.target }})
     needs: changes
-    if: needs.changes.outputs.firmware == 'true'
+    if: needs.changes.outputs.firmware_build == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -261,7 +263,7 @@ jobs:
   esp32-host:
     name: ESP32 Host Tests
     needs: changes
-    if: needs.changes.outputs.firmware == 'true'
+    if: needs.changes.outputs.firmware_host == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -712,7 +714,8 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           ESP32_RESULT: ${{ needs.esp32.result }}
-          FIRMWARE_CHANGED: ${{ needs.changes.outputs.firmware }}
+          FIRMWARE_BUILD_CHANGED: ${{ needs.changes.outputs.firmware_build }}
+          FIRMWARE_HOST_CHANGED: ${{ needs.changes.outputs.firmware_host }}
           HOST_RESULT: ${{ needs.esp32-host.result }}
           IOS_CHANGED: ${{ needs.changes.outputs.ios }}
           IOS_RESULT: ${{ needs.ios.result }}
@@ -732,11 +735,15 @@ jobs:
 
           require_result "CI component selection" "$CHANGES_RESULT" success
 
-          if test "$FIRMWARE_CHANGED" = true; then
+          if test "$FIRMWARE_BUILD_CHANGED" = true; then
             require_result "ESP32 builds" "$ESP32_RESULT" success
-            require_result "ESP32 host tests" "$HOST_RESULT" success
           else
             require_result "ESP32 builds" "$ESP32_RESULT" skipped
+          fi
+
+          if test "$FIRMWARE_HOST_CHANGED" = true; then
+            require_result "ESP32 host tests" "$HOST_RESULT" success
+          else
             require_result "ESP32 host tests" "$HOST_RESULT" skipped
           fi
 

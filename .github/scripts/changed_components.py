@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Classify changed repository paths for GitHub Actions CI routing."""
+"""Classify changed paths into the minimum safe GitHub Actions CI jobs."""
 
 from __future__ import annotations
 
@@ -9,9 +9,13 @@ import subprocess
 from collections.abc import Iterable, Sequence
 
 
-COMPONENTS = ("firmware", "ios", "map_backend", "osm")
-FULL_CI_PATH_PREFIXES = (".github/scripts/",)
-FULL_CI_PATHS = {".github/workflows/ci.yml"}
+COMPONENTS = ("firmware_build", "firmware_host", "ios", "map_backend", "osm")
+FULL_CI_PATHS = {
+    ".github/scripts/changed_components.py",
+    ".github/workflows/ci.yml",
+}
+FIRMWARE_HOST_ONLY_PATH_PREFIXES = ("esp32/tools/tests/",)
+FIRMWARE_HOST_PATH_PREFIXES = (".github/actions/require-immutable-releases/",)
 FIRMWARE_WORKFLOW_PATHS = {
     ".github/workflows/firmware-diagnostics.yml",
     ".github/workflows/firmware-release.yml",
@@ -68,24 +72,32 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
         if not path:
             continue
 
-        if path in FULL_CI_PATHS or path.startswith(FULL_CI_PATH_PREFIXES):
+        if path in FULL_CI_PATHS:
             return {component: True for component in COMPONENTS}
 
+        if path.startswith("esp32/"):
+            selected["firmware_host"] = True
+            if (
+                not path.startswith(FIRMWARE_HOST_ONLY_PATH_PREFIXES)
+                and not path.endswith(".md")
+            ):
+                selected["firmware_build"] = True
+
         if (
-            path.startswith("esp32/")
-            or path.startswith("tools/tests/")
+            path.startswith("tools/tests/")
+            or path.startswith(FIRMWARE_HOST_PATH_PREFIXES)
             or path in FIRMWARE_WORKFLOW_PATHS
             or path in FIRMWARE_CONTRACT_PATHS
             or path in FIRMWARE_RELEASE_TOOL_PATHS
         ):
-            selected["firmware"] = True
+            selected["firmware_host"] = True
 
         if path.startswith("ios-app/") or path in IOS_CONTRACT_PATHS:
             selected["ios"] = True
 
         if path in FIRMWARE_MANIFEST_PATHS:
             # The release producer and the shipped iOS verifier share this contract.
-            selected["firmware"] = True
+            selected["firmware_host"] = True
             selected["ios"] = True
 
         if path == ".dockerignore" or path.startswith("map-platform/"):
@@ -98,13 +110,13 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
 
         if path.startswith(SHARED_FMB_FIXTURE_PREFIX):
             # Firmware, the backend, and the extractor all assert these bytes.
-            selected["firmware"] = True
+            selected["firmware_host"] = True
             selected["map_backend"] = True
             selected["osm"] = True
 
         if path == SHARED_MAP_STREAM_FIXTURE_PATH:
             # The same signed-stream bytes are parsed by backend, iOS, and firmware.
-            selected["firmware"] = True
+            selected["firmware_host"] = True
             selected["ios"] = True
             selected["map_backend"] = True
 
@@ -124,21 +136,24 @@ def select_scope(scope: str) -> dict[str, bool] | None:
         return {component: True for component in COMPONENTS}
     if scope == "firmware":
         return {
-            "firmware": True,
+            "firmware_build": True,
+            "firmware_host": True,
             "ios": False,
             "map_backend": False,
             "osm": False,
         }
     if scope == "ios":
         return {
-            "firmware": False,
+            "firmware_build": False,
+            "firmware_host": False,
             "ios": True,
             "map_backend": False,
             "osm": False,
         }
     if scope == "map":
         return {
-            "firmware": False,
+            "firmware_build": False,
+            "firmware_host": False,
             "ios": False,
             "map_backend": True,
             "osm": True,

@@ -16,7 +16,8 @@ class ChangedComponentsTests(unittest.TestCase):
     def test_docs_only_change_skips_product_jobs(self) -> None:
         self.assertEqual(
             {
-                "firmware": False,
+                "firmware_build": False,
+                "firmware_host": False,
                 "ios": False,
                 "map_backend": False,
                 "osm": False,
@@ -31,12 +32,28 @@ class ChangedComponentsTests(unittest.TestCase):
             ["map-platform/backend/map_platform/api.py"]
         )
 
-        self.assertTrue(firmware["firmware"])
+        self.assertTrue(firmware["firmware_build"])
+        self.assertTrue(firmware["firmware_host"])
         self.assertFalse(firmware["ios"])
         self.assertTrue(ios["ios"])
-        self.assertFalse(ios["firmware"])
+        self.assertFalse(ios["firmware_build"])
+        self.assertFalse(ios["firmware_host"])
         self.assertTrue(backend["map_backend"])
         self.assertFalse(backend["osm"])
+
+    def test_firmware_host_only_inputs_skip_board_builds(self) -> None:
+        for path in (
+            "esp32/README.md",
+            "esp32/tools/tests/test_build_firmware.py",
+            "tools/tests/test_future_release_tool.py",
+            ".github/actions/require-immutable-releases/action.yml",
+            ".github/workflows/firmware-release.yml",
+            "docs/firmware-build-provenance.md",
+        ):
+            with self.subTest(path=path):
+                selected = changed_components.classify_paths([path])
+                self.assertFalse(selected["firmware_build"])
+                self.assertTrue(selected["firmware_host"])
 
     def test_osm_changes_also_validate_the_backend_image(self) -> None:
         selected = changed_components.classify_paths(
@@ -53,7 +70,8 @@ class ChangedComponentsTests(unittest.TestCase):
 
         self.assertEqual(
             {
-                "firmware": True,
+                "firmware_build": False,
+                "firmware_host": True,
                 "ios": False,
                 "map_backend": True,
                 "osm": True,
@@ -68,7 +86,8 @@ class ChangedComponentsTests(unittest.TestCase):
 
         self.assertEqual(
             {
-                "firmware": True,
+                "firmware_build": False,
+                "firmware_host": True,
                 "ios": True,
                 "map_backend": False,
                 "osm": False,
@@ -83,7 +102,8 @@ class ChangedComponentsTests(unittest.TestCase):
 
         self.assertEqual(
             {
-                "firmware": True,
+                "firmware_build": False,
+                "firmware_host": True,
                 "ios": True,
                 "map_backend": True,
                 "osm": False,
@@ -109,13 +129,15 @@ class ChangedComponentsTests(unittest.TestCase):
         for path in firmware_contracts:
             with self.subTest(path=path):
                 selected = changed_components.classify_paths([path])
-                self.assertTrue(selected["firmware"])
+                self.assertFalse(selected["firmware_build"])
+                self.assertTrue(selected["firmware_host"])
                 self.assertFalse(selected["ios"])
         for path in ios_contracts:
             with self.subTest(path=path):
                 selected = changed_components.classify_paths([path])
                 self.assertTrue(selected["ios"])
-                self.assertFalse(selected["firmware"])
+                self.assertFalse(selected["firmware_build"])
+                self.assertFalse(selected["firmware_host"])
 
     def test_firmware_manifest_generator_and_tests_select_both_consumers(self) -> None:
         for path in (
@@ -125,7 +147,8 @@ class ChangedComponentsTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(
                     {
-                        "firmware": True,
+                        "firmware_build": False,
+                        "firmware_host": True,
                         "ios": True,
                         "map_backend": False,
                         "osm": False,
@@ -142,7 +165,8 @@ class ChangedComponentsTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(
                     {
-                        "firmware": True,
+                        "firmware_build": False,
+                        "firmware_host": True,
                         "ios": False,
                         "map_backend": False,
                         "osm": False,
@@ -158,7 +182,8 @@ class ChangedComponentsTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 selected = changed_components.classify_paths([path])
-                self.assertTrue(selected["firmware"])
+                self.assertFalse(selected["firmware_build"])
+                self.assertTrue(selected["firmware_host"])
                 self.assertFalse(selected["ios"])
 
     def test_future_root_tool_tests_select_the_firmware_host_job(self) -> None:
@@ -170,7 +195,8 @@ class ChangedComponentsTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(
                     {
-                        "firmware": True,
+                        "firmware_build": False,
+                        "firmware_host": True,
                         "ios": False,
                         "map_backend": False,
                         "osm": False,
@@ -185,6 +211,13 @@ class ChangedComponentsTests(unittest.TestCase):
 
         self.assertTrue(all(selected.values()))
 
+    def test_ci_policy_test_change_runs_in_the_selector_only(self) -> None:
+        selected = changed_components.classify_paths(
+            [".github/scripts/tests/test_workflow_policy.py"]
+        )
+
+        self.assertFalse(any(selected.values()))
+
     def test_manual_dispatch_runs_every_component(self) -> None:
         selected = changed_components.classify_paths([], run_all=True)
 
@@ -195,7 +228,8 @@ class ChangedComponentsTests(unittest.TestCase):
 
         self.assertIsNotNone(selected)
         assert selected is not None
-        self.assertFalse(selected["firmware"])
+        self.assertFalse(selected["firmware_build"])
+        self.assertFalse(selected["firmware_host"])
         self.assertFalse(selected["ios"])
         self.assertTrue(selected["map_backend"])
         self.assertTrue(selected["osm"])
@@ -206,12 +240,16 @@ class ChangedComponentsTests(unittest.TestCase):
             {component: True for component in changed_components.COMPONENTS},
             changed_components.select_scope("all"),
         )
-        for scope, component in (("firmware", "firmware"), ("ios", "ios")):
-            with self.subTest(scope=scope):
-                selected = changed_components.select_scope(scope)
-                assert selected is not None
-                self.assertTrue(selected[component])
-                self.assertEqual(1, sum(selected.values()))
+        firmware = changed_components.select_scope("firmware")
+        assert firmware is not None
+        self.assertTrue(firmware["firmware_build"])
+        self.assertTrue(firmware["firmware_host"])
+        self.assertEqual(2, sum(firmware.values()))
+
+        ios = changed_components.select_scope("ios")
+        assert ios is not None
+        self.assertTrue(ios["ios"])
+        self.assertEqual(1, sum(ios.values()))
         with self.assertRaisesRegex(ValueError, "unsupported CI scope"):
             changed_components.select_scope("unknown")
 
@@ -292,7 +330,8 @@ class ChangedComponentsTests(unittest.TestCase):
 
         self.assertEqual(
             {
-                "firmware": True,
+                "firmware_build": False,
+                "firmware_host": True,
                 "ios": False,
                 "map_backend": False,
                 "osm": False,

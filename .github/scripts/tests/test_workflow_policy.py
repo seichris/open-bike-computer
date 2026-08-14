@@ -295,6 +295,32 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("github.event_name", general_ci)
         self.assertIn("inputs.scope || 'auto'", general_ci)
 
+    def test_firmware_build_and_host_routing_stay_independent(self) -> None:
+        general_ci = workflow_source("ci.yml")
+        changes = mapping_block(general_ci, "changes", indent=2)
+        esp32 = mapping_block(general_ci, "esp32", indent=2)
+        host = mapping_block(general_ci, "esp32-host", indent=2)
+        gate = mapping_block(general_ci, "gate", indent=2)
+
+        self.assertIn(
+            "firmware_build: ${{ steps.components.outputs.firmware_build }}",
+            changes,
+        )
+        self.assertIn(
+            "firmware_host: ${{ steps.components.outputs.firmware_host }}",
+            changes,
+        )
+        self.assertIn(
+            "if: needs.changes.outputs.firmware_build == 'true'",
+            esp32,
+        )
+        self.assertIn(
+            "if: needs.changes.outputs.firmware_host == 'true'",
+            host,
+        )
+        self.assertIn("FIRMWARE_BUILD_CHANGED", gate)
+        self.assertIn("FIRMWARE_HOST_CHANGED", gate)
+
     def test_partial_manual_runs_do_not_publish_the_protected_gate(self) -> None:
         general_ci = workflow_source("ci.yml")
 
@@ -406,6 +432,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         for path in SHARED_CONTRACT_PATHS:
             with self.subTest(path=path):
                 self.assertIn(f'      - "{path}"', general_ci)
+        self.assertIn('      - ".github/actions/**"', general_ci)
         self.assertIn('      - "test-fixtures/fmb/**"', general_ci)
         self.assertIn('      - "tools/firmware_manifest.py"', general_ci)
         self.assertIn('      - "tools/firmware-signing-requirements.txt"', general_ci)
