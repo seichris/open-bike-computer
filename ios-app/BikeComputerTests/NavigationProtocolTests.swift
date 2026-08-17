@@ -8257,21 +8257,21 @@ struct NavigationProtocolTests {
         )
         assert(
             source.contains("if item.isActiveOnDevice {") &&
-                source.contains("if item.isOnIPhone {") &&
                 source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
-                source.contains("IPhoneDownloadStatusIcon()") &&
                 source.contains("? \"arrow.clockwise.circle\"") &&
                 source.contains(": \"arrow.up.circle\"") &&
+                !source.contains("IPhoneDownloadStatusIcon") &&
+                !source.contains("Image(systemName: \"iphone\")") &&
                 !source.contains("BikeComputerMapStatusIcon") &&
                 !source.contains("Text(\"b\")"),
-            "saved maps use the agreed iPhone-only, device-only, and shared icons"
+            "saved maps use the same active check and inactive upload icons regardless of origin"
         )
         assert(
             source.contains("Text(\"No offline maps yet\")"),
             "Saved Maps uses the agreed empty-state copy"
         )
         assert(
-            source.contains("and is not saved on this iPhone") &&
+            source.contains("This map is not saved on this iPhone") &&
                 source.contains("is active on the Bike Computer") &&
                 source.contains("Transfer \\(displayName) to device"),
             "saved-map presence indicators expose accessible state labels"
@@ -8297,10 +8297,18 @@ struct NavigationProtocolTests {
         )
         assert(
             source.contains("SavedMapThumbnail(") &&
-                source.contains("manager.previewImage(for: item)") &&
+                source.contains("let previewImage = manager.previewImage(for: item)") &&
                 source.contains("manager.loadPreviewIfNeeded(for: item)") &&
                 source.contains(".frame(width: 52, height: 36)"),
             "each saved map shows a fixed-size preview before its editable name"
+        )
+        assert(
+            source.contains("presentedPreview = SavedMapPreviewPresentation(") &&
+                source.contains(".sheet(item: $presentedPreview)") &&
+                source.contains("SavedMapPreviewSheet(preview: preview)") &&
+                source.contains(".accessibilityLabel(\"Show preview for \\(displayName)\")") &&
+                source.contains("Button(\"Close\")"),
+            "tapping an available saved-map thumbnail opens an accessible preview modal"
         )
         assert(
             source.contains("manager.savedMapListItems(") &&

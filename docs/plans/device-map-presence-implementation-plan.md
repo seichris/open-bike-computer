@@ -27,15 +27,16 @@ The Saved Maps list becomes the union of:
 2. the active map descriptor reported by the currently authenticated bike
    computer.
 
-Each row shows two independent location indicators:
-
-- an iPhone symbol showing whether the exact map artifact is saved locally;
-- a filled round bike-computer symbol containing a lowercase `b`, showing
-  whether that exact map artifact is active on the device.
+Each row reuses the existing saved-map state indicator: a round upload arrow
+when a local map can be sent to the device, or a green check when the exact map
+is active. No separate phone or bike-computer symbol is shown. A local trash
+button indicates that the map is cached on the iPhone; its absence identifies a
+device-only row.
 
 A device-only map receives the same style of map preview as an iPhone-cached
 map. The iPhone generates that preview from trusted, bounded geographic
-metadata; firmware does not send PNG bytes over BLE.
+metadata; firmware does not send PNG bytes over BLE. Tapping an available
+thumbnail opens that rendered preview in a modal.
 
 ## Current main-branch behavior
 
@@ -90,29 +91,21 @@ preview images from the SD card.
 
 ### Presence states and icons
 
-| Exact artifact state | iPhone indicator | Bike-computer indicator | Primary interaction |
+| Exact artifact state | State indicator | Local delete button | Primary interaction |
 | --- | --- | --- | --- |
-| Cached only on this iPhone | Blue `iphone` symbol | Gray filled circle with white lowercase `b` and a small upload badge | Tap the `b` button to transfer |
-| Active only on the connected device | Gray `iphone` symbol | Green filled circle with white lowercase `b` and a small check badge | Status only |
-| Cached on this iPhone and active on the device | Blue `iphone` symbol | Green filled circle with white lowercase `b` and a small check badge | Tapping the `b` button may retain the existing “Already on Device” explanation |
-| Upload in progress | Blue `iphone` symbol | Gray/blue `b` circle with a progress ring | Existing pause/resume behavior remains authoritative |
+| Cached only on this iPhone | Existing round `arrow.up.circle` | Visible | Tap the arrow to transfer |
+| Active only on the connected device | Existing green `checkmark.circle.fill` | Hidden | Status only |
+| Cached on this iPhone and active on the device | Existing green `checkmark.circle.fill` | Visible | Tapping the check may retain the existing “Already on Device” explanation |
+| Upload in progress | Existing upload progress/resume treatment | Visible | Existing pause/resume behavior remains authoritative |
 
-The lowercase `b` stays visible in every device state. Badges and accessibility
-labels carry meaning in addition to color.
+Do not show a separate iPhone or bike-computer symbol. The state indicator is
+the same regardless of where the row originated. The local trash button is the
+visual distinction between a local row and a device-only row, while
+accessibility text states explicitly when the map is not saved on the iPhone.
 
-Recommended visual metrics for the device indicator:
-
-- preserve the current 32 x 32-point button target;
-- render a 26-28-point filled circle;
-- center a white semibold lowercase `b` using Dynamic Type-safe sizing;
-- use the current success green for the active state;
-- use `secondary`/neutral gray for the inactive state;
-- place the upload or check badge at the lower trailing edge without covering
-  the `b`; and
-- preserve adequate contrast in light and dark appearance.
-
-The iPhone indicator is informational and is not a download-from-device
-button. A gray iPhone means the app does not possess the map pack.
+Inactive device packs remain outside this active-map-only protocol. If a future
+device inventory exposes them, use the same round upload/activation arrow and
+omit the local trash button.
 
 Accessibility labels must describe the complete state, for example:
 
@@ -330,11 +323,8 @@ generic map placeholder. Lack of a preview must not hide the row.
 Refactor `DownloadedMapRow` into a row that accepts `SavedMapListItem` rather
 than requiring a local `packURL`.
 
-Add focused components:
-
-- `PhoneMapPresenceIcon`, backed by the SF Symbol `iphone`; and
-- `BikeComputerMapPresenceButton`, drawn as a filled circle containing a
-  lowercase `b` with optional upload/check/progress treatment.
+Use the existing upload and installed-state SF Symbols directly in the saved
+map row; no origin-specific icon component is needed.
 
 Preserve the current upload enablement conditions, background upload resume
 behavior, installed confirmation, rename commit behavior, and local delete
@@ -346,17 +336,23 @@ confirmation. Gate controls by the row's actual capabilities:
   the iPhone; and
 - the active device indicator remains visible when there is no local pack.
 
+Make the rendered thumbnail a plain button whenever a preview is available.
+Capture the displayed image at tap time and present it scaled to fit in a modal
+with the map display name, a Close action, and an accessibility label that
+describes the preview action. A still-loading placeholder must not open an
+empty modal.
+
 ## Compatibility and failure behavior
 
 | Situation | Required behavior |
 | --- | --- |
-| New iOS + new firmware + cloned current SD | Device-only row, gray phone, green `b`, manifest name, generated preview |
-| New iOS + older firmware with active ID/session | Device-only row, gray phone, green `b`, ID-derived name, placeholder preview |
+| New iOS + new firmware + cloned current SD | Device-only row, green check, no trash, manifest name, generated preview |
+| New iOS + older firmware with active ID/session | Device-only row, green check, no trash, ID-derived name, placeholder preview |
 | New iOS + older firmware with active ID but no session | Conservative device-only row; do not merge with same-area local pack |
 | Old iOS + new firmware | Existing Saved Maps behavior; additive fields ignored |
 | Missing or invalid active manifest | No phantom device-only row; retain valid local rows |
 | Valid active map with malformed optional name/bounds | Device-only row with safe fallback name/preview |
-| SD removed after connection | Fresh status clears the device descriptor and green `b` state |
+| SD removed after connection | Fresh status clears the device descriptor and active green-check state |
 | Incomplete/lost `MSTC` response | Keep the previous complete descriptor until a complete replacement or connection reset; never publish partial data |
 | Same map ID, different sessions | Separate device-active and local rows |
 | MapKit unavailable/offline | Bounds fallback or generic map placeholder; row remains usable |
@@ -477,15 +473,17 @@ Use a verified exact clone containing the hidden active stream state,
 3. Boot and confirm SD mount, active map selection, and normal map rendering.
 4. Connect and authenticate the other iPhone.
 5. Open Saved Maps and confirm the active map appears first.
-6. Confirm the iPhone symbol is gray and the round lowercase-`b` icon is green.
+6. Confirm the active green check is shown, there is no iPhone icon, and there
+   is no local trash action.
 7. Confirm the manifest-derived display name appears.
 8. Confirm the bounds fallback appears promptly and the MapKit snapshot replaces
-   it when available.
+   it when available, then tap the thumbnail and confirm the preview opens in a
+   modal.
 9. Reboot/reconnect and confirm the same identity and preview are restored.
 10. Remove or swap the SD card, request fresh status, and confirm the green
     device presence is not retained incorrectly.
-11. Download the exact same artifact to the iPhone and confirm the row merges to
-    blue iPhone plus green `b` without duplication.
+11. Download the exact same artifact to the iPhone and confirm the row remains a
+    single green-check row and gains the local trash action.
 12. Test a same-map-ID but different-session local pack and confirm it does not
     receive a false active state.
 
@@ -495,11 +493,14 @@ The implementation is complete only when all of the following are true:
 
 - A current cloned SD map appears in Saved Maps on a different, otherwise
   empty iPhone after an authenticated connection.
-- The row accurately distinguishes phone absence from device-active presence.
-- The bike-computer indicator is a filled round icon with a lowercase `b`, gray
-  when inactive/uploadable and green when active.
+- The row accurately distinguishes phone absence from device-active presence
+  through the local trash action and an explicit accessibility hint.
+- The state indicator is the existing round arrow when inactive/uploadable and
+  the existing green check when active, regardless of row origin.
 - A device-only map receives a bounds-derived preview without transferring PNG
   data over BLE.
+- Tapping an available Saved Maps thumbnail opens the displayed preview in an
+  accessible, dismissible modal; a loading placeholder does not open one.
 - Exact local/device identities merge; same-area different artifacts do not.
 - Device-only rows cannot be renamed, locally deleted, or mistaken for an
   iPhone download.

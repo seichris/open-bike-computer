@@ -874,15 +874,33 @@ private struct SavedMapRow: View {
     let onCommitRename: (SavedMapRenameCommit) -> Void
     @State private var isShowingInstalledConfirmation = false
     @State private var isShowingDeleteConfirmation = false
+    @State private var presentedPreview: SavedMapPreviewPresentation?
 
     var body: some View {
         let displayName = item.displayName
         let packURL = item.packURL
         let isPausedUpload = packURL.map(manager.isPausedMapUpload) ?? false
+        let previewImage = manager.previewImage(for: item)
 
         HStack(spacing: 12) {
-            SavedMapThumbnail(
-                image: manager.previewImage(for: item)
+            Button {
+                guard let previewImage else { return }
+                finishRenaming()
+                focusedPackFilename = nil
+                presentedPreview = SavedMapPreviewPresentation(
+                    displayName: displayName,
+                    image: previewImage
+                )
+            } label: {
+                SavedMapThumbnail(image: previewImage)
+            }
+            .buttonStyle(.plain)
+            .disabled(previewImage == nil)
+            .accessibilityLabel("Show preview for \(displayName)")
+            .accessibilityHint(
+                previewImage == nil
+                    ? "Preview is loading"
+                    : "Opens the map preview"
             )
             .task(id: item.id) {
                 manager.loadPreviewIfNeeded(for: item)
@@ -944,33 +962,22 @@ private struct SavedMapRow: View {
                 }
 
             if item.isActiveOnDevice {
-                if item.isOnIPhone {
-                    Button {
-                        finishRenaming()
-                        focusedPackFilename = nil
-                        isShowingInstalledConfirmation = true
-                    } label: {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(.green)
-                            .frame(width: 32, height: 32)
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("\(displayName) is active on the Bike Computer")
-                    .accessibilityHint("Shows the installed map status")
-                } else {
-                    HStack(spacing: 4) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(.green)
-                            .frame(width: 32, height: 32)
-
-                        IPhoneDownloadStatusIcon()
-                    }
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(
-                        "\(displayName) is active on the Bike Computer " +
-                            "and is not saved on this iPhone"
-                    )
+                Button {
+                    finishRenaming()
+                    focusedPackFilename = nil
+                    isShowingInstalledConfirmation = true
+                } label: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .frame(width: 32, height: 32)
                 }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("\(displayName) is active on the Bike Computer")
+                .accessibilityHint(
+                    item.isOnIPhone
+                        ? "Shows the installed map status"
+                        : "This map is not saved on this iPhone"
+                )
             } else if let packURL {
                 Button {
                     finishRenaming()
@@ -1037,6 +1044,10 @@ private struct SavedMapRow: View {
                     "A copy already installed on the Bike Computer remains there."
             )
         }
+        .sheet(item: $presentedPreview) { preview in
+            SavedMapPreviewSheet(preview: preview)
+                .presentationDetents([.large])
+        }
     }
 
     private func finishRenaming() {
@@ -1046,21 +1057,34 @@ private struct SavedMapRow: View {
     }
 }
 
-private struct IPhoneDownloadStatusIcon: View {
-    var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            Image(systemName: "iphone")
-                .font(.system(size: 24, weight: .regular))
-                .foregroundStyle(.secondary)
+private struct SavedMapPreviewPresentation: Identifiable {
+    let id = UUID()
+    let displayName: String
+    let image: UIImage
+}
 
-            Image(systemName: "arrow.down.circle.fill")
-                .font(.system(size: 12, weight: .semibold))
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(.white, Color.blue)
-                .background(Circle().fill(Color(uiColor: .systemBackground)))
-                .offset(x: 4, y: 3)
+private struct SavedMapPreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let preview: SavedMapPreviewPresentation
+
+    var body: some View {
+        NavigationView {
+            Image(uiImage: preview.image)
+                .resizable()
+                .scaledToFit()
+                .padding()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(uiColor: .systemBackground))
+                .navigationTitle(preview.displayName)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") {
+                            dismiss()
+                        }
+                    }
+                }
         }
-        .frame(width: 32, height: 32)
     }
 }
 
