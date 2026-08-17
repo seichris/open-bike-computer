@@ -441,7 +441,7 @@ nonisolated enum DeviceMapSnapshotPreviewStore {
                 .contentModificationDateKey,
                 .isRegularFileKey,
             ],
-            options: [.skipsHiddenFiles]
+            options: []
         ) else {
             return
         }
@@ -4600,7 +4600,7 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
-    private func updateSavedMapTransferMetadata(
+    func updateSavedMapTransferMetadata(
         mapID: String,
         protocolVersion: Int?,
         streamFormatVersion: Int?,
@@ -4611,6 +4611,11 @@ final class OfflineMapManager: ObservableObject {
         for fileExtension in ["bmap", "zip"] {
             let url = directory.appendingPathComponent("\(mapID).\(fileExtension)")
             guard var metadata = SavedMapArtifactMetadataStore.load(for: url) else { continue }
+            let mergeIdentityChanged =
+                metadata.lastTransferProtocol != protocolVersion ||
+                metadata.lastTransferSessionID != sessionID ||
+                metadata.expectedActiveMapID != mapID ||
+                metadata.expectedActiveSessionID != sessionID
             metadata.lastTransferProtocol = protocolVersion
             metadata.lastTransferStreamFormat = streamFormatVersion
             metadata.lastTransferSessionID = sessionID
@@ -4618,7 +4623,19 @@ final class OfflineMapManager: ObservableObject {
             metadata.expectedActiveSessionID = sessionID
             metadata.lastTransferOutcome = outcome
             try? SavedMapArtifactMetadataStore.save(metadata, for: url)
+            if mergeIdentityChanged {
+                refreshCachedMapRecord(for: url)
+            }
         }
+    }
+
+    func refreshCachedMapRecord(for packURL: URL) {
+        guard let index = cachedMapRecords.firstIndex(where: {
+            $0.packURL.standardizedFileURL == packURL.standardizedFileURL
+        }) else {
+            return
+        }
+        cachedMapRecords[index] = cachedMapRecord(for: packURL)
     }
 
     private func updateSavedMapDeviceState(

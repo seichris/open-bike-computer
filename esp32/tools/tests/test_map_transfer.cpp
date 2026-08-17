@@ -460,6 +460,13 @@ static void testParsesOptionalActiveMapPresentationMetadata() {
   assert((manifest.boundsE7 ==
           std::array<int32_t, 4>{-468300000, -240100000, -463600000,
                                  -233500000}));
+
+  const std::string maximumName(240, 'x');
+  status = installer.validateManifestText(
+      presentationManifest("\"displayName\":\"" + maximumName + "\","),
+      manifest);
+  assert(status.ok);
+  assert(manifest.displayName == maximumName);
 }
 
 static void testIgnoresInvalidOptionalActiveMapPresentationMetadata() {
@@ -483,6 +490,56 @@ static void testIgnoresInvalidOptionalActiveMapPresentationMetadata() {
   assert(status.ok);
   assert(manifest.displayName.empty());
   assert(!manifest.hasBoundsE7);
+
+  status = installer.validateManifestText(
+      presentationManifest(
+          "\"displayName\":\"ride\\u0085name\","
+          "\"boundsE7\":[1200000000,300000000,1210000000,310000000],"),
+      manifest);
+  assert(status.ok);
+  assert(manifest.displayName.empty());
+  assert(manifest.hasBoundsE7);
+}
+
+static void testBindsActivePresentationToManifestReceipt() {
+  const std::string root = tempRoot();
+  const std::string installedRoot =
+      root + "/VECTMAP/.maps/signed-session";
+  assert(::system((std::string("mkdir -p ") + installedRoot).c_str()) == 0);
+  const std::string manifestText = presentationManifest(
+      "\"displayName\":\"Signed Map\","
+      "\"boundsE7\":[1209000000,307000000,1219500000,315500000],");
+  writeFile(installedRoot + "/.manifest.json", manifestText);
+  writeFile(
+      root + "/VECTMAP/active-map.json",
+      "{\"mapId\":\"map-1\",\"sessionId\":\"signed-session\","
+      "\"root\":\"/VECTMAP/.maps/signed-session\","
+      "\"renderer\":\"esp32-fmb\",\"formatVersion\":1,"
+      "\"labelProfileVersion\":0,\"labelLanguages\":[],"
+      "\"internationalFallback\":\"\",\"manifestReceipt\":\"" +
+          sha(manifestText) +
+          "\",\"signedManifestReceipt\":\"" + std::string(64, 'a') +
+          "\"}\n");
+
+  MapTransferInstaller installer(root);
+  ActiveMapSelection selection;
+  map_transfer::MapPresentationMetadata presentation;
+  assert(installer.readActiveMapPresentation(selection, presentation).ok);
+  assert(presentation.displayName == "Signed Map");
+  map_transfer::MapPresentationRevision revision;
+  assert(installer.readActiveMapPresentationRevision(selection, revision));
+  assert(revision.bytes == manifestText.size());
+
+  const std::string modifiedManifest = presentationManifest(
+      "\"displayName\":\"Modified Map\","
+      "\"boundsE7\":[100000000,100000000,200000000,200000000],");
+  writeFile(installedRoot + "/.manifest.json", modifiedManifest);
+  const auto status =
+      installer.readActiveMapPresentation(selection, presentation);
+  assert(!status.ok);
+  assert(status.code == "installed_manifest_receipt");
+  assert(::unlink((installedRoot + "/.manifest.json").c_str()) == 0);
+  assert(!installer.readActiveMapPresentationRevision(selection, revision));
 }
 
 static void testRejectsMalformedActiveTargetMetadata() {
@@ -584,7 +641,12 @@ static void testValidatesStagedMapAndActivates() {
   assert(selection.target.formatVersion == 1);
   assert(selection.previousRoot.empty());
   map_transfer::MapPresentationMetadata presentation;
-  assert(installer.readActiveMapPresentation(presentation).ok);
+  ActiveMapSelection presentedSelection;
+  assert(installer.readActiveMapPresentation(presentedSelection, presentation)
+             .ok);
+  assert(presentedSelection.mapId == selection.mapId);
+  assert(presentedSelection.sessionId == selection.sessionId);
+  assert(presentedSelection.root == selection.root);
   assert(presentation.displayName == "Active Map");
   assert(presentation.hasBoundsE7);
   assert((presentation.boundsE7 ==
@@ -602,8 +664,8 @@ static void testValidatesStagedMapAndActivates() {
   assert(cleared.ok);
   assert(cleared.code == "active_cleared");
   assert(installer.readActiveMap(selection).code == "active_missing");
-  assert(installer.readActiveMapPresentation(presentation).code ==
-         "active_missing");
+  assert(installer.readActiveMapPresentation(presentedSelection, presentation)
+             .code == "active_missing");
 }
 
 static void testActivationSwitchesPointerAndRetainsPreviousVersion() {
@@ -1358,6 +1420,7 @@ int main() {
   testRejectsUnsafeManifestPath();
   testParsesOptionalActiveMapPresentationMetadata();
   testIgnoresInvalidOptionalActiveMapPresentationMetadata();
+  testBindsActivePresentationToManifestReceipt();
   testRejectsMalformedActiveTargetMetadata();
   testRejectsPathOutsideMapNamespace();
   testRejectsMapBlockOutsideRendererBudget();

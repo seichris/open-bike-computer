@@ -27,7 +27,27 @@ nonisolated struct DeviceActiveMapDescriptor: Equatable, Sendable {
     }
 
     var previewFilename: String {
-        "\(mapID)--\(stableIdentity).png"
+        let boundsIdentity = bounds.map { value in
+            [
+                value.minLongitude,
+                value.minLatitude,
+                value.maxLongitude,
+                value.maxLatitude,
+            ]
+            .map { String($0.bitPattern, radix: 16) }
+            .joined(separator: ",")
+        } ?? ""
+        let identity = [
+            mapID,
+            sessionID ?? "",
+            manifestReceipt ?? "",
+            displayName ?? "",
+            boundsIdentity,
+        ].joined(separator: "\u{0}")
+        let digest = SHA256.hash(data: Data(identity.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "device-map-\(digest).png"
     }
 
     init?(
@@ -54,22 +74,32 @@ nonisolated struct DeviceActiveMapDescriptor: Equatable, Sendable {
         guard let mapID = statusObject["activeMapId"] as? String else {
             return nil
         }
-        let bounds: [Int]? = (statusObject["activeMapBoundsE7"] as? [NSNumber])?.compactMap {
-            let value = $0.doubleValue
-            guard value.isFinite,
-                  value.rounded(.towardZero) == value,
-                  value >= Double(Int32.min),
-                  value <= Double(Int32.max) else {
-                return nil
+        let bounds: [Int]? = (statusObject["activeMapBoundsE7"] as? [Any]).flatMap {
+            guard $0.count == 4 else { return nil }
+            var values: [Int] = []
+            values.reserveCapacity(4)
+            for item in $0 {
+                guard let number = item as? NSNumber,
+                      CFGetTypeID(number) != CFBooleanGetTypeID() else {
+                    return nil
+                }
+                let value = number.doubleValue
+                guard value.isFinite,
+                      value.rounded(.towardZero) == value,
+                      value >= Double(Int32.min),
+                      value <= Double(Int32.max) else {
+                    return nil
+                }
+                values.append(Int(value))
             }
-            return Int(value)
+            return values
         }
         self.init(
             mapID: mapID,
             sessionID: statusObject["activeSessionId"] as? String,
             manifestReceipt: statusObject["activeManifestReceipt"] as? String,
             displayName: statusObject["activeMapDisplayName"] as? String,
-            boundsE7: bounds?.count == 4 ? bounds : nil
+            boundsE7: bounds
         )
     }
 

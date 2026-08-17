@@ -207,6 +207,8 @@ static bool validUtf8(const std::string &value) {
     const uint8_t second = static_cast<uint8_t>(value[index + 1]);
     if (second < secondMinimum || second > secondMaximum)
       return false;
+    if (first == 0xc2 && second >= 0x80 && second <= 0x9f)
+      return false;
     for (size_t offset = 2; offset <= continuationCount; ++offset) {
       const uint8_t continuation =
           static_cast<uint8_t>(value[index + offset]);
@@ -261,7 +263,7 @@ static std::string jsonPresentationStringValue(const std::string &json,
                  ? output
                  : std::string();
     }
-    if (character < 0x20)
+    if (character < 0x20 || character == 0x7f)
       return "";
     if (character != '\\') {
       output.push_back(static_cast<char>(character));
@@ -273,7 +275,8 @@ static std::string jsonPresentationStringValue(const std::string &json,
         output.push_back(escaped);
       } else if (escaped == 'u') {
         uint16_t first = 0;
-        if (!readUnicodeEscape(json, cursor, first) || first < 0x20)
+        if (!readUnicodeEscape(json, cursor, first) || first < 0x20 ||
+            (first >= 0x7f && first <= 0x9f))
           return "";
         uint32_t codePoint = first;
         if (first >= 0xd800 && first <= 0xdbff) {
@@ -2587,16 +2590,70 @@ MapTransferInstaller::readActiveManifest(MapManifest &manifest) const {
 }
 
 InstallStatus MapTransferInstaller::readActiveMapPresentation(
+    ActiveMapSelection &selection,
     MapPresentationMetadata &presentation) const {
+  selection = ActiveMapSelection();
   presentation = MapPresentationMetadata();
+  const InstallStatus active = readActiveMap(selection);
+  if (!active.ok)
+    return active;
+  if (!safeActiveRoot(selection.root) || !activeRootExists(selection.root))
+    return fail("installed_root", "installed map root is missing");
+  std::string manifestText;
+  if (!readTextFile(joinPath(joinPath(storageRoot_, selection.root),
+                             kInstalledManifestFile),
+                    manifestText, kMaxManifestBytes)) {
+    return fail("installed_manifest", "installed map manifest is missing");
+  }
+  if (jsonStringValue(manifestText, "mapId") != selection.mapId) {
+    return fail("installed_manifest_identity",
+                "installed map manifest does not match active map ID");
+  }
+  if (!selection.manifestReceipt.empty()) {
+    const std::string receipt = sha256Hex(
+        reinterpret_cast<const uint8_t *>(manifestText.data()),
+        manifestText.size());
+    std::string expectedReceipt = selection.manifestReceipt;
+    std::transform(expectedReceipt.begin(), expectedReceipt.end(),
+                   expectedReceipt.begin(), ::tolower);
+    if (receipt != expectedReceipt) {
+      return fail("installed_manifest_receipt",
+                  "installed map manifest does not match active selection");
+    }
+    presentation.displayName =
+        jsonPresentationStringValue(manifestText, "displayName");
+    presentation.hasBoundsE7 =
+        jsonPresentationBoundsE7(manifestText, presentation.boundsE7);
+    return {true, "ok", ""};
+  }
   MapManifest manifest;
-  const InstallStatus status = readActiveManifest(manifest);
+  const InstallStatus status = validateManifestText(manifestText, manifest);
   if (!status.ok)
     return status;
   presentation.displayName = manifest.displayName;
   presentation.boundsE7 = manifest.boundsE7;
   presentation.hasBoundsE7 = manifest.hasBoundsE7;
   return status;
+}
+
+bool MapTransferInstaller::readActiveMapPresentationRevision(
+    const ActiveMapSelection &selection,
+    MapPresentationRevision &revision) const {
+  revision = MapPresentationRevision();
+  if (!safeActiveRoot(selection.root))
+    return false;
+  struct stat info = {};
+  const std::string path = joinPath(
+      joinPath(storageRoot_, selection.root), kInstalledManifestFile);
+  if (::stat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
+      info.st_size <= 0 ||
+      static_cast<uint64_t>(info.st_size) > kMaxManifestBytes) {
+    return false;
+  }
+  revision.bytes = static_cast<uint64_t>(info.st_size);
+  revision.modifiedSeconds = static_cast<int64_t>(info.st_mtime);
+  revision.inode = static_cast<uint64_t>(info.st_ino);
+  return true;
 }
 
 bool MapTransferInstaller::pruneStagingSessions(

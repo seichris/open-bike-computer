@@ -779,7 +779,7 @@ private struct SavedMapsSettingsSection: View {
         )
         Section(header: Text("Saved Maps")) {
             if savedMaps.isEmpty {
-                Text("No saved maps yet")
+                Text("No offline maps yet")
                     .foregroundColor(.secondary)
             } else {
                 ForEach(savedMaps) { item in

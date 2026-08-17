@@ -1498,6 +1498,43 @@ static std::string jsonEscape(const std::string &value) {
 }
 
 static std::string mapTransferStatusJson() {
+  struct ActivePresentationCache {
+    bool available = false;
+    std::string mapId;
+    std::string sessionId;
+    std::string root;
+    std::string manifestReceipt;
+    std::string signedManifestReceipt;
+    map_transfer::MapPresentationMetadata presentation;
+    map_transfer::MapPresentationRevision revision;
+
+    bool matches(
+        const map_transfer::ActiveMapSelection &selection,
+        const map_transfer::MapPresentationRevision &sourceRevision) const {
+      return available && mapId == selection.mapId &&
+             sessionId == selection.sessionId && root == selection.root &&
+             manifestReceipt == selection.manifestReceipt &&
+             signedManifestReceipt == selection.signedManifestReceipt &&
+             revision.bytes == sourceRevision.bytes &&
+             revision.modifiedSeconds == sourceRevision.modifiedSeconds &&
+             revision.inode == sourceRevision.inode;
+    }
+
+    void store(const map_transfer::ActiveMapSelection &selection,
+               const map_transfer::MapPresentationMetadata &value,
+               const map_transfer::MapPresentationRevision &sourceRevision) {
+      available = true;
+      mapId = selection.mapId;
+      sessionId = selection.sessionId;
+      root = selection.root;
+      manifestReceipt = selection.manifestReceipt;
+      signedManifestReceipt = selection.signedManifestReceipt;
+      presentation = value;
+      revision = sourceRevision;
+    }
+  };
+  static ActivePresentationCache activePresentationCache;
+
   map_transfer::HttpTransferStatus transferStatus = mapTransferHttp.status();
   map_transfer::ActiveMapSelection activeMap;
   map_transfer::MapTransferInstaller installer("/sdcard");
@@ -1506,8 +1543,41 @@ static std::string mapTransferStatusJson() {
   map_transfer::MapPresentationMetadata activePresentation;
   map_transfer::InstallStatus activePresentationStatus;
   if (activeStatus.ok) {
-    activePresentationStatus =
-        installer.readActiveMapPresentation(activePresentation);
+    map_transfer::MapPresentationRevision activePresentationRevision;
+    const bool hasPresentationRevision =
+        installer.readActiveMapPresentationRevision(
+            activeMap, activePresentationRevision);
+    if (hasPresentationRevision && activePresentationCache.matches(
+                                       activeMap,
+                                       activePresentationRevision)) {
+      activePresentation = activePresentationCache.presentation;
+      activePresentationStatus = {true, "ok", ""};
+    } else {
+      activePresentationCache = ActivePresentationCache();
+      const map_transfer::ActiveMapSelection requestedActiveMap = activeMap;
+      activePresentationStatus = installer.readActiveMapPresentation(
+          activeMap, activePresentation);
+      if (activePresentationStatus.ok) {
+        map_transfer::MapPresentationRevision presentedRevision;
+        if (installer.readActiveMapPresentationRevision(
+                activeMap, presentedRevision) &&
+            activeMap.mapId == requestedActiveMap.mapId &&
+            activeMap.sessionId == requestedActiveMap.sessionId &&
+            activeMap.root == requestedActiveMap.root &&
+            activeMap.manifestReceipt == requestedActiveMap.manifestReceipt &&
+            activeMap.signedManifestReceipt ==
+                requestedActiveMap.signedManifestReceipt &&
+            activePresentationRevision.bytes == presentedRevision.bytes &&
+            activePresentationRevision.modifiedSeconds ==
+                presentedRevision.modifiedSeconds &&
+            activePresentationRevision.inode == presentedRevision.inode) {
+          activePresentationCache.store(activeMap, activePresentation,
+                                        presentedRevision);
+        }
+      }
+    }
+  } else {
+    activePresentationCache = ActivePresentationCache();
   }
   const bool streamSupported = mapTransferHttp.streamInstallSupported();
 

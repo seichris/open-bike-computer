@@ -22,6 +22,12 @@ struct MapPresentationMetadata {
   bool hasBoundsE7 = false;
 };
 
+struct MapPresentationRevision {
+  uint64_t bytes = 0;
+  int64_t modifiedSeconds = 0;
+  uint64_t inode = 0;
+};
+
 struct MapManifest {
   uint32_t schemaVersion = 0;
   std::string mapId;
@@ -177,8 +183,12 @@ public:
   bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;
   InstallStatus readActiveManifest(MapManifest &manifest) const;
-  InstallStatus
-  readActiveMapPresentation(MapPresentationMetadata &presentation) const;
+  InstallStatus readActiveMapPresentation(
+      ActiveMapSelection &selection,
+      MapPresentationMetadata &presentation) const;
+  bool readActiveMapPresentationRevision(
+      const ActiveMapSelection &selection,
+      MapPresentationRevision &revision) const;
   InstallStatus readActiveMapId(std::string &mapId) const;
   InstallStatus rollbackActiveMap(const std::string &sessionId) const;
   InstallStatus discardIncompleteStreamMap(

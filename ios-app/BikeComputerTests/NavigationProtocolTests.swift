@@ -8263,6 +8263,17 @@ struct NavigationProtocolTests {
             "each saved map shows distinct iPhone and Bike Computer presence icons"
         )
         assert(
+            source.contains("Text(\"No offline maps yet\")"),
+            "Saved Maps uses the agreed empty-state copy"
+        )
+        assert(
+            source.contains("is saved on this iPhone") &&
+                source.contains("is not saved on this iPhone") &&
+                source.contains("is active on the Bike Computer") &&
+                source.contains("Transfer \\(displayName) to device"),
+            "both saved-map presence indicators expose accessible state labels"
+        )
+        assert(
             source.contains("manager.resumePausedMapUpload(bleManager: bleManager)") &&
                 source.contains("Map upload paused. Tap to resume."),
             "the paused status row resumes the matching map transfer"
@@ -9223,6 +9234,93 @@ struct NavigationProtocolTests {
         assertEqual(items.count, 1, "disconnect removes live device-only inventory")
         assert(items[0].isOnIPhone && !items[0].isActiveOnDevice,
                "disconnect preserves the iPhone cache without stale device presence")
+
+        manager.deleteCachedPack(at: packURL)
+        items = manager.savedMapListItems(activeDeviceMap: exactDevice)
+        assertEqual(items.count, 1,
+                    "deleting the iPhone copy keeps the active device map visible")
+        assert(!items[0].isOnIPhone && items[0].isActiveOnDevice,
+               "local deletion converts a merged row into device-only inventory")
+        assert(manager.savedMapListItems(activeDeviceMap: nil).isEmpty,
+               "no local or connected-device map produces an empty inventory")
+
+        let streamCacheDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(
+                "saved-stream-inventory-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try? FileManager.default.createDirectory(
+            at: streamCacheDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: streamCacheDirectory) }
+        let streamURL = streamCacheDirectory.appendingPathComponent("stream-map.bmap")
+        try? Data([1, 2, 3, 4]).write(to: streamURL)
+        let signedReceipt = String(repeating: "d", count: 64)
+        let streamArtifact = OfflineMapArtifact(
+            format: OfflineMapArtifact.bikeMapStreamFormat,
+            mediaType: "application/vnd.openbikecomputer.map-stream",
+            filename: streamURL.lastPathComponent,
+            objectKey: "maps/stream-map.bmap",
+            bytes: 4,
+            sha256: String(repeating: "a", count: 64),
+            manifestReceipt: String(repeating: "b", count: 64),
+            signedManifestReceipt: signedReceipt
+        )
+        let streamMetadata = SavedMapArtifactMetadata(
+            schemaVersion: SavedMapArtifactMetadata.currentSchemaVersion,
+            mapID: "stream-map",
+            displayName: "Stream Map",
+            localArtifactFilename: streamURL.lastPathComponent,
+            streamFormatVersion: 1,
+            rendererFormatVersion: 2,
+            jobID: nil,
+            serverURLString: nil,
+            clientInstallationID: nil,
+            primaryArtifact: streamArtifact,
+            legacyArtifact: nil,
+            lastTransferProtocol: nil,
+            lastTransferStreamFormat: nil,
+            lastTransferSessionID: nil,
+            lastBackgroundTaskID: nil,
+            lastDeviceSequence: nil,
+            lastDeviceState: nil,
+            lastDeviceStep: nil,
+            lastDeviceStepCount: nil,
+            lastDeviceProgress: nil,
+            expectedActiveMapID: nil,
+            expectedActiveSessionID: nil,
+            lastTransferOutcome: nil
+        )
+        try? SavedMapArtifactMetadataStore.save(streamMetadata, for: streamURL)
+        let streamManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: streamCacheDirectory
+        )
+        let legacySession = "stream-map-legacy-session"
+        let legacyDevice = DeviceActiveMapDescriptor(
+            mapID: "stream-map",
+            sessionID: legacySession
+        )!
+        assertEqual(
+            streamManager.savedMapListItems(activeDeviceMap: legacyDevice).count,
+            2,
+            "a stream pack does not claim an unknown legacy fallback session"
+        )
+        streamManager.updateSavedMapTransferMetadata(
+            mapID: "stream-map",
+            protocolVersion: 1,
+            streamFormatVersion: nil,
+            sessionID: legacySession,
+            outcome: "installed"
+        )
+        let refreshedItems = streamManager.savedMapListItems(
+            activeDeviceMap: legacyDevice
+        )
+        assertEqual(refreshedItems.count, 1,
+                    "recorded legacy transfer identity refreshes the live inventory")
+        assert(refreshedItems[0].isOnIPhone && refreshedItems[0].isActiveOnDevice,
+               "protocol-v1 fallback installation merges without an app relaunch")
     }
 
     static func testOfflineMapManifestDecoding() {
@@ -15624,6 +15722,68 @@ struct NavigationProtocolTests {
         assertEqual(manager.activeDeviceMap?.sessionID, nil,
                     "older firmware without a session cannot merge with a local pack")
 
+        let malformedPresentationPacket =
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
+                """
+                {"enabled":true,"activeMapId":"safe-map","activeSessionId":"safe-session","activeMapDisplayName":42,"activeMapBoundsE7":[1219500000,315500000,1209000000,307000000]}
+                """.utf8
+            )
+        assert(manager.handleMapTransferStatusNotification(malformedPresentationPacket),
+               "malformed optional map presentation should not reject the status")
+        assertEqual(manager.activeDeviceMap?.mapID, "safe-map",
+                    "valid active identity survives malformed optional presentation")
+        assertEqual(manager.activeDeviceMap?.displayName, nil,
+                    "malformed optional display name is omitted")
+        assertEqual(manager.activeDeviceMap?.bounds, nil,
+                    "reversed optional preview bounds are omitted")
+
+        let booleanBoundsPacket =
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
+                """
+                {"enabled":true,"activeMapId":"safe-map","activeMapBoundsE7":[false,false,true,true]}
+                """.utf8
+            )
+        assert(manager.handleMapTransferStatusNotification(booleanBoundsPacket),
+               "boolean optional bounds should not reject the status")
+        assertEqual(manager.activeDeviceMap?.bounds, nil,
+                    "JSON booleans are not accepted as integer coordinates")
+
+        let oversizedBoundsPacket =
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
+                """
+                {"enabled":true,"activeMapId":"safe-map","activeMapBoundsE7":[100000000,100000000,200000000,200000000,2147483648]}
+                """.utf8
+            )
+        assert(manager.handleMapTransferStatusNotification(oversizedBoundsPacket),
+               "oversized optional bounds should not reject the status")
+        assertEqual(manager.activeDeviceMap?.bounds, nil,
+                    "invalid extra coordinates cannot be compacted into a valid bounds array")
+
+        let collisionA = DeviceActiveMapDescriptor(
+            mapID: "a--b",
+            sessionID: "c",
+            boundsE7: [100000000, 100000000, 200000000, 200000000]
+        )!
+        let collisionB = DeviceActiveMapDescriptor(
+            mapID: "a",
+            sessionID: "b--c",
+            boundsE7: [100000000, 100000000, 200000000, 200000000]
+        )!
+        assert(collisionA.previewFilename != collisionB.previewFilename,
+               "preview cache filenames bind unambiguous map and session identities")
+        let legacyBoundsA = DeviceActiveMapDescriptor(
+            mapID: ".legacy-map",
+            boundsE7: [100000000, 100000000, 200000000, 200000000]
+        )!
+        let legacyBoundsB = DeviceActiveMapDescriptor(
+            mapID: ".legacy-map",
+            boundsE7: [300000000, 300000000, 400000000, 400000000]
+        )!
+        assert(legacyBoundsA.previewFilename != legacyBoundsB.previewFilename,
+               "sessionless preview identity includes presentation metadata")
+        assert(legacyBoundsA.previewFilename.hasPrefix("device-map-"),
+               "valid dot-prefixed map IDs cannot create hidden preview files")
+
         let missingActivePacket = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
             "{\"enabled\":true,\"activeError\":{\"code\":\"installed_manifest\"}}".utf8
         )
@@ -15636,7 +15796,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerReassemblesChunkedMapTransferStatus() {
         let manager = BLEManager()
         let body = Data("""
-        {"enabled":true,"baseUrl":"http://192.168.4.20:8080","activeMapId":"custom-map","activeSessionId":"custom-map-session","activation":{"status":"installed","sequence":9,"sessionId":"custom-map-session"}}
+        {"enabled":true,"baseUrl":"http://192.168.4.20:8080","activeMapId":"custom-map","activeSessionId":"custom-map-session","activeMapDisplayName":"Custom Map","activeMapBoundsE7":[1209000000,307000000,1219500000,315500000],"activation":{"status":"installed","sequence":9,"sessionId":"custom-map-session"}}
         """.utf8)
         let chunkSize = 13
         let chunkCount = UInt8((body.count + chunkSize - 1) / chunkSize)
@@ -15655,6 +15815,10 @@ struct NavigationProtocolTests {
                     "chunk reassembly exposes active map")
         assertEqual(manager.mapTransferActiveSessionId, "custom-map-session",
                     "chunk reassembly exposes durable active session")
+        assertEqual(manager.activeDeviceMap?.displayName, "Custom Map",
+                    "chunk reassembly publishes the device map display name")
+        assertEqual(manager.activeDeviceMap?.bounds?.maxLatitude, 31.55,
+                    "chunk reassembly publishes the device map preview bounds")
         assertEqual(manager.mapTransferActivationStatus, "installed",
                     "chunk reassembly exposes activation state")
         assertEqual(manager.mapTransferActivationSequence, 9,
