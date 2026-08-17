@@ -778,6 +778,88 @@ struct SavedMapPreviewCatalystTests {
             fail("a late snapshot must not persist after its map was deleted")
         }
 
+        let deviceDescriptor = DeviceActiveMapDescriptor(
+            mapID: "cloned-sd-map",
+            sessionID: "cloned-sd-session",
+            displayName: "Cloned SD Map",
+            boundsE7: [1_209_000_000, 307_000_000, 1_219_500_000, 315_500_000]
+        )!
+        var deviceSnapshotGenerationCount = 0
+        let devicePreviewManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { bounds in
+                guard bounds == expectedBounds else {
+                    fail("device-only preview should use its reported bounds")
+                }
+                deviceSnapshotGenerationCount += 1
+                return snapshotPNG
+            }
+        )
+        devicePreviewManager.updateActiveDeviceMap(deviceDescriptor)
+        guard let deviceItem = devicePreviewManager.savedMapListItems(
+            activeDeviceMap: deviceDescriptor
+        ).first(where: { $0.deviceMap?.mapID == deviceDescriptor.mapID }) else {
+            fail("device-only map should appear in the merged saved-map inventory")
+        }
+        devicePreviewManager.loadPreviewIfNeeded(for: deviceItem)
+        let devicePreviewDeadline = Date().addingTimeInterval(3)
+        while (!imageMatchesPNG(
+            devicePreviewManager.previewImage(for: deviceItem),
+            data: snapshotPNG
+        ) || DeviceMapSnapshotPreviewStore.imageData(
+            for: deviceDescriptor,
+            in: cacheDirectory
+        ) != snapshotPNG) && Date() < devicePreviewDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard deviceSnapshotGenerationCount == 1,
+              imageMatchesPNG(
+                  devicePreviewManager.previewImage(for: deviceItem),
+                  data: snapshotPNG
+              ),
+              DeviceMapSnapshotPreviewStore.imageData(
+                  for: deviceDescriptor,
+                  in: cacheDirectory
+              ) == snapshotPNG else {
+            fail("device-only map should generate and persist its MapKit preview")
+        }
+
+        var restoredDeviceGenerationCount = 0
+        let restoredDevicePreviewManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { _ in
+                restoredDeviceGenerationCount += 1
+                return nil
+            }
+        )
+        restoredDevicePreviewManager.updateActiveDeviceMap(deviceDescriptor)
+        guard let restoredDeviceItem = restoredDevicePreviewManager.savedMapListItems(
+            activeDeviceMap: deviceDescriptor
+        ).first(where: { $0.deviceMap?.mapID == deviceDescriptor.mapID }) else {
+            fail("restored device-only map should remain visible")
+        }
+        restoredDevicePreviewManager.loadPreviewIfNeeded(for: restoredDeviceItem)
+        let restoredDeviceDeadline = Date().addingTimeInterval(3)
+        while !imageMatchesPNG(
+            restoredDevicePreviewManager.previewImage(for: restoredDeviceItem),
+            data: snapshotPNG
+        ) && Date() < restoredDeviceDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard restoredDeviceGenerationCount == 0,
+              imageMatchesPNG(
+                  restoredDevicePreviewManager.previewImage(for: restoredDeviceItem),
+                  data: snapshotPNG
+              ) else {
+            fail("device preview cache should survive relaunch without another snapshot")
+        }
+        restoredDevicePreviewManager.updateActiveDeviceMap(nil)
+        guard restoredDevicePreviewManager.previewImage(for: restoredDeviceItem) == nil else {
+            fail("disconnect should clear live device-only preview state")
+        }
+
         let northWestCoordinate = CLLocationCoordinate2D(
             latitude: expectedBounds.maxLatitude,
             longitude: expectedBounds.minLongitude

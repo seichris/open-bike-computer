@@ -744,6 +744,7 @@ struct NavigationProtocolTests {
         await testOfflineMapCompatibilityArchiveCancellation()
         await testOfflineMapArchiveValidationCancellation()
         testCachedMapInstalledIdentityUsesManifestSession()
+        testSavedMapInventoryMergesOnlyExactDeviceContent()
         testOfflineMapManifestDecoding()
         testMapTransferUploadURLEncodesPlusPathComponents()
         testMapTransferOutcomePolicy()
@@ -8255,11 +8256,11 @@ struct NavigationProtocolTests {
             "Saved Maps omits redundant device and transfer summary rows"
         )
         assert(
-            source.contains("if isInstalled {") &&
-                source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
-                source.contains("\"arrow.clockwise.circle\"") &&
-                source.contains("\"arrow.up.circle\""),
-            "each saved map shows installed status, resume, or upload as exclusive actions"
+            source.contains("Image(systemName: \"iphone\")") &&
+                source.contains("Text(\"b\")") &&
+                source.contains("state: .active") &&
+                source.contains("uploadProgress.map { .uploading($0) } ?? .available"),
+            "each saved map shows distinct iPhone and Bike Computer presence icons"
         )
         assert(
             source.contains("manager.resumePausedMapUpload(bleManager: bleManager)") &&
@@ -8282,10 +8283,16 @@ struct NavigationProtocolTests {
         )
         assert(
             source.contains("SavedMapThumbnail(") &&
-                source.contains("manager.previewImage(forCachedPack: packURL)") &&
-                source.contains("manager.loadPreviewIfNeeded(forCachedPack: packURL)") &&
+                source.contains("manager.previewImage(for: item)") &&
+                source.contains("manager.loadPreviewIfNeeded(for: item)") &&
                 source.contains(".frame(width: 52, height: 36)"),
             "each saved map shows a fixed-size preview before its editable name"
+        )
+        assert(
+            source.contains("manager.savedMapListItems(") &&
+                source.contains("activeDeviceMap: bleManager.activeDeviceMap") &&
+                source.contains("manager.updateActiveDeviceMap(descriptor)"),
+            "Saved Maps includes and tracks the connected Bike Computer inventory"
         )
         let managerSourceURL = URL(fileURLWithPath:
             "ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift"
@@ -9155,6 +9162,69 @@ struct NavigationProtocolTests {
         )
     }
 
+    @MainActor
+    static func testSavedMapInventoryMergesOnlyExactDeviceContent() {
+        let cacheDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("saved-map-inventory-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: cacheDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+
+        let manifestData = Data("""
+        {"schemaVersion":1,"mapId":"map-1","displayName":"Phone Map"}
+        """.utf8)
+        let packURL = cacheDirectory.appendingPathComponent("map-1.zip")
+        try? makeStoredZip(entries: [
+            ("manifest.json", manifestData),
+            ("VECTMAP/map-1/+0032+0008/123_456.fmb", Data("map-block".utf8)),
+        ]).write(to: packURL)
+        let suite = "saved-map-inventory-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let manager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory
+        )
+        let exactSession = MapTransferSessionIdentity.make(
+            mapId: "map-1",
+            manifestData: manifestData
+        )
+        let exactDevice = DeviceActiveMapDescriptor(
+            mapID: "map-1",
+            sessionID: exactSession,
+            displayName: "Device Name",
+            boundsE7: [1_209_000_000, 307_000_000, 1_219_500_000, 315_500_000]
+        )!
+
+        var items = manager.savedMapListItems(activeDeviceMap: exactDevice)
+        assertEqual(items.count, 1, "the exact device and iPhone map collapse into one row")
+        assert(items[0].isOnIPhone && items[0].isActiveOnDevice,
+               "the merged row exposes both presence states")
+        assertEqual(items[0].displayName, "Phone Map",
+                    "a local saved name wins when exact content is merged")
+
+        let regeneratedDevice = DeviceActiveMapDescriptor(
+            mapID: "map-1",
+            sessionID: "different-session",
+            displayName: "Cloned SD Map",
+            boundsE7: [1_209_000_000, 307_000_000, 1_219_500_000, 315_500_000]
+        )!
+        items = manager.savedMapListItems(activeDeviceMap: regeneratedDevice)
+        assertEqual(items.count, 2,
+                    "same map ID with different content stays as separate device and phone rows")
+        assert(!items[0].isOnIPhone && items[0].isActiveOnDevice,
+               "device-only content sorts first and is not claimed by the iPhone")
+        assert(items[1].isOnIPhone && !items[1].isActiveOnDevice,
+               "the local regenerated map remains uploadable")
+
+        items = manager.savedMapListItems(activeDeviceMap: nil)
+        assertEqual(items.count, 1, "disconnect removes live device-only inventory")
+        assert(items[0].isOnIPhone && !items[0].isActiveOnDevice,
+               "disconnect preserves the iPhone cache without stale device presence")
+    }
+
     static func testOfflineMapManifestDecoding() {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("offline-map-manifest-test-\(UUID().uuidString).zip")
@@ -9789,6 +9859,9 @@ struct NavigationProtocolTests {
           "enabled": true,
           "activeMapId": "old-map",
           "activeSessionId": "old-map-session",
+          "activeManifestReceipt": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activeMapDisplayName": "Old Map",
+          "activeMapBoundsE7": [1037500000, 12400000, 1039300000, 13700000],
           "activation": {
             "status": "failed",
             "sequence": 9,
@@ -9814,6 +9887,13 @@ struct NavigationProtocolTests {
         assertEqual(status.activation?.error?.code, "file_sha256", "status exposes activation error code")
         assertEqual(status.activation?.error?.message, "sha mismatch for VECTMAP/new-map/1.fmb", "status exposes activation error message")
         assertEqual(status.activeSessionId, "old-map-session", "status exposes durable active session identity")
+        assertEqual(status.activeManifestReceipt, String(repeating: "a", count: 64),
+                    "HTTP status exposes the active manifest receipt")
+        assertEqual(status.activeMapDisplayName, "Old Map",
+                    "HTTP status exposes the active display name")
+        assertEqual(status.activeMapBoundsE7,
+                    [1_037_500_000, 12_400_000, 1_039_300_000, 13_700_000],
+                    "HTTP status exposes normalized preview bounds")
     }
 
     static func testFirmwareManifestDecodingAndHash() {
@@ -15496,7 +15576,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activeManifestReceipt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","activeRendererFormat":2,"labelProfileVersion":1,"labelLanguages":["ja","en"],"fontAssetHealthy":true,"activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activeManifestReceipt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","activeMapDisplayName":"Kyoto Hills","activeMapBoundsE7":[1356000000,349000000,1360000000,352000000],"activeRendererFormat":2,"labelProfileVersion":1,"labelLanguages":["ja","en"],"fontAssetHealthy":true,"activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
         """
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -15508,6 +15588,12 @@ struct NavigationProtocolTests {
         assertEqual(manager.activeMapManifestReceipt,
                     String(repeating: "a", count: 64),
                     "status parser associates label health with the active receipt")
+        assertEqual(manager.activeDeviceMap?.mapID, "kyoto-v1",
+                    "status parser publishes a device map descriptor")
+        assertEqual(manager.activeDeviceMap?.displayName, "Kyoto Hills",
+                    "device map descriptor exposes its manifest display name")
+        assertEqual(manager.activeDeviceMap?.bounds?.minLongitude, 135.6,
+                    "device map descriptor converts integer preview bounds")
         assertEqual(manager.activeMapRendererFormat, 2,
                     "status parser exposes active renderer target")
         assertEqual(manager.activeMapLabelProfileVersion, 1,
@@ -15527,6 +15613,24 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceMapFoundForCurrentLocation, false, "status parser exposes current map coverage")
         assertEqual(manager.deviceMapBlockCount, 0, "status parser exposes current map block count")
         assertEqual(manager.mapTransferLastError, "previous: previous upload failed", "status parser exposes last transfer error")
+
+        let legacyPacket = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
+            "{\"enabled\":true,\"activeMapId\":\"legacy-map\"}".utf8
+        )
+        assert(manager.handleMapTransferStatusNotification(legacyPacket),
+               "legacy map status should remain supported")
+        assertEqual(manager.activeDeviceMap?.mapID, "legacy-map",
+                    "older firmware still creates a conservative device-only descriptor")
+        assertEqual(manager.activeDeviceMap?.sessionID, nil,
+                    "older firmware without a session cannot merge with a local pack")
+
+        let missingActivePacket = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
+            "{\"enabled\":true,\"activeError\":{\"code\":\"installed_manifest\"}}".utf8
+        )
+        assert(manager.handleMapTransferStatusNotification(missingActivePacket),
+               "active-map error status should be consumed")
+        assertEqual(manager.activeDeviceMap, nil,
+                    "a complete status without an active map clears device inventory")
     }
 
     static func testBLEManagerReassemblesChunkedMapTransferStatus() {
@@ -15559,6 +15663,12 @@ struct NavigationProtocolTests {
 
     static func testBLEManagerCompletesRetransmittedChunkedMapTransferStatus() {
         let manager = BLEManager()
+        let previousBody = Data(
+            "{\"enabled\":true,\"activeMapId\":\"previous-map\",\"activeSessionId\":\"previous-session\"}".utf8
+        )
+        assert(manager.handleMapTransferStatusNotification(
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + previousBody
+        ), "a previous complete map status should seed the live descriptor")
         let body = Data("""
         {"enabled":false,"activeMapId":"shanghai-v2","activeSessionId":"session-v2","activeRendererFormat":2,"labelProfileVersion":1,"labelLanguages":["zh-Hans","en"],"fontAssetHealthy":true,"activation":{"status":"installed","sequence":10,"sessionId":"session-v2","mapId":"shanghai-v2","step":3,"steps":3,"progress":100}}
         """.utf8)
@@ -15579,8 +15689,10 @@ struct NavigationProtocolTests {
             assert(manager.handleMapTransferStatusNotification(frame(index: index)),
                    "first lossy status response should retain received chunks")
         }
-        assertEqual(manager.mapTransferActiveMapId, "",
-                    "an incomplete response must not publish partial state")
+        assertEqual(manager.mapTransferActiveMapId, "previous-map",
+                    "an incomplete response must retain the previous complete state")
+        assertEqual(manager.activeDeviceMap?.sessionID, "previous-session",
+                    "an incomplete response must retain complete device inventory")
 
         for index in UInt8(0)..<chunkCount {
             assert(manager.handleMapTransferStatusNotification(frame(index: index)),

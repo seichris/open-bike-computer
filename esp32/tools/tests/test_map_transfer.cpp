@@ -426,6 +426,65 @@ static void testRejectsUnsafeManifestPath() {
   assert(status.code == "manifest_path");
 }
 
+static std::string presentationManifest(const std::string &metadata) {
+  return "{\"schemaVersion\":1,\"mapId\":\"map-1\"," + metadata +
+         "\"files\":[{\"path\":\"VECTMAP/map-1/+0000+0000/1.fmb\","
+         "\"bytes\":1,\"sha256\":\"" + std::string(64, '0') +
+         "\"}]}";
+}
+
+static void testParsesOptionalActiveMapPresentationMetadata() {
+  MapTransferInstaller installer("/tmp/root");
+  MapManifest manifest;
+
+  auto status = installer.validateManifestText(
+      presentationManifest(
+          "\"displayName\":\"Shànghǎi 🚲\","
+          "\"boundsE7\":[1209000000,307000000,1219500000,315500000],"),
+      manifest);
+  assert(status.ok);
+  assert(manifest.displayName == "Shànghǎi 🚲");
+  assert(manifest.hasBoundsE7);
+  assert((manifest.boundsE7 ==
+          std::array<int32_t, 4>{1209000000, 307000000, 1219500000,
+                                 315500000}));
+
+  status = installer.validateManifestText(
+      presentationManifest(
+          "\"displayName\":\"S\\u00e3o Paulo \\ud83d\\udeb2\","
+          "\"bounds\":[-46.83,-24.01,-46.36,-23.35],"),
+      manifest);
+  assert(status.ok);
+  assert(manifest.displayName == "São Paulo 🚲");
+  assert(manifest.hasBoundsE7);
+  assert((manifest.boundsE7 ==
+          std::array<int32_t, 4>{-468300000, -240100000, -463600000,
+                                 -233500000}));
+}
+
+static void testIgnoresInvalidOptionalActiveMapPresentationMetadata() {
+  MapTransferInstaller installer("/tmp/root");
+  MapManifest manifest;
+
+  auto status = installer.validateManifestText(
+      presentationManifest(
+          "\"displayName\":\"line\\nbreak\","
+          "\"boundsE7\":[1210000000,310000000,1200000000,320000000],"),
+      manifest);
+  assert(status.ok);
+  assert(manifest.displayName.empty());
+  assert(!manifest.hasBoundsE7);
+
+  const std::string oversizedName(241, 'x');
+  status = installer.validateManifestText(
+      presentationManifest("\"displayName\":\"" + oversizedName +
+                           "\",\"bounds\":[-181,-20,-180,-10],"),
+      manifest);
+  assert(status.ok);
+  assert(manifest.displayName.empty());
+  assert(!manifest.hasBoundsE7);
+}
+
 static void testRejectsMalformedActiveTargetMetadata() {
   const std::string root = tempRoot();
   assert(::system((std::string("mkdir -p ") + root + "/VECTMAP").c_str()) ==
@@ -480,7 +539,10 @@ static void testValidatesStagedMapAndActivates() {
   writeFile(stagedDir + "/123_456.fmb", blockData);
   writeFile(stagedDir + "/123_456.fmp", previewData);
   const std::string manifestText =
-      "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"files\":["
+      "{\"schemaVersion\":1,\"mapId\":\"map-1\","
+      "\"displayName\":\"Active Map\","
+      "\"boundsE7\":[1209000000,307000000,1219500000,315500000],"
+      "\"files\":["
       "{\"path\":\"VECTMAP/map-1/+0032+0008/123_456.fmb\",\"bytes\":" +
       std::to_string(blockData.size()) +
       ","
@@ -521,6 +583,13 @@ static void testValidatesStagedMapAndActivates() {
   assert(selection.target.renderer == "esp32-fmb");
   assert(selection.target.formatVersion == 1);
   assert(selection.previousRoot.empty());
+  map_transfer::MapPresentationMetadata presentation;
+  assert(installer.readActiveMapPresentation(presentation).ok);
+  assert(presentation.displayName == "Active Map");
+  assert(presentation.hasBoundsE7);
+  assert((presentation.boundsE7 ==
+          std::array<int32_t, 4>{1209000000, 307000000, 1219500000,
+                                 315500000}));
   assert(!exists(root + "/VECTMAP/.staging/" + session));
   assert(!exists(root + "/VECTMAP/.activation-transaction.json"));
 
@@ -533,6 +602,8 @@ static void testValidatesStagedMapAndActivates() {
   assert(cleared.ok);
   assert(cleared.code == "active_cleared");
   assert(installer.readActiveMap(selection).code == "active_missing");
+  assert(installer.readActiveMapPresentation(presentation).code ==
+         "active_missing");
 }
 
 static void testActivationSwitchesPointerAndRetainsPreviousVersion() {
@@ -1285,6 +1356,8 @@ int main() {
   testTargetThreeBuildingContractValidation();
   testActivationStateTracksAttemptsAndCompactStatus();
   testRejectsUnsafeManifestPath();
+  testParsesOptionalActiveMapPresentationMetadata();
+  testIgnoresInvalidOptionalActiveMapPresentationMetadata();
   testRejectsMalformedActiveTargetMetadata();
   testRejectsPathOutsideMapNamespace();
   testRejectsMapBlockOutsideRendererBudget();

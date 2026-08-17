@@ -1503,6 +1503,12 @@ static std::string mapTransferStatusJson() {
   map_transfer::MapTransferInstaller installer("/sdcard");
   map_transfer::InstallStatus activeStatus =
       installer.readActiveMap(activeMap);
+  map_transfer::MapPresentationMetadata activePresentation;
+  map_transfer::InstallStatus activePresentationStatus;
+  if (activeStatus.ok) {
+    activePresentationStatus =
+        installer.readActiveMapPresentation(activePresentation);
+  }
   const bool streamSupported = mapTransferHttp.streamInstallSupported();
 
   std::string body = std::string("{\"configured\":") +
@@ -1552,7 +1558,7 @@ static std::string mapTransferStatusJson() {
     body += ",\"hotspotFallbackReason\":\"" +
             jsonEscape(transferStatus.hotspotFallbackReason) + "\"";
   }
-  if (activeStatus.ok) {
+  if (activeStatus.ok && activePresentationStatus.ok) {
     body += ",\"activeMapId\":\"" + jsonEscape(activeMap.mapId) + "\"";
     if (!activeMap.sessionId.empty()) {
       body += ",\"activeSessionId\":\"" +
@@ -1562,6 +1568,12 @@ static std::string mapTransferStatusJson() {
       body += ",\"activeManifestReceipt\":\"" +
               jsonEscape(activeMap.manifestReceipt) + "\"";
     }
+    map_transfer_status_protocol::ActiveMapPresentation presentation;
+    presentation.displayName = activePresentation.displayName;
+    presentation.boundsE7 = activePresentation.boundsE7;
+    presentation.hasBoundsE7 = activePresentation.hasBoundsE7;
+    map_transfer_status_protocol::appendActiveMapPresentation(body,
+                                                              presentation);
     if (activeMap.target.formatVersion != 0) {
       body += ",\"activeRendererFormat\":" +
               std::to_string(activeMap.target.formatVersion) +
@@ -1582,7 +1594,9 @@ static std::string mapTransferStatusJson() {
                   : "false";
     }
   } else {
-    body += ",\"activeError\":{\"code\":\"" + jsonEscape(activeStatus.code) +
+    const map_transfer::InstallStatus &failure =
+        activeStatus.ok ? activePresentationStatus : activeStatus;
+    body += ",\"activeError\":{\"code\":\"" + jsonEscape(failure.code) +
             "\"}";
   }
 

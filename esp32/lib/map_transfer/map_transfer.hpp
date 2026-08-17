@@ -16,9 +16,18 @@ struct ManifestFile {
   uint64_t bytes = 0;
 };
 
+struct MapPresentationMetadata {
+  std::string displayName;
+  std::array<int32_t, 4> boundsE7 = {};
+  bool hasBoundsE7 = false;
+};
+
 struct MapManifest {
   uint32_t schemaVersion = 0;
   std::string mapId;
+  std::string displayName;
+  std::array<int32_t, 4> boundsE7 = {};
+  bool hasBoundsE7 = false;
   std::string renderer;
   uint32_t formatVersion = 0;
   uint32_t labelProfileVersion = 0;
@@ -168,6 +177,8 @@ public:
   bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;
   InstallStatus readActiveManifest(MapManifest &manifest) const;
+  InstallStatus
+  readActiveMapPresentation(MapPresentationMetadata &presentation) const;
   InstallStatus readActiveMapId(std::string &mapId) const;
   InstallStatus rollbackActiveMap(const std::string &sessionId) const;
   InstallStatus discardIncompleteStreamMap(

@@ -354,7 +354,7 @@ nonisolated enum SavedMapSnapshotPreviewStore {
         }
     }
 
-    private static func isValidPNG(_ data: Data) -> Bool {
+    static func isValidPNG(_ data: Data) -> Bool {
         guard (33...maximumImageBytes).contains(data.count),
               data.starts(with: pngSignature),
               uint32BE(data, at: 8) == 13,
@@ -371,6 +371,104 @@ nonisolated enum SavedMapSnapshotPreviewStore {
             UInt32(data[offset + 1]) << 16 |
             UInt32(data[offset + 2]) << 8 |
             UInt32(data[offset + 3])
+    }
+}
+
+nonisolated enum DeviceMapSnapshotPreviewStore {
+    private static let maximumEntryCount = 16
+    private static let maximumEntryAge: TimeInterval = 30 * 24 * 60 * 60
+
+    static func imageData(
+        for descriptor: DeviceActiveMapDescriptor,
+        in cacheRoot: URL
+    ) -> Data? {
+        let url = imageURL(for: descriptor, in: cacheRoot)
+        guard let values = try? url.resourceValues(
+            forKeys: [.fileSizeKey, .isRegularFileKey]
+        ),
+        values.isRegularFile == true,
+        let fileSize = values.fileSize,
+        (33...SavedMapSnapshotPreviewStore.maximumImageBytes).contains(fileSize),
+        let data = try? Data(contentsOf: url),
+        SavedMapSnapshotPreviewStore.isValidPNG(data) else {
+            return nil
+        }
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date()],
+            ofItemAtPath: url.path
+        )
+        return data
+    }
+
+    static func save(
+        _ data: Data,
+        for descriptor: DeviceActiveMapDescriptor,
+        in cacheRoot: URL
+    ) throws {
+        guard SavedMapSnapshotPreviewStore.isValidPNG(data) else {
+            throw OfflineMapPlatformError.invalidPack(
+                "device map snapshot preview is not a valid PNG"
+            )
+        }
+        let directory = previewDirectory(in: cacheRoot)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        try data.write(
+            to: imageURL(for: descriptor, in: cacheRoot),
+            options: .atomic
+        )
+        prune(directory: directory)
+    }
+
+    static func imageURL(
+        for descriptor: DeviceActiveMapDescriptor,
+        in cacheRoot: URL
+    ) -> URL {
+        previewDirectory(in: cacheRoot)
+            .appendingPathComponent(descriptor.previewFilename, isDirectory: false)
+    }
+
+    private static func previewDirectory(in cacheRoot: URL) -> URL {
+        cacheRoot.appendingPathComponent("DeviceMapPreviews", isDirectory: true)
+    }
+
+    private static func prune(directory: URL, now: Date = Date()) {
+        guard var entries = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [
+                .contentModificationDateKey,
+                .isRegularFileKey,
+            ],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+        entries = entries.filter { url in
+            let values = try? url.resourceValues(
+                forKeys: [.contentModificationDateKey, .isRegularFileKey]
+            )
+            return values?.isRegularFile == true &&
+                url.pathExtension.lowercased() == "png"
+        }
+        entries.sort { lhs, rhs in
+            let lhsDate = (try? lhs.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate) ?? .distantPast
+            let rhsDate = (try? rhs.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate) ?? .distantPast
+            return lhsDate > rhsDate
+        }
+        for (index, url) in entries.enumerated() {
+            let date = (try? url.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate) ?? .distantPast
+            if index >= maximumEntryCount || now.timeIntervalSince(date) > maximumEntryAge {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
     }
 }
 
@@ -1446,6 +1544,24 @@ nonisolated struct OfflineMapActivityCounter {
     }
 }
 
+nonisolated struct SavedMapLocalRecord: Equatable, Sendable {
+    let packURL: URL
+    let mapID: String
+    let acceptedSessionIDs: Set<String>
+    let displayName: String
+}
+
+nonisolated struct SavedMapListItem: Identifiable, Equatable, Sendable {
+    let id: String
+    let localRecord: SavedMapLocalRecord?
+    let deviceMap: DeviceActiveMapDescriptor?
+    let displayName: String
+
+    var packURL: URL? { localRecord?.packURL }
+    var isOnIPhone: Bool { localRecord != nil }
+    var isActiveOnDevice: Bool { deviceMap != nil }
+}
+
 @MainActor
 final class OfflineMapManager: ObservableObject {
     typealias PackDownloadOperation = (
@@ -1471,6 +1587,7 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var downloadURL: URL?
     @Published private(set) var downloadedPackURL: URL?
     @Published private(set) var cachedPackURLs: [URL] = []
+    @Published private(set) var cachedMapRecords: [SavedMapLocalRecord] = []
     @Published private(set) var downloadProgress: Double = 0
     @Published private(set) var downloadByteProgress: OfflineMapByteProgress?
     @Published private(set) var transferProgress: Double = 0
@@ -1545,6 +1662,7 @@ final class OfflineMapManager: ObservableObject {
     private var unavailablePackPreviews: Set<String> = []
     private var previewLoadTasks: [String: Task<Void, Never>] = [:]
     private let previewLoadRegistry = OfflineMapPreviewLoadRegistry()
+    private var currentActiveDeviceMap: DeviceActiveMapDescriptor?
 #endif
 
     init(
@@ -1939,6 +2057,15 @@ final class OfflineMapManager: ObservableObject {
         )
     }
 
+    func mapUploadProgress(for packURL: URL) -> Double? {
+        guard savedMapID(for: packURL) == lastTransferMapId,
+              lastTransferOutcome == "uploading" || hasActiveBackgroundUpload,
+              !isPausedMapUpload(packURL) else {
+            return nil
+        }
+        return min(0.99, max(0.02, transferProgress))
+    }
+
     private func startCachedPackTransfer(
         at packURL: URL,
         bleManager: BLEManager,
@@ -2005,7 +2132,86 @@ final class OfflineMapManager: ObservableObject {
         )
     }
 
+    func savedMapListItems(
+        activeDeviceMap: DeviceActiveMapDescriptor?
+    ) -> [SavedMapListItem] {
+        var remainingRecords = cachedMapRecords
+        var items: [SavedMapListItem] = []
+
+        if let activeDeviceMap {
+            let matchingIndex = activeDeviceMap.sessionID.flatMap { sessionID in
+                remainingRecords.firstIndex { record in
+                    record.mapID == activeDeviceMap.mapID &&
+                        record.acceptedSessionIDs.contains(sessionID)
+                }
+            }
+            if let matchingIndex {
+                let record = remainingRecords.remove(at: matchingIndex)
+                items.append(
+                    SavedMapListItem(
+                        id: "local:\(record.packURL.standardizedFileURL.path)",
+                        localRecord: record,
+                        deviceMap: activeDeviceMap,
+                        displayName: record.displayName
+                    )
+                )
+            } else {
+                items.append(
+                    SavedMapListItem(
+                        id: "device:\(activeDeviceMap.mapID):\(activeDeviceMap.stableIdentity)",
+                        localRecord: nil,
+                        deviceMap: activeDeviceMap,
+                        displayName: SavedMapDisplayNamePolicy.resolve(
+                            artifactDisplayName: activeDeviceMap.displayName,
+                            sourceRegionName: nil,
+                            mapID: activeDeviceMap.mapID
+                        )
+                    )
+                )
+            }
+        }
+
+        items.append(contentsOf: remainingRecords.map { record in
+            SavedMapListItem(
+                id: "local:\(record.packURL.standardizedFileURL.path)",
+                localRecord: record,
+                deviceMap: nil,
+                displayName: record.displayName
+            )
+        })
+        return items
+    }
+
 #if canImport(UIKit)
+    func updateActiveDeviceMap(_ descriptor: DeviceActiveMapDescriptor?) {
+        guard descriptor != currentActiveDeviceMap else { return }
+        if let currentActiveDeviceMap {
+            let key = devicePreviewCacheKey(for: currentActiveDeviceMap)
+            previewLoadRegistry.invalidate(key)
+            previewLoadTasks.removeValue(forKey: key)?.cancel()
+            packPreviewImages.removeValue(forKey: key)
+            unavailablePackPreviews.remove(key)
+        }
+        currentActiveDeviceMap = descriptor
+    }
+
+    func previewImage(for item: SavedMapListItem) -> UIImage? {
+        if let packURL = item.packURL {
+            return previewImage(forCachedPack: packURL)
+        }
+        guard let descriptor = item.deviceMap else { return nil }
+        return packPreviewImages[devicePreviewCacheKey(for: descriptor)]
+    }
+
+    func loadPreviewIfNeeded(for item: SavedMapListItem) {
+        if let packURL = item.packURL {
+            loadPreviewIfNeeded(forCachedPack: packURL)
+            return
+        }
+        guard let descriptor = item.deviceMap else { return }
+        loadDevicePreviewIfNeeded(for: descriptor)
+    }
+
     func previewImage(forCachedPack packURL: URL) -> UIImage? {
         packPreviewImages[previewCacheKey(for: packURL)]
     }
@@ -2125,6 +2331,85 @@ final class OfflineMapManager: ObservableObject {
         }
         return image
     }
+
+    private func loadDevicePreviewIfNeeded(
+        for descriptor: DeviceActiveMapDescriptor
+    ) {
+        if currentActiveDeviceMap != descriptor {
+            updateActiveDeviceMap(descriptor)
+        }
+        let key = devicePreviewCacheKey(for: descriptor)
+        guard packPreviewImages[key] == nil,
+              !unavailablePackPreviews.contains(key),
+              previewLoadTasks[key] == nil else {
+            return
+        }
+        if let bounds = descriptor.bounds {
+            packPreviewImages[key] = OfflineMapFallbackPreviewRenderer.image(
+                for: bounds
+            )
+        }
+        guard let cacheRoot = try? cachedPackDirectory() else {
+            unavailablePackPreviews.insert(key)
+            return
+        }
+        let token = previewLoadRegistry.begin(for: key)
+        previewLoadTasks[key] = Task { [weak self] in
+            let storedData = await Task.detached(priority: .utility) {
+                DeviceMapSnapshotPreviewStore.imageData(
+                    for: descriptor,
+                    in: cacheRoot
+                )
+            }.value
+            guard let self,
+                  self.previewLoadRegistry.isCurrent(token, for: key),
+                  !Task.isCancelled,
+                  self.currentActiveDeviceMap == descriptor else {
+                return
+            }
+            if let storedImage = self.usableSnapshotImage(from: storedData) {
+                _ = self.previewLoadRegistry.finishIfCurrent(token, for: key)
+                self.previewLoadTasks.removeValue(forKey: key)
+                self.packPreviewImages[key] = storedImage
+                return
+            }
+            guard let bounds = descriptor.bounds else {
+                _ = self.previewLoadRegistry.finishIfCurrent(token, for: key)
+                self.previewLoadTasks.removeValue(forKey: key)
+                self.unavailablePackPreviews.insert(key)
+                return
+            }
+
+            let generatedData: Data?
+            do {
+                generatedData = try await self.mapSnapshot(bounds)
+            } catch is CancellationError {
+                if self.previewLoadRegistry.finishIfCurrent(token, for: key) {
+                    self.previewLoadTasks.removeValue(forKey: key)
+                }
+                return
+            } catch {
+                generatedData = nil
+            }
+            guard self.previewLoadRegistry.finishIfCurrent(token, for: key) else {
+                return
+            }
+            self.previewLoadTasks.removeValue(forKey: key)
+            guard !Task.isCancelled,
+                  self.currentActiveDeviceMap == descriptor else {
+                return
+            }
+            if let generatedData,
+               let image = self.usableSnapshotImage(from: generatedData) {
+                try? DeviceMapSnapshotPreviewStore.save(
+                    generatedData,
+                    for: descriptor,
+                    in: cacheRoot
+                )
+                self.packPreviewImages[key] = image
+            }
+        }
+    }
 #endif
 
     @discardableResult
@@ -2141,6 +2426,7 @@ final class OfflineMapManager: ObservableObject {
         }
         persistPackDisplayNames()
         syncSavedMapInventory(packURL)
+        refreshCachedPacks()
         return displayName
     }
 
@@ -2155,30 +2441,10 @@ final class OfflineMapManager: ObservableObject {
         // Older firmware does not expose the content-derived session, so it
         // cannot prove that a regenerated same-area pack is already installed.
         guard !activeSessionId.isEmpty else { return false }
-        if let metadata = SavedMapArtifactMetadataStore.load(for: packURL),
-           metadata.primaryArtifact?.isBikeMapStream == true,
-           let signedReceipt = metadata.primaryArtifact?.signedManifestReceipt,
-           !signedReceipt.isEmpty {
-            let acceptedSessions = [
-                signedReceipt,
-                metadata.expectedActiveSessionID,
-                metadata.lastTransferSessionID,
-            ].compactMap { value in
-                value?.isEmpty == false ? value : nil
-            }
-            return acceptedSessions.contains(activeSessionId)
-        }
-        guard let archive = try? OfflineMapPackArchive(url: packURL),
-              let manifest = try? archive.manifest(),
-              let mapId = manifest.mapId,
-              let manifestEntry = archive.manifestEntry,
-              let manifestData = try? archive.data(for: manifestEntry) else {
-            return false
-        }
-        return MapTransferSessionIdentity.make(
-            mapId: mapId,
-            manifestData: manifestData
-        ) == activeSessionId
+        return acceptedActiveSessionIDs(
+            for: packURL,
+            mapID: activeMapId
+        ).contains(activeSessionId)
     }
 
     var lastTransferDescription: String? {
@@ -4478,7 +4744,12 @@ final class OfflineMapManager: ObservableObject {
                 return lhsDate > rhsDate
             }
 #if canImport(UIKit)
-            let activePreviewKeys = Set(packURLs.map(previewCacheKey))
+            var activePreviewKeys = Set(packURLs.map(previewCacheKey))
+            if let currentActiveDeviceMap {
+                activePreviewKeys.insert(
+                    devicePreviewCacheKey(for: currentActiveDeviceMap)
+                )
+            }
             for key in Array(packPreviewImages.keys) where !activePreviewKeys.contains(key) {
                 packPreviewImages.removeValue(forKey: key)
             }
@@ -4489,6 +4760,7 @@ final class OfflineMapManager: ObservableObject {
             unavailablePackPreviews.formIntersection(activePreviewKeys)
 #endif
             cacheDefaultDisplayNames(for: packURLs)
+            cachedMapRecords = packURLs.map(cachedMapRecord)
             cachedPackURLs = packURLs
         } catch {
 #if canImport(UIKit)
@@ -4501,12 +4773,19 @@ final class OfflineMapManager: ObservableObject {
             unavailablePackPreviews.removeAll()
 #endif
             cachedPackURLs = []
+            cachedMapRecords = []
         }
     }
 
 #if canImport(UIKit)
     private func previewCacheKey(for packURL: URL) -> String {
         packURL.standardizedFileURL.path
+    }
+
+    private func devicePreviewCacheKey(
+        for descriptor: DeviceActiveMapDescriptor
+    ) -> String {
+        "device:\(descriptor.previewFilename)"
     }
 
     private func invalidateCachedPreview(for packURL: URL) {
@@ -4581,6 +4860,48 @@ final class OfflineMapManager: ObservableObject {
     private func savedMapID(for packURL: URL) -> String {
         SavedMapArtifactMetadataStore.load(for: packURL)?.mapID ??
             packURL.deletingPathExtension().lastPathComponent
+    }
+
+    private func cachedMapRecord(for packURL: URL) -> SavedMapLocalRecord {
+        let mapID = savedMapID(for: packURL)
+        return SavedMapLocalRecord(
+            packURL: packURL,
+            mapID: mapID,
+            acceptedSessionIDs: acceptedActiveSessionIDs(
+                for: packURL,
+                mapID: mapID
+            ),
+            displayName: displayName(forCachedPack: packURL)
+        )
+    }
+
+    private func acceptedActiveSessionIDs(
+        for packURL: URL,
+        mapID: String
+    ) -> Set<String> {
+        if let metadata = SavedMapArtifactMetadataStore.load(for: packURL),
+           metadata.primaryArtifact?.isBikeMapStream == true,
+           let signedReceipt = metadata.primaryArtifact?.signedManifestReceipt,
+           !signedReceipt.isEmpty {
+            return Set([
+                signedReceipt,
+                metadata.expectedActiveSessionID,
+                metadata.lastTransferSessionID,
+            ].compactMap { value in
+                value?.isEmpty == false ? value : nil
+            })
+        }
+        guard let archive = try? OfflineMapPackArchive(url: packURL),
+              let manifest = try? archive.manifest(),
+              manifest.mapId == mapID,
+              let manifestEntry = archive.manifestEntry,
+              let manifestData = try? archive.data(for: manifestEntry) else {
+            return []
+        }
+        return [MapTransferSessionIdentity.make(
+            mapId: mapID,
+            manifestData: manifestData
+        )]
     }
 
     private func transferIdentity(for packURL: URL) throws -> (mapID: String, sessionID: String) {

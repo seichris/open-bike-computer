@@ -1304,6 +1304,15 @@ Status responses should include:
   distinguishes regenerated packs that intentionally reuse a stable map ID.
 - `activeManifestReceipt`: SHA-256 identity of the exact installed manifest;
   the app binds the following label-health fields to this receipt.
+- `activeMapDisplayName`: optional, bounded UTF-8 display name read from the
+  installed manifest. Invalid or missing presentation metadata is omitted and
+  does not invalidate an otherwise usable map.
+- `activeMapBoundsE7`: optional four-integer array in
+  `[minLongitude, minLatitude, maxLongitude, maxLatitude]` order, with each
+  coordinate scaled by `10^7`. Firmware normalizes legacy decimal `bounds`
+  manifests to this representation. The app validates these bounds and uses
+  them to generate a local preview; preview image bytes are never sent over
+  BLE.
 - `activeRendererFormat`: the installed renderer target format (`1` legacy,
   `2` FMB v3 + FMA1 street labels, `3` FMB v4 + FMA1 + OSM buildings).
 - `labelProfileVersion`: `1` for the current target-2/3 label profile, otherwise

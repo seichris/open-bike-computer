@@ -774,15 +774,18 @@ private struct SavedMapsSettingsSection: View {
     @State private var renameInteraction = SavedMapRenameInteraction()
 
     var body: some View {
+        let savedMaps = manager.savedMapListItems(
+            activeDeviceMap: bleManager.activeDeviceMap
+        )
         Section(header: Text("Saved Maps")) {
-            if manager.cachedPackURLs.isEmpty {
-                Text("0 maps downloaded yet")
+            if savedMaps.isEmpty {
+                Text("No saved maps yet")
                     .foregroundColor(.secondary)
             } else {
-                ForEach(manager.cachedPackURLs, id: \.self) { packURL in
-                    DownloadedMapRow(
+                ForEach(savedMaps) { item in
+                    SavedMapRow(
                         manager: manager,
-                        packURL: packURL,
+                        item: item,
                         focusedPackFilename: $focusedPackFilename,
                         renameInteraction: $renameInteraction,
                         onCommitRename: commitRename
@@ -813,7 +816,11 @@ private struct SavedMapsSettingsSection: View {
             }
         }
         .onAppear {
+            manager.updateActiveDeviceMap(bleManager.activeDeviceMap)
             manager.reconcileLastTransfer(bleManager: bleManager)
+        }
+        .onChange(of: bleManager.activeDeviceMap) { descriptor in
+            manager.updateActiveDeviceMap(descriptor)
         }
         .onChange(of: bleManager.mapTransferActiveMapId) { _ in
             manager.reconcileLastTransfer(bleManager: bleManager)
@@ -858,10 +865,10 @@ private struct SavedMapsSettingsSection: View {
     }
 }
 
-private struct DownloadedMapRow: View {
+private struct SavedMapRow: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
-    let packURL: URL
+    let item: SavedMapListItem
     @FocusState.Binding var focusedPackFilename: String?
     @Binding var renameInteraction: SavedMapRenameInteraction
     let onCommitRename: (SavedMapRenameCommit) -> Void
@@ -869,23 +876,21 @@ private struct DownloadedMapRow: View {
     @State private var isShowingDeleteConfirmation = false
 
     var body: some View {
-        let displayName = manager.displayName(forCachedPack: packURL)
-        let isInstalled = manager.isCachedPackInstalled(
-            packURL,
-            activeMapId: bleManager.mapTransferActiveMapId,
-            activeSessionId: bleManager.mapTransferActiveSessionId
-        )
-        let isPausedUpload = manager.isPausedMapUpload(packURL)
+        let displayName = item.displayName
+        let packURL = item.packURL
+        let isPausedUpload = packURL.map(manager.isPausedMapUpload) ?? false
+        let uploadProgress = packURL.flatMap(manager.mapUploadProgress)
 
         HStack(spacing: 12) {
             SavedMapThumbnail(
-                image: manager.previewImage(forCachedPack: packURL)
+                image: manager.previewImage(for: item)
             )
-            .task(id: packURL) {
-                manager.loadPreviewIfNeeded(forCachedPack: packURL)
+            .task(id: item.id) {
+                manager.loadPreviewIfNeeded(for: item)
             }
 
-            if renameInteraction.editingFilename == packURL.lastPathComponent {
+            if let packURL,
+               renameInteraction.editingFilename == packURL.lastPathComponent {
                 TextField(
                     "Map name",
                     text: Binding(
@@ -905,7 +910,7 @@ private struct DownloadedMapRow: View {
                     })
                     .accessibilityLabel("Map name")
                     .layoutPriority(1)
-            } else {
+            } else if let packURL {
                 Button {
                     if let commit = renameInteraction.begin(
                         filename: packURL.lastPathComponent,
@@ -926,6 +931,11 @@ private struct DownloadedMapRow: View {
                 .accessibilityLabel("Rename \(displayName)")
                 .accessibilityHint("Edits this saved map name")
                 .layoutPriority(1)
+            } else {
+                Text(displayName)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .layoutPriority(1)
             }
 
             Spacer()
@@ -934,31 +944,46 @@ private struct DownloadedMapRow: View {
                     focusedPackFilename = nil
                 }
 
-            if isInstalled {
-                Button {
-                    finishRenaming()
-                    focusedPackFilename = nil
-                    isShowingInstalledConfirmation = true
-                } label: {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                        .frame(width: 32, height: 32)
+            Image(systemName: "iphone")
+                .foregroundStyle(item.isOnIPhone ? Color.blue : Color.secondary)
+                .frame(width: 28, height: 32)
+                .accessibilityLabel(
+                    item.isOnIPhone
+                        ? "\(displayName) is saved on this iPhone"
+                        : "\(displayName) is not saved on this iPhone"
+                )
+
+            if item.isActiveOnDevice {
+                if item.isOnIPhone {
+                    Button {
+                        finishRenaming()
+                        focusedPackFilename = nil
+                        isShowingInstalledConfirmation = true
+                    } label: {
+                        BikeComputerMapStatusIcon(
+                            state: .active
+                        )
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("\(displayName) is active on the Bike Computer")
+                    .accessibilityHint("Shows the installed map status")
+                } else {
+                    BikeComputerMapStatusIcon(
+                        state: .active
+                    )
+                    .accessibilityLabel("\(displayName) is active on the Bike Computer")
                 }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("\(displayName) is installed on device")
-                .accessibilityHint("Shows the installed map status")
-            } else {
+            } else if let packURL {
                 Button {
                     finishRenaming()
                     focusedPackFilename = nil
                     manager.transferCachedPack(at: packURL, bleManager: bleManager)
                 } label: {
-                    Image(
-                        systemName: isPausedUpload
-                            ? "arrow.clockwise.circle"
-                            : "arrow.up.circle"
+                    BikeComputerMapStatusIcon(
+                        state: isPausedUpload
+                            ? .paused
+                            : uploadProgress.map { .uploading($0) } ?? .available
                     )
-                        .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.borderless)
                 .disabled(
@@ -973,17 +998,23 @@ private struct DownloadedMapRow: View {
                 )
             }
 
-            Button(role: .destructive) {
-                finishRenaming()
-                focusedPackFilename = nil
-                isShowingDeleteConfirmation = true
-            } label: {
-                Image(systemName: "trash")
+            if packURL != nil {
+                Button(role: .destructive) {
+                    finishRenaming()
+                    focusedPackFilename = nil
+                    isShowingDeleteConfirmation = true
+                } label: {
+                    Image(systemName: "trash")
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.borderless)
+                .disabled(manager.isBusy || manager.hasActiveBackgroundUpload)
+                .accessibilityLabel("Delete \(displayName)")
+            } else {
+                Color.clear
                     .frame(width: 32, height: 32)
+                    .accessibilityHidden(true)
             }
-            .buttonStyle(.borderless)
-            .disabled(manager.isBusy || manager.hasActiveBackgroundUpload)
-            .accessibilityLabel("Delete \(displayName)")
         }
         .alert("Already on Device", isPresented: $isShowingInstalledConfirmation) {
             Button("OK", role: .cancel) {}
@@ -996,7 +1027,9 @@ private struct DownloadedMapRow: View {
             titleVisibility: .visible
         ) {
             Button("Delete", role: .destructive) {
-                manager.deleteCachedPack(at: packURL)
+                if let packURL {
+                    manager.deleteCachedPack(at: packURL)
+                }
             }
             Button("Cancel", role: .cancel) { }
         } message: {
@@ -1011,6 +1044,74 @@ private struct DownloadedMapRow: View {
         if let commit = renameInteraction.finish() {
             onCommitRename(commit)
         }
+    }
+}
+
+private struct BikeComputerMapStatusIcon: View {
+    enum State: Equatable {
+        case active
+        case available
+        case paused
+        case uploading(Double)
+
+        var color: Color {
+            switch self {
+            case .active:
+                return .green
+            case .uploading:
+                return .blue
+            case .available, .paused:
+                return .secondary
+            }
+        }
+
+        var badgeSystemName: String {
+            switch self {
+            case .active:
+                return "checkmark.circle.fill"
+            case .available:
+                return "arrow.up.circle.fill"
+            case .paused:
+                return "arrow.clockwise.circle.fill"
+            case .uploading:
+                return "arrow.up.circle.fill"
+            }
+        }
+    }
+
+    let state: State
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            Circle()
+                .fill(state.color)
+                .frame(width: 28, height: 28)
+                .overlay {
+                    Text("b")
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .offset(y: -0.5)
+                }
+
+            if case let .uploading(progress) = state {
+                Circle()
+                    .trim(from: 0, to: progress)
+                    .stroke(
+                        Color.blue,
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 32, height: 32)
+            }
+
+            Image(systemName: state.badgeSystemName)
+                .font(.system(size: 11, weight: .semibold))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, state.color)
+                .background(Circle().fill(Color(uiColor: .systemBackground)))
+                .offset(x: 3, y: 3)
+        }
+        .frame(width: 34, height: 34)
     }
 }
 

@@ -4,8 +4,10 @@
 
 This plan was authored from freshly fetched `origin/main` at
 `95880ff88ba96b01abf714c13ad2107ed3110535` on 2026-08-17. It is an
-implementation contract, not a claim that the feature has been implemented or
-shipped.
+implementation contract for the accompanying branch, not a claim that the
+feature has shipped. The software changes and automated coverage are
+implemented on this branch; the cloned-SD physical-device acceptance check
+remains a release validation step.
 
 The feature makes the iOS **Saved Maps** section reflect the map that is
 currently active on the connected bike computer even when the corresponding
