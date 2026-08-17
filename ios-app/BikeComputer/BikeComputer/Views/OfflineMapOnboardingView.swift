@@ -13,7 +13,7 @@ struct OfflineMapOnboardingView: View {
     @ObservedObject var manager: OfflineMapManager
     let step: OfflineMapOnboardingStep
     let location: CLLocation?
-    let isLocationAuthorized: Bool
+    let locationAuthorizationStatus: CLAuthorizationStatus
     let onRequestLocation: () -> Void
     let onChooseArea: () -> Void
     let onClose: () -> Void
@@ -23,13 +23,15 @@ struct OfflineMapOnboardingView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.headline)
-                        .frame(width: 36, height: 36)
+                if allowsClose {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.headline)
+                            .frame(width: 36, height: 36)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Close")
 
                 Spacer()
             }
@@ -41,7 +43,7 @@ struct OfflineMapOnboardingView: View {
                     .font(.title2.weight(.semibold))
                     .multilineTextAlignment(.center)
 
-                Text(step.message)
+                Text(step.message(for: locationAuthorizationAction))
                     .font(.body)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -115,7 +117,7 @@ struct OfflineMapOnboardingView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
-                } else if !isLocationAuthorized {
+                } else if locationAuthorizationAction != .none {
                     locationActions
                 } else if location == nil {
                     ProgressView()
@@ -141,23 +143,43 @@ struct OfflineMapOnboardingView: View {
     }
 
     private var locationActions: some View {
-        VStack(spacing: 10) {
-            Button(action: onRequestLocation) {
-                Label("Enable Location", systemImage: "location")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-
-            Button {
-                if let url = URL(string: UIApplication.openSettingsURLString) {
-                    openURL(url)
+        Group {
+            switch locationAuthorizationAction {
+            case .requestInApp:
+                Button(action: onRequestLocation) {
+                    Text("Continue")
+                        .frame(maxWidth: .infinity)
                 }
-            } label: {
-                Text("Open iPhone Settings")
-                    .frame(maxWidth: .infinity)
+                .buttonStyle(.borderedProminent)
+
+            case .openSettings:
+                Button {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        openURL(url)
+                    }
+                } label: {
+                    Text("Open iPhone Settings")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+
+            case .none:
+                EmptyView()
             }
-            .buttonStyle(.bordered)
         }
+    }
+
+    private var locationAuthorizationAction: LocationAuthorizationRemediation {
+        LocationAuthorizationRemediationPolicy.action(
+            for: locationAuthorizationStatus
+        )
+    }
+
+    private var allowsClose: Bool {
+        step != .download ||
+            LocationAuthorizationRemediationPolicy.allowsDismissal(
+                for: locationAuthorizationStatus
+            )
     }
 }
 
@@ -171,12 +193,21 @@ private extension OfflineMapOnboardingStep {
         }
     }
 
-    var message: String {
+    func message(
+        for locationAuthorizationAction: LocationAuthorizationRemediation
+    ) -> String {
         switch self {
         case .welcome:
             return "Plan your rides, connect your Bicino One, or turn your iPhone into a cycling computer."
         case .download:
-            return "Choose an area to download to your Bike Computer."
+            switch locationAuthorizationAction {
+            case .requestInApp:
+                return "Bicino uses your current location to prepare the right offline map for your Bike Computer."
+            case .openSettings:
+                return "Location access is needed to prepare a map for your current area. You can grant access in iPhone Settings."
+            case .none:
+                return "Choose an area to download to your Bike Computer."
+            }
         }
     }
 }
