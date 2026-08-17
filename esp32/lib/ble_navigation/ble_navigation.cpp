@@ -1497,88 +1497,145 @@ static std::string jsonEscape(const std::string &value) {
   return out;
 }
 
-static std::string mapTransferStatusJson() {
-  struct ActivePresentationCache {
-    bool available = false;
-    std::string mapId;
-    std::string sessionId;
-    std::string root;
-    std::string manifestReceipt;
-    std::string signedManifestReceipt;
-    map_transfer::MapPresentationMetadata presentation;
-    map_transfer::MapPresentationRevision revision;
+struct ActivePresentationCache {
+  bool available = false;
+  std::string mapId;
+  std::string sessionId;
+  std::string root;
+  std::string manifestReceipt;
+  std::string signedManifestReceipt;
+  map_transfer::MapPresentationMetadata presentation;
+  map_transfer::MapPresentationRevision revision;
 
-    bool matches(
-        const map_transfer::ActiveMapSelection &selection,
-        const map_transfer::MapPresentationRevision &sourceRevision) const {
-      return available && mapId == selection.mapId &&
-             sessionId == selection.sessionId && root == selection.root &&
-             manifestReceipt == selection.manifestReceipt &&
-             signedManifestReceipt == selection.signedManifestReceipt &&
-             revision.bytes == sourceRevision.bytes &&
-             revision.modifiedSeconds == sourceRevision.modifiedSeconds &&
-             revision.inode == sourceRevision.inode;
-    }
+  bool matches(
+      const map_transfer::ActiveMapSelection &selection,
+      const map_transfer::MapPresentationRevision &sourceRevision) const {
+    return available && mapId == selection.mapId &&
+           sessionId == selection.sessionId && root == selection.root &&
+           manifestReceipt == selection.manifestReceipt &&
+           signedManifestReceipt == selection.signedManifestReceipt &&
+           revision.bytes == sourceRevision.bytes &&
+           revision.modifiedSeconds == sourceRevision.modifiedSeconds &&
+           revision.inode == sourceRevision.inode;
+  }
 
-    void store(const map_transfer::ActiveMapSelection &selection,
-               const map_transfer::MapPresentationMetadata &value,
-               const map_transfer::MapPresentationRevision &sourceRevision) {
-      available = true;
-      mapId = selection.mapId;
-      sessionId = selection.sessionId;
-      root = selection.root;
-      manifestReceipt = selection.manifestReceipt;
-      signedManifestReceipt = selection.signedManifestReceipt;
-      presentation = value;
-      revision = sourceRevision;
-    }
-  };
-  static ActivePresentationCache activePresentationCache;
+  void clear() {
+    available = false;
+    mapId.clear();
+    sessionId.clear();
+    root.clear();
+    manifestReceipt.clear();
+    signedManifestReceipt.clear();
+    presentation = map_transfer::MapPresentationMetadata();
+    revision = map_transfer::MapPresentationRevision();
+  }
 
-  map_transfer::HttpTransferStatus transferStatus = mapTransferHttp.status();
+  void store(const map_transfer::ActiveMapSelection &selection,
+             const map_transfer::MapPresentationMetadata &value,
+             const map_transfer::MapPresentationRevision &sourceRevision) {
+    available = true;
+    mapId = selection.mapId;
+    sessionId = selection.sessionId;
+    root = selection.root;
+    manifestReceipt = selection.manifestReceipt;
+    signedManifestReceipt = selection.signedManifestReceipt;
+    presentation = value;
+    revision = sourceRevision;
+  }
+};
+
+struct ActiveMapStatusSnapshot {
+  bool available = false;
+  std::string errorCode;
   map_transfer::ActiveMapSelection activeMap;
+  map_transfer::MapPresentationMetadata presentation;
+};
+
+// Keep filesystem/manifest work out of the JSON composition frame. The
+// Arduino loop task has an 8 KiB stack and the VFS stat path is deep enough
+// that combining both phases can trip its stack canary on a status request.
+__attribute__((noinline)) static const ActiveMapStatusSnapshot &
+readActiveMapStatusSnapshot() {
+  static ActivePresentationCache activePresentationCache;
+  static ActiveMapStatusSnapshot snapshot;
+
   map_transfer::MapTransferInstaller installer("/sdcard");
+  map_transfer::ActiveMapSelection activeMap;
   map_transfer::InstallStatus activeStatus =
       installer.readActiveMap(activeMap);
+  if (!activeStatus.ok) {
+    activePresentationCache.clear();
+    snapshot.available = false;
+    snapshot.errorCode = activeStatus.code;
+    return snapshot;
+  }
+
   map_transfer::MapPresentationMetadata activePresentation;
   map_transfer::InstallStatus activePresentationStatus;
-  if (activeStatus.ok) {
-    map_transfer::MapPresentationRevision activePresentationRevision;
-    const bool hasPresentationRevision =
-        installer.readActiveMapPresentationRevision(
-            activeMap, activePresentationRevision);
-    if (hasPresentationRevision && activePresentationCache.matches(
-                                       activeMap,
-                                       activePresentationRevision)) {
-      activePresentation = activePresentationCache.presentation;
-      activePresentationStatus = {true, "ok", ""};
-    } else {
-      activePresentationCache = ActivePresentationCache();
-      const map_transfer::ActiveMapSelection requestedActiveMap = activeMap;
-      activePresentationStatus = installer.readActiveMapPresentation(
-          activeMap, activePresentation);
-      if (activePresentationStatus.ok) {
-        map_transfer::MapPresentationRevision presentedRevision;
-        if (installer.readActiveMapPresentationRevision(
-                activeMap, presentedRevision) &&
-            activeMap.mapId == requestedActiveMap.mapId &&
-            activeMap.sessionId == requestedActiveMap.sessionId &&
-            activeMap.root == requestedActiveMap.root &&
-            activeMap.manifestReceipt == requestedActiveMap.manifestReceipt &&
-            activeMap.signedManifestReceipt ==
-                requestedActiveMap.signedManifestReceipt &&
-            activePresentationRevision.bytes == presentedRevision.bytes &&
-            activePresentationRevision.modifiedSeconds ==
-                presentedRevision.modifiedSeconds &&
-            activePresentationRevision.inode == presentedRevision.inode) {
-          activePresentationCache.store(activeMap, activePresentation,
-                                        presentedRevision);
-        }
+  map_transfer::MapPresentationRevision activePresentationRevision;
+  const bool hasPresentationRevision =
+      installer.readActiveMapPresentationRevision(
+          activeMap, activePresentationRevision);
+  if (hasPresentationRevision && activePresentationCache.matches(
+                                     activeMap,
+                                     activePresentationRevision)) {
+    activePresentation = activePresentationCache.presentation;
+    activePresentationStatus = {true, "ok", ""};
+  } else {
+    activePresentationCache.clear();
+    snapshot.activeMap = activeMap;
+    activePresentationStatus = installer.readActiveMapPresentation(
+        activeMap, activePresentation);
+    if (activePresentationStatus.ok) {
+      map_transfer::MapPresentationRevision presentedRevision;
+      if (installer.readActiveMapPresentationRevision(
+              activeMap, presentedRevision) &&
+          activeMap.mapId == snapshot.activeMap.mapId &&
+          activeMap.sessionId == snapshot.activeMap.sessionId &&
+          activeMap.root == snapshot.activeMap.root &&
+          activeMap.manifestReceipt == snapshot.activeMap.manifestReceipt &&
+          activeMap.signedManifestReceipt ==
+              snapshot.activeMap.signedManifestReceipt &&
+          activePresentationRevision.bytes == presentedRevision.bytes &&
+          activePresentationRevision.modifiedSeconds ==
+              presentedRevision.modifiedSeconds &&
+          activePresentationRevision.inode == presentedRevision.inode) {
+        activePresentationCache.store(activeMap, activePresentation,
+                                      presentedRevision);
       }
     }
-  } else {
-    activePresentationCache = ActivePresentationCache();
   }
+
+  if (!activePresentationStatus.ok) {
+    snapshot.available = false;
+    snapshot.errorCode = activePresentationStatus.code;
+    return snapshot;
+  }
+
+  snapshot.available = true;
+  snapshot.errorCode.clear();
+  snapshot.activeMap = activeMap;
+  snapshot.presentation = activePresentation;
+  return snapshot;
+}
+
+static void appendActiveMapPresentationStatus(
+    std::string &body,
+    const map_transfer::MapPresentationMetadata &activePresentation) {
+  map_transfer_status_protocol::ActiveMapPresentation presentation;
+  presentation.displayName = activePresentation.displayName;
+  presentation.boundsE7 = activePresentation.boundsE7;
+  presentation.hasBoundsE7 = activePresentation.hasBoundsE7;
+  map_transfer_status_protocol::appendActiveMapPresentation(body,
+                                                            presentation);
+}
+
+// Do not let link-time optimization merge this back into the filesystem phase.
+__attribute__((noinline)) static std::string composeMapTransferStatusJson(
+    const ActiveMapStatusSnapshot &activeMapStatus) {
+  map_transfer::HttpTransferStatus transferStatus = mapTransferHttp.status();
+  const map_transfer::ActiveMapSelection &activeMap =
+      activeMapStatus.activeMap;
   const bool streamSupported = mapTransferHttp.streamInstallSupported();
 
   std::string body = std::string("{\"configured\":") +
@@ -1628,7 +1685,7 @@ static std::string mapTransferStatusJson() {
     body += ",\"hotspotFallbackReason\":\"" +
             jsonEscape(transferStatus.hotspotFallbackReason) + "\"";
   }
-  if (activeStatus.ok && activePresentationStatus.ok) {
+  if (activeMapStatus.available) {
     body += ",\"activeMapId\":\"" + jsonEscape(activeMap.mapId) + "\"";
     if (!activeMap.sessionId.empty()) {
       body += ",\"activeSessionId\":\"" +
@@ -1638,12 +1695,7 @@ static std::string mapTransferStatusJson() {
       body += ",\"activeManifestReceipt\":\"" +
               jsonEscape(activeMap.manifestReceipt) + "\"";
     }
-    map_transfer_status_protocol::ActiveMapPresentation presentation;
-    presentation.displayName = activePresentation.displayName;
-    presentation.boundsE7 = activePresentation.boundsE7;
-    presentation.hasBoundsE7 = activePresentation.hasBoundsE7;
-    map_transfer_status_protocol::appendActiveMapPresentation(body,
-                                                              presentation);
+    appendActiveMapPresentationStatus(body, activeMapStatus.presentation);
     if (activeMap.target.formatVersion != 0) {
       body += ",\"activeRendererFormat\":" +
               std::to_string(activeMap.target.formatVersion) +
@@ -1664,9 +1716,8 @@ static std::string mapTransferStatusJson() {
                   : "false";
     }
   } else {
-    const map_transfer::InstallStatus &failure =
-        activeStatus.ok ? activePresentationStatus : activeStatus;
-    body += ",\"activeError\":{\"code\":\"" + jsonEscape(failure.code) +
+    body += ",\"activeError\":{\"code\":\"" +
+            jsonEscape(activeMapStatus.errorCode) +
             "\"}";
   }
 
@@ -1680,6 +1731,10 @@ static std::string mapTransferStatusJson() {
 
   body += "}";
   return body;
+}
+
+static std::string mapTransferStatusJson() {
+  return composeMapTransferStatusJson(readActiveMapStatusSnapshot());
 }
 
 static std::string genericTransferStatusJson() {
