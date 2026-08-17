@@ -8487,6 +8487,14 @@ struct NavigationProtocolTests {
             return
         }
         let developerSource = String(source[developerStart...])
+        let rootSettingsSource = String(source[..<developerStart])
+        assert(
+            !rootSettingsSource.contains("title: \"App Version\"") &&
+                developerSource.contains("Section(header: Text(\"App\"))") &&
+                developerSource.contains("title: \"App Version\"") &&
+                developerSource.contains("value: appVersionText"),
+            "App Version appears only in Developer Settings"
+        )
         assert(
             developerSource.contains(
                 "NavigationOverlaysSettingsSection()\n        }\n        .navigationTitle(\"Developer Settings\")"
