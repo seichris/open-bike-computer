@@ -263,7 +263,8 @@ struct ContentView: View {
                         manager: offlineMapManager,
                         step: onboardingStep,
                         location: coordinator.currentLocation,
-                        isLocationAuthorized: coordinator.isLocationAuthorized,
+                        locationAuthorizationStatus:
+                            coordinator.locationAuthorizationStatus,
                         onRequestLocation: {
                             coordinator.requestLocationAuthorization()
                         },

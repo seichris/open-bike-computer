@@ -85,7 +85,13 @@ struct SettingsView: View {
                 if !locationAuthorized {
                     Section {
                         Button(action: remediateLocationAuthorization) {
-                            Label("Enable Location Access", systemImage: "location")
+                            Label(
+                                LocationAuthorizationRemediationPolicy
+                                    .buttonTitle(
+                                        for: locationAuthorizationStatus
+                                    ) ?? "Location Access",
+                                systemImage: "location"
+                            )
                         }
                     } footer: {
                         Text("Location access is needed to download the map for your current area.")
@@ -316,15 +322,14 @@ private struct RideDetectionSettingsView: View {
 
                 if store.settings.startMode != .off &&
                     !store.hasAcknowledgedLocationUse {
-                    Button("Enable iPhone GPS for Detection") {
+                    Button("Use iPhone GPS for Detection") {
                         showLocationUseWarning = true
                     }
                     .alert(
                         "Use iPhone GPS for Ride Detection?",
                         isPresented: $showLocationUseWarning
                     ) {
-                        Button("Not Now", role: .cancel) {}
-                        Button("Enable") {
+                        Button("Continue") {
                             store.acknowledgeLocationUse()
                             if authorizationStatus == .notDetermined {
                                 onRequestLocationAuthorization()
@@ -351,7 +356,9 @@ private struct RideDetectionSettingsView: View {
                         }
                     } label: {
                         Label(
-                            "Enable Location Access",
+                            LocationAuthorizationRemediationPolicy
+                                .buttonTitle(for: authorizationStatus)
+                                ?? "Location Access",
                             systemImage: "location"
                         )
                     }

@@ -17372,14 +17372,43 @@ struct NavigationProtocolTests {
             "first-use location access presents the native permission prompt"
         )
         assertEqual(
+            LocationAuthorizationRemediationPolicy.buttonTitle(
+                for: .notDetermined
+            ),
+            "Continue",
+            "first-use permission copy does not imply that access is already granted"
+        )
+        assert(
+            !LocationAuthorizationRemediationPolicy.allowsDismissal(
+                for: .notDetermined
+            ),
+            "the pre-permission explanation cannot defer the native prompt"
+        )
+        assertEqual(
             LocationAuthorizationRemediationPolicy.action(for: .denied),
             .openSettings,
             "denied location access directs the user to Apple Settings"
         )
         assertEqual(
+            LocationAuthorizationRemediationPolicy.buttonTitle(for: .denied),
+            "Open iPhone Settings",
+            "denied access clearly identifies the post-decision remediation"
+        )
+        assert(
+            LocationAuthorizationRemediationPolicy.allowsDismissal(for: .denied),
+            "post-denial remediation remains optional"
+        )
+        assertEqual(
             LocationAuthorizationRemediationPolicy.action(for: .restricted),
             .openSettings,
             "restricted location access directs the user to Apple Settings"
+        )
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.buttonTitle(
+                for: .restricted
+            ),
+            "Open iPhone Settings",
+            "restricted access uses the post-decision settings action"
         )
 #if !os(macOS)
         assertEqual(
@@ -17388,6 +17417,13 @@ struct NavigationProtocolTests {
             ),
             .none,
             "authorized location access needs no remediation"
+        )
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.buttonTitle(
+                for: .authorizedWhenInUse
+            ),
+            nil,
+            "authorized access does not show a permission action"
         )
 #endif
         assertEqual(
