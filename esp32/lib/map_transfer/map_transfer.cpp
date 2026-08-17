@@ -7,7 +7,9 @@
 #include <array>
 #include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
@@ -133,6 +135,255 @@ static std::string jsonStringValue(const std::string &json,
     out.push_back(c);
   }
   return "";
+}
+
+static int hexValue(char value) {
+  if (value >= '0' && value <= '9')
+    return value - '0';
+  if (value >= 'a' && value <= 'f')
+    return value - 'a' + 10;
+  if (value >= 'A' && value <= 'F')
+    return value - 'A' + 10;
+  return -1;
+}
+
+static bool appendUtf8(uint32_t codePoint, std::string &output) {
+  if (codePoint <= 0x7f) {
+    output.push_back(static_cast<char>(codePoint));
+  } else if (codePoint <= 0x7ff) {
+    output.push_back(static_cast<char>(0xc0 | (codePoint >> 6)));
+    output.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+  } else if (codePoint <= 0xffff) {
+    if (codePoint >= 0xd800 && codePoint <= 0xdfff)
+      return false;
+    output.push_back(static_cast<char>(0xe0 | (codePoint >> 12)));
+    output.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
+    output.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+  } else if (codePoint <= 0x10ffff) {
+    output.push_back(static_cast<char>(0xf0 | (codePoint >> 18)));
+    output.push_back(static_cast<char>(0x80 | ((codePoint >> 12) & 0x3f)));
+    output.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
+    output.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
+  } else {
+    return false;
+  }
+  return true;
+}
+
+static bool validUtf8(const std::string &value) {
+  for (size_t index = 0; index < value.size();) {
+    const uint8_t first = static_cast<uint8_t>(value[index]);
+    size_t continuationCount = 0;
+    uint8_t secondMinimum = 0x80;
+    uint8_t secondMaximum = 0xbf;
+    if (first <= 0x7f) {
+      index++;
+      continue;
+    } else if (first >= 0xc2 && first <= 0xdf) {
+      continuationCount = 1;
+    } else if (first == 0xe0) {
+      continuationCount = 2;
+      secondMinimum = 0xa0;
+    } else if (first >= 0xe1 && first <= 0xec) {
+      continuationCount = 2;
+    } else if (first == 0xed) {
+      continuationCount = 2;
+      secondMaximum = 0x9f;
+    } else if (first >= 0xee && first <= 0xef) {
+      continuationCount = 2;
+    } else if (first == 0xf0) {
+      continuationCount = 3;
+      secondMinimum = 0x90;
+    } else if (first >= 0xf1 && first <= 0xf3) {
+      continuationCount = 3;
+    } else if (first == 0xf4) {
+      continuationCount = 3;
+      secondMaximum = 0x8f;
+    } else {
+      return false;
+    }
+    if (index + continuationCount >= value.size())
+      return false;
+    const uint8_t second = static_cast<uint8_t>(value[index + 1]);
+    if (second < secondMinimum || second > secondMaximum)
+      return false;
+    if (first == 0xc2 && second >= 0x80 && second <= 0x9f)
+      return false;
+    for (size_t offset = 2; offset <= continuationCount; ++offset) {
+      const uint8_t continuation =
+          static_cast<uint8_t>(value[index + offset]);
+      if (continuation < 0x80 || continuation > 0xbf)
+        return false;
+    }
+    index += continuationCount + 1;
+  }
+  return true;
+}
+
+static bool readUnicodeEscape(const std::string &json, size_t &cursor,
+                              uint16_t &value) {
+  if (cursor + 4 > json.size())
+    return false;
+  value = 0;
+  for (size_t index = 0; index < 4; ++index) {
+    const int digit = hexValue(json[cursor + index]);
+    if (digit < 0)
+      return false;
+    value = static_cast<uint16_t>((value << 4) | digit);
+  }
+  cursor += 4;
+  return true;
+}
+
+static std::string jsonPresentationStringValue(const std::string &json,
+                                               const std::string &key) {
+  constexpr size_t kMaximumDisplayNameBytes = 240;
+  const std::string needle = "\"" + key + "\"";
+  size_t cursor = json.find(needle);
+  if (cursor == std::string::npos)
+    return "";
+  cursor = json.find(':', cursor + needle.size());
+  if (cursor == std::string::npos)
+    return "";
+  cursor++;
+  while (cursor < json.size() &&
+         std::isspace(static_cast<unsigned char>(json[cursor])) != 0)
+    cursor++;
+  if (cursor >= json.size() || json[cursor++] != '"')
+    return "";
+
+  std::string output;
+  output.reserve(80);
+  while (cursor < json.size()) {
+    const unsigned char character =
+        static_cast<unsigned char>(json[cursor++]);
+    if (character == '"') {
+      return !output.empty() && output.size() <= kMaximumDisplayNameBytes &&
+                     validUtf8(output)
+                 ? output
+                 : std::string();
+    }
+    if (character < 0x20 || character == 0x7f)
+      return "";
+    if (character != '\\') {
+      output.push_back(static_cast<char>(character));
+    } else {
+      if (cursor >= json.size())
+        return "";
+      const char escaped = json[cursor++];
+      if (escaped == '"' || escaped == '\\' || escaped == '/') {
+        output.push_back(escaped);
+      } else if (escaped == 'u') {
+        uint16_t first = 0;
+        if (!readUnicodeEscape(json, cursor, first) || first < 0x20 ||
+            (first >= 0x7f && first <= 0x9f))
+          return "";
+        uint32_t codePoint = first;
+        if (first >= 0xd800 && first <= 0xdbff) {
+          if (cursor + 2 > json.size() || json[cursor] != '\\' ||
+              json[cursor + 1] != 'u')
+            return "";
+          cursor += 2;
+          uint16_t second = 0;
+          if (!readUnicodeEscape(json, cursor, second) || second < 0xdc00 ||
+              second > 0xdfff)
+            return "";
+          codePoint = 0x10000u +
+                      ((static_cast<uint32_t>(first) - 0xd800u) << 10) +
+                      (static_cast<uint32_t>(second) - 0xdc00u);
+        } else if (first >= 0xdc00 && first <= 0xdfff) {
+          return "";
+        }
+        if (!appendUtf8(codePoint, output))
+          return "";
+      } else {
+        // Escaped controls are not valid display-name content.
+        return "";
+      }
+    }
+    if (output.size() > kMaximumDisplayNameBytes)
+      return "";
+  }
+  return "";
+}
+
+static bool jsonNumberArray4(const std::string &json, const std::string &key,
+                             std::array<double, 4> &values, bool &found) {
+  found = false;
+  const std::string needle = "\"" + key + "\"";
+  size_t cursor = json.find(needle);
+  if (cursor == std::string::npos)
+    return false;
+  found = true;
+  cursor = json.find(':', cursor + needle.size());
+  if (cursor == std::string::npos)
+    return false;
+  cursor++;
+  while (cursor < json.size() &&
+         std::isspace(static_cast<unsigned char>(json[cursor])) != 0)
+    cursor++;
+  if (cursor >= json.size() || json[cursor++] != '[')
+    return false;
+  for (size_t index = 0; index < values.size(); ++index) {
+    while (cursor < json.size() &&
+           std::isspace(static_cast<unsigned char>(json[cursor])) != 0)
+      cursor++;
+    if (cursor >= json.size())
+      return false;
+    errno = 0;
+    char *end = nullptr;
+    const char *start = json.c_str() + cursor;
+    const double parsed = std::strtod(start, &end);
+    if (end == start || errno == ERANGE || !std::isfinite(parsed))
+      return false;
+    cursor = static_cast<size_t>(end - json.c_str());
+    values[index] = parsed;
+    while (cursor < json.size() &&
+           std::isspace(static_cast<unsigned char>(json[cursor])) != 0)
+      cursor++;
+    const char expected = index + 1 == values.size() ? ']' : ',';
+    if (cursor >= json.size() || json[cursor++] != expected)
+      return false;
+  }
+  return true;
+}
+
+static bool boundsE7Valid(const std::array<int32_t, 4> &bounds) {
+  return bounds[0] >= -1800000000 && bounds[0] <= 1800000000 &&
+         bounds[2] >= -1800000000 && bounds[2] <= 1800000000 &&
+         bounds[1] >= -900000000 && bounds[1] <= 900000000 &&
+         bounds[3] >= -900000000 && bounds[3] <= 900000000 &&
+         bounds[0] < bounds[2] && bounds[1] < bounds[3];
+}
+
+static bool jsonPresentationBoundsE7(const std::string &json,
+                                     std::array<int32_t, 4> &bounds) {
+  std::array<double, 4> values = {};
+  bool found = false;
+  if (jsonNumberArray4(json, "boundsE7", values, found)) {
+    for (size_t index = 0; index < values.size(); ++index) {
+      if (values[index] != std::trunc(values[index]) ||
+          values[index] < std::numeric_limits<int32_t>::min() ||
+          values[index] > std::numeric_limits<int32_t>::max())
+        return false;
+      bounds[index] = static_cast<int32_t>(values[index]);
+    }
+    return boundsE7Valid(bounds);
+  }
+  if (found)
+    return false;
+
+  if (!jsonNumberArray4(json, "bounds", values, found))
+    return false;
+  for (size_t index = 0; index < values.size(); ++index) {
+    const double scaled = values[index] * 10000000.0;
+    if (!std::isfinite(scaled) ||
+        scaled < std::numeric_limits<int32_t>::min() ||
+        scaled > std::numeric_limits<int32_t>::max())
+      return false;
+    bounds[index] = static_cast<int32_t>(std::llround(scaled));
+  }
+  return boundsE7Valid(bounds);
 }
 
 static uint64_t jsonUintValue(const std::string &json, const std::string &key) {
@@ -672,6 +923,10 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
   manifest.schemaVersion =
       static_cast<uint32_t>(jsonUintValue(manifestText, "schemaVersion"));
   manifest.mapId = jsonStringValue(manifestText, "mapId");
+  manifest.displayName =
+      jsonPresentationStringValue(manifestText, "displayName");
+  manifest.hasBoundsE7 =
+      jsonPresentationBoundsE7(manifestText, manifest.boundsE7);
   manifest.renderer = jsonStringValue(manifestText, "renderer");
   manifest.formatVersion =
       static_cast<uint32_t>(jsonUintValue(manifestText, "formatVersion"));
@@ -2332,6 +2587,73 @@ MapTransferInstaller::readActiveManifest(MapManifest &manifest) const {
   if (!active.ok)
     return active;
   return readInstalledManifest(selection.root, manifest);
+}
+
+InstallStatus MapTransferInstaller::readActiveMapPresentation(
+    ActiveMapSelection &selection,
+    MapPresentationMetadata &presentation) const {
+  selection = ActiveMapSelection();
+  presentation = MapPresentationMetadata();
+  const InstallStatus active = readActiveMap(selection);
+  if (!active.ok)
+    return active;
+  if (!safeActiveRoot(selection.root) || !activeRootExists(selection.root))
+    return fail("installed_root", "installed map root is missing");
+  std::string manifestText;
+  if (!readTextFile(joinPath(joinPath(storageRoot_, selection.root),
+                             kInstalledManifestFile),
+                    manifestText, kMaxManifestBytes)) {
+    return fail("installed_manifest", "installed map manifest is missing");
+  }
+  if (jsonStringValue(manifestText, "mapId") != selection.mapId) {
+    return fail("installed_manifest_identity",
+                "installed map manifest does not match active map ID");
+  }
+  if (!selection.manifestReceipt.empty()) {
+    const std::string receipt = sha256Hex(
+        reinterpret_cast<const uint8_t *>(manifestText.data()),
+        manifestText.size());
+    std::string expectedReceipt = selection.manifestReceipt;
+    std::transform(expectedReceipt.begin(), expectedReceipt.end(),
+                   expectedReceipt.begin(), ::tolower);
+    if (receipt != expectedReceipt) {
+      return fail("installed_manifest_receipt",
+                  "installed map manifest does not match active selection");
+    }
+    presentation.displayName =
+        jsonPresentationStringValue(manifestText, "displayName");
+    presentation.hasBoundsE7 =
+        jsonPresentationBoundsE7(manifestText, presentation.boundsE7);
+    return {true, "ok", ""};
+  }
+  MapManifest manifest;
+  const InstallStatus status = validateManifestText(manifestText, manifest);
+  if (!status.ok)
+    return status;
+  presentation.displayName = manifest.displayName;
+  presentation.boundsE7 = manifest.boundsE7;
+  presentation.hasBoundsE7 = manifest.hasBoundsE7;
+  return status;
+}
+
+bool MapTransferInstaller::readActiveMapPresentationRevision(
+    const ActiveMapSelection &selection,
+    MapPresentationRevision &revision) const {
+  revision = MapPresentationRevision();
+  if (!safeActiveRoot(selection.root))
+    return false;
+  struct stat info = {};
+  const std::string path = joinPath(
+      joinPath(storageRoot_, selection.root), kInstalledManifestFile);
+  if (::stat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
+      info.st_size <= 0 ||
+      static_cast<uint64_t>(info.st_size) > kMaxManifestBytes) {
+    return false;
+  }
+  revision.bytes = static_cast<uint64_t>(info.st_size);
+  revision.modifiedSeconds = static_cast<int64_t>(info.st_mtime);
+  revision.inode = static_cast<uint64_t>(info.st_ino);
+  return true;
 }
 
 bool MapTransferInstaller::pruneStagingSessions(

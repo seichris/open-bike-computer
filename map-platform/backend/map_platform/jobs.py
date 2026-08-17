@@ -1944,7 +1944,12 @@ def _normalize_user_label(value: Any) -> str:
         raise ValueError("displayName must not be empty")
     if len(label) > 80:
         raise ValueError("displayName must be at most 80 characters")
-    if any(ord(character) < 32 or ord(character) == 127 for character in label):
+    if len(label.encode("utf-8")) > 240:
+        raise ValueError("displayName must be at most 240 UTF-8 bytes")
+    if any(
+        ord(character) < 32 or 127 <= ord(character) <= 159
+        for character in label
+    ):
         raise ValueError("displayName must not contain control characters")
     return label
 

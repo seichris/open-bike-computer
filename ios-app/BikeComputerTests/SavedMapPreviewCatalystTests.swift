@@ -778,6 +778,158 @@ struct SavedMapPreviewCatalystTests {
             fail("a late snapshot must not persist after its map was deleted")
         }
 
+        let deviceDescriptor = DeviceActiveMapDescriptor(
+            mapID: "cloned-sd-map",
+            sessionID: "cloned-sd-session",
+            displayName: "Cloned SD Map",
+            boundsE7: [1_209_000_000, 307_000_000, 1_219_500_000, 315_500_000]
+        )!
+        var deviceSnapshotGenerationCount = 0
+        let devicePreviewManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { bounds in
+                guard bounds == expectedBounds else {
+                    fail("device-only preview should use its reported bounds")
+                }
+                deviceSnapshotGenerationCount += 1
+                return snapshotPNG
+            }
+        )
+        devicePreviewManager.updateActiveDeviceMap(deviceDescriptor)
+        guard let deviceItem = devicePreviewManager.savedMapListItems(
+            activeDeviceMap: deviceDescriptor
+        ).first(where: { $0.deviceMap?.mapID == deviceDescriptor.mapID }) else {
+            fail("device-only map should appear in the merged saved-map inventory")
+        }
+        devicePreviewManager.loadPreviewIfNeeded(for: deviceItem)
+        let devicePreviewDeadline = Date().addingTimeInterval(3)
+        while (!imageMatchesPNG(
+            devicePreviewManager.previewImage(for: deviceItem),
+            data: snapshotPNG
+        ) || DeviceMapSnapshotPreviewStore.imageData(
+            for: deviceDescriptor,
+            in: cacheDirectory
+        ) != snapshotPNG) && Date() < devicePreviewDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard deviceSnapshotGenerationCount == 1,
+              imageMatchesPNG(
+                  devicePreviewManager.previewImage(for: deviceItem),
+                  data: snapshotPNG
+              ),
+              DeviceMapSnapshotPreviewStore.imageData(
+                  for: deviceDescriptor,
+                  in: cacheDirectory
+              ) == snapshotPNG else {
+            fail("device-only map should generate and persist its MapKit preview")
+        }
+
+        var restoredDeviceGenerationCount = 0
+        let restoredDevicePreviewManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { _ in
+                restoredDeviceGenerationCount += 1
+                return nil
+            }
+        )
+        restoredDevicePreviewManager.updateActiveDeviceMap(deviceDescriptor)
+        guard let restoredDeviceItem = restoredDevicePreviewManager.savedMapListItems(
+            activeDeviceMap: deviceDescriptor
+        ).first(where: { $0.deviceMap?.mapID == deviceDescriptor.mapID }) else {
+            fail("restored device-only map should remain visible")
+        }
+        restoredDevicePreviewManager.loadPreviewIfNeeded(for: restoredDeviceItem)
+        let restoredDeviceDeadline = Date().addingTimeInterval(3)
+        while !imageMatchesPNG(
+            restoredDevicePreviewManager.previewImage(for: restoredDeviceItem),
+            data: snapshotPNG
+        ) && Date() < restoredDeviceDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard restoredDeviceGenerationCount == 0,
+              imageMatchesPNG(
+                  restoredDevicePreviewManager.previewImage(for: restoredDeviceItem),
+                  data: snapshotPNG
+              ) else {
+            fail("device preview cache should survive relaunch without another snapshot")
+        }
+        restoredDevicePreviewManager.updateActiveDeviceMap(nil)
+        guard restoredDevicePreviewManager.previewImage(for: restoredDeviceItem) == nil else {
+            fail("disconnect should clear live device-only preview state")
+        }
+
+        let sessionlessDescriptorA = DeviceActiveMapDescriptor(
+            mapID: "legacy-map",
+            boundsE7: [1_209_000_000, 307_000_000, 1_219_500_000, 315_500_000]
+        )!
+        let sessionlessDescriptorB = DeviceActiveMapDescriptor(
+            mapID: "legacy-map",
+            boundsE7: [1_000_000_000, 200_000_000, 1_010_000_000, 210_000_000]
+        )!
+        do {
+            try DeviceMapSnapshotPreviewStore.save(
+                snapshotPNG,
+                for: sessionlessDescriptorA,
+                in: cacheDirectory
+            )
+        } catch {
+            fail("sessionless device preview should persist: \(error)")
+        }
+        guard DeviceMapSnapshotPreviewStore.imageURL(
+            for: sessionlessDescriptorA,
+            in: cacheDirectory
+        ) != DeviceMapSnapshotPreviewStore.imageURL(
+            for: sessionlessDescriptorB,
+            in: cacheDirectory
+        ), DeviceMapSnapshotPreviewStore.imageData(
+            for: sessionlessDescriptorB,
+            in: cacheDirectory
+        ) == nil else {
+            fail("sessionless descriptors with different bounds must not share previews")
+        }
+
+        let pruneCacheDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "device-preview-prune-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: pruneCacheDirectory) }
+        for index in 0..<18 {
+            let descriptor = DeviceActiveMapDescriptor(
+                mapID: ".map-\(index)",
+                sessionID: "session-\(index)",
+                boundsE7: [
+                    1_000_000_000 + index,
+                    200_000_000,
+                    1_010_000_000 + index,
+                    210_000_000,
+                ]
+            )!
+            do {
+                try DeviceMapSnapshotPreviewStore.save(
+                    snapshotPNG,
+                    for: descriptor,
+                    in: pruneCacheDirectory
+                )
+            } catch {
+                fail("bounded device preview cache should save entry \(index): \(error)")
+            }
+        }
+        let prunedEntries = (try? FileManager.default.contentsOfDirectory(
+            at: pruneCacheDirectory.appendingPathComponent(
+                "DeviceMapPreviews",
+                isDirectory: true
+            ),
+            includingPropertiesForKeys: nil,
+            options: []
+        ))?.filter { $0.pathExtension.lowercased() == "png" } ?? []
+        guard prunedEntries.count <= 16,
+              prunedEntries.allSatisfy({ !$0.lastPathComponent.hasPrefix(".") }) else {
+            fail("device preview cache should prune dot-prefixed map identities")
+        }
+
         let northWestCoordinate = CLLocationCoordinate2D(
             latitude: expectedBounds.maxLatitude,
             longitude: expectedBounds.minLongitude

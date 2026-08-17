@@ -15,6 +15,145 @@ import Security
 import UIKit
 #endif
 
+nonisolated struct DeviceActiveMapDescriptor: Equatable, Sendable {
+    let mapID: String
+    let sessionID: String?
+    let manifestReceipt: String?
+    let displayName: String?
+    let bounds: OfflineMapPreviewBounds?
+
+    var stableIdentity: String {
+        sessionID ?? manifestReceipt ?? mapID
+    }
+
+    var previewFilename: String {
+        let boundsIdentity = bounds.map { value in
+            [
+                value.minLongitude,
+                value.minLatitude,
+                value.maxLongitude,
+                value.maxLatitude,
+            ]
+            .map { String($0.bitPattern, radix: 16) }
+            .joined(separator: ",")
+        } ?? ""
+        let identity = [
+            mapID,
+            sessionID ?? "",
+            manifestReceipt ?? "",
+            displayName ?? "",
+            boundsIdentity,
+        ].joined(separator: "\u{0}")
+        let digest = SHA256.hash(data: Data(identity.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "device-map-\(digest).png"
+    }
+
+    init?(
+        mapID: String,
+        sessionID: String? = nil,
+        manifestReceipt: String? = nil,
+        displayName: String? = nil,
+        boundsE7: [Int]? = nil
+    ) {
+        guard Self.isSafeMapID(mapID) else { return nil }
+        self.mapID = mapID
+        self.sessionID = sessionID.flatMap(Self.validSessionID)
+        self.manifestReceipt = manifestReceipt.flatMap(Self.validReceipt)
+        self.displayName = displayName.flatMap(Self.validDisplayName)
+        self.bounds = boundsE7.flatMap { values in
+            guard values.count == 4 else { return nil }
+            return OfflineMapPreviewBounds(
+                coordinates: values.map { Double($0) / 10_000_000 }
+            )
+        }
+    }
+
+    init?(statusObject: [String: Any]) {
+        guard let mapID = statusObject["activeMapId"] as? String else {
+            return nil
+        }
+        let bounds: [Int]? = (statusObject["activeMapBoundsE7"] as? [Any]).flatMap {
+            guard $0.count == 4 else { return nil }
+            var values: [Int] = []
+            values.reserveCapacity(4)
+            for item in $0 {
+                guard let number = item as? NSNumber,
+                      CFGetTypeID(number) != CFBooleanGetTypeID() else {
+                    return nil
+                }
+                let value = number.doubleValue
+                guard value.isFinite,
+                      value.rounded(.towardZero) == value,
+                      value >= Double(Int32.min),
+                      value <= Double(Int32.max) else {
+                    return nil
+                }
+                values.append(Int(value))
+            }
+            return values
+        }
+        self.init(
+            mapID: mapID,
+            sessionID: statusObject["activeSessionId"] as? String,
+            manifestReceipt: statusObject["activeManifestReceipt"] as? String,
+            displayName: statusObject["activeMapDisplayName"] as? String,
+            boundsE7: bounds
+        )
+    }
+
+    private static func isSafeMapID(_ value: String) -> Bool {
+        guard !value.isEmpty,
+              value.utf8.count <= 64,
+              value != ".",
+              value != ".." else {
+            return false
+        }
+        return value.utf8.allSatisfy(isSafeIdentifierByte)
+    }
+
+    private static func validSessionID(_ value: String) -> String? {
+        guard !value.isEmpty,
+              value.utf8.count <= 80,
+              value.first != ".",
+              !value.contains(".."),
+              value.utf8.allSatisfy(isSafeIdentifierByte) else {
+            return nil
+        }
+        return value
+    }
+
+    private static func validReceipt(_ value: String) -> String? {
+        guard value.utf8.count == 64,
+              value.utf8.allSatisfy({ byte in
+                  (48...57).contains(byte) || (65...70).contains(byte) ||
+                      (97...102).contains(byte)
+              }) else {
+            return nil
+        }
+        return value.lowercased()
+    }
+
+    private static func validDisplayName(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.count <= 80,
+              trimmed.utf8.count <= 240,
+              trimmed.unicodeScalars.allSatisfy({
+                  !CharacterSet.controlCharacters.contains($0)
+              }) else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private static func isSafeIdentifierByte(_ byte: UInt8) -> Bool {
+        (48...57).contains(byte) || (65...90).contains(byte) ||
+            (97...122).contains(byte) || byte == 45 || byte == 46 || byte == 95
+    }
+}
+
 struct NavigationWriteEndpoint {
     let maximumWriteLength: Int
     let expectsWriteResponse: Bool
@@ -698,6 +837,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferAccessPointSSID: String?
     @Published var mapTransferActiveMapId: String = ""
     @Published var mapTransferActiveSessionId: String = ""
+    @Published private(set) var activeDeviceMap: DeviceActiveMapDescriptor?
     @Published private(set) var activeMapManifestReceipt: String = ""
     @Published private(set) var activeMapRendererFormat: Int?
     @Published private(set) var activeMapLabelProfileVersion: Int?
@@ -4728,6 +4868,7 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferAccessPointSSID = nil
         mapTransferActiveMapId = ""
         mapTransferActiveSessionId = ""
+        activeDeviceMap = nil
         activeMapManifestReceipt = ""
         activeMapRendererFormat = nil
         activeMapLabelProfileVersion = nil
@@ -7746,6 +7887,7 @@ extension BLEManager: CBPeripheralDelegate {
         mapTransferActiveMapId = object["activeMapId"] as? String ?? ""
         mapTransferActiveSessionId = object["activeSessionId"] as? String ?? ""
         activeMapManifestReceipt = object["activeManifestReceipt"] as? String ?? ""
+        activeDeviceMap = DeviceActiveMapDescriptor(statusObject: object)
         activeMapRendererFormat =
             (object["activeRendererFormat"] as? NSNumber)?.intValue
         activeMapLabelProfileVersion =

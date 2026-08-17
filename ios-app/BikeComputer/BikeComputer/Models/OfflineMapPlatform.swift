@@ -1280,6 +1280,9 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
     let enabled: Bool?
     let activeMapId: String?
     let activeSessionId: String?
+    var activeManifestReceipt: String? = nil
+    var activeMapDisplayName: String? = nil
+    var activeMapBoundsE7: [Int]? = nil
     let activation: Activation?
     let protocols: [Int]?
     let streamFormatVersions: [Int]?

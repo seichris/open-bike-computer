@@ -414,6 +414,10 @@ class SourceAndJobTests(unittest.TestCase):
                 service.create_job({**base, "target": {"renderer": "unknown"}})
             with self.assertRaisesRegex(ValueError, "displayName must be at most"):
                 service.create_job({**base, "displayName": "x" * 81})
+            with self.assertRaisesRegex(ValueError, "240 UTF-8 bytes"):
+                service.create_job({**base, "displayName": "🚲" * 61})
+            with self.assertRaisesRegex(ValueError, "control characters"):
+                service.create_job({**base, "displayName": "ride\u0085name"})
 
             job = service.create_job(
                 {

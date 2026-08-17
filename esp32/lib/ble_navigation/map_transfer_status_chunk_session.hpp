@@ -1,10 +1,73 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
 
 namespace map_transfer_status_protocol {
+
+struct ActiveMapPresentation {
+  std::string displayName;
+  std::array<int32_t, 4> boundsE7 = {};
+  bool hasBoundsE7 = false;
+};
+
+inline std::string jsonEscape(const std::string &value) {
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string output;
+  output.reserve(value.size() + 8);
+  for (const unsigned char character : value) {
+    switch (character) {
+    case '"':
+      output += "\\\"";
+      break;
+    case '\\':
+      output += "\\\\";
+      break;
+    case '\b':
+      output += "\\b";
+      break;
+    case '\f':
+      output += "\\f";
+      break;
+    case '\n':
+      output += "\\n";
+      break;
+    case '\r':
+      output += "\\r";
+      break;
+    case '\t':
+      output += "\\t";
+      break;
+    default:
+      if (character < 0x20) {
+        output += "\\u00";
+        output.push_back(kHex[character >> 4]);
+        output.push_back(kHex[character & 0x0f]);
+      } else {
+        output.push_back(static_cast<char>(character));
+      }
+      break;
+    }
+  }
+  return output;
+}
+
+inline void appendActiveMapPresentation(std::string &body,
+                                        const ActiveMapPresentation &value) {
+  if (!value.displayName.empty()) {
+    body += ",\"activeMapDisplayName\":\"" +
+            jsonEscape(value.displayName) + "\"";
+  }
+  if (value.hasBoundsE7) {
+    body += ",\"activeMapBoundsE7\":[" +
+            std::to_string(value.boundsE7[0]) + "," +
+            std::to_string(value.boundsE7[1]) + "," +
+            std::to_string(value.boundsE7[2]) + "," +
+            std::to_string(value.boundsE7[3]) + "]";
+  }
+}
 
 // ATT notifications reserve three bytes for the protocol header. Each
 // authenticated notification then adds a 22-byte envelope, and chunked map

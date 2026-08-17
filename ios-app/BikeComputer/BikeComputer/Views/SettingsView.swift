@@ -144,11 +144,6 @@ struct SettingsView: View {
                         Label("Hardware Customization", systemImage: "dial.low")
                     }
 
-                    SettingsValueRow(
-                        title: "App Version",
-                        value: appVersionText
-                    )
-
                     NavigationLink {
                         DeveloperSettingsView(
                             offlineMapManager: offlineMapManager,
@@ -205,26 +200,6 @@ struct SettingsView: View {
                 ),
                 systemImage: "bicycle"
             )
-        }
-    }
-
-    private var appVersionText: String {
-        let version = Bundle.main.object(
-            forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String
-        let build = Bundle.main.object(
-            forInfoDictionaryKey: "CFBundleVersion"
-        ) as? String
-
-        switch (version, build) {
-        case let (version?, build?):
-            return "\(version) (\(build))"
-        case let (version?, nil):
-            return version
-        case let (nil, build?):
-            return build
-        case (nil, nil):
-            return "Unknown"
         }
     }
 
@@ -774,15 +749,18 @@ private struct SavedMapsSettingsSection: View {
     @State private var renameInteraction = SavedMapRenameInteraction()
 
     var body: some View {
+        let savedMaps = manager.savedMapListItems(
+            activeDeviceMap: bleManager.activeDeviceMap
+        )
         Section(header: Text("Saved Maps")) {
-            if manager.cachedPackURLs.isEmpty {
-                Text("0 maps downloaded yet")
+            if savedMaps.isEmpty {
+                Text("No offline maps yet")
                     .foregroundColor(.secondary)
             } else {
-                ForEach(manager.cachedPackURLs, id: \.self) { packURL in
-                    DownloadedMapRow(
+                ForEach(savedMaps) { item in
+                    SavedMapRow(
                         manager: manager,
-                        packURL: packURL,
+                        item: item,
                         focusedPackFilename: $focusedPackFilename,
                         renameInteraction: $renameInteraction,
                         onCommitRename: commitRename
@@ -813,7 +791,11 @@ private struct SavedMapsSettingsSection: View {
             }
         }
         .onAppear {
+            manager.updateActiveDeviceMap(bleManager.activeDeviceMap)
             manager.reconcileLastTransfer(bleManager: bleManager)
+        }
+        .onChange(of: bleManager.activeDeviceMap) { descriptor in
+            manager.updateActiveDeviceMap(descriptor)
         }
         .onChange(of: bleManager.mapTransferActiveMapId) { _ in
             manager.reconcileLastTransfer(bleManager: bleManager)
@@ -858,34 +840,49 @@ private struct SavedMapsSettingsSection: View {
     }
 }
 
-private struct DownloadedMapRow: View {
+private struct SavedMapRow: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
-    let packURL: URL
+    let item: SavedMapListItem
     @FocusState.Binding var focusedPackFilename: String?
     @Binding var renameInteraction: SavedMapRenameInteraction
     let onCommitRename: (SavedMapRenameCommit) -> Void
     @State private var isShowingInstalledConfirmation = false
     @State private var isShowingDeleteConfirmation = false
+    @State private var presentedPreview: SavedMapPreviewPresentation?
 
     var body: some View {
-        let displayName = manager.displayName(forCachedPack: packURL)
-        let isInstalled = manager.isCachedPackInstalled(
-            packURL,
-            activeMapId: bleManager.mapTransferActiveMapId,
-            activeSessionId: bleManager.mapTransferActiveSessionId
-        )
-        let isPausedUpload = manager.isPausedMapUpload(packURL)
+        let displayName = item.displayName
+        let packURL = item.packURL
+        let isPausedUpload = packURL.map(manager.isPausedMapUpload) ?? false
+        let previewImage = manager.previewImage(for: item)
 
         HStack(spacing: 12) {
-            SavedMapThumbnail(
-                image: manager.previewImage(forCachedPack: packURL)
+            Button {
+                guard let previewImage else { return }
+                finishRenaming()
+                focusedPackFilename = nil
+                presentedPreview = SavedMapPreviewPresentation(
+                    displayName: displayName,
+                    image: previewImage
+                )
+            } label: {
+                SavedMapThumbnail(image: previewImage)
+            }
+            .buttonStyle(.plain)
+            .disabled(previewImage == nil)
+            .accessibilityLabel("Show preview for \(displayName)")
+            .accessibilityHint(
+                previewImage == nil
+                    ? "Preview is loading"
+                    : "Opens the map preview"
             )
-            .task(id: packURL) {
-                manager.loadPreviewIfNeeded(forCachedPack: packURL)
+            .task(id: item.id) {
+                manager.loadPreviewIfNeeded(for: item)
             }
 
-            if renameInteraction.editingFilename == packURL.lastPathComponent {
+            if let packURL,
+               renameInteraction.editingFilename == packURL.lastPathComponent {
                 TextField(
                     "Map name",
                     text: Binding(
@@ -905,7 +902,7 @@ private struct DownloadedMapRow: View {
                     })
                     .accessibilityLabel("Map name")
                     .layoutPriority(1)
-            } else {
+            } else if let packURL {
                 Button {
                     if let commit = renameInteraction.begin(
                         filename: packURL.lastPathComponent,
@@ -926,6 +923,11 @@ private struct DownloadedMapRow: View {
                 .accessibilityLabel("Rename \(displayName)")
                 .accessibilityHint("Edits this saved map name")
                 .layoutPriority(1)
+            } else {
+                Text(displayName)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .layoutPriority(1)
             }
 
             Spacer()
@@ -934,7 +936,7 @@ private struct DownloadedMapRow: View {
                     focusedPackFilename = nil
                 }
 
-            if isInstalled {
+            if item.isActiveOnDevice {
                 Button {
                     finishRenaming()
                     focusedPackFilename = nil
@@ -945,9 +947,13 @@ private struct DownloadedMapRow: View {
                         .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.borderless)
-                .accessibilityLabel("\(displayName) is installed on device")
-                .accessibilityHint("Shows the installed map status")
-            } else {
+                .accessibilityLabel("\(displayName) is active on the Bike Computer")
+                .accessibilityHint(
+                    item.isOnIPhone
+                        ? "Shows the installed map status"
+                        : "This map is not saved on this iPhone"
+                )
+            } else if let packURL {
                 Button {
                     finishRenaming()
                     focusedPackFilename = nil
@@ -973,17 +979,23 @@ private struct DownloadedMapRow: View {
                 )
             }
 
-            Button(role: .destructive) {
-                finishRenaming()
-                focusedPackFilename = nil
-                isShowingDeleteConfirmation = true
-            } label: {
-                Image(systemName: "trash")
+            if packURL != nil {
+                Button(role: .destructive) {
+                    finishRenaming()
+                    focusedPackFilename = nil
+                    isShowingDeleteConfirmation = true
+                } label: {
+                    Image(systemName: "trash")
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.borderless)
+                .disabled(manager.isBusy || manager.hasActiveBackgroundUpload)
+                .accessibilityLabel("Delete \(displayName)")
+            } else {
+                Color.clear
                     .frame(width: 32, height: 32)
+                    .accessibilityHidden(true)
             }
-            .buttonStyle(.borderless)
-            .disabled(manager.isBusy || manager.hasActiveBackgroundUpload)
-            .accessibilityLabel("Delete \(displayName)")
         }
         .alert("Already on Device", isPresented: $isShowingInstalledConfirmation) {
             Button("OK", role: .cancel) {}
@@ -996,7 +1008,9 @@ private struct DownloadedMapRow: View {
             titleVisibility: .visible
         ) {
             Button("Delete", role: .destructive) {
-                manager.deleteCachedPack(at: packURL)
+                if let packURL {
+                    manager.deleteCachedPack(at: packURL)
+                }
             }
             Button("Cancel", role: .cancel) { }
         } message: {
@@ -1005,11 +1019,46 @@ private struct DownloadedMapRow: View {
                     "A copy already installed on the Bike Computer remains there."
             )
         }
+        .sheet(item: $presentedPreview) { preview in
+            SavedMapPreviewSheet(preview: preview)
+                .presentationDetents([.large])
+        }
     }
 
     private func finishRenaming() {
         if let commit = renameInteraction.finish() {
             onCommitRename(commit)
+        }
+    }
+}
+
+private struct SavedMapPreviewPresentation: Identifiable {
+    let id = UUID()
+    let displayName: String
+    let image: UIImage
+}
+
+private struct SavedMapPreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let preview: SavedMapPreviewPresentation
+
+    var body: some View {
+        NavigationView {
+            Image(uiImage: preview.image)
+                .resizable()
+                .scaledToFit()
+                .padding()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(uiColor: .systemBackground))
+                .navigationTitle(preview.displayName)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") {
+                            dismiss()
+                        }
+                    }
+                }
         }
     }
 }
@@ -2482,6 +2531,13 @@ private struct DeveloperSettingsView: View {
                 }
             }
 
+            Section(header: Text("App")) {
+                SettingsValueRow(
+                    title: "App Version",
+                    value: appVersionText
+                )
+            }
+
             NavigationOverlaysSettingsSection()
         }
         .navigationTitle("Developer Settings")
@@ -2511,6 +2567,26 @@ private struct DeveloperSettingsView: View {
         }
 
         return "Connected"
+    }
+
+    private var appVersionText: String {
+        let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String
+        let build = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleVersion"
+        ) as? String
+
+        switch (version, build) {
+        case let (version?, build?):
+            return "\(version) (\(build))"
+        case let (version?, nil):
+            return version
+        case let (nil, build?):
+            return build
+        case (nil, nil):
+            return "Unknown"
+        }
     }
 }
 
