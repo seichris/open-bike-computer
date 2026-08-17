@@ -8256,22 +8256,25 @@ struct NavigationProtocolTests {
             "Saved Maps omits redundant device and transfer summary rows"
         )
         assert(
-            source.contains("Image(systemName: \"iphone\")") &&
-                source.contains("Text(\"b\")") &&
-                source.contains("state: .active") &&
-                source.contains("uploadProgress.map { .uploading($0) } ?? .available"),
-            "each saved map shows distinct iPhone and Bike Computer presence icons"
+            source.contains("if item.isActiveOnDevice {") &&
+                source.contains("if item.isOnIPhone {") &&
+                source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
+                source.contains("IPhoneDownloadStatusIcon()") &&
+                source.contains("? \"arrow.clockwise.circle\"") &&
+                source.contains(": \"arrow.up.circle\"") &&
+                !source.contains("BikeComputerMapStatusIcon") &&
+                !source.contains("Text(\"b\")"),
+            "saved maps use the agreed iPhone-only, device-only, and shared icons"
         )
         assert(
             source.contains("Text(\"No offline maps yet\")"),
             "Saved Maps uses the agreed empty-state copy"
         )
         assert(
-            source.contains("is saved on this iPhone") &&
-                source.contains("is not saved on this iPhone") &&
+            source.contains("and is not saved on this iPhone") &&
                 source.contains("is active on the Bike Computer") &&
                 source.contains("Transfer \\(displayName) to device"),
-            "both saved-map presence indicators expose accessible state labels"
+            "saved-map presence indicators expose accessible state labels"
         )
         assert(
             source.contains("manager.resumePausedMapUpload(bleManager: bleManager)") &&

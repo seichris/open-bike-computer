@@ -879,7 +879,6 @@ private struct SavedMapRow: View {
         let displayName = item.displayName
         let packURL = item.packURL
         let isPausedUpload = packURL.map(manager.isPausedMapUpload) ?? false
-        let uploadProgress = packURL.flatMap(manager.mapUploadProgress)
 
         HStack(spacing: 12) {
             SavedMapThumbnail(
@@ -944,15 +943,6 @@ private struct SavedMapRow: View {
                     focusedPackFilename = nil
                 }
 
-            Image(systemName: "iphone")
-                .foregroundStyle(item.isOnIPhone ? Color.blue : Color.secondary)
-                .frame(width: 28, height: 32)
-                .accessibilityLabel(
-                    item.isOnIPhone
-                        ? "\(displayName) is saved on this iPhone"
-                        : "\(displayName) is not saved on this iPhone"
-                )
-
             if item.isActiveOnDevice {
                 if item.isOnIPhone {
                     Button {
@@ -960,18 +950,26 @@ private struct SavedMapRow: View {
                         focusedPackFilename = nil
                         isShowingInstalledConfirmation = true
                     } label: {
-                        BikeComputerMapStatusIcon(
-                            state: .active
-                        )
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                            .frame(width: 32, height: 32)
                     }
                     .buttonStyle(.borderless)
                     .accessibilityLabel("\(displayName) is active on the Bike Computer")
                     .accessibilityHint("Shows the installed map status")
                 } else {
-                    BikeComputerMapStatusIcon(
-                        state: .active
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                            .frame(width: 32, height: 32)
+
+                        IPhoneDownloadStatusIcon()
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(
+                        "\(displayName) is active on the Bike Computer " +
+                            "and is not saved on this iPhone"
                     )
-                    .accessibilityLabel("\(displayName) is active on the Bike Computer")
                 }
             } else if let packURL {
                 Button {
@@ -979,11 +977,12 @@ private struct SavedMapRow: View {
                     focusedPackFilename = nil
                     manager.transferCachedPack(at: packURL, bleManager: bleManager)
                 } label: {
-                    BikeComputerMapStatusIcon(
-                        state: isPausedUpload
-                            ? .paused
-                            : uploadProgress.map { .uploading($0) } ?? .available
+                    Image(
+                        systemName: isPausedUpload
+                            ? "arrow.clockwise.circle"
+                            : "arrow.up.circle"
                     )
+                        .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.borderless)
                 .disabled(
@@ -1047,71 +1046,21 @@ private struct SavedMapRow: View {
     }
 }
 
-private struct BikeComputerMapStatusIcon: View {
-    enum State: Equatable {
-        case active
-        case available
-        case paused
-        case uploading(Double)
-
-        var color: Color {
-            switch self {
-            case .active:
-                return .green
-            case .uploading:
-                return .blue
-            case .available, .paused:
-                return .secondary
-            }
-        }
-
-        var badgeSystemName: String {
-            switch self {
-            case .active:
-                return "checkmark.circle.fill"
-            case .available:
-                return "arrow.up.circle.fill"
-            case .paused:
-                return "arrow.clockwise.circle.fill"
-            case .uploading:
-                return "arrow.up.circle.fill"
-            }
-        }
-    }
-
-    let state: State
-
+private struct IPhoneDownloadStatusIcon: View {
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            Circle()
-                .fill(state.color)
-                .frame(width: 28, height: 28)
-                .overlay {
-                    Text("b")
-                        .font(.system(size: 17, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .offset(y: -0.5)
-                }
+            Image(systemName: "iphone")
+                .font(.system(size: 24, weight: .regular))
+                .foregroundStyle(.secondary)
 
-            if case let .uploading(progress) = state {
-                Circle()
-                    .trim(from: 0, to: progress)
-                    .stroke(
-                        Color.blue,
-                        style: StrokeStyle(lineWidth: 2, lineCap: .round)
-                    )
-                    .rotationEffect(.degrees(-90))
-                    .frame(width: 32, height: 32)
-            }
-
-            Image(systemName: state.badgeSystemName)
-                .font(.system(size: 11, weight: .semibold))
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 12, weight: .semibold))
                 .symbolRenderingMode(.palette)
-                .foregroundStyle(.white, state.color)
+                .foregroundStyle(.white, Color.blue)
                 .background(Circle().fill(Color(uiColor: .systemBackground)))
-                .offset(x: 3, y: 3)
+                .offset(x: 4, y: 3)
         }
-        .frame(width: 34, height: 34)
+        .frame(width: 32, height: 32)
     }
 }
 
