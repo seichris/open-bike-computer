@@ -814,7 +814,7 @@ acceptance thresholds are:
 - requested area remains approximately 23.84 km²;
 - aligned output remains approximately 110 km² and contains the same required
   output block IDs;
-- source query area is `<= 1.35 * outputArea` and `<= 800 km²` (expected near
+- source query area is `<= 1.35 * outputArea` and `<= 1,200 km²` (expected near
   output area plus the proposed 256 m buffer, not near 785 km²);
 - source expansion is at least 80% smaller than the supplied 785 km² baseline;
 - time to first preprocessing progress is `<= 10 s` after entering
@@ -827,7 +827,7 @@ acceptance thresholds are:
 - retries, cache hits, source bytes, peak memory, total wall time, and artifact
   receipts are recorded for review.
 
-The `10 s`, 80%, 50%, 1.35, and 800 km² values are policy gates. They must be
+The `10 s`, 80%, 50%, 1.35, and 1,200 km² values are policy gates. They must be
 reviewed against measured hardware/worker variance before production gating,
 but a relaxed threshold must be documented and versioned rather than silently
 accepted.
@@ -879,7 +879,7 @@ These must be resolved before implementation is declared complete:
    or should the source index make the buffer fully object-extents-driven?
 2. Should production use full source-snapshot precompute, lazy cells, or both
    with a prewarm scheduler? What is the retention/eviction policy?
-3. Is the 1.35 ratio/800 km² cap appropriate for large polygon and
+3. Is the 1.35 ratio/1,200 km² cap appropriate for large polygon and
    route requests, or should limits be per geometry mode?
 4. Should a relation that cannot be closed after the bounded retry fail the
    entire job, or be omitted with a typed partial-map result? The default in

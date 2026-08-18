@@ -62,6 +62,7 @@ MAP_FOLDER = args.map_folder
 
 MAPBLOCK_SIZE_BITS = 12     # 4096 x 4096 coords (~meters) per block  
 MAPFOLDER_SIZE_BITS = 4     # 16 x 16 map blocks per folder
+BUILDING_SCOPE_POLICY_VERSION = 5
 mapblock_mask  = pow( 2, MAPBLOCK_SIZE_BITS) - 1     # ...00000000111111111111
 mapfolder_mask = pow( 2, MAPFOLDER_SIZE_BITS) - 1    # ...00001111
 
@@ -90,7 +91,8 @@ if args.scope_plan:
         not isinstance(scope_hash, str)
         or hashlib.sha256(canonical_json(serialized_scope)).hexdigest() != scope_hash
         or serialized_scope.get("schemaVersion") != 1
-        or serialized_scope.get("policy", {}).get("policyVersion") != 4
+        or serialized_scope.get("policy", {}).get("policyVersion")
+        != BUILDING_SCOPE_POLICY_VERSION
         or serialized_scope.get("policy", {}).get("blockGridVersion") != 1
         or serialized_scope.get("policy", {}).get("blockSizeMeters") != 4096
     ):
