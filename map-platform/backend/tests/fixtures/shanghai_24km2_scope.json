@@ -6,7 +6,7 @@
     "bbox": [121.42348032386748, 31.231296744774028, 121.46390451165284, 31.286969933448667]
   },
   "expected": {
-    "scopePolicyVersion": 1,
+    "scopePolicyVersion": 2,
     "blockGridVersion": 1,
     "outputBlocks": [[3300, 894], [3300, 895], [3300, 896], [3301, 894], [3301, 895], [3301, 896]],
     "requestedApproximateAreaM2": 23840377,

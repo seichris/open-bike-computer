@@ -89,6 +89,10 @@ class BuildingBenchmarkTests(unittest.TestCase):
             ],
             5_000,
         )
+        self.assertEqual(
+            report["proposedThresholds"]["maximumSourceAreaM2"],
+            500_000_000,
+        )
 
     def test_selected_policy_may_differ_from_legacy_but_is_self_deterministic(self):
         runs = {name: run_record(name) for name in REQUIRED_RUNS}

@@ -186,7 +186,7 @@ current production settings:
 
 | Key | Proposed value | Rationale / decision gate |
 | --- | --- | --- |
-| `scopePolicyVersion` | `1` | Separates these semantics from the current cell-expanded policy |
+| `scopePolicyVersion` | `2` | Versions the reviewed increase from the initial 200 km² source-area cap |
 | `blockSizeMeters` | `4096` | Existing FMB contract; changing it is out of scope |
 | `geometryBufferMeters` | `256` | Initial candidate buffer for buildings and ordinary feature clipping |
 | `relationClosureMode` | `source_snapshot_index` | Fetch complete relation members by ID instead of widening to a calibration cell |
@@ -196,7 +196,7 @@ current production settings:
 | `calibrationHaloCells` | `1` | Preserve the existing stable-neighborhood rule, but satisfy it from cache |
 | `calibrationMinimumSamples` | `3` | Preserve the current rule; fewer direct samples use class defaults |
 | `maxSourceToOutputAreaRatio` | `1.35` | Proposed benchmark safety bound using projected source/output areas |
-| `maxSourceAreaKm2` | `200` | Proposed Shanghai-scale hard cap; larger jobs need an explicit policy review |
+| `maxSourceAreaKm2` | `500` | Controlled city-area validation cap; larger jobs still need an explicit policy review |
 | `boundaryToleranceMeters` | `0.05` | Match the current seam-wall tolerance unless fixture evidence changes it |
 | `maxRelationObjectsPerJob` | `200,000` | Protect worker memory/CPU; the pinned Shanghai benchmark requires 124,383 closure objects, leaving about 61% headroom; exceedance is a typed failure, not silent truncation |
 
@@ -814,7 +814,7 @@ acceptance thresholds are:
 - requested area remains approximately 23.84 km²;
 - aligned output remains approximately 110 km² and contains the same required
   output block IDs;
-- source query area is `<= 1.35 * outputArea` and `<= 200 km²` (expected near
+- source query area is `<= 1.35 * outputArea` and `<= 500 km²` (expected near
   output area plus the proposed 256 m buffer, not near 785 km²);
 - source expansion is at least 80% smaller than the supplied 785 km² baseline;
 - time to first preprocessing progress is `<= 10 s` after entering
@@ -827,7 +827,7 @@ acceptance thresholds are:
 - retries, cache hits, source bytes, peak memory, total wall time, and artifact
   receipts are recorded for review.
 
-The `10 s`, 80%, 50%, 1.35, and 200 km² values are proposals. They must be
+The `10 s`, 80%, 50%, 1.35, and 500 km² values are policy gates. They must be
 reviewed against measured hardware/worker variance before production gating,
 but a relaxed threshold must be documented and versioned rather than silently
 accepted.
@@ -879,7 +879,7 @@ These must be resolved before implementation is declared complete:
    or should the source index make the buffer fully object-extents-driven?
 2. Should production use full source-snapshot precompute, lazy cells, or both
    with a prewarm scheduler? What is the retention/eviction policy?
-3. Is the proposed 1.35 ratio/200 km² cap appropriate for large polygon and
+3. Is the 1.35 ratio/500 km² cap appropriate for large polygon and
    route requests, or should limits be per geometry mode?
 4. Should a relation that cannot be closed after the bounded retry fail the
    entire job, or be omitted with a typed partial-map result? The default in
