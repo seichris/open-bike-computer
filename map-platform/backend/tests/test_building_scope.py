@@ -14,8 +14,6 @@ from map_platform.building_scope import (
     plan_building_scope,
     point_in_ring,
     segment_rectangle_distance,
-    x_to_lon,
-    y_to_lat,
 )
 from map_platform.geometry import normalize_geometry
 from map_platform.models import Bounds, JobStatus, MapJob, SourceRegion
@@ -58,32 +56,32 @@ class BuildingScopeTests(unittest.TestCase):
         self.assertLessEqual(first.document["metrics"]["sourceToOutputAreaBasisPoints"], 13_500)
         self.assertLess(first.document["metrics"]["sourceAreaM2"], BUILDING_MAX_SOURCE_AREA_M2)
 
-    def test_default_policy_accepts_a_near_500_square_kilometer_scope(self):
-        block_size = 4096
-        min_x = 3300 * block_size + 1
-        min_y = 894 * block_size + 1
-        max_x = 3304 * block_size - 1
-        max_y = 901 * block_size - 1
+    def test_default_policy_accepts_observed_348_square_kilometer_shanghai_scope(self):
         job = make_job({
             "mode": "custom_bbox",
             "bbox": [
-                x_to_lon(min_x),
-                y_to_lat(min_y),
-                x_to_lon(max_x),
-                y_to_lat(max_y),
+                121.30632294659607,
+                31.158348295222982,
+                121.52266583255309,
+                31.31010442485655,
             ],
         })
 
         plan = self.plan(job)
 
-        self.assertEqual(BUILDING_SCOPE_POLICY_VERSION, 2)
-        self.assertEqual(BUILDING_MAX_SOURCE_AREA_M2, 500_000_000)
-        self.assertEqual(plan.document["policy"]["maxSourceAreaM2"], 500_000_000)
-        self.assertEqual(plan.document["metrics"]["outputBlockCount"], 28)
-        self.assertEqual(plan.document["metrics"]["sourceAreaM2"], 493_092_864)
+        self.assertEqual(BUILDING_SCOPE_POLICY_VERSION, 3)
+        self.assertEqual(BUILDING_MAX_SOURCE_AREA_M2, 800_000_000)
+        self.assertEqual(plan.document["policy"]["maxSourceAreaM2"], 800_000_000)
+        self.assertEqual(
+            plan.document["metrics"]["requestedApproximateAreaM2"],
+            347_879_737,
+        )
+        self.assertEqual(plan.document["metrics"]["outputBlockCount"], 42)
+        self.assertEqual(plan.document["metrics"]["outputAreaM2"], 704_643_072)
+        self.assertEqual(plan.document["metrics"]["sourceAreaM2"], 732_168_192)
 
         with self.assertRaises(BuildingScopeError) as raised:
-            self.plan(job, policy=BuildingScopePolicy(max_source_area_m2=492_000_000))
+            self.plan(job, policy=BuildingScopePolicy(max_source_area_m2=732_000_000))
         self.assertEqual(raised.exception.code, "building_scope_exceeded")
 
     def test_polygon_selects_only_intersecting_blocks(self):
