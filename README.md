@@ -7,12 +7,12 @@ A sleek, Garmin-mounted bike computer.
 🧭 Ride stats and turn-by-turn directions on your bike computer.\
 📡 Connect your power meter and cadence sensor.
 
-[![Download Bike Computer 2.0 on the App Store](https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83)](https://apps.apple.com/us/app/bike-computer-2-0/id6788977349)
+[![Download Bike Computer 2.0 on the App Store](https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83)](https://geo.itunes.apple.com/app/id6788977349)
 
 ## Get started
 
 1. **Buy your bike computer including Garmin mount at [bicino.com](https://bicino.com)** or get a generic [Waveshare 1.75"](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31262), or a [Waveshare 2.06"](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm).
-2. **Download** [**the Bicino iPhone and Apple Watch app**](https://apps.apple.com/us/app/bike-computer-2-0/id6788977349) and pair your bike computer.
+2. **Download** [**the Bicino iPhone and Apple Watch app**](https://geo.itunes.apple.com/app/id6788977349) and pair your bike computer.
 3. **Ride.** Track your workout and check your live ride statistics on your bike computer.
 
 ## Contributing
