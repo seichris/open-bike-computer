@@ -89,6 +89,9 @@ class MapMonitoringStoreTests(unittest.TestCase):
             singapore = build_job(
                 "cohort-singapore", now=now, processing_seconds=90
             )
+            singapore_cold = build_job(
+                "cohort-singapore-cold", now=now, processing_seconds=900
+            )
             shanghai = build_job(
                 "cohort-shanghai", now=now, processing_seconds=30
             )
@@ -99,7 +102,7 @@ class MapMonitoringStoreTests(unittest.TestCase):
                 url="https://example.invalid/shanghai.osm.pbf",
                 bounds=Bounds(120.8, 30.6, 122.2, 31.9),
             )
-            for job in (singapore, shanghai):
+            for job in (singapore, singapore_cold, shanghai):
                 job.building_preprocessing_mode = "selected"
                 job.preparation_estimator_context = {
                     "performanceCompatibilityKey": "a" * 64,
@@ -115,6 +118,16 @@ class MapMonitoringStoreTests(unittest.TestCase):
                         "complexity": {"sourceCount": 50_000},
                     },
                 }
+                cache_hits = 6 if job.job_id == "cohort-singapore" else 0
+                job.artifact_metrics = {
+                    "buildingBuild": {
+                        "blockCache": {
+                            "requestedBlockCount": 6,
+                            "initialHitCount": cache_hits,
+                            "initialMissCount": 6 - cache_hits,
+                        }
+                    }
+                }
                 self.assertTrue(store.record_job(job))
 
             samples = store.estimate_samples(
@@ -128,6 +141,7 @@ class MapMonitoringStoreTests(unittest.TestCase):
                 source_area_m2=100_000_000,
                 building_source_count=50_000,
                 cache_outcome="hit",
+                building_cache_outcome="full_hit",
                 minimum_samples=1,
             )
             queued_samples = store.estimate_samples(
@@ -141,10 +155,26 @@ class MapMonitoringStoreTests(unittest.TestCase):
                 source_area_m2=100_000_000,
                 building_source_count=50_000,
                 cache_outcome="hit",
+                building_cache_outcome="full_hit",
+                minimum_samples=1,
+            )
+            cold_samples = store.estimate_samples(
+                performance_key="a" * 64,
+                renderer=3,
+                preprocessing_mode="selected",
+                outcome_class="full_build",
+                claimed=True,
+                source_region_id="sg",
+                output_block_count=6,
+                source_area_m2=100_000_000,
+                building_source_count=50_000,
+                cache_outcome="hit",
+                building_cache_outcome="cold_miss",
                 minimum_samples=1,
             )
 
         self.assertEqual(samples, [90.0])
+        self.assertEqual(cold_samples, [900.0])
         self.assertEqual(
             queued_samples,
             [90.0],

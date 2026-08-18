@@ -50,7 +50,7 @@ For host-only development, this project requires `shapely`, `PyYAML`,
 cd scripts
 python3 -m venv venv
 source venv/bin/activate
-pip install shapely PyYAML Pillow freetype-py uharfbuzz "osmium==4.3.1"
+pip install "shapely==2.0.7" PyYAML Pillow freetype-py uharfbuzz "osmium==4.3.1"
 ```
 
 ## Example of the creation of the map files
@@ -156,6 +156,18 @@ collection.
 
 Buildings are clipped only when FMB blocks are emitted; new clip edges receive
 a cleared wall bit so adjacent blocks do not render artificial seam facades.
+Plan-aware builds cache the canonical FMB building section for each global
+4,096-metre block. The cache identity binds the source snapshot, height rules,
+sealed calibration generation, building/profile and FMB versions, the pinned
+geometry engine, spatial normalization and block-encoding algorithms,
+source-index/closure algorithms,
+and block-grid semantics. It deliberately excludes request bounds, languages,
+roads, and labels. Cached sections can therefore be composed with a new
+request's label and non-building sections without aliasing request-specific
+content. Misses use deterministic STRtree part association and bounded parallel
+block clipping/encoding; publication uses per-block cross-process locks,
+content hashes, atomic manifests, and corruption-triggered recomputation.
+
 Plan-aware runs emit exactly one canonical `BUILDING_SCOPE` marker, structured
 `BUILDING_PREPROCESS_PROGRESS` markers while source/index/calibration work is in
 flight, one bounded `BUILDING_COMPLEXITY` marker immediately after the already
@@ -163,7 +175,9 @@ required source-building materialization and before containment/height
 normalization, and final `BUILDING_STATS` with encoded-record provenance and
 seam diagnostics. Complexity includes outline/part counts, unresolved
 containment candidate product, polygon/ring/hole and vertex counts, and known
-preparation rejections; it does not add a second geometry parse. The backend
+preparation rejections. Final statistics also report actual spatial candidates,
+prepared outlines, cache hits/misses/race hits, lock wait, and lookup/generation
+timings; it does not add a second geometry parse. The backend
 strictly validates these counters, uses them only for advisory preparation-time
 refinement/monitoring, validates the scope marker against the frozen plan, and
 keeps calibration units separate from block progress. No complexity field is

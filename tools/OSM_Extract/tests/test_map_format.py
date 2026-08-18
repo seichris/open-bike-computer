@@ -10,7 +10,7 @@ import zlib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from map_format import MapFormatError, write_fmb
+from map_format import MapFormatError, encode_building_section, write_fmb
 from font_asset import FontFaceSpec, FontPackBuilder
 
 
@@ -380,8 +380,23 @@ class BinaryMapFormatTests(unittest.TestCase):
                 building_records=[building],
             )
             data = path.read_bytes()
+            section, section_metadata = encode_building_section([building])
+            cached_path = pathlib.Path(directory) / "cached.fmb"
+            cached_metadata = write_fmb(
+                cached_path,
+                [],
+                [],
+                min_x=0,
+                min_y=0,
+                font_builder=EmptyBuilder(),
+                building_section=section,
+                building_metadata=section_metadata,
+            )
+            cached_data = cached_path.read_bytes()
 
         self.assertEqual(data[:4], b"FMB\x04")
+        self.assertEqual(cached_data, data)
+        self.assertEqual(cached_metadata, metadata)
         self.assertEqual(metadata["buildings"], 1)
         self.assertEqual(metadata["buildingPoints"], 4)
         directory_offset = 8

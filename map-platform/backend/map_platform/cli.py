@@ -14,8 +14,14 @@ from .generation_profiles import (
 from .geofabrik_sources import GeofabrikSourceProvider
 from .jobs import ArtifactGarbageCollectionError, JobStore, MapJobService
 from .map_buildings import (
+    building_block_workers,
     building_preprocessing_scope_mode,
     building_target3_generation_allowlist,
+)
+from .building_cache_maintenance import (
+    DEFAULT_BUILDING_BLOCK_CACHE_MAX_BYTES,
+    DEFAULT_BUILDING_BLOCK_CACHE_RETENTION_DAYS,
+    prune_building_block_cache,
 )
 from .map_signing import load_map_artifact_signer_from_environment
 from .map_stream_build_identity import (
@@ -215,12 +221,15 @@ def _perform_maintenance(
     max_gc_items: int,
     monitoring_store: MapMonitoringStore | None = None,
     monitoring_retention_days: int | None = None,
+    building_cache_retention_days: int = DEFAULT_BUILDING_BLOCK_CACHE_RETENTION_DAYS,
+    building_cache_max_bytes: int = DEFAULT_BUILDING_BLOCK_CACHE_MAX_BYTES,
 ) -> dict[str, object]:
     result: dict[str, object] = {
         "maintenance": True,
         "expired": 0,
         "removedWorkDirs": 0,
         "removedRateLimits": 0,
+        "buildingBlockCache": {},
     }
     failures: dict[str, object] = {}
     tasks = (
@@ -240,6 +249,15 @@ def _perform_maintenance(
         (
             "removedRateLimits",
             lambda: purge_expired_rate_limits(data_root / "rate-limits.sqlite3"),
+        ),
+        (
+            "buildingBlockCache",
+            lambda: prune_building_block_cache(
+                data_root / "building-cache",
+                older_than_days=building_cache_retention_days,
+                max_bytes=building_cache_max_bytes,
+                max_items=max_gc_items,
+            ),
         ),
     )
     if monitoring_store is not None:
@@ -323,6 +341,26 @@ def main() -> int:
         "--max-gc-items",
         type=int,
         default=int(os.environ.get("MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS", "100")),
+    )
+    maintenance_loop.add_argument(
+        "--building-cache-retention-days",
+        type=int,
+        default=int(
+            os.environ.get(
+                "MAP_PLATFORM_BUILDING_BLOCK_CACHE_RETENTION_DAYS",
+                str(DEFAULT_BUILDING_BLOCK_CACHE_RETENTION_DAYS),
+            )
+        ),
+    )
+    maintenance_loop.add_argument(
+        "--building-cache-max-bytes",
+        type=int,
+        default=int(
+            os.environ.get(
+                "MAP_PLATFORM_BUILDING_BLOCK_CACHE_MAX_BYTES",
+                str(DEFAULT_BUILDING_BLOCK_CACHE_MAX_BYTES),
+            )
+        ),
     )
     maintenance_loop.add_argument(
         "--heartbeat-path",
@@ -427,6 +465,7 @@ def main() -> int:
             ),
             source_cache=source_cache,
             building_scope_mode=preprocessing_scope_mode,
+            building_block_workers=building_block_workers(),
             artifact_store=create_artifact_store_from_environment(data_root),
             map_signer=map_signer,
             producer_build_sha256=producer_build_sha256,
@@ -566,6 +605,10 @@ def main() -> int:
                     max_gc_items=args.max_gc_items,
                     monitoring_store=monitoring_store,
                     monitoring_retention_days=monitoring_retention_days,
+                    building_cache_retention_days=(
+                        args.building_cache_retention_days
+                    ),
+                    building_cache_max_bytes=args.building_cache_max_bytes,
                 )
             except MaintenanceIterationError as exc:
                 maintenance_result = exc.result

@@ -20,6 +20,7 @@ from map_platform.manifest import (
 )
 from map_platform.map_stream import canonical_manifest_bytes
 from map_platform.map_buildings import (
+    building_block_workers,
     building_preprocessing_scope_mode,
     building_target3_generation_allowlist,
     building_target3_generation_enabled,
@@ -34,6 +35,8 @@ from map_platform.pipeline import (
 from map_platform.building_scope import plan_building_scope
 from map_platform.building_scope import BuildingScopeError, BuildingScopePolicy
 from map_platform.building_identity import (
+    canonical_json as canonical_building_json,
+    selected_building_block_cache_identity,
     selected_building_identity,
     selected_calibration_identity,
 )
@@ -168,6 +171,62 @@ class MapBuildingContractTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "legacy, shadow, or selected"):
                 building_preprocessing_scope_mode()
+
+    def test_building_block_worker_configuration_is_bounded(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(building_block_workers(), 4)
+        with patch.dict(
+            "os.environ",
+            {"MAP_PLATFORM_BUILDING_BLOCK_WORKERS": "8"},
+            clear=True,
+        ):
+            self.assertEqual(building_block_workers(), 8)
+        for value in ("0", "17", "many"):
+            with self.subTest(value=value), patch.dict(
+                "os.environ",
+                {"MAP_PLATFORM_BUILDING_BLOCK_WORKERS": value},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "BUILDING_BLOCK_WORKERS"):
+                    building_block_workers()
+
+    def test_building_block_cache_identity_is_scope_independent_and_hash_bound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job = self._service(JobStore(tmp)).create_job(self._request())
+            plan = plan_building_scope(
+                job,
+                calibration_cell_size_meters=8192,
+                calibration_halo_cells=1,
+                calibration_minimum_samples=3,
+            )
+            rules_path = (
+                Path(__file__).resolve().parents[3]
+                / "tools/OSM_Extract/conf/building_height_rules.yaml"
+            )
+            _manifest, generation = self._calibration_generation("1" * 64, plan)
+            identity = selected_building_block_cache_identity(
+                source_snapshot_sha256="1" * 64,
+                rules_path=rules_path,
+                scope_plan=plan,
+                calibration_generation=generation,
+            )
+            body = {
+                key: value
+                for key, value in identity.items()
+                if key != "cacheIdentitySha256"
+            }
+
+            self.assertNotIn("scopePlanSha256", canonical_building_json(identity).decode())
+            self.assertEqual(identity["blockSizeMeters"], 4096)
+            self.assertEqual(identity["normalizationAlgorithmVersion"], 2)
+            self.assertEqual(
+                identity["geometryEngine"],
+                {"name": "shapely", "version": "2.0.7"},
+            )
+            self.assertEqual(
+                identity["cacheIdentitySha256"],
+                hashlib.sha256(canonical_building_json(body)).hexdigest(),
+            )
 
     def test_target_three_allowlist_is_strict(self):
         installation_id = "inst_v2_" + "a" * 32
@@ -1277,6 +1336,11 @@ class MapBuildingContractTests(unittest.TestCase):
             self.assertEqual(retries[0]["bufferMeters"], 512)
             attempt_scope = observed_metrics["buildingPreprocessing"]["attemptScope"]
             self.assertEqual(attempt_scope["closurePlanSha256"], "6" * 64)
+            self.assertEqual(
+                observed_metrics["buildingPreprocessing"]["blockCacheIdentity"]
+                ["geometryBufferMeters"],
+                512,
+            )
             self.assertEqual(job.build_cache_aliases, [base_exact_key])
             self.assertEqual(
                 job.build_identity_derivation,
