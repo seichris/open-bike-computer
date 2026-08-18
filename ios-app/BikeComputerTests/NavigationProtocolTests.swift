@@ -13410,9 +13410,9 @@ struct NavigationProtocolTests {
         assert(lifecycle.markComparisonReady(for: otherPeripheralID),
                "the selected Bike Computer can advance to code comparison")
         assert(lifecycle.beginConfirmation(for: otherPeripheralID),
-               "the matching-code action can submit once")
+               "the physical matching-code confirmation submits automatically")
         assert(!lifecycle.beginConfirmation(for: otherPeripheralID),
-               "a matching-code confirmation cannot be submitted twice")
+               "an automatic pairing confirmation cannot be submitted twice")
         let handoffCancellation = lifecycle.cancel(
             connectedIdentifier: peripheralID
         )

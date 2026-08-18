@@ -421,17 +421,6 @@ struct BikeComputerPairingFlow: View {
                                 Text("Registering this iPhone…")
                             }
                         }
-                    } else if bleManager.isPairingConfirmedOnDevice {
-                        Section {
-                            Button(
-                                "Codes Match",
-                                role: prompt.isReplacingExistingRegistration
-                                    ? .destructive
-                                    : nil
-                            ) {
-                                bleManager.confirmPairingAfterCodeMatch()
-                            }
-                        }
                     } else {
                         Section {
                             Text(prompt.formattedCode)
