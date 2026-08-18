@@ -120,6 +120,26 @@ class MapBuildResult:
 
 
 class CommandRunner:
+    def __init__(self) -> None:
+        self.last_execution_metrics: dict[str, int | float] = {}
+
+    @staticmethod
+    def _resident_bytes(process_id: int) -> int | None:
+        try:
+            status = Path(f"/proc/{process_id}/status").read_text(
+                encoding="utf-8"
+            )
+        except OSError:
+            return None
+        resident_kib = []
+        for line in status.splitlines():
+            field, separator, value = line.partition(":")
+            if separator and field in {"VmHWM", "VmRSS"}:
+                parts = value.split()
+                if parts and parts[0].isdigit():
+                    resident_kib.append(int(parts[0]))
+        return max(resident_kib) * 1024 if resident_kib else None
+
     def run(
         self,
         args: list[str],
@@ -133,7 +153,16 @@ class CommandRunner:
                 cwd=cwd,
                 cancellation_check=cancellation_check,
             )
-        result = subprocess.run(args, cwd=cwd, check=True, text=True, capture_output=True)
+        self.last_execution_metrics = {}
+        started = time.perf_counter()
+        try:
+            result = subprocess.run(
+                args, cwd=cwd, check=True, text=True, capture_output=True
+            )
+        finally:
+            self.last_execution_metrics = {
+                "wallSeconds": round(time.perf_counter() - started, 6)
+            }
         return (result.stdout or result.stderr).strip()
 
     def run_streaming(
@@ -144,6 +173,8 @@ class CommandRunner:
         on_output=None,
         cancellation_check=None,
     ) -> str:
+        self.last_execution_metrics = {}
+        started = time.perf_counter()
         process = subprocess.Popen(
             args,
             cwd=cwd,
@@ -155,10 +186,16 @@ class CommandRunner:
         output: list[str] = []
         pending = ""
         stdout_open = True
+        peak_resident_bytes = self._resident_bytes(process.pid)
         try:
             assert process.stdout is not None
             descriptor = process.stdout.fileno()
             while True:
+                resident_bytes = self._resident_bytes(process.pid)
+                if resident_bytes is not None:
+                    peak_resident_bytes = max(
+                        peak_resident_bytes or 0, resident_bytes
+                    )
                 if cancellation_check is not None and cancellation_check():
                     raise RuntimeError("preprocessing command was cancelled")
                 if not stdout_open:
@@ -207,6 +244,12 @@ class CommandRunner:
         finally:
             if process.stdout is not None:
                 process.stdout.close()
+            metrics: dict[str, int | float] = {
+                "wallSeconds": round(time.perf_counter() - started, 6)
+            }
+            if peak_resident_bytes is not None:
+                metrics["peakResidentBytes"] = peak_resident_bytes
+            self.last_execution_metrics = metrics
         combined_output = "".join(output)
         if return_code != 0:
             raise subprocess.CalledProcessError(return_code, args, output=combined_output)
@@ -222,6 +265,7 @@ _BUILDING_FAILURE_PREFIX = "BUILDING_PREPROCESS_FAILURE:"
 _BUILDING_PREPROCESS_PROGRESS_PREFIX = "BUILDING_PREPROCESS_PROGRESS:"
 _BUILDING_FAILURE_CODES = {
     "building_scope_exceeded",
+    "building_object_limit_exceeded",
     "building_relation_incomplete",
     "building_calibration_unavailable",
     "building_source_snapshot_changed",
@@ -229,11 +273,65 @@ _BUILDING_FAILURE_CODES = {
 }
 _BUILDING_FAILURE_MESSAGES = {
     "building_scope_exceeded": "selected building scope exceeds policy",
+    "building_object_limit_exceeded": (
+        "selected building closure exceeds the object limit"
+    ),
     "building_relation_incomplete": "selected building relation closure is incomplete",
     "building_calibration_unavailable": "selected building calibration is unavailable",
     "building_source_snapshot_changed": "selected building source snapshot changed",
     "building_scope_policy_invalid": "selected building scope policy is invalid",
 }
+
+
+def _coalesce_projected_rectangles(
+    rectangles: list[list[int]] | tuple[tuple[int, int, int, int], ...],
+) -> tuple[tuple[int, int, int, int], ...]:
+    """Merge edge-compatible rectangles without changing their exact union."""
+    current = tuple(sorted({tuple(rectangle) for rectangle in rectangles}))
+    if any(
+        len(rectangle) != 4
+        or rectangle[2] <= rectangle[0]
+        or rectangle[3] <= rectangle[1]
+        for rectangle in current
+    ):
+        raise BuildingScopeError(
+            "building_scope_policy_invalid",
+            "source scope contains an invalid extraction rectangle",
+        )
+
+    def merge_axis(
+        values: tuple[tuple[int, int, int, int], ...], *, horizontal: bool
+    ) -> tuple[tuple[int, int, int, int], ...]:
+        groups: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        for min_x, min_y, max_x, max_y in values:
+            key = (min_y, max_y) if horizontal else (min_x, max_x)
+            interval = (min_x, max_x) if horizontal else (min_y, max_y)
+            groups.setdefault(key, []).append(interval)
+        merged = []
+        for key, intervals in sorted(groups.items()):
+            start, end = sorted(intervals)[0]
+            for next_start, next_end in sorted(intervals)[1:]:
+                if next_start <= end:
+                    end = max(end, next_end)
+                    continue
+                merged.append(
+                    (start, key[0], end, key[1])
+                    if horizontal
+                    else (key[0], start, key[1], end)
+                )
+                start, end = next_start, next_end
+            merged.append(
+                (start, key[0], end, key[1])
+                if horizontal
+                else (key[0], start, key[1], end)
+            )
+        return tuple(sorted(merged))
+
+    while True:
+        merged = merge_axis(merge_axis(current, horizontal=True), horizontal=False)
+        if merged == current:
+            return current
+        current = merged
 
 
 def parse_map_progress(line: str) -> tuple[int, int] | None:
@@ -479,6 +577,7 @@ class MapBuildPipeline:
     ) -> MapBuildResult:
         build_started_monotonic = time.monotonic()
         building_phase_timings: dict[str, float] = {}
+        building_resource_metrics: dict[str, Any] = {}
         if self.uses_selected_preprocessing(job) and on_phase_progress is not None:
             external_phase_progress = on_phase_progress
             observability = getattr(job, "_building_observability", None)
@@ -726,6 +825,7 @@ class MapBuildPipeline:
         if on_status and not selected_scope:
             on_status(JobStatus.EXTRACTING_PBF)
         source_extraction_started = time.perf_counter()
+        source_extraction_metrics: dict[str, Any] | None = None
         try:
             if format_version == BUILDING_RENDERER_FORMAT_VERSION:
                 extract_kwargs = {"bounds": source_bounds, "force_bounds": True}
@@ -734,7 +834,7 @@ class MapBuildPipeline:
                     extract_kwargs["source_snapshot_sha256"] = source_snapshot_sha256
                 if cancellation_check is not None:
                     extract_kwargs["cancellation_check"] = cancellation_check
-                self._extract_pbf(
+                source_extraction_metrics = self._extract_pbf(
                     job,
                     source_pbf,
                     clipped_pbf,
@@ -744,7 +844,7 @@ class MapBuildPipeline:
                 extract_kwargs = {"bounds": source_bounds}
                 if cancellation_check is not None:
                     extract_kwargs["cancellation_check"] = cancellation_check
-                self._extract_pbf(
+                source_extraction_metrics = self._extract_pbf(
                     job,
                     source_pbf,
                     clipped_pbf,
@@ -760,9 +860,29 @@ class MapBuildPipeline:
                 "selected building source extraction failed",
             ) from exc
         if selected_scope:
-            building_phase_timings["sourceExtraction"] = (
+            source_extraction_seconds = (
                 time.perf_counter() - source_extraction_started
             )
+            building_phase_timings["sourceExtraction"] = source_extraction_seconds
+            if isinstance(source_extraction_metrics, dict):
+                source_extraction_metrics["durationSeconds"] = round(
+                    source_extraction_seconds, 6
+                )
+                building_resource_metrics["sourceExtraction"] = (
+                    source_extraction_metrics
+                )
+                if job.building_preprocessing_runtime is None:
+                    job.building_preprocessing_runtime = {}
+                job.building_preprocessing_runtime["resourceMetrics"] = deepcopy(
+                    building_resource_metrics
+                )
+                print(
+                    "BUILDING_SOURCE_EXTRACTION:"
+                    + canonical_building_json(source_extraction_metrics).decode(
+                        "utf-8"
+                    ),
+                    flush=True,
+                )
         if on_status:
             on_status(JobStatus.CONVERTING_FEATURES)
         calibration_manifest = None
@@ -943,7 +1063,7 @@ class MapBuildPipeline:
                     retry_extract_kwargs["cancellation_check"] = (
                         cancellation_check
                     )
-                self._extract_pbf(
+                retry_extraction_metrics = self._extract_pbf(
                     job,
                     source_pbf,
                     clipped_pbf,
@@ -1015,6 +1135,16 @@ class MapBuildPipeline:
                     "sourceAreaM2": attempt_summary["sourceAreaM2"],
                     "sourceBoundsE7": attempt_summary["sourceBoundsE7"],
                 }
+                if isinstance(retry_extraction_metrics, dict):
+                    retry_record["sourceExtraction"] = retry_extraction_metrics
+                    building_resource_metrics.setdefault(
+                        "relationRetryExtractions", []
+                    ).append(retry_extraction_metrics)
+                    if job.building_preprocessing_runtime is None:
+                        job.building_preprocessing_runtime = {}
+                    job.building_preprocessing_runtime[
+                        "resourceMetrics"
+                    ] = deepcopy(building_resource_metrics)
                 if isinstance(attempt_preprocessing_metrics.get("closure"), dict):
                     retry_record["closure"] = attempt_preprocessing_metrics["closure"]
                 relation_retries.append(retry_record)
@@ -1113,6 +1243,7 @@ class MapBuildPipeline:
                 key: round(value, 6)
                 for key, value in building_phase_timings.items()
             }
+            label_metrics["buildingResourceMetrics"] = building_resource_metrics
             label_metrics["buildingObservability"] = {
                 "firstProgressMilliseconds": preprocessing_observability.get(
                     "firstProgressMilliseconds", 0
@@ -2327,6 +2458,28 @@ class MapBuildPipeline:
             kwargs["cancellation_check"] = cancellation_check
         return self.runner.run(args, **kwargs)
 
+    def _last_command_execution_metrics(self) -> dict[str, int | float]:
+        raw = getattr(self.runner, "last_execution_metrics", None)
+        if not isinstance(raw, dict):
+            return {}
+        metrics = {}
+        wall_seconds = raw.get("wallSeconds")
+        if (
+            isinstance(wall_seconds, (int, float))
+            and not isinstance(wall_seconds, bool)
+            and math.isfinite(float(wall_seconds))
+            and wall_seconds >= 0
+        ):
+            metrics["wallSeconds"] = round(float(wall_seconds), 6)
+        peak_resident_bytes = raw.get("peakResidentBytes")
+        if (
+            isinstance(peak_resident_bytes, int)
+            and not isinstance(peak_resident_bytes, bool)
+            and peak_resident_bytes >= 0
+        ):
+            metrics["peakResidentBytes"] = peak_resident_bytes
+        return metrics
+
     def _extract_pbf(
         self,
         job: MapJob,
@@ -2338,8 +2491,9 @@ class MapBuildPipeline:
         scope_plan: ScopePlan | None = None,
         source_snapshot_sha256: str | None = None,
         cancellation_check=None,
-    ) -> None:
+    ) -> dict[str, Any]:
         bounds = bounds or job.geometry.bounds
+        extraction_metrics: dict[str, Any] = {"schemaVersion": 1}
         extraction_option = (
             ["--option=types=multipolygon,building"]
             if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION
@@ -2353,45 +2507,86 @@ class MapBuildPipeline:
                     "building_source_snapshot_changed",
                     "source snapshot changed before selected-area extraction",
                 )
-            part_root = clipped_pbf.parent / "source-scope-parts"
-            if part_root.exists():
-                shutil.rmtree(part_root)
-            part_root.mkdir()
-            part_paths = []
-            extracts = []
-            for index, (min_x, min_y, max_x, max_y) in enumerate(
-                scope_plan.document["sourceScope"]["rectanglesMeters"]
-            ):
-                name = f"part-{index:05d}.osm.pbf"
-                part_paths.append(part_root / name)
-                extracts.append(
-                    {
-                        "output": name,
-                        "output_format": "pbf",
-                        "bbox": [
+            original_rectangles = scope_plan.document["sourceScope"][
+                "rectanglesMeters"
+            ]
+            coalesced_rectangles = _coalesce_projected_rectangles(
+                original_rectangles
+            )
+            extraction_metrics.update(
+                {
+                    "inputRectangleCount": len(original_rectangles),
+                    "coalescedRectangleCount": len(coalesced_rectangles),
+                }
+            )
+            part_paths: list[Path] = []
+            if len(coalesced_rectangles) == 1:
+                min_x, min_y, max_x, max_y = coalesced_rectangles[0]
+                args = [
+                    "osmium",
+                    "extract",
+                    "--strategy=smart",
+                    *extraction_option,
+                    "-b",
+                    ",".join(
+                        str(value)
+                        for value in (
                             x_to_lon(min_x),
                             y_to_lat(min_y),
                             x_to_lon(max_x),
                             y_to_lat(max_y),
-                        ],
-                    }
+                        )
+                    ),
+                    str(source_pbf),
+                    "-o",
+                    str(clipped_pbf),
+                    "--overwrite",
+                ]
+            else:
+                part_root = clipped_pbf.parent / "source-scope-parts"
+                if part_root.exists():
+                    shutil.rmtree(part_root)
+                part_root.mkdir()
+                extracts = []
+                for index, (min_x, min_y, max_x, max_y) in enumerate(
+                    coalesced_rectangles
+                ):
+                    name = f"part-{index:05d}.osm.pbf"
+                    part_paths.append(part_root / name)
+                    extracts.append(
+                        {
+                            "output": name,
+                            "output_format": "pbf",
+                            "bbox": [
+                                x_to_lon(min_x),
+                                y_to_lat(min_y),
+                                x_to_lon(max_x),
+                                y_to_lat(max_y),
+                            ],
+                        }
+                    )
+                config_path = clipped_pbf.parent / "source-scope-extract.json"
+                config_path.write_text(
+                    json.dumps(
+                        {
+                            "directory": str(part_root),
+                            "extracts": extracts,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    encoding="utf-8",
                 )
-            config_path = clipped_pbf.parent / "source-scope-extract.json"
-            config_path.write_text(
-                json.dumps(
-                    {
-                        "directory": str(part_root),
-                        "extracts": extracts,
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                encoding="utf-8",
-            )
-            args = [
-                "osmium", "extract", "--strategy=smart", *extraction_option,
-                "--config", str(config_path), str(source_pbf), "--overwrite",
-            ]
+                args = [
+                    "osmium",
+                    "extract",
+                    "--strategy=smart",
+                    *extraction_option,
+                    "--config",
+                    str(config_path),
+                    str(source_pbf),
+                    "--overwrite",
+                ]
         else:
             args = [
                 "osmium", "extract", "--strategy=smart", *extraction_option,
@@ -2419,7 +2614,10 @@ class MapBuildPipeline:
                 "--overwrite",
             ]
         self._run_command(args, cancellation_check=cancellation_check)
-        if scope_plan is not None:
+        extract_command_metrics = self._last_command_execution_metrics()
+        if extract_command_metrics:
+            extraction_metrics["extractCommand"] = extract_command_metrics
+        if scope_plan is not None and part_paths:
             self._run_command(
                 [
                     "osmium",
@@ -2431,12 +2629,40 @@ class MapBuildPipeline:
                 ],
                 cancellation_check=cancellation_check,
             )
+            merge_command_metrics = self._last_command_execution_metrics()
+            if merge_command_metrics:
+                extraction_metrics["mergeCommand"] = merge_command_metrics
+        if scope_plan is not None:
             if sha256_file(source_pbf) != source_snapshot_sha256:
                 clipped_pbf.unlink(missing_ok=True)
                 raise BuildingScopeError(
                     "building_source_snapshot_changed",
                     "source snapshot changed during selected-area extraction",
                 )
+        if clipped_pbf.is_file():
+            extraction_metrics["outputBytes"] = clipped_pbf.stat().st_size
+        command_metrics = [
+            value
+            for key in ("extractCommand", "mergeCommand")
+            if isinstance((value := extraction_metrics.get(key)), dict)
+        ]
+        peak_values = [
+            value["peakResidentBytes"]
+            for value in command_metrics
+            if isinstance(value.get("peakResidentBytes"), int)
+        ]
+        if peak_values:
+            extraction_metrics["peakResidentBytes"] = max(peak_values)
+        wall_values = [
+            value["wallSeconds"]
+            for value in command_metrics
+            if isinstance(value.get("wallSeconds"), (int, float))
+        ]
+        if wall_values:
+            extraction_metrics["commandWallSeconds"] = round(
+                sum(wall_values), 6
+            )
+        return extraction_metrics
 
     def _run_preprocessing_command(
         self,

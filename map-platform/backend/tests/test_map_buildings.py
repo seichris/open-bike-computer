@@ -26,7 +26,11 @@ from map_platform.map_buildings import (
     load_building_calibration_window,
 )
 from map_platform.models import Bounds, MapJob, SourceRegion
-from map_platform.pipeline import MapBuildPipeline, PipelinePaths
+from map_platform.pipeline import (
+    MapBuildPipeline,
+    PipelinePaths,
+    _coalesce_projected_rectangles,
+)
 from map_platform.building_scope import plan_building_scope
 from map_platform.building_scope import BuildingScopeError, BuildingScopePolicy
 from map_platform.building_identity import (
@@ -772,7 +776,7 @@ class MapBuildingContractTests(unittest.TestCase):
                 raised.exception.code, "building_source_snapshot_changed"
             )
 
-    def test_selected_source_extract_uses_every_bounded_rectangle_and_merges(self):
+    def test_selected_source_extract_coalesces_rectangular_scope(self):
         request = self._request()
         request["bbox"] = [103.80, 1.28, 103.83, 1.31]
         with tempfile.TemporaryDirectory() as tmp:
@@ -795,7 +799,7 @@ class MapBuildingContractTests(unittest.TestCase):
             clipped.parent.mkdir()
             expected_sha = "4" * 64
             with patch("map_platform.pipeline.sha256_file", return_value=expected_sha):
-                pipeline._extract_pbf(
+                metrics = pipeline._extract_pbf(
                     job,
                     source,
                     clipped,
@@ -803,21 +807,46 @@ class MapBuildingContractTests(unittest.TestCase):
                     source_snapshot_sha256=expected_sha,
                 )
 
-            self.assertEqual(len(runner.calls), 2)
+            self.assertGreater(
+                len(plan.document["sourceScope"]["rectanglesMeters"]), 1
+            )
+            self.assertEqual(metrics["coalescedRectangleCount"], 1)
+            self.assertEqual(len(runner.calls), 1)
             extract_args = runner.calls[0][0]
             self.assertEqual(extract_args[:3], ["osmium", "extract", "--strategy=smart"])
             self.assertIn("--option=types=multipolygon,building", extract_args)
-            self.assertIn("--config", extract_args)
-            config_path = Path(extract_args[extract_args.index("--config") + 1])
-            config = json.loads(config_path.read_text())
-            self.assertEqual(
-                len(config["extracts"]),
-                len(plan.document["sourceScope"]["rectanglesMeters"]),
-            )
-            self.assertTrue(all(set(item) == {"bbox", "output", "output_format"} for item in config["extracts"]))
-            merge_args = runner.calls[1][0]
-            self.assertEqual(merge_args[:2], ["osmium", "merge"])
-            self.assertEqual(merge_args[-3:], ["-o", str(clipped), "--overwrite"])
+            self.assertIn("-b", extract_args)
+            self.assertNotIn("--config", extract_args)
+            self.assertIn("-o", extract_args)
+            self.assertEqual(extract_args[extract_args.index("-o") + 1], str(clipped))
+
+    def test_rectangle_coalescing_preserves_irregular_and_disconnected_union(self):
+        self.assertEqual(
+            _coalesce_projected_rectangles(
+                [
+                    [0, 0, 2, 2],
+                    [2, 0, 4, 2],
+                    [0, 2, 2, 4],
+                    [10, 10, 12, 12],
+                ]
+            ),
+            (
+                (0, 0, 4, 2),
+                (0, 2, 2, 4),
+                (10, 10, 12, 12),
+            ),
+        )
+        self.assertEqual(
+            _coalesce_projected_rectangles(
+                [
+                    [0, 0, 2, 2],
+                    [2, 0, 4, 2],
+                    [0, 2, 2, 4],
+                    [2, 2, 4, 4],
+                ]
+            ),
+            ((0, 0, 4, 4),),
+        )
 
     def test_selected_source_extract_fails_if_snapshot_changes_before_or_during(self):
         request = self._request()
@@ -859,7 +888,7 @@ class MapBuildingContractTests(unittest.TestCase):
                         source_snapshot_sha256=expected_sha,
                     )
             self.assertEqual(during.exception.code, "building_source_snapshot_changed")
-            self.assertEqual(len(runner.calls), 2)
+            self.assertEqual(len(runner.calls), 1)
 
     def test_selected_closure_rehydration_checks_source_before_and_after(self):
         class MaterializingRunner(RecordingRunner):
