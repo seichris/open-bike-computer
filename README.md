@@ -1,5 +1,11 @@
 <img width="4168" height="1054" alt="Bike Computer devices and companion apps" src="docs/images/bike_header.jpg" />
 
+<p align="center">
+  <img src="docs/images/iphone-plan-rides.png" alt="Plan your next ride in the Bike Computer app" width="200" />
+  <img src="docs/images/iphone-follow-route.png" alt="Follow a route with turn-by-turn guidance" width="200" />
+  <img src="docs/images/iphone-bike-display.png" alt="Send turn-by-turn guidance to the bike display" width="200" />
+</p>
+
 A sleek, Garmin-mounted bike computer.
 
 🗺️ Navigation with Apple Maps.\
