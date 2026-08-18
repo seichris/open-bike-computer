@@ -125,7 +125,7 @@ class BuildingSourceIndexTests(unittest.TestCase):
                     calibration_cell_size_meters=8192,
                     calibration_halo_cells=1,
                 )
-            self.assertEqual(raised.exception.code, "building_relation_incomplete")
+            self.assertEqual(raised.exception.code, "building_object_limit_exceeded")
 
     def test_output_candidate_extent_adds_its_runtime_calibration_anchor(self):
         nodes = [

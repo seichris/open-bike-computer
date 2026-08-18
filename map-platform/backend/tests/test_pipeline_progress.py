@@ -179,7 +179,8 @@ class PipelineProgressTests(unittest.TestCase):
 
     def test_streaming_runner_reports_output_before_completion(self):
         lines = []
-        output = CommandRunner().run_streaming(
+        runner = CommandRunner()
+        output = runner.run_streaming(
             [sys.executable, "-c", "print('MAP_PROGRESS:1:2', flush=True); print('MAP_PROGRESS:2:2', flush=True)"],
             on_output=lines.append,
         )
@@ -189,6 +190,8 @@ class PipelineProgressTests(unittest.TestCase):
             [(1, 2), (2, 2)],
         )
         self.assertIn("MAP_PROGRESS:2:2", output)
+        self.assertIn("wallSeconds", runner.last_execution_metrics)
+        self.assertGreaterEqual(runner.last_execution_metrics["wallSeconds"], 0)
 
     def test_streaming_runner_cancels_silent_preprocessing_promptly(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -436,6 +439,12 @@ class PipelineProgressTests(unittest.TestCase):
         )
         cases = (
             (typed_output, "source_index", "building_source_snapshot_changed"),
+            (
+                'BUILDING_PREPROCESS_FAILURE:{"code":'
+                '"building_object_limit_exceeded","message":"too many"}\n',
+                "relation_closure",
+                "building_object_limit_exceeded",
+            ),
             ("tool failed\n", "source_index", "building_relation_incomplete"),
             ("tool failed\n", "calibration_cells", "building_calibration_unavailable"),
         )

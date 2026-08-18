@@ -64,7 +64,7 @@ class Target3CLITests(unittest.TestCase):
             scope = {
                 "schemaVersion": 1,
                 "policy": {
-                    "policyVersion": 1,
+                    "policyVersion": 4,
                     "blockGridVersion": 1,
                     "blockSizeMeters": 4096,
                     "selectionSemantics": "complete_blocks_no_selection_edge_clipping",
@@ -382,7 +382,7 @@ class Target3CLITests(unittest.TestCase):
             scope = {
                 "schemaVersion": 1,
                 "policy": {
-                    "policyVersion": 1,
+                    "policyVersion": 4,
                     "blockGridVersion": 1,
                     "blockSizeMeters": 4096,
                     "selectionSemantics": "complete_blocks_no_selection_edge_clipping",

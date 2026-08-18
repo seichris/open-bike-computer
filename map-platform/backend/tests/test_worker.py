@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from map_platform.artifacts import ArtifactRecord, FileSystemArtifactStore, sha256_file
+from map_platform.building_scope import BuildingScopeError
 from map_platform.jobs import (
     ArtifactGarbageCollectionError,
     JobClaimError,
@@ -46,6 +47,15 @@ class FakePipeline:
         pack_path = Path(tempfile.gettempdir()) / f"map-123-{job.job_id}.zip"
         pack_path.write_bytes(b"zip-data")
         return "map-123", pack_path
+
+
+class DeterministicFailurePipeline:
+    def build(self, job, on_status=None, on_progress=None):
+        del job, on_status, on_progress
+        raise BuildingScopeError(
+            "building_object_limit_exceeded",
+            "building closure exceeds the job object limit",
+        )
 
 
 class BlockingRetryEstimateCoordinator:
@@ -448,6 +458,32 @@ class WorkerTests(unittest.TestCase):
                 if event["message"] == "queued for retry"
             )
             self.assertEqual(completed_retry_event["errorCode"], "map_build_failed")
+
+    def test_worker_does_not_retry_deterministic_building_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp)
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+
+            result = MapWorker(
+                store,
+                DeterministicFailurePipeline(),
+                worker_id="worker-test",
+            ).run_next()
+            loaded = store.get(job.job_id)
+
+            self.assertTrue(result.processed)
+            self.assertEqual(loaded.status, JobStatus.FAILED)
+            self.assertEqual(loaded.attempts, 1)
+            self.assertEqual(
+                loaded.error_code, "building_object_limit_exceeded"
+            )
+            self.assertIsNotNone(loaded.finished_at)
 
     def test_retryable_failure_is_never_observable_as_terminal(self):
         with tempfile.TemporaryDirectory() as tmp:

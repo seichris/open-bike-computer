@@ -75,7 +75,7 @@ if args.scope_plan:
         not isinstance(scope_hash, str)
         or hashlib.sha256(canonical_json(serialized_scope)).hexdigest() != scope_hash
         or serialized_scope.get("schemaVersion") != 1
-        or serialized_scope.get("policy", {}).get("policyVersion") != 1
+        or serialized_scope.get("policy", {}).get("policyVersion") != 4
         or serialized_scope.get("policy", {}).get("blockGridVersion") != 1
         or serialized_scope.get("policy", {}).get("blockSizeMeters") != 4096
     ):

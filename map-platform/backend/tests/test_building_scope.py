@@ -69,9 +69,12 @@ class BuildingScopeTests(unittest.TestCase):
 
         plan = self.plan(job)
 
-        self.assertEqual(BUILDING_SCOPE_POLICY_VERSION, 3)
+        self.assertEqual(BUILDING_SCOPE_POLICY_VERSION, 4)
         self.assertEqual(BUILDING_MAX_SOURCE_AREA_M2, 800_000_000)
         self.assertEqual(plan.document["policy"]["maxSourceAreaM2"], 800_000_000)
+        self.assertEqual(
+            plan.document["policy"]["maxRelationObjectsPerJob"], 500_000
+        )
         self.assertEqual(
             plan.document["metrics"]["requestedApproximateAreaM2"],
             347_879_737,
