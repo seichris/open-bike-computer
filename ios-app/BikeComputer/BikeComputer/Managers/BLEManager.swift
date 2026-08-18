@@ -824,7 +824,6 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var activeDeviceID: String?
     @Published private(set) var connectedDeviceID: String?
     @Published private(set) var pairingPrompt: BikeComputerPairingPrompt?
-    @Published private(set) var isPairingConfirmedOnDevice = false
     @Published private(set) var isPairingConfirmationSubmitting = false
     @Published private(set) var completedPairingGeneration: UInt64 = 0
     @Published private(set) var pairingStatusMessage: String?
@@ -1041,6 +1040,8 @@ class BLEManager: NSObject, ObservableObject {
     private var pendingConnectionAfterDisconnect: UUID?
     private var pendingScannedConnectionIdentifier: UUID?
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
+    private var explicitDiscoveryOrderStabilizer =
+        BLEExplicitDiscoveryOrderStabilizer()
     private var discoveryFreshnessTimer: Timer?
     private var pendingScanStartWorkItem: DispatchWorkItem?
     private var lastPhysicalScanStoppedAt: Date?
@@ -2196,6 +2197,7 @@ class BLEManager: NSObject, ObservableObject {
         opportunisticObservations.removeAll()
         discoveredDevices = []
         discoveredPeripherals = [:]
+        explicitDiscoveryOrderStabilizer.reset()
         if !keepingCandidate {
             opportunisticCandidateExpiryTimer?.invalidate()
             opportunisticCandidateExpiryTimer = nil
@@ -2687,7 +2689,6 @@ class BLEManager: NSObject, ObservableObject {
         )
         pendingPairingMaterial = nil
         pairingPrompt = nil
-        isPairingConfirmedOnDevice = false
         isPairingConfirmationSubmitting = false
         pairingError = nil
         pairingStatusMessage = "Connecting to \(candidate.advertisedName)…"
@@ -2704,17 +2705,18 @@ class BLEManager: NSObject, ObservableObject {
         connectDiscoveredPeripheral(identifier: candidate.peripheralIdentifier)
     }
 
-    func confirmPairingAfterCodeMatch() {
+    private func submitPairingConfirmationAfterDevicePress(
+        from peripheral: CBPeripheral
+    ) -> Bool {
         guard let material = pendingPairingMaterial,
-              let peripheral = connectedPeripheral,
-              isPairingConfirmedOnDevice,
+              connectedPeripheral?.identifier == peripheral.identifier,
               !isPairingConfirmationSubmitting,
               ownershipLifecycle.beginConfirmation(
                 for: peripheral.identifier
-              ) else { return }
+              ) else { return false }
         isPairingConfirmationSubmitting = true
-        // Persist recovery eligibility only after both the hardware button
-        // confirmation and the user's matching-code confirmation on iPhone.
+        // The fresh hardware button press is the user's matching-code
+        // confirmation and proves physical access to this Bike Computer.
         deviceRegistry.markProvisionalOwnerKeyConfirmed(
             deviceID: material.deviceID
         )
@@ -2726,6 +2728,7 @@ class BLEManager: NSObject, ObservableObject {
         pairingStatusMessage = "Registering this iPhone…"
         startAuthenticationTimeout(for: peripheral)
         enqueueAuthMessage(material.confirmationCommand)
+        return true
     }
 
     func cancelPairing() {
@@ -2756,7 +2759,6 @@ class BLEManager: NSObject, ObservableObject {
         pendingPairingMaterial = nil
         pendingPairingCandidate = nil
         pairingPrompt = nil
-        isPairingConfirmedOnDevice = false
         isPairingConfirmationSubmitting = false
         pairingStatusMessage = nil
         pairingError = nil
@@ -2793,7 +2795,6 @@ class BLEManager: NSObject, ObservableObject {
         pendingPairingMaterial = nil
         pendingPairingCandidate = nil
         pairingPrompt = nil
-        isPairingConfirmedOnDevice = false
         isPairingConfirmationSubmitting = false
         pendingConnectionAfterDisconnect = nil
         pendingScannedConnectionIdentifier = nil
@@ -3263,7 +3264,6 @@ class BLEManager: NSObject, ObservableObject {
         pendingPairingMaterial = nil
         pendingPairingCandidate = nil
         pairingPrompt = nil
-        isPairingConfirmedOnDevice = false
         isPairingConfirmationSubmitting = false
         navigationWriteEndpoint = nil
         navigationWriteQueue.removeAll()
@@ -5244,8 +5244,15 @@ class BLEManager: NSObject, ObservableObject {
                 failAuthentication("The physical pairing confirmation did not match this device.", peripheral: peripheral)
                 return
             }
-            isPairingConfirmedOnDevice = true
-            pairingStatusMessage = "Confirm the matching code on this iPhone."
+            guard submitPairingConfirmationAfterDevicePress(
+                from: peripheral
+            ) else {
+                failAuthentication(
+                    "Could not finish pairing after the physical confirmation.",
+                    peripheral: peripheral
+                )
+                return
+            }
             return
         }
         if message.hasPrefix("SERVER2|") {
@@ -5905,7 +5912,6 @@ class BLEManager: NSObject, ObservableObject {
         pairingError = message
         pairingStatusMessage = nil
         pairingPrompt = nil
-        isPairingConfirmedOnDevice = false
         isPairingConfirmationSubmitting = false
         authInfoFallbackTimer?.invalidate()
         authInfoFallbackTimer = nil
@@ -6050,7 +6056,6 @@ class BLEManager: NSObject, ObservableObject {
         clearUnknownDiscoveryState()
         refreshKnownDevices()
         pairingPrompt = nil
-        isPairingConfirmedOnDevice = false
         isPairingConfirmationSubmitting = false
         pairingStatusMessage = nil
         pairingError = nil
@@ -6794,20 +6799,11 @@ extension BLEManager: CBCentralManagerDelegate {
             connectToPeripheral(peripheral)
         case .explicitDiscovery:
             discoveredPeripherals[peripheral.identifier] = peripheral
-            if let index = discoveredDevices.firstIndex(where: {
-                $0.id == candidate.id
-            }) {
-                discoveredDevices[index] = candidate
-            } else {
-                discoveredDevices.append(candidate)
-            }
-            discoveredDevices.sort { lhs, rhs in
-                let lhsRank = BLEDiscoverySignalPolicy.rank(for: lhs.rssi)
-                let rhsRank = BLEDiscoverySignalPolicy.rank(for: rhs.rssi)
-                if lhsRank != rhsRank { return lhsRank > rhsRank }
-                return lhs.peripheralIdentifier.uuidString <
-                    rhs.peripheralIdentifier.uuidString
-            }
+            explicitDiscoveryOrderStabilizer.merge(
+                candidate,
+                into: &discoveredDevices,
+                now: candidate.lastSeenAt
+            )
             pairingStatusMessage = discoveredDevices.isEmpty ? "Looking for nearby Bike Computers…" : nil
         case .opportunisticDiscovery:
             guard let activeDiscoveryGeneration else {
@@ -6971,7 +6967,6 @@ extension BLEManager: CBCentralManagerDelegate {
 
         if pendingPairingSession != nil && pairingError == nil {
             pairingPrompt = nil
-            isPairingConfirmedOnDevice = false
             pairingStatusMessage = nil
             pairingError = "Pairing was interrupted. Cancel and add the Bike Computer again."
         }

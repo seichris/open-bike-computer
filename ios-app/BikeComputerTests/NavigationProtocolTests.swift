@@ -13410,9 +13410,9 @@ struct NavigationProtocolTests {
         assert(lifecycle.markComparisonReady(for: otherPeripheralID),
                "the selected Bike Computer can advance to code comparison")
         assert(lifecycle.beginConfirmation(for: otherPeripheralID),
-               "the matching-code action can submit once")
+               "the physical matching-code confirmation submits automatically")
         assert(!lifecycle.beginConfirmation(for: otherPeripheralID),
-               "a matching-code confirmation cannot be submitted twice")
+               "an automatic pairing confirmation cannot be submitted twice")
         let handoffCancellation = lifecycle.cancel(
             connectedIdentifier: peripheralID
         )
@@ -14162,6 +14162,58 @@ struct NavigationProtocolTests {
             BLEDiscoverySignalPolicy.description(for: 127),
             "Unavailable",
             "Core Bluetooth's RSSI sentinel is not displayed as a real dBm value"
+        )
+        let initialNearbyObservation = Date(timeIntervalSince1970: 1_000)
+        var nearbyOrderStabilizer = BLEExplicitDiscoveryOrderStabilizer()
+        var stableNearbyDevices: [DiscoveredBikeComputerDevice] = []
+        var initiallyWeaker = weaker
+        initiallyWeaker.lastSeenAt = initialNearbyObservation
+        var initiallyStronger = candidate
+        initiallyStronger.lastSeenAt =
+            initialNearbyObservation.addingTimeInterval(0.1)
+        nearbyOrderStabilizer.merge(
+            initiallyWeaker,
+            into: &stableNearbyDevices,
+            now: initiallyWeaker.lastSeenAt
+        )
+        nearbyOrderStabilizer.merge(
+            initiallyStronger,
+            into: &stableNearbyDevices,
+            now: initiallyStronger.lastSeenAt
+        )
+        assertEqual(
+            stableNearbyDevices.map(\.peripheralIdentifier),
+            [initiallyWeaker.peripheralIdentifier,
+             initiallyStronger.peripheralIdentifier],
+            "new Nearby rows append without displacing visible rows"
+        )
+        initiallyWeaker.rssi = -80
+        initiallyWeaker.lastSeenAt =
+            initialNearbyObservation.addingTimeInterval(1)
+        nearbyOrderStabilizer.merge(
+            initiallyWeaker,
+            into: &stableNearbyDevices,
+            now: initiallyWeaker.lastSeenAt
+        )
+        assertEqual(
+            stableNearbyDevices.map(\.peripheralIdentifier),
+            [initiallyWeaker.peripheralIdentifier,
+             initiallyStronger.peripheralIdentifier],
+            "RSSI updates preserve Nearby row order during the stability window"
+        )
+        initiallyStronger.lastSeenAt = initialNearbyObservation.addingTimeInterval(
+            BLEExplicitDiscoveryOrderStabilizer.minimumReorderInterval
+        )
+        nearbyOrderStabilizer.merge(
+            initiallyStronger,
+            into: &stableNearbyDevices,
+            now: initiallyStronger.lastSeenAt
+        )
+        assertEqual(
+            stableNearbyDevices.map(\.peripheralIdentifier),
+            [initiallyStronger.peripheralIdentifier,
+             initiallyWeaker.peripheralIdentifier],
+            "Nearby rows refresh by signal strength after five stable seconds"
         )
         assertEqual(
             BLEOpportunisticCandidatePolicy.strongest(
