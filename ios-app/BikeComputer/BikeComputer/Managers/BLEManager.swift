@@ -1041,6 +1041,8 @@ class BLEManager: NSObject, ObservableObject {
     private var pendingConnectionAfterDisconnect: UUID?
     private var pendingScannedConnectionIdentifier: UUID?
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
+    private var explicitDiscoveryOrderStabilizer =
+        BLEExplicitDiscoveryOrderStabilizer()
     private var discoveryFreshnessTimer: Timer?
     private var pendingScanStartWorkItem: DispatchWorkItem?
     private var lastPhysicalScanStoppedAt: Date?
@@ -2196,6 +2198,7 @@ class BLEManager: NSObject, ObservableObject {
         opportunisticObservations.removeAll()
         discoveredDevices = []
         discoveredPeripherals = [:]
+        explicitDiscoveryOrderStabilizer.reset()
         if !keepingCandidate {
             opportunisticCandidateExpiryTimer?.invalidate()
             opportunisticCandidateExpiryTimer = nil
@@ -6794,20 +6797,11 @@ extension BLEManager: CBCentralManagerDelegate {
             connectToPeripheral(peripheral)
         case .explicitDiscovery:
             discoveredPeripherals[peripheral.identifier] = peripheral
-            if let index = discoveredDevices.firstIndex(where: {
-                $0.id == candidate.id
-            }) {
-                discoveredDevices[index] = candidate
-            } else {
-                discoveredDevices.append(candidate)
-            }
-            discoveredDevices.sort { lhs, rhs in
-                let lhsRank = BLEDiscoverySignalPolicy.rank(for: lhs.rssi)
-                let rhsRank = BLEDiscoverySignalPolicy.rank(for: rhs.rssi)
-                if lhsRank != rhsRank { return lhsRank > rhsRank }
-                return lhs.peripheralIdentifier.uuidString <
-                    rhs.peripheralIdentifier.uuidString
-            }
+            explicitDiscoveryOrderStabilizer.merge(
+                candidate,
+                into: &discoveredDevices,
+                now: candidate.lastSeenAt
+            )
             pairingStatusMessage = discoveredDevices.isEmpty ? "Looking for nearby Bike Computers…" : nil
         case .opportunisticDiscovery:
             guard let activeDiscoveryGeneration else {

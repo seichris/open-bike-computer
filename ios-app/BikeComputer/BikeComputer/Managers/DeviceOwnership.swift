@@ -164,6 +164,46 @@ enum BLEDiscoverySignalPolicy {
     }
 }
 
+struct BLEExplicitDiscoveryOrderStabilizer {
+    static let minimumReorderInterval: TimeInterval = 5
+
+    private var lastReorderedAt: Date?
+
+    mutating func merge(
+        _ candidate: DiscoveredBikeComputerDevice,
+        into devices: inout [DiscoveredBikeComputerDevice],
+        now: Date = Date()
+    ) {
+        if let index = devices.firstIndex(where: { $0.id == candidate.id }) {
+            devices[index] = candidate
+        } else {
+            devices.append(candidate)
+        }
+
+        guard let lastReorderedAt else {
+            self.lastReorderedAt = now
+            return
+        }
+        guard now.timeIntervalSince(lastReorderedAt) >=
+                Self.minimumReorderInterval else {
+            return
+        }
+
+        devices.sort { lhs, rhs in
+            let lhsRank = BLEDiscoverySignalPolicy.rank(for: lhs.rssi)
+            let rhsRank = BLEDiscoverySignalPolicy.rank(for: rhs.rssi)
+            if lhsRank != rhsRank { return lhsRank > rhsRank }
+            return lhs.peripheralIdentifier.uuidString <
+                rhs.peripheralIdentifier.uuidString
+        }
+        self.lastReorderedAt = now
+    }
+
+    mutating func reset() {
+        lastReorderedAt = nil
+    }
+}
+
 enum BLEScanPurpose: Equatable {
     case none
     case trustedReconnect(UUID)
