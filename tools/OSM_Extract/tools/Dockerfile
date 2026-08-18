@@ -1,4 +1,4 @@
-FROM ubuntu:20.04
+FROM ubuntu:22.04
 LABEL maintainer="arestabrucs"
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -27,5 +27,5 @@ RUN apt update -qq && apt install -y --no-install-recommends \
     python3-dev \
     zlib1g-dev \
     gdal-bin \
-  && pip install pillow shapely "matplotlib<3.6" pyyaml uharfbuzz freetype-py "osmium==4.3.1" \
+  && pip install pillow "shapely==2.0.7" "matplotlib<3.6" pyyaml uharfbuzz freetype-py "osmium==4.3.1" \
   && rm -rf /var/lib/apt/lists/*

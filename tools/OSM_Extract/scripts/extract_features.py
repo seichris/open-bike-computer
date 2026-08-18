@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 from funcs import process_features, clip_lines, clip_polygons, style_features, render_map, lat2y, lon2x
 from feature_types import get_type_id
-from map_format import write_fmb
+from map_format import encode_building_section, write_fmb
 from font_asset import FontPackBuilder
 from label_pipeline import join_named_roads, normalize_preferred_languages, prepare_road_labels
 from block_progress import BlockProgressReporter
@@ -14,6 +14,12 @@ from building_pipeline import (
     projected_selection_geometry,
 )
 from building_calibration_cache import CalibrationCache, CalibrationCacheError, canonical_json
+from building_block_cache import (
+    BuildingBlockCache,
+    BuildingBlockCacheError,
+    load_building_block_cache_identity,
+)
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import product
 from shapely import box
 from shapely.geometry import shape
@@ -36,7 +42,17 @@ parser.add_argument("--scope-plan")
 parser.add_argument("--suppress-scope-marker", action="store_true")
 parser.add_argument("--calibration-manifest")
 parser.add_argument("--calibration-source-sha256")
+parser.add_argument("--building-block-cache-root")
+parser.add_argument("--building-block-cache-identity")
+parser.add_argument("--building-block-workers", type=int, default=4)
 args = parser.parse_args()
+
+if not 1 <= args.building_block_workers <= 16:
+    parser.error("--building-block-workers must be between 1 and 16")
+if (args.building_block_cache_root is None) != (
+    args.building_block_cache_identity is None
+):
+    parser.error("building block cache root and identity must be supplied together")
 
 LINES_INPUT_FILE = "{}_lines.geojson".format(args.geojson_prefix)
 POLYGONS_INPUT_FILE = "{}_polygons.geojson".format(args.geojson_prefix)
@@ -58,7 +74,6 @@ area_max_x, area_max_y = lon2x( float( max_lon)), lat2y( float( max_lat))
 building_normalization_started = None
 building_normalization_seconds = 0.0
 if args.renderer_format == 3:
-    building_normalization_started = time.perf_counter()
     area_min_x &= ~mapblock_mask
     area_min_y &= ~mapblock_mask
     area_max_x = (area_max_x + mapblock_mask) & ~mapblock_mask
@@ -75,7 +90,7 @@ if args.scope_plan:
         not isinstance(scope_hash, str)
         or hashlib.sha256(canonical_json(serialized_scope)).hexdigest() != scope_hash
         or serialized_scope.get("schemaVersion") != 1
-        or serialized_scope.get("policy", {}).get("policyVersion") != 1
+        or serialized_scope.get("policy", {}).get("policyVersion") != 4
         or serialized_scope.get("policy", {}).get("blockGridVersion") != 1
         or serialized_scope.get("policy", {}).get("blockSizeMeters") != 4096
     ):
@@ -136,6 +151,19 @@ if args.scope_plan:
             flush=True,
         )
 
+x_positions = range(area_min_x, area_max_x, 4096)
+y_positions = range(area_min_y, area_max_y, 4096)
+block_positions = tuple(
+    scope_block_positions
+    if scope_block_positions is not None
+    else product(x_positions, y_positions)
+)
+total = len(block_positions)
+if total <= 0:
+    raise ValueError("map extraction has no output blocks")
+if scope_plan is not None and args.building_block_cache_root is None:
+    raise ValueError("plan-aware target 3 requires the building block cache")
+
 if args.renderer_format == 3:
     print(
         'BUILDING_PREPROCESS_PROGRESS:'
@@ -178,6 +206,10 @@ buildings = []
 building_report = {}
 building_complexity = {}
 building_rules_sha256 = None
+building_block_cache_entries = {}
+building_cache_report = None
+building_cache_lookup_seconds = 0.0
+building_cache_generation_seconds = 0.0
 if args.renderer_format == 3:
     rules_path = os.path.join(os.path.dirname(__file__), "..", "conf", "building_height_rules.yaml")
     building_rules, building_rules_sha256 = load_rules(rules_path)
@@ -223,43 +255,240 @@ if args.renderer_format == 3:
             flush=True,
         )
 
-    try:
-        buildings, building_report, _ = prepare_buildings(
-            collect_building_features(
-                polygons["features"],
-                lines["features"],
-                relation_index,
+    def publish_preprocess_progress(unit, completed, total):
+        print(
+            "BUILDING_PREPROCESS_PROGRESS:"
+            + json.dumps(
+                {
+                    "completed": completed,
+                    "indeterminate": False,
+                    "total": total,
+                    "unit": unit,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
             ),
-            building_rules,
-            relation_index,
-            selection_geometry if apply_selection_mask else None,
-            calibration_cache=calibration_cache,
-            calibration_rules_sha256=building_rules_sha256,
-            calibration_source_sha256=args.calibration_source_sha256,
-            strict_relations=scope_plan is not None,
-            on_complexity=publish_building_complexity,
+            flush=True,
         )
-    except CalibrationCacheError as exc:
+
+    block_cache = None
+    missing_building_blocks = list(block_positions)
+    if args.building_block_cache_identity is not None:
+        try:
+            cache_identity = load_building_block_cache_identity(
+                args.building_block_cache_identity
+            )
+            calibration_manifest_document = json.loads(
+                open(args.calibration_manifest, "rb").read()
+            )
+            scope_policy = scope_plan["policy"] if scope_plan is not None else None
+            if (
+                cache_identity["sourceSnapshotSha256"]
+                != args.calibration_source_sha256
+                or cache_identity["rulesSha256"] != building_rules_sha256
+                or calibration_cache is None
+                or cache_identity["calibration"]["calibrationKey"]
+                != calibration_cache.key
+                or cache_identity["calibration"]["manifestSha256"]
+                != calibration_manifest_document.get("manifestSha256")
+                or cache_identity["calibration"]["entrySetSha256"]
+                != hashlib.sha256(
+                    canonical_json(calibration_manifest_document.get("cells"))
+                ).hexdigest()
+                or (
+                    scope_policy is not None
+                    and any(
+                        cache_identity[key] != scope_policy[key]
+                        for key in (
+                            "blockGridVersion",
+                            "blockSizeMeters",
+                            "selectionSemantics",
+                            "geometryBufferMeters",
+                            "relationRetryBufferMeters",
+                            "maxGeometryBufferMeters",
+                        )
+                    )
+                )
+            ):
+                raise BuildingBlockCacheError(
+                    "building block cache inputs are incompatible"
+                )
+            block_cache = BuildingBlockCache(
+                args.building_block_cache_root,
+                cache_identity,
+            )
+            lookup_started = time.perf_counter()
+            missing_building_blocks = []
+            publish_preprocess_progress("building_cache_lookup", 0, total)
+            for completed, position in enumerate(block_positions, start=1):
+                entry = block_cache.load(*position)
+                if entry is None:
+                    missing_building_blocks.append(position)
+                else:
+                    building_block_cache_entries[position] = entry
+                publish_preprocess_progress("building_cache_lookup", completed, total)
+            building_cache_lookup_seconds = time.perf_counter() - lookup_started
+            building_cache_report = {
+                "schemaVersion": 1,
+                "cacheIdentitySha256": cache_identity["cacheIdentitySha256"],
+                "requestedBlockCount": total,
+                "initialHitCount": len(building_block_cache_entries),
+                "initialMissCount": len(missing_building_blocks),
+                "builtCount": 0,
+                "raceHitCount": 0,
+                "workerCount": min(
+                    args.building_block_workers,
+                    max(1, len(missing_building_blocks)),
+                ),
+                "lockWaitMilliseconds": 0,
+            }
+            print(
+                "BUILDING_BLOCK_CACHE:"
+                + json.dumps(
+                    {
+                        key: building_cache_report[key]
+                        for key in (
+                            "schemaVersion",
+                            "cacheIdentitySha256",
+                            "requestedBlockCount",
+                            "initialHitCount",
+                            "initialMissCount",
+                            "workerCount",
+                        )
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+        except (BuildingBlockCacheError, KeyError, OSError, TypeError) as exc:
+            print(
+                "BUILDING_PREPROCESS_FAILURE:"
+                + json.dumps(
+                    {
+                        "code": "building_block_cache_unavailable",
+                        "message": str(exc),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+            raise SystemExit(2) from exc
+
+    try:
+        if missing_building_blocks or block_cache is None:
+            building_normalization_started = time.perf_counter()
+            buildings, building_report, _ = prepare_buildings(
+                collect_building_features(
+                    polygons["features"],
+                    lines["features"],
+                    relation_index,
+                ),
+                building_rules,
+                relation_index,
+                selection_geometry if apply_selection_mask else None,
+                calibration_cache=calibration_cache,
+                calibration_rules_sha256=building_rules_sha256,
+                calibration_source_sha256=args.calibration_source_sha256,
+                strict_relations=scope_plan is not None,
+                on_complexity=publish_building_complexity,
+                on_association_progress=lambda completed, total: (
+                    publish_preprocess_progress(
+                        "building_part_association", completed, total
+                    )
+                ),
+            )
+            building_normalization_seconds = (
+                time.perf_counter() - building_normalization_started
+            )
+            publish_preprocess_progress("building_normalization", 1, 1)
+        else:
+            # A complete cache hit proves this request has no normalization
+            # work. Publish the same terminal unit so phase consumers do not
+            # have to infer completion solely from cache telemetry.
+            publish_preprocess_progress("building_normalization", 1, 1)
+        if block_cache is not None and missing_building_blocks:
+            cache_generation_started = time.perf_counter()
+            publish_preprocess_progress(
+                "building_cache_generation",
+                0,
+                len(missing_building_blocks),
+            )
+
+            def materialize_building_block(position):
+                min_x, min_y = position
+
+                def build_section():
+                    records, block_stats = clip_buildings(
+                        buildings,
+                        box(min_x, min_y, min_x + 4096, min_y + 4096),
+                        min_x,
+                        min_y,
+                    )
+                    section, section_metadata = encode_building_section(records)
+                    if (
+                        section_metadata["buildings"] != block_stats["recordCount"]
+                        or section_metadata["buildingPoints"]
+                        != block_stats["pointCount"]
+                    ):
+                        raise BuildingBlockCacheError(
+                            "building block encoding statistics changed"
+                        )
+                    return section, {
+                        **block_stats,
+                        "sectionBytes": section_metadata["buildingBytes"],
+                    }
+
+                return position, block_cache.materialize(
+                    min_x,
+                    min_y,
+                    build_section,
+                )
+
+            completed = 0
+            worker_count = min(
+                args.building_block_workers,
+                len(missing_building_blocks),
+            )
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = [
+                    executor.submit(materialize_building_block, position)
+                    for position in missing_building_blocks
+                ]
+                for future in as_completed(futures):
+                    position, entry = future.result()
+                    building_block_cache_entries[position] = entry
+                    building_cache_report[
+                        "builtCount" if entry.outcome == "built" else "raceHitCount"
+                    ] += 1
+                    building_cache_report["lockWaitMilliseconds"] += max(
+                        0,
+                        int(round(entry.lock_wait_seconds * 1000)),
+                    )
+                    completed += 1
+                    publish_preprocess_progress(
+                        "building_cache_generation",
+                        completed,
+                        len(missing_building_blocks),
+                    )
+            building_cache_generation_seconds = (
+                time.perf_counter() - cache_generation_started
+            )
+    except (CalibrationCacheError, BuildingBlockCacheError, OSError) as exc:
+        code = getattr(exc, "code", "building_block_cache_unavailable")
         print(
             "BUILDING_PREPROCESS_FAILURE:"
             + json.dumps(
-                {"code": exc.code, "message": str(exc)},
+                {"code": code, "message": str(exc)},
                 sort_keys=True,
                 separators=(",", ":"),
             ),
             flush=True,
         )
         raise SystemExit(2) from exc
-    building_normalization_seconds = (
-        time.perf_counter() - building_normalization_started
-    )
-    print(
-        'BUILDING_PREPROCESS_PROGRESS:'
-        '{"completed":1,"indeterminate":false,"total":1,'
-        '"unit":"building_normalization"}',
-        flush=True,
-    )
-
+    if len(building_block_cache_entries) not in {0, total}:
+        raise ValueError("building block cache did not cover the output scope")
 # extract relevant features
 print("Extracting features")
 label_diagnostics = {}
@@ -317,14 +546,6 @@ if args.renderer_format >= 2:
     label_phase_timings["labelCandidateGeneration"] = time.perf_counter() - candidate_started
 # polygons = make_all_convex( polygons)
 
-x_positions = range(area_min_x, area_max_x, 4096)
-y_positions = range(area_min_y, area_max_y, 4096)
-if scope_block_positions is not None:
-    block_positions = scope_block_positions
-    total = len(scope_block_positions)
-else:
-    block_positions = product(x_positions, y_positions)
-    total = len(x_positions) * len(y_positions)
 progress = BlockProgressReporter(total)
 fmb_writing_seconds = 0.0
 building_totals = {
@@ -364,14 +585,22 @@ for init_x, init_y in progress.track(block_positions):
         clipped_polygons = clip_polygons( polygons, mapblock_bbox)
         clipped_buildings = []
         building_block_stats = {}
+        cached_building_block = None
         if args.renderer_format == 3:
-            clipped_buildings, building_block_stats = clip_buildings(
-                buildings, building_block_bbox, min_x, min_y
+            cached_building_block = building_block_cache_entries.get(
+                (min_x, min_y)
             )
+            if cached_building_block is not None:
+                building_block_stats = cached_building_block.stats
+            else:
+                clipped_buildings, building_block_stats = clip_buildings(
+                    buildings, building_block_bbox, min_x, min_y
+                )
+        building_record_count = building_block_stats.get("recordCount", 0)
         if (
             len(clipped_lines) == 0
             and len(clipped_polygons) == 0
-            and len(clipped_buildings) == 0
+            and building_record_count == 0
         ):
             continue
 
@@ -432,14 +661,27 @@ for init_x, init_y in progress.track(block_positions):
 
         # BINARY VERSION (.fmb)
         block_write_started = time.perf_counter()
+        fmb_kwargs = {"font_builder": font_builder}
+        if cached_building_block is not None:
+            fmb_kwargs.update(
+                {
+                    "building_section": cached_building_block.section,
+                    "building_metadata": {
+                        "buildings": building_block_stats["recordCount"],
+                        "buildingPoints": building_block_stats["pointCount"],
+                        "buildingBytes": building_block_stats["sectionBytes"],
+                    },
+                }
+            )
+        elif args.renderer_format == 3:
+            fmb_kwargs["building_records"] = clipped_buildings
         block_metadata = write_fmb(
             f"{file_name}.fmb",
             clipped_polygons,
             clipped_lines,
             min_x,
             min_y,
-            font_builder=font_builder,
-            building_records=clipped_buildings if args.renderer_format == 3 else None,
+            **fmb_kwargs,
         )
         fmb_writing_seconds += time.perf_counter() - block_write_started
         if font_builder is not None:
@@ -502,8 +744,20 @@ if args.renderer_format == 3:
             building_totals[key] = value
     building_totals["complexity"] = building_complexity
     building_totals["rulesSha256"] = building_rules_sha256
+    if building_cache_report is not None:
+        building_cache_report["lookupSeconds"] = round(
+            building_cache_lookup_seconds,
+            6,
+        )
+        building_cache_report["generationSeconds"] = round(
+            building_cache_generation_seconds,
+            6,
+        )
+        building_totals["blockCache"] = building_cache_report
     building_totals["phaseTimings"] = {
         "buildingNormalization": round(building_normalization_seconds, 6),
+        "blockCacheLookup": round(building_cache_lookup_seconds, 6),
+        "blockCacheGeneration": round(building_cache_generation_seconds, 6),
         "blockEncoding": round(building_block_encoding_seconds, 6),
     }
     print("BUILDING_STATS:" + json.dumps(building_totals, sort_keys=True, separators=(",", ":")))

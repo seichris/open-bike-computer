@@ -101,6 +101,17 @@ def building_preprocessing_scope_mode() -> str:
     return value
 
 
+def building_block_workers() -> int:
+    raw = os.environ.get("MAP_PLATFORM_BUILDING_BLOCK_WORKERS", "4").strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("MAP_PLATFORM_BUILDING_BLOCK_WORKERS must be an integer") from exc
+    if not 1 <= value <= 16:
+        raise ValueError("MAP_PLATFORM_BUILDING_BLOCK_WORKERS must be between 1 and 16")
+    return value
+
+
 def manifest_building_summary(stats: dict[str, Any] | None) -> dict[str, int]:
     if not isinstance(stats, dict):
         raise ValueError("renderer format 3 is missing building statistics")

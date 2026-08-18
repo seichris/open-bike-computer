@@ -69,6 +69,7 @@ from .building_identity import (
     calibration_generation_manifest_path,
     canonical_json as canonical_building_json,
     selected_calibration_identity,
+    selected_building_block_cache_identity,
     selected_building_identity,
 )
 from .models import JobStatus, MapJob, SourceRegion
@@ -120,6 +121,26 @@ class MapBuildResult:
 
 
 class CommandRunner:
+    def __init__(self) -> None:
+        self.last_execution_metrics: dict[str, int | float] = {}
+
+    @staticmethod
+    def _resident_bytes(process_id: int) -> int | None:
+        try:
+            status = Path(f"/proc/{process_id}/status").read_text(
+                encoding="utf-8"
+            )
+        except OSError:
+            return None
+        resident_kib = []
+        for line in status.splitlines():
+            field, separator, value = line.partition(":")
+            if separator and field in {"VmHWM", "VmRSS"}:
+                parts = value.split()
+                if parts and parts[0].isdigit():
+                    resident_kib.append(int(parts[0]))
+        return max(resident_kib) * 1024 if resident_kib else None
+
     def run(
         self,
         args: list[str],
@@ -133,7 +154,16 @@ class CommandRunner:
                 cwd=cwd,
                 cancellation_check=cancellation_check,
             )
-        result = subprocess.run(args, cwd=cwd, check=True, text=True, capture_output=True)
+        self.last_execution_metrics = {}
+        started = time.perf_counter()
+        try:
+            result = subprocess.run(
+                args, cwd=cwd, check=True, text=True, capture_output=True
+            )
+        finally:
+            self.last_execution_metrics = {
+                "wallSeconds": round(time.perf_counter() - started, 6)
+            }
         return (result.stdout or result.stderr).strip()
 
     def run_streaming(
@@ -144,6 +174,8 @@ class CommandRunner:
         on_output=None,
         cancellation_check=None,
     ) -> str:
+        self.last_execution_metrics = {}
+        started = time.perf_counter()
         process = subprocess.Popen(
             args,
             cwd=cwd,
@@ -155,10 +187,16 @@ class CommandRunner:
         output: list[str] = []
         pending = ""
         stdout_open = True
+        peak_resident_bytes = self._resident_bytes(process.pid)
         try:
             assert process.stdout is not None
             descriptor = process.stdout.fileno()
             while True:
+                resident_bytes = self._resident_bytes(process.pid)
+                if resident_bytes is not None:
+                    peak_resident_bytes = max(
+                        peak_resident_bytes or 0, resident_bytes
+                    )
                 if cancellation_check is not None and cancellation_check():
                     raise RuntimeError("preprocessing command was cancelled")
                 if not stdout_open:
@@ -207,6 +245,12 @@ class CommandRunner:
         finally:
             if process.stdout is not None:
                 process.stdout.close()
+            metrics: dict[str, int | float] = {
+                "wallSeconds": round(time.perf_counter() - started, 6)
+            }
+            if peak_resident_bytes is not None:
+                metrics["peakResidentBytes"] = peak_resident_bytes
+            self.last_execution_metrics = metrics
         combined_output = "".join(output)
         if return_code != 0:
             raise subprocess.CalledProcessError(return_code, args, output=combined_output)
@@ -218,22 +262,80 @@ _LABEL_STATS_PREFIX = "LABEL_STATS:"
 _BUILDING_STATS_PREFIX = "BUILDING_STATS:"
 _BUILDING_SCOPE_PREFIX = "BUILDING_SCOPE:"
 _BUILDING_COMPLEXITY_PREFIX = "BUILDING_COMPLEXITY:"
+_BUILDING_BLOCK_CACHE_PREFIX = "BUILDING_BLOCK_CACHE:"
 _BUILDING_FAILURE_PREFIX = "BUILDING_PREPROCESS_FAILURE:"
 _BUILDING_PREPROCESS_PROGRESS_PREFIX = "BUILDING_PREPROCESS_PROGRESS:"
 _BUILDING_FAILURE_CODES = {
     "building_scope_exceeded",
+    "building_object_limit_exceeded",
     "building_relation_incomplete",
     "building_calibration_unavailable",
+    "building_block_cache_unavailable",
     "building_source_snapshot_changed",
     "building_scope_policy_invalid",
 }
 _BUILDING_FAILURE_MESSAGES = {
     "building_scope_exceeded": "selected building scope exceeds policy",
+    "building_object_limit_exceeded": (
+        "selected building closure exceeds the object limit"
+    ),
     "building_relation_incomplete": "selected building relation closure is incomplete",
     "building_calibration_unavailable": "selected building calibration is unavailable",
+    "building_block_cache_unavailable": "selected building block cache is unavailable",
     "building_source_snapshot_changed": "selected building source snapshot changed",
     "building_scope_policy_invalid": "selected building scope policy is invalid",
 }
+
+
+def _coalesce_projected_rectangles(
+    rectangles: list[list[int]] | tuple[tuple[int, int, int, int], ...],
+) -> tuple[tuple[int, int, int, int], ...]:
+    """Merge edge-compatible rectangles without changing their exact union."""
+    current = tuple(sorted({tuple(rectangle) for rectangle in rectangles}))
+    if any(
+        len(rectangle) != 4
+        or rectangle[2] <= rectangle[0]
+        or rectangle[3] <= rectangle[1]
+        for rectangle in current
+    ):
+        raise BuildingScopeError(
+            "building_scope_policy_invalid",
+            "source scope contains an invalid extraction rectangle",
+        )
+
+    def merge_axis(
+        values: tuple[tuple[int, int, int, int], ...], *, horizontal: bool
+    ) -> tuple[tuple[int, int, int, int], ...]:
+        groups: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        for min_x, min_y, max_x, max_y in values:
+            key = (min_y, max_y) if horizontal else (min_x, max_x)
+            interval = (min_x, max_x) if horizontal else (min_y, max_y)
+            groups.setdefault(key, []).append(interval)
+        merged = []
+        for key, intervals in sorted(groups.items()):
+            start, end = sorted(intervals)[0]
+            for next_start, next_end in sorted(intervals)[1:]:
+                if next_start <= end:
+                    end = max(end, next_end)
+                    continue
+                merged.append(
+                    (start, key[0], end, key[1])
+                    if horizontal
+                    else (key[0], start, key[1], end)
+                )
+                start, end = next_start, next_end
+            merged.append(
+                (start, key[0], end, key[1])
+                if horizontal
+                else (key[0], start, key[1], end)
+            )
+        return tuple(sorted(merged))
+
+    while True:
+        merged = merge_axis(merge_axis(current, horizontal=True), horizontal=False)
+        if merged == current:
+            return current
+        current = merged
 
 
 def parse_map_progress(line: str) -> tuple[int, int] | None:
@@ -348,6 +450,44 @@ def parse_building_preprocess_progress(line: str) -> dict[str, Any] | None:
     }
 
 
+def parse_building_block_cache(line: str) -> dict[str, Any] | None:
+    value = _parse_structured_stats(line, _BUILDING_BLOCK_CACHE_PREFIX)
+    if not isinstance(value, dict) or set(value) != {
+        "schemaVersion",
+        "cacheIdentitySha256",
+        "requestedBlockCount",
+        "initialHitCount",
+        "initialMissCount",
+        "workerCount",
+    }:
+        return None
+    counts = tuple(
+        value[key]
+        for key in (
+            "requestedBlockCount",
+            "initialHitCount",
+            "initialMissCount",
+            "workerCount",
+        )
+    )
+    if (
+        value["schemaVersion"] != 1
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", str(value["cacheIdentitySha256"])
+        )
+        or any(
+            isinstance(item, bool) or not isinstance(item, int) or item < 0
+            for item in counts
+        )
+        or value["requestedBlockCount"] <= 0
+        or not 1 <= value["workerCount"] <= 16
+        or value["initialHitCount"] + value["initialMissCount"]
+        != value["requestedBlockCount"]
+    ):
+        return None
+    return value
+
+
 def safe_build_failure(job: MapJob, exc: Exception) -> tuple[str, str]:
     code = getattr(exc, "code", "map_build_failed")
     if isinstance(exc, SourceCacheError):
@@ -442,6 +582,7 @@ class MapBuildPipeline:
         producer_image_digest: str | None = None,
         source_preview_geometry_resolver: Callable[[SourceRegion], dict[str, Any] | None] | None = None,
         building_scope_mode: str = "shadow",
+        building_block_workers: int = 4,
     ):
         self.paths = paths
         self.runner = runner or CommandRunner()
@@ -454,6 +595,13 @@ class MapBuildPipeline:
         if building_scope_mode not in {"legacy", "shadow", "selected"}:
             raise ValueError("building scope mode must be legacy, shadow, or selected")
         self.building_scope_mode = building_scope_mode
+        if (
+            isinstance(building_block_workers, bool)
+            or not isinstance(building_block_workers, int)
+            or not 1 <= building_block_workers <= 16
+        ):
+            raise ValueError("building block workers must be between 1 and 16")
+        self.building_block_workers = building_block_workers
         if self.map_signer is not None and self.artifact_store is None:
             raise ValueError("map stream generation requires durable artifact storage")
         if self.map_signer is not None and not re.fullmatch(
@@ -479,6 +627,7 @@ class MapBuildPipeline:
     ) -> MapBuildResult:
         build_started_monotonic = time.monotonic()
         building_phase_timings: dict[str, float] = {}
+        building_resource_metrics: dict[str, Any] = {}
         if self.uses_selected_preprocessing(job) and on_phase_progress is not None:
             external_phase_progress = on_phase_progress
             observability = getattr(job, "_building_observability", None)
@@ -509,6 +658,7 @@ class MapBuildPipeline:
         pack_root = job_dir / "pack"
         vectmap_output = pack_root / "VECTMAP" / map_id
         archive_path = job_dir / f"{map_id}.zip"
+        building_block_cache_identity_path: Path | None = None
         format_version = renderer_format_version(job.request)
         processing_bounds = aligned_processing_bounds(
             job,
@@ -641,6 +791,22 @@ class MapBuildPipeline:
                 scope_plan=scope_plan,
                 calibration_generation=calibration_generation,
             )
+            block_cache_identity = selected_building_block_cache_identity(
+                source_snapshot_sha256=source_snapshot_sha256,
+                rules_path=(
+                    self.paths.osm_extract_root
+                    / "conf"
+                    / "building_height_rules.yaml"
+                ),
+                scope_plan=scope_plan,
+                calibration_generation=calibration_generation,
+            )
+            building_block_cache_identity_path = (
+                job_dir / "building-block-cache-identity.json"
+            )
+            building_block_cache_identity_path.write_bytes(
+                canonical_building_json(block_cache_identity) + b"\n"
+            )
             if job.build_cache_key is not None or job.build_compatibility_key is not None:
                 expected_build_keys = reuse_keys(
                     job,
@@ -660,6 +826,7 @@ class MapBuildPipeline:
                         "selected building inputs changed after build identity reservation",
                     )
             scope_diagnostics["identity"] = building_identity
+            scope_diagnostics["blockCacheIdentity"] = block_cache_identity
         else:
             source_pbf = self._source_pbf_path(job)
             source_snapshot_sha256 = None
@@ -726,6 +893,7 @@ class MapBuildPipeline:
         if on_status and not selected_scope:
             on_status(JobStatus.EXTRACTING_PBF)
         source_extraction_started = time.perf_counter()
+        source_extraction_metrics: dict[str, Any] | None = None
         try:
             if format_version == BUILDING_RENDERER_FORMAT_VERSION:
                 extract_kwargs = {"bounds": source_bounds, "force_bounds": True}
@@ -734,7 +902,7 @@ class MapBuildPipeline:
                     extract_kwargs["source_snapshot_sha256"] = source_snapshot_sha256
                 if cancellation_check is not None:
                     extract_kwargs["cancellation_check"] = cancellation_check
-                self._extract_pbf(
+                source_extraction_metrics = self._extract_pbf(
                     job,
                     source_pbf,
                     clipped_pbf,
@@ -744,7 +912,7 @@ class MapBuildPipeline:
                 extract_kwargs = {"bounds": source_bounds}
                 if cancellation_check is not None:
                     extract_kwargs["cancellation_check"] = cancellation_check
-                self._extract_pbf(
+                source_extraction_metrics = self._extract_pbf(
                     job,
                     source_pbf,
                     clipped_pbf,
@@ -760,9 +928,29 @@ class MapBuildPipeline:
                 "selected building source extraction failed",
             ) from exc
         if selected_scope:
-            building_phase_timings["sourceExtraction"] = (
+            source_extraction_seconds = (
                 time.perf_counter() - source_extraction_started
             )
+            building_phase_timings["sourceExtraction"] = source_extraction_seconds
+            if isinstance(source_extraction_metrics, dict):
+                source_extraction_metrics["durationSeconds"] = round(
+                    source_extraction_seconds, 6
+                )
+                building_resource_metrics["sourceExtraction"] = (
+                    source_extraction_metrics
+                )
+                if job.building_preprocessing_runtime is None:
+                    job.building_preprocessing_runtime = {}
+                job.building_preprocessing_runtime["resourceMetrics"] = deepcopy(
+                    building_resource_metrics
+                )
+                print(
+                    "BUILDING_SOURCE_EXTRACTION:"
+                    + canonical_building_json(source_extraction_metrics).decode(
+                        "utf-8"
+                    ),
+                    flush=True,
+                )
         if on_status:
             on_status(JobStatus.CONVERTING_FEATURES)
         calibration_manifest = None
@@ -943,7 +1131,7 @@ class MapBuildPipeline:
                     retry_extract_kwargs["cancellation_check"] = (
                         cancellation_check
                     )
-                self._extract_pbf(
+                retry_extraction_metrics = self._extract_pbf(
                     job,
                     source_pbf,
                     clipped_pbf,
@@ -968,6 +1156,25 @@ class MapBuildPipeline:
                         else {}
                     ),
                 )
+                if building_block_cache_identity_path is None:
+                    raise BuildingScopeError(
+                        "building_scope_policy_invalid",
+                        "selected building block cache identity is unavailable",
+                    )
+                block_cache_identity = selected_building_block_cache_identity(
+                    source_snapshot_sha256=source_snapshot_sha256,
+                    rules_path=(
+                        self.paths.osm_extract_root
+                        / "conf"
+                        / "building_height_rules.yaml"
+                    ),
+                    scope_plan=attempt_scope_plan,
+                    calibration_generation=calibration_generation,
+                )
+                building_block_cache_identity_path.write_bytes(
+                    canonical_building_json(block_cache_identity) + b"\n"
+                )
+                scope_diagnostics["blockCacheIdentity"] = block_cache_identity
                 attempt_summary = attempt_scope_plan.summary()
                 attempt_artifact_scope = {
                     "scopePlanSha256": attempt_scope_plan.sha256,
@@ -1015,6 +1222,16 @@ class MapBuildPipeline:
                     "sourceAreaM2": attempt_summary["sourceAreaM2"],
                     "sourceBoundsE7": attempt_summary["sourceBoundsE7"],
                 }
+                if isinstance(retry_extraction_metrics, dict):
+                    retry_record["sourceExtraction"] = retry_extraction_metrics
+                    building_resource_metrics.setdefault(
+                        "relationRetryExtractions", []
+                    ).append(retry_extraction_metrics)
+                    if job.building_preprocessing_runtime is None:
+                        job.building_preprocessing_runtime = {}
+                    job.building_preprocessing_runtime[
+                        "resourceMetrics"
+                    ] = deepcopy(building_resource_metrics)
                 if isinstance(attempt_preprocessing_metrics.get("closure"), dict):
                     retry_record["closure"] = attempt_preprocessing_metrics["closure"]
                 relation_retries.append(retry_record)
@@ -1034,6 +1251,9 @@ class MapBuildPipeline:
                     "scope_plan_path": scope_plan_path,
                     "calibration_manifest": calibration_manifest,
                     "calibration_source_sha256": source_snapshot_sha256,
+                    "building_block_cache_identity_path": (
+                        building_block_cache_identity_path
+                    ),
                     "planned_scope_marker": planned_scope_marker,
                 }
             )
@@ -1113,6 +1333,7 @@ class MapBuildPipeline:
                 key: round(value, 6)
                 for key, value in building_phase_timings.items()
             }
+            label_metrics["buildingResourceMetrics"] = building_resource_metrics
             label_metrics["buildingObservability"] = {
                 "firstProgressMilliseconds": preprocessing_observability.get(
                     "firstProgressMilliseconds", 0
@@ -2083,11 +2304,21 @@ class MapBuildPipeline:
             source_index = value["sourceIndex"]
             closure = value["closure"]
             calibration = value["calibration"]
+            block_cache = value.get("blockCacheIdentity")
             identity_body = {
                 key: item
                 for key, item in identity.items()
                 if key != "identitySha256"
             }
+            block_cache_body = (
+                {
+                    key: item
+                    for key, item in block_cache.items()
+                    if key != "cacheIdentitySha256"
+                }
+                if isinstance(block_cache, dict)
+                else None
+            )
             if (
                 hashlib.sha256(canonical_building_json(identity_body)).hexdigest()
                 != identity["identitySha256"]
@@ -2111,6 +2342,26 @@ class MapBuildPipeline:
                 != calibration["entrySetSha256"]
                 or identity["calibration"]["generationCellCount"]
                 != calibration["cellCount"]
+                or (
+                    block_cache is not None
+                    and (
+                        not isinstance(block_cache, dict)
+                        or hashlib.sha256(
+                            canonical_building_json(block_cache_body)
+                        ).hexdigest()
+                        != block_cache["cacheIdentitySha256"]
+                        or block_cache["sourceSnapshotSha256"]
+                        != identity["sourceSnapshotSha256"]
+                        or block_cache["rulesSha256"]
+                        != identity["calibration"]["rulesSha256"]
+                        or block_cache["calibration"]["calibrationKey"]
+                        != calibration["calibrationKey"]
+                        or block_cache["calibration"]["manifestSha256"]
+                        != calibration["manifestSha256"]
+                        or block_cache["calibration"]["entrySetSha256"]
+                        != calibration["entrySetSha256"]
+                    )
+                )
             ):
                 raise ValueError(
                     "selected building preprocessing identity is inconsistent"
@@ -2176,6 +2427,8 @@ class MapBuildPipeline:
                     )
                 },
             }
+            if block_cache is not None:
+                summary["blockCache"] = deepcopy(block_cache)
             if "attemptScope" in value:
                 attempt_scope = value["attemptScope"]
                 summary["attemptScope"] = {
@@ -2205,6 +2458,15 @@ class MapBuildPipeline:
             summary["calibration"]["manifestSha256"],
             summary["calibration"]["entrySetSha256"],
         )
+        if "blockCache" in summary:
+            digest_paths += (
+                summary["blockCache"]["cacheIdentitySha256"],
+                summary["blockCache"]["sourceSnapshotSha256"],
+                summary["blockCache"]["rulesSha256"],
+                summary["blockCache"]["calibration"]["calibrationKey"],
+                summary["blockCache"]["calibration"]["manifestSha256"],
+                summary["blockCache"]["calibration"]["entrySetSha256"],
+            )
         if "attemptScope" in summary:
             digest_paths += (
                 summary["attemptScope"]["scopePlanSha256"],
@@ -2236,6 +2498,24 @@ class MapBuildPipeline:
             summary["calibration"]["cellsMisses"],
             summary["calibration"]["cellsRebuilt"],
         )
+        if "blockCache" in summary:
+            counts += (
+                summary["blockCache"]["schemaVersion"],
+                summary["blockCache"]["buildingProfileVersion"],
+                summary["blockCache"]["rendererFormatVersion"],
+                summary["blockCache"]["fmbVersion"],
+                summary["blockCache"]["blockGridVersion"],
+                summary["blockCache"]["blockSizeMeters"],
+                summary["blockCache"]["geometryBufferMeters"],
+                summary["blockCache"]["relationRetryBufferMeters"],
+                summary["blockCache"]["maxGeometryBufferMeters"],
+                summary["blockCache"]["normalizationAlgorithmVersion"],
+                summary["blockCache"]["blockEncodingAlgorithmVersion"],
+                summary["blockCache"]["sourceIndex"]["schemaVersion"],
+                summary["blockCache"]["sourceIndex"]["algorithmVersion"],
+                summary["blockCache"]["closureAlgorithmVersion"],
+                summary["blockCache"]["calibration"]["algorithmVersion"],
+            )
         if "attemptScope" in summary:
             counts += (
                 summary["attemptScope"]["sourceAreaM2"],
@@ -2327,6 +2607,28 @@ class MapBuildPipeline:
             kwargs["cancellation_check"] = cancellation_check
         return self.runner.run(args, **kwargs)
 
+    def _last_command_execution_metrics(self) -> dict[str, int | float]:
+        raw = getattr(self.runner, "last_execution_metrics", None)
+        if not isinstance(raw, dict):
+            return {}
+        metrics = {}
+        wall_seconds = raw.get("wallSeconds")
+        if (
+            isinstance(wall_seconds, (int, float))
+            and not isinstance(wall_seconds, bool)
+            and math.isfinite(float(wall_seconds))
+            and wall_seconds >= 0
+        ):
+            metrics["wallSeconds"] = round(float(wall_seconds), 6)
+        peak_resident_bytes = raw.get("peakResidentBytes")
+        if (
+            isinstance(peak_resident_bytes, int)
+            and not isinstance(peak_resident_bytes, bool)
+            and peak_resident_bytes >= 0
+        ):
+            metrics["peakResidentBytes"] = peak_resident_bytes
+        return metrics
+
     def _extract_pbf(
         self,
         job: MapJob,
@@ -2338,8 +2640,9 @@ class MapBuildPipeline:
         scope_plan: ScopePlan | None = None,
         source_snapshot_sha256: str | None = None,
         cancellation_check=None,
-    ) -> None:
+    ) -> dict[str, Any]:
         bounds = bounds or job.geometry.bounds
+        extraction_metrics: dict[str, Any] = {"schemaVersion": 1}
         extraction_option = (
             ["--option=types=multipolygon,building"]
             if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION
@@ -2353,45 +2656,86 @@ class MapBuildPipeline:
                     "building_source_snapshot_changed",
                     "source snapshot changed before selected-area extraction",
                 )
-            part_root = clipped_pbf.parent / "source-scope-parts"
-            if part_root.exists():
-                shutil.rmtree(part_root)
-            part_root.mkdir()
-            part_paths = []
-            extracts = []
-            for index, (min_x, min_y, max_x, max_y) in enumerate(
-                scope_plan.document["sourceScope"]["rectanglesMeters"]
-            ):
-                name = f"part-{index:05d}.osm.pbf"
-                part_paths.append(part_root / name)
-                extracts.append(
-                    {
-                        "output": name,
-                        "output_format": "pbf",
-                        "bbox": [
+            original_rectangles = scope_plan.document["sourceScope"][
+                "rectanglesMeters"
+            ]
+            coalesced_rectangles = _coalesce_projected_rectangles(
+                original_rectangles
+            )
+            extraction_metrics.update(
+                {
+                    "inputRectangleCount": len(original_rectangles),
+                    "coalescedRectangleCount": len(coalesced_rectangles),
+                }
+            )
+            part_paths: list[Path] = []
+            if len(coalesced_rectangles) == 1:
+                min_x, min_y, max_x, max_y = coalesced_rectangles[0]
+                args = [
+                    "osmium",
+                    "extract",
+                    "--strategy=smart",
+                    *extraction_option,
+                    "-b",
+                    ",".join(
+                        str(value)
+                        for value in (
                             x_to_lon(min_x),
                             y_to_lat(min_y),
                             x_to_lon(max_x),
                             y_to_lat(max_y),
-                        ],
-                    }
+                        )
+                    ),
+                    str(source_pbf),
+                    "-o",
+                    str(clipped_pbf),
+                    "--overwrite",
+                ]
+            else:
+                part_root = clipped_pbf.parent / "source-scope-parts"
+                if part_root.exists():
+                    shutil.rmtree(part_root)
+                part_root.mkdir()
+                extracts = []
+                for index, (min_x, min_y, max_x, max_y) in enumerate(
+                    coalesced_rectangles
+                ):
+                    name = f"part-{index:05d}.osm.pbf"
+                    part_paths.append(part_root / name)
+                    extracts.append(
+                        {
+                            "output": name,
+                            "output_format": "pbf",
+                            "bbox": [
+                                x_to_lon(min_x),
+                                y_to_lat(min_y),
+                                x_to_lon(max_x),
+                                y_to_lat(max_y),
+                            ],
+                        }
+                    )
+                config_path = clipped_pbf.parent / "source-scope-extract.json"
+                config_path.write_text(
+                    json.dumps(
+                        {
+                            "directory": str(part_root),
+                            "extracts": extracts,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    encoding="utf-8",
                 )
-            config_path = clipped_pbf.parent / "source-scope-extract.json"
-            config_path.write_text(
-                json.dumps(
-                    {
-                        "directory": str(part_root),
-                        "extracts": extracts,
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                encoding="utf-8",
-            )
-            args = [
-                "osmium", "extract", "--strategy=smart", *extraction_option,
-                "--config", str(config_path), str(source_pbf), "--overwrite",
-            ]
+                args = [
+                    "osmium",
+                    "extract",
+                    "--strategy=smart",
+                    *extraction_option,
+                    "--config",
+                    str(config_path),
+                    str(source_pbf),
+                    "--overwrite",
+                ]
         else:
             args = [
                 "osmium", "extract", "--strategy=smart", *extraction_option,
@@ -2419,7 +2763,10 @@ class MapBuildPipeline:
                 "--overwrite",
             ]
         self._run_command(args, cancellation_check=cancellation_check)
-        if scope_plan is not None:
+        extract_command_metrics = self._last_command_execution_metrics()
+        if extract_command_metrics:
+            extraction_metrics["extractCommand"] = extract_command_metrics
+        if scope_plan is not None and part_paths:
             self._run_command(
                 [
                     "osmium",
@@ -2431,12 +2778,40 @@ class MapBuildPipeline:
                 ],
                 cancellation_check=cancellation_check,
             )
+            merge_command_metrics = self._last_command_execution_metrics()
+            if merge_command_metrics:
+                extraction_metrics["mergeCommand"] = merge_command_metrics
+        if scope_plan is not None:
             if sha256_file(source_pbf) != source_snapshot_sha256:
                 clipped_pbf.unlink(missing_ok=True)
                 raise BuildingScopeError(
                     "building_source_snapshot_changed",
                     "source snapshot changed during selected-area extraction",
                 )
+        if clipped_pbf.is_file():
+            extraction_metrics["outputBytes"] = clipped_pbf.stat().st_size
+        command_metrics = [
+            value
+            for key in ("extractCommand", "mergeCommand")
+            if isinstance((value := extraction_metrics.get(key)), dict)
+        ]
+        peak_values = [
+            value["peakResidentBytes"]
+            for value in command_metrics
+            if isinstance(value.get("peakResidentBytes"), int)
+        ]
+        if peak_values:
+            extraction_metrics["peakResidentBytes"] = max(peak_values)
+        wall_values = [
+            value["wallSeconds"]
+            for value in command_metrics
+            if isinstance(value.get("wallSeconds"), (int, float))
+        ]
+        if wall_values:
+            extraction_metrics["commandWallSeconds"] = round(
+                sum(wall_values), 6
+            )
+        return extraction_metrics
 
     def _run_preprocessing_command(
         self,
@@ -3075,6 +3450,7 @@ class MapBuildPipeline:
         scope_plan_path: Path | None = None,
         calibration_manifest: Path | None = None,
         calibration_source_sha256: str | None = None,
+        building_block_cache_identity_path: Path | None = None,
         on_phase_progress=None,
         planned_scope_marker: dict[str, Any] | None = None,
         cancellation_check=None,
@@ -3112,6 +3488,17 @@ class MapBuildPipeline:
             args.extend(
                 ["--calibration-source-sha256", str(calibration_source_sha256)]
             )
+        if building_block_cache_identity_path is not None:
+            args.extend(
+                [
+                    "--building-block-cache-root",
+                    str(self.paths.building_cache_root),
+                    "--building-block-cache-identity",
+                    str(building_block_cache_identity_path),
+                    "--building-block-workers",
+                    str(self.building_block_workers),
+                ]
+            )
         if (
             format_version == BUILDING_RENDERER_FORMAT_VERSION
             and job.geometry.geometry is not None
@@ -3136,9 +3523,10 @@ class MapBuildPipeline:
         building_stats: dict[str, Any] | None = None
         building_scope: dict[str, Any] | None = None
         building_complexity: dict[str, int] | None = None
+        building_block_cache_evidence: dict[str, Any] | None = None
 
         def handle_output(line: str) -> None:
-            nonlocal label_stats, building_stats, building_scope, building_complexity
+            nonlocal label_stats, building_stats, building_scope, building_complexity, building_block_cache_evidence
             preprocess_progress = parse_building_preprocess_progress(line)
             if preprocess_progress is not None:
                 self._emit_phase_progress(
@@ -3153,6 +3541,25 @@ class MapBuildPipeline:
                         else None
                     ),
                     indeterminate=preprocess_progress["indeterminate"],
+                )
+            parsed_block_cache = parse_building_block_cache(line)
+            if parsed_block_cache is not None:
+                if building_block_cache_evidence is not None:
+                    raise RuntimeError(
+                        "building-aware extraction emitted BUILDING_BLOCK_CACHE more than once"
+                    )
+                building_block_cache_evidence = parsed_block_cache
+                self._emit_phase_progress(
+                    on_phase_progress,
+                    phase="building_preprocessing",
+                    unit="building_cache_lookup",
+                    completed=parsed_block_cache["requestedBlockCount"],
+                    total=parsed_block_cache["requestedBlockCount"],
+                    total_blocks=parsed_block_cache["requestedBlockCount"],
+                    indeterminate=False,
+                    estimator_evidence={
+                        "buildingBlockCache": parsed_block_cache
+                    },
                 )
             progress = parse_map_progress(line)
             if progress is not None and progress_coalescer.should_emit(*progress):

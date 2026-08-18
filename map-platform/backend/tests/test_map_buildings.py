@@ -20,16 +20,23 @@ from map_platform.manifest import (
 )
 from map_platform.map_stream import canonical_manifest_bytes
 from map_platform.map_buildings import (
+    building_block_workers,
     building_preprocessing_scope_mode,
     building_target3_generation_allowlist,
     building_target3_generation_enabled,
     load_building_calibration_window,
 )
 from map_platform.models import Bounds, MapJob, SourceRegion
-from map_platform.pipeline import MapBuildPipeline, PipelinePaths
+from map_platform.pipeline import (
+    MapBuildPipeline,
+    PipelinePaths,
+    _coalesce_projected_rectangles,
+)
 from map_platform.building_scope import plan_building_scope
 from map_platform.building_scope import BuildingScopeError, BuildingScopePolicy
 from map_platform.building_identity import (
+    canonical_json as canonical_building_json,
+    selected_building_block_cache_identity,
     selected_building_identity,
     selected_calibration_identity,
 )
@@ -164,6 +171,62 @@ class MapBuildingContractTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "legacy, shadow, or selected"):
                 building_preprocessing_scope_mode()
+
+    def test_building_block_worker_configuration_is_bounded(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(building_block_workers(), 4)
+        with patch.dict(
+            "os.environ",
+            {"MAP_PLATFORM_BUILDING_BLOCK_WORKERS": "8"},
+            clear=True,
+        ):
+            self.assertEqual(building_block_workers(), 8)
+        for value in ("0", "17", "many"):
+            with self.subTest(value=value), patch.dict(
+                "os.environ",
+                {"MAP_PLATFORM_BUILDING_BLOCK_WORKERS": value},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "BUILDING_BLOCK_WORKERS"):
+                    building_block_workers()
+
+    def test_building_block_cache_identity_is_scope_independent_and_hash_bound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job = self._service(JobStore(tmp)).create_job(self._request())
+            plan = plan_building_scope(
+                job,
+                calibration_cell_size_meters=8192,
+                calibration_halo_cells=1,
+                calibration_minimum_samples=3,
+            )
+            rules_path = (
+                Path(__file__).resolve().parents[3]
+                / "tools/OSM_Extract/conf/building_height_rules.yaml"
+            )
+            _manifest, generation = self._calibration_generation("1" * 64, plan)
+            identity = selected_building_block_cache_identity(
+                source_snapshot_sha256="1" * 64,
+                rules_path=rules_path,
+                scope_plan=plan,
+                calibration_generation=generation,
+            )
+            body = {
+                key: value
+                for key, value in identity.items()
+                if key != "cacheIdentitySha256"
+            }
+
+            self.assertNotIn("scopePlanSha256", canonical_building_json(identity).decode())
+            self.assertEqual(identity["blockSizeMeters"], 4096)
+            self.assertEqual(identity["normalizationAlgorithmVersion"], 2)
+            self.assertEqual(
+                identity["geometryEngine"],
+                {"name": "shapely", "version": "2.0.7"},
+            )
+            self.assertEqual(
+                identity["cacheIdentitySha256"],
+                hashlib.sha256(canonical_building_json(body)).hexdigest(),
+            )
 
     def test_target_three_allowlist_is_strict(self):
         installation_id = "inst_v2_" + "a" * 32
@@ -772,7 +835,7 @@ class MapBuildingContractTests(unittest.TestCase):
                 raised.exception.code, "building_source_snapshot_changed"
             )
 
-    def test_selected_source_extract_uses_every_bounded_rectangle_and_merges(self):
+    def test_selected_source_extract_coalesces_rectangular_scope(self):
         request = self._request()
         request["bbox"] = [103.80, 1.28, 103.83, 1.31]
         with tempfile.TemporaryDirectory() as tmp:
@@ -795,7 +858,7 @@ class MapBuildingContractTests(unittest.TestCase):
             clipped.parent.mkdir()
             expected_sha = "4" * 64
             with patch("map_platform.pipeline.sha256_file", return_value=expected_sha):
-                pipeline._extract_pbf(
+                metrics = pipeline._extract_pbf(
                     job,
                     source,
                     clipped,
@@ -803,21 +866,46 @@ class MapBuildingContractTests(unittest.TestCase):
                     source_snapshot_sha256=expected_sha,
                 )
 
-            self.assertEqual(len(runner.calls), 2)
+            self.assertGreater(
+                len(plan.document["sourceScope"]["rectanglesMeters"]), 1
+            )
+            self.assertEqual(metrics["coalescedRectangleCount"], 1)
+            self.assertEqual(len(runner.calls), 1)
             extract_args = runner.calls[0][0]
             self.assertEqual(extract_args[:3], ["osmium", "extract", "--strategy=smart"])
             self.assertIn("--option=types=multipolygon,building", extract_args)
-            self.assertIn("--config", extract_args)
-            config_path = Path(extract_args[extract_args.index("--config") + 1])
-            config = json.loads(config_path.read_text())
-            self.assertEqual(
-                len(config["extracts"]),
-                len(plan.document["sourceScope"]["rectanglesMeters"]),
-            )
-            self.assertTrue(all(set(item) == {"bbox", "output", "output_format"} for item in config["extracts"]))
-            merge_args = runner.calls[1][0]
-            self.assertEqual(merge_args[:2], ["osmium", "merge"])
-            self.assertEqual(merge_args[-3:], ["-o", str(clipped), "--overwrite"])
+            self.assertIn("-b", extract_args)
+            self.assertNotIn("--config", extract_args)
+            self.assertIn("-o", extract_args)
+            self.assertEqual(extract_args[extract_args.index("-o") + 1], str(clipped))
+
+    def test_rectangle_coalescing_preserves_irregular_and_disconnected_union(self):
+        self.assertEqual(
+            _coalesce_projected_rectangles(
+                [
+                    [0, 0, 2, 2],
+                    [2, 0, 4, 2],
+                    [0, 2, 2, 4],
+                    [10, 10, 12, 12],
+                ]
+            ),
+            (
+                (0, 0, 4, 2),
+                (0, 2, 2, 4),
+                (10, 10, 12, 12),
+            ),
+        )
+        self.assertEqual(
+            _coalesce_projected_rectangles(
+                [
+                    [0, 0, 2, 2],
+                    [2, 0, 4, 2],
+                    [0, 2, 2, 4],
+                    [2, 2, 4, 4],
+                ]
+            ),
+            ((0, 0, 4, 4),),
+        )
 
     def test_selected_source_extract_fails_if_snapshot_changes_before_or_during(self):
         request = self._request()
@@ -859,7 +947,7 @@ class MapBuildingContractTests(unittest.TestCase):
                         source_snapshot_sha256=expected_sha,
                     )
             self.assertEqual(during.exception.code, "building_source_snapshot_changed")
-            self.assertEqual(len(runner.calls), 2)
+            self.assertEqual(len(runner.calls), 1)
 
     def test_selected_closure_rehydration_checks_source_before_and_after(self):
         class MaterializingRunner(RecordingRunner):
@@ -1248,6 +1336,11 @@ class MapBuildingContractTests(unittest.TestCase):
             self.assertEqual(retries[0]["bufferMeters"], 512)
             attempt_scope = observed_metrics["buildingPreprocessing"]["attemptScope"]
             self.assertEqual(attempt_scope["closurePlanSha256"], "6" * 64)
+            self.assertEqual(
+                observed_metrics["buildingPreprocessing"]["blockCacheIdentity"]
+                ["geometryBufferMeters"],
+                512,
+            )
             self.assertEqual(job.build_cache_aliases, [base_exact_key])
             self.assertEqual(
                 job.build_identity_derivation,
