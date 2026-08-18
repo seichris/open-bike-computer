@@ -69,9 +69,11 @@ class BuildingScopeTests(unittest.TestCase):
 
         plan = self.plan(job)
 
-        self.assertEqual(BUILDING_SCOPE_POLICY_VERSION, 4)
-        self.assertEqual(BUILDING_MAX_SOURCE_AREA_M2, 800_000_000)
-        self.assertEqual(plan.document["policy"]["maxSourceAreaM2"], 800_000_000)
+        self.assertEqual(BUILDING_SCOPE_POLICY_VERSION, 5)
+        self.assertEqual(BUILDING_MAX_SOURCE_AREA_M2, 1_200_000_000)
+        self.assertEqual(
+            plan.document["policy"]["maxSourceAreaM2"], 1_200_000_000
+        )
         self.assertEqual(
             plan.document["policy"]["maxRelationObjectsPerJob"], 500_000
         )
@@ -85,6 +87,30 @@ class BuildingScopeTests(unittest.TestCase):
 
         with self.assertRaises(BuildingScopeError) as raised:
             self.plan(job, policy=BuildingScopePolicy(max_source_area_m2=732_000_000))
+        self.assertEqual(raised.exception.code, "building_scope_exceeded")
+
+    def test_default_policy_accepts_source_scope_between_800_and_1200_square_kilometers(self):
+        job = make_job({
+            "mode": "custom_bbox",
+            "bbox": [
+                121.2738715137025,
+                31.135584875777948,
+                121.55511726544664,
+                31.332867844301585,
+            ],
+        })
+
+        plan = self.plan(job)
+
+        self.assertEqual(plan.document["metrics"]["outputBlockCount"], 63)
+        self.assertEqual(plan.document["metrics"]["outputAreaM2"], 1_056_964_608)
+        self.assertEqual(plan.document["metrics"]["sourceAreaM2"], 1_090_781_184)
+
+        with self.assertRaises(BuildingScopeError) as raised:
+            self.plan(
+                job,
+                policy=BuildingScopePolicy(max_source_area_m2=1_090_000_000),
+            )
         self.assertEqual(raised.exception.code, "building_scope_exceeded")
 
     def test_polygon_selects_only_intersecting_blocks(self):
