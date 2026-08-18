@@ -69,6 +69,7 @@ from .building_identity import (
     calibration_generation_manifest_path,
     canonical_json as canonical_building_json,
     selected_calibration_identity,
+    selected_building_block_cache_identity,
     selected_building_identity,
 )
 from .models import JobStatus, MapJob, SourceRegion
@@ -261,6 +262,7 @@ _LABEL_STATS_PREFIX = "LABEL_STATS:"
 _BUILDING_STATS_PREFIX = "BUILDING_STATS:"
 _BUILDING_SCOPE_PREFIX = "BUILDING_SCOPE:"
 _BUILDING_COMPLEXITY_PREFIX = "BUILDING_COMPLEXITY:"
+_BUILDING_BLOCK_CACHE_PREFIX = "BUILDING_BLOCK_CACHE:"
 _BUILDING_FAILURE_PREFIX = "BUILDING_PREPROCESS_FAILURE:"
 _BUILDING_PREPROCESS_PROGRESS_PREFIX = "BUILDING_PREPROCESS_PROGRESS:"
 _BUILDING_FAILURE_CODES = {
@@ -268,6 +270,7 @@ _BUILDING_FAILURE_CODES = {
     "building_object_limit_exceeded",
     "building_relation_incomplete",
     "building_calibration_unavailable",
+    "building_block_cache_unavailable",
     "building_source_snapshot_changed",
     "building_scope_policy_invalid",
 }
@@ -278,6 +281,7 @@ _BUILDING_FAILURE_MESSAGES = {
     ),
     "building_relation_incomplete": "selected building relation closure is incomplete",
     "building_calibration_unavailable": "selected building calibration is unavailable",
+    "building_block_cache_unavailable": "selected building block cache is unavailable",
     "building_source_snapshot_changed": "selected building source snapshot changed",
     "building_scope_policy_invalid": "selected building scope policy is invalid",
 }
@@ -446,6 +450,44 @@ def parse_building_preprocess_progress(line: str) -> dict[str, Any] | None:
     }
 
 
+def parse_building_block_cache(line: str) -> dict[str, Any] | None:
+    value = _parse_structured_stats(line, _BUILDING_BLOCK_CACHE_PREFIX)
+    if not isinstance(value, dict) or set(value) != {
+        "schemaVersion",
+        "cacheIdentitySha256",
+        "requestedBlockCount",
+        "initialHitCount",
+        "initialMissCount",
+        "workerCount",
+    }:
+        return None
+    counts = tuple(
+        value[key]
+        for key in (
+            "requestedBlockCount",
+            "initialHitCount",
+            "initialMissCount",
+            "workerCount",
+        )
+    )
+    if (
+        value["schemaVersion"] != 1
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", str(value["cacheIdentitySha256"])
+        )
+        or any(
+            isinstance(item, bool) or not isinstance(item, int) or item < 0
+            for item in counts
+        )
+        or value["requestedBlockCount"] <= 0
+        or not 1 <= value["workerCount"] <= 16
+        or value["initialHitCount"] + value["initialMissCount"]
+        != value["requestedBlockCount"]
+    ):
+        return None
+    return value
+
+
 def safe_build_failure(job: MapJob, exc: Exception) -> tuple[str, str]:
     code = getattr(exc, "code", "map_build_failed")
     if isinstance(exc, SourceCacheError):
@@ -540,6 +582,7 @@ class MapBuildPipeline:
         producer_image_digest: str | None = None,
         source_preview_geometry_resolver: Callable[[SourceRegion], dict[str, Any] | None] | None = None,
         building_scope_mode: str = "shadow",
+        building_block_workers: int = 4,
     ):
         self.paths = paths
         self.runner = runner or CommandRunner()
@@ -552,6 +595,13 @@ class MapBuildPipeline:
         if building_scope_mode not in {"legacy", "shadow", "selected"}:
             raise ValueError("building scope mode must be legacy, shadow, or selected")
         self.building_scope_mode = building_scope_mode
+        if (
+            isinstance(building_block_workers, bool)
+            or not isinstance(building_block_workers, int)
+            or not 1 <= building_block_workers <= 16
+        ):
+            raise ValueError("building block workers must be between 1 and 16")
+        self.building_block_workers = building_block_workers
         if self.map_signer is not None and self.artifact_store is None:
             raise ValueError("map stream generation requires durable artifact storage")
         if self.map_signer is not None and not re.fullmatch(
@@ -608,6 +658,7 @@ class MapBuildPipeline:
         pack_root = job_dir / "pack"
         vectmap_output = pack_root / "VECTMAP" / map_id
         archive_path = job_dir / f"{map_id}.zip"
+        building_block_cache_identity_path: Path | None = None
         format_version = renderer_format_version(job.request)
         processing_bounds = aligned_processing_bounds(
             job,
@@ -740,6 +791,22 @@ class MapBuildPipeline:
                 scope_plan=scope_plan,
                 calibration_generation=calibration_generation,
             )
+            block_cache_identity = selected_building_block_cache_identity(
+                source_snapshot_sha256=source_snapshot_sha256,
+                rules_path=(
+                    self.paths.osm_extract_root
+                    / "conf"
+                    / "building_height_rules.yaml"
+                ),
+                scope_plan=scope_plan,
+                calibration_generation=calibration_generation,
+            )
+            building_block_cache_identity_path = (
+                job_dir / "building-block-cache-identity.json"
+            )
+            building_block_cache_identity_path.write_bytes(
+                canonical_building_json(block_cache_identity) + b"\n"
+            )
             if job.build_cache_key is not None or job.build_compatibility_key is not None:
                 expected_build_keys = reuse_keys(
                     job,
@@ -759,6 +826,7 @@ class MapBuildPipeline:
                         "selected building inputs changed after build identity reservation",
                     )
             scope_diagnostics["identity"] = building_identity
+            scope_diagnostics["blockCacheIdentity"] = block_cache_identity
         else:
             source_pbf = self._source_pbf_path(job)
             source_snapshot_sha256 = None
@@ -1088,6 +1156,25 @@ class MapBuildPipeline:
                         else {}
                     ),
                 )
+                if building_block_cache_identity_path is None:
+                    raise BuildingScopeError(
+                        "building_scope_policy_invalid",
+                        "selected building block cache identity is unavailable",
+                    )
+                block_cache_identity = selected_building_block_cache_identity(
+                    source_snapshot_sha256=source_snapshot_sha256,
+                    rules_path=(
+                        self.paths.osm_extract_root
+                        / "conf"
+                        / "building_height_rules.yaml"
+                    ),
+                    scope_plan=attempt_scope_plan,
+                    calibration_generation=calibration_generation,
+                )
+                building_block_cache_identity_path.write_bytes(
+                    canonical_building_json(block_cache_identity) + b"\n"
+                )
+                scope_diagnostics["blockCacheIdentity"] = block_cache_identity
                 attempt_summary = attempt_scope_plan.summary()
                 attempt_artifact_scope = {
                     "scopePlanSha256": attempt_scope_plan.sha256,
@@ -1164,6 +1251,9 @@ class MapBuildPipeline:
                     "scope_plan_path": scope_plan_path,
                     "calibration_manifest": calibration_manifest,
                     "calibration_source_sha256": source_snapshot_sha256,
+                    "building_block_cache_identity_path": (
+                        building_block_cache_identity_path
+                    ),
                     "planned_scope_marker": planned_scope_marker,
                 }
             )
@@ -2214,11 +2304,21 @@ class MapBuildPipeline:
             source_index = value["sourceIndex"]
             closure = value["closure"]
             calibration = value["calibration"]
+            block_cache = value.get("blockCacheIdentity")
             identity_body = {
                 key: item
                 for key, item in identity.items()
                 if key != "identitySha256"
             }
+            block_cache_body = (
+                {
+                    key: item
+                    for key, item in block_cache.items()
+                    if key != "cacheIdentitySha256"
+                }
+                if isinstance(block_cache, dict)
+                else None
+            )
             if (
                 hashlib.sha256(canonical_building_json(identity_body)).hexdigest()
                 != identity["identitySha256"]
@@ -2242,6 +2342,26 @@ class MapBuildPipeline:
                 != calibration["entrySetSha256"]
                 or identity["calibration"]["generationCellCount"]
                 != calibration["cellCount"]
+                or (
+                    block_cache is not None
+                    and (
+                        not isinstance(block_cache, dict)
+                        or hashlib.sha256(
+                            canonical_building_json(block_cache_body)
+                        ).hexdigest()
+                        != block_cache["cacheIdentitySha256"]
+                        or block_cache["sourceSnapshotSha256"]
+                        != identity["sourceSnapshotSha256"]
+                        or block_cache["rulesSha256"]
+                        != identity["calibration"]["rulesSha256"]
+                        or block_cache["calibration"]["calibrationKey"]
+                        != calibration["calibrationKey"]
+                        or block_cache["calibration"]["manifestSha256"]
+                        != calibration["manifestSha256"]
+                        or block_cache["calibration"]["entrySetSha256"]
+                        != calibration["entrySetSha256"]
+                    )
+                )
             ):
                 raise ValueError(
                     "selected building preprocessing identity is inconsistent"
@@ -2307,6 +2427,8 @@ class MapBuildPipeline:
                     )
                 },
             }
+            if block_cache is not None:
+                summary["blockCache"] = deepcopy(block_cache)
             if "attemptScope" in value:
                 attempt_scope = value["attemptScope"]
                 summary["attemptScope"] = {
@@ -2336,6 +2458,15 @@ class MapBuildPipeline:
             summary["calibration"]["manifestSha256"],
             summary["calibration"]["entrySetSha256"],
         )
+        if "blockCache" in summary:
+            digest_paths += (
+                summary["blockCache"]["cacheIdentitySha256"],
+                summary["blockCache"]["sourceSnapshotSha256"],
+                summary["blockCache"]["rulesSha256"],
+                summary["blockCache"]["calibration"]["calibrationKey"],
+                summary["blockCache"]["calibration"]["manifestSha256"],
+                summary["blockCache"]["calibration"]["entrySetSha256"],
+            )
         if "attemptScope" in summary:
             digest_paths += (
                 summary["attemptScope"]["scopePlanSha256"],
@@ -2367,6 +2498,24 @@ class MapBuildPipeline:
             summary["calibration"]["cellsMisses"],
             summary["calibration"]["cellsRebuilt"],
         )
+        if "blockCache" in summary:
+            counts += (
+                summary["blockCache"]["schemaVersion"],
+                summary["blockCache"]["buildingProfileVersion"],
+                summary["blockCache"]["rendererFormatVersion"],
+                summary["blockCache"]["fmbVersion"],
+                summary["blockCache"]["blockGridVersion"],
+                summary["blockCache"]["blockSizeMeters"],
+                summary["blockCache"]["geometryBufferMeters"],
+                summary["blockCache"]["relationRetryBufferMeters"],
+                summary["blockCache"]["maxGeometryBufferMeters"],
+                summary["blockCache"]["normalizationAlgorithmVersion"],
+                summary["blockCache"]["blockEncodingAlgorithmVersion"],
+                summary["blockCache"]["sourceIndex"]["schemaVersion"],
+                summary["blockCache"]["sourceIndex"]["algorithmVersion"],
+                summary["blockCache"]["closureAlgorithmVersion"],
+                summary["blockCache"]["calibration"]["algorithmVersion"],
+            )
         if "attemptScope" in summary:
             counts += (
                 summary["attemptScope"]["sourceAreaM2"],
@@ -3301,6 +3450,7 @@ class MapBuildPipeline:
         scope_plan_path: Path | None = None,
         calibration_manifest: Path | None = None,
         calibration_source_sha256: str | None = None,
+        building_block_cache_identity_path: Path | None = None,
         on_phase_progress=None,
         planned_scope_marker: dict[str, Any] | None = None,
         cancellation_check=None,
@@ -3338,6 +3488,17 @@ class MapBuildPipeline:
             args.extend(
                 ["--calibration-source-sha256", str(calibration_source_sha256)]
             )
+        if building_block_cache_identity_path is not None:
+            args.extend(
+                [
+                    "--building-block-cache-root",
+                    str(self.paths.building_cache_root),
+                    "--building-block-cache-identity",
+                    str(building_block_cache_identity_path),
+                    "--building-block-workers",
+                    str(self.building_block_workers),
+                ]
+            )
         if (
             format_version == BUILDING_RENDERER_FORMAT_VERSION
             and job.geometry.geometry is not None
@@ -3362,9 +3523,10 @@ class MapBuildPipeline:
         building_stats: dict[str, Any] | None = None
         building_scope: dict[str, Any] | None = None
         building_complexity: dict[str, int] | None = None
+        building_block_cache_evidence: dict[str, Any] | None = None
 
         def handle_output(line: str) -> None:
-            nonlocal label_stats, building_stats, building_scope, building_complexity
+            nonlocal label_stats, building_stats, building_scope, building_complexity, building_block_cache_evidence
             preprocess_progress = parse_building_preprocess_progress(line)
             if preprocess_progress is not None:
                 self._emit_phase_progress(
@@ -3379,6 +3541,25 @@ class MapBuildPipeline:
                         else None
                     ),
                     indeterminate=preprocess_progress["indeterminate"],
+                )
+            parsed_block_cache = parse_building_block_cache(line)
+            if parsed_block_cache is not None:
+                if building_block_cache_evidence is not None:
+                    raise RuntimeError(
+                        "building-aware extraction emitted BUILDING_BLOCK_CACHE more than once"
+                    )
+                building_block_cache_evidence = parsed_block_cache
+                self._emit_phase_progress(
+                    on_phase_progress,
+                    phase="building_preprocessing",
+                    unit="building_cache_lookup",
+                    completed=parsed_block_cache["requestedBlockCount"],
+                    total=parsed_block_cache["requestedBlockCount"],
+                    total_blocks=parsed_block_cache["requestedBlockCount"],
+                    indeterminate=False,
+                    estimator_evidence={
+                        "buildingBlockCache": parsed_block_cache
+                    },
                 )
             progress = parse_map_progress(line)
             if progress is not None and progress_coalescer.should_emit(*progress):

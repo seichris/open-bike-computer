@@ -284,7 +284,7 @@ def _label_sections(polylines, min_x, min_y, font_builder):
     }
 
 
-def _building_section(records):
+def encode_building_section(records):
     if len(records) > MAX_BLOCK_BUILDINGS:
         raise MapFormatError("building record count exceeds FMB v4 limits")
     total_points = 0
@@ -355,6 +355,34 @@ def _building_section(records):
     }
 
 
+def _validated_building_section(section, metadata):
+    if not isinstance(section, bytes) or len(section) < _BUILDING_SECTION_HEADER.size:
+        raise MapFormatError("preencoded building section is invalid")
+    if not isinstance(metadata, dict) or set(metadata) != {
+        "buildings",
+        "buildingPoints",
+        "buildingBytes",
+    }:
+        raise MapFormatError("preencoded building metadata is invalid")
+    record_count, reserved, point_count = _BUILDING_SECTION_HEADER.unpack_from(section)
+    if (
+        reserved != 0
+        or metadata["buildings"] != record_count
+        or metadata["buildingPoints"] != point_count
+        or metadata["buildingBytes"] != len(section)
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in metadata.values()
+        )
+    ):
+        raise MapFormatError("preencoded building section does not match metadata")
+    return section, dict(metadata)
+
+
+# Retain the private name for existing fixture and compatibility imports.
+_building_section = encode_building_section
+
+
 def _append_directory(data, magic, sections):
     if len(magic) != 4 or not 1 <= len(sections) <= 255:
         raise MapFormatError("extension directory header is invalid")
@@ -394,12 +422,19 @@ def write_fmb(
     min_y,
     font_builder=None,
     building_records=None,
+    building_section=None,
+    building_metadata=None,
 ):
     """Write a renderer-format-specific FMB v2, v3, or v4 block."""
 
-    if building_records is not None and font_builder is None:
+    if building_records is not None and building_section is not None:
+        raise MapFormatError("building records and preencoded section are mutually exclusive")
+    has_buildings = building_records is not None or building_section is not None
+    if has_buildings and font_builder is None:
         raise MapFormatError("FMB v4 requires the street-label font/profile")
-    version = 4 if building_records is not None else (3 if font_builder is not None else 2)
+    if building_section is None and building_metadata is not None:
+        raise MapFormatError("preencoded building metadata requires a section")
+    version = 4 if has_buildings else (3 if font_builder is not None else 2)
     data = bytearray(b"FMB" + bytes((version,)))
     data.extend(struct.pack("<H", len(polygons)))
     for feature in polygons:
@@ -423,10 +458,18 @@ def write_fmb(
             polylines, min_x, min_y, font_builder
         )
         metadata.update({"buildings": 0, "buildingPoints": 0, "buildingBytes": 0})
-        if building_records is not None:
-            building_section, building_metadata = _building_section(building_records)
-            sections = (*sections, (FMB_V4_SECTION_BUILDINGS, building_section))
-            metadata.update(building_metadata)
+        if has_buildings:
+            if building_section is None:
+                encoded_section, encoded_metadata = encode_building_section(
+                    building_records
+                )
+            else:
+                encoded_section, encoded_metadata = _validated_building_section(
+                    building_section,
+                    building_metadata,
+                )
+            sections = (*sections, (FMB_V4_SECTION_BUILDINGS, encoded_section))
+            metadata.update(encoded_metadata)
             _append_directory(data, b"EXT4", sections)
         else:
             _append_directory(data, b"EXT3", sections)

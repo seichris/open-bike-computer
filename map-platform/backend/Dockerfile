@@ -34,7 +34,7 @@ RUN ln -s /app/map-platform/backend /app/backend \
   && ln -s /app/map-platform/config /app/config
 
 RUN python -m pip install '/app/map-platform/backend[api,object-storage]' \
-  && python -m pip install shapely "matplotlib<3.6" pyyaml
+  && python -m pip install "matplotlib<3.6" pyyaml
 
 ENV PYTHONPATH=/app/map-platform/backend
 

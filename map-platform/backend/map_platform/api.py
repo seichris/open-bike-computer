@@ -33,6 +33,7 @@ from .jobs import (
 )
 from .limits import JobLimits
 from .map_buildings import (
+    building_block_workers,
     building_preprocessing_scope_mode,
     building_target3_generation_allowlist,
 )
@@ -244,6 +245,7 @@ def create_app():
         PipelinePaths(repo_root=repo_root, work_root=data_root / "work", pack_root=data_root / "packs"),
         source_cache=source_cache,
         building_scope_mode=preprocessing_scope_mode,
+        building_block_workers=building_block_workers(),
         source_preview_geometry_resolver=(
             source_provider.preview_geometry_for_source
             if source_provider is not None

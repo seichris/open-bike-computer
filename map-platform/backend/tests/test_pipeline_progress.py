@@ -21,6 +21,7 @@ from map_platform.pipeline import (
     ProgressCoalescer,
     parse_label_stats,
     parse_building_preprocess_progress,
+    parse_building_block_cache,
     parse_building_complexity,
     parse_building_scope,
     parse_map_progress,
@@ -77,6 +78,10 @@ class BuildingPhaseStreamingRunner:
         for line in (
             'BUILDING_PREPROCESS_PROGRESS:{"completed":0,"indeterminate":true,'
             '"unit":"building_normalization"}',
+            'BUILDING_BLOCK_CACHE:{"schemaVersion":1,'
+            '"cacheIdentitySha256":"' + "a" * 64 + '",'
+            '"requestedBlockCount":1,"initialHitCount":1,'
+            '"initialMissCount":0,"workerCount":1}',
             'BUILDING_PREPROCESS_PROGRESS:{"completed":1,"indeterminate":false,'
             '"total":1,"unit":"building_normalization"}',
             'BUILDING_COMPLEXITY:{"schemaVersion":1,"sourceCount":0,'
@@ -156,6 +161,21 @@ class PipelineProgressTests(unittest.TestCase):
             parse_building_complexity(
                 complexity.replace('"containmentCandidateProduct":8',
                                    '"containmentCandidateProduct":true')
+            )
+        )
+        cache_marker = (
+            'BUILDING_BLOCK_CACHE:{"schemaVersion":1,'
+            '"cacheIdentitySha256":"' + "a" * 64 + '",'
+            '"requestedBlockCount":16,"initialHitCount":12,'
+            '"initialMissCount":4,"workerCount":4}'
+        )
+        self.assertEqual(
+            parse_building_block_cache(cache_marker)["initialHitCount"],
+            12,
+        )
+        self.assertIsNone(
+            parse_building_block_cache(
+                cache_marker.replace('"initialMissCount":4', '"initialMissCount":3')
             )
         )
         self.assertEqual(
@@ -415,13 +435,20 @@ class PipelineProgressTests(unittest.TestCase):
                     "building_preprocessing",
                     "building_preprocessing",
                     "building_preprocessing",
+                    "building_preprocessing",
                     "block_encoding",
                     "block_encoding",
                 ],
             )
             self.assertEqual(
-                phase_progress[2]["estimatorEvidence"]["complexity"][
+                phase_progress[3]["estimatorEvidence"]["complexity"][
                     "schemaVersion"
+                ],
+                1,
+            )
+            self.assertEqual(
+                phase_progress[1]["estimatorEvidence"]["buildingBlockCache"][
+                    "initialHitCount"
                 ],
                 1,
             )

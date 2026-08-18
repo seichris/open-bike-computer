@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from shapely.geometry import box, LineString, mapping, MultiPolygon, Polygon
 from shapely.ops import unary_union
+from shapely.prepared import prep
 import yaml
 
 
@@ -15,6 +16,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from building_height import HeightProvenance, HeightRules
 from building_pipeline import (
     BUILDING_FLAG_FLAT_BASE,
+    OutlineSpatialIndex,
+    _containment_parent,
     _calibration_cell,
     clip_buildings,
     collect_building_features,
@@ -126,11 +129,14 @@ class BuildingPipelineTests(unittest.TestCase):
         )
         snapshots = []
 
-        def containment(source, prepared):
+        def containment(source):
             self.assertTrue(snapshots, "complexity must publish before containment")
             return None
 
-        with patch("building_pipeline._containment_parent", side_effect=containment):
+        with patch(
+            "building_pipeline.OutlineSpatialIndex.containment_parent",
+            side_effect=containment,
+        ):
             prepare_buildings(
                 [outline, part],
                 self.rules,
@@ -144,6 +150,82 @@ class BuildingPipelineTests(unittest.TestCase):
         self.assertEqual(snapshots[0]["unresolvedPartCount"], 1)
         self.assertEqual(snapshots[0]["containmentCandidateProduct"], 1)
         self.assertGreater(snapshots[0]["sourceVertexCount"], 0)
+
+    def test_spatial_containment_matches_legacy_predicates_and_tie_breaking(self):
+        outlines = [
+            prepare_buildings(
+                [feature(10, box(0, 0, 100, 100), '"building"=>"yes"')],
+                self.rules,
+            )[0][0],
+            prepare_buildings(
+                [feature(11, box(20, 20, 80, 80), '"building"=>"yes"')],
+                self.rules,
+            )[0][0],
+            prepare_buildings(
+                [feature(12, box(20, 20, 80, 80), '"building"=>"yes"')],
+                self.rules,
+            )[0][0],
+        ]
+        parts = prepare_buildings(
+            [
+                feature(
+                    20,
+                    box(30, 30, 40, 40),
+                    '"building:part"=>"yes"',
+                    building=None,
+                ),
+                feature(
+                    21,
+                    box(200, 200, 210, 210),
+                    '"building:part"=>"yes"',
+                    building=None,
+                ),
+            ],
+            self.rules,
+        )[0]
+        legacy = [
+            (outline, prep(outline.geometry.buffer(0.05)))
+            for outline in outlines
+        ]
+        index = OutlineSpatialIndex(outlines)
+
+        self.assertEqual(
+            [index.containment_parent(part) for part in parts],
+            [_containment_parent(part, legacy) for part in parts],
+        )
+        self.assertEqual(index.containment_parent(parts[0]), "w11")
+        self.assertEqual(index.metrics()["containmentQueryCount"], 3)
+        self.assertLess(
+            index.metrics()["containmentPreparedOutlineCount"],
+            len(outlines) + 1,
+        )
+
+    def test_part_association_progress_is_bounded_and_finishes(self):
+        progress = []
+        inputs = [feature(1, box(0, 0, 100, 100), '"building"=>"yes"')]
+        inputs.extend(
+            feature(
+                identifier,
+                box(identifier, identifier, identifier + 1, identifier + 1),
+                '"building:part"=>"yes"',
+                building=None,
+            )
+            for identifier in range(2, 207)
+        )
+
+        _buildings, report, _flat = prepare_buildings(
+            inputs,
+            self.rules,
+            on_association_progress=lambda completed, total: progress.append(
+                (completed, total)
+            ),
+        )
+
+        self.assertEqual(progress[0], (0, 205))
+        self.assertEqual(progress[-1], (205, 205))
+        self.assertLessEqual(len(progress), 105)
+        self.assertEqual(report["containmentQueryCount"], 205)
+        self.assertEqual(report["containmentPreparedOutlineCount"], 1)
 
     def test_explicit_relation_promotes_untagged_parent_and_tagged_parts(self):
         outline = feature(

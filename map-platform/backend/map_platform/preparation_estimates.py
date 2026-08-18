@@ -14,7 +14,7 @@ from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from .building_identity import (
     BUILDING_CLOSURE_ALGORITHM_VERSION,
-    BUILDING_EXTRACTION_ALGORITHM_VERSION,
+    BUILDING_NORMALIZATION_ALGORITHM_VERSION,
     BUILDING_SOURCE_INDEX_ALGORITHM_VERSION,
 )
 from .building_scope import BUILDING_SCOPE_POLICY_VERSION
@@ -44,6 +44,9 @@ PUBLIC_BASIS = frozenset(
         "feature_complexity",
         "calibration_hit",
         "calibration_miss",
+        "building_block_cache_hit",
+        "building_block_cache_partial",
+        "building_block_cache_miss",
         "reuse_exact",
         "reuse_subset",
         "phase_progress",
@@ -213,6 +216,7 @@ class EstimateHistory(Protocol):
         source_area_m2: int | None = None,
         building_source_count: int | None = None,
         cache_outcome: str | None = None,
+        building_cache_outcome: str | None = None,
         minimum_samples: int = 20,
         limit: int = 500,
     ) -> list[float]: ...
@@ -398,6 +402,14 @@ class PreparationEstimator:
         completed = set(COMPLETED_BY_PHASE.get(phase, ()))
         completed.update(_string_list(context.get("completedComponents"), 16))
         progress = evidence.get("progress") if isinstance(evidence, dict) else None
+        building_block_cache = (
+            evidence.get("buildingBlockCache")
+            if isinstance(evidence, dict)
+            else None
+        )
+        building_block_cache_outcome = _building_block_cache_outcome(
+            building_block_cache
+        )
         if phase == "building_preprocessing" and isinstance(progress, dict):
             unit = progress.get("unit")
             if unit in {
@@ -406,12 +418,18 @@ class PreparationEstimator:
                 "dependency_snapshot",
                 "building_normalization",
                 "building_complexity",
+                "building_cache_lookup",
+                "building_cache_generation",
+                "building_part_association",
             }:
                 completed.add("source")
             if unit in {
                 "dependency_snapshot",
                 "building_normalization",
                 "building_complexity",
+                "building_cache_lookup",
+                "building_cache_generation",
+                "building_part_association",
             }:
                 completed.update({"source", "dependencies"})
             if (
@@ -421,6 +439,8 @@ class PreparationEstimator:
                 and float(progress["total"]) > 0
             ):
                 completed.add("normalization")
+        if building_block_cache_outcome == "full_hit":
+            completed.add("normalization")
         all_components: dict[str, tuple[float, float]] = {
             name: (float(value[0]), float(value[1]))
             for name, value in baseline["components"].items()
@@ -492,6 +512,12 @@ class PreparationEstimator:
                 basis.append("calibration_miss")
         if isinstance(complexity, dict):
             basis.append("feature_complexity")
+        if building_block_cache_outcome == "full_hit":
+            basis.append("building_block_cache_hit")
+        elif building_block_cache_outcome == "partial_hit":
+            basis.append("building_block_cache_partial")
+        elif building_block_cache_outcome == "cold_miss":
+            basis.append("building_block_cache_miss")
         if completed:
             basis.append("phase_progress")
         if int(job.attempts) > 1:
@@ -569,6 +595,9 @@ class PreparationEstimator:
                         dependencies.get("cacheOutcome")
                         if isinstance(dependencies.get("cacheOutcome"), str)
                         else None
+                    ),
+                    building_cache_outcome=_building_block_cache_outcome(
+                        evidence.get("buildingBlockCache")
                     ),
                     minimum_samples=self.config.minimum_history_samples,
                 )
@@ -1394,7 +1423,7 @@ def _validate_profile(value: Any) -> None:
     if value["buildingProfileVersion"] != BUILDING_PROFILE_VERSION:
         raise ValueError("preparation estimate building profile is stale")
     expected_algorithms = {
-        "buildingNormalization": BUILDING_EXTRACTION_ALGORITHM_VERSION,
+        "buildingNormalization": BUILDING_NORMALIZATION_ALGORITHM_VERSION,
         "buildingSourceIndex": BUILDING_SOURCE_INDEX_ALGORITHM_VERSION,
         "relationClosure": BUILDING_CLOSURE_ALGORITHM_VERSION,
     }
@@ -1540,6 +1569,13 @@ def _validate_estimator_evidence(evidence: Mapping[str, Any]) -> None:
             "preparationRejectedCount",
         },
         "progress": {"completed", "total"},
+        "buildingBlockCache": {
+            "schemaVersion",
+            "requestedBlockCount",
+            "initialHitCount",
+            "initialMissCount",
+            "workerCount",
+        },
     }
     for section_name, fields in counter_sections.items():
         section = evidence.get(section_name)
@@ -1667,6 +1703,23 @@ def _optional_counter(value: Any) -> int | None:
     ):
         return value
     return None
+
+
+def _building_block_cache_outcome(value: Any) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    requested = value.get("requestedBlockCount")
+    hits = value.get("initialHitCount")
+    misses = value.get("initialMissCount")
+    if not all(_finite_nonnegative(item) for item in (requested, hits, misses)):
+        return None
+    if int(requested) <= 0 or int(hits) + int(misses) != int(requested):
+        return None
+    if int(misses) == 0:
+        return "full_hit"
+    if int(hits) == 0:
+        return "cold_miss"
+    return "partial_hit"
 
 
 def _optional_identity(value: Any, *, image: bool) -> str | None:
