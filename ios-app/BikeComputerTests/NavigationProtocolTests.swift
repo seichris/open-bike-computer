@@ -607,6 +607,7 @@ struct NavigationProtocolTests {
         testRouteTransportTypes()
         testMapTrackingPolicy()
         testDeveloperLocationOverride()
+        testLocationAuthorizationRemediationPolicy()
         testRideActivityPolicy()
         testRideDetectionLocationStatusResolver()
         testDeviceGPSPacketBuilder()
@@ -726,6 +727,7 @@ struct NavigationProtocolTests {
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
         await testOfflineMapPollerRetriesTransientFailure()
         await testOfflineMapPollerStopsOnTerminalAndCancellation()
+        testOfflineMapJobFailureMessages()
         testOfflineMapCreateJobURLRequest()
         testOfflineMapListJobsURLRequest()
         testOfflineMapInventoryMutationURLRequests()
@@ -746,6 +748,7 @@ struct NavigationProtocolTests {
         await testOfflineMapCompatibilityArchiveCancellation()
         await testOfflineMapArchiveValidationCancellation()
         testCachedMapInstalledIdentityUsesManifestSession()
+        testSavedMapInventoryMergesOnlyExactDeviceContent()
         testOfflineMapManifestDecoding()
         testMapTransferUploadURLEncodesPlusPathComponents()
         testMapTransferOutcomePolicy()
@@ -5454,102 +5457,14 @@ struct NavigationProtocolTests {
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: false,
-                hasAdvancedPastLocation: false,
-                isLocationAuthorized: false,
-                isNavigationReady: false,
-                hasSDCard: nil,
-                activeMapId: "",
                 confirmedDeviceMapMissing: false
             ),
-            .step(.location),
-            "first launch starts with location"
-        )
-        assertEqual(
-            OfflineMapOnboardingPolicy.presentation(
-                hasCompletedFirstRun: false,
-                hasAdvancedPastLocation: true,
-                isLocationAuthorized: false,
-                isNavigationReady: false,
-                hasSDCard: nil,
-                activeMapId: "",
-                confirmedDeviceMapMissing: false
-            ),
-            .step(.device),
-            "skipping location advances directly to device connection"
-        )
-        assertEqual(
-            OfflineMapOnboardingPolicy.presentation(
-                hasCompletedFirstRun: false,
-                hasAdvancedPastLocation: false,
-                isLocationAuthorized: true,
-                isNavigationReady: false,
-                hasSDCard: nil,
-                activeMapId: "",
-                confirmedDeviceMapMissing: false
-            ),
-            .step(.device),
-            "authorizing location advances directly to device connection"
-        )
-        assertEqual(
-            OfflineMapOnboardingPolicy.presentation(
-                hasCompletedFirstRun: false,
-                hasAdvancedPastLocation: true,
-                isLocationAuthorized: false,
-                isNavigationReady: true,
-                hasSDCard: nil,
-                activeMapId: "",
-                confirmedDeviceMapMissing: false
-            ),
-            .step(.checkingDevice),
-            "the modal remains visible while connected map status loads"
-        )
-        assertEqual(
-            OfflineMapOnboardingPolicy.presentation(
-                hasCompletedFirstRun: false,
-                hasAdvancedPastLocation: true,
-                isLocationAuthorized: false,
-                isNavigationReady: true,
-                hasSDCard: true,
-                activeMapId: "",
-                confirmedDeviceMapMissing: false
-            ),
-            .step(.download),
-            "a connected device with no map advances to download even when location was skipped"
-        )
-        assertEqual(
-            OfflineMapOnboardingPolicy.presentation(
-                hasCompletedFirstRun: false,
-                hasAdvancedPastLocation: true,
-                isLocationAuthorized: true,
-                isNavigationReady: true,
-                hasSDCard: false,
-                activeMapId: "",
-                confirmedDeviceMapMissing: false
-            ),
-            .step(.storageUnavailable),
-            "missing storage keeps onboarding visible with recovery guidance"
-        )
-        assertEqual(
-            OfflineMapOnboardingPolicy.presentation(
-                hasCompletedFirstRun: false,
-                hasAdvancedPastLocation: true,
-                isLocationAuthorized: true,
-                isNavigationReady: true,
-                hasSDCard: true,
-                activeMapId: "installed-map",
-                confirmedDeviceMapMissing: false
-            ),
-            .completeFirstRun,
-            "an installed map completes first-run onboarding"
+            .step(.welcome),
+            "first launch starts with the Bicino welcome"
         )
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: true,
-                hasAdvancedPastLocation: true,
-                isLocationAuthorized: true,
-                isNavigationReady: true,
-                hasSDCard: true,
-                activeMapId: "",
                 confirmedDeviceMapMissing: true
             ),
             .step(.download),
@@ -5558,11 +5473,6 @@ struct NavigationProtocolTests {
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: true,
-                hasAdvancedPastLocation: true,
-                isLocationAuthorized: true,
-                isNavigationReady: true,
-                hasSDCard: true,
-                activeMapId: "installed-map",
                 confirmedDeviceMapMissing: false
             ),
             .hidden,
@@ -5709,6 +5619,37 @@ struct NavigationProtocolTests {
             )?.value,
             "Re-estimating after retry…",
             "retry pending state has explicit copy"
+        )
+        let retryWithStaleAvailableEstimate = decode(
+            """
+            {
+              "jobId": "estimate-retry-stale",
+              "status": "queued",
+              "attempts": 2,
+              "createdAt": "2026-08-10T00:00:00Z",
+              "preparationEstimate": {
+                "schemaVersion": 1,
+                "modelVersion": "map-preparation-v1",
+                "revision": 4,
+                "state": "available",
+                "generatedAt": "2026-08-10T01:00:00Z",
+                "attempt": 1,
+                "basedOnPhase": "building_complexity",
+                "confidence": "medium",
+                "remaining": {"lowerSeconds": 60, "upperSeconds": 120},
+                "basis": ["baseline_profile"],
+                "sampleCount": 24
+              }
+            }
+            """
+        )
+        assertEqual(
+            OfflineMapPreparationEstimatePresentation.presentation(
+                for: retryWithStaleAvailableEstimate,
+                now: now
+            )?.value,
+            "Re-estimating after retry…",
+            "newly claimed retry suppresses the previous attempt's stale estimate"
         )
         let malformed = decode(
             """
@@ -6054,6 +5995,40 @@ struct NavigationProtocolTests {
             excludedJobIds: ["job-regenerated", "job-running", "job-cached-old"]
         )
         assertEqual(none, nil, "terminal and ready-without-map jobs are not recoverable")
+
+        guard let legacyRetry = offlineMapJob(
+            jobId: "job-legacy-retry",
+            status: "failed",
+            errorCode: "map_build_failed",
+            attempts: 1,
+            maxAttempts: 3,
+            createdAt: "2026-07-12T09:00:00Z",
+            updatedAt: "2026-07-12T09:00:00Z",
+            clientInstallationId: "installation-mine"
+        ) else {
+            assert(false, "legacy retry recovery fixture should decode")
+            return
+        }
+        let legacySelection = OfflineMapJobRecoverySelector.select(
+            jobs: [legacyRetry],
+            clientInstallationId: "installation-mine",
+            now: Date(timeIntervalSince1970: 1_783_846_805)
+        )
+        assertEqual(
+            legacySelection?.jobId,
+            "job-legacy-retry",
+            "recovery discovers an old worker's transient failed-to-queued job"
+        )
+        let staleLegacySelection = OfflineMapJobRecoverySelector.select(
+            jobs: [legacyRetry],
+            clientInstallationId: "installation-mine",
+            now: Date(timeIntervalSince1970: 1_783_846_840)
+        )
+        assertEqual(
+            staleLegacySelection,
+            nil,
+            "recovery does not repeatedly adopt a permanent legacy-shaped failure"
+        )
 
     }
 
@@ -7622,11 +7597,90 @@ struct NavigationProtocolTests {
 
     @MainActor
     static func testOfflineMapPollerStopsOnTerminalAndCancellation() async {
-        guard let failed = offlineMapJob(status: "failed", error: "conversion failed"),
-              let running = offlineMapJob(status: "converting_features") else {
+        guard let failed = offlineMapJob(
+            status: "failed",
+            error: "selected building scope exceeds policy; jobId=failed-job",
+            errorCode: "building_scope_exceeded"
+        ),
+              let running = offlineMapJob(status: "converting_features"),
+              let exhausted = offlineMapJob(
+                status: "failed",
+                error: "worker failed; jobId=exhausted-job",
+                errorCode: "map_build_failed"
+              ),
+              let cancelled = offlineMapJob(status: "cancelled"),
+              let expired = offlineMapJob(status: "expired"),
+              let legacyRetryFailure = offlineMapJob(
+                status: "failed",
+                error: "temporary worker failure; jobId=legacy-retry-job",
+                errorCode: "map_build_failed",
+                attempts: 1,
+                maxAttempts: 3
+              ),
+              let queued = offlineMapJob(status: "queued", attempts: 1, maxAttempts: 3),
+              let ready = offlineMapJob(status: "ready", mapId: "map-ready") else {
             assert(false, "terminal poller test jobs should decode")
             return
         }
+
+        var legacyRetryFetchCount = 0
+        let legacyRetryResult = try? await OfflineMapJobPoller.waitForReady(
+            jobId: "legacy-retry-job",
+            pollIntervalNanoseconds: 0,
+            fetch: { _ in
+                legacyRetryFetchCount += 1
+                switch legacyRetryFetchCount {
+                case 1...3: return legacyRetryFailure
+                case 4: return queued
+                default: return ready
+                }
+            },
+            sleep: { _ in },
+            onUpdate: { _ in },
+            onRetry: {}
+        )
+        assertEqual(
+            legacyRetryResult?.mapId,
+            "map-ready",
+            "poller tolerates the old worker's transient failed-to-queued transition"
+        )
+        assertEqual(
+            legacyRetryFetchCount,
+            5,
+            "poller tolerates repeated legacy failures within the bounded grace window"
+        )
+
+        var inlineFailureFetchCount = 0
+        var inlineFailureClock: TimeInterval = 0
+        do {
+            _ = try await OfflineMapJobPoller.waitForReady(
+                jobId: "inline-failed-job",
+                pollIntervalNanoseconds: 0,
+                fetch: { _ in
+                    inlineFailureFetchCount += 1
+                    return legacyRetryFailure
+                },
+                sleep: { _ in },
+                onUpdate: { _ in },
+                onRetry: {},
+                legacyFailedGraceSeconds: 1,
+                monotonicNow: {
+                    defer { inlineFailureClock += 2 }
+                    return inlineFailureClock
+                }
+            )
+            assert(false, "repeated legacy-shaped failure should be terminal")
+        } catch OfflineMapPlatformError.mapJobFailed {
+            assertEqual(
+                inlineFailureFetchCount,
+                2,
+                "inline failure stops when the compatibility grace window ends"
+            )
+        } catch {
+            assert(false, "repeated legacy-shaped failure should use platform error")
+        }
+
+        assert(exhausted.isTerminal, "a failed final attempt is terminal")
 
         do {
             _ = try await OfflineMapJobPoller.waitForReady(
@@ -7638,11 +7692,78 @@ struct NavigationProtocolTests {
                 onRetry: {}
             )
             assert(false, "terminal map job should throw")
-        } catch OfflineMapPlatformError.serverStatus(let status, let body) {
-            assertEqual(status, 409, "terminal map job uses conflict status")
-            assert(body.contains("conversion failed"), "terminal map job preserves server error")
+        } catch OfflineMapPlatformError.mapJobFailed(let code, let message) {
+            assertEqual(code, "building_scope_exceeded", "terminal map job preserves typed server code")
+            assert(message.contains("selected building scope"), "terminal map job preserves diagnostic detail")
+            let displayMessage = OfflineMapPlatformError
+                .mapJobFailed(code: code, message: message)
+                .localizedDescription
+            assert(
+                displayMessage.contains("Choose a smaller area"),
+                "building scope failure provides an actionable recovery"
+            )
+            assert(
+                !displayMessage.contains("jobId="),
+                "building scope failure hides internal diagnostics from the user"
+            )
         } catch {
             assert(false, "terminal map job should use platform error")
+        }
+
+        do {
+            _ = try await OfflineMapJobPoller.waitForReady(
+                jobId: "exhausted-job",
+                pollIntervalNanoseconds: 0,
+                fetch: { _ in exhausted },
+                sleep: { _ in },
+                onUpdate: { _ in },
+                onRetry: {}
+            )
+            assert(false, "exhausted map job should throw")
+        } catch OfflineMapPlatformError.mapJobFailed(let code, _) {
+            assertEqual(code, "map_build_failed", "exhausted map job preserves its stable code")
+        } catch {
+            assert(false, "exhausted map job should use platform error")
+        }
+
+        do {
+            _ = try await OfflineMapJobPoller.waitForReady(
+                jobId: "cancelled-job",
+                pollIntervalNanoseconds: 0,
+                fetch: { _ in cancelled },
+                sleep: { _ in },
+                onUpdate: { _ in },
+                onRetry: {}
+            )
+            assert(false, "cancelled map job should throw")
+        } catch OfflineMapPlatformError.mapJobCancelled {
+            assert(
+                OfflineMapPlatformError.mapJobCancelled.localizedDescription
+                    .contains("was cancelled"),
+                "cancelled map job explains what happened"
+            )
+        } catch {
+            assert(false, "cancelled map job should use its typed platform error")
+        }
+
+        do {
+            _ = try await OfflineMapJobPoller.waitForReady(
+                jobId: "expired-job",
+                pollIntervalNanoseconds: 0,
+                fetch: { _ in expired },
+                sleep: { _ in },
+                onUpdate: { _ in },
+                onRetry: {}
+            )
+            assert(false, "expired map job should throw")
+        } catch OfflineMapPlatformError.mapJobExpired {
+            assert(
+                OfflineMapPlatformError.mapJobExpired.localizedDescription
+                    .contains("Start a new download"),
+                "expired map job provides the recovery action"
+            )
+        } catch {
+            assert(false, "expired map job should use its typed platform error")
         }
 
         do {
@@ -7662,12 +7783,51 @@ struct NavigationProtocolTests {
         }
     }
 
+    static func testOfflineMapJobFailureMessages() {
+        let internalDiagnostic = "internal details; jobId=failed-job; /private/server/path"
+        let expectations: [(String?, String)] = [
+            ("building_scope_exceeded", "Choose a smaller area"),
+            ("building_source_snapshot_changed", "Retry the same area"),
+            ("source_cache_unavailable", "temporarily unavailable"),
+            ("building_relation_incomplete", "Adjust the selected area slightly"),
+            ("building_calibration_unavailable", "3D building data could not be prepared"),
+            ("building_scope_policy_invalid", "temporarily misconfigured"),
+            ("map_build_failed", "after several attempts"),
+            ("map_stream_format_invalid", "generated map data was invalid"),
+            ("map_stream_build_failed", "could not be prepared"),
+            ("map_stream_signing_failed", "secured for download"),
+            ("artifact_storage_failed", "stored for download"),
+            ("future_failure_code", "couldn't build this map"),
+            (nil, "couldn't build this map"),
+        ]
+
+        for (code, recoveryText) in expectations {
+            let codeLabel = code ?? "missing code"
+            let displayMessage = OfflineMapPlatformError
+                .mapJobFailed(code: code, message: internalDiagnostic)
+                .localizedDescription
+            assert(
+                displayMessage.contains(recoveryText),
+                "\(codeLabel) provides actionable recovery guidance"
+            )
+            assert(
+                !displayMessage.contains("jobId=") &&
+                    !displayMessage.contains("/private/server/path"),
+                "\(codeLabel) hides internal diagnostics from the user"
+            )
+        }
+    }
+
     static func offlineMapJob(
         jobId: String? = nil,
         status: String,
         mapId: String? = nil,
         error: String? = nil,
+        errorCode: String? = nil,
+        attempts: Int? = nil,
+        maxAttempts: Int? = nil,
         createdAt: String? = nil,
+        updatedAt: String? = nil,
         clientInstallationId: String? = nil,
         clientRequestId: String? = nil,
         installOnDevice: Bool? = nil
@@ -7675,7 +7835,11 @@ struct NavigationProtocolTests {
         var payload: [String: Any] = ["jobId": jobId ?? "job-\(status)", "status": status]
         if let mapId { payload["mapId"] = mapId }
         if let error { payload["error"] = error }
+        if let errorCode { payload["errorCode"] = errorCode }
+        if let attempts { payload["attempts"] = attempts }
+        if let maxAttempts { payload["maxAttempts"] = maxAttempts }
         if let createdAt { payload["createdAt"] = createdAt }
+        if let updatedAt { payload["updatedAt"] = updatedAt }
         if let clientInstallationId { payload["clientInstallationId"] = clientInstallationId }
         if let clientRequestId { payload["clientRequestId"] = clientRequestId }
         if let installOnDevice { payload["installOnDevice"] = installOnDevice }
@@ -8143,11 +8307,25 @@ struct NavigationProtocolTests {
             "Saved Maps omits redundant device and transfer summary rows"
         )
         assert(
-            source.contains("if isInstalled {") &&
+            source.contains("if item.isActiveOnDevice {") &&
                 source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
-                source.contains("\"arrow.clockwise.circle\"") &&
-                source.contains("\"arrow.up.circle\""),
-            "each saved map shows installed status, resume, or upload as exclusive actions"
+                source.contains("? \"arrow.clockwise.circle\"") &&
+                source.contains(": \"arrow.up.circle\"") &&
+                !source.contains("IPhoneDownloadStatusIcon") &&
+                !source.contains("Image(systemName: \"iphone\")") &&
+                !source.contains("BikeComputerMapStatusIcon") &&
+                !source.contains("Text(\"b\")"),
+            "saved maps use the same active check and inactive upload icons regardless of origin"
+        )
+        assert(
+            source.contains("Text(\"No offline maps yet\")"),
+            "Saved Maps uses the agreed empty-state copy"
+        )
+        assert(
+            source.contains("This map is not saved on this iPhone") &&
+                source.contains("is active on the Bike Computer") &&
+                source.contains("Transfer \\(displayName) to device"),
+            "saved-map presence indicators expose accessible state labels"
         )
         assert(
             source.contains("manager.resumePausedMapUpload(bleManager: bleManager)") &&
@@ -8170,10 +8348,24 @@ struct NavigationProtocolTests {
         )
         assert(
             source.contains("SavedMapThumbnail(") &&
-                source.contains("manager.previewImage(forCachedPack: packURL)") &&
-                source.contains("manager.loadPreviewIfNeeded(forCachedPack: packURL)") &&
+                source.contains("let previewImage = manager.previewImage(for: item)") &&
+                source.contains("manager.loadPreviewIfNeeded(for: item)") &&
                 source.contains(".frame(width: 52, height: 36)"),
             "each saved map shows a fixed-size preview before its editable name"
+        )
+        assert(
+            source.contains("presentedPreview = SavedMapPreviewPresentation(") &&
+                source.contains(".sheet(item: $presentedPreview)") &&
+                source.contains("SavedMapPreviewSheet(preview: preview)") &&
+                source.contains(".accessibilityLabel(\"Show preview for \\(displayName)\")") &&
+                source.contains("Button(\"Close\")"),
+            "tapping an available saved-map thumbnail opens an accessible preview modal"
+        )
+        assert(
+            source.contains("manager.savedMapListItems(") &&
+                source.contains("activeDeviceMap: bleManager.activeDeviceMap") &&
+                source.contains("manager.updateActiveDeviceMap(descriptor)"),
+            "Saved Maps includes and tracks the connected Bike Computer inventory"
         )
         let managerSourceURL = URL(fileURLWithPath:
             "ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift"
@@ -8346,6 +8538,14 @@ struct NavigationProtocolTests {
             return
         }
         let developerSource = String(source[developerStart...])
+        let rootSettingsSource = String(source[..<developerStart])
+        assert(
+            !rootSettingsSource.contains("title: \"App Version\"") &&
+                developerSource.contains("Section(header: Text(\"App\"))") &&
+                developerSource.contains("title: \"App Version\"") &&
+                developerSource.contains("value: appVersionText"),
+            "App Version appears only in Developer Settings"
+        )
         assert(
             developerSource.contains(
                 "NavigationOverlaysSettingsSection()\n        }\n        .navigationTitle(\"Developer Settings\")"
@@ -9043,6 +9243,156 @@ struct NavigationProtocolTests {
         )
     }
 
+    @MainActor
+    static func testSavedMapInventoryMergesOnlyExactDeviceContent() {
+        let cacheDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("saved-map-inventory-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: cacheDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+
+        let manifestData = Data("""
+        {"schemaVersion":1,"mapId":"map-1","displayName":"Phone Map"}
+        """.utf8)
+        let packURL = cacheDirectory.appendingPathComponent("map-1.zip")
+        try? makeStoredZip(entries: [
+            ("manifest.json", manifestData),
+            ("VECTMAP/map-1/+0032+0008/123_456.fmb", Data("map-block".utf8)),
+        ]).write(to: packURL)
+        let suite = "saved-map-inventory-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let manager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory
+        )
+        let exactSession = MapTransferSessionIdentity.make(
+            mapId: "map-1",
+            manifestData: manifestData
+        )
+        let exactDevice = DeviceActiveMapDescriptor(
+            mapID: "map-1",
+            sessionID: exactSession,
+            displayName: "Device Name",
+            boundsE7: [1_209_000_000, 307_000_000, 1_219_500_000, 315_500_000]
+        )!
+
+        var items = manager.savedMapListItems(activeDeviceMap: exactDevice)
+        assertEqual(items.count, 1, "the exact device and iPhone map collapse into one row")
+        assert(items[0].isOnIPhone && items[0].isActiveOnDevice,
+               "the merged row exposes both presence states")
+        assertEqual(items[0].displayName, "Phone Map",
+                    "a local saved name wins when exact content is merged")
+
+        let regeneratedDevice = DeviceActiveMapDescriptor(
+            mapID: "map-1",
+            sessionID: "different-session",
+            displayName: "Cloned SD Map",
+            boundsE7: [1_209_000_000, 307_000_000, 1_219_500_000, 315_500_000]
+        )!
+        items = manager.savedMapListItems(activeDeviceMap: regeneratedDevice)
+        assertEqual(items.count, 2,
+                    "same map ID with different content stays as separate device and phone rows")
+        assert(!items[0].isOnIPhone && items[0].isActiveOnDevice,
+               "device-only content sorts first and is not claimed by the iPhone")
+        assert(items[1].isOnIPhone && !items[1].isActiveOnDevice,
+               "the local regenerated map remains uploadable")
+
+        items = manager.savedMapListItems(activeDeviceMap: nil)
+        assertEqual(items.count, 1, "disconnect removes live device-only inventory")
+        assert(items[0].isOnIPhone && !items[0].isActiveOnDevice,
+               "disconnect preserves the iPhone cache without stale device presence")
+
+        manager.deleteCachedPack(at: packURL)
+        items = manager.savedMapListItems(activeDeviceMap: exactDevice)
+        assertEqual(items.count, 1,
+                    "deleting the iPhone copy keeps the active device map visible")
+        assert(!items[0].isOnIPhone && items[0].isActiveOnDevice,
+               "local deletion converts a merged row into device-only inventory")
+        assert(manager.savedMapListItems(activeDeviceMap: nil).isEmpty,
+               "no local or connected-device map produces an empty inventory")
+
+        let streamCacheDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(
+                "saved-stream-inventory-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try? FileManager.default.createDirectory(
+            at: streamCacheDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: streamCacheDirectory) }
+        let streamURL = streamCacheDirectory.appendingPathComponent("stream-map.bmap")
+        try? Data([1, 2, 3, 4]).write(to: streamURL)
+        let signedReceipt = String(repeating: "d", count: 64)
+        let streamArtifact = OfflineMapArtifact(
+            format: OfflineMapArtifact.bikeMapStreamFormat,
+            mediaType: "application/vnd.openbikecomputer.map-stream",
+            filename: streamURL.lastPathComponent,
+            objectKey: "maps/stream-map.bmap",
+            bytes: 4,
+            sha256: String(repeating: "a", count: 64),
+            manifestReceipt: String(repeating: "b", count: 64),
+            signedManifestReceipt: signedReceipt
+        )
+        let streamMetadata = SavedMapArtifactMetadata(
+            schemaVersion: SavedMapArtifactMetadata.currentSchemaVersion,
+            mapID: "stream-map",
+            displayName: "Stream Map",
+            localArtifactFilename: streamURL.lastPathComponent,
+            streamFormatVersion: 1,
+            rendererFormatVersion: 2,
+            jobID: nil,
+            serverURLString: nil,
+            clientInstallationID: nil,
+            primaryArtifact: streamArtifact,
+            legacyArtifact: nil,
+            lastTransferProtocol: nil,
+            lastTransferStreamFormat: nil,
+            lastTransferSessionID: nil,
+            lastBackgroundTaskID: nil,
+            lastDeviceSequence: nil,
+            lastDeviceState: nil,
+            lastDeviceStep: nil,
+            lastDeviceStepCount: nil,
+            lastDeviceProgress: nil,
+            expectedActiveMapID: nil,
+            expectedActiveSessionID: nil,
+            lastTransferOutcome: nil
+        )
+        try? SavedMapArtifactMetadataStore.save(streamMetadata, for: streamURL)
+        let streamManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: streamCacheDirectory
+        )
+        let legacySession = "stream-map-legacy-session"
+        let legacyDevice = DeviceActiveMapDescriptor(
+            mapID: "stream-map",
+            sessionID: legacySession
+        )!
+        assertEqual(
+            streamManager.savedMapListItems(activeDeviceMap: legacyDevice).count,
+            2,
+            "a stream pack does not claim an unknown legacy fallback session"
+        )
+        streamManager.updateSavedMapTransferMetadata(
+            mapID: "stream-map",
+            protocolVersion: 1,
+            streamFormatVersion: nil,
+            sessionID: legacySession,
+            outcome: "installed"
+        )
+        let refreshedItems = streamManager.savedMapListItems(
+            activeDeviceMap: legacyDevice
+        )
+        assertEqual(refreshedItems.count, 1,
+                    "recorded legacy transfer identity refreshes the live inventory")
+        assert(refreshedItems[0].isOnIPhone && refreshedItems[0].isActiveOnDevice,
+               "protocol-v1 fallback installation merges without an app relaunch")
+    }
+
     static func testOfflineMapManifestDecoding() {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("offline-map-manifest-test-\(UUID().uuidString).zip")
@@ -9677,6 +10027,9 @@ struct NavigationProtocolTests {
           "enabled": true,
           "activeMapId": "old-map",
           "activeSessionId": "old-map-session",
+          "activeManifestReceipt": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "activeMapDisplayName": "Old Map",
+          "activeMapBoundsE7": [1037500000, 12400000, 1039300000, 13700000],
           "activation": {
             "status": "failed",
             "sequence": 9,
@@ -9702,6 +10055,13 @@ struct NavigationProtocolTests {
         assertEqual(status.activation?.error?.code, "file_sha256", "status exposes activation error code")
         assertEqual(status.activation?.error?.message, "sha mismatch for VECTMAP/new-map/1.fmb", "status exposes activation error message")
         assertEqual(status.activeSessionId, "old-map-session", "status exposes durable active session identity")
+        assertEqual(status.activeManifestReceipt, String(repeating: "a", count: 64),
+                    "HTTP status exposes the active manifest receipt")
+        assertEqual(status.activeMapDisplayName, "Old Map",
+                    "HTTP status exposes the active display name")
+        assertEqual(status.activeMapBoundsE7,
+                    [1_037_500_000, 12_400_000, 1_039_300_000, 13_700_000],
+                    "HTTP status exposes normalized preview bounds")
     }
 
     static func testFirmwareManifestDecodingAndHash() {
@@ -13227,8 +13587,46 @@ struct NavigationProtocolTests {
                 knownDeviceCount: 0,
                 isExplicitBikeComputerSetup: false
             ),
+            "Add a Bicino Bike Computer",
+            "empty settings presents the bike-computer setup title"
+        )
+        assertEqual(
+            BikeComputerSettingsPresentationPolicy.settingsLinkTitle(
+                knownDeviceCount: 0
+            ),
+            "Connect a Bicino Bike Computer!",
+            "empty settings presents a clear add-device action"
+        )
+        assertEqual(
+            BikeComputerSettingsPresentationPolicy.settingsLinkTitle(
+                knownDeviceCount: 1
+            ),
             "My Bike Computer",
-            "combined settings keeps sensors discoverable without a bike computer"
+            "registered settings keeps the existing singular title"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldPromoteSettingsLink(
+                knownDeviceCount: 0
+            ),
+            "the add-device action is promoted only for an empty registry"
+        )
+        assert(
+            !BikeComputerSettingsPresentationPolicy.shouldPromoteSettingsLink(
+                knownDeviceCount: 1
+            ),
+            "a registered bike computer keeps the settings link in its usual position"
+        )
+        assert(
+            !BikeComputerSettingsPresentationPolicy.shouldShowDeviceScreens(
+                knownDeviceCount: 0
+            ),
+            "an empty registry replaces unavailable device screens"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldShowDeviceScreens(
+                knownDeviceCount: 1
+            ),
+            "a registered bike computer keeps device screen settings"
         )
         assert(
             !BikeComputerSettingsPresentationPolicy.shouldStartDiscovery(
@@ -13288,9 +13686,9 @@ struct NavigationProtocolTests {
         assert(lifecycle.markComparisonReady(for: otherPeripheralID),
                "the selected Bike Computer can advance to code comparison")
         assert(lifecycle.beginConfirmation(for: otherPeripheralID),
-               "the matching-code action can submit once")
+               "the physical matching-code confirmation submits automatically")
         assert(!lifecycle.beginConfirmation(for: otherPeripheralID),
-               "a matching-code confirmation cannot be submitted twice")
+               "an automatic pairing confirmation cannot be submitted twice")
         let handoffCancellation = lifecycle.cancel(
             connectedIdentifier: peripheralID
         )
@@ -14040,6 +14438,58 @@ struct NavigationProtocolTests {
             BLEDiscoverySignalPolicy.description(for: 127),
             "Unavailable",
             "Core Bluetooth's RSSI sentinel is not displayed as a real dBm value"
+        )
+        let initialNearbyObservation = Date(timeIntervalSince1970: 1_000)
+        var nearbyOrderStabilizer = BLEExplicitDiscoveryOrderStabilizer()
+        var stableNearbyDevices: [DiscoveredBikeComputerDevice] = []
+        var initiallyWeaker = weaker
+        initiallyWeaker.lastSeenAt = initialNearbyObservation
+        var initiallyStronger = candidate
+        initiallyStronger.lastSeenAt =
+            initialNearbyObservation.addingTimeInterval(0.1)
+        nearbyOrderStabilizer.merge(
+            initiallyWeaker,
+            into: &stableNearbyDevices,
+            now: initiallyWeaker.lastSeenAt
+        )
+        nearbyOrderStabilizer.merge(
+            initiallyStronger,
+            into: &stableNearbyDevices,
+            now: initiallyStronger.lastSeenAt
+        )
+        assertEqual(
+            stableNearbyDevices.map(\.peripheralIdentifier),
+            [initiallyWeaker.peripheralIdentifier,
+             initiallyStronger.peripheralIdentifier],
+            "new Nearby rows append without displacing visible rows"
+        )
+        initiallyWeaker.rssi = -80
+        initiallyWeaker.lastSeenAt =
+            initialNearbyObservation.addingTimeInterval(1)
+        nearbyOrderStabilizer.merge(
+            initiallyWeaker,
+            into: &stableNearbyDevices,
+            now: initiallyWeaker.lastSeenAt
+        )
+        assertEqual(
+            stableNearbyDevices.map(\.peripheralIdentifier),
+            [initiallyWeaker.peripheralIdentifier,
+             initiallyStronger.peripheralIdentifier],
+            "RSSI updates preserve Nearby row order during the stability window"
+        )
+        initiallyStronger.lastSeenAt = initialNearbyObservation.addingTimeInterval(
+            BLEExplicitDiscoveryOrderStabilizer.minimumReorderInterval
+        )
+        nearbyOrderStabilizer.merge(
+            initiallyStronger,
+            into: &stableNearbyDevices,
+            now: initiallyStronger.lastSeenAt
+        )
+        assertEqual(
+            stableNearbyDevices.map(\.peripheralIdentifier),
+            [initiallyStronger.peripheralIdentifier,
+             initiallyWeaker.peripheralIdentifier],
+            "Nearby rows refresh by signal strength after five stable seconds"
         )
         assertEqual(
             BLEOpportunisticCandidatePolicy.strongest(
@@ -15571,7 +16021,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activeManifestReceipt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","activeRendererFormat":2,"labelProfileVersion":1,"labelLanguages":["ja","en"],"fontAssetHealthy":true,"activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activeManifestReceipt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","activeMapDisplayName":"Kyoto Hills","activeMapBoundsE7":[1356000000,349000000,1360000000,352000000],"activeRendererFormat":2,"labelProfileVersion":1,"labelLanguages":["ja","en"],"fontAssetHealthy":true,"activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
         """
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -15583,6 +16033,12 @@ struct NavigationProtocolTests {
         assertEqual(manager.activeMapManifestReceipt,
                     String(repeating: "a", count: 64),
                     "status parser associates label health with the active receipt")
+        assertEqual(manager.activeDeviceMap?.mapID, "kyoto-v1",
+                    "status parser publishes a device map descriptor")
+        assertEqual(manager.activeDeviceMap?.displayName, "Kyoto Hills",
+                    "device map descriptor exposes its manifest display name")
+        assertEqual(manager.activeDeviceMap?.bounds?.minLongitude, 135.6,
+                    "device map descriptor converts integer preview bounds")
         assertEqual(manager.activeMapRendererFormat, 2,
                     "status parser exposes active renderer target")
         assertEqual(manager.activeMapLabelProfileVersion, 1,
@@ -15602,12 +16058,92 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceMapFoundForCurrentLocation, false, "status parser exposes current map coverage")
         assertEqual(manager.deviceMapBlockCount, 0, "status parser exposes current map block count")
         assertEqual(manager.mapTransferLastError, "previous: previous upload failed", "status parser exposes last transfer error")
+
+        let legacyPacket = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
+            "{\"enabled\":true,\"activeMapId\":\"legacy-map\"}".utf8
+        )
+        assert(manager.handleMapTransferStatusNotification(legacyPacket),
+               "legacy map status should remain supported")
+        assertEqual(manager.activeDeviceMap?.mapID, "legacy-map",
+                    "older firmware still creates a conservative device-only descriptor")
+        assertEqual(manager.activeDeviceMap?.sessionID, nil,
+                    "older firmware without a session cannot merge with a local pack")
+
+        let malformedPresentationPacket =
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
+                """
+                {"enabled":true,"activeMapId":"safe-map","activeSessionId":"safe-session","activeMapDisplayName":42,"activeMapBoundsE7":[1219500000,315500000,1209000000,307000000]}
+                """.utf8
+            )
+        assert(manager.handleMapTransferStatusNotification(malformedPresentationPacket),
+               "malformed optional map presentation should not reject the status")
+        assertEqual(manager.activeDeviceMap?.mapID, "safe-map",
+                    "valid active identity survives malformed optional presentation")
+        assertEqual(manager.activeDeviceMap?.displayName, nil,
+                    "malformed optional display name is omitted")
+        assertEqual(manager.activeDeviceMap?.bounds, nil,
+                    "reversed optional preview bounds are omitted")
+
+        let booleanBoundsPacket =
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
+                """
+                {"enabled":true,"activeMapId":"safe-map","activeMapBoundsE7":[false,false,true,true]}
+                """.utf8
+            )
+        assert(manager.handleMapTransferStatusNotification(booleanBoundsPacket),
+               "boolean optional bounds should not reject the status")
+        assertEqual(manager.activeDeviceMap?.bounds, nil,
+                    "JSON booleans are not accepted as integer coordinates")
+
+        let oversizedBoundsPacket =
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
+                """
+                {"enabled":true,"activeMapId":"safe-map","activeMapBoundsE7":[100000000,100000000,200000000,200000000,2147483648]}
+                """.utf8
+            )
+        assert(manager.handleMapTransferStatusNotification(oversizedBoundsPacket),
+               "oversized optional bounds should not reject the status")
+        assertEqual(manager.activeDeviceMap?.bounds, nil,
+                    "invalid extra coordinates cannot be compacted into a valid bounds array")
+
+        let collisionA = DeviceActiveMapDescriptor(
+            mapID: "a--b",
+            sessionID: "c",
+            boundsE7: [100000000, 100000000, 200000000, 200000000]
+        )!
+        let collisionB = DeviceActiveMapDescriptor(
+            mapID: "a",
+            sessionID: "b--c",
+            boundsE7: [100000000, 100000000, 200000000, 200000000]
+        )!
+        assert(collisionA.previewFilename != collisionB.previewFilename,
+               "preview cache filenames bind unambiguous map and session identities")
+        let legacyBoundsA = DeviceActiveMapDescriptor(
+            mapID: ".legacy-map",
+            boundsE7: [100000000, 100000000, 200000000, 200000000]
+        )!
+        let legacyBoundsB = DeviceActiveMapDescriptor(
+            mapID: ".legacy-map",
+            boundsE7: [300000000, 300000000, 400000000, 400000000]
+        )!
+        assert(legacyBoundsA.previewFilename != legacyBoundsB.previewFilename,
+               "sessionless preview identity includes presentation metadata")
+        assert(legacyBoundsA.previewFilename.hasPrefix("device-map-"),
+               "valid dot-prefixed map IDs cannot create hidden preview files")
+
+        let missingActivePacket = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
+            "{\"enabled\":true,\"activeError\":{\"code\":\"installed_manifest\"}}".utf8
+        )
+        assert(manager.handleMapTransferStatusNotification(missingActivePacket),
+               "active-map error status should be consumed")
+        assertEqual(manager.activeDeviceMap, nil,
+                    "a complete status without an active map clears device inventory")
     }
 
     static func testBLEManagerReassemblesChunkedMapTransferStatus() {
         let manager = BLEManager()
         let body = Data("""
-        {"enabled":true,"baseUrl":"http://192.168.4.20:8080","activeMapId":"custom-map","activeSessionId":"custom-map-session","activation":{"status":"installed","sequence":9,"sessionId":"custom-map-session"}}
+        {"enabled":true,"baseUrl":"http://192.168.4.20:8080","activeMapId":"custom-map","activeSessionId":"custom-map-session","activeMapDisplayName":"Custom Map","activeMapBoundsE7":[1209000000,307000000,1219500000,315500000],"activation":{"status":"installed","sequence":9,"sessionId":"custom-map-session"}}
         """.utf8)
         let chunkSize = 13
         let chunkCount = UInt8((body.count + chunkSize - 1) / chunkSize)
@@ -15626,6 +16162,10 @@ struct NavigationProtocolTests {
                     "chunk reassembly exposes active map")
         assertEqual(manager.mapTransferActiveSessionId, "custom-map-session",
                     "chunk reassembly exposes durable active session")
+        assertEqual(manager.activeDeviceMap?.displayName, "Custom Map",
+                    "chunk reassembly publishes the device map display name")
+        assertEqual(manager.activeDeviceMap?.bounds?.maxLatitude, 31.55,
+                    "chunk reassembly publishes the device map preview bounds")
         assertEqual(manager.mapTransferActivationStatus, "installed",
                     "chunk reassembly exposes activation state")
         assertEqual(manager.mapTransferActivationSequence, 9,
@@ -15634,6 +16174,12 @@ struct NavigationProtocolTests {
 
     static func testBLEManagerCompletesRetransmittedChunkedMapTransferStatus() {
         let manager = BLEManager()
+        let previousBody = Data(
+            "{\"enabled\":true,\"activeMapId\":\"previous-map\",\"activeSessionId\":\"previous-session\"}".utf8
+        )
+        assert(manager.handleMapTransferStatusNotification(
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + previousBody
+        ), "a previous complete map status should seed the live descriptor")
         let body = Data("""
         {"enabled":false,"activeMapId":"shanghai-v2","activeSessionId":"session-v2","activeRendererFormat":2,"labelProfileVersion":1,"labelLanguages":["zh-Hans","en"],"fontAssetHealthy":true,"activation":{"status":"installed","sequence":10,"sessionId":"session-v2","mapId":"shanghai-v2","step":3,"steps":3,"progress":100}}
         """.utf8)
@@ -15654,8 +16200,10 @@ struct NavigationProtocolTests {
             assert(manager.handleMapTransferStatusNotification(frame(index: index)),
                    "first lossy status response should retain received chunks")
         }
-        assertEqual(manager.mapTransferActiveMapId, "",
-                    "an incomplete response must not publish partial state")
+        assertEqual(manager.mapTransferActiveMapId, "previous-map",
+                    "an incomplete response must retain the previous complete state")
+        assertEqual(manager.activeDeviceMap?.sessionID, "previous-session",
+                    "an incomplete response must retain complete device inventory")
 
         for index in UInt8(0)..<chunkCount {
             assert(manager.handleMapTransferStatusNotification(frame(index: index)),
@@ -17141,6 +17689,78 @@ struct NavigationProtocolTests {
         assertEqual(overridden.horizontalAccuracy, 4, "override should preserve accuracy")
         assertEqual(overridden.course, 72, "override should preserve course")
         assertEqual(overridden.speed, 8, "override should preserve speed")
+    }
+
+    static func testLocationAuthorizationRemediationPolicy() {
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.action(
+                for: .notDetermined
+            ),
+            .requestInApp,
+            "first-use location access presents the native permission prompt"
+        )
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.buttonTitle(
+                for: .notDetermined
+            ),
+            "Continue",
+            "first-use permission copy does not imply that access is already granted"
+        )
+        assert(
+            !LocationAuthorizationRemediationPolicy.allowsDismissal(
+                for: .notDetermined
+            ),
+            "the pre-permission explanation cannot defer the native prompt"
+        )
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.action(for: .denied),
+            .openSettings,
+            "denied location access directs the user to Apple Settings"
+        )
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.buttonTitle(for: .denied),
+            "Open iPhone Settings",
+            "denied access clearly identifies the post-decision remediation"
+        )
+        assert(
+            LocationAuthorizationRemediationPolicy.allowsDismissal(for: .denied),
+            "post-denial remediation remains optional"
+        )
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.action(for: .restricted),
+            .openSettings,
+            "restricted location access directs the user to Apple Settings"
+        )
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.buttonTitle(
+                for: .restricted
+            ),
+            "Open iPhone Settings",
+            "restricted access uses the post-decision settings action"
+        )
+#if !os(macOS)
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.action(
+                for: .authorizedWhenInUse
+            ),
+            .none,
+            "authorized location access needs no remediation"
+        )
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.buttonTitle(
+                for: .authorizedWhenInUse
+            ),
+            nil,
+            "authorized access does not show a permission action"
+        )
+#endif
+        assertEqual(
+            LocationAuthorizationRemediationPolicy.action(
+                for: .authorizedAlways
+            ),
+            .none,
+            "always-authorized location access needs no remediation"
+        )
     }
 
     static func testNavigationEngineIgnoresLiveLocationFarFromRouteStart() {

@@ -181,6 +181,9 @@ for section in config.sections():
         )
 
 ci_workflow = (repo_root / ".github/workflows/ci.yml").read_text()
+firmware_routing = (
+    repo_root / ".github/scripts/changed_components.py"
+).read_text()
 diagnostic_workflow = (
     repo_root / ".github/workflows/firmware-diagnostics.yml"
 ).read_text()
@@ -210,7 +213,7 @@ for environment in light_sleep_profiles:
     assert profile in diagnostic_workflow
 for environment in remote_debug_profiles:
     profile = environment.removeprefix("env:")
-    assert profile in ci_workflow
+    assert profile in firmware_routing
     assert profile in diagnostic_workflow
 
 battery_validation = (

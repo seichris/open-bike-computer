@@ -105,11 +105,19 @@ python -m map_platform.cli worker-loop
 ```
 
 Run ready-time retention, artifact garbage collection, work-directory cleanup,
-and expired rate-limit-pseudonym deletion independently from request traffic:
+expired rate-limit-pseudonym deletion, and lease-aware building-block cache
+retention independently from request traffic:
 
 ```sh
 python -m map_platform.cli maintenance-loop
 ```
+
+Building-block cache generation defaults to four workers and is bounded to
+1-16 with `MAP_PLATFORM_BUILDING_BLOCK_WORKERS`. Derived block-cache namespaces
+default to 14 days of idle retention and a 20 GiB ceiling, configurable with
+`MAP_PLATFORM_BUILDING_BLOCK_CACHE_RETENTION_DAYS` and
+`MAP_PLATFORM_BUILDING_BLOCK_CACHE_MAX_BYTES`. Maintenance skips any namespace
+holding a worker lease.
 
 The configured source PBF must exist under
 `map-platform/backend/data/source-pbf/` before a worker can run, or the worker

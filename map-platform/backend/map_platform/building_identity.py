@@ -20,6 +20,11 @@ BUILDING_CLOSURE_ALGORITHM_VERSION = 1
 BUILDING_CALIBRATION_SCHEMA_VERSION = 1
 BUILDING_CALIBRATION_ALGORITHM_VERSION = 1
 BUILDING_CALIBRATION_CREATION_TOOL = "open-bike-building-calibration"
+BUILDING_BLOCK_CACHE_SCHEMA_VERSION = 1
+BUILDING_NORMALIZATION_ALGORITHM_VERSION = 2
+BUILDING_BLOCK_ENCODING_ALGORITHM_VERSION = 1
+BUILDING_FMB_VERSION = 4
+BUILDING_GEOMETRY_ENGINE_VERSION = "2.0.7"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
@@ -127,6 +132,69 @@ def selected_calibration_identity(
     }
     calibration_key = hashlib.sha256(canonical_json(calibration_document)).hexdigest()
     return {**calibration_document, "calibrationKey": calibration_key}
+
+
+def selected_building_block_cache_identity(
+    *,
+    source_snapshot_sha256: str,
+    rules_path: Path,
+    scope_plan: ScopePlan,
+    calibration_generation: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the request-independent identity for canonical building blocks."""
+    calibration = selected_calibration_identity(
+        source_snapshot_sha256=source_snapshot_sha256,
+        rules_path=rules_path,
+        scope_plan=scope_plan,
+    )
+    calibration_key = calibration["calibrationKey"]
+    if (
+        not isinstance(calibration_generation, dict)
+        or calibration_generation.get("calibrationKey") != calibration_key
+        or not _SHA256_RE.fullmatch(
+            str(calibration_generation.get("manifestSha256") or "")
+        )
+        or not _SHA256_RE.fullmatch(
+            str(calibration_generation.get("entrySetSha256") or "")
+        )
+    ):
+        raise ValueError("building block cache calibration identity is invalid")
+    scope = scope_plan.document
+    body = {
+        "schemaVersion": BUILDING_BLOCK_CACHE_SCHEMA_VERSION,
+        "sourceSnapshotSha256": source_snapshot_sha256,
+        "rulesSha256": calibration["rulesSha256"],
+        "buildingProfileVersion": BUILDING_PROFILE_VERSION,
+        "rendererFormatVersion": 3,
+        "fmbVersion": BUILDING_FMB_VERSION,
+        "blockGridVersion": scope["policy"]["blockGridVersion"],
+        "blockSizeMeters": scope["policy"]["blockSizeMeters"],
+        "selectionSemantics": scope["policy"]["selectionSemantics"],
+        "geometryBufferMeters": scope["policy"]["geometryBufferMeters"],
+        "relationRetryBufferMeters": scope["policy"]["relationRetryBufferMeters"],
+        "maxGeometryBufferMeters": scope["policy"]["maxGeometryBufferMeters"],
+        "normalizationAlgorithmVersion": BUILDING_NORMALIZATION_ALGORITHM_VERSION,
+        "blockEncodingAlgorithmVersion": BUILDING_BLOCK_ENCODING_ALGORITHM_VERSION,
+        "geometryEngine": {
+            "name": "shapely",
+            "version": BUILDING_GEOMETRY_ENGINE_VERSION,
+        },
+        "sourceIndex": {
+            "schemaVersion": BUILDING_SOURCE_INDEX_SCHEMA_VERSION,
+            "algorithmVersion": BUILDING_SOURCE_INDEX_ALGORITHM_VERSION,
+        },
+        "closureAlgorithmVersion": BUILDING_CLOSURE_ALGORITHM_VERSION,
+        "calibration": {
+            "algorithmVersion": BUILDING_CALIBRATION_ALGORITHM_VERSION,
+            "calibrationKey": calibration_key,
+            "manifestSha256": calibration_generation["manifestSha256"],
+            "entrySetSha256": calibration_generation["entrySetSha256"],
+        },
+    }
+    return {
+        **body,
+        "cacheIdentitySha256": hashlib.sha256(canonical_json(body)).hexdigest(),
+    }
 
 
 def calibration_generation_from_manifest(

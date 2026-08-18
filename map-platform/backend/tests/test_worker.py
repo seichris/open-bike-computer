@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from map_platform.artifacts import ArtifactRecord, FileSystemArtifactStore, sha256_file
+from map_platform.building_scope import BuildingScopeError
 from map_platform.jobs import (
     ArtifactGarbageCollectionError,
     JobClaimError,
@@ -46,6 +47,30 @@ class FakePipeline:
         pack_path = Path(tempfile.gettempdir()) / f"map-123-{job.job_id}.zip"
         pack_path.write_bytes(b"zip-data")
         return "map-123", pack_path
+
+
+class DeterministicFailurePipeline:
+    def build(self, job, on_status=None, on_progress=None):
+        del job, on_status, on_progress
+        raise BuildingScopeError(
+            "building_object_limit_exceeded",
+            "building closure exceeds the job object limit",
+        )
+
+
+class BlockingRetryEstimateCoordinator:
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def publish(self, *args, **kwargs):
+        return None
+
+    def publish_pending_retry(self, job_id, *, worker_id):
+        del job_id, worker_id
+        self.started.set()
+        if not self.release.wait(timeout=2):
+            raise TimeoutError("test retry estimate publication was not released")
 
 
 class CancellingPipeline:
@@ -426,6 +451,72 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNone(first.job.to_dict()["progress"])
             self.assertEqual(first.job.to_dict()["errorCode"], "map_build_failed")
             self.assertEqual(first_queued_event["message"], "queued for retry")
+            self.assertEqual(first_queued_event["errorCode"], "map_build_failed")
+            completed_retry_event = next(
+                event
+                for event in loaded.events
+                if event["message"] == "queued for retry"
+            )
+            self.assertEqual(completed_retry_event["errorCode"], "map_build_failed")
+
+    def test_worker_does_not_retry_deterministic_building_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp)
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+
+            result = MapWorker(
+                store,
+                DeterministicFailurePipeline(),
+                worker_id="worker-test",
+            ).run_next()
+            loaded = store.get(job.job_id)
+
+            self.assertTrue(result.processed)
+            self.assertEqual(loaded.status, JobStatus.FAILED)
+            self.assertEqual(loaded.attempts, 1)
+            self.assertEqual(
+                loaded.error_code, "building_object_limit_exceeded"
+            )
+            self.assertIsNotNone(loaded.finished_at)
+
+    def test_retryable_failure_is_never_observable_as_terminal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp)
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            coordinator = BlockingRetryEstimateCoordinator()
+            worker = MapWorker(
+                store,
+                FakePipeline(failures=1),
+                worker_id="worker-retry-state",
+                estimate_coordinator=coordinator,
+            )
+            results = []
+            thread = threading.Thread(target=lambda: results.append(worker.run_next()))
+            thread.start()
+            try:
+                self.assertTrue(coordinator.started.wait(timeout=2))
+                observed = store.get(job.job_id)
+                self.assertEqual(observed.status, JobStatus.QUEUED)
+                self.assertIsNone(observed.finished_at)
+                self.assertEqual(observed.error_code, "map_build_failed")
+                self.assertFalse(
+                    any(event["status"] == "failed" for event in observed.events)
+                )
+            finally:
+                coordinator.release.set()
+                thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].job.status, JobStatus.QUEUED)
 
     def test_monitoring_skips_retryable_attempt_until_job_finishes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -444,6 +535,7 @@ class WorkerTests(unittest.TestCase):
 
             first = worker.run_next()
             self.assertFalse(first.monitoring_event["monitoringPersisted"])
+            self.assertEqual(first.monitoring_event["errorCode"], "map_build_failed")
             self.assertEqual(monitoring.summary()["runs"]["count"], 0)
 
             second = worker.run_next()
@@ -469,6 +561,35 @@ class WorkerTests(unittest.TestCase):
 
             self.assertFalse(result.monitoring_event["monitoringPersisted"])
             monitoring.record_job.assert_called_once()
+
+    def test_monitoring_fallback_preserves_retry_error_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp)
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            job.error_code = "map_build_failed"
+            worker = MapWorker(
+                store,
+                FakePipeline(),
+                worker_id="worker-monitoring-fallback",
+                monitoring_store=Mock(),
+            )
+
+            with patch(
+                "map_platform.worker.build_map_job_monitoring_event",
+                side_effect=ValueError("malformed optional telemetry"),
+            ):
+                event = worker._monitoring_event(
+                    job,
+                    job.created_at,
+                    outcome="failed",
+                    persist=False,
+                )
+
+            self.assertEqual(event["errorCode"], "map_build_failed")
+            self.assertFalse(event["monitoringPersisted"])
 
     def test_worker_ignores_cancelled_job(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1682,6 +1803,7 @@ class WorkerTests(unittest.TestCase):
                 store.claim_next("worker-replacement", interrupted_job_stale_seconds=0)
             )
             self.assertEqual(store.get(job.job_id).status, JobStatus.FAILED)
+            self.assertEqual(store.get(job.job_id).error_code, "map_build_failed")
             self.assertEqual(store.cleanup_artifact_garbage(artifact_store), 1)
             recovered = store.get(job.job_id)
             self.assertEqual(recovered.pending_artifact_keys, [])

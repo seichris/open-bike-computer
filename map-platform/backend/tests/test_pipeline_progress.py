@@ -21,6 +21,7 @@ from map_platform.pipeline import (
     ProgressCoalescer,
     parse_label_stats,
     parse_building_preprocess_progress,
+    parse_building_block_cache,
     parse_building_complexity,
     parse_building_scope,
     parse_map_progress,
@@ -77,6 +78,10 @@ class BuildingPhaseStreamingRunner:
         for line in (
             'BUILDING_PREPROCESS_PROGRESS:{"completed":0,"indeterminate":true,'
             '"unit":"building_normalization"}',
+            'BUILDING_BLOCK_CACHE:{"schemaVersion":1,'
+            '"cacheIdentitySha256":"' + "a" * 64 + '",'
+            '"requestedBlockCount":1,"initialHitCount":1,'
+            '"initialMissCount":0,"workerCount":1}',
             'BUILDING_PREPROCESS_PROGRESS:{"completed":1,"indeterminate":false,'
             '"total":1,"unit":"building_normalization"}',
             'BUILDING_COMPLEXITY:{"schemaVersion":1,"sourceCount":0,'
@@ -158,6 +163,21 @@ class PipelineProgressTests(unittest.TestCase):
                                    '"containmentCandidateProduct":true')
             )
         )
+        cache_marker = (
+            'BUILDING_BLOCK_CACHE:{"schemaVersion":1,'
+            '"cacheIdentitySha256":"' + "a" * 64 + '",'
+            '"requestedBlockCount":16,"initialHitCount":12,'
+            '"initialMissCount":4,"workerCount":4}'
+        )
+        self.assertEqual(
+            parse_building_block_cache(cache_marker)["initialHitCount"],
+            12,
+        )
+        self.assertIsNone(
+            parse_building_block_cache(
+                cache_marker.replace('"initialMissCount":4', '"initialMissCount":3')
+            )
+        )
         self.assertEqual(
             parse_building_preprocess_progress(
                 'BUILDING_PREPROCESS_PROGRESS:{"unit":"source_index",'
@@ -179,7 +199,8 @@ class PipelineProgressTests(unittest.TestCase):
 
     def test_streaming_runner_reports_output_before_completion(self):
         lines = []
-        output = CommandRunner().run_streaming(
+        runner = CommandRunner()
+        output = runner.run_streaming(
             [sys.executable, "-c", "print('MAP_PROGRESS:1:2', flush=True); print('MAP_PROGRESS:2:2', flush=True)"],
             on_output=lines.append,
         )
@@ -189,6 +210,8 @@ class PipelineProgressTests(unittest.TestCase):
             [(1, 2), (2, 2)],
         )
         self.assertIn("MAP_PROGRESS:2:2", output)
+        self.assertIn("wallSeconds", runner.last_execution_metrics)
+        self.assertGreaterEqual(runner.last_execution_metrics["wallSeconds"], 0)
 
     def test_streaming_runner_cancels_silent_preprocessing_promptly(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -412,13 +435,20 @@ class PipelineProgressTests(unittest.TestCase):
                     "building_preprocessing",
                     "building_preprocessing",
                     "building_preprocessing",
+                    "building_preprocessing",
                     "block_encoding",
                     "block_encoding",
                 ],
             )
             self.assertEqual(
-                phase_progress[2]["estimatorEvidence"]["complexity"][
+                phase_progress[3]["estimatorEvidence"]["complexity"][
                     "schemaVersion"
+                ],
+                1,
+            )
+            self.assertEqual(
+                phase_progress[1]["estimatorEvidence"]["buildingBlockCache"][
+                    "initialHitCount"
                 ],
                 1,
             )
@@ -436,6 +466,12 @@ class PipelineProgressTests(unittest.TestCase):
         )
         cases = (
             (typed_output, "source_index", "building_source_snapshot_changed"),
+            (
+                'BUILDING_PREPROCESS_FAILURE:{"code":'
+                '"building_object_limit_exceeded","message":"too many"}\n',
+                "relation_closure",
+                "building_object_limit_exceeded",
+            ),
             ("tool failed\n", "source_index", "building_relation_incomplete"),
             ("tool failed\n", "calibration_cells", "building_calibration_unavailable"),
         )

@@ -8,25 +8,36 @@ on:
         required: false
         default: all
         type: string
+      firmware_hardware:
+        description: Firmware hardware families to build
+        required: false
+        default: "175"
+        type: string
   push:
     branches:
       - main
     paths:
       - ".dockerignore"
+      - ".github/actions/**"
       - ".github/scripts/**"
       - ".github/workflows/ci.yml"
       - ".github/workflows/firmware-diagnostics.yml"
       - ".github/workflows/firmware-release.yml"
+      - ".github/workflows/firmware-runtime-performance.yml"
+      - ".github/workflows/firmware-runtime-publish.yml"
+      - ".github/workflows/firmware-runtime-refresh.yml"
       - ".github/workflows/map-platform-ci.yml"
       - ".github/workflows/map-platform-image.yml"
       - ".github/workflows/speaker-firmware.yml"
       - "docs/app-store-privacy-disclosures.md"
       - "docs/device-ownership-test-vectors.json"
       - "docs/firmware-battery-life-hardware-validation.md"
+      - "docs/firmware-build-provenance.md"
       - "docs/firmware-factory-release.md"
       - "docs/firmware-map-memory-diagnostics.md"
       - "docs/firmware-map-render-scheduler.md"
       - "docs/firmware-map-rendering-psram.md"
+      - "docs/firmware-runtime-maintenance.md"
       - "docs/releases/watchos-workout-companion.md"
       - "esp32/**"
       - "ios-app/**"
@@ -34,6 +45,8 @@ on:
       - "test-fixtures/fmb/**"
       - "tools/firmware_manifest.py"
       - "tools/factory_release_manifest.py"
+      - "tools/firmware-signing-requirements.txt"
+      - "tools/verify_github_release_assets.py"
       - "tools/tests/**"
       - "tools/OSM_Extract/**"
   pull_request:
@@ -49,6 +62,15 @@ on:
           - firmware
           - ios
           - map
+      firmware_hardware:
+        description: Firmware hardware families to build
+        required: true
+        default: "175"
+        type: choice
+        options:
+          - "175"
+          - "206"
+          - all
 
 permissions:
   contents: read
@@ -56,7 +78,8 @@ permissions:
 concurrency:
   group: >-
     ${{ github.workflow }}-${{ github.event_name }}-${{
-    github.event.pull_request.number || github.ref }}-${{ inputs.scope || 'auto' }}
+    github.event.pull_request.number || github.ref }}-${{ inputs.scope || 'auto' }}-${{
+    inputs.firmware_hardware || '175' }}
   cancel-in-progress: true
 
 jobs:
@@ -64,7 +87,9 @@ jobs:
     name: Select CI components
     runs-on: ubuntu-latest
     outputs:
-      firmware: ${{ steps.components.outputs.firmware }}
+      firmware_build: ${{ steps.components.outputs.firmware_build }}
+      firmware_host: ${{ steps.components.outputs.firmware_host }}
+      firmware_targets: ${{ steps.components.outputs.firmware_targets }}
       ios: ${{ steps.components.outputs.ios }}
       map_backend: ${{ steps.components.outputs.map_backend }}
       osm: ${{ steps.components.outputs.osm }}
@@ -98,6 +123,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '0000000000000000000000000000000000000000' }}
           CI_SCOPE: ${{ github.ref_type == 'tag' && 'all' || inputs.scope || 'auto' }}
           EVENT_NAME: ${{ github.event_name }}
+          FIRMWARE_HARDWARE: ${{ inputs.firmware_hardware || '175' }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: >-
           python3 .github/scripts/changed_components.py
@@ -105,23 +131,18 @@ jobs:
           --base "$BASE_SHA"
           --head "$HEAD_SHA"
           --scope "$CI_SCOPE"
+          --firmware-hardware "$FIRMWARE_HARDWARE"
           >> "$GITHUB_OUTPUT"
 
   esp32:
     name: ESP32 (${{ matrix.target }})
     needs: changes
-    if: needs.changes.outputs.firmware == 'true'
+    if: needs.changes.outputs.firmware_build == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - WAVESHARE_AMOLED_175
-          - WAVESHARE_AMOLED_175_REMOTE_DEBUG
-          - WAVESHARE_AMOLED_175_PRODUCTION
-          - WAVESHARE_AMOLED_206
-          - WAVESHARE_AMOLED_206_REMOTE_DEBUG
-          - WAVESHARE_AMOLED_206_PRODUCTION
+        target: ${{ fromJSON(needs.changes.outputs.firmware_targets) }}
     defaults:
       run:
         working-directory: esp32
@@ -133,22 +154,29 @@ jobs:
           path: esp32/.pio/open-bike-build/downloads
           key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
       - name: Build with the repository-owned firmware runtime
-        run: env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "${{ matrix.target }}"
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          factory_args=()
+          if [[ "${BUILD_ENVIRONMENT}" == *_PRODUCTION ]]; then
+            factory_target="${BUILD_ENVIRONMENT%_PRODUCTION}"
+            factory_args=(
+              --factory-output-dir
+              "${RUNNER_TEMP}/factory-${factory_target}"
+            )
+          fi
+          env -u LD_LIBRARY_PATH python3 tools/build_firmware.py \
+            "${BUILD_ENVIRONMENT}" "${factory_args[@]}"
       - name: Verify production factory bundle packaging
         if: endsWith(matrix.target, '_PRODUCTION')
         env:
           BUILD_ENVIRONMENT: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          release_git_sha="$(git rev-parse HEAD)"
           factory_target="${BUILD_ENVIRONMENT%_PRODUCTION}"
           output_dir="${RUNNER_TEMP}/factory-${factory_target}"
           extract_dir="${RUNNER_TEMP}/factory-extract-${factory_target}"
-          python3 tools/package_factory_firmware.py \
-            --environment "${BUILD_ENVIRONMENT}" \
-            --target "${factory_target}" \
-            --expected-git-sha "${release_git_sha}" \
-            --output-dir "${output_dir}"
           mkdir -p "${extract_dir}"
           tar -xzf "${output_dir}/${factory_target}.factory.tar.gz" \
             -C "${extract_dir}"
@@ -269,7 +297,7 @@ jobs:
   esp32-host:
     name: ESP32 Host Tests
     needs: changes
-    if: needs.changes.outputs.firmware == 'true'
+    if: needs.changes.outputs.firmware_host == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -724,7 +752,8 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           ESP32_RESULT: ${{ needs.esp32.result }}
-          FIRMWARE_CHANGED: ${{ needs.changes.outputs.firmware }}
+          FIRMWARE_BUILD_CHANGED: ${{ needs.changes.outputs.firmware_build }}
+          FIRMWARE_HOST_CHANGED: ${{ needs.changes.outputs.firmware_host }}
           HOST_RESULT: ${{ needs.esp32-host.result }}
           IOS_CHANGED: ${{ needs.changes.outputs.ios }}
           IOS_RESULT: ${{ needs.ios.result }}
@@ -744,11 +773,15 @@ jobs:
 
           require_result "CI component selection" "$CHANGES_RESULT" success
 
-          if test "$FIRMWARE_CHANGED" = true; then
+          if test "$FIRMWARE_BUILD_CHANGED" = true; then
             require_result "ESP32 builds" "$ESP32_RESULT" success
-            require_result "ESP32 host tests" "$HOST_RESULT" success
           else
             require_result "ESP32 builds" "$ESP32_RESULT" skipped
+          fi
+
+          if test "$FIRMWARE_HOST_CHANGED" = true; then
+            require_result "ESP32 host tests" "$HOST_RESULT" success
+          else
             require_result "ESP32 host tests" "$HOST_RESULT" skipped
           fi
 

@@ -134,6 +134,12 @@ class FactoryFirmwareBundleTests(unittest.TestCase):
             "sourceDateEpoch": "1700000000",
             "buildTimestamp": "2023-11-14T22:13:20Z",
             "uploadEligible": True,
+            "runtimeProvenance": {
+                "lockSetId": "firmware-runtime-test-1",
+                "manifestSha256": "1" * 64,
+                "target": "linux-x86_64-cp313",
+                "bundleSha256": "2" * 64,
+            },
             "platformioIniSha256": sha256(
                 (project / "platformio.ini").read_bytes()
             ),
@@ -164,10 +170,22 @@ class FactoryFirmwareBundleTests(unittest.TestCase):
         return project, manifest_path, images
 
     def package(self, project: Path, output: Path) -> tuple[Path, Path]:
+        manifest_path = (
+            project
+            / ".pio/open-bike-build/builds"
+            / ENVIRONMENT
+            / "current.json"
+        )
         with mock.patch.object(
             package_factory_firmware,
             "current_source_identity",
             return_value=GIT_SHA,
+        ), mock.patch.object(
+            package_factory_firmware,
+            "require_validated_generated_sdkconfig_defaults",
+            side_effect=lambda *_: json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            ),
         ):
             return package_factory_firmware.package_factory_bundle(
                 project_dir=project,
@@ -191,7 +209,7 @@ class FactoryFirmwareBundleTests(unittest.TestCase):
                 descriptor_path.read_bytes(), second_descriptor.read_bytes()
             )
             descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
-            self.assertEqual(1, descriptor["schemaVersion"])
+            self.assertEqual(2, descriptor["schemaVersion"])
             self.assertEqual(
                 "esp32-factory-flash-bundle", descriptor["artifactType"]
             )
@@ -206,6 +224,25 @@ class FactoryFirmwareBundleTests(unittest.TestCase):
             self.assertEqual(
                 sha256(manifest_path.read_bytes()),
                 descriptor["buildAttestation"]["sha256"],
+            )
+            runtime_provenance = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )["runtimeProvenance"]
+            self.assertEqual(
+                {
+                    "lockSetId": "firmware-runtime-test-1",
+                    "target": "linux-x86_64-cp313",
+                    "manifestSha256": "1" * 64,
+                    "bundleSha256": "2" * 64,
+                    "runtimeProvenanceSha256": sha256(
+                        json.dumps(
+                            runtime_provenance,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ),
+                },
+                descriptor["runtimeAttestation"],
             )
             self.assertEqual(
                 {"flashMode": "keep", "flashFrequency": "keep", "flashSize": "keep"},
@@ -304,6 +341,17 @@ class FactoryFirmwareBundleTests(unittest.TestCase):
                 package_factory_firmware,
                 "current_source_identity",
                 return_value=f"dirty-{GIT_SHA}",
+            ), mock.patch.object(
+                package_factory_firmware,
+                "require_validated_generated_sdkconfig_defaults",
+                side_effect=lambda *_: json.loads(
+                    (
+                        project
+                        / ".pio/open-bike-build/builds"
+                        / ENVIRONMENT
+                        / "current.json"
+                    ).read_text(encoding="utf-8")
+                ),
             ):
                 with self.assertRaisesRegex(
                     package_factory_firmware.BundleError,
@@ -331,6 +379,52 @@ class FactoryFirmwareBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 package_factory_firmware.BundleError,
                 "another environment",
+            ):
+                self.package(project, root / "dist")
+
+    def test_strict_build_validator_must_match_manifest_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            project, manifest_path, _ = self.create_project(root)
+            validated = json.loads(manifest_path.read_text(encoding="utf-8"))
+            validated["runtimeProvenance"]["bundleSha256"] = "f" * 64
+            output = root / "dist"
+
+            def strict_validator(*_: object) -> dict[str, object]:
+                self.assertFalse(output.exists())
+                return validated
+
+            with mock.patch.object(
+                package_factory_firmware,
+                "require_validated_generated_sdkconfig_defaults",
+                side_effect=strict_validator,
+            ), self.assertRaisesRegex(
+                package_factory_firmware.BundleError,
+                "changed during strict factory validation",
+            ):
+                package_factory_firmware.package_factory_bundle(
+                    project_dir=project,
+                    environment=ENVIRONMENT,
+                    target=TARGET,
+                    expected_git_sha=GIT_SHA,
+                    output_dir=output,
+                )
+            self.assertFalse(output.exists())
+
+    def test_missing_runtime_provenance_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            project, manifest_path, _ = self.create_project(root)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            del manifest["runtimeProvenance"]
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                package_factory_firmware.BundleError,
+                "missing locked runtime provenance",
             ):
                 self.package(project, root / "dist")
 
@@ -389,6 +483,20 @@ class FactoryFirmwareBundleTests(unittest.TestCase):
                         expected_git_sha=GIT_SHA,
                         output_dir=root / "dist",
                     )
+
+    def test_nonempty_output_directory_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            project, _, _ = self.create_project(root)
+            output = root / "dist"
+            output.mkdir()
+            (output / "unexpected.bin").write_bytes(b"unexpected")
+
+            with self.assertRaisesRegex(
+                package_factory_firmware.BundleError,
+                "output directory must be empty",
+            ):
+                self.package(project, output)
 
 
 if __name__ == "__main__":

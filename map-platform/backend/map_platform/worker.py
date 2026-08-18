@@ -19,6 +19,16 @@ from .pipeline import MapBuildPipeline, safe_build_failure
 from .reuse import SubsetReuseUnavailable
 
 
+_NON_RETRYABLE_BUILD_ERROR_CODES = frozenset(
+    {
+        "building_scope_exceeded",
+        "building_object_limit_exceeded",
+        "building_source_snapshot_changed",
+        "building_scope_policy_invalid",
+    }
+)
+
+
 @dataclass(frozen=True)
 class WorkerResult:
     worker_id: str
@@ -345,6 +355,21 @@ class MapWorker:
                 else:
                     build_result = self.pipeline.build(job, **build_kwargs)
                 map_id, archive_path = build_result
+            if (
+                isinstance(self.pipeline, MapBuildPipeline)
+                and job.building_preprocessing_inputs is not None
+                and job.building_preprocessing_runtime is not None
+            ):
+                self.store.freeze_building_preprocessing_inputs_unless_cancelled(
+                    job.job_id,
+                    worker_id=self.worker_id,
+                    building_preprocessing_inputs=(
+                        job.building_preprocessing_inputs
+                    ),
+                    building_preprocessing_runtime=(
+                        job.building_preprocessing_runtime
+                    ),
+                )
             published_archive = (
                 self.pipeline.published_archive_path(map_id, job.job_id)
                 if hasattr(self.pipeline, "published_archive_path")
@@ -396,6 +421,23 @@ class MapWorker:
                     self.pipeline.cleanup_failed_attempt(job)
                 except OSError:
                     pass
+                if (
+                    job.building_preprocessing_inputs is not None
+                    and job.building_preprocessing_runtime is not None
+                ):
+                    try:
+                        self.store.freeze_building_preprocessing_inputs_unless_cancelled(
+                            job.job_id,
+                            worker_id=self.worker_id,
+                            building_preprocessing_inputs=(
+                                job.building_preprocessing_inputs
+                            ),
+                            building_preprocessing_runtime=(
+                                job.building_preprocessing_runtime
+                            ),
+                        )
+                    except RuntimeError:
+                        pass
             current = self.store.get(job.job_id)
             if current.status == JobStatus.CANCELLED or current.worker_id != self.worker_id:
                 if (
@@ -416,41 +458,38 @@ class MapWorker:
                     monitoring_event=monitoring_event,
                 )
             error_message, error_code = safe_build_failure(job, exc)
-            failed = self.store.update_status_unless_cancelled(
+            retrying = (
+                job.attempts < job.max_attempts
+                and error_code not in _NON_RETRYABLE_BUILD_ERROR_CODES
+            )
+            completed = self.store.update_status_unless_cancelled(
                 job.job_id,
-                JobStatus.FAILED,
+                JobStatus.QUEUED if retrying else JobStatus.FAILED,
                 error=error_message,
                 error_code=error_code,
                 worker_id=self.worker_id,
-                event=error_message,
-                finished=True,
+                event="queued for retry" if retrying else error_message,
+                finished=not retrying,
             )
             monitoring_event = self._monitoring_event(
-                failed,
+                completed,
                 attempt_started_at,
                 outcome="failed",
-                persist=failed.attempts >= failed.max_attempts,
+                persist=not retrying,
             )
-            if failed.attempts < failed.max_attempts:
+            if retrying:
                 if self.estimate_coordinator is not None:
                     self.estimate_coordinator.publish_pending_retry(
                         job.job_id,
                         worker_id=self.worker_id,
                     )
-                failed = self.store.update_status_unless_cancelled(
-                    job.job_id,
-                    JobStatus.QUEUED,
-                    error=error_message,
-                    error_code=error_code,
-                    worker_id=self.worker_id,
-                    event="queued for retry",
-                )
+                    completed = self.store.get(job.job_id)
             elif isinstance(self.pipeline, MapBuildPipeline) and self.pipeline.artifact_store is not None:
                 self.store.queue_terminal_pending_artifacts(job.job_id)
-                failed = self.store.get(job.job_id)
+                completed = self.store.get(job.job_id)
             return WorkerResult(
                 worker_id=self.worker_id,
-                job=failed,
+                job=completed,
                 processed=True,
                 monitoring_event=monitoring_event,
             )
@@ -491,6 +530,8 @@ class MapWorker:
                 "outcome": outcome,
                 "attempt": job.attempts,
             }
+            if job.error_code is not None:
+                event["errorCode"] = job.error_code
         event["monitoringPersisted"] = monitoring_persisted
         return event
 

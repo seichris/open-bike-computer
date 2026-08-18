@@ -33,10 +33,12 @@ SHARED_CONTRACT_PATHS = {
     "docs/app-store-privacy-disclosures.md",
     "docs/device-ownership-test-vectors.json",
     "docs/firmware-battery-life-hardware-validation.md",
+    "docs/firmware-build-provenance.md",
     "docs/firmware-factory-release.md",
     "docs/firmware-map-memory-diagnostics.md",
     "docs/firmware-map-render-scheduler.md",
     "docs/firmware-map-rendering-psram.md",
+    "docs/firmware-runtime-maintenance.md",
     "docs/releases/watchos-workout-companion.md",
 }
 JOB_KEY_PATTERN = re.compile(
@@ -243,7 +245,11 @@ class WorkflowPolicyTests(unittest.TestCase):
         builder_jobs = tuple(
             (workflow, job, block)
             for workflow, source in workflow_sources(root)
-            if workflow != "firmware-runtime-refresh.yml"
+            if workflow
+            not in {
+                "firmware-runtime-refresh.yml",
+                "firmware-runtime-performance.yml",
+            }
             for job, block in firmware_builder_jobs(source)
         )
         self.assertTrue(builder_jobs)
@@ -270,16 +276,23 @@ class WorkflowPolicyTests(unittest.TestCase):
                 )
         self.assertEqual((), tuple(violations))
 
-    def test_pull_requests_compile_remote_debug_and_weekly_diagnostics(self) -> None:
-        default_targets = matrix_targets(workflow_source("ci.yml"))
+    def test_default_and_diagnostic_firmware_matrices_stay_separate(self) -> None:
+        general_ci = workflow_source("ci.yml")
+        router = (REPO_ROOT / ".github/scripts/changed_components.py").read_text(
+            encoding="utf-8"
+        )
         diagnostic_targets = matrix_targets(
             workflow_source("firmware-diagnostics.yml")
         )
 
-        self.assertEqual(
-            CORE_FIRMWARE_TARGETS | REMOTE_DEBUG_FIRMWARE_TARGETS,
-            default_targets,
+        self.assertEqual(set(), matrix_targets(general_ci))
+        self.assertIn(
+            "target: ${{ fromJSON(needs.changes.outputs.firmware_targets) }}",
+            general_ci,
         )
+        for target in CORE_FIRMWARE_TARGETS | REMOTE_DEBUG_FIRMWARE_TARGETS:
+            with self.subTest(target=target):
+                self.assertIn(f'"{target}"', router)
         self.assertEqual(DIAGNOSTIC_FIRMWARE_TARGETS, diagnostic_targets)
 
     def test_pull_request_remote_debug_builds_verify_metrics_routes(self) -> None:
@@ -306,6 +319,49 @@ class WorkflowPolicyTests(unittest.TestCase):
 
         self.assertIn("github.event_name", general_ci)
         self.assertIn("inputs.scope || 'auto'", general_ci)
+        self.assertIn("inputs.firmware_hardware || '175'", general_ci)
+
+    def test_firmware_build_and_host_routing_stay_independent(self) -> None:
+        general_ci = workflow_source("ci.yml")
+        changes = mapping_block(general_ci, "changes", indent=2)
+        esp32 = mapping_block(general_ci, "esp32", indent=2)
+        host = mapping_block(general_ci, "esp32-host", indent=2)
+        gate = mapping_block(general_ci, "gate", indent=2)
+
+        self.assertIn(
+            "firmware_build: ${{ steps.components.outputs.firmware_build }}",
+            changes,
+        )
+        self.assertIn(
+            "firmware_host: ${{ steps.components.outputs.firmware_host }}",
+            changes,
+        )
+        self.assertIn(
+            "firmware_targets: ${{ steps.components.outputs.firmware_targets }}",
+            changes,
+        )
+        self.assertIn(
+            "if: needs.changes.outputs.firmware_build == 'true'",
+            esp32,
+        )
+        self.assertIn(
+            "if: needs.changes.outputs.firmware_host == 'true'",
+            host,
+        )
+        self.assertIn("FIRMWARE_BUILD_CHANGED", gate)
+        self.assertIn("FIRMWARE_HOST_CHANGED", gate)
+
+    def test_206_firmware_ci_is_explicitly_dispatched(self) -> None:
+        general_ci = workflow_source("ci.yml")
+        instructions = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+        self.assertEqual(2, general_ci.count('default: "175"'))
+        self.assertIn('          - "206"', general_ci)
+        self.assertIn("--firmware-hardware \"$FIRMWARE_HARDWARE\"", general_ci)
+        self.assertIn("gh workflow run ci.yml", instructions)
+        self.assertIn("firmware_hardware=206", instructions)
+        self.assertIn("previous_run_id", instructions)
+        self.assertIn("gh run watch", instructions)
 
     def test_partial_manual_runs_do_not_publish_the_protected_gate(self) -> None:
         general_ci = workflow_source("ci.yml")
@@ -327,19 +383,31 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn('      - "v*"', diagnostic_ci)
         self.assertIn('      - "v*"', release)
         self.assertIn("uses: ./.github/workflows/ci.yml", release)
+        self.assertIn("firmware_hardware: all", release)
         self.assertIn(
             "uses: ./.github/workflows/firmware-diagnostics.yml", release
         )
         self.assertIn("      - build\n      - diagnostics\n      - validate\n", release)
-        self.assertIn("  attestations: read\n", release)
-        self.assertIn("  packages: read\n", release)
+        release_permissions = mapping_block(release, "permissions", indent=0)
+        self.assertIn("  attestations: read", release_permissions)
+        self.assertIn("  contents: read", release_permissions)
+        self.assertIn("  packages: read", release_permissions)
+        publish_job = mapping_block(release, "publish", indent=2)
+        self.assertIn("contents: write", publish_job)
+        self.assertIn("pages: write", publish_job)
 
     def test_release_publishes_signed_factory_flash_bundles(self) -> None:
         release = workflow_source("firmware-release.yml")
+        immutable_preflight = (
+            REPO_ROOT
+            / ".github"
+            / "actions"
+            / "require-immutable-releases"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn("tools/package_factory_firmware.py", release)
-        self.assertIn('release_git_sha="$(git rev-parse HEAD)"', release)
-        self.assertIn('--expected-git-sha "${release_git_sha}"', release)
+        self.assertIn("--factory-output-dir dist", release)
+        self.assertNotIn("tools/package_factory_firmware.py", release)
         self.assertIn('"${target}.factory.tar.gz"', release)
         self.assertIn('"${target}.factory-bundle.json"', release)
         self.assertIn("tools/factory_release_manifest.py", release)
@@ -347,21 +415,57 @@ class WorkflowPolicyTests(unittest.TestCase):
             '--output "release-assets/${target}.factory-release.json"',
             release,
         )
-        self.assertLess(
-            release.index("python3 tools/package_factory_firmware.py"),
-            release.index(
-                'cp ".pio/build/${{ matrix.environment }}/firmware.bin" '
-                '"dist/${{ matrix.target }}.bin"'
-            ),
-        )
         self.assertNotIn("find dist -name '*.bin'", release)
+        self.assertNotIn("--clobber", release)
+        self.assertIn("--draft", release)
+        self.assertIn("tools/verify_github_release_assets.py", release)
+        self.assertIn("already exists; refusing to replace assets", release)
+        self.assertIn('"repos/${GITHUB_REPOSITORY}/releases/${release_id}"', release)
+        self.assertIn("expected exactly one matching draft release", release)
+        self.assertIn(
+            "uses: ./.github/actions/require-immutable-releases", release
+        )
+        self.assertIn("--require-immutable", release)
+        self.assertIn("X-GitHub-Api-Version: 2026-03-10", release)
+        self.assertIn(
+            "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
+            immutable_preflight,
+        )
+        self.assertIn("permission-administration: read", immutable_preflight)
+        self.assertIn(
+            "repositories: ${{ github.event.repository.name }}", immutable_preflight
+        )
+        self.assertIn("/immutable-releases", immutable_preflight)
+        self.assertIn("--require-hashes --only-binary=:all: --no-deps", release)
+        self.assertIn("tools/firmware-signing-requirements.txt", release)
+        self.assertNotIn("pip install --upgrade cryptography", release)
+
+    def test_release_pages_recovery_accepts_only_attested_immutable_assets(self) -> None:
+        release = workflow_source("firmware-release.yml")
+        recovery = mapping_block(release, "recover-pages", indent=2)
+
+        self.assertIn("  workflow_dispatch:\n", release)
+        self.assertIn("if: github.event_name == 'workflow_dispatch'", recovery)
+        self.assertIn("attestations: read", recovery)
+        self.assertIn("contents: read", recovery)
+        self.assertNotIn("contents: write", recovery)
+        self.assertIn("must run from the default branch", recovery)
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", recovery)
+        self.assertNotIn("ref: ${{ inputs.release_tag }}", recovery)
+        self.assertIn("--require-immutable", recovery)
+        self.assertIn('gh release verify "${RELEASE_TAG}"', recovery)
+        self.assertIn('gh release verify-asset "${RELEASE_TAG}"', recovery)
+        self.assertIn("actions/upload-pages-artifact@v3", recovery)
+        self.assertIn("actions/deploy-pages@v4", recovery)
+        self.assertNotIn("FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY", recovery)
 
     def test_production_ci_extracts_and_checks_factory_bundles(self) -> None:
         general_ci = workflow_source("ci.yml")
 
         self.assertIn("Verify production factory bundle packaging", general_ci)
         self.assertIn("if: endsWith(matrix.target, '_PRODUCTION')", general_ci)
-        self.assertIn("tools/package_factory_firmware.py", general_ci)
+        self.assertIn("--factory-output-dir", general_ci)
+        self.assertNotIn("tools/package_factory_firmware.py", general_ci)
         self.assertIn("tar -xzf", general_ci)
         self.assertIn("sha256sum --check SHA256SUMS", general_ci)
 
@@ -371,8 +475,11 @@ class WorkflowPolicyTests(unittest.TestCase):
         for path in SHARED_CONTRACT_PATHS:
             with self.subTest(path=path):
                 self.assertIn(f'      - "{path}"', general_ci)
+        self.assertIn('      - ".github/actions/**"', general_ci)
         self.assertIn('      - "test-fixtures/fmb/**"', general_ci)
         self.assertIn('      - "tools/firmware_manifest.py"', general_ci)
+        self.assertIn('      - "tools/firmware-signing-requirements.txt"', general_ci)
+        self.assertIn('      - "tools/verify_github_release_assets.py"', general_ci)
         self.assertIn('      - "tools/tests/**"', general_ci)
 
     def test_promotion_contract_requires_the_aggregate_gate(self) -> None:
@@ -409,6 +516,53 @@ class WorkflowPolicyTests(unittest.TestCase):
             'json.load(open(sys.argv[1]))["bundle"]["sha256"]',
             runtime_refresh,
         )
+        self.assertIn("tools/firmware_runtime_publication.py identity", runtime_refresh)
+        self.assertIn("--factory-output-dir", runtime_refresh)
+        self.assertIn("firmware-runtime-review-summary", runtime_refresh)
+
+    def test_runtime_publication_is_manual_approval_gated_and_create_only(self) -> None:
+        publication = workflow_source("firmware-runtime-publish.yml")
+        validate = mapping_block(publication, "validate", indent=2)
+        publish = mapping_block(publication, "publish", indent=2)
+
+        self.assertRegex(publication, r"(?m)^on:\n  workflow_dispatch:\n")
+        self.assertNotRegex(publication, r"(?m)^  (?:push|pull_request|schedule):")
+        self.assertIn("  contents: read", publication)
+        self.assertNotIn("contents: write", validate)
+        self.assertIn("environment: firmware-runtime-publication", publish)
+        self.assertIn("contents: write", publish)
+        self.assertIn("candidate run does not match", validate)
+        self.assertIn("requires human reviewers", validate)
+        self.assertIn("verify-staged", publish)
+        self.assertIn("tools/verify_github_release_assets.py", publish)
+        self.assertIn("already exists; refusing to replace it", publish)
+        self.assertIn(
+            "uses: ./.github/actions/require-immutable-releases", publish
+        )
+        self.assertIn("--require-immutable", publish)
+        self.assertIn("Runtime tag ${release_tag} already exists", publish)
+        self.assertIn("runtime release tag does not bind", publish)
+        self.assertIn("X-GitHub-Api-Version: 2026-03-10", publish)
+        self.assertNotIn("--clobber", publication)
+
+    def test_runtime_performance_gate_uses_five_native_samples(self) -> None:
+        performance = workflow_source("firmware-runtime-performance.yml")
+
+        self.assertIn("linux-x86_64-cp313", performance)
+        self.assertIn("macos-arm64-cp313", performance)
+        self.assertIn("for sample_index in 1 2 3 4 5", performance)
+        self.assertIn("--runtime-check-only", performance)
+        self.assertIn("check_firmware_runtime_performance.py", performance)
+
+    def test_runtime_documentation_does_not_restore_the_removed_resolver_boundary(self) -> None:
+        sources = "\n".join(
+            (REPO_ROOT / path).read_text(encoding="utf-8")
+            for path in ("AGENTS.md", "CONTRIBUTING.md", "esp32/README.md")
+        )
+
+        self.assertNotIn("first-run online Python dependency resolver", sources)
+        self.assertNotIn("initial Python standard library", sources)
+        self.assertIn("complete initial caller", sources)
 
     def test_host_job_mapping_stops_at_the_next_peer(self) -> None:
         source = (

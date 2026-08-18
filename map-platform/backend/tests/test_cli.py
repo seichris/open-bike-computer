@@ -104,6 +104,15 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(summary["errno"], 13)
         self.assertNotIn(sentinel, json.dumps(summary))
 
+    @patch(
+        "map_platform.cli.prune_building_block_cache",
+        return_value={
+            "removedNamespaces": 1,
+            "removedBytes": 200,
+            "retainedBytes": 300,
+            "skippedLeasedNamespaces": 0,
+        },
+    )
     @patch("map_platform.cli.purge_expired_rate_limits", return_value=3)
     @patch("map_platform.cli.cleanup_work_dirs", return_value=2)
     @patch("map_platform.cli.expire_ready_jobs", return_value=1)
@@ -112,6 +121,7 @@ class MaintenanceTests(unittest.TestCase):
         expire_ready_jobs,
         cleanup_work_dirs,
         purge_expired_rate_limits,
+        prune_building_block_cache,
     ):
         store = Mock()
         artifact_store = Mock()
@@ -130,6 +140,12 @@ class MaintenanceTests(unittest.TestCase):
                 "expired": 1,
                 "removedWorkDirs": 2,
                 "removedRateLimits": 3,
+                "buildingBlockCache": {
+                    "removedNamespaces": 1,
+                    "removedBytes": 200,
+                    "retainedBytes": 300,
+                    "skippedLeasedNamespaces": 0,
+                },
             },
         )
         expire_ready_jobs.assert_called_once_with(
@@ -141,6 +157,12 @@ class MaintenanceTests(unittest.TestCase):
         cleanup_work_dirs.assert_called_once_with(Path("/data/work"), store)
         purge_expired_rate_limits.assert_called_once_with(
             Path("/data/rate-limits.sqlite3")
+        )
+        prune_building_block_cache.assert_called_once_with(
+            Path("/data/building-cache"),
+            older_than_days=14,
+            max_bytes=20 * 1024 * 1024 * 1024,
+            max_items=100,
         )
 
     @patch("map_platform.cli.purge_expired_rate_limits", return_value=3)

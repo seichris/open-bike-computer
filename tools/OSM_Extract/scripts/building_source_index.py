@@ -303,7 +303,7 @@ class BuildingSourceIndex:
                             required_nodes.add(key)
                 if len(required_relations) + len(required_ways) + len(required_nodes) > maximum_objects:
                     raise BuildingSourceIndexError(
-                        "building_relation_incomplete", "building closure exceeds the job object limit"
+                        "building_object_limit_exceeded", "building closure exceeds the job object limit"
                     )
 
             for way_key in sorted(required_ways):
@@ -317,7 +317,7 @@ class BuildingSourceIndex:
                 required_nodes.update(node["key"] for node in json.loads(way[0]))
                 if len(required_relations) + len(required_ways) + len(required_nodes) > maximum_objects:
                     raise BuildingSourceIndexError(
-                        "building_relation_incomplete", "building closure exceeds the job object limit"
+                        "building_object_limit_exceeded", "building closure exceeds the job object limit"
                     )
 
             target_cells = set()

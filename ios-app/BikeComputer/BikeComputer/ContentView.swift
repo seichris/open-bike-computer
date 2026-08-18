@@ -83,10 +83,10 @@ struct ContentView: View {
     @State private var dismissedOfflineMapOnboarding = false
     @State private var confirmedDeviceMapMissing = false
     @State private var isOfflineMapOnboardingStatePrepared = false
+    // Preserve the original key so users who completed the previous first-run
+    // flow are not shown a new welcome after updating.
     @AppStorage("offlineMapOnboarding.firstRunCompleted.v1")
-    private var hasCompletedFirstRunMapOnboarding = false
-    @AppStorage("offlineMapOnboarding.locationStepCompleted.v1")
-    private var hasAdvancedPastMapOnboardingLocation = false
+    private var hasCompletedFirstRunWelcome = false
     @AppStorage("offlineMapOnboarding.existingInstallMigrationCompleted.v1")
     private var hasMigratedExistingInstallOnboarding = false
     @State private var offlineMapSelectionWidth: CGFloat?
@@ -261,21 +261,17 @@ struct ContentView: View {
 
                     OfflineMapOnboardingView(
                         manager: offlineMapManager,
-                        bleManager: coordinator.bleManager,
                         step: onboardingStep,
                         location: coordinator.currentLocation,
-                        isLocationAuthorized: coordinator.isLocationAuthorized,
-                        onRequestLocation: advancePastLocationAndRequestAccess,
-                        onSkipLocation: advancePastLocation,
-                        onConnectDevice: {
-                            presentedSheet = .bikeComputerSetup
-                        },
-                        onCheckDeviceMaps: {
-                            _ = coordinator.bleManager.requestMapTransferStatus()
-                            _ = coordinator.bleManager.requestDeviceTransferStatus()
+                        locationAuthorizationStatus:
+                            coordinator.locationAuthorizationStatus,
+                        onRequestLocation: {
+                            coordinator.requestLocationAuthorization()
                         },
                         onChooseArea: beginOnboardingMapSelection,
-                        onClose: dismissOfflineMapOnboarding
+                        onClose: {
+                            dismissOfflineMapOnboarding(step: onboardingStep)
+                        }
                     )
                     .transition(.scale(scale: 0.96).combined(with: .opacity))
                     .zIndex(20)
@@ -430,12 +426,6 @@ struct ContentView: View {
 
             guard deviceMapMissingCandidate else { return }
             confirmedDeviceMapMissing = true
-        }
-        .task(id: offlineMapOnboardingPresentation) {
-            guard offlineMapOnboardingPresentation == .completeFirstRun else {
-                return
-            }
-            hasCompletedFirstRunMapOnboarding = true
         }
         .task(id: workoutSegmentToast?.index) {
             guard let index = workoutSegmentToast?.index else { return }
@@ -850,12 +840,7 @@ struct ContentView: View {
 
     private var offlineMapOnboardingPresentation: OfflineMapOnboardingPresentation {
         OfflineMapOnboardingPolicy.presentation(
-            hasCompletedFirstRun: hasCompletedFirstRunMapOnboarding,
-            hasAdvancedPastLocation: hasAdvancedPastMapOnboardingLocation,
-            isLocationAuthorized: coordinator.isLocationAuthorized,
-            isNavigationReady: coordinator.bleManager.isNavigationReady,
-            hasSDCard: coordinator.bleManager.deviceHasSDCard,
-            activeMapId: coordinator.bleManager.mapTransferActiveMapId,
+            hasCompletedFirstRun: hasCompletedFirstRunWelcome,
             confirmedDeviceMapMissing: confirmedDeviceMapMissing
         )
     }
@@ -875,22 +860,18 @@ struct ContentView: View {
         return step
     }
 
-    private func advancePastLocationAndRequestAccess() {
-        advancePastLocation()
-        coordinator.requestLocationAuthorization()
-    }
-
-    private func advancePastLocation() {
-        hasAdvancedPastMapOnboardingLocation = true
-    }
-
     private func beginOnboardingMapSelection() {
-        hasCompletedFirstRunMapOnboarding = true
+        hasCompletedFirstRunWelcome = true
         offlineMapManager.beginMapAreaSelection()
     }
 
-    private func dismissOfflineMapOnboarding() {
+    private func dismissOfflineMapOnboarding(
+        step: OfflineMapOnboardingStep
+    ) {
         dismissedOfflineMapOnboarding = true
+        if step == .welcome {
+            hasCompletedFirstRunWelcome = true
+        }
     }
 
     private func migrateExistingInstallOnboardingIfNeeded() {
@@ -898,8 +879,7 @@ struct ContentView: View {
         hasMigratedExistingInstallOnboarding = true
 
         guard !coordinator.bleManager.knownDevices.isEmpty else { return }
-        hasAdvancedPastMapOnboardingLocation = true
-        hasCompletedFirstRunMapOnboarding = true
+        hasCompletedFirstRunWelcome = true
     }
 
     private var topOverlay: some View {

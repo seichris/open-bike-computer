@@ -6,6 +6,8 @@ from copy import deepcopy
 import re
 from typing import Any
 
+from .building_scope import BUILDING_MAX_SOURCE_AREA_M2
+
 
 class BuildingBenchmarkError(ValueError):
     """Raised when a benchmark run does not satisfy the reviewed gate."""
@@ -169,7 +171,7 @@ def validate_benchmark_evidence(
         "selected benchmark source area changed",
     )
     _require(
-        source_area <= 200_000_000
+        source_area <= BUILDING_MAX_SOURCE_AREA_M2
         and source_ratio
         <= _integer(
             expected.get("maximumSourceToOutputAreaBasisPoints"),
@@ -278,7 +280,7 @@ def validate_benchmark_evidence(
             ],
         },
         "proposedThresholds": {
-            "maximumSourceAreaM2": 200_000_000,
+            "maximumSourceAreaM2": BUILDING_MAX_SOURCE_AREA_M2,
             "maximumSourceToOutputAreaBasisPoints": _integer(
                 expected.get("maximumSourceToOutputAreaBasisPoints"),
                 "maximum source ratio",

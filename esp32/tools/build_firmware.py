@@ -63,6 +63,7 @@ from pioarduino_custom_core import (
     correct_penv_setup_text,
     pioarduino_transform_source_sha256,
 )
+from package_factory_firmware import BundleError, package_factory_bundle
 
 
 ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -1220,7 +1221,7 @@ def _print_provenance(
         return "missing" if result is None else result
 
     print(
-        f"{marker} schema=1 environment={environment} git={source_identity} "
+        f"{marker} schema=2 environment={environment} git={source_identity} "
         f"uploadEligible={1 if manifest else 0} "
         f"coreCache={value('coreCache')} "
         f"coreInputKey={value('coreInputKey')} "
@@ -1240,6 +1241,9 @@ def _print_provenance(
         f"runtimeUvDistributionsSha256={runtime_value('uvDistributionSha256')} "
         f"runtimeEsptoolDistributionsSha256={runtime_value('esptoolDistributionSha256')} "
         f"runtimeBootstrapMs={os.environ.get('OPEN_BIKE_FIRMWARE_RUNTIME_BOOTSTRAP_MS', 'missing')} "
+        f"runtimeSharedMs={os.environ.get('OPEN_BIKE_FIRMWARE_RUNTIME_SHARED_MS', 'missing')} "
+        f"runtimeHydrationMs={os.environ.get('OPEN_BIKE_FIRMWARE_RUNTIME_HYDRATION_MS', 'missing')} "
+        f"runtimeVerificationMs={os.environ.get('OPEN_BIKE_FIRMWARE_RUNTIME_VERIFICATION_MS', 'missing')} "
         f"runtimePioarduinoPenvTreeSha256={nested_value(core, 'penvTreeSha256')} "
         f"runtimeEspIdfVenvTreeSha256={nested_value(core, 'espIdfPythonEnvTreeSha256')} "
         f"runtimeTransformedPlatformTreeSha256={nested_value(core, 'platformTreeSha256')} "
@@ -1522,6 +1526,7 @@ def build_firmware(
     *,
     pio_command: str = "pio",
     max_passes: int = 3,
+    factory_output_dir: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> Path:
     """Build ``environment`` and return its verified firmware ELF path.
@@ -1540,6 +1545,13 @@ def build_firmware(
     _validate_environment(project_dir, environment)
     _reject_source_affecting_environment()
     expected_identity = current_source_identity(project_dir, environment)
+    if factory_output_dir is not None and environment not in {
+        "WAVESHARE_AMOLED_175_PRODUCTION",
+        "WAVESHARE_AMOLED_206_PRODUCTION",
+    }:
+        raise BuildError(
+            "factory output requires a matching Waveshare production environment"
+        )
 
     firmware_elf = project_dir / ".pio" / "build" / environment / "firmware.elf"
     firmware_bin = project_dir / ".pio" / "build" / environment / "firmware.bin"
@@ -1827,6 +1839,29 @@ def build_firmware(
                     expected_identity,
                     manifest,
                 )
+                if factory_output_dir is not None:
+                    target = environment.removesuffix("_PRODUCTION")
+                    factory_started = time.monotonic()
+                    try:
+                        archive, descriptor = package_factory_bundle(
+                            project_dir=project_dir,
+                            environment=environment,
+                            target=target,
+                            expected_git_sha=expected_identity,
+                            output_dir=factory_output_dir,
+                        )
+                    except (BundleError, OSError) as error:
+                        raise BuildError(str(error)) from error
+                    packaging_ms = round((time.monotonic() - factory_started) * 1000)
+                    print(
+                        "FIRMWARE_FACTORY_PROVENANCE schema=1 "
+                        f"environment={environment} git={expected_identity} "
+                        f"packagingMs={packaging_ms} archive={archive.name} "
+                        f"archiveSha256={_file_sha256(archive)} "
+                        f"descriptor={descriptor.name} "
+                        f"descriptorSha256={_file_sha256(descriptor)}",
+                        flush=True,
+                    )
                 print(f"Verified real firmware artifact: {firmware_elf}", flush=True)
                 return firmware_elf
 
@@ -1985,6 +2020,19 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="revalidate and upload an existing attested build without rebuilding",
     )
+    parser.add_argument(
+        "--factory-output-dir",
+        type=Path,
+        help=(
+            "after a verified production build, create the deterministic "
+            "factory archive and descriptor under this create-only directory"
+        ),
+    )
+    parser.add_argument(
+        "--runtime-check-only",
+        action="store_true",
+        help="verify the locked runtime handoff and report timings without building",
+    )
     return parser.parse_args(argv)
 
 
@@ -2000,13 +2048,40 @@ def main(
     try:
         try:
             runtime = runtime_handoff(raw_arguments, args.project_dir.resolve())
-            pio_command = (
-                "unit-test-pio"
-                if runtime is None
-                else str(runtime_pio_path(args.project_dir.resolve(), runtime))
-            )
         except FirmwareRuntimeError as error:
             raise BuildError(str(error)) from error
+        if args.runtime_check_only:
+            if (
+                args.upload_only
+                or args.factory_output_dir is not None
+                or args.upload_port is not None
+                or args.device_serial is not None
+                or args.device_name is not None
+            ):
+                raise BuildError(
+                    "--runtime-check-only cannot build, package, or upload firmware"
+                )
+            if runtime is None:
+                raise BuildError("runtime check did not receive locked provenance")
+            print(
+                "FIRMWARE_RUNTIME_CHECK schema=1 "
+                f"target={runtime.target} lockSetId={runtime.lock_set_id} "
+                "bootstrapMs="
+                f"{os.environ.get('OPEN_BIKE_FIRMWARE_RUNTIME_BOOTSTRAP_MS', 'missing')} "
+                "sharedMs="
+                f"{os.environ.get('OPEN_BIKE_FIRMWARE_RUNTIME_SHARED_MS', 'missing')} "
+                "hydrationMs="
+                f"{os.environ.get('OPEN_BIKE_FIRMWARE_RUNTIME_HYDRATION_MS', 'missing')} "
+                "verificationMs="
+                f"{os.environ.get('OPEN_BIKE_FIRMWARE_RUNTIME_VERIFICATION_MS', 'missing')}",
+                flush=True,
+            )
+            return 0
+        pio_command = (
+            "unit-test-pio"
+            if runtime is None
+            else str(runtime_pio_path(args.project_dir.resolve(), runtime))
+        )
         device_entry = None
         device_serial = args.device_serial
         if args.device_name is not None:
@@ -2024,12 +2099,23 @@ def main(
             raise BuildError(
                 "--upload-only requires --upload-port or --device-serial/--device-name"
             )
+        if args.factory_output_dir is not None and (
+            args.upload_only or args.upload_port is not None or device_serial is not None
+        ):
+            raise BuildError(
+                "--factory-output-dir cannot be combined with an upload selector or --upload-only"
+            )
         if device_serial is None and args.device_timeout != 60.0:
             raise BuildError("--device-timeout requires --device-serial or --device-name")
         if not math.isfinite(args.device_timeout) or args.device_timeout < 0:
             raise BuildError("device timeout must be a finite nonnegative value")
         if not args.upload_only:
-            build_firmware(args.project_dir, args.environment, pio_command=pio_command)
+            build_firmware(
+                args.project_dir,
+                args.environment,
+                pio_command=pio_command,
+                factory_output_dir=args.factory_output_dir,
+            )
         if args.upload_port is not None or device_serial is not None:
             upload_options: dict[str, object] = {
                 "device_serial": device_serial,

@@ -7,6 +7,8 @@ from map_platform.building_scope import (
     BuildingScopeError,
     BuildingScopePolicy,
     BUILDING_BLOCK_GRID_VERSION,
+    BUILDING_MAX_SOURCE_AREA_M2,
+    BUILDING_SCOPE_POLICY_VERSION,
     legacy_building_scope_diagnostics,
     mercator_scale,
     plan_building_scope,
@@ -52,7 +54,64 @@ class BuildingScopeTests(unittest.TestCase):
         self.assertEqual(first.sha256, hashlib.sha256(first.canonical_bytes()).hexdigest())
         self.assertGreater(len(first.calibration_sample_cells), len(first.calibration_cells))
         self.assertLessEqual(first.document["metrics"]["sourceToOutputAreaBasisPoints"], 13_500)
-        self.assertLess(first.document["metrics"]["sourceAreaM2"], 200_000_000)
+        self.assertLess(first.document["metrics"]["sourceAreaM2"], BUILDING_MAX_SOURCE_AREA_M2)
+
+    def test_default_policy_accepts_observed_348_square_kilometer_shanghai_scope(self):
+        job = make_job({
+            "mode": "custom_bbox",
+            "bbox": [
+                121.30632294659607,
+                31.158348295222982,
+                121.52266583255309,
+                31.31010442485655,
+            ],
+        })
+
+        plan = self.plan(job)
+
+        self.assertEqual(BUILDING_SCOPE_POLICY_VERSION, 5)
+        self.assertEqual(BUILDING_MAX_SOURCE_AREA_M2, 1_200_000_000)
+        self.assertEqual(
+            plan.document["policy"]["maxSourceAreaM2"], 1_200_000_000
+        )
+        self.assertEqual(
+            plan.document["policy"]["maxRelationObjectsPerJob"], 500_000
+        )
+        self.assertEqual(
+            plan.document["metrics"]["requestedApproximateAreaM2"],
+            347_879_737,
+        )
+        self.assertEqual(plan.document["metrics"]["outputBlockCount"], 42)
+        self.assertEqual(plan.document["metrics"]["outputAreaM2"], 704_643_072)
+        self.assertEqual(plan.document["metrics"]["sourceAreaM2"], 732_168_192)
+
+        with self.assertRaises(BuildingScopeError) as raised:
+            self.plan(job, policy=BuildingScopePolicy(max_source_area_m2=732_000_000))
+        self.assertEqual(raised.exception.code, "building_scope_exceeded")
+
+    def test_default_policy_accepts_source_scope_between_800_and_1200_square_kilometers(self):
+        job = make_job({
+            "mode": "custom_bbox",
+            "bbox": [
+                121.2738715137025,
+                31.135584875777948,
+                121.55511726544664,
+                31.332867844301585,
+            ],
+        })
+
+        plan = self.plan(job)
+
+        self.assertEqual(plan.document["metrics"]["outputBlockCount"], 63)
+        self.assertEqual(plan.document["metrics"]["outputAreaM2"], 1_056_964_608)
+        self.assertEqual(plan.document["metrics"]["sourceAreaM2"], 1_090_781_184)
+
+        with self.assertRaises(BuildingScopeError) as raised:
+            self.plan(
+                job,
+                policy=BuildingScopePolicy(max_source_area_m2=1_090_000_000),
+            )
+        self.assertEqual(raised.exception.code, "building_scope_exceeded")
 
     def test_polygon_selects_only_intersecting_blocks(self):
         coordinates = [[121.45, 31.20], [121.50, 31.20], [121.50, 31.22], [121.45, 31.20]]

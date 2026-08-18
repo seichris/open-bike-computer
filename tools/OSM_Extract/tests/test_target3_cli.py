@@ -26,6 +26,46 @@ HOST_FONT_CANDIDATES = (
 )
 
 
+def write_block_cache_identity(
+    root, source_sha, rules_sha, calibration_key, calibration_manifest
+):
+    manifest = json.loads(calibration_manifest.read_bytes())
+    body = {
+        "schemaVersion": 1,
+        "sourceSnapshotSha256": source_sha,
+        "rulesSha256": rules_sha,
+        "buildingProfileVersion": 1,
+        "rendererFormatVersion": 3,
+        "fmbVersion": 4,
+        "blockGridVersion": 1,
+        "blockSizeMeters": 4096,
+        "selectionSemantics": "complete_blocks_no_selection_edge_clipping",
+        "geometryBufferMeters": 256,
+        "relationRetryBufferMeters": 512,
+        "maxGeometryBufferMeters": 2048,
+        "normalizationAlgorithmVersion": 2,
+        "blockEncodingAlgorithmVersion": 1,
+        "geometryEngine": {"name": "shapely", "version": "2.0.7"},
+        "sourceIndex": {"schemaVersion": 1, "algorithmVersion": 2},
+        "closureAlgorithmVersion": 1,
+        "calibration": {
+            "algorithmVersion": 1,
+            "calibrationKey": calibration_key,
+            "manifestSha256": manifest["manifestSha256"],
+            "entrySetSha256": hashlib.sha256(
+                canonical_json(manifest["cells"])
+            ).hexdigest(),
+        },
+    }
+    value = {
+        **body,
+        "cacheIdentitySha256": hashlib.sha256(canonical_json(body)).hexdigest(),
+    }
+    path = root / "building-block-cache-identity.json"
+    path.write_bytes(canonical_json(value) + b"\n")
+    return path
+
+
 class Target3CLITests(unittest.TestCase):
     def test_ogr_untagged_relation_outline_reaches_strict_target_three(self):
         host_font = next(
@@ -64,12 +104,15 @@ class Target3CLITests(unittest.TestCase):
             scope = {
                 "schemaVersion": 1,
                 "policy": {
-                    "policyVersion": 1,
+                    "policyVersion": 5,
                     "blockGridVersion": 1,
                     "blockSizeMeters": 4096,
                     "selectionSemantics": "complete_blocks_no_selection_edge_clipping",
                     "relationClosureMode": "source_snapshot_index",
                     "maxRelationObjectsPerJob": 1_000,
+                    "geometryBufferMeters": 256,
+                    "relationRetryBufferMeters": 512,
+                    "maxGeometryBufferMeters": 2048,
                 },
                 "outputBlocks": [
                     {"x": 0, "y": 0, "boundsMeters": [0, 0, 4096, 4096]}
@@ -166,6 +209,13 @@ class Target3CLITests(unittest.TestCase):
                 ),
             )
             calibration_cache.materialize_cells(sample_cells, {})
+            block_cache_identity = write_block_cache_identity(
+                root,
+                source_sha,
+                rules_sha,
+                calibration_cache.key,
+                calibration_cache.key_root / "manifest.json",
+            )
             output = root / "map"
             rendered = subprocess.run(
                 [
@@ -187,6 +237,10 @@ class Target3CLITests(unittest.TestCase):
                     str(calibration_cache.key_root / "manifest.json"),
                     "--calibration-source-sha256",
                     source_sha,
+                    "--building-block-cache-root",
+                    str(root / "block-cache"),
+                    "--building-block-cache-identity",
+                    str(block_cache_identity),
                 ],
                 cwd=ROOT / "scripts",
                 env=environment,
@@ -379,13 +433,23 @@ class Target3CLITests(unittest.TestCase):
                 (x, y) for x in range(-1, 3) for y in range(-1, 2)
             ]
             calibration_cache.materialize_cells(sample_cells, {})
+            block_cache_identity = write_block_cache_identity(
+                root,
+                source_sha,
+                rules_sha,
+                calibration_cache.key,
+                calibration_cache.key_root / "manifest.json",
+            )
             scope = {
                 "schemaVersion": 1,
                 "policy": {
-                    "policyVersion": 1,
+                    "policyVersion": 5,
                     "blockGridVersion": 1,
                     "blockSizeMeters": 4096,
                     "selectionSemantics": "complete_blocks_no_selection_edge_clipping",
+                    "geometryBufferMeters": 256,
+                    "relationRetryBufferMeters": 512,
+                    "maxGeometryBufferMeters": 2048,
                 },
                 "outputBlocks": [
                     {"x": 0, "y": 0, "boundsMeters": [0, 0, 4096, 4096]}
@@ -468,6 +532,8 @@ class Target3CLITests(unittest.TestCase):
                     "--calibration-manifest",
                     str(calibration_cache.key_root / "manifest.json"),
                     "--calibration-source-sha256", source_sha,
+                    "--building-block-cache-root", str(root / "block-cache"),
+                    "--building-block-cache-identity", str(block_cache_identity),
                 ]
             selected_result = subprocess.run(
                 selected_command,
@@ -499,6 +565,38 @@ class Target3CLITests(unittest.TestCase):
             self.assertEqual(selected_stats["recordCount"], 2)
             self.assertEqual(selected_stats["calibrationSource"], "sourceSnapshotCache")
             self.assertEqual(len(list(selected_output.rglob("*.fmb"))), 1)
+            self.assertEqual(selected_stats["blockCache"]["initialMissCount"], 1)
+            self.assertEqual(selected_stats["blockCache"]["builtCount"], 1)
+
+            warm_output = root / "selected-map-warm"
+            warm_command = list(selected_command)
+            warm_command[warm_command.index(str(selected_output))] = str(warm_output)
+            warm_result = subprocess.run(
+                warm_command,
+                cwd=ROOT / "scripts",
+                check=False,
+                env=environment,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(
+                warm_result.returncode,
+                0,
+                f"stdout:\n{warm_result.stdout}\nstderr:\n{warm_result.stderr}",
+            )
+            warm_stats = json.loads(
+                next(
+                    line for line in warm_result.stdout.splitlines()
+                    if line.startswith("BUILDING_STATS:")
+                ).removeprefix("BUILDING_STATS:")
+            )
+            self.assertEqual(warm_stats["blockCache"]["initialHitCount"], 1)
+            self.assertEqual(warm_stats["blockCache"]["initialMissCount"], 0)
+            self.assertEqual(warm_stats["blockCache"]["builtCount"], 0)
+            self.assertEqual(
+                next(selected_output.rglob("*.fmb")).read_bytes(),
+                next(warm_output.rglob("*.fmb")).read_bytes(),
+            )
 
             invalid_scope = json.loads(json.dumps(scope))
             invalid_scope["policy"].pop("selectionSemantics")

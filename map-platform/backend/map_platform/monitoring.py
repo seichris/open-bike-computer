@@ -73,6 +73,9 @@ MONITORING_COLUMNS = frozenset(
         "source_bytes",
         "source_expansion_basis_points",
         "calibration_cache_outcome",
+        "building_block_cache_outcome",
+        "building_block_cache_hit_count",
+        "building_block_cache_miss_count",
         "closure_candidate_count",
         "closure_way_count",
         "closure_node_count",
@@ -128,6 +131,9 @@ MONITORING_V2_COLUMN_TYPES = {
     "source_bytes": "INTEGER",
     "source_expansion_basis_points": "INTEGER",
     "calibration_cache_outcome": "TEXT",
+    "building_block_cache_outcome": "TEXT",
+    "building_block_cache_hit_count": "INTEGER",
+    "building_block_cache_miss_count": "INTEGER",
     "closure_candidate_count": "INTEGER",
     "closure_way_count": "INTEGER",
     "closure_node_count": "INTEGER",
@@ -333,6 +339,7 @@ class MapMonitoringStore:
         source_area_m2: int | None = None,
         building_source_count: int | None = None,
         cache_outcome: str | None = None,
+        building_cache_outcome: str | None = None,
         minimum_samples: int = 20,
         limit: int = 500,
     ) -> list[float]:
@@ -349,7 +356,8 @@ class MapMonitoringStore:
                        output_block_count,
                        source_area_m2,
                        building_source_count,
-                       calibration_cache_outcome
+                       calibration_cache_outcome,
+                       building_block_cache_outcome
                 FROM map_build_runs
                 WHERE status = 'ready'
                   AND attempts = 1
@@ -376,6 +384,15 @@ class MapMonitoringStore:
             for row in rows
             if _is_finite_number(row["duration"])
             and float(row["duration"]) >= 0
+        ]
+        # Building-block cache hits remove the dominant normalization and
+        # encoding work. Never dilute a known cold, partial, or warm cohort
+        # with a different cache outcome, even when the cohort is still small.
+        compatible = [
+            row
+            for row in valid
+            if building_cache_outcome is None
+            or row["building_block_cache_outcome"] == building_cache_outcome
         ]
         requested_block_bucket = _block_bucket(output_block_count)
         requested_density_bucket = _density_bucket(
@@ -424,9 +441,9 @@ class MapMonitoringStore:
             )
 
         tiers = [
-            [row for row in valid if exact(row)],
-            [row for row in valid if neighboring(row)],
-            valid,
+            [row for row in compatible if exact(row)],
+            [row for row in compatible if neighboring(row)],
+            compatible,
         ]
         minimum = max(1, min(int(minimum_samples), 10_000))
         selected = next((tier for tier in tiers if len(tier) >= minimum), None)
@@ -541,6 +558,7 @@ class MapMonitoringStore:
                     performance_compatibility_key,
                     outcome_class,
                     calibration_cache_outcome,
+                    building_block_cache_outcome,
                     output_block_count,
                     source_area_m2,
                     building_source_count,
@@ -807,6 +825,9 @@ class MapMonitoringStore:
                 source_bytes INTEGER,
                 source_expansion_basis_points INTEGER,
                 calibration_cache_outcome TEXT,
+                building_block_cache_outcome TEXT,
+                building_block_cache_hit_count INTEGER,
+                building_block_cache_miss_count INTEGER,
                 closure_candidate_count INTEGER,
                 closure_way_count INTEGER,
                 closure_node_count INTEGER,
@@ -987,6 +1008,8 @@ def build_map_job_monitoring_event(
     }
     if job.reuse_strategy is not None:
         event["reuseStrategy"] = job.reuse_strategy
+    if job.error_code is not None:
+        event["errorCode"] = job.error_code
     if isinstance(job.preparation_estimate, dict):
         estimate = job.preparation_estimate
         event["preparationEstimate"] = {
@@ -1034,6 +1057,13 @@ def _terminal_estimator_features(job: MapJob) -> dict[str, Any]:
     complexity = complexity if isinstance(complexity, dict) else {}
     building = metrics.get("buildingBuild")
     building = building if isinstance(building, dict) else {}
+    building_block_cache = building.get("blockCache")
+    building_block_cache = (
+        building_block_cache if isinstance(building_block_cache, dict) else {}
+    )
+    building_block_cache_outcome = _building_block_cache_outcome(
+        building_block_cache
+    )
     label = metrics.get("labelBuild")
     label = label if isinstance(label, dict) else {}
     calibration = preprocessing.get("calibrationGenerationExecution")
@@ -1085,6 +1115,13 @@ def _terminal_estimator_features(job: MapJob) -> dict[str, Any]:
         ),
         "calibration_cache_outcome": (
             cache_outcome if isinstance(cache_outcome, str) else None
+        ),
+        "building_block_cache_outcome": building_block_cache_outcome,
+        "building_block_cache_hit_count": _nonnegative_integer(
+            building_block_cache.get("initialHitCount")
+        ),
+        "building_block_cache_miss_count": _nonnegative_integer(
+            building_block_cache.get("initialMissCount")
         ),
         "closure_candidate_count": _nonnegative_integer(
             closure.get("candidateCount")
@@ -1209,6 +1246,7 @@ def _cohort_summary(rows: list[sqlite3.Row]) -> dict[str, Any]:
         mode = row["preprocessing_mode"] or "unknown"
         outcome = row["outcome_class"] or "unknown"
         cache = row["calibration_cache_outcome"] or "unknown"
+        building_cache = row["building_block_cache_outcome"] or "unknown"
         blocks = row["output_block_count"]
         block_bucket = _block_bucket(blocks)
         density_bucket = _density_bucket(
@@ -1224,6 +1262,7 @@ def _cohort_summary(rows: list[sqlite3.Row]) -> dict[str, Any]:
                 str(mode),
                 str(outcome),
                 str(cache),
+                f"block-cache-{building_cache}",
                 f"blocks-{block_bucket}",
                 f"density-{density_bucket}",
                 f"profile-{performance_prefix}",
@@ -1416,6 +1455,27 @@ def _nonnegative_integer(value: Any) -> int | None:
     ):
         return value
     return None
+
+
+def _building_block_cache_outcome(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    requested = _nonnegative_integer(value.get("requestedBlockCount"))
+    hits = _nonnegative_integer(value.get("initialHitCount"))
+    misses = _nonnegative_integer(value.get("initialMissCount"))
+    if (
+        requested is None
+        or requested <= 0
+        or hits is None
+        or misses is None
+        or hits + misses != requested
+    ):
+        return None
+    if misses == 0:
+        return "full_hit"
+    if hits == 0:
+        return "cold_miss"
+    return "partial_hit"
 
 
 def _block_bucket(value: Any) -> str:

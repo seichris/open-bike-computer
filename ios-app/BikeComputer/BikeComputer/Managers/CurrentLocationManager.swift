@@ -58,6 +58,52 @@ nonisolated enum RideActivityPolicy {
     }
 }
 
+nonisolated enum LocationAuthorizationRemediation: Equatable {
+    case requestInApp
+    case openSettings
+    case none
+}
+
+nonisolated enum LocationAuthorizationRemediationPolicy {
+    static func action(
+        for status: CLAuthorizationStatus
+    ) -> LocationAuthorizationRemediation {
+        switch status {
+        case .notDetermined:
+            .requestInApp
+        case .restricted, .denied:
+            .openSettings
+        case .authorizedAlways:
+            .none
+#if !os(macOS)
+        case .authorizedWhenInUse:
+            .none
+#endif
+        @unknown default:
+            .openSettings
+        }
+    }
+
+    static func buttonTitle(
+        for status: CLAuthorizationStatus
+    ) -> String? {
+        switch action(for: status) {
+        case .requestInApp:
+            "Continue"
+        case .openSettings:
+            "Open iPhone Settings"
+        case .none:
+            nil
+        }
+    }
+
+    static func allowsDismissal(
+        for status: CLAuthorizationStatus
+    ) -> Bool {
+        action(for: status) != .requestInApp
+    }
+}
+
 nonisolated enum RideIdleTimerController {
     static func update(
         isNavigating: Bool,
@@ -344,8 +390,8 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             )
         }
 #endif
-        // First-run onboarding owns the permission prompt so the user can read
-        // the rationale or skip location before iOS asks for access.
+        // User-initiated feature flows own the permission request so the native
+        // prompt appears in context and the user's response remains authoritative.
     }
     
     func requestLocation() {

@@ -8,6 +8,7 @@ import struct
 import subprocess
 import tarfile
 import tempfile
+import types
 import unittest
 import zipfile
 from contextlib import redirect_stderr, redirect_stdout
@@ -1239,6 +1240,37 @@ build_src_filter =
         self.assertNotIn("nobuild", command)
         self.assertNotIn("upload", command)
 
+    def test_attestation_canonicalizes_platformio_flash_offsets(self):
+        core = self.write_core_attestation().resolve()
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware()
+        plan_path = (
+            self.project_dir
+            / ".pio/build"
+            / self.environment
+            / FLASH_PLAN_FILENAME
+        )
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["images"][0]["offset"] = "0x0000"
+        image_tail = [
+            value
+            for image in plan["images"]
+            for value in (image["offset"], image["path"])
+        ]
+        plan["command"][-len(image_tail) :] = image_tail
+        plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+
+        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
+            manifest_path = record_generated_sdkconfig_defaults(
+                self.project_dir, self.environment
+            )
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        flash_plan = manifest["flashPlan"]
+        self.assertEqual(flash_plan["images"][0]["offset"], "0x0")
+        self.assertEqual(flash_plan["command"][-8], "0x0")
+
     def test_attestation_rejects_platformio_app_offset_mismatch(self):
         core = self.write_core_attestation()
         defaults = self.project_dir / "sdkconfig.defaults"
@@ -1656,6 +1688,85 @@ build_src_filter =
         mocked_build.assert_not_called()
         mocked_upload.assert_not_called()
         self.assertIn("requires --upload-port or --device-serial", errors.getvalue())
+
+    def test_cli_routes_factory_output_through_the_build_helper(self):
+        production = f"{self.environment}_PRODUCTION"
+        output_dir = self.project_dir / "factory-output"
+        with patch("build_firmware.build_firmware") as mocked_build:
+            result = main(
+                [
+                    production,
+                    "--project-dir",
+                    str(self.project_dir),
+                    "--factory-output-dir",
+                    str(output_dir),
+                ],
+                runtime_handoff=lambda _argv, _project: None,
+            )
+
+        self.assertEqual(0, result)
+        mocked_build.assert_called_once_with(
+            self.project_dir,
+            production,
+            pio_command="unit-test-pio",
+            factory_output_dir=output_dir,
+        )
+
+    def test_cli_rejects_factory_output_with_upload(self):
+        errors = StringIO()
+        with patch("build_firmware.build_firmware") as mocked_build, patch(
+            "build_firmware.upload_firmware"
+        ) as mocked_upload, redirect_stderr(errors):
+            result = main(
+                [
+                    f"{self.environment}_PRODUCTION",
+                    "--project-dir",
+                    str(self.project_dir),
+                    "--factory-output-dir",
+                    str(self.project_dir / "factory-output"),
+                    "--upload-port",
+                    "/dev/cu.test",
+                ],
+                runtime_handoff=lambda _argv, _project: None,
+            )
+
+        self.assertEqual(1, result)
+        mocked_build.assert_not_called()
+        mocked_upload.assert_not_called()
+        self.assertIn("cannot be combined", errors.getvalue())
+
+    def test_cli_runtime_check_reports_locked_handoff_without_building(self):
+        output = StringIO()
+        provenance = types.SimpleNamespace(
+            target="macos-arm64-cp313",
+            lock_set_id="firmware-runtime-test-1",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "OPEN_BIKE_FIRMWARE_RUNTIME_BOOTSTRAP_MS": "101",
+                "OPEN_BIKE_FIRMWARE_RUNTIME_SHARED_MS": "11",
+                "OPEN_BIKE_FIRMWARE_RUNTIME_HYDRATION_MS": "22",
+                "OPEN_BIKE_FIRMWARE_RUNTIME_VERIFICATION_MS": "33",
+            },
+        ), patch("build_firmware.build_firmware") as mocked_build, redirect_stdout(
+            output
+        ):
+            result = main(
+                [
+                    self.environment,
+                    "--project-dir",
+                    str(self.project_dir),
+                    "--runtime-check-only",
+                ],
+                runtime_handoff=lambda _argv, _project: provenance,
+            )
+
+        self.assertEqual(0, result)
+        mocked_build.assert_not_called()
+        self.assertIn("FIRMWARE_RUNTIME_CHECK schema=1", output.getvalue())
+        self.assertIn("bootstrapMs=101", output.getvalue())
+        self.assertIn("verificationMs=33", output.getvalue())
 
     def test_cli_device_name_rejects_family_mismatch_before_build(self):
         registry = (self.project_dir / "devices.json").resolve()
@@ -2099,6 +2210,64 @@ build_src_filter =
             )
 
         self.assertIn(f"coreAttestationSha256={digest}", output.getvalue())
+        self.assertIn("FIRMWARE_BUILD_PROVENANCE schema=2", output.getvalue())
+        fields = {
+            item.split("=", 1)[0]
+            for item in output.getvalue().strip().split()[1:]
+        }
+        self.assertEqual(
+            {
+                "schema",
+                "environment",
+                "git",
+                "uploadEligible",
+                "coreCache",
+                "coreInputKey",
+                "runtimeLockSetId",
+                "runtimeManifestSha256",
+                "runtimeTarget",
+                "runtimeBundleSha256",
+                "runtimeTreeSha256",
+                "runtimePythonSha256",
+                "runtimePioSha256",
+                "runtimeUvSha256",
+                "runtimePythonVersion",
+                "runtimePlatformioVersion",
+                "runtimeTopLevelDistributionsSha256",
+                "runtimePioarduinoRootDistributionsSha256",
+                "runtimeEspIdfDistributionsSha256",
+                "runtimeUvDistributionsSha256",
+                "runtimeEsptoolDistributionsSha256",
+                "runtimeBootstrapMs",
+                "runtimeSharedMs",
+                "runtimeHydrationMs",
+                "runtimeVerificationMs",
+                "runtimePioarduinoPenvTreeSha256",
+                "runtimeEspIdfVenvTreeSha256",
+                "runtimeTransformedPlatformTreeSha256",
+                "phasePlatformPreparationMs",
+                "phaseCustomCoreBootstrapMs",
+                "phaseApplicationCompileMs",
+                "phaseApplicationBuildMs",
+                "phaseLinkMs",
+                "phaseAttestationMs",
+                "phaseTotalMs",
+                "sourceDateEpoch",
+                "buildTimestamp",
+                "firmwareBinSha256",
+                "firmwareElfSha256",
+                "bootloaderBinSha256",
+                "partitionTableBinSha256",
+                "bootApp0Sha256",
+                "flashPlanSha256",
+                "coreAttestationSha256",
+                "platformArchiveSha256",
+                "platformPackagesSha256",
+                "libraryDependenciesSha256",
+                "managedComponentsSha256",
+            },
+            fields,
+        )
 
     def test_downloads_and_content_pins_platform_project_config(self):
         self.platform_config_patch.stop()

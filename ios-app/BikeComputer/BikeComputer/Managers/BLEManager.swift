@@ -15,6 +15,145 @@ import Security
 import UIKit
 #endif
 
+nonisolated struct DeviceActiveMapDescriptor: Equatable, Sendable {
+    let mapID: String
+    let sessionID: String?
+    let manifestReceipt: String?
+    let displayName: String?
+    let bounds: OfflineMapPreviewBounds?
+
+    var stableIdentity: String {
+        sessionID ?? manifestReceipt ?? mapID
+    }
+
+    var previewFilename: String {
+        let boundsIdentity = bounds.map { value in
+            [
+                value.minLongitude,
+                value.minLatitude,
+                value.maxLongitude,
+                value.maxLatitude,
+            ]
+            .map { String($0.bitPattern, radix: 16) }
+            .joined(separator: ",")
+        } ?? ""
+        let identity = [
+            mapID,
+            sessionID ?? "",
+            manifestReceipt ?? "",
+            displayName ?? "",
+            boundsIdentity,
+        ].joined(separator: "\u{0}")
+        let digest = SHA256.hash(data: Data(identity.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "device-map-\(digest).png"
+    }
+
+    init?(
+        mapID: String,
+        sessionID: String? = nil,
+        manifestReceipt: String? = nil,
+        displayName: String? = nil,
+        boundsE7: [Int]? = nil
+    ) {
+        guard Self.isSafeMapID(mapID) else { return nil }
+        self.mapID = mapID
+        self.sessionID = sessionID.flatMap(Self.validSessionID)
+        self.manifestReceipt = manifestReceipt.flatMap(Self.validReceipt)
+        self.displayName = displayName.flatMap(Self.validDisplayName)
+        self.bounds = boundsE7.flatMap { values in
+            guard values.count == 4 else { return nil }
+            return OfflineMapPreviewBounds(
+                coordinates: values.map { Double($0) / 10_000_000 }
+            )
+        }
+    }
+
+    init?(statusObject: [String: Any]) {
+        guard let mapID = statusObject["activeMapId"] as? String else {
+            return nil
+        }
+        let bounds: [Int]? = (statusObject["activeMapBoundsE7"] as? [Any]).flatMap {
+            guard $0.count == 4 else { return nil }
+            var values: [Int] = []
+            values.reserveCapacity(4)
+            for item in $0 {
+                guard let number = item as? NSNumber,
+                      CFGetTypeID(number) != CFBooleanGetTypeID() else {
+                    return nil
+                }
+                let value = number.doubleValue
+                guard value.isFinite,
+                      value.rounded(.towardZero) == value,
+                      value >= Double(Int32.min),
+                      value <= Double(Int32.max) else {
+                    return nil
+                }
+                values.append(Int(value))
+            }
+            return values
+        }
+        self.init(
+            mapID: mapID,
+            sessionID: statusObject["activeSessionId"] as? String,
+            manifestReceipt: statusObject["activeManifestReceipt"] as? String,
+            displayName: statusObject["activeMapDisplayName"] as? String,
+            boundsE7: bounds
+        )
+    }
+
+    private static func isSafeMapID(_ value: String) -> Bool {
+        guard !value.isEmpty,
+              value.utf8.count <= 64,
+              value != ".",
+              value != ".." else {
+            return false
+        }
+        return value.utf8.allSatisfy(isSafeIdentifierByte)
+    }
+
+    private static func validSessionID(_ value: String) -> String? {
+        guard !value.isEmpty,
+              value.utf8.count <= 80,
+              value.first != ".",
+              !value.contains(".."),
+              value.utf8.allSatisfy(isSafeIdentifierByte) else {
+            return nil
+        }
+        return value
+    }
+
+    private static func validReceipt(_ value: String) -> String? {
+        guard value.utf8.count == 64,
+              value.utf8.allSatisfy({ byte in
+                  (48...57).contains(byte) || (65...70).contains(byte) ||
+                      (97...102).contains(byte)
+              }) else {
+            return nil
+        }
+        return value.lowercased()
+    }
+
+    private static func validDisplayName(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.count <= 80,
+              trimmed.utf8.count <= 240,
+              trimmed.unicodeScalars.allSatisfy({
+                  !CharacterSet.controlCharacters.contains($0)
+              }) else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private static func isSafeIdentifierByte(_ byte: UInt8) -> Bool {
+        (48...57).contains(byte) || (65...90).contains(byte) ||
+            (97...122).contains(byte) || byte == 45 || byte == 46 || byte == 95
+    }
+}
+
 struct NavigationWriteEndpoint {
     let maximumWriteLength: Int
     let expectsWriteResponse: Bool
@@ -695,7 +834,6 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var activeDeviceID: String?
     @Published private(set) var connectedDeviceID: String?
     @Published private(set) var pairingPrompt: BikeComputerPairingPrompt?
-    @Published private(set) var isPairingConfirmedOnDevice = false
     @Published private(set) var isPairingConfirmationSubmitting = false
     @Published private(set) var completedPairingGeneration: UInt64 = 0
     @Published private(set) var pairingStatusMessage: String?
@@ -708,6 +846,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferAccessPointSSID: String?
     @Published var mapTransferActiveMapId: String = ""
     @Published var mapTransferActiveSessionId: String = ""
+    @Published private(set) var activeDeviceMap: DeviceActiveMapDescriptor?
     @Published private(set) var activeMapManifestReceipt: String = ""
     @Published private(set) var activeMapRendererFormat: Int?
     @Published private(set) var activeMapLabelProfileVersion: Int?
@@ -911,6 +1050,8 @@ class BLEManager: NSObject, ObservableObject {
     private var pendingConnectionAfterDisconnect: UUID?
     private var pendingScannedConnectionIdentifier: UUID?
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
+    private var explicitDiscoveryOrderStabilizer =
+        BLEExplicitDiscoveryOrderStabilizer()
     private var discoveryFreshnessTimer: Timer?
     private var pendingScanStartWorkItem: DispatchWorkItem?
     private var lastPhysicalScanStoppedAt: Date?
@@ -2070,6 +2211,7 @@ class BLEManager: NSObject, ObservableObject {
         opportunisticObservations.removeAll()
         discoveredDevices = []
         discoveredPeripherals = [:]
+        explicitDiscoveryOrderStabilizer.reset()
         if !keepingCandidate {
             opportunisticCandidateExpiryTimer?.invalidate()
             opportunisticCandidateExpiryTimer = nil
@@ -2561,7 +2703,6 @@ class BLEManager: NSObject, ObservableObject {
         )
         pendingPairingMaterial = nil
         pairingPrompt = nil
-        isPairingConfirmedOnDevice = false
         isPairingConfirmationSubmitting = false
         pairingError = nil
         pairingStatusMessage = "Connecting to \(candidate.advertisedName)…"
@@ -2578,17 +2719,18 @@ class BLEManager: NSObject, ObservableObject {
         connectDiscoveredPeripheral(identifier: candidate.peripheralIdentifier)
     }
 
-    func confirmPairingAfterCodeMatch() {
+    private func submitPairingConfirmationAfterDevicePress(
+        from peripheral: CBPeripheral
+    ) -> Bool {
         guard let material = pendingPairingMaterial,
-              let peripheral = connectedPeripheral,
-              isPairingConfirmedOnDevice,
+              connectedPeripheral?.identifier == peripheral.identifier,
               !isPairingConfirmationSubmitting,
               ownershipLifecycle.beginConfirmation(
                 for: peripheral.identifier
-              ) else { return }
+              ) else { return false }
         isPairingConfirmationSubmitting = true
-        // Persist recovery eligibility only after both the hardware button
-        // confirmation and the user's matching-code confirmation on iPhone.
+        // The fresh hardware button press is the user's matching-code
+        // confirmation and proves physical access to this Bike Computer.
         deviceRegistry.markProvisionalOwnerKeyConfirmed(
             deviceID: material.deviceID
         )
@@ -2600,6 +2742,7 @@ class BLEManager: NSObject, ObservableObject {
         pairingStatusMessage = "Registering this iPhone…"
         startAuthenticationTimeout(for: peripheral)
         enqueueAuthMessage(material.confirmationCommand)
+        return true
     }
 
     func cancelPairing() {
@@ -2630,7 +2773,6 @@ class BLEManager: NSObject, ObservableObject {
         pendingPairingMaterial = nil
         pendingPairingCandidate = nil
         pairingPrompt = nil
-        isPairingConfirmedOnDevice = false
         isPairingConfirmationSubmitting = false
         pairingStatusMessage = nil
         pairingError = nil
@@ -2667,7 +2809,6 @@ class BLEManager: NSObject, ObservableObject {
         pendingPairingMaterial = nil
         pendingPairingCandidate = nil
         pairingPrompt = nil
-        isPairingConfirmedOnDevice = false
         isPairingConfirmationSubmitting = false
         pendingConnectionAfterDisconnect = nil
         pendingScannedConnectionIdentifier = nil
@@ -3137,7 +3278,6 @@ class BLEManager: NSObject, ObservableObject {
         pendingPairingMaterial = nil
         pendingPairingCandidate = nil
         pairingPrompt = nil
-        isPairingConfirmedOnDevice = false
         isPairingConfirmationSubmitting = false
         navigationWriteEndpoint = nil
         navigationWriteQueue.removeAll()
@@ -4868,6 +5008,7 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferAccessPointSSID = nil
         mapTransferActiveMapId = ""
         mapTransferActiveSessionId = ""
+        activeDeviceMap = nil
         activeMapManifestReceipt = ""
         activeMapRendererFormat = nil
         activeMapLabelProfileVersion = nil
@@ -5248,8 +5389,15 @@ class BLEManager: NSObject, ObservableObject {
                 failAuthentication("The physical pairing confirmation did not match this device.", peripheral: peripheral)
                 return
             }
-            isPairingConfirmedOnDevice = true
-            pairingStatusMessage = "Confirm the matching code on this iPhone."
+            guard submitPairingConfirmationAfterDevicePress(
+                from: peripheral
+            ) else {
+                failAuthentication(
+                    "Could not finish pairing after the physical confirmation.",
+                    peripheral: peripheral
+                )
+                return
+            }
             return
         }
         if message.hasPrefix("SERVER2|") {
@@ -5909,7 +6057,6 @@ class BLEManager: NSObject, ObservableObject {
         pairingError = message
         pairingStatusMessage = nil
         pairingPrompt = nil
-        isPairingConfirmedOnDevice = false
         isPairingConfirmationSubmitting = false
         authInfoFallbackTimer?.invalidate()
         authInfoFallbackTimer = nil
@@ -6054,7 +6201,6 @@ class BLEManager: NSObject, ObservableObject {
         clearUnknownDiscoveryState()
         refreshKnownDevices()
         pairingPrompt = nil
-        isPairingConfirmedOnDevice = false
         isPairingConfirmationSubmitting = false
         pairingStatusMessage = nil
         pairingError = nil
@@ -6798,20 +6944,11 @@ extension BLEManager: CBCentralManagerDelegate {
             connectToPeripheral(peripheral)
         case .explicitDiscovery:
             discoveredPeripherals[peripheral.identifier] = peripheral
-            if let index = discoveredDevices.firstIndex(where: {
-                $0.id == candidate.id
-            }) {
-                discoveredDevices[index] = candidate
-            } else {
-                discoveredDevices.append(candidate)
-            }
-            discoveredDevices.sort { lhs, rhs in
-                let lhsRank = BLEDiscoverySignalPolicy.rank(for: lhs.rssi)
-                let rhsRank = BLEDiscoverySignalPolicy.rank(for: rhs.rssi)
-                if lhsRank != rhsRank { return lhsRank > rhsRank }
-                return lhs.peripheralIdentifier.uuidString <
-                    rhs.peripheralIdentifier.uuidString
-            }
+            explicitDiscoveryOrderStabilizer.merge(
+                candidate,
+                into: &discoveredDevices,
+                now: candidate.lastSeenAt
+            )
             pairingStatusMessage = discoveredDevices.isEmpty ? "Looking for nearby Bike Computers…" : nil
         case .opportunisticDiscovery:
             guard let activeDiscoveryGeneration else {
@@ -6976,7 +7113,6 @@ extension BLEManager: CBCentralManagerDelegate {
 
         if pendingPairingSession != nil && pairingError == nil {
             pairingPrompt = nil
-            isPairingConfirmedOnDevice = false
             pairingStatusMessage = nil
             pairingError = "Pairing was interrupted. Cancel and add the Bike Computer again."
         }
@@ -7961,6 +8097,7 @@ extension BLEManager: CBPeripheralDelegate {
         mapTransferActiveMapId = object["activeMapId"] as? String ?? ""
         mapTransferActiveSessionId = object["activeSessionId"] as? String ?? ""
         activeMapManifestReceipt = object["activeManifestReceipt"] as? String ?? ""
+        activeDeviceMap = DeviceActiveMapDescriptor(statusObject: object)
         activeMapRendererFormat =
             (object["activeRendererFormat"] as? NSNumber)?.intValue
         activeMapLabelProfileVersion =

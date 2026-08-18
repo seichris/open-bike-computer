@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "modelVersion": "map-preparation-v1",
   "featureSchemaVersion": 1,
-  "runtimePerformanceProfileVersion": "map-pipeline-2026-08-v1",
-  "scopePolicyVersion": 1,
+  "runtimePerformanceProfileVersion": "map-pipeline-2026-08-v2",
+  "scopePolicyVersion": 5,
   "buildingProfileVersion": 1,
   "algorithmVersions": {
-    "buildingNormalization": 1,
+    "buildingNormalization": 2,
     "buildingSourceIndex": 2,
     "relationClosure": 1
   },

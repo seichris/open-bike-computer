@@ -24,6 +24,7 @@ from shapely.geometry.base import BaseGeometry
 from shapely.geometry.polygon import orient
 from shapely.ops import transform, unary_union
 from shapely.prepared import prep
+from shapely.strtree import STRtree
 
 from building_height import (
     HeightProvenance,
@@ -65,6 +66,87 @@ class SourceBuilding:
     extrude: bool = True
     flat_base: bool = False
     wall_boundary: BaseGeometry | None = None
+
+
+class OutlineSpatialIndex:
+    """Deterministic, lazy containment lookup for building parts.
+
+    STRtree only removes outlines whose envelopes cannot possibly contain a
+    part. The exact legacy predicates and tie-breaking remain authoritative,
+    so replacing the previous all-outlines scan cannot change associations.
+    Prepared 5 cm buffers are materialized only for envelope candidates and
+    retained for the rest of the request.
+    """
+
+    def __init__(self, outlines: Iterable[SourceBuilding]):
+        self.outlines = tuple(outlines)
+        self.envelopes = tuple(outline.geometry.envelope for outline in self.outlines)
+        self.tree = STRtree(self.envelopes) if self.envelopes else None
+        self._indices_by_geometry_id = {
+            id(geometry): index for index, geometry in enumerate(self.envelopes)
+        }
+        self._indices_by_geometry_wkb: dict[bytes, list[int]] = defaultdict(list)
+        for index, geometry in enumerate(self.envelopes):
+            self._indices_by_geometry_wkb[geometry.wkb].append(index)
+        self._prepared: dict[int, Any] = {}
+        self.query_count = 0
+        self.spatial_candidate_count = 0
+        self.envelope_candidate_count = 0
+
+    def _query_indices(self, geometry: BaseGeometry) -> list[int]:
+        if self.tree is None:
+            return []
+        matches = self.tree.query(geometry)
+        if len(matches) == 0:
+            return []
+        first = matches[0]
+        if hasattr(first, "item"):
+            first = first.item()
+        if isinstance(first, int):
+            return [int(value) for value in matches]
+        indices = set()
+        for candidate in matches:
+            index = self._indices_by_geometry_id.get(id(candidate))
+            if index is not None:
+                indices.add(index)
+                continue
+            # Shapely 1.x normally returns the original geometry objects. Keep
+            # every equal envelope if an alternate build returns copies; using
+            # only the first would break object-key tie ordering.
+            indices.update(self._indices_by_geometry_wkb.get(candidate.wkb, ()))
+        return sorted(indices)
+
+    def containment_parent(self, part: SourceBuilding) -> str | None:
+        self.query_count += 1
+        part_envelope = part.geometry.envelope
+        indices = self._query_indices(part_envelope)
+        self.spatial_candidate_count += len(indices)
+        candidates: list[SourceBuilding] = []
+        for index in indices:
+            outline = self.outlines[index]
+            if not self.envelopes[index].covers(part_envelope):
+                continue
+            self.envelope_candidate_count += 1
+            prepared = self._prepared.get(index)
+            if prepared is None:
+                prepared = prep(outline.geometry.buffer(0.05))
+                self._prepared[index] = prepared
+            if prepared.covers(part.geometry):
+                candidates.append(outline)
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda item: (item.geometry.area, item.object_key),
+        ).object_key
+
+    def metrics(self) -> dict[str, int]:
+        return {
+            "containmentQueryCount": self.query_count,
+            "containmentSpatialCandidateCount": self.spatial_candidate_count,
+            "containmentEnvelopeCandidateCount": self.envelope_candidate_count,
+            "containmentPreparedOutlineCount": len(self._prepared),
+        }
 
 
 def load_rules(path: str | Path) -> tuple[HeightRules, str]:
@@ -241,6 +323,7 @@ def prepare_buildings(
     calibration_source_sha256: str | None = None,
     strict_relations: bool = False,
     on_complexity=None,
+    on_association_progress=None,
 ) -> tuple[list[SourceBuilding], dict[str, Any], set[str]]:
     if calibration_cache is not None and (
         calibration_cache.identity.rules_sha256 != calibration_rules_sha256
@@ -293,11 +376,17 @@ def prepare_buildings(
             )
         )
 
-    associated: list[SourceBuilding] = []
     outlines = [source for source in sources if not source.is_part]
-    prepared_outlines = [
-        (outline, prep(outline.geometry.buffer(0.05))) for outline in outlines
-    ]
+    unresolved_parts = sum(
+        source.is_part and part_parents.get(source.object_key) is None
+        for source in sources
+    )
+    containment_index = OutlineSpatialIndex(outlines)
+    associated: list[SourceBuilding] = []
+    associated_unresolved_parts = 0
+    progress_interval = max(1, (unresolved_parts + 99) // 100)
+    if on_association_progress is not None and unresolved_parts:
+        on_association_progress(0, unresolved_parts)
     for source in sources:
         if not source.is_part:
             associated.append(source)
@@ -310,8 +399,20 @@ def prepare_buildings(
                 "an explicit building parent is missing from converted geometry",
             )
         if parent_key is None:
-            parent_key = _containment_parent(source, prepared_outlines)
+            parent_key = containment_index.containment_parent(source)
             association = "containment" if parent_key is not None else "none"
+            associated_unresolved_parts += 1
+            if (
+                on_association_progress is not None
+                and (
+                    associated_unresolved_parts == unresolved_parts
+                    or associated_unresolved_parts % progress_interval == 0
+                )
+            ):
+                on_association_progress(
+                    associated_unresolved_parts,
+                    unresolved_parts,
+                )
         associated.append(replace(source, parent_key=parent_key, association=association))
     sources = associated
     by_key = {source.object_key: source for source in sources}
@@ -436,6 +537,7 @@ def prepare_buildings(
             if calibration_cache is not None
             else None
         ),
+        **containment_index.metrics(),
         **provenance_counts,
     }
     return resolved_sources, report, flat_outline_keys

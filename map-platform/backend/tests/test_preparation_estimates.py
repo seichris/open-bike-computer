@@ -396,11 +396,26 @@ class PreparationEstimateTests(unittest.TestCase):
             revision=4,
             based_on_phase="building_preprocessing",
         )
+        context["evidence"]["progress"]["unit"] = "building_cache_lookup"
+        context["evidence"]["buildingBlockCache"] = {
+            "schemaVersion": 1,
+            "cacheIdentitySha256": "a" * 64,
+            "requestedBlockCount": 6,
+            "initialHitCount": 6,
+            "initialMissCount": 0,
+            "workerCount": 4,
+        }
+        cache_hit = estimator.estimate(
+            job,
+            context,
+            revision=5,
+            based_on_phase="building_preprocessing",
+        )
         context["evidence"]["progress"]["unit"] = "building_normalization"
         normalization_done = estimator.estimate(
             job,
             context,
-            revision=5,
+            revision=6,
             based_on_phase="building_preprocessing",
         )
         self.assertEqual(scope_planned["remaining"], queued["remaining"])
@@ -411,6 +426,11 @@ class PreparationEstimateTests(unittest.TestCase):
         self.assertEqual(
             normalization_pending["remaining"],
             dependencies_done["remaining"],
+        )
+        self.assertIn("building_block_cache_hit", cache_hit["basis"])
+        self.assertLess(
+            cache_hit["remaining"]["upperSeconds"],
+            normalization_pending["remaining"]["upperSeconds"],
         )
         self.assertLess(
             normalization_done["remaining"]["upperSeconds"],

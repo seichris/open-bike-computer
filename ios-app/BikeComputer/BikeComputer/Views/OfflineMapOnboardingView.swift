@@ -2,7 +2,7 @@
 //  OfflineMapOnboardingView.swift
 //  BikeComputer
 //
-//  Guided current-location map install flow.
+//  First-run welcome and guided current-location map install flow.
 //
 
 import CoreLocation
@@ -11,14 +11,10 @@ import UIKit
 
 struct OfflineMapOnboardingView: View {
     @ObservedObject var manager: OfflineMapManager
-    @ObservedObject var bleManager: BLEManager
     let step: OfflineMapOnboardingStep
     let location: CLLocation?
-    let isLocationAuthorized: Bool
+    let locationAuthorizationStatus: CLAuthorizationStatus
     let onRequestLocation: () -> Void
-    let onSkipLocation: () -> Void
-    let onConnectDevice: () -> Void
-    let onCheckDeviceMaps: () -> Void
     let onChooseArea: () -> Void
     let onClose: () -> Void
 
@@ -27,33 +23,27 @@ struct OfflineMapOnboardingView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.headline)
-                        .frame(width: 36, height: 36)
+                if allowsClose {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.headline)
+                            .frame(width: 36, height: 36)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Close")
 
                 Spacer()
-
-                if step == .location {
-                    Button("Skip", action: onSkipLocation)
-                        .font(.subheadline.weight(.semibold))
-                }
             }
 
             VStack(spacing: 18) {
-                Image(systemName: step.symbol)
-                    .font(.system(size: 42, weight: .semibold))
-                    .foregroundColor(.accentColor)
-                    .frame(height: 48)
+                artwork
 
                 Text(step.title)
                     .font(.title2.weight(.semibold))
                     .multilineTextAlignment(.center)
 
-                Text(step.message)
+                Text(step.message(for: locationAuthorizationAction))
                     .font(.body)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -75,53 +65,49 @@ struct OfflineMapOnboardingView: View {
     }
 
     @ViewBuilder
+    private var artwork: some View {
+        switch step {
+        case .welcome:
+            VStack(spacing: 14) {
+                Image("BicinoOneSettingsPromo")
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 170)
+                    .clipped()
+                    .clipShape(
+                        RoundedRectangle(
+                            cornerRadius: 14,
+                            style: .continuous
+                        )
+                    )
+                    .accessibilityHidden(true)
+
+                Image("BicinoLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(Color.bicinoBrandRed)
+                    .frame(width: 88, height: 64)
+                    .accessibilityLabel("Bicino")
+            }
+
+        case .download:
+            Image(systemName: "map.circle")
+                .font(.system(size: 42, weight: .semibold))
+                .foregroundColor(.accentColor)
+                .frame(height: 48)
+        }
+    }
+
+    @ViewBuilder
     private var actionContent: some View {
         switch step {
-        case .location:
-            VStack(spacing: 10) {
-                Button(action: onRequestLocation) {
-                    Label("Enable Location", systemImage: "location")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button {
-                    if let url = URL(string: UIApplication.openSettingsURLString) {
-                        openURL(url)
-                    }
-                } label: {
-                    Text("Open iPhone Settings")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
+        case .welcome:
+            Button(action: onClose) {
+                Text("Get Started")
+                    .frame(maxWidth: .infinity)
             }
-
-        case .device:
-            VStack(spacing: 10) {
-                Button(action: onConnectDevice) {
-                    Label("Connect Bike Computer", systemImage: "bicycle")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-
-                Text(bleManager.centralStateDescription)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-        case .checkingDevice:
-            VStack(spacing: 12) {
-                ProgressView()
-                Text("Checking map storage…")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                Button(action: onCheckDeviceMaps) {
-                    Label("Check Again", systemImage: "arrow.clockwise")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-            }
+            .buttonStyle(.borderedProminent)
 
         case .download:
             VStack(spacing: 12) {
@@ -131,7 +117,7 @@ struct OfflineMapOnboardingView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
-                } else if !isLocationAuthorized {
+                } else if locationAuthorizationAction != .none {
                     locationActions
                 } else if location == nil {
                     ProgressView()
@@ -153,80 +139,83 @@ struct OfflineMapOnboardingView: View {
                         .multilineTextAlignment(.center)
                 }
             }
-
-        case .storageUnavailable:
-            Button(action: onCheckDeviceMaps) {
-                Label("Check Again", systemImage: "arrow.clockwise")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
         }
     }
 
     private var locationActions: some View {
-        VStack(spacing: 10) {
-            Button(action: onRequestLocation) {
-                Label("Enable Location", systemImage: "location")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-
-            Button {
-                if let url = URL(string: UIApplication.openSettingsURLString) {
-                    openURL(url)
+        Group {
+            switch locationAuthorizationAction {
+            case .requestInApp:
+                Button(action: onRequestLocation) {
+                    Text("Continue")
+                        .frame(maxWidth: .infinity)
                 }
-            } label: {
-                Text("Open iPhone Settings")
-                    .frame(maxWidth: .infinity)
+                .buttonStyle(.borderedProminent)
+
+            case .openSettings:
+                Button {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        openURL(url)
+                    }
+                } label: {
+                    Text("Open iPhone Settings")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+
+            case .none:
+                EmptyView()
             }
-            .buttonStyle(.bordered)
         }
+    }
+
+    private var locationAuthorizationAction: LocationAuthorizationRemediation {
+        LocationAuthorizationRemediationPolicy.action(
+            for: locationAuthorizationStatus
+        )
+    }
+
+    private var allowsClose: Bool {
+        step != .download ||
+            LocationAuthorizationRemediationPolicy.allowsDismissal(
+                for: locationAuthorizationStatus
+            )
     }
 }
 
 private extension OfflineMapOnboardingStep {
-    var symbol: String {
-        switch self {
-        case .location:
-            return "location.circle"
-        case .device:
-            return "antenna.radiowaves.left.and.right.circle"
-        case .checkingDevice:
-            return "externaldrive.badge.questionmark"
-        case .download:
-            return "map.circle"
-        case .storageUnavailable:
-            return "sdcard"
-        }
-    }
-
     var title: String {
         switch self {
-        case .location:
-            return "Enable Location"
-        case .device:
-            return "Connect Your Bike Computer"
-        case .checkingDevice:
-            return "Checking Your Bike Computer"
+        case .welcome:
+            return "Welcome to Bicino"
         case .download:
             return "Download Map"
-        case .storageUnavailable:
-            return "Insert an SD Card"
         }
     }
 
-    var message: String {
+    func message(
+        for locationAuthorizationAction: LocationAuthorizationRemediation
+    ) -> String {
         switch self {
-        case .location:
-            return "Bicino needs your current location to prepare the right offline map."
-        case .device:
-            return "Connect your Bike Computer before downloading its first map."
-        case .checkingDevice:
-            return "The app is checking whether your Bike Computer already has a map."
+        case .welcome:
+            return "Plan your rides, connect your Bicino One, or turn your iPhone into a cycling computer."
         case .download:
-            return "Choose an area to download to your Bike Computer."
-        case .storageUnavailable:
-            return "Insert an SD card in your Bike Computer, then check again."
+            switch locationAuthorizationAction {
+            case .requestInApp:
+                return "Bicino uses your current location to prepare the right offline map for your Bike Computer."
+            case .openSettings:
+                return "Location access is needed to prepare a map for your current area. You can grant access in iPhone Settings."
+            case .none:
+                return "Choose an area to download to your Bike Computer."
+            }
         }
     }
+}
+
+private extension Color {
+    static let bicinoBrandRed = Color(
+        red: 1,
+        green: 55.0 / 255.0,
+        blue: 46.0 / 255.0
+    )
 }

@@ -542,13 +542,14 @@ class JobStore:
                 preview_geometry=None,
             )
         if event or previous_status != status:
-            job.events.append(
-                {
-                    "at": job.updated_at,
-                    "status": status.value,
-                    "message": event or f"entered {status.value}",
-                }
-            )
+            job_event = {
+                "at": job.updated_at,
+                "status": status.value,
+                "message": event or f"entered {status.value}",
+            }
+            if error_code is not None:
+                job_event["errorCode"] = error_code
+            job.events.append(job_event)
         self.save(job)
         return job
 
@@ -1333,6 +1334,7 @@ class JobStore:
                 job.job_id,
                 JobStatus.FAILED,
                 error="maximum retry attempts exceeded",
+                error_code="map_build_failed",
                 finished=True,
             )
         job.status = JobStatus.VALIDATING
@@ -1942,7 +1944,12 @@ def _normalize_user_label(value: Any) -> str:
         raise ValueError("displayName must not be empty")
     if len(label) > 80:
         raise ValueError("displayName must be at most 80 characters")
-    if any(ord(character) < 32 or ord(character) == 127 for character in label):
+    if len(label.encode("utf-8")) > 240:
+        raise ValueError("displayName must be at most 240 UTF-8 bytes")
+    if any(
+        ord(character) < 32 or 127 <= ord(character) <= 159
+        for character in label
+    ):
         raise ValueError("displayName must not contain control characters")
     return label
 
