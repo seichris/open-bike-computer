@@ -3,7 +3,7 @@
   "modelVersion": "map-preparation-v1",
   "featureSchemaVersion": 1,
   "runtimePerformanceProfileVersion": "map-pipeline-2026-08-v1",
-  "scopePolicyVersion": 2,
+  "scopePolicyVersion": 3,
   "buildingProfileVersion": 1,
   "algorithmVersions": {
     "buildingNormalization": 1,

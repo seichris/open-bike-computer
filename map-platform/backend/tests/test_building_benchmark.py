@@ -91,7 +91,7 @@ class BuildingBenchmarkTests(unittest.TestCase):
         )
         self.assertEqual(
             report["proposedThresholds"]["maximumSourceAreaM2"],
-            500_000_000,
+            800_000_000,
         )
 
     def test_selected_policy_may_differ_from_legacy_but_is_self_deterministic(self):
