@@ -303,12 +303,13 @@ final class TestBLEManager: BLEManager {
         return true
     }
 
-    override func sendRouteGeometry(_ data: Data) {
+    override func sendRouteGeometry(_ data: Data) -> Bool {
         guard isConnected, isNavigationReady else {
-            return
+            return false
         }
 
         sentRouteGeometry.append(data)
+        return true
     }
 
     override func sendGPSPosition(
@@ -322,9 +323,9 @@ final class TestBLEManager: BLEManager {
         routeRemainingMeters: Double? = nil,
         horizontalAccuracyMeters: Double? = nil,
         locationTimestamp: Date? = nil
-    ) {
+    ) -> Bool {
         guard isConnected, isNavigationReady else {
-            return
+            return false
         }
 
         sentGPSPositions.append(DeviceGPSPacketBuilder.data(
@@ -340,6 +341,7 @@ final class TestBLEManager: BLEManager {
             locationTimestamp: locationTimestamp,
             includeRideDetectionQuality: supportsGPSPositionQualityV1
         ))
+        return true
     }
 }
 
@@ -614,9 +616,11 @@ struct NavigationProtocolTests {
         testRouteGeometryTransmissionPolicy()
         testNavigationEngineUsesRouteBearingForInvalidCourse()
         testShanghaiNormalAndTestNavigationShareWGSDeviceSpace()
+        testRendererBenchmarkGPSOverrideSuppressesPhysicalFixes()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
         testGPSQueuePolicy()
+        testRendererBenchmarkProtocol()
         testDeviceBLEProtocolConstants()
         testWorkoutDeviceFrameVectors()
         testWorkoutDeviceFrameSentinelsAndSaturation()
@@ -4902,6 +4906,53 @@ struct NavigationProtocolTests {
         assertEqual(testEngine.routeCoordinateExtractionCount, 1,
                     "test navigation uses the same cached MKRoute polyline")
         testEngine.stopNavigation()
+    }
+
+    @MainActor
+    static func testRendererBenchmarkGPSOverrideSuppressesPhysicalFixes() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+
+        _ = engine.processExternalLocation(CLLocation(
+            latitude: 31.2304,
+            longitude: 121.4737
+        ))
+        assertEqual(manager.sentGPSPositions.count, 1,
+                    "an idle physical fix normally reaches the device")
+
+        guard let token = manager.beginDeviceGPSOverride() else {
+            assert(false, "renderer replay acquires the device GPS override")
+            return
+        }
+        assert(manager.beginDeviceGPSOverride() == nil,
+               "device GPS override has one scoped owner")
+        _ = engine.processExternalLocation(CLLocation(
+            latitude: 31.2305,
+            longitude: 121.4738
+        ))
+        assertEqual(manager.sentGPSPositions.count, 1,
+                    "physical fixes do not interleave with renderer replay GPS")
+
+        manager.endDeviceGPSOverride(UUID())
+        _ = engine.processExternalLocation(CLLocation(
+            latitude: 31.2306,
+            longitude: 121.4739
+        ))
+        assertEqual(manager.sentGPSPositions.count, 1,
+                    "a non-owner cannot release the GPS override")
+
+        manager.endDeviceGPSOverride(token)
+        assertEqual(manager.sentGPSPositions.count, 2,
+                    "override cleanup immediately restores the latest physical GPS")
+        _ = engine.processExternalLocation(CLLocation(
+            latitude: 31.2307,
+            longitude: 121.4740
+        ))
+        assertEqual(manager.sentGPSPositions.count, 3,
+                    "physical GPS resumes after renderer replay cleanup")
     }
 
     static func testOfflineMapCustomBBoxRequest() {
@@ -10882,6 +10933,225 @@ struct NavigationProtocolTests {
                     "retry age survives replacement while backpressure remains active")
     }
 
+    static func testRendererBenchmarkProtocol() {
+        let fixtureURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-shanghai-v1.json"
+        )
+        guard let fixtureData = try? Data(contentsOf: fixtureURL),
+              let fixture = try? RendererBenchmarkFixture.decode(fixtureData) else {
+            assert(false, "checked-in renderer benchmark fixture decodes")
+            return
+        }
+        assertEqual(fixture.id, "shanghai-center-renderer-v1",
+                    "renderer benchmark keeps its pinned fixture identity")
+        assertEqual(fixture.cadenceHz, 1,
+                    "renderer benchmark fixture stays at exactly 1 Hz")
+        assertEqual(fixture.points.count, 120,
+                    "renderer benchmark fixture retains the full Shanghai loop")
+        let shortFixture = Data(
+            #"{"schema":1,"id":"short","cadenceHz":1,"nominalSpeedMetersPerSecond":4,"points":[{"latitude":31.2,"longitude":121.4},{"latitude":31.2001,"longitude":121.4001}]}"#.utf8
+        )
+        assert(
+            (try? RendererBenchmarkFixture.decode(shortFixture)) == nil,
+            "renderer replay rejects fixtures shorter than the declared 60-second window"
+        )
+
+        let fixtureHash = Data(SHA256.hash(data: fixtureData))
+        assertEqual(
+            fixtureHash.map { String(format: "%02x", $0) }.joined(),
+            "d5171f6b30478a09948381bbdb86da33752bc646fa6077153f69a4bd840eb36e",
+            "fixture edits require an explicit pinned-hash update"
+        )
+        guard let geometry = RendererBenchmarkRouteGeometry.data(
+            fixture: fixture,
+            sampleIndex: 119
+        ) else {
+            assert(false, "renderer benchmark geometry encodes across loop boundary")
+            return
+        }
+        assertEqual(geometry.count, 164,
+                    "40 renderer route points use the bounded wire payload")
+        assertEqual(
+            readInt32LE(geometry, offset: 0),
+            Int32(fixture.points[119].latitude * 1_000_000),
+            "renderer geometry starts at the selected fixture sample"
+        )
+
+        guard let marker = RendererBenchmarkMarkerPacket.data(
+            fixtureSHA256: fixtureHash,
+            sampleIndex: 119,
+            sampleCount: fixture.points.count,
+            loop: 0x1234_5678
+        ) else {
+            assert(false, "valid renderer benchmark marker encodes")
+            return
+        }
+        assertEqual(marker.count, 44, "renderer marker has the firmware frame size")
+        assertEqual(String(data: marker.prefix(4), encoding: .utf8), "RBM1",
+                    "renderer marker prefix stays firmware-compatible")
+        assertEqual(readUInt16LE(marker, offset: 36), 119,
+                    "renderer marker carries its sample index")
+        assertEqual(readUInt16LE(marker, offset: 38), 120,
+                    "renderer marker carries fixture sample count")
+        assertEqual(readUInt32LE(marker, offset: 40), 0x1234_5678,
+                    "renderer marker carries replay loop")
+
+        guard let window = RendererBenchmarkWindowPacket.data(
+            profile: .medium,
+            repeatNumber: 7,
+            runNonce: 0x0102_0304_0506_0708,
+            fixtureSHA256: fixtureHash,
+            fixtureID: fixture.id
+        ) else {
+            assert(false, "valid ordinary renderer window encodes")
+            return
+        }
+        assertEqual(String(data: window.prefix(4), encoding: .utf8), "RBW1",
+                    "ordinary renderer window prefix stays firmware-compatible")
+        assertEqual(window[4], 1, "ordinary renderer window carries schema 1")
+        assertEqual(window[5], RendererBenchmarkProfile.medium.rawValue,
+                    "ordinary renderer window carries the selected profile")
+        assertEqual(readUInt16LE(window, offset: 6), 7,
+                    "ordinary renderer window carries repeat number")
+        assertEqual(Array(window[8..<16]),
+                    [8, 7, 6, 5, 4, 3, 2, 1],
+                    "ordinary renderer run nonce is little-endian")
+        assertEqual(Int(window[48]), fixture.id.utf8.count,
+                    "ordinary renderer window bounds its route identity")
+
+        let body = Data(
+            #"{"ok":true,"schema":1,"identity":{},"memory":{},"render":{}}"#.utf8
+        )
+        var reassembler = RendererDiagnosticsChunkReassembler()
+        let chunks = stride(from: 0, to: body.count, by: 17).map {
+            body.subdata(in: $0..<min($0 + 17, body.count))
+        }
+        var completedBody: Data?
+        for index in chunks.indices.reversed() {
+            var frame = Data(DeviceBLEProtocol.rendererMetricsChunkPrefix.utf8)
+            frame.append(9)
+            frame.append(UInt8(index))
+            frame.append(UInt8(chunks.count))
+            frame.append(chunks[index])
+            if case let .complete(reassembled)? = reassembler.consume(frame) {
+                completedBody = reassembled
+            }
+        }
+        assertEqual(completedBody, body,
+                    "out-of-order renderer chunks reassemble deterministically")
+        assert(
+            RendererDiagnosticsSnapshotEnvelope.normalizedJSONString(body) != nil,
+            "shared renderer snapshot envelope validates"
+        )
+        var interruptedReassembler = RendererDiagnosticsChunkReassembler()
+        var firstInterruptedChunk = Data(
+            DeviceBLEProtocol.rendererMetricsChunkPrefix.utf8
+        )
+        firstInterruptedChunk.append(contentsOf: [3, 0, 2])
+        firstInterruptedChunk.append(contentsOf: body.prefix(10))
+        assertEqual(
+            interruptedReassembler.consume(firstInterruptedChunk),
+            .pending,
+            "a partial renderer snapshot waits for its remaining chunks"
+        )
+        assertEqual(
+            interruptedReassembler.consume(firstInterruptedChunk),
+            .rejected,
+            "duplicate renderer chunks fail closed and clear partial state"
+        )
+        assertEqual(
+            interruptedReassembler.consume(firstInterruptedChunk),
+            .pending,
+            "a fresh renderer transfer can start after duplicate rejection"
+        )
+        assertEqual(
+            interruptedReassembler.consume(
+                Data(DeviceBLEProtocol.rendererMetricsChunkPrefix.utf8)
+            ),
+            .rejected,
+            "malformed renderer chunks clear partial state"
+        )
+        guard let ordinaryCapture = RendererOrdinaryDiagnosticsCapture.json(
+            fixtureID: fixture.id,
+            fixtureSHA256: fixtureHash,
+            snapshots: [String(decoding: body, as: UTF8.self)],
+            generatedAt: Date(timeIntervalSince1970: 0)
+        ),
+              let ordinaryObject = try? JSONSerialization.jsonObject(
+                with: Data(ordinaryCapture.utf8)
+              ) as? [String: Any],
+              let ordinarySnapshots = ordinaryObject["snapshots"] as? [Any]
+        else {
+            assert(false, "ordinary diagnostics capture exports valid JSON")
+            return
+        }
+        assertEqual(
+            ordinaryObject["kind"] as? String,
+            "ordinary-renderer-diagnostics",
+            "ordinary capture is machine-identifiable"
+        )
+        assertEqual(ordinarySnapshots.count, 1,
+                    "ordinary capture retains validated snapshots")
+
+        let manager = BLEManager()
+        var cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8)
+        cap2.append(contentsOf: [1, 0, 0, 4, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2),
+               "renderer diagnostics CAP2 response is consumed")
+        assert(manager.supportsRendererDiagnostics,
+               "CAP2 bit 18 enables renderer diagnostics")
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        var writes: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 185,
+            canSend: { true },
+            write: { writes.append($0) }
+        ))
+        assert(manager.beginRendererBenchmarkWindow(
+            profile: .medium,
+            repeatNumber: 7,
+            runNonce: 0x0102_0304_0506_0708,
+            fixtureSHA256: fixtureHash,
+            fixtureID: fixture.id
+        ), "BLE manager queues an ordinary renderer benchmark window")
+        assertEqual(String(data: writes.last?.prefix(4) ?? Data(), encoding: .utf8),
+                    "RBW1", "renderer window uses the authenticated navigation fallback")
+        assert(manager.sendRendererBenchmarkMarker(
+            fixtureSHA256: fixtureHash,
+            sampleIndex: 1,
+            sampleCount: fixture.points.count,
+            loop: 2
+        ), "BLE manager queues renderer benchmark markers")
+        assertEqual(String(data: writes.last?.prefix(4) ?? Data(), encoding: .utf8),
+                    "RBM1", "renderer marker uses the authenticated navigation fallback")
+        assert(manager.requestRendererDiagnosticsSnapshot(),
+               "BLE manager queues an explicit metrics request")
+        assertEqual(String(data: writes.last?.prefix(4) ?? Data(), encoding: .utf8),
+                    "RDMS", "renderer metrics request uses the shared prefix")
+
+        var direct = Data(DeviceBLEProtocol.rendererMetricsResponsePrefix.utf8)
+        var partial = Data(DeviceBLEProtocol.rendererMetricsChunkPrefix.utf8)
+        partial.append(contentsOf: [5, 0, 2])
+        partial.append(contentsOf: body.prefix(10))
+        assert(manager.handleRendererDiagnosticsNotification(partial),
+               "BLE manager accepts a partial renderer snapshot")
+        direct.append(body)
+        assert(manager.handleRendererDiagnosticsNotification(direct),
+               "BLE manager consumes direct renderer snapshots")
+        assertEqual(manager.rendererDiagnosticsRevision, 1,
+                    "valid renderer snapshots advance the observable revision")
+        var staleRemainder = Data(
+            DeviceBLEProtocol.rendererMetricsChunkPrefix.utf8
+        )
+        staleRemainder.append(contentsOf: [5, 1, 2])
+        staleRemainder.append(contentsOf: body.dropFirst(10))
+        assert(manager.handleRendererDiagnosticsNotification(staleRemainder),
+               "stale chunk remainder is consumed as a new incomplete stream")
+        assertEqual(manager.rendererDiagnosticsRevision, 1,
+                    "a newer direct snapshot invalidates older partial chunks")
+    }
+
     static func testDeviceBLEProtocolConstants() {
         assertEqual(DeviceBLEProtocol.serviceUUIDString, "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800", "service UUID must stay firmware-compatible")
         assertEqual(DeviceBLEProtocol.navigationCharacteristicUUIDString, "2A6E", "navigation characteristic UUID must stay firmware-compatible")
@@ -10922,7 +11192,13 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rideAutomationCapabilityMask, 1 << 15, "CAP2 bit 15 advertises ride automation without colliding with Watch control")
         assertEqual(DeviceBLEProtocol.remoteDeviceDebugCapabilityMask, 1 << 16, "CAP2 bit 16 advertises remote device debugging without colliding with ride automation")
         assertEqual(DeviceBLEProtocol.gpsPositionQualityV1CapabilityMask, 1 << 17, "CAP2 bit 17 advertises GPS quality v1")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 15, "capability version negotiates GPS quality after remote debugging in version 14")
+        assertEqual(DeviceBLEProtocol.rendererDiagnosticsCapabilityMask, 1 << 18, "CAP2 bit 18 advertises renderer diagnostics")
+        assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 16, "capability version negotiates renderer diagnostics after GPS quality in version 15")
+        assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
+        assertEqual(DeviceBLEProtocol.rendererMetricsResponsePrefix, "RDMT", "renderer metrics responses use RDMT")
+        assertEqual(DeviceBLEProtocol.rendererMetricsChunkPrefix, "RDMC", "renderer metrics chunks use RDMC")
+        assertEqual(DeviceBLEProtocol.rendererBenchmarkMarkerPrefix, "RBM1", "renderer replay markers use RBM1")
         assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
                     "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
                     "workout telemetry uses the dedicated 128-bit characteristic")

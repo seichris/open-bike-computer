@@ -14,10 +14,12 @@ COMPONENTS = ("firmware_build", "firmware_host", "ios", "map_backend", "osm")
 FIRMWARE_TARGETS = {
     "175": (
         "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
         "WAVESHARE_AMOLED_175_PRODUCTION",
     ),
     "206": (
         "WAVESHARE_AMOLED_206",
+        "WAVESHARE_AMOLED_206_REMOTE_DEBUG",
         "WAVESHARE_AMOLED_206_PRODUCTION",
     ),
 }
@@ -173,7 +175,7 @@ def select_scope(scope: str) -> dict[str, bool] | None:
 
 
 def select_firmware_targets(hardware: str) -> tuple[str, ...]:
-    """Return the explicitly selected core firmware build environments."""
+    """Return the explicitly selected firmware build environments."""
 
     if hardware == "all":
         return FIRMWARE_TARGETS["175"] + FIRMWARE_TARGETS["206"]

@@ -395,7 +395,10 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         render = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
         self.assertIn("map_building_admission::retainNearest", render)
         self.assertIn("map_building_admission::select", render)
-        self.assertIn("const map_building_admission::Quotas quotas", render)
+        self.assertIn(
+            "const map_building_admission::Quotas &quotas = context.tuning.buildings",
+            render,
+        )
         self.assertIn("maximumExtrudedRecords", BUILDING_ADMISSION_SOURCE)
         self.assertIn("admissionDiagnostics.flat", render)
         self.assertIn("buildingAllocationFailed", render)
@@ -403,11 +406,21 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn('fallbackDiagnostics.allocationFallback = true', render)
         self.assertIn("throw std::bad_alloc()", render)
         self.assertIn("drewFootprint", render)
+        self.assertEqual(
+            render.count("++renderedBuildings;"),
+            2,
+            "normal and bounded-flat passes both report rendered buildings",
+        )
         self.assertNotIn("deadline", render.lower())
         self.assertNotIn("kMaximumBuildingRenderTimeMs", MAP_HEADER_SOURCE)
         self.assertIn("CourtyardPolicy::SolidRoofFallback", render)
         self.assertIn("const bool preserveCourtyards", render)
         self.assertNotIn("++courtyardDeferred;\n          continue;", render)
+        self.assertNotIn(
+            "admissionDiagnostics.deferred + metadataDeferredBuildings +\n"
+            "        courtyardDeferred",
+            render,
+        )
 
     def test_late_worker_exit_has_an_explicit_restart_handoff(self):
         stop = function_body(MAP_RENDERER_SOURCE, "bool Maps::stopRenderWorker")

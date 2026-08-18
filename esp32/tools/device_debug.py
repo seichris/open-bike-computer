@@ -24,6 +24,10 @@ TARGET_DIMENSIONS = {
     "WAVESHARE_AMOLED_175": (466, 466),
     "WAVESHARE_AMOLED_206": (410, 502),
 }
+TARGET_ROTATIONS = {
+    "WAVESHARE_AMOLED_175": 1,
+    "WAVESHARE_AMOLED_206": 0,
+}
 
 
 class DebugClientError(RuntimeError):
@@ -134,6 +138,8 @@ class DebugClient:
             raise DebugClientError(
                 f"unexpected target identity or dimensions: {target!r} {dimensions!r}"
             )
+        if result.get("viewRotation") != TARGET_ROTATIONS[target]:
+            raise DebugClientError("device info has an invalid panel rotation")
         device_id = result.get("deviceId")
         if not isinstance(device_id, str) or not device_id:
             raise DebugClientError("device info has no stable device identity")
@@ -154,6 +160,80 @@ class DebugClient:
             self._event_sequence_initialized = True
         self.identity = result
         return result
+
+    def metrics(self) -> dict[str, Any]:
+        raw = self._request("/device-debug/v1/metrics")
+        try:
+            result = json.loads((raw or b"").decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DebugClientError("device returned invalid renderer metrics JSON") from exc
+        if (
+            not isinstance(result, dict)
+            or result.get("ok") is not True
+            or result.get("schema") != 1
+            or not isinstance(result.get("sequence"), int)
+            or isinstance(result.get("sequence"), bool)
+            or not 0 <= result["sequence"] <= 0xFFFFFFFF
+            or not isinstance(result.get("timestampMs"), int)
+            or isinstance(result.get("timestampMs"), bool)
+            or not 0 <= result["timestampMs"] <= 0xFFFFFFFF
+            or not isinstance(result.get("window"), dict)
+            or not isinstance(result.get("identity"), dict)
+            or not isinstance(result.get("tuning"), dict)
+            or not isinstance(result.get("memory"), dict)
+            or not isinstance(result.get("render"), dict)
+            or not isinstance(result.get("ui"), dict)
+            or not isinstance(result.get("displayFlush"), dict)
+            or not isinstance(result.get("gps"), dict)
+            or not isinstance(result.get("routeReplay"), dict)
+            or not isinstance(result.get("remoteDebug"), dict)
+        ):
+            raise DebugClientError("device renderer metrics schema is invalid")
+        return result
+
+    def begin_renderer_window(
+        self,
+        *,
+        profile: str,
+        run_id: str,
+        repeat: int,
+        map_fixture_id: str,
+        map_fixture_sha256: str,
+        route_fixture_id: str,
+        route_fixture_sha256: str,
+        route_mode: str = "ios-fixture-1hz",
+    ) -> int:
+        raw = self._request(
+            "/device-debug/v1/metrics/window",
+            method="POST",
+            body={
+                "schema": 1,
+                "profile": profile,
+                "runId": run_id,
+                "repeat": repeat,
+                "mapFixture": {
+                    "id": map_fixture_id,
+                    "sha256": map_fixture_sha256,
+                },
+                "routeFixture": {
+                    "id": route_fixture_id,
+                    "sha256": route_fixture_sha256,
+                },
+                "routeMode": route_mode,
+            },
+        )
+        try:
+            result = json.loads((raw or b"").decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DebugClientError("device returned invalid renderer window JSON") from exc
+        request_id = result.get("requestId") if isinstance(result, dict) else None
+        if (
+            not isinstance(request_id, int)
+            or isinstance(request_id, bool)
+            or not 1 <= request_id <= 0xFFFFFFFF
+        ):
+            raise DebugClientError("device renderer window response is invalid")
+        return request_id
 
     def frame(self, after: int = 0) -> tuple[dict[str, int], bytes]:
         if isinstance(after, bool) or not isinstance(after, int) or not (0 <= after <= 0xFFFFFFFF):
@@ -245,31 +325,56 @@ def _png_chunk(kind: bytes, payload: bytes) -> bytes:
 
 
 def write_rgb565_png(
-    output: Path, width: int, height: int, stride: int, pixels: bytes
+    output: Path,
+    width: int,
+    height: int,
+    stride: int,
+    pixels: bytes,
+    rotation_quarters: int = 0,
 ) -> None:
     if (
         width <= 0
         or height <= 0
         or stride < width * 2
         or len(pixels) != stride * height
+        or rotation_quarters not in (0, 1, 2, 3)
     ):
         raise DebugClientError("RGB565 input dimensions or length are invalid")
-    compressor = zlib.compressobj(level=6)
-    compressed: list[bytes] = []
+    output_width = height if rotation_quarters % 2 else width
+    output_height = width if rotation_quarters % 2 else height
+    rgb = bytearray(output_width * output_height * 3)
     for y in range(height):
         source = memoryview(pixels)[y * stride : y * stride + width * 2]
-        row = bytearray(1 + width * 3)
-        row[0] = 0
         for x in range(width):
             value = source[x * 2] | (source[x * 2 + 1] << 8)
-            offset = 1 + x * 3
-            row[offset] = ((value >> 11) & 0x1F) * 255 // 31
-            row[offset + 1] = ((value >> 5) & 0x3F) * 255 // 63
-            row[offset + 2] = (value & 0x1F) * 255 // 31
+            if rotation_quarters == 1:
+                destination_x, destination_y = y, width - 1 - x
+            elif rotation_quarters == 2:
+                destination_x, destination_y = width - 1 - x, height - 1 - y
+            elif rotation_quarters == 3:
+                destination_x, destination_y = height - 1 - y, x
+            else:
+                destination_x, destination_y = x, y
+            offset = (destination_y * output_width + destination_x) * 3
+            rgb[offset] = ((value >> 11) & 0x1F) * 255 // 31
+            rgb[offset + 1] = ((value >> 5) & 0x3F) * 255 // 63
+            rgb[offset + 2] = (value & 0x1F) * 255 // 31
+    compressor = zlib.compressobj(level=6)
+    compressed: list[bytes] = []
+    for y in range(output_height):
+        row = bytearray(1 + output_width * 3)
+        row[0] = 0
+        start = y * output_width * 3
+        row[1:] = rgb[start : start + output_width * 3]
         compressed.append(compressor.compress(row))
     compressed.append(compressor.flush())
     png = bytearray(b"\x89PNG\r\n\x1a\n")
-    png += _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    png += _png_chunk(
+        b"IHDR",
+        struct.pack(
+            ">IIBBBBB", output_width, output_height, 8, 2, 0, 0, 0
+        ),
+    )
     png += _png_chunk(b"IDAT", b"".join(compressed))
     png += _png_chunk(b"IEND", b"")
     output.write_bytes(png)
@@ -298,6 +403,22 @@ def _run(args: argparse.Namespace, client: DebugClient) -> None:
     if args.command == "info":
         print(json.dumps(client.info(), indent=2, sort_keys=True))
         return
+    if args.command == "metrics":
+        print(json.dumps(client.metrics(), indent=2, sort_keys=True))
+        return
+    if args.command == "begin-window":
+        request_id = client.begin_renderer_window(
+            profile=args.profile,
+            run_id=args.run_id,
+            repeat=args.repeat,
+            map_fixture_id=args.map_fixture_id,
+            map_fixture_sha256=args.map_fixture_sha256,
+            route_fixture_id=args.route_fixture_id,
+            route_fixture_sha256=args.route_fixture_sha256,
+            route_mode=args.route_mode,
+        )
+        print(json.dumps({"ok": True, "requestId": request_id}))
+        return
     if args.command == "wake":
         client.wake()
         print("wake requested")
@@ -320,6 +441,7 @@ def _run(args: argparse.Namespace, client: DebugClient) -> None:
             metadata["height"],
             metadata["stride"],
             pixels,
+            info["viewRotation"],
         )
         print(f"wrote frame {metadata['sequence']} to {args.output}")
     elif args.command == "tap":
@@ -358,6 +480,22 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=8.0)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("info")
+    commands.add_parser("metrics")
+    window = commands.add_parser("begin-window")
+    window.add_argument(
+        "--profile", required=True, choices=("flat", "current", "medium", "high")
+    )
+    window.add_argument("--run-id", required=True)
+    window.add_argument("--repeat", required=True, type=int)
+    window.add_argument("--map-fixture-id", required=True)
+    window.add_argument("--map-fixture-sha256", required=True)
+    window.add_argument("--route-fixture-id", required=True)
+    window.add_argument("--route-fixture-sha256", required=True)
+    window.add_argument(
+        "--route-mode",
+        choices=("ios-fixture-1hz", "ordinary-ble-1hz"),
+        default="ios-fixture-1hz",
+    )
     screenshot = commands.add_parser("screenshot")
     screenshot.add_argument("--output", required=True, type=Path)
     for name in ("tap", "long-press"):

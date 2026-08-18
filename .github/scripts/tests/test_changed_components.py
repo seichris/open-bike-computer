@@ -226,10 +226,12 @@ class ChangedComponentsTests(unittest.TestCase):
     def test_firmware_hardware_selection_is_explicit(self) -> None:
         targets_175 = (
             "WAVESHARE_AMOLED_175",
+            "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
             "WAVESHARE_AMOLED_175_PRODUCTION",
         )
         targets_206 = (
             "WAVESHARE_AMOLED_206",
+            "WAVESHARE_AMOLED_206_REMOTE_DEBUG",
             "WAVESHARE_AMOLED_206_PRODUCTION",
         )
 

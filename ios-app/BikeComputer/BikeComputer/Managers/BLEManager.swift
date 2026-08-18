@@ -274,6 +274,11 @@ enum DeviceBLEProtocol {
     static let deviceTransferControlPrefix = "DTRN"
     static let deviceTransferStatusPrefix = "DSTS"
     static let deviceTransferStatusChunkPrefix = "DSTC"
+    static let rendererMetricsRequestPrefix = "RDMS"
+    static let rendererMetricsResponsePrefix = "RDMT"
+    static let rendererMetricsChunkPrefix = "RDMC"
+    static let rendererBenchmarkMarkerPrefix = "RBM1"
+    static let rendererBenchmarkWindowPrefix = "RBW1"
     static let deviceCapabilitiesPrefix = "CAPS"
     static let deviceCapabilitiesV2Prefix = "CAP2"
     static let soundPlayPrefix = "SNDP"
@@ -304,7 +309,8 @@ enum DeviceBLEProtocol {
     static let rideAutomationCapabilityMask: UInt32 = 1 << 15
     static let remoteDeviceDebugCapabilityMask: UInt32 = 1 << 16
     static let gpsPositionQualityV1CapabilityMask: UInt32 = 1 << 17
-    static let deviceCapabilitiesVersion: UInt8 = 15
+    static let rendererDiagnosticsCapabilityMask: UInt32 = 1 << 18
+    static let deviceCapabilitiesVersion: UInt8 = 16
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryOriginFrameLength = 28
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
@@ -806,6 +812,10 @@ class BLEManager: NSObject, ObservableObject {
         PhoneWatchConnectivityStateV1()
     @Published private(set) var supportsRemoteDeviceDebug: Bool = false
     @Published private(set) var supportsGPSPositionQualityV1: Bool = false
+    @Published private(set) var supportsRendererDiagnostics: Bool = false
+    @Published private(set) var rendererDiagnosticsSnapshotJSON: String?
+    @Published private(set) var rendererDiagnosticsStatus = "unavailable"
+    @Published private(set) var rendererDiagnosticsRevision: UInt64 = 0
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
@@ -1085,6 +1095,9 @@ class BLEManager: NSObject, ObservableObject {
     private var deviceTransferStatusChunkTransferID: UInt8?
     private var deviceTransferStatusChunkCount: UInt8 = 0
     private var deviceTransferStatusChunks: [UInt8: Data] = [:]
+    private var rendererDiagnosticsChunks =
+        RendererDiagnosticsChunkReassembler()
+    private var deviceGPSOverrideToken: UUID?
     private var writeWithResponseInFlight = false
     private var navigationWriteWithResponseFailureHandler: (() -> Void)?
     private var navigationWriteWithResponseLabel: String?
@@ -1129,6 +1142,7 @@ class BLEManager: NSObject, ObservableObject {
     var onWorkoutStartRequest: (() -> Void)?
     var onRideAutomationFrame: ((RideAutomationFrame) -> Void)?
     var onDestinationCatalogWriteFailure: (() -> Void)?
+    var onDeviceGPSOverrideEnded: (() -> Void)?
     
     // MARK: - UserDefaults Keys
     private enum SettingsKeys {
@@ -3361,12 +3375,13 @@ class BLEManager: NSObject, ObservableObject {
     
     /// Send route geometry data to ESP32.
     /// Format: [StartLat:4][StartLon:4][DeltaLat:2][DeltaLon:2]...
-    func sendRouteGeometry(_ data: Data) {
+    @discardableResult
+    func sendRouteGeometry(_ data: Data) -> Bool {
         guard let peripheral = connectedPeripheral,
               isConnected,
               isNavigationReady else {
             log("Cannot send geometry: BLE not ready")
-            return
+            return false
         }
 
         let maxLength = navigationWriteEndpoint?.maximumWriteLength ?? 0
@@ -3374,10 +3389,10 @@ class BLEManager: NSObject, ObservableObject {
            let endpoint = navigationWriteEndpoint {
             guard data.count <= endpoint.maximumWriteLength else {
                 log("Cannot send geometry: \(data.count) bytes exceeds write limit \(maxLength)")
-                return
+                return false
             }
 
-            enqueueNavigationWrite(
+            guard enqueueNavigationWrite(
                 data,
                 endpoint: endpoint,
                 label: "native route geometry",
@@ -3387,19 +3402,22 @@ class BLEManager: NSObject, ObservableObject {
                     guard let self, let peripheral, let characteristic else { return }
                     self.writeDeviceData(payload, to: characteristic, on: peripheral)
                 }
-            )
+            ) else {
+                log("Route geometry not queued: write queue unavailable")
+                return false
+            }
             log("Queued native route geometry: \(data.count) bytes")
-            return
+            return true
         }
 
         var fallback = Data(DeviceBLEProtocol.routeGeometryFallbackPrefix.utf8)
         fallback.append(data)
         guard fallback.count <= maxLength else {
             log("Cannot send geometry: \(data.count) bytes exceeds write limit \(maxLength)")
-            return
+            return false
         }
 
-        sendFallbackMapPacket(
+        return sendFallbackMapPacket(
             fallback,
             label: "route geometry",
             writeClass: .route,
@@ -3409,11 +3427,35 @@ class BLEManager: NSObject, ObservableObject {
 
     /// Clear route geometry on ESP32.
     func clearRouteGeometry() {
-        sendRouteGeometry(Data())
+        _ = sendRouteGeometry(Data())
+    }
+
+    /// Temporarily gives one developer workflow ownership of device GPS
+    /// writes. NavigationEngine keeps its latest physical fix while this lease
+    /// is held, but does not enqueue physical fixes during the override.
+    func beginDeviceGPSOverride() -> UUID? {
+        guard deviceGPSOverrideToken == nil else {
+            log("Cannot begin device GPS override: another owner is active")
+            return nil
+        }
+        let token = UUID()
+        deviceGPSOverrideToken = token
+        return token
+    }
+
+    func endDeviceGPSOverride(_ token: UUID) {
+        guard deviceGPSOverrideToken == token else { return }
+        deviceGPSOverrideToken = nil
+        onDeviceGPSOverrideEnded?()
+    }
+
+    var allowsAutomaticDeviceGPSWrites: Bool {
+        deviceGPSOverrideToken == nil
     }
 
     /// Send GPS position and optional ride telemetry to ESP32.
     /// Format: 30-byte legacy payload plus the negotiated 6-byte GPS-quality tail.
+    @discardableResult
     func sendGPSPosition(
         lat: Double,
         lon: Double,
@@ -3425,12 +3467,12 @@ class BLEManager: NSObject, ObservableObject {
         routeRemainingMeters: Double? = nil,
         horizontalAccuracyMeters: Double? = nil,
         locationTimestamp: Date? = nil
-    ) {
+    ) -> Bool {
         guard isConnected,
               let endpoint = navigationWriteEndpoint,
               isNavigationReady else {
             log("Cannot send GPS position: BLE not ready")
-            return
+            return false
         }
 
         let wireHeading = DeviceGPSHeadingWirePolicy.heading(
@@ -3508,14 +3550,14 @@ class BLEManager: NSObject, ObservableObject {
                     transportExpectsWriteResponse: expectsWriteResponse
                 ) else {
                     log("GPS position not queued: write queue unavailable")
-                    return
+                    return false
                 }
                 if let heading {
                     log(String(format: "Queued native GPS position: heading=%.0f", heading))
                 } else {
                     log("Queued native GPS position: heading=invalid")
                 }
-                return
+                return true
             }
         }
 
@@ -3529,9 +3571,9 @@ class BLEManager: NSObject, ObservableObject {
         let fallback = buildFallback()
         guard fallback.count <= endpoint.maximumWriteLength else {
             log("Cannot send GPS position fallback: write limit exceeded")
-            return
+            return false
         }
-        sendFallbackMapPacket(
+        return sendFallbackMapPacket(
             fallback,
             label: "GPS position",
             writeClass: .gpsPosition,
@@ -4134,6 +4176,10 @@ class BLEManager: NSObject, ObservableObject {
         isWatchControllerPromotionInFlight = false
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
+        supportsRendererDiagnostics = false
+        rendererDiagnosticsChunks.reset()
+        rendererDiagnosticsSnapshotJSON = nil
+        rendererDiagnosticsStatus = "unsupported"
         updateWorkoutTelemetryCapability(false)
         nextDestinationCatalogTransferID = 1
         hasReceivedDeviceCapabilities = true
@@ -4551,6 +4597,98 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
+    func requestRendererDiagnosticsSnapshot() -> Bool {
+        guard supportsRendererDiagnostics else {
+            rendererDiagnosticsStatus = "unsupported"
+            return false
+        }
+        let packet = Data(DeviceBLEProtocol.rendererMetricsRequestPrefix.utf8)
+        let queued = sendTransferControlPacket(
+            packet,
+            label: "renderer diagnostics metrics",
+            coalescingKey: "renderer.diagnostics.metrics"
+        )
+        rendererDiagnosticsStatus = queued ? "requested" : "request failed"
+        return queued
+    }
+
+    @discardableResult
+    func sendRendererBenchmarkMarker(
+        fixtureSHA256: Data,
+        sampleIndex: Int,
+        sampleCount: Int,
+        loop: UInt32
+    ) -> Bool {
+        guard supportsRendererDiagnostics,
+              let packet = RendererBenchmarkMarkerPacket.data(
+                fixtureSHA256: fixtureSHA256,
+                sampleIndex: sampleIndex,
+                sampleCount: sampleCount,
+                loop: loop
+              ) else {
+            return false
+        }
+        return DevicePacketRouting.sendPreferredThenFallback(
+            preferred: {
+                sendNativeMapTransferPacket(
+                    packet,
+                    label: "renderer benchmark marker",
+                    writeClass: .settingsControl,
+                    coalescingKey: "renderer.benchmark.marker"
+                )
+            },
+            fallback: {
+                sendFallbackMapPacket(
+                    packet,
+                    label: "renderer benchmark marker",
+                    writeClass: .settingsControl,
+                    coalescingKey: "renderer.benchmark.marker"
+                )
+            }
+        )
+    }
+
+    @discardableResult
+    func beginRendererBenchmarkWindow(
+        profile: RendererBenchmarkProfile,
+        repeatNumber: UInt16,
+        runNonce: UInt64,
+        fixtureSHA256: Data,
+        fixtureID: String
+    ) -> Bool {
+        guard supportsRendererDiagnostics,
+              let packet = RendererBenchmarkWindowPacket.data(
+                profile: profile,
+                repeatNumber: repeatNumber,
+                runNonce: runNonce,
+                fixtureSHA256: fixtureSHA256,
+                fixtureID: fixtureID
+              ) else {
+            return false
+        }
+        return DevicePacketRouting.sendPreferredThenFallback(
+            preferred: {
+                sendNativeMapTransferPacket(
+                    packet,
+                    label: "renderer benchmark window",
+                    writeClass: .settingsControl,
+                    coalescingKey: "renderer.benchmark.window",
+                    prioritized: true
+                )
+            },
+            fallback: {
+                sendFallbackMapPacket(
+                    packet,
+                    label: "renderer benchmark window",
+                    writeClass: .settingsControl,
+                    coalescingKey: "renderer.benchmark.window",
+                    prioritized: true
+                )
+            }
+        )
+    }
+
+    @discardableResult
     func sendDestinationCatalog(_ payload: DeviceDestinationCatalogPayload) -> Bool {
         guard supportsDestinationPicker,
               let endpoint = navigationWriteEndpoint,
@@ -4758,6 +4896,7 @@ class BLEManager: NSObject, ObservableObject {
         rideAutomationCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
+        deviceGPSOverrideToken = nil
         clearTransferState()
         deviceHasSDCard = nil
         deviceMapFoundForCurrentLocation = nil
@@ -4826,6 +4965,7 @@ class BLEManager: NSObject, ObservableObject {
         rideAutomationCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
+        deviceGPSOverrideToken = nil
         resetNavigationWriteResponseWait()
         pendingAuthNonce = nil
         authFlowState = .idle
@@ -4932,6 +5072,11 @@ class BLEManager: NSObject, ObservableObject {
         watchControllerOperationStatus = nil
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
+        supportsRendererDiagnostics = false
+        rendererDiagnosticsChunks.reset()
+        rendererDiagnosticsSnapshotJSON = nil
+        rendererDiagnosticsStatus = "unavailable"
+        rendererDiagnosticsRevision = 0
         updateWorkoutTelemetryCapability(false)
         powerButtonHonkConfigurationError = nil
         nextDestinationCatalogTransferID = 1
@@ -6919,6 +7064,7 @@ extension BLEManager: CBCentralManagerDelegate {
         rideAutomationCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
+        deviceGPSOverrideToken = nil
         clearTransferState()
         deviceHasSDCard = nil
         deviceMapFoundForCurrentLocation = nil
@@ -7387,6 +7533,10 @@ extension BLEManager: CBPeripheralDelegate {
         isWatchControllerPromotionInFlight = false
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
+        supportsRendererDiagnostics = false
+        rendererDiagnosticsChunks.reset()
+        rendererDiagnosticsSnapshotJSON = nil
+        rendererDiagnosticsStatus = "invalid capabilities"
         updateWorkoutTelemetryCapability(false)
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
@@ -7508,6 +7658,8 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.remoteDeviceDebugCapabilityMask != 0
         let hasGPSPositionQualityV1 =
             flags & DeviceBLEProtocol.gpsPositionQualityV1CapabilityMask != 0
+        let hasRendererDiagnostics =
+            flags & DeviceBLEProtocol.rendererDiagnosticsCapabilityMask != 0
         if has3DBuildings && shouldApply3DBuildingVisibilityDefault {
             shouldApply3DBuildingVisibilityDefault = false
             UserDefaults.standard.set(
@@ -7589,6 +7741,14 @@ extension BLEManager: CBPeripheralDelegate {
         supportsScopedWatchController = hasScopedWatchController
         supportsRemoteDeviceDebug = hasRemoteDeviceDebug
         supportsGPSPositionQualityV1 = hasGPSPositionQualityV1
+        supportsRendererDiagnostics = hasRendererDiagnostics
+        if !hasRendererDiagnostics {
+            rendererDiagnosticsChunks.reset()
+            rendererDiagnosticsSnapshotJSON = nil
+            rendererDiagnosticsStatus = "unsupported"
+        } else if rendererDiagnosticsSnapshotJSON == nil {
+            rendererDiagnosticsStatus = "ready"
+        }
         updateWorkoutTelemetryCapability(hasWorkoutTelemetry)
         if !hasPowerButtonHonkAcknowledgement {
             clearPendingPowerButtonHonkConfiguration()
@@ -7654,10 +7814,65 @@ extension BLEManager: CBPeripheralDelegate {
         if handleDeviceCapabilitiesNotification(data) {
             return true
         }
+        if handleRendererDiagnosticsNotification(data) {
+            return true
+        }
         if handleDeviceTransferStatusNotification(data) {
             return true
         }
         return handleMapTransferStatusNotification(data)
+    }
+
+    @discardableResult
+    func handleRendererDiagnosticsNotification(_ data: Data) -> Bool {
+        guard data.count >= 4,
+              let prefix = String(data: data.prefix(4), encoding: .utf8) else {
+            return false
+        }
+        if prefix == DeviceBLEProtocol.rendererMetricsChunkPrefix {
+            guard supportsRendererDiagnostics else {
+                rendererDiagnosticsChunks.reset()
+                rendererDiagnosticsStatus = "unsupported"
+                return true
+            }
+            guard let result = rendererDiagnosticsChunks.consume(data) else {
+                return false
+            }
+            switch result {
+            case .pending:
+                rendererDiagnosticsStatus = "receiving"
+            case let .complete(body):
+                applyRendererDiagnosticsBody(body)
+            case .rejected:
+                rendererDiagnosticsStatus = "invalid snapshot"
+            }
+            return true
+        }
+        guard prefix == DeviceBLEProtocol.rendererMetricsResponsePrefix else {
+            return false
+        }
+        guard supportsRendererDiagnostics else {
+            rendererDiagnosticsChunks.reset()
+            rendererDiagnosticsStatus = "unsupported"
+            return true
+        }
+        rendererDiagnosticsChunks.reset()
+        applyRendererDiagnosticsBody(Data(data.dropFirst(4)))
+        return true
+    }
+
+    private func applyRendererDiagnosticsBody(_ body: Data) {
+        guard supportsRendererDiagnostics,
+              let json = RendererDiagnosticsSnapshotEnvelope
+                .normalizedJSONString(body) else {
+            rendererDiagnosticsStatus = "invalid snapshot"
+            log("Received invalid renderer diagnostics snapshot")
+            return
+        }
+        rendererDiagnosticsSnapshotJSON = json
+        rendererDiagnosticsRevision &+= 1
+        rendererDiagnosticsStatus = "snapshot received"
+        log("Renderer diagnostics snapshot received: \(body.count) bytes")
     }
 
     @discardableResult

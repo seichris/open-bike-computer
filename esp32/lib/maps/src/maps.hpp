@@ -13,6 +13,8 @@
 #include "../../ble_navigation/ble_navigation.hpp"
 #include "../../settings/settings.hpp"
 #include "../../storage/storage.hpp"
+#include "../../renderer_diagnostics/renderer_diagnostics_policy.hpp"
+#include "../../renderer_tuning/renderer_tuning.hpp"
 // #include "../../tft/tft.hpp" // Removed or minimal include if possible?
 #include "../../utils/src/gpsMath.hpp"
 #include "mapTransform.hpp"
@@ -136,6 +138,8 @@ private:
 
   struct RenderContext {
     ScreenMapRenderSettings style{};
+    renderer_tuning::Definition tuning = renderer_tuning::kCurrent;
+    uint32_t rendererDiagnosticsWindowId = 0;
     map_transform::WorldPoint measuredGpsWorld{};
     map_transform::WorldPoint presentedWorld{};
     // Screen mode and route/session availability are distinct. The guidance
@@ -156,10 +160,18 @@ private:
   static constexpr uint32_t MAP_RENDER_DECLARED_SLICE_US = 50000;
 
   struct RasterDiagnostics {
+    uint32_t candidateBuildings = 0;
     uint32_t selectedBuildings = 0;
     uint32_t extrudedBuildings = 0;
     uint32_t flatBuildings = 0;
     uint32_t deferredBuildings = 0;
+    uint32_t oversizedBuildings = 0;
+    uint32_t renderedBuildings = 0;
+    uint32_t extrudedP90DistancePx = 0;
+    uint32_t extrudedFarthestDistancePx = 0;
+    uint32_t buildingProjectionMs = 0;
+    uint32_t buildingDrawMs = 0;
+    uint8_t buildingLimiterFlags = 0;
     bool allocationFallback = false;
   };
 
@@ -402,6 +414,8 @@ private:
   uint64_t lastStyleSignature = 0;
   uint64_t lastNavigationSignature = 0;
   uint64_t lastProjectionSignature = 0;
+  renderer_tuning::Profile rendererTuningProfile_ =
+      renderer_tuning::Profile::Current;
   uint64_t lastHeadingSessionSignature = 0;
   uint32_t headingSessionEpoch = 1;
   map_pose_input_policy::Tracker poseInputTracker;
@@ -662,5 +676,11 @@ public:
   bool debugStreetLabelFontHealthy() const {
     return streetLabelFontHealthy.load(std::memory_order_acquire);
   }
+  bool setRendererTuningProfile(renderer_tuning::Profile profile,
+                                uint32_t nowMs);
+  renderer_tuning::Profile rendererTuningProfile() const {
+    return rendererTuningProfile_;
+  }
+  renderer_diagnostics::JobCounters rendererDiagnosticsJobCounters() const;
   bool takeStreetLabelRuntimeFailure(std::string &code);
 };

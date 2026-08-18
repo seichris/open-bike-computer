@@ -11,6 +11,7 @@
 #include "../power_management/active_low_wake_interrupt_gate.hpp"
 #endif
 #include "../power_management/power_management.hpp"
+#include "../renderer_diagnostics/renderer_diagnostics.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
 #ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
@@ -257,6 +258,9 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   // Inform LVGL 9 that flushing is complete
   lv_display_flush_ready(disp);
   uint32_t durationUs = micros() - startUs;
+#if FIRMWARE_DIAGNOSTICS
+  renderer_diagnostics::noteDisplayFlushUs(durationUs);
+#endif
 #if POWER_METRICS
   power_metrics::noteDisplayFlush(rotationUs, qspiUs, durationUs);
   power_metrics::pulseEnd(power_metrics::Pulse::DisplayFlush);

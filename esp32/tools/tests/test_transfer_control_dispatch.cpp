@@ -7,6 +7,7 @@ using ble_transfer::Action;
 using ble_transfer::NotifyGeneric;
 using ble_transfer::NotifyMap;
 using ble_transfer::NotifyNone;
+using ble_transfer::NotifyRendererDiagnostics;
 using ble_transfer::PendingRequest;
 
 int main() {
@@ -18,6 +19,13 @@ int main() {
   auto request = pending.take();
   assert(request.action == Action::EnableMap);
   assert(request.notifications == (NotifyMap | NotifyGeneric));
+
+  pending.merge(Action::None, NotifyRendererDiagnostics);
+  pending.merge(Action::None, NotifyMap);
+  request = pending.take();
+  assert(request.action == Action::None);
+  assert(request.notifications ==
+         (NotifyRendererDiagnostics | NotifyMap));
 
   pending.merge(Action::EnableMap, NotifyMap);
   pending.merge(Action::EnableDebug, NotifyGeneric);

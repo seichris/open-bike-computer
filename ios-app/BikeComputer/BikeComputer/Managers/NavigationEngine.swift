@@ -80,8 +80,15 @@ class NavigationEngine: NSObject, ObservableObject {
     
     /// Set the BLE manager for sending data to ESP32
     func setBLEManager(_ manager: BLEManager) {
+        if let previousManager = bleManager, previousManager !== manager {
+            previousManager.onDeviceGPSOverrideEnded = nil
+        }
         self.bleManager = manager
         cancellables.removeAll()
+        manager.onDeviceGPSOverrideEnded = { [weak self, weak manager] in
+            guard manager?.isNavigationReady == true else { return }
+            self?.resendCurrentDeviceGpsPosition()
+        }
 
         manager.$isNavigationReady
             .removeDuplicates()
@@ -745,6 +752,9 @@ class NavigationEngine: NSObject, ObservableObject {
 
     private func sendDeviceGpsPosition(_ location: CLLocation, convertFromMapKitRoute: Bool, includeRideTelemetry: Bool = true) {
         lastDeviceGpsLocation = (location, convertFromMapKitRoute)
+        guard bleManager?.allowsAutomaticDeviceGPSWrites ?? true else {
+            return
+        }
         let wgsCoordinate = convertFromMapKitRoute
             ? CoordinateConverter.gcj02ToWGS84(coordinate: location.coordinate)
             : location.coordinate

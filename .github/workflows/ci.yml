@@ -183,11 +183,31 @@ jobs:
           cd "${extract_dir}/${factory_target}.factory"
           sha256sum --check SHA256SUMS
       - name: Verify ordinary artifacts exclude remote-debug routes
+        if: ${{ !contains(matrix.target, '_REMOTE_DEBUG') }}
         run: |
           if grep -aFq "/device-debug/" ".pio/build/${{ matrix.target }}/firmware.elf"; then
             echo "Non-debug firmware contains remote-debug routes"
             exit 1
           fi
+      - name: Verify remote-debug artifacts include renderer metrics routes
+        if: contains(matrix.target, '_REMOTE_DEBUG')
+        run: |
+          python3 - "${{ matrix.target }}" <<'PY'
+          from pathlib import Path
+          import sys
+
+          artifact = Path(".pio/build") / sys.argv[1] / "firmware.elf"
+          firmware = artifact.read_bytes()
+          routes = (
+              "/device-debug/v1/metrics",
+              "/device-debug/v1/metrics/window",
+          )
+          missing = [
+              route for route in routes if route.encode("utf-8") + b"\0" not in firmware
+          ]
+          if missing:
+              raise SystemExit(f"Missing remote-debug routes: {', '.join(missing)}")
+          PY
 
   ios:
     name: iOS
@@ -446,7 +466,10 @@ jobs:
             test_gps_input_freshness \
             test_map_building_admission \
             test_map_route_geometry \
-            test_map_building_workspace; do
+            test_map_building_workspace \
+            test_renderer_diagnostics \
+            test_renderer_diagnostics_ble_protocol \
+            test_renderer_diagnostics_request; do
             g++ -std=c++17 -Wall -Wextra -Werror \
               "tools/tests/${test}.cpp" \
               -o "/tmp/${test}"
@@ -495,7 +518,8 @@ jobs:
           PYTHONPATH=tools python -m unittest \
             tools.tests.test_device_debug_cli \
             tools.tests.test_device_debug_http_contract \
-            tools.tests.test_device_debug_page
+            tools.tests.test_device_debug_page \
+            tools.tests.test_renderer_benchmark
       - name: Filled line rasterizer host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \

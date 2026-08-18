@@ -19,6 +19,7 @@ enum Notification : uint8_t {
   NotifyNone = 0,
   NotifyMap = 1 << 0,
   NotifyGeneric = 1 << 1,
+  NotifyRendererDiagnostics = 1 << 2,
 };
 
 struct Request {

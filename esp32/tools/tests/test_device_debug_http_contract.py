@@ -78,6 +78,65 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             pointer.index("deserializeJson"),
         )
 
+    def test_renderer_metrics_are_authenticated_bounded_and_rate_limited(self):
+        handler = HTTP[
+            HTTP.index("bool DeviceDebugHttp::handleRequest") :
+            HTTP.index(
+                "bool DeviceDebugHttp::allowShortUnauthenticatedResponseCompletion"
+            )
+        ]
+        authorization = handler.index("authorize(request, client)")
+        metrics_route = handler.index('"/device-debug/v1/metrics"')
+        window_route = handler.index('"/device-debug/v1/metrics/window"')
+        self.assertLess(authorization, metrics_route)
+        self.assertLess(authorization, window_route)
+
+        metrics = HTTP[
+            HTTP.index("bool DeviceDebugHttp::handleRendererMetrics") :
+            HTTP.index("bool DeviceDebugHttp::handleRendererWindow")
+        ]
+        self.assertIn("kMetricsResponseMinimumIntervalMs", metrics)
+        self.assertIn("metrics_rate_limited", metrics)
+        self.assertIn("metrics_memory", metrics)
+        self.assertIn("body.empty()", metrics)
+
+        window = HTTP[
+            HTTP.index("bool DeviceDebugHttp::handleRendererWindow") :
+            HTTP.index("bool DeviceDebugHttp::handleFrame")
+        ]
+        self.assertIn("kRendererWindowMinimumIntervalMs", window)
+        self.assertIn("renderer_window_rate_limited", window)
+        self.assertIn("kRendererWindowBodyMaximumBytes", window)
+        self.assertLess(
+            window.index("readHttpBody"),
+            window.index("server_->isRequestAuthorized(request)"),
+        )
+        self.assertLess(
+            window.index("server_->isRequestAuthorized(request)"),
+            window.index("xQueueOverwrite"),
+        )
+
+    def test_renderer_windows_bind_the_active_map_before_profile_change(self):
+        renderer_loop = MAIN[
+            MAIN.index("device_debug::RendererRunRequest rendererRunRequest") :
+            MAIN.index("constexpr uint32_t kStaticHousekeepingPeriodMs")
+        ]
+        self.assertLess(
+            renderer_loop.index("rendererRequestMatchesActiveMap"),
+            renderer_loop.index("beginWindow"),
+        )
+        self.assertLess(
+            renderer_loop.index("beginWindow"),
+            renderer_loop.index(
+                "setRendererTuningProfile(rendererRunRequest.profile"
+            ),
+        )
+        self.assertIn("rendererTransferStatus.enabled", renderer_loop)
+        self.assertIn('rendererTransferStatus.mode == "debug"', renderer_loop)
+        self.assertIn(
+            "rejected window restored current profile", renderer_loop
+        )
+
     def test_generic_status_exposes_network_selection_without_password(self):
         status = BLE[
             BLE.index("static std::string genericTransferStatusJson") :

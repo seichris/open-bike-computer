@@ -2,9 +2,11 @@
 
 #include "device_debug_frame_store.hpp"
 #include "device_debug_input.hpp"
+#include "renderer_diagnostics_request.hpp"
 #include "../device_transfer/device_transfer_http.hpp"
 
 #include <atomic>
+#include <freertos/queue.h>
 
 #include "device_debug_request_latch.hpp"
 #include <cstdint>
@@ -28,6 +30,7 @@ public:
   bool bootPressRequested() const;
   bool takeBootPressRequest();
   bool takeAutomaticExitRequest();
+  bool takeRendererRunRequest(RendererRunRequest &request);
   bool initialized() const { return configured_ && runtimeReady_; }
 
 private:
@@ -42,6 +45,10 @@ private:
   bool handleWake(WiFiClient &client);
   bool handleBootPress(const device_transfer::HttpRequest &request,
                        WiFiClient &client);
+  bool handleRendererMetrics(WiFiClient &client);
+  bool handleRendererWindow(const device_transfer::HttpRequest &request,
+                            WiFiClient &client);
+  void updateRendererDebugOverhead();
   bool handleExit(WiFiClient &client);
 
   device_transfer::HttpTransferServer *server_ = nullptr;
@@ -51,6 +58,10 @@ private:
   OneShotRequestLatch bootPressRequested_;
   std::atomic<bool> exitRequested_{false};
   std::atomic<bool> exitResponsePending_{false};
+  QueueHandle_t rendererRunQueue_ = nullptr;
+  std::atomic<uint32_t> nextRendererRequestId_{0};
+  uint32_t lastMetricsResponseMs_ = 0;
+  uint32_t lastRendererWindowRequestMs_ = 0;
   uint32_t lastFrameResponseMs_ = 0;
   uint32_t lastFrameResponseDurationMs_ = 0;
   uint32_t maxFrameResponseDurationMs_ = 0;
