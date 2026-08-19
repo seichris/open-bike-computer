@@ -83,8 +83,10 @@ parts but no outline (for example, `source relation r11258294 ...`). Preserve
 that detail from the public job error and preserve it with the immutable source
 snapshot identity. Do not silently drop
 the relation or promote a higher closure limit. The exact full-bbox job may
-proceed only after the source snapshot is corrected or an explicitly reviewed,
-identity-versioned policy for retaining valid standalone parts is enabled.
+proceed under the identity-versioned narrow policy only when the relation has
+one direct way member whose source way is explicitly tagged `building=yes`.
+All ambiguous, multi-part, or untagged relations still require corrected
+source data or an explicit product-policy review.
 
 ## Completion checks
 

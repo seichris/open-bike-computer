@@ -36,12 +36,14 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         self.building_ways: set[str] = set()
         self.relation_members: dict[str, list[dict[str, str]]] = {}
         self.building_relations: set[str] = set()
+        self.way_tags: dict[str, dict[str, str]] = {}
         self.part_parent_candidates: dict[str, set[str]] = {}
         self.parts_without_outline: set[str] = set()
         # Keep the relation identity alongside the legacy part set. The set is
         # used for closure intersection; this detail map makes a fail-closed
         # source diagnostic actionable without dumping a whole relation/PBF.
         self.incomplete_relation_parts: dict[str, tuple[str, ...]] = {}
+        self.standalone_part_keys: set[str] = set()
 
     def node(self, node) -> None:
         key = f"n{node.id}"
@@ -55,6 +57,7 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         if key not in self.required_ways:
             return
         self.way_nodes[key] = [f"n{node.ref}" for node in way.nodes]
+        self.way_tags[key] = dict(sorted((tag.k, tag.v) for tag in way.tags))
         if (
             way.tags.get("building") not in (None, "", "no")
             or way.tags.get("building:part") not in (None, "", "no")
@@ -124,6 +127,38 @@ class BuildingRelationHandler(osmium.SimpleHandler):
                 self.part_parents[part] = min(existing, parent)
             else:
                 self.part_parents[part] = parent
+
+    def finalize(self) -> None:
+        """Apply the narrow standalone-part normalization after all ways arrive.
+
+        OSM objects are normally delivered ways before relations, but the
+        policy must not depend on callback order. Only a single direct way
+        member with an explicit ``building`` tag qualifies. Any part shared
+        with another malformed relation remains fail-closed rather than being
+        silently reinterpreted.
+        """
+
+        qualified_relations = {
+            relation_key
+            for relation_key, parts in self.incomplete_relation_parts.items()
+            if len(parts) == 1
+            and parts[0].startswith("w")
+            and self.way_tags.get(parts[0], {}).get("building")
+            not in (None, "", "no")
+        }
+        unsafe_parts = {
+            part
+            for relation_key, parts in self.incomplete_relation_parts.items()
+            if relation_key not in qualified_relations
+            for part in parts
+        }
+        self.standalone_part_keys = {
+            part
+            for relation_key in qualified_relations
+            for part in self.incomplete_relation_parts[relation_key]
+            if part not in unsafe_parts
+        }
+        self.parts_without_outline.difference_update(self.standalone_part_keys)
 
 
 def load_scope_policy(path: Path) -> dict:
@@ -346,6 +381,7 @@ def main() -> None:
         )
     handler = BuildingRelationHandler(expected_closure=expected)
     handler.apply_file(args.pbf, locations=False)
+    handler.finalize()
     if index is not None:
         closure_audit = audit_closure(
             handler,
@@ -361,6 +397,8 @@ def main() -> None:
         "relations": handler.relations,
         "ambiguousParts": handler.ambiguous_parts,
     }
+    if handler.standalone_part_keys:
+        result["standalonePartKeys"] = sorted(handler.standalone_part_keys)
     if closure_audit is not None:
         result["closureAudit"] = closure_audit
     Path(args.output).write_text(

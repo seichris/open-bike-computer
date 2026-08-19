@@ -16,7 +16,10 @@ BUILDING_PREPROCESSING_IDENTITY_SCHEMA_VERSION = 1
 BUILDING_EXTRACTION_ALGORITHM_VERSION = 1
 BUILDING_SOURCE_INDEX_SCHEMA_VERSION = 1
 BUILDING_SOURCE_INDEX_ALGORITHM_VERSION = 2
-BUILDING_CLOSURE_ALGORITHM_VERSION = 1
+# v2 records the reviewed single-explicit-part standalone normalization. A
+# cache built with v1 must never be reused because relation association and FMB
+# part flags can differ even when the source snapshot is unchanged.
+BUILDING_CLOSURE_ALGORITHM_VERSION = 2
 BUILDING_CALIBRATION_SCHEMA_VERSION = 1
 BUILDING_CALIBRATION_ALGORITHM_VERSION = 1
 BUILDING_CALIBRATION_CREATION_TOOL = "open-bike-building-calibration"

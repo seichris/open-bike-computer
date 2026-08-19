@@ -125,6 +125,36 @@ class BuildingRelationIngressTests(unittest.TestCase):
         self.assertEqual(handler.parts_without_outline, {"w30"})
         self.assertEqual(handler.incomplete_relation_parts, {"r106": ("w30",)})
 
+    def test_single_explicit_building_part_is_retained_standalone(self):
+        handler = BuildingRelationHandler(
+            expected_closure={
+                "requiredRelationKeys": ["r107"],
+                "requiredWayKeys": ["w30"],
+            }
+        )
+
+        class Tags(list):
+            def get(self, key):
+                return next((tag.v for tag in self if tag.k == key), None)
+
+        handler.way(
+            SimpleNamespace(
+                id=30,
+                nodes=[],
+                tags=Tags([SimpleNamespace(k="building", v="yes")]),
+            )
+        )
+        handler.relation(
+            self.relation(
+                107,
+                [{"type": "w", "ref": 30, "role": "part"}],
+            )
+        )
+        handler.finalize()
+
+        self.assertEqual(handler.standalone_part_keys, {"w30"})
+        self.assertFalse(handler.parts_without_outline)
+
     def test_cli_indexes_real_osm_building_relations_deterministically(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "building-relations.json"
@@ -223,6 +253,38 @@ class BuildingRelationIngressTests(unittest.TestCase):
             self.assertEqual(audit["relationRetryCount"], 0)
             self.assertEqual(audit["closureRelationCount"], 4)
             self.assertEqual(audit["sourceSnapshotSha256"], source_sha)
+
+            safe_source = root / "safe-standalone.osm"
+            safe_source.write_text(
+                clean_source.read_text().replace(
+                    "</osm>",
+                    '<relation id="108" version="1">'
+                    '<member type="way" ref="10" role="part" />'
+                    '<tag k="type" v="building" />'
+                    "</relation></osm>",
+                )
+            )
+            safe_sha = hashlib.sha256(safe_source.read_bytes()).hexdigest()
+            safe_index = BuildingSourceIndex(root / "safe-cache", safe_sha)
+            safe_index.build_with_scanner(lambda path: scan_source(safe_source, path))
+            safe_output = root / "safe.json"
+            safe = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(safe_source),
+                    str(safe_output),
+                    "--source-index-manifest", str(safe_index.manifest_path),
+                    "--scope-plan", str(scope_path),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(safe.returncode, 0, safe.stdout + safe.stderr)
+            self.assertEqual(
+                json.loads(safe_output.read_text())["standalonePartKeys"],
+                ["w10"],
+            )
 
             malformed_source = root / "malformed.osm"
             malformed_source.write_text(

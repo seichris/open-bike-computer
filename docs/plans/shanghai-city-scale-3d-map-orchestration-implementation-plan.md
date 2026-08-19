@@ -53,7 +53,10 @@ and 26,285 nodes), so neither the relation-object ceiling nor host RAM was the
 cause. Reproducing the preserved clipped PBF showed source relation `r11258294`
 (`Guangfulin Culture Exhibition Hall`) is tagged `type=building` but contains
 only a `part` member and no outline. That is an invalid/incomplete relation and
-is correctly non-publishable under the fail-closed relation policy. The worker
+is not eligible for the general relation policy. The reviewed narrow fallback
+now retains a single direct way member as a standalone part only when that way
+itself is explicitly tagged `building=yes`; ambiguous, multi-part, or untagged
+cases remain fail-closed. The worker
 cgroup peaked at 6,121,091,072 bytes during the final retry, with no OOM event;
 the prior generic task error also exposed a diagnostics gap. The follow-up
 pipeline change parses typed conversion failures in chunk execution and stores
@@ -64,8 +67,9 @@ behind `map_build_failed`.
 The follow-up diagnostic image for commit `d4333e80` is now deployed only to
 validation as
 `ghcr.io/seichris/open-bike-computer-map-platform@sha256:7bf08c97a1fc0fceca26355dac5a2069e77c9d3c28554c3c59e20b0fefd0857d`.
-It retains the same fail-closed behavior but names the malformed source
-relation and part members in the typed failure. A fresh 16.923716841 km²
+It preserves fail-closed behavior for ambiguous or untagged relations, while
+naming the malformed source relation and part members in the typed failure. A
+fresh 16.923716841 km²
 validation smoke (`ea7d419dca064ce5af7a`) reached `ready` with 6/6 receipts,
 a 131,878-byte ZIP (`3f280a5736ec9ef92390ca758fb477c642a1ece56d5421c395d079d7f8d1eb4f`),
 and zero active reservations. Production remains pinned to the existing
