@@ -2133,7 +2133,14 @@ class MapBuildPipeline:
             from build_building_closure import output_bounds_e7
             from building_source_index import BuildingSourceIndex
 
-            index = BuildingSourceIndex.from_manifest(source_index_manifest)
+            # The source-index cache was sealed and identity-checked by the
+            # parent preparation step.  Workload scans must reuse that
+            # immutable manifest without re-auditing the multi-GB SQLite
+            # database for every child scope.
+            index = BuildingSourceIndex.from_manifest(
+                source_index_manifest,
+                validate_database=False,
+            )
             workload = index.workload_for_bounds(
                 output_bounds_e7(scope_plan.document),
                 maximum_objects=scope_plan.document["policy"][
