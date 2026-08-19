@@ -492,6 +492,58 @@ class PipelineProgressTests(unittest.TestCase):
                     )
                 self.assertEqual(context.exception.code, expected_code)
 
+    def test_extractor_translates_typed_preflight_failure(self):
+        source = SourceRegion(
+            id="sg",
+            provider="test",
+            name="Singapore",
+            url="https://example.invalid/sg.osm.pbf",
+            bounds=Bounds(103.0, 1.0, 104.5, 1.8),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = MapJobService(
+                SourceIndex([source]),
+                JobStore(root / "jobs"),
+                label_target2_enabled=True,
+                building_target3_enabled=True,
+            ).create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                    "target": {
+                        "renderer": "esp32-fmb",
+                        "rendererFormatVersion": 3,
+                    },
+                    "labels": {
+                        "profileVersion": 1,
+                        "preferredLanguages": ["en"],
+                        "internationalFallback": "en",
+                    },
+                }
+            )
+            pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"),
+                runner=FailingBuildingStreamingRunner(
+                    'BUILDING_PREPROCESS_FAILURE:{"code":"building_calibration_unavailable",'
+                    '"message":"scope plan calibration inputs are incomplete"}\n'
+                ),
+            )
+            with self.assertRaises(BuildingScopeError) as context:
+                pipeline._extract_features(
+                    job,
+                    root / "features",
+                    root / "raw-map",
+                    on_progress=lambda *_progress: None,
+                )
+            self.assertEqual(
+                context.exception.code, "building_calibration_unavailable"
+            )
+            self.assertEqual(
+                str(context.exception),
+                "scope plan calibration inputs are incomplete",
+            )
+
     def test_unpinned_legacy_target_does_not_emit_building_cache_progress(self):
         source = SourceRegion(
             id="sg",

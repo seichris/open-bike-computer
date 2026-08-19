@@ -5548,30 +5548,39 @@ class MapBuildPipeline:
                     raise RuntimeError("building-aware extraction emitted BUILDING_SCOPE more than once")
                 building_scope = parsed_building_scope
 
-        if (
-            on_progress or on_phase_progress or cancellation_check is not None
-        ) and hasattr(self.runner, "run_streaming"):
-            streaming_kwargs = {
-                "cwd": self.paths.osm_extract_root / "scripts",
-                "on_output": handle_output,
-            }
-            if cancellation_check is not None:
-                streaming_kwargs["cancellation_check"] = cancellation_check
-            self.runner.run_streaming(args, **streaming_kwargs)
-            return self._build_metrics(
-                format_version,
-                label_stats,
-                building_stats,
-                planned_scope_marker or building_scope,
-                building_complexity,
-                require_building_scope=(
-                    scope_plan_path is not None and planned_scope_marker is None
-                ),
+        try:
+            if (
+                on_progress or on_phase_progress or cancellation_check is not None
+            ) and hasattr(self.runner, "run_streaming"):
+                streaming_kwargs = {
+                    "cwd": self.paths.osm_extract_root / "scripts",
+                    "on_output": handle_output,
+                }
+                if cancellation_check is not None:
+                    streaming_kwargs["cancellation_check"] = cancellation_check
+                self.runner.run_streaming(args, **streaming_kwargs)
+            else:
+                output = self.runner.run(
+                    args, cwd=self.paths.osm_extract_root / "scripts"
+                )
+                for line in output.splitlines():
+                    handle_output(line)
+        except subprocess.CalledProcessError as exc:
+            output = "\n".join(
+                value
+                for value in (
+                    getattr(exc, "stdout", None),
+                    getattr(exc, "stderr", None),
+                    getattr(exc, "output", None),
+                )
+                if isinstance(value, str)
             )
-
-        output = self.runner.run(args, cwd=self.paths.osm_extract_root / "scripts")
-        for line in output.splitlines():
-            handle_output(line)
+            failure = parse_building_failure(output)
+            if failure is not None:
+                raise BuildingScopeError(
+                    failure["code"], failure["message"]
+                ) from exc
+            raise
         return self._build_metrics(
             format_version,
             label_stats,
