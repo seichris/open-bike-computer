@@ -29,6 +29,7 @@ constexpr std::size_t kQueueCapacity = 32;
 constexpr std::size_t kChunkBytes = 256 * 1024;
 constexpr std::size_t kRetentionBytes = 32 * 1024 * 1024;
 constexpr uint8_t kRetentionBoots = 20;
+constexpr uint8_t kRetentionDays = 14;
 
 void begin(Storage &storage, uint32_t bootSequence, uint32_t firmwareFingerprint);
 void process(uint32_t nowMs);

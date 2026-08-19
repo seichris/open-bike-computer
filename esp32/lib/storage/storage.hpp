@@ -130,7 +130,10 @@ public:
   Storage();
 
   esp_err_t initSD();
-  bool ensureSdMounted();
+  // Remount the removable card when requested. Existing callers retain the
+  // FFat fallback by default; diagnostics can opt out so an absent card never
+  // turns into an unbounded internal log sink.
+  bool ensureSdMounted(bool allowInternalFallback = true);
   void markSdUnavailable();
   esp_err_t initSPIFFS();
   SDCardInfo getSDCardInfo();

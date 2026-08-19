@@ -6,6 +6,11 @@
 #include <dirent.h>
 #include <cstdio>
 #include <cstring>
+#include <sys/stat.h>
+
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#include <esp_attr.h>
+#endif
 
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../storage/storage.hpp"
@@ -23,11 +28,19 @@
 #endif
 
 namespace ride_diagnostics {
+
+bool recordInternal(Level level, const char *category, const char *event,
+                    const char *fieldsJson, bool clearsFaultCapsule,
+                    uint32_t faultBoot, uint32_t faultEventCount);
+
 namespace {
 
 struct QueuedEvent {
   uint16_t length;
   bool critical;
+  bool clearsFaultCapsule;
+  uint32_t faultCapsuleBoot;
+  uint32_t faultCapsuleEventCount;
   char line[kMaximumEventBytes];
 };
 
@@ -35,7 +48,36 @@ struct ChunkFile {
   uint32_t boot;
   uint32_t chunk;
   uint32_t bytes;
+  time_t modifiedAt;
 };
+
+struct FaultCapsuleState {
+  uint32_t magic;
+  uint32_t bootSequence;
+  uint32_t firstMissingUptimeMs;
+  uint32_t lastMissingUptimeMs;
+  uint32_t eventCount;
+  uint32_t droppedCount;
+  uint32_t storageErrorCount;
+  uint32_t resetReason;
+  uint16_t activeStage;
+  uint16_t completedStage;
+  char lastCriticalCategory[24];
+  char lastCriticalEvent[48];
+};
+
+constexpr uint32_t kFaultCapsuleMagic = 0x52444350; // "RDCP"
+
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+RTC_NOINIT_ATTR FaultCapsuleState retainedFaultCapsule;
+#else
+FaultCapsuleState retainedFaultCapsule = {};
+#endif
+
+FaultCapsuleState currentFaultCapsule = {};
+FaultCapsuleState pendingFaultCapsule = {};
+bool pendingFaultCapsuleValid = false;
+portMUX_TYPE faultCapsuleMux = portMUX_INITIALIZER_UNLOCKED;
 
 constexpr std::size_t kMaximumRetainedFiles = 256;
 
@@ -56,6 +98,7 @@ std::atomic<uint16_t> maxQueueDepth{0};
 char activeCapture[48] = {};
 portMUX_TYPE captureMux = portMUX_INITIALIZER_UNLOCKED;
 char activePath[192] = {};
+std::atomic<bool> lastStorageAvailable{false};
 
 const char *levelName(Level level) {
   switch (level) {
@@ -136,6 +179,110 @@ void copyCapture(char *out, std::size_t capacity) {
   portEXIT_CRITICAL(&captureMux);
 }
 
+bool validFaultCapsule(const FaultCapsuleState &capsule) {
+  return capsule.magic == kFaultCapsuleMagic && capsule.bootSequence != 0 &&
+         capsule.eventCount != 0;
+}
+
+void initializeFaultCapsules() {
+  portENTER_CRITICAL(&faultCapsuleMux);
+  pendingFaultCapsuleValid = validFaultCapsule(retainedFaultCapsule) &&
+                             retainedFaultCapsule.bootSequence != bootSequence;
+  if (pendingFaultCapsuleValid)
+    pendingFaultCapsule = retainedFaultCapsule;
+
+  memset(&currentFaultCapsule, 0, sizeof(currentFaultCapsule));
+  currentFaultCapsule.magic = kFaultCapsuleMagic;
+  currentFaultCapsule.bootSequence = bootSequence;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  const boot_diagnostics::Snapshot snapshot = boot_diagnostics::snapshot();
+  currentFaultCapsule.resetReason = snapshot.resetReason;
+  currentFaultCapsule.activeStage = static_cast<uint16_t>(snapshot.activeStage);
+  currentFaultCapsule.completedStage =
+      static_cast<uint16_t>(snapshot.completedStage);
+#endif
+  portEXIT_CRITICAL(&faultCapsuleMux);
+}
+
+void updateFaultCapsule(Level level, const char *category, const char *event,
+                        bool storageFailure) {
+  portENTER_CRITICAL(&faultCapsuleMux);
+  if (currentFaultCapsule.magic != kFaultCapsuleMagic ||
+      currentFaultCapsule.bootSequence != bootSequence) {
+    memset(&currentFaultCapsule, 0, sizeof(currentFaultCapsule));
+    currentFaultCapsule.magic = kFaultCapsuleMagic;
+    currentFaultCapsule.bootSequence = bootSequence;
+  }
+  const uint32_t nowMs = millis();
+  if (currentFaultCapsule.eventCount == 0)
+    currentFaultCapsule.firstMissingUptimeMs = nowMs;
+  currentFaultCapsule.lastMissingUptimeMs = nowMs;
+  currentFaultCapsule.eventCount++;
+  if (storageFailure)
+    currentFaultCapsule.storageErrorCount++;
+  if (level == Level::Warning || level == Level::Error || storageFailure) {
+    if (category != nullptr) {
+      strncpy(currentFaultCapsule.lastCriticalCategory, category,
+              sizeof(currentFaultCapsule.lastCriticalCategory) - 1);
+      currentFaultCapsule.lastCriticalCategory[
+          sizeof(currentFaultCapsule.lastCriticalCategory) - 1] = '\0';
+    }
+    if (event != nullptr) {
+      strncpy(currentFaultCapsule.lastCriticalEvent, event,
+              sizeof(currentFaultCapsule.lastCriticalEvent) - 1);
+      currentFaultCapsule.lastCriticalEvent[
+          sizeof(currentFaultCapsule.lastCriticalEvent) - 1] = '\0';
+    }
+  }
+  currentFaultCapsule.droppedCount = dropped.load();
+  retainedFaultCapsule = currentFaultCapsule;
+  portEXIT_CRITICAL(&faultCapsuleMux);
+}
+
+bool faultCapsuleFields(const FaultCapsuleState &capsule, char *out,
+                        std::size_t capacity) {
+  if (!validFaultCapsule(capsule) || out == nullptr || capacity == 0)
+    return false;
+  const int length = snprintf(
+      out, capacity,
+      "{\"bootSequence\":%lu,\"firstMissingUptimeMs\":%lu,"
+      "\"lastMissingUptimeMs\":%lu,\"eventCount\":%lu,"
+      "\"droppedCount\":%lu,\"storageErrorCount\":%lu,"
+      "\"resetReason\":%lu,\"activeStage\":%u,"
+      "\"completedStage\":%u,\"lastCriticalCategory\":\"%s\","
+      "\"lastCriticalEvent\":\"%s\"}",
+      static_cast<unsigned long>(capsule.bootSequence),
+      static_cast<unsigned long>(capsule.firstMissingUptimeMs),
+      static_cast<unsigned long>(capsule.lastMissingUptimeMs),
+      static_cast<unsigned long>(capsule.eventCount),
+      static_cast<unsigned long>(capsule.droppedCount),
+      static_cast<unsigned long>(capsule.storageErrorCount),
+      static_cast<unsigned long>(capsule.resetReason),
+      static_cast<unsigned>(capsule.activeStage),
+      static_cast<unsigned>(capsule.completedStage),
+      capsule.lastCriticalCategory[0] == '\0' ? "unknown"
+                                              : capsule.lastCriticalCategory,
+      capsule.lastCriticalEvent[0] == '\0' ? "storage_unavailable"
+                                           : capsule.lastCriticalEvent);
+  return length > 0 && static_cast<std::size_t>(length) < capacity;
+}
+
+void clearFaultCapsule(const FaultCapsuleState &capsule) {
+  portENTER_CRITICAL(&faultCapsuleMux);
+  if (pendingFaultCapsuleValid &&
+      pendingFaultCapsule.bootSequence == capsule.bootSequence &&
+      pendingFaultCapsule.eventCount == capsule.eventCount) {
+    pendingFaultCapsuleValid = false;
+    memset(&pendingFaultCapsule, 0, sizeof(pendingFaultCapsule));
+  }
+  if (currentFaultCapsule.bootSequence == capsule.bootSequence &&
+      currentFaultCapsule.eventCount == capsule.eventCount) {
+    memset(&currentFaultCapsule, 0, sizeof(currentFaultCapsule));
+    memset(&retainedFaultCapsule, 0, sizeof(retainedFaultCapsule));
+  }
+  portEXIT_CRITICAL(&faultCapsuleMux);
+}
+
 bool utcNow(char *out, std::size_t capacity) {
   const time_t now = time(nullptr);
   if (now < 1700000000)
@@ -148,7 +295,10 @@ bool utcNow(char *out, std::size_t capacity) {
 void closeActiveFile() {
   if (activeFile != nullptr) {
     fflush(activeFile);
-    storage->close(activeFile);
+    if (storage != nullptr)
+      storage->close(activeFile);
+    else
+      fclose(activeFile);
     activeFile = nullptr;
   }
 }
@@ -225,6 +375,8 @@ std::size_t collectChunkFiles(ChunkFile *files, std::size_t capacity) {
         char path[224] = {};
         snprintf(path, sizeof(path), "%s/%s", bootPath, name);
         file.bytes = static_cast<uint32_t>(storage->size(path));
+        struct stat metadata = {};
+        file.modifiedAt = ::stat(path, &metadata) == 0 ? metadata.st_mtime : 0;
         ++count;
       }
       closedir(bootDirectory);
@@ -250,13 +402,20 @@ void pruneRetention() {
   const uint32_t oldestAllowedBoot =
       newestBoot >= kRetentionBoots - 1 ? newestBoot - (kRetentionBoots - 1) : 0;
   uint64_t totalBytes = 0;
+  const time_t now = time(nullptr);
+  const bool validClock = now >= static_cast<time_t>(1700000000);
+  const time_t oldestAllowedTime =
+      validClock ? now - static_cast<time_t>(kRetentionDays) * 24 * 60 * 60 : 0;
   for (std::size_t index = 0; index < count; ++index)
     totalBytes += files[index].bytes;
 
   for (std::size_t index = 0; index < count; ++index) {
     const ChunkFile &file = files[index];
     const bool isActive = file.boot == bootSequence && file.chunk == activeChunk;
-    const bool tooOld = file.boot < oldestAllowedBoot;
+    const bool tooOldByBoot = file.boot < oldestAllowedBoot;
+    const bool tooOldByDate = validClock && file.modifiedAt > 0 &&
+                              file.modifiedAt < oldestAllowedTime;
+    const bool tooOld = tooOldByBoot || tooOldByDate;
     if (isActive || (!tooOld && totalBytes <= kRetentionBytes))
       continue;
     char path[224] = {};
@@ -270,8 +429,15 @@ void pruneRetention() {
 }
 
 bool writeQueuedEvent(const QueuedEvent &event) {
+  if (storage == nullptr || !storage->getSdLoaded()) {
+    closeActiveFile();
+    storageErrors.fetch_add(1);
+    updateFaultCapsule(Level::Error, "storage", "write_unavailable", true);
+    return false;
+  }
   if (!openActiveFile()) {
     storageErrors.fetch_add(1);
+    updateFaultCapsule(Level::Error, "storage", "write_unavailable", true);
     return false;
   }
   if (storage->size(activePath) + event.length > kChunkBytes) {
@@ -280,6 +446,7 @@ bool writeQueuedEvent(const QueuedEvent &event) {
     activeChunkSnapshot.store(activeChunk);
     if (!openActiveFile()) {
       storageErrors.fetch_add(1);
+      updateFaultCapsule(Level::Error, "storage", "chunk_open_failed", true);
       return false;
     }
   }
@@ -289,6 +456,7 @@ bool writeQueuedEvent(const QueuedEvent &event) {
   if (result != event.length) {
     closeActiveFile();
     storageErrors.fetch_add(1);
+    updateFaultCapsule(Level::Error, "storage", "write_failed", true);
     return false;
   }
   if (event.critical || (nextSequence.load() % 16U) == 0U)
@@ -296,14 +464,69 @@ bool writeQueuedEvent(const QueuedEvent &event) {
   const uint32_t writtenCount = written.fetch_add(1) + 1;
   if ((writtenCount % 16U) == 0U)
     pruneRetention();
+  if (event.clearsFaultCapsule) {
+    FaultCapsuleState capsule = {};
+    capsule.magic = kFaultCapsuleMagic;
+    capsule.bootSequence = event.faultCapsuleBoot;
+    capsule.eventCount = event.faultCapsuleEventCount;
+    clearFaultCapsule(capsule);
+  }
   return true;
+}
+
+void flushFaultCapsulesIfPossible() {
+  if (storage == nullptr || !storage->getSdLoaded())
+    return;
+
+  FaultCapsuleState pending = {};
+  FaultCapsuleState current = {};
+  bool hasPending = false;
+  bool hasCurrent = false;
+  portENTER_CRITICAL(&faultCapsuleMux);
+  hasPending = pendingFaultCapsuleValid;
+  if (hasPending)
+    pending = pendingFaultCapsule;
+  hasCurrent = validFaultCapsule(currentFaultCapsule);
+  if (hasCurrent)
+    current = currentFaultCapsule;
+  portEXIT_CRITICAL(&faultCapsuleMux);
+
+  auto flush = [](const FaultCapsuleState &capsule) {
+    char fields[512] = {};
+    if (!faultCapsuleFields(capsule, fields, sizeof(fields)))
+      return false;
+    return recordInternal(Level::Warning, "storage", "storage_gap", fields,
+                          true, capsule.bootSequence, capsule.eventCount);
+  };
+
+  if (hasPending)
+    (void)flush(pending);
+  if (hasCurrent)
+    (void)flush(current);
 }
 
 void writerTask(void *) {
   QueuedEvent event = {};
+  uint32_t lastMountAttemptMs = 0;
+  lastStorageAvailable.store(storage != nullptr && storage->getSdLoaded(),
+                             std::memory_order_release);
   while (true) {
-    if (xQueueReceive(queue, &event, portMAX_DELAY) == pdTRUE)
+    if (xQueueReceive(queue, &event, pdMS_TO_TICKS(1000)) == pdTRUE)
       writeQueuedEvent(event);
+
+    if (storage == nullptr)
+      continue;
+    const uint32_t nowMs = millis();
+    if (!storage->getSdLoaded() &&
+        static_cast<uint32_t>(nowMs - lastMountAttemptMs) >= 5000U) {
+      lastMountAttemptMs = nowMs;
+      storage->ensureSdMounted(false);
+    }
+    const bool available = storage->getSdLoaded();
+    const bool wasAvailable =
+        lastStorageAvailable.exchange(available, std::memory_order_acq_rel);
+    if (available && !wasAvailable)
+      flushFaultCapsulesIfPossible();
   }
 }
 
@@ -339,6 +562,8 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
   activeChunk = 1;
   activeChunkSnapshot.store(activeChunk);
 #if PERSISTENT_RIDE_DIAGNOSTICS
+  initializeFaultCapsules();
+  lastStorageAvailable.store(storage->getSdLoaded(), std::memory_order_release);
   if (queue == nullptr)
     queue = xQueueCreate(kQueueCapacity, sizeof(QueuedEvent));
   if (queue != nullptr && writerTaskHandle == nullptr) {
@@ -353,6 +578,7 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
            firmware_metadata::target(),
            static_cast<unsigned long>(firmware_metadata::build()));
   record(Level::Info, "boot", "recorder_started", fields);
+  flushFaultCapsulesIfPossible();
 #else
   (void)storageRef;
   (void)bootSequenceRef;
@@ -368,8 +594,9 @@ void process(uint32_t nowMs) {
 #endif
 }
 
-bool record(Level level, const char *category, const char *event,
-            const char *fieldsJson) {
+bool recordInternal(Level level, const char *category, const char *event,
+                    const char *fieldsJson, bool clearsFaultCapsule,
+                    uint32_t faultBoot, uint32_t faultEventCount) {
 #if !PERSISTENT_RIDE_DIAGNOSTICS
   (void)level;
   (void)category;
@@ -387,6 +614,12 @@ bool record(Level level, const char *category, const char *event,
       fieldsJson[fieldsLength - 1] != '}' ||
       strchr(fieldsJson, '\n') != nullptr || strchr(fieldsJson, '\r') != nullptr) {
     dropped.fetch_add(1);
+    return false;
+  }
+  if (storage == nullptr || !storage->getSdLoaded()) {
+    dropped.fetch_add(1);
+    storageErrors.fetch_add(1);
+    updateFaultCapsule(level, category, event, true);
     return false;
   }
   const uint32_t sequence = nextSequence.fetch_add(1);
@@ -419,8 +652,20 @@ bool record(Level level, const char *category, const char *event,
   }
   queued.length = static_cast<uint16_t>(length);
   queued.critical = level == Level::Error || level == Level::Warning;
-  return enqueue(queued);
+  queued.clearsFaultCapsule = clearsFaultCapsule;
+  queued.faultCapsuleBoot = faultBoot;
+  queued.faultCapsuleEventCount = faultEventCount;
+  if (!enqueue(queued)) {
+    updateFaultCapsule(level, category, event, false);
+    return false;
+  }
+  return true;
 #endif
+}
+
+bool record(Level level, const char *category, const char *event,
+            const char *fieldsJson) {
+  return recordInternal(level, category, event, fieldsJson, false, 0, 0);
 }
 
 bool markIssue(const char *code) {

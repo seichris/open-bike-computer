@@ -57,7 +57,7 @@ std::string formatSize(uint64_t size) {
  */
 Storage::Storage() : isSdLoaded(false), card(nullptr) {}
 
-bool Storage::ensureSdMounted() {
+bool Storage::ensureSdMounted(bool allowInternalFallback) {
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   if (mountMutex == nullptr)
@@ -88,7 +88,7 @@ bool Storage::ensureSdMounted() {
 #endif
     ready = initSD() == ESP_OK;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-    if (!ready)
+    if (!ready && allowInternalFallback)
       initSPIFFS();
 #endif
   }
