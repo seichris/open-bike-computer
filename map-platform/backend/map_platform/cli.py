@@ -440,6 +440,9 @@ def main() -> int:
                         "receipts": list(
                             building_task_store.list_receipts(args.job_id)
                         ),
+                        "attempts": list(
+                            building_task_store.list_attempts(args.job_id)
+                        ),
                     },
                     indent=2,
                     sort_keys=True,

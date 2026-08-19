@@ -367,8 +367,8 @@ class BuildingTaskStore:
                 "SELECT state, cancellation_generation FROM map_build_plans WHERE parent_job_id=?",
                 (task.parent_job_id,),
             ).fetchone()
-            if plan is None or plan["state"] == "cancelled":
-                raise StaleLeaseError("parent plan is cancelled")
+            if plan is None or plan["state"] in {"cancelled", "failed", "ready"}:
+                raise StaleLeaseError("parent plan is no longer active")
             assigned = connection.execute(
                 "SELECT 1 FROM map_build_task_blocks WHERE parent_job_id=? AND block_x=? AND block_y=? AND task_id=?",
                 (task.parent_job_id, block[0], block[1], task_id),
@@ -611,6 +611,25 @@ class BuildingTaskStore:
         finally:
             connection.close()
 
+    def list_attempts(self, parent_job_id: str) -> tuple[dict[str, Any], ...]:
+        connection = self._connect()
+        try:
+            return tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT attempts.*, tasks.parent_job_id, tasks.kind
+                    FROM map_build_task_attempts attempts
+                    JOIN map_build_tasks tasks ON tasks.task_id = attempts.task_id
+                    WHERE tasks.parent_job_id=?
+                    ORDER BY attempts.started_at, attempts.task_id, attempts.attempt_number
+                    """,
+                    (parent_job_id,),
+                ).fetchall()
+            )
+        finally:
+            connection.close()
+
     def get_plan(self, parent_job_id: str) -> dict[str, Any] | None:
         connection = self._connect()
         try:
@@ -735,8 +754,8 @@ class BuildingTaskStore:
             "SELECT state FROM map_build_plans WHERE parent_job_id=?",
             (row["parent_job_id"],),
         ).fetchone()
-        if plan is None or plan["state"] == "cancelled":
-            raise StaleLeaseError("parent plan is cancelled")
+        if plan is None or plan["state"] in {"cancelled", "failed", "ready"}:
+            raise StaleLeaseError("parent plan is no longer active")
         return self._row_to_task(row)
 
     def _finish_attempt(

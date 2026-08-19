@@ -62,6 +62,10 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.assertIsNotNone(claimed)
         assert claimed is not None
         self.assertEqual(claimed.attempt_number, 1)
+        attempts = self.store.list_attempts("job-1")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["task_id"], claimed.task.task_id)
+        self.assertEqual(attempts[0]["outcome"], "leased")
         self.store.heartbeat(
             claimed.task.task_id,
             worker_id="worker-a",
