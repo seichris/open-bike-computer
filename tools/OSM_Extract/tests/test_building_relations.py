@@ -2,6 +2,7 @@ import json
 import hashlib
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,7 @@ from building_source_index import BuildingSourceIndex  # noqa: E402
 from build_building_source_index import scan_source  # noqa: E402
 from extract_building_relations import (  # noqa: E402
     BuildingRelationHandler,
+    _closure_rows,
     load_source_index_manifest,
 )
 
@@ -25,6 +27,33 @@ SCRIPT = ROOT / "scripts" / "extract_building_relations.py"
 
 
 class BuildingRelationIngressTests(unittest.TestCase):
+    def test_closure_rows_batches_source_audit_queries(self):
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.execute("CREATE TABLE ways (object_key TEXT, nodes_json TEXT)")
+            connection.executemany(
+                "INSERT INTO ways VALUES (?, ?)",
+                ((f"w{index}", "[]") for index in range(5)),
+            )
+            statements = []
+            connection.set_trace_callback(statements.append)
+            rows = dict(
+                _closure_rows(
+                    connection,
+                    table="ways",
+                    value_column="nodes_json",
+                    keys={f"w{index}" for index in range(5)},
+                    batch_size=2,
+                )
+            )
+            self.assertEqual(set(rows), {f"w{index}" for index in range(5)})
+            self.assertEqual(
+                len([statement for statement in statements if statement.startswith("SELECT")]),
+                3,
+            )
+        finally:
+            connection.close()
+
     def test_source_index_manifest_loader_skips_full_database_rescan(self):
         sentinel = object()
         with patch(

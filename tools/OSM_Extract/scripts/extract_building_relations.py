@@ -196,30 +196,33 @@ def audit_closure(
                 "building_relation_incomplete",
                 "output building relation has ambiguous or missing explicit parents",
             )
-        for relation_key in sorted(required_relations):
-            row = connection.execute(
-                "SELECT members_json FROM relations WHERE object_key = ?",
-                (relation_key,),
-            ).fetchone()
-            if row is None:
+        for relation_key, members_json in _closure_rows(
+            connection,
+            table="relations",
+            value_column="members_json",
+            keys=required_relations,
+        ):
+            if members_json is None:
                 raise BuildingSourceIndexError(
                     "building_relation_incomplete", f"source relation {relation_key} is unavailable"
                 )
-            source_members = json.loads(row[0])
+            source_members = json.loads(members_json)
             if handler.relation_members.get(relation_key) != source_members:
                 raise BuildingSourceIndexError(
                     "building_relation_incomplete", f"source relation {relation_key} is incomplete"
                 )
 
-        for way_key in sorted(required_ways):
-            row = connection.execute(
-                "SELECT nodes_json FROM ways WHERE object_key = ?", (way_key,)
-            ).fetchone()
-            if row is None:
+        for way_key, nodes_json in _closure_rows(
+            connection,
+            table="ways",
+            value_column="nodes_json",
+            keys=required_ways,
+        ):
+            if nodes_json is None:
                 raise BuildingSourceIndexError(
                     "building_relation_incomplete", f"source way {way_key} is unavailable"
                 )
-            source_nodes = [node["key"] for node in json.loads(row[0])]
+            source_nodes = [node["key"] for node in json.loads(nodes_json)]
             if handler.way_nodes.get(way_key) != source_nodes:
                 raise BuildingSourceIndexError(
                     "building_relation_incomplete", f"source way {way_key} is incomplete"
@@ -245,6 +248,35 @@ def audit_closure(
         }
     finally:
         connection.close()
+
+
+def _closure_rows(
+    connection: sqlite3.Connection,
+    *,
+    table: str,
+    value_column: str,
+    keys: set[str],
+    batch_size: int = 500,
+):
+    """Yield closure rows using bounded ``IN`` queries instead of N+1 reads."""
+
+    if table not in {"relations", "ways"} or value_column not in {
+        "members_json",
+        "nodes_json",
+    }:
+        raise ValueError("invalid closure row selector")
+    ordered_keys = tuple(sorted(keys))
+    for offset in range(0, len(ordered_keys), batch_size):
+        batch = ordered_keys[offset : offset + batch_size]
+        placeholders = ",".join("?" for _ in batch)
+        rows = connection.execute(
+            f"SELECT object_key, {value_column} FROM {table} "
+            f"WHERE object_key IN ({placeholders}) ORDER BY object_key",
+            batch,
+        ).fetchall()
+        values = {row[0]: row[1] for row in rows}
+        for key in batch:
+            yield key, values.get(key)
 
 
 def is_building_relation(tags: dict[str, str]) -> bool:
