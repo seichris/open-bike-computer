@@ -1042,7 +1042,7 @@ same one-job workflow.
 repository's immutable GHCR workflow and deployed only to the validation
 Coolify app with `chunked_allowlist` and concurrency one. The current
 validation digest is
-`ghcr.io/seichris/open-bike-computer-map-platform@sha256:67b64523becf97649d0b2943508409d485df5b23660160dbb505d9e1cfc494a3`;
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:a6eed22cc5a6c37d18eb37939bbfa0983c3433763d35be5ddff220910d125535`;
 all three validation containers report healthy. Retained central job
 `3d7fefb317ba47e88616` and west job `4acd2e89c8714555bb1d` reached `ready` with
 artifact and receipt validation. The full rectangle was deliberately
@@ -1051,11 +1051,11 @@ cancelled after source-resolution selected the China snapshot; the app-sized
 artifact and receipt evidence. The cancellation follow-up image passed the
 live leased-container regression, and validation maintenance repaired the
 historical cancelled-attempt rows. The branch image also passed a fresh
-16.923717 km² target-3 smoke job `b32b715c316a400c9906` with six durable block
-receipts, a 132,279-byte ZIP (`b32007e0e80934eef4088282c9fc68ec16cb9310e555fa47fbd8c6979d629483`),
-and a 717,205,504-byte source-extraction peak; its typed-preflight code is
-present in the exact deployed image
-`67b64523becf97649d0b2943508409d485df5b23660160dbb505d9e1cfc494a3`;
+16.923717 km² target-3 smoke job `2771caa3ab20404c98bb` with six durable block
+receipts, a 132,325-byte ZIP (`4ce50f649ae1709ed556eb973efdfe0b9f4ccc5068d1736771d1d6e5f86938fe`),
+and a 703,766,528-byte source-extraction peak; its final ZIP validation passed
+on the exact deployed image
+`a6eed22cc5a6c37d18eb37939bbfa0983c3433763d35be5ddff220910d125535`.
 production remains pinned to its existing digest. Physical validation, cold
 central/632 km²/full-bbox coverage, and production promotion are still
 required.
@@ -1067,10 +1067,12 @@ misses, 1,837,615-byte ZIP, 20 FMB entries) and job
 cache misses, 419,087-byte ZIP, 16 FMB entries). The latter artifact SHA-256 is
 `475361a14ebd9ee60324e287f9d02bdaf7bc6eb62546522de5d02550c2011877` and ZIP
 testing passed. Two sparse-cell probes failed closed before publication with
-generic chunk-execution errors despite nonzero workload receipts; the new image
-now converts preflight scope, relation, and calibration failures to typed
-records, while the historical rows remain retained as a diagnostics/data-shape
-follow-up and are not counted as a memory failure.
+generic chunk-execution errors despite nonzero workload receipts. The latest
+image now preserves the typed preflight result end-to-end: sparse rerun
+`a514a62ce5ea4e4991c2` failed as `building_calibration_unavailable` with the
+stable calibration key and source snapshot identity, rather than generic
+`map_build_failed`; the historical rows remain retained as diagnostics and are
+not counted as a memory failure.
 The full-bbox, physical acceptance, and production-promotion gates remain
 open.
 
