@@ -1,4 +1,5 @@
 #include "ride_diagnostics.hpp"
+#include "ride_diagnostics_format.hpp"
 
 #include <Arduino.h>
 #include <atomic>
@@ -51,22 +52,10 @@ struct ChunkFile {
   time_t modifiedAt;
 };
 
-struct FaultCapsuleState {
-  uint32_t magic;
-  uint32_t bootSequence;
-  uint32_t firstMissingUptimeMs;
-  uint32_t lastMissingUptimeMs;
-  uint32_t eventCount;
-  uint32_t droppedCount;
-  uint32_t storageErrorCount;
-  uint32_t resetReason;
-  uint16_t activeStage;
-  uint16_t completedStage;
-  char lastCriticalCategory[24];
-  char lastCriticalEvent[48];
-};
-
-constexpr uint32_t kFaultCapsuleMagic = 0x52444350; // "RDCP"
+using detail::FaultCapsuleState;
+using detail::formatFaultCapsuleFields;
+using detail::kFaultCapsuleMagic;
+using detail::validFaultCapsule;
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 RTC_NOINIT_ATTR FaultCapsuleState retainedFaultCapsule;
@@ -179,11 +168,6 @@ void copyCapture(char *out, std::size_t capacity) {
   portEXIT_CRITICAL(&captureMux);
 }
 
-bool validFaultCapsule(const FaultCapsuleState &capsule) {
-  return capsule.magic == kFaultCapsuleMagic && capsule.bootSequence != 0 &&
-         capsule.eventCount != 0;
-}
-
 void initializeFaultCapsules() {
   portENTER_CRITICAL(&faultCapsuleMux);
   pendingFaultCapsuleValid = validFaultCapsule(retainedFaultCapsule) &&
@@ -237,34 +221,6 @@ void updateFaultCapsule(Level level, const char *category, const char *event,
   currentFaultCapsule.droppedCount = dropped.load();
   retainedFaultCapsule = currentFaultCapsule;
   portEXIT_CRITICAL(&faultCapsuleMux);
-}
-
-bool faultCapsuleFields(const FaultCapsuleState &capsule, char *out,
-                        std::size_t capacity) {
-  if (!validFaultCapsule(capsule) || out == nullptr || capacity == 0)
-    return false;
-  const int length = snprintf(
-      out, capacity,
-      "{\"bootSequence\":%lu,\"firstMissingUptimeMs\":%lu,"
-      "\"lastMissingUptimeMs\":%lu,\"eventCount\":%lu,"
-      "\"droppedCount\":%lu,\"storageErrorCount\":%lu,"
-      "\"resetReason\":%lu,\"activeStage\":%u,"
-      "\"completedStage\":%u,\"lastCriticalCategory\":\"%s\","
-      "\"lastCriticalEvent\":\"%s\"}",
-      static_cast<unsigned long>(capsule.bootSequence),
-      static_cast<unsigned long>(capsule.firstMissingUptimeMs),
-      static_cast<unsigned long>(capsule.lastMissingUptimeMs),
-      static_cast<unsigned long>(capsule.eventCount),
-      static_cast<unsigned long>(capsule.droppedCount),
-      static_cast<unsigned long>(capsule.storageErrorCount),
-      static_cast<unsigned long>(capsule.resetReason),
-      static_cast<unsigned>(capsule.activeStage),
-      static_cast<unsigned>(capsule.completedStage),
-      capsule.lastCriticalCategory[0] == '\0' ? "unknown"
-                                              : capsule.lastCriticalCategory,
-      capsule.lastCriticalEvent[0] == '\0' ? "storage_unavailable"
-                                           : capsule.lastCriticalEvent);
-  return length > 0 && static_cast<std::size_t>(length) < capacity;
 }
 
 void clearFaultCapsule(const FaultCapsuleState &capsule) {
@@ -493,7 +449,7 @@ void flushFaultCapsulesIfPossible() {
 
   auto flush = [](const FaultCapsuleState &capsule) {
     char fields[512] = {};
-    if (!faultCapsuleFields(capsule, fields, sizeof(fields)))
+    if (!formatFaultCapsuleFields(capsule, fields, sizeof(fields)))
       return false;
     return recordInternal(Level::Warning, "storage", "storage_gap", fields,
                           true, capsule.bootSequence, capsule.eventCount);

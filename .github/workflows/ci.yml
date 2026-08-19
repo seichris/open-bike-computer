@@ -319,6 +319,12 @@ jobs:
       - name: Firmware manifest tests
         run: python3 -m unittest discover -s tools/tests
         working-directory: ${{ github.workspace }}
+      - name: Ride diagnostics format host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_ride_diagnostics_format.cpp \
+            -o /tmp/test_ride_diagnostics_format
+          /tmp/test_ride_diagnostics_format
       - name: Verify generated pre-connection assets
         run: |
           python -m pip install -r tools/preconnection-assets-requirements.txt
