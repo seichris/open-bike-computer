@@ -199,7 +199,7 @@ class MapReuseTests(unittest.TestCase):
                 producer_image_digest=PRODUCER_IMAGE,
             )
             self.assertEqual(first_keys.compatibility, preview_keys.compatibility)
-            self.assertNotEqual(first_keys.exact, preview_keys.exact)
+            self.assertEqual(first_keys.exact, preview_keys.exact)
             first.source_region = replace(
                 first.source_region,
                 name="Renamed source",
@@ -915,7 +915,7 @@ class MapReuseTests(unittest.TestCase):
                 result.build_compatibility_key, leased_keys.compatibility
             )
 
-    def test_exact_reuse_key_changes_when_resolved_preview_changes(self):
+    def test_exact_reuse_key_ignores_resolved_source_preview_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source_without_preview = replace(self.source, preview_geometry=None)
@@ -973,8 +973,8 @@ class MapReuseTests(unittest.TestCase):
             ).run_next()
 
             self.assertEqual(result.job.status, JobStatus.READY)
-            self.assertIsNone(result.job.reuse_strategy)
-            self.assertEqual(pipeline.full_build_calls, 1)
+            self.assertEqual(result.job.reuse_strategy, "exact")
+            self.assertEqual(pipeline.full_build_calls, 0)
 
     def test_subset_rejects_a_corrupt_selected_block(self):
         with tempfile.TemporaryDirectory() as tmp:
