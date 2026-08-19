@@ -3079,6 +3079,78 @@ class MapBuildPipeline:
                 ),
             ) from exc
 
+    @staticmethod
+    def _materialize_workload_closure(
+        scope_plan: ScopePlan,
+        workload_receipt: Mapping[str, Any],
+        closure_plan_path: Path,
+        closure_ids_path: Path,
+        source_snapshot_sha256: str,
+    ) -> dict[str, Any]:
+        """Materialize a previously verified exact workload receipt.
+
+        Workload scans already run the immutable source-index closure query and
+        persist every object key plus the closure digest.  Re-running that
+        query during the build would add the same multi-minute SQLite walk a
+        second time.  Reconstruct the canonical closure document locally,
+        verify its digest against the receipt and scope, and only then write
+        the ID list consumed by ``osmium getid``.
+        """
+
+        if workload_receipt.get("sourceSnapshotSha256") != source_snapshot_sha256:
+            raise BuildingScopeError(
+                "building_source_snapshot_changed",
+                "workload receipt source identity changed",
+            )
+        required_fields = (
+            "sourceIndexKey",
+            "candidateKeys",
+            "requiredRelationKeys",
+            "requiredWayKeys",
+            "requiredNodeKeys",
+            "calibrationTargetCells",
+            "calibrationSampleCells",
+            "closurePlanSha256",
+        )
+        if any(field not in workload_receipt for field in required_fields):
+            raise BuildingScopeError(
+                "building_workload_receipt_mismatch",
+                "workload receipt is missing closure identity fields",
+            )
+        body = {
+            "schemaVersion": 1,
+            "scopePlanSha256": scope_plan.sha256,
+            "sourceIndexKey": workload_receipt["sourceIndexKey"],
+            "sourceSnapshotSha256": source_snapshot_sha256,
+            "candidateKeys": list(workload_receipt["candidateKeys"]),
+            "requiredRelationKeys": list(workload_receipt["requiredRelationKeys"]),
+            "requiredWayKeys": list(workload_receipt["requiredWayKeys"]),
+            "requiredNodeKeys": list(workload_receipt["requiredNodeKeys"]),
+            "calibrationTargetCells": list(
+                workload_receipt["calibrationTargetCells"]
+            ),
+            "calibrationSampleCells": list(
+                workload_receipt["calibrationSampleCells"]
+            ),
+        }
+        closure_sha256 = hashlib.sha256(canonical_building_json(body)).hexdigest()
+        if closure_sha256 != workload_receipt["closurePlanSha256"]:
+            raise BuildingScopeError(
+                "building_workload_receipt_mismatch",
+                "workload receipt closure identity does not match the scope",
+            )
+        closure = {**body, "closurePlanSha256": closure_sha256}
+        closure_plan_path.write_bytes(canonical_building_json(closure) + b"\n")
+        object_ids = sorted(
+            set(closure["requiredRelationKeys"])
+            | set(closure["requiredWayKeys"])
+            | set(closure["requiredNodeKeys"])
+        )
+        closure_ids_path.write_text(
+            "".join(f"{key}\n" for key in object_ids), encoding="ascii"
+        )
+        return closure
+
     def build_building_chunk(
         self,
         job: MapJob,
@@ -3186,36 +3258,61 @@ class MapBuildPipeline:
             cancellation_check=cancellation_check,
         )
         preprocessing_timings: dict[str, float] = {}
-        try:
-            closure_output = self._run_preprocessing_command(
-                [
-                    sys.executable,
-                    str(
-                        self.paths.osm_extract_root
-                        / "scripts"
-                        / "build_building_closure.py"
-                    ),
-                    "--source-index-manifest",
-                    str(source_index_manifest),
-                    "--scope-plan",
-                    str(scope_plan_path),
-                    "--closure-plan",
-                    str(closure_plan_path),
-                    "--ids-output",
-                    str(closure_ids_path),
-                ],
-                cwd=self.paths.osm_extract_root / "scripts",
-                on_phase_progress=on_phase_progress,
-                default_unit="relation_closure",
+        if workload_receipt is not None:
+            started = time.perf_counter()
+            closure = self._materialize_workload_closure(
+                scope_plan,
+                workload_receipt,
+                closure_plan_path,
+                closure_ids_path,
+                source_snapshot_sha256,
+            )
+            preprocessing_timings["relation_closure"] = round(
+                time.perf_counter() - started, 6
+            )
+            self._emit_phase_progress(
+                on_phase_progress,
+                unit="relation_closure",
+                completed=1,
+                total=1,
                 total_blocks=len(scope_plan.output_blocks),
-                timings=preprocessing_timings,
-                cancellation_check=cancellation_check,
+                indeterminate=False,
             )
-        except BuildingScopeError as exc:
-            self._raise_chunk_split_if_needed(
-                exc, task_id=task_id, scope_plan=scope_plan
-            )
-            raise
+            closure_output = {
+                "reusedWorkloadReceipt": True,
+                "closurePlanSha256": closure["closurePlanSha256"],
+            }
+        else:
+            try:
+                closure_output = self._run_preprocessing_command(
+                    [
+                        sys.executable,
+                        str(
+                            self.paths.osm_extract_root
+                            / "scripts"
+                            / "build_building_closure.py"
+                        ),
+                        "--source-index-manifest",
+                        str(source_index_manifest),
+                        "--scope-plan",
+                        str(scope_plan_path),
+                        "--closure-plan",
+                        str(closure_plan_path),
+                        "--ids-output",
+                        str(closure_ids_path),
+                    ],
+                    cwd=self.paths.osm_extract_root / "scripts",
+                    on_phase_progress=on_phase_progress,
+                    default_unit="relation_closure",
+                    total_blocks=len(scope_plan.output_blocks),
+                    timings=preprocessing_timings,
+                    cancellation_check=cancellation_check,
+                )
+            except BuildingScopeError as exc:
+                self._raise_chunk_split_if_needed(
+                    exc, task_id=task_id, scope_plan=scope_plan
+                )
+                raise
         try:
             closure = json.loads(closure_plan_path.read_bytes())
         except (OSError, TypeError, ValueError) as exc:

@@ -921,6 +921,77 @@ class MapBuildingContractTests(unittest.TestCase):
                 all(task.state == "ready" for task in task_store.list_tasks(job.job_id))
             )
 
+    def test_workload_receipt_materializes_canonical_closure_without_rescan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(self._request())
+            calibration = load_building_calibration_window(
+                Path(__file__).resolve().parents[3]
+                / "tools/OSM_Extract/conf/building_height_rules.yaml"
+            )
+            scope_plan = plan_building_scope(
+                job,
+                calibration_cell_size_meters=calibration.cell_size_meters,
+                calibration_halo_cells=calibration.halo_cells,
+                calibration_minimum_samples=calibration.minimum_samples,
+            )
+            source_sha = "a" * 64
+            closure_body = {
+                "schemaVersion": 1,
+                "scopePlanSha256": scope_plan.sha256,
+                "sourceIndexKey": "b" * 64,
+                "sourceSnapshotSha256": source_sha,
+                "candidateKeys": ["w1"],
+                "requiredRelationKeys": ["r1"],
+                "requiredWayKeys": ["w1"],
+                "requiredNodeKeys": ["n1"],
+                "calibrationTargetCells": [[1, 2]],
+                "calibrationSampleCells": [[0, 1], [1, 2]],
+            }
+            receipt = {
+                **closure_body,
+                "closurePlanSha256": hashlib.sha256(
+                    canonical_building_json(closure_body)
+                ).hexdigest(),
+                "relationCount": 1,
+                "wayCount": 1,
+                "nodeCount": 1,
+                "totalObjectCount": 3,
+                "storedRelationMemberCount": 1,
+                "wayNodeReferenceCount": 1,
+                "vertexCount": 1,
+                "candidateOutlineCount": 1,
+                "candidatePartCount": 0,
+                "ringCount": None,
+                "holeCount": None,
+            }
+            closure_path = root / "closure.json"
+            ids_path = root / "closure.ids"
+
+            closure = MapBuildPipeline._materialize_workload_closure(
+                scope_plan,
+                receipt,
+                closure_path,
+                ids_path,
+                source_sha,
+            )
+
+            self.assertEqual(closure["closurePlanSha256"], receipt["closurePlanSha256"])
+            self.assertEqual(json.loads(closure_path.read_bytes()), closure)
+            self.assertEqual(ids_path.read_text(encoding="ascii"), "n1\nr1\nw1\n")
+            bad = dict(receipt)
+            bad["requiredWayKeys"] = ["w2"]
+            with self.assertRaisesRegex(
+                BuildingScopeError, "workload receipt closure identity"
+            ):
+                MapBuildPipeline._materialize_workload_closure(
+                    scope_plan,
+                    bad,
+                    root / "bad-closure.json",
+                    root / "bad-closure.ids",
+                    source_sha,
+                )
+
     def test_selected_inputs_are_frozen_across_retry_and_source_changes_fail_closed(self):
         request = self._request()
         request["bbox"] = [103.80, 1.28, 103.83, 1.31]
