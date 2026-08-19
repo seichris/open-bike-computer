@@ -1593,9 +1593,6 @@ class MapBuildPipeline:
         global_plan_path = parent_root / "global-plan.json"
         global_plan.write(global_plan_path)
 
-        if on_status is not None:
-            on_status(JobStatus.RESOLVING_SOURCE)
-
         calibration_execution: dict[str, Any] = {}
         calibration_manifest, calibration_generation = (
             self._ensure_selected_calibration_generation(
