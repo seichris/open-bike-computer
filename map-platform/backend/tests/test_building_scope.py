@@ -1,7 +1,9 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from map_platform.building_scope import (
     BuildingScopeError,
@@ -9,6 +11,7 @@ from map_platform.building_scope import (
     BUILDING_BLOCK_GRID_VERSION,
     BUILDING_MAX_SOURCE_AREA_M2,
     BUILDING_SCOPE_POLICY_VERSION,
+    configured_building_max_relation_objects_per_job,
     legacy_building_scope_diagnostics,
     mercator_scale,
     plan_building_scope,
@@ -88,6 +91,41 @@ class BuildingScopeTests(unittest.TestCase):
         with self.assertRaises(BuildingScopeError) as raised:
             self.plan(job, policy=BuildingScopePolicy(max_source_area_m2=732_000_000))
         self.assertEqual(raised.exception.code, "building_scope_exceeded")
+
+    def test_relation_object_ceiling_can_be_temporarily_overridden(self):
+        with patch.dict(
+            os.environ,
+            {"MAP_PLATFORM_BUILDING_MAX_RELATION_OBJECTS_PER_JOB": "600000"},
+            clear=False,
+        ):
+            self.assertEqual(
+                configured_building_max_relation_objects_per_job(), 600_000
+            )
+            plan = self.plan(
+                make_job({
+                    "mode": "custom_bbox",
+                    "bbox": [
+                        121.30632294659607,
+                        31.158348295222982,
+                        121.52266583255309,
+                        31.31010442485655,
+                    ],
+                })
+            )
+            self.assertEqual(
+                plan.document["policy"]["maxRelationObjectsPerJob"], 600_000
+            )
+            self.assertEqual(plan.summary()["maxRelationObjectsPerJob"], 600_000)
+
+    def test_relation_object_ceiling_override_is_bounded(self):
+        with patch.dict(
+            os.environ,
+            {"MAP_PLATFORM_BUILDING_MAX_RELATION_OBJECTS_PER_JOB": "2000001"},
+            clear=False,
+        ):
+            with self.assertRaises(BuildingScopeError) as raised:
+                configured_building_max_relation_objects_per_job()
+            self.assertEqual(raised.exception.code, "building_scope_policy_invalid")
 
     def test_default_policy_accepts_source_scope_between_800_and_1200_square_kilometers(self):
         job = make_job({

@@ -714,6 +714,7 @@ class MapBuildPipeline:
                         "calibrationCellCount",
                         "calibrationSampleCellCount",
                         "geometryBufferMeters",
+                        "maxRelationObjectsPerJob",
                         "sourceBoundsE7",
                     )
                 }

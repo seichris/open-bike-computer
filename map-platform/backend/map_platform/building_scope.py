@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
@@ -27,6 +28,10 @@ BUILDING_MAX_GEOMETRY_BUFFER_METERS = 2_048
 BUILDING_MAX_SOURCE_TO_OUTPUT_AREA_BASIS_POINTS = 13_500
 BUILDING_MAX_SOURCE_AREA_M2 = 1_200_000_000
 BUILDING_MAX_RELATION_OBJECTS_PER_JOB = 500_000
+BUILDING_MAX_RELATION_OBJECTS_PER_JOB_ENV = (
+    "MAP_PLATFORM_BUILDING_MAX_RELATION_OBJECTS_PER_JOB"
+)
+BUILDING_MAX_RELATION_OBJECTS_PER_JOB_ENV_CEILING = 2_000_000
 BUILDING_SELECTION_SEMANTICS = "complete_blocks_no_selection_edge_clipping"
 BUILDING_RELATION_CLOSURE_MODE = "source_snapshot_index"
 BUILDING_SCOPE_SCHEMA_VERSION = 1
@@ -38,6 +43,27 @@ class BuildingScopeError(RuntimeError):
     def __init__(self, code: str, message: str):
         self.code = code
         super().__init__(message)
+
+
+def configured_building_max_relation_objects_per_job() -> int:
+    """Return the process-local closure ceiling, with a bounded dev override."""
+    raw = os.environ.get(BUILDING_MAX_RELATION_OBJECTS_PER_JOB_ENV)
+    if raw is None or not raw.strip():
+        return BUILDING_MAX_RELATION_OBJECTS_PER_JOB
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise BuildingScopeError(
+            "building_scope_policy_invalid",
+            f"{BUILDING_MAX_RELATION_OBJECTS_PER_JOB_ENV} must be an integer",
+        ) from exc
+    if not 1 <= value <= BUILDING_MAX_RELATION_OBJECTS_PER_JOB_ENV_CEILING:
+        raise BuildingScopeError(
+            "building_scope_policy_invalid",
+            f"{BUILDING_MAX_RELATION_OBJECTS_PER_JOB_ENV} must be between 1 and "
+            f"{BUILDING_MAX_RELATION_OBJECTS_PER_JOB_ENV_CEILING}",
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -130,6 +156,7 @@ class ScopePlan:
             "scopePlanSha256": self.sha256,
             **metrics,
             "geometryBufferMeters": policy["geometryBufferMeters"],
+            "maxRelationObjectsPerJob": policy["maxRelationObjectsPerJob"],
             "sourceBoundsE7": document["sourceScope"]["boundsE7"],
         }
 
@@ -143,7 +170,11 @@ def plan_building_scope(
     policy: BuildingScopePolicy | None = None,
     geometry_buffer_meters: int | None = None,
 ) -> ScopePlan:
-    policy = policy or BuildingScopePolicy()
+    policy = policy or BuildingScopePolicy(
+        max_relation_objects_per_job=(
+            configured_building_max_relation_objects_per_job()
+        )
+    )
     policy.validate()
     if any(isinstance(value, bool) or not isinstance(value, int) for value in (
         calibration_cell_size_meters, calibration_halo_cells, calibration_minimum_samples
