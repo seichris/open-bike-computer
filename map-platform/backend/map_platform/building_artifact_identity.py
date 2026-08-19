@@ -71,4 +71,3 @@ def validate_partition_invariant_artifact_identity(
     if dict(value) != expected:
         raise ValueError("partition-invariant artifact identity is not canonical")
     return expected
-
