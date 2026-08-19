@@ -12,7 +12,41 @@ from typing import Any, Iterable, Mapping
 
 RESOURCE_MODEL_SCHEMA_VERSION = 1
 DEFAULT_MINIMUM_OBSERVATIONS = 8
+RESOURCE_MODEL_VERSION = "building-resource-model-untrained-v1"
+CONSERVATIVE_MEMORY_MODEL_VERSION = "conservative-counter-floor-v1"
+DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES = 512 * 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def conservative_peak_memory_bytes(workload: Mapping[str, Any]) -> int:
+    """Return an explicit pre-training memory reservation from raw counters.
+
+    This is intentionally a coarse, versioned floor rather than a trained
+    admission model.  It keeps an exact workload scan from being represented
+    as a zero-byte task and becomes the prediction recorded beside the later
+    measured RSS.  Operators must not promote this model to a higher
+    concurrency policy without retained worker-class observations.
+    """
+
+    if not isinstance(workload, Mapping):
+        raise ValueError("workload counters must be a mapping")
+
+    def counter(name: str) -> int:
+        value = workload.get(name, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"workload counter {name} is invalid")
+        return value
+
+    estimate = DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES
+    estimate += counter("nodeCount") * 96
+    estimate += counter("wayCount") * 640
+    estimate += counter("relationCount") * 1_536
+    estimate += counter("storedRelationMemberCount") * 96
+    estimate += counter("wayNodeReferenceCount") * 48
+    estimate += counter("vertexCount") * 48
+    estimate += counter("candidateOutlineCount") * 2_048
+    estimate += counter("candidatePartCount") * 2_048
+    return estimate
 
 
 def summarize_resource_observations(

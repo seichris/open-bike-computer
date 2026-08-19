@@ -18,13 +18,15 @@ machine-readable benchmark fixtures, the read-only worker cgroup/resource
 report exists, and Phase 1 global planning has a deterministic shadow path.
 Phase 2's SQLite WAL parent/task/attempt/receipt store, lease fencing, crash
 recovery, authenticated diagnostics, and operator inspection commands are now
-implemented, including the durable exact-workload receipt handoff, canonical
+implemented, including durable exact-workload receipt handoff, canonical
 global-to-chunk scope projection, monotonic parent stages, receipt-based
 aggregate block progress, and capability-aware memory/CPU reservations with a
-concurrency-one default for heavy work. Production still uses the existing
-monolithic executor and hard ceilings until workload benchmarks, chunk-only
-execution, cache-only assembly validation, and fair multi-parent scheduling are
-shipped.
+concurrency-one default for heavy work. The parent worker now dispatches the
+chunked path behind an explicit rollout mode, reopens failed plans for retry,
+executes cache-aware child tasks, and performs fail-closed cache-only assembly.
+Production still uses the existing monolithic executor and hard ceilings until
+the benchmark, golden-equivalence, retention/runbook, deployment, and physical
+acceptance gates are complete.
 
 The core decision is:
 
@@ -776,13 +778,15 @@ refuse tasks above the 85% memory headroom threshold, and reserve memory/CPU in
 a durable resource-pool ledger; reservations are released on heartbeat expiry,
 completion, split, cancellation, or lease recovery. The default heavy-task
 concurrency is one. A workload-scan receipt now promotes the deterministic
-child to a pending `building_chunk`; child execution is not enabled by the
-parent worker yet. The public parent-job response now projects additive
-coordinator progress and preserves legacy counters, while detailed task,
-receipt, attempt, and reservation diagnostics remain authenticated; fair
-scheduling now uses a durable last-claimed round-robin cursor and reserves at
-most one slot per parent while another parent has unrepresented pending work.
-Weighted quotas and admission-aware priority policies remain pending.
+child to a pending `building_chunk`. The chunked parent worker consumes those
+scans, resumes failed plans without discarding successful receipts, and records
+runtime resource summaries and receipt-set identity. The public parent-job
+response projects additive coordinator progress and preserves legacy counters,
+while detailed task, receipt, attempt, and reservation diagnostics remain
+authenticated; fair scheduling now uses a durable last-claimed round-robin
+cursor and reserves at most one slot per parent while another parent has
+unrepresented pending work. Weighted quotas and admission-aware priority
+policies remain pending.
 Authenticated plan diagnostics now include an observational p95 resource-model
 summary grouped by the stable worker capability identity; groups below the
 reviewed sample count remain explicitly uncalibrated and do not alter
@@ -804,13 +808,12 @@ byte-identical across monolithic and multiple partition layouts.
 
 **Current status:** the canonical chunk scope projection, bounded chunk
 execution entry point, cache-manifest reread, and transactional per-block
-receipt publication are implemented behind an explicit API. The ordinary
-parent build still does not call this path; source-index/calibration reuse,
-runtime split signaling for multi-block guard failures, and a deterministic
-longer-axis bisection helper, and durable workload-scan child enqueue
-transition are implemented behind explicit APIs. Source-index/calibration
-reuse and monolithic-vs-partition golden equivalence remain to be validated
-before allowlisting it.
+receipt publication are implemented and invoked by the parent worker for
+`chunked_allowlist`/`chunked` jobs. Source-index, calibration, and source
+identity are frozen once per parent; cache hits become zero-work child tasks;
+exact workload scans promote to bounded child execution; and multi-block guard
+failures emit deterministic split tasks. Monolithic-vs-partition golden
+equivalence, measured benchmarks, and allowlist rollout remain pending.
 
 ### Phase 4 — Cache-only final assembly
 
@@ -828,21 +831,31 @@ every global block receipt, rereads and matches the canonical cache manifests,
 extracts whole-map roads/labels, and passes a fail-closed cache-only flag to the
 extractor. A cache miss cannot silently re-enter monolithic building
 normalization. Assembly now validates the final ZIP size and published ZIP
-receipt before the parent can enter `ready`. The parent worker does not invoke
-assembly yet; final partition-invariant artifact identity, whole-artifact
-signature/device gates, and the high-limit reference comparison remain
-pending. The coordinator also derives a canonical block receipt-set identity
-ordered by global block coordinates, which is the input to the remaining
-partition-invariant artifact comparison.
+receipt before the parent can enter `ready`. The parent worker invokes this
+assembly after every block receipt is ready, records final ZIP validation and
+receipt-set metrics, and cannot fall back to monolithic building normalization.
+Final partition-invariant artifact identity, whole-artifact signature/device
+gates, and the high-limit reference comparison remain pending. The coordinator
+also derives a canonical block receipt-set identity ordered by global block
+coordinates, which is the input to the remaining partition-invariant artifact
+comparison.
 
 ### Phase 5 — Progress, estimates, operations, and retention
 
 1. Aggregate monotonic block progress and phase estimates into the parent.
 2. Add authenticated operator plan/task diagnostics and monitoring events.
 3. Add cache/task retention that preserves reusable canonical blocks while
-   cleaning parent attempt data.
+   cleaning parent attempt data; successful receipts and resource observations
+   remain retained for calibration.
 4. Add alarms and runbooks for splits, OOMs, stale leases, corrupt cache, and
    final size limits.
+
+**Current status:** additive parent progress, authenticated plan/task/resource
+diagnostics, capability-aware reservations, and retained worker observations
+are implemented. The maintenance loop now prunes only old failed/cancelled
+coordinator evidence while retaining successful plans and canonical cache
+blocks. Alarm thresholds, operator runbooks, and production benchmark evidence
+remain pending.
 
 **Exit gate:** operators can explain every minute and resource peak of a
 Shanghai build from retained data, while current iOS clients still complete the
@@ -1005,12 +1018,14 @@ artifact.
 - [ ] Version and train the retained resource model and worker capability identity.
 - [x] Add bounded memory/CPU reservations with a concurrency-one heavy-task default.
 - [x] Add fair scheduling across parent jobs.
-- [ ] Implement chunk-only canonical building block generation.
+- [x] Implement chunk-only canonical building block generation.
 - [x] Emit typed multi-block runtime split signals and deterministic bisection.
 - [x] Convert split signals into bounded workload-scan child enqueue transitions.
-- [ ] Implement cache-only final assembly and whole-artifact validation.
+- [x] Implement cache-only final assembly and whole-artifact validation.
 - [ ] Preserve partition-invariant block and artifact identity.
 - [x] Add public aggregate progress and authenticated operator diagnostics.
+- [x] Add conservative failed/cancelled task-evidence retention without
+      deleting reusable canonical cache blocks.
 - [ ] Pass geometry, relation, height, seam, cache, orchestration, fault, and
       compatibility suites.
 - [ ] Pass central, west, and exact full-bbox server benchmarks.

@@ -578,7 +578,7 @@ def _preparation_estimator_context(value: Any) -> dict[str, Any] | None:
 def _building_preprocessing_mode(value: Any) -> str | None:
     if value is None:
         return None
-    if value not in {"legacy", "shadow", "selected"}:
+    if value not in {"legacy", "shadow", "selected", "chunked_allowlist", "chunked"}:
         raise ValueError("building preprocessing mode is invalid")
     return value
 

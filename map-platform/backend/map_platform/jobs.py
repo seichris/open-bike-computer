@@ -909,7 +909,13 @@ class JobStore:
         worker_id: str,
         building_preprocessing_mode: str,
     ) -> MapJob:
-        if building_preprocessing_mode not in {"legacy", "shadow", "selected"}:
+        if building_preprocessing_mode not in {
+            "legacy",
+            "shadow",
+            "selected",
+            "chunked_allowlist",
+            "chunked",
+        }:
             raise ValueError("building preprocessing mode is invalid")
         with self._queue_lock():
             job = self.get(job_id)

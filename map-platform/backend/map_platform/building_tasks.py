@@ -12,9 +12,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from .building_resource_model import summarize_resource_observations
+from .building_resource_model import (
+    CONSERVATIVE_MEMORY_MODEL_VERSION,
+    DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES,
+    conservative_peak_memory_bytes,
+    summarize_resource_observations,
+)
 
 BUILDING_TASK_SCHEMA_VERSION = 4
+DEFAULT_BUILDING_TASK_RETENTION_DAYS = 30
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _TASK_STATES = {"pending", "leased", "ready", "split", "failed", "cancelled"}
 _PLAN_STATES = {
@@ -284,6 +290,70 @@ class BuildingTaskStore:
                     (parent_job_id,),
                 ).fetchone()
             )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def reopen_failed_plan(
+        self,
+        parent_job_id: str,
+        *,
+        stage: str = "chunk_planning",
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Requeue a failed parent for a bounded job-level retry.
+
+        Job retries keep the same parent identity.  Reopening only a failed
+        plan preserves ready receipts, split history, and all attempt
+        observations while making failed child tasks eligible for a fresh
+        lease.  Cancelled and ready plans remain terminal by design.
+        """
+
+        if stage not in _PLAN_STATES or stage in _TERMINAL_PLAN_STATES:
+            raise BuildingTaskStoreError("plan stage is invalid")
+        now = self._clock() if now is None else now
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+            if row["state"] == "failed":
+                connection.execute(
+                    """
+                    UPDATE map_build_plans
+                    SET stage=?, state=?, updated_at=?
+                    WHERE parent_job_id=?
+                    """,
+                    (stage, stage, now, parent_job_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE map_build_tasks
+                    SET state='pending', typed_error=NULL,
+                        lease_owner=NULL, lease_token=NULL,
+                        lease_expires_at=NULL, heartbeat_at=NULL,
+                        next_eligible_at=?, updated_at=?
+                    WHERE parent_job_id=? AND state='failed'
+                    """,
+                    (now, now, parent_job_id),
+                )
+                connection.execute(
+                    "DELETE FROM map_build_resource_reservations WHERE parent_job_id=?",
+                    (parent_job_id,),
+                )
+            result = connection.execute(
+                "SELECT * FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            connection.commit()
+            return dict(result) if result is not None else None
         except Exception:
             connection.rollback()
             raise
@@ -671,6 +741,10 @@ class BuildingTaskStore:
                     "holeCount",
                 )
             }
+            predicted["estimatedPeakMemoryBytes"] = conservative_peak_memory_bytes(
+                receipt
+            )
+            predicted["memoryEstimateSource"] = CONSERVATIVE_MEMORY_MODEL_VERSION
             connection.execute(
                 """
                 UPDATE map_build_tasks
@@ -874,8 +948,10 @@ class BuildingTaskStore:
             or task.lease_token != lease_token
         ):
             raise StaleLeaseError("task lease is no longer valid")
-        if task.kind != "building_chunk":
-            raise BuildingTaskStoreError("only building chunks can be runtime split")
+        if task.kind not in {"building_chunk", "building_workload_scan"}:
+            raise BuildingTaskStoreError(
+                "only building chunks or workload scans can be runtime split"
+            )
         if task.split_depth >= split_depth_limit:
             raise BuildingTaskStoreError("building task split depth limit reached")
         from .building_orchestration import deterministic_runtime_bisection
@@ -1064,6 +1140,145 @@ class BuildingTaskStore:
                     (parent_job_id,),
                 ).fetchall()
             )
+        finally:
+            connection.close()
+
+    def workload_receipt(self, task_id: str) -> dict[str, Any] | None:
+        """Return one validated durable workload receipt by task identity."""
+
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT workload_json FROM map_build_workload_receipts WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            value = json.loads(row["workload_json"])
+            return _validate_workload_receipt(value)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise BuildingTaskStoreError(
+                "stored workload receipt is invalid"
+            ) from exc
+        finally:
+            connection.close()
+
+    def prune_terminal_evidence(
+        self,
+        *,
+        older_than_days: int = DEFAULT_BUILDING_TASK_RETENTION_DAYS,
+        max_plans: int = 100,
+        now: float | None = None,
+    ) -> dict[str, int]:
+        """Bound failed/cancelled coordinator history without touching caches.
+
+        Successful plans and all canonical block receipts remain available for
+        calibration and operator diagnostics.  Only terminal failed/cancelled
+        plans older than the retention window are removed, and a candidate is
+        skipped if a lease or reservation is still present.  The external
+        building-block cache is deliberately outside this transaction and is
+        retained by its own lease-aware cache policy.
+        """
+
+        if (
+            isinstance(older_than_days, bool)
+            or not isinstance(older_than_days, int)
+            or older_than_days < 1
+            or isinstance(max_plans, bool)
+            or not isinstance(max_plans, int)
+            or max_plans < 1
+        ):
+            raise ValueError("building task retention settings are invalid")
+        current_time = self._clock() if now is None else now
+        cutoff = current_time - older_than_days * 86_400
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            candidates = connection.execute(
+                """
+                SELECT parent_job_id
+                FROM map_build_plans
+                WHERE state IN ('failed', 'cancelled') AND updated_at < ?
+                ORDER BY updated_at, parent_job_id
+                LIMIT ?
+                """,
+                (cutoff, max_plans),
+            ).fetchall()
+            removed_plans = 0
+            removed_tasks = 0
+            removed_attempts = 0
+            skipped_active = 0
+            for candidate in candidates:
+                parent_job_id = candidate["parent_job_id"]
+                active = connection.execute(
+                    """
+                    SELECT 1
+                    FROM map_build_tasks AS tasks
+                    LEFT JOIN map_build_resource_reservations AS reservations
+                      ON reservations.task_id = tasks.task_id
+                    WHERE tasks.parent_job_id=?
+                      AND (tasks.state='leased' OR reservations.task_id IS NOT NULL)
+                    LIMIT 1
+                    """,
+                    (parent_job_id,),
+                ).fetchone()
+                if active is not None:
+                    skipped_active += 1
+                    continue
+                task_ids = [
+                    row["task_id"]
+                    for row in connection.execute(
+                        "SELECT task_id FROM map_build_tasks WHERE parent_job_id=?",
+                        (parent_job_id,),
+                    ).fetchall()
+                ]
+                if task_ids:
+                    placeholders = ",".join("?" for _ in task_ids)
+                    attempt_count = connection.execute(
+                        f"SELECT COUNT(*) FROM map_build_task_attempts WHERE task_id IN ({placeholders})",
+                        task_ids,
+                    ).fetchone()[0]
+                    connection.execute(
+                        f"DELETE FROM map_build_resource_reservations WHERE task_id IN ({placeholders})",
+                        task_ids,
+                    )
+                    connection.execute(
+                        f"DELETE FROM map_build_workload_receipts WHERE task_id IN ({placeholders})",
+                        task_ids,
+                    )
+                    connection.execute(
+                        f"DELETE FROM map_build_block_receipts WHERE task_id IN ({placeholders})",
+                        task_ids,
+                    )
+                    connection.execute(
+                        f"DELETE FROM map_build_task_attempts WHERE task_id IN ({placeholders})",
+                        task_ids,
+                    )
+                    connection.execute(
+                        f"DELETE FROM map_build_task_blocks WHERE task_id IN ({placeholders})",
+                        task_ids,
+                    )
+                    connection.execute(
+                        f"DELETE FROM map_build_tasks WHERE task_id IN ({placeholders})",
+                        task_ids,
+                    )
+                connection.execute(
+                    "DELETE FROM map_build_plans WHERE parent_job_id=?",
+                    (parent_job_id,),
+                )
+                removed_plans += 1
+                removed_tasks += len(task_ids)
+                removed_attempts += int(attempt_count if task_ids else 0)
+            connection.commit()
+            return {
+                "removedPlans": removed_plans,
+                "removedTasks": removed_tasks,
+                "removedAttempts": removed_attempts,
+                "skippedActive": skipped_active,
+            }
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -1726,7 +1941,7 @@ def _resource_request(
 def _predicted_memory(row: sqlite3.Row) -> int:
     predicted = row["predicted_resource_json"]
     if not predicted:
-        return 0
+        return DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES
     try:
         document = json.loads(predicted)
     except (TypeError, ValueError) as exc:
@@ -1735,7 +1950,7 @@ def _predicted_memory(row: sqlite3.Row) -> int:
         raise BuildingTaskStoreError("task predicted resource is invalid")
     estimate = document.get("estimatedPeakMemoryBytes")
     if estimate is None:
-        return 0
+        return DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES
     if isinstance(estimate, bool) or not isinstance(estimate, int) or estimate < 0:
         raise BuildingTaskStoreError("task memory estimate is invalid")
     return estimate

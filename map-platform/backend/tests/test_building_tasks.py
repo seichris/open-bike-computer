@@ -165,6 +165,50 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.assertEqual(progress["totalChunks"], 1)
         self.assertFalse(progress["indeterminate"])
 
+    def test_failed_parent_reopens_for_job_retry_without_discarding_history(self):
+        self.store.add_tasks([self.spec(blocks=((1, 2),))])
+        claimed = self.store.claim_next(worker_id="worker-a")
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        self.store.fail(
+            claimed.task.task_id,
+            worker_id="worker-a",
+            lease_token=claimed.lease_token,
+            typed_failure="building_chunk_execution_failed",
+            transient=False,
+        )
+        self.store.set_plan_stage("job-1", stage="failed", state="failed")
+
+        reopened = self.store.reopen_failed_plan("job-1")
+
+        self.assertEqual(reopened["state"], "chunk_planning")
+        self.assertEqual(self.store.get_task("task-1").state, "pending")
+        self.assertEqual(len(self.store.list_attempts("job-1")), 1)
+
+    def test_terminal_retention_prunes_failed_history_but_not_cache_policy(self):
+        self.store.add_tasks([self.spec(blocks=((1, 2),))])
+        claimed = self.store.claim_next(worker_id="worker-a")
+        assert claimed is not None
+        self.store.fail(
+            claimed.task.task_id,
+            worker_id="worker-a",
+            lease_token=claimed.lease_token,
+            typed_failure="building_chunk_execution_failed",
+            transient=False,
+        )
+        self.store.set_plan_stage("job-1", stage="failed", state="failed")
+
+        result = self.store.prune_terminal_evidence(
+            older_than_days=1,
+            max_plans=10,
+            now=100.0 + 86_401,
+        )
+
+        self.assertEqual(result["removedPlans"], 1)
+        self.assertEqual(result["removedTasks"], 1)
+        self.assertEqual(result["removedAttempts"], 1)
+        self.assertIsNone(self.store.get_plan("job-1"))
+
     def test_memory_capability_admission_skips_heavy_task(self):
         self.store.add_tasks(
             [
@@ -547,6 +591,13 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.assertEqual(
             promoted.predicted_resource["workloadReceipt"]["totalObjectCount"],
             4,
+        )
+        self.assertGreater(
+            promoted.predicted_resource["estimatedPeakMemoryBytes"], 0
+        )
+        self.assertEqual(
+            promoted.predicted_resource["memoryEstimateSource"],
+            "conservative-counter-floor-v1",
         )
         receipts = self.store.list_workload_receipts("job-1")
         self.assertEqual(len(receipts), 1)

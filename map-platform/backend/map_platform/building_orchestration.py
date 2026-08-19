@@ -241,6 +241,118 @@ class BuildingPartitionPlan:
     def canonical_bytes(self) -> bytes:
         return self._canonical_payload
 
+    @classmethod
+    def read(
+        cls,
+        path,
+        *,
+        global_plan_sha256: str,
+        expected_blocks: Sequence[MapBlock] | None = None,
+    ) -> "BuildingPartitionPlan":
+        """Read and validate the immutable partition plan used for resume."""
+
+        try:
+            raw = json.loads(path.read_bytes())
+        except (OSError, TypeError, ValueError) as exc:
+            raise BuildingChunkPlanningError(
+                "building_chunk_plan_invalid",
+                "partition plan is unavailable or malformed",
+            ) from exc
+        if not isinstance(raw, dict):
+            raise BuildingChunkPlanningError(
+                "building_chunk_plan_invalid", "partition plan is not an object"
+            )
+        persisted_sha = raw.get("partitionPlanSha256")
+        body = {key: value for key, value in raw.items() if key != "partitionPlanSha256"}
+        if (
+            body.get("globalPlanSha256") != global_plan_sha256
+            or not isinstance(persisted_sha, str)
+            or hashlib.sha256(canonical_json(body)).hexdigest() != persisted_sha
+        ):
+            raise BuildingChunkPlanningError(
+                "building_chunk_plan_invalid", "partition plan identity is invalid"
+            )
+        try:
+            policy_document = body["policy"]
+            policy = BuildingChunkPolicy(
+                policy_version=policy_document["policyVersion"],
+                source_area_target_m2=policy_document["sourceAreaTargetM2"],
+                source_area_hard_m2=policy_document["sourceAreaHardM2"],
+                closure_objects_target=policy_document["closureObjectsTarget"],
+                closure_objects_hard=policy_document["closureObjectsHard"],
+                wall_time_target_seconds=policy_document["wallTimeTargetSeconds"],
+                wall_time_hard_seconds=policy_document["wallTimeHardSeconds"],
+                max_missing_building_blocks=policy_document["maxMissingBuildingBlocks"],
+                split_depth_limit=policy_document["splitDepthLimit"],
+            )
+            policy.validate()
+            raw_chunks = body["chunks"]
+            raw_cache_hits = body["cacheHitBlocks"]
+            if not isinstance(raw_chunks, list) or not isinstance(raw_cache_hits, list):
+                raise ValueError("partition entries are invalid")
+            chunks: list[BuildingChunkPlan] = []
+            for raw_chunk in raw_chunks:
+                workload = raw_chunk["workload"]
+                blocks = tuple(
+                    MapBlock(int(block[0]), int(block[1]))
+                    for block in workload["blocks"]
+                )
+                chunk_workload = ChunkWorkload(
+                    blocks=blocks,
+                    source_area_m2=workload["sourceAreaM2"],
+                    closure_objects=workload["closureObjects"],
+                    estimated_peak_memory_bytes=workload[
+                        "estimatedPeakMemoryBytes"
+                    ],
+                    estimated_wall_seconds=workload["estimatedWallSeconds"],
+                    cache_hit_count=workload["cacheHitCount"],
+                    missing_block_count=workload["missingBlockCount"],
+                    target_violations=tuple(workload["targetViolations"]),
+                    hard_violations=tuple(workload["hardViolations"]),
+                    requires_exact_workload_scan=workload[
+                        "requiresExactWorkloadScan"
+                    ],
+                )
+                chunks.append(
+                    BuildingChunkPlan(
+                        chunk_id=raw_chunk["chunkId"],
+                        blocks=blocks,
+                        split_depth=raw_chunk["splitDepth"],
+                        workload=chunk_workload,
+                    )
+                )
+            cache_hit_blocks = tuple(
+                MapBlock(int(block[0]), int(block[1])) for block in raw_cache_hits
+            )
+        except (KeyError, TypeError, ValueError, IndexError, OverflowError) as exc:
+            raise BuildingChunkPlanningError(
+                "building_chunk_plan_invalid", "partition plan entries are invalid"
+            ) from exc
+        if len(set(cache_hit_blocks)) != len(cache_hit_blocks):
+            raise BuildingChunkPlanningError(
+                "building_chunk_plan_invalid", "partition cache hits are duplicated"
+            )
+        all_blocks = [block for chunk in chunks for block in chunk.blocks]
+        if len(set(all_blocks)) != len(all_blocks) or set(all_blocks) & set(cache_hit_blocks):
+            raise BuildingChunkPlanningError(
+                "building_chunk_plan_invalid", "partition block ownership overlaps"
+            )
+        if expected_blocks is not None and set(all_blocks) | set(cache_hit_blocks) != set(
+            expected_blocks
+        ):
+            raise BuildingChunkPlanningError(
+                "building_chunk_plan_invalid",
+                "partition block ownership does not cover the global plan",
+            )
+        return cls(
+            global_plan_sha256=global_plan_sha256,
+            policy=policy,
+            chunks=tuple(chunks),
+            cache_hit_blocks=cache_hit_blocks,
+            _canonical_payload=canonical_json(body),
+            sha256=persisted_sha,
+        )
+
     def write(self, path) -> None:
         if hashlib.sha256(self._canonical_payload).hexdigest() != self.sha256:
             raise BuildingChunkPlanningError(

@@ -1334,7 +1334,7 @@ def validate_estimator_context(value: Any) -> dict[str, Any]:
         raise ValueError("estimator context schema is unsupported")
     renderer = _bounded_int(value["rendererFormatVersion"], 1, 3)
     mode = value["preprocessingMode"]
-    if mode not in {"legacy", "shadow", "selected"}:
+    if mode not in {"legacy", "shadow", "selected", "chunked_allowlist", "chunked"}:
         raise ValueError("estimator preprocessing mode is invalid")
     for key in ("performanceCompatibilityKey", "profileSha256"):
         if not isinstance(value[key], str) or not re.fullmatch(r"[0-9a-f]{64}", value[key]):

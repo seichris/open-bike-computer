@@ -166,7 +166,13 @@ class MapBuildingContractTests(unittest.TestCase):
     def test_target_three_preprocessing_scope_mode_is_strict(self):
         with patch.dict("os.environ", {}, clear=True):
             self.assertEqual(building_preprocessing_scope_mode(), "shadow")
-        for mode in ("legacy", "shadow", "selected"):
+        for mode in (
+            "legacy",
+            "shadow",
+            "selected",
+            "chunked_allowlist",
+            "chunked",
+        ):
             with self.subTest(mode=mode), patch.dict(
                 "os.environ",
                 {"MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE": mode.upper()},
@@ -737,11 +743,21 @@ class MapBuildingContractTests(unittest.TestCase):
     def test_selected_scope_mode_is_accepted_and_unknown_modes_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(
+                self._request()
+            )
             pipeline = MapBuildPipeline(
                 PipelinePaths(root, root / "work", root / "packs"),
                 building_scope_mode="selected",
             )
             self.assertEqual(pipeline.building_scope_mode, "selected")
+            for mode in ("chunked_allowlist", "chunked"):
+                with self.subTest(mode=mode):
+                    chunked = MapBuildPipeline(
+                        PipelinePaths(root, root / "work", root / "packs"),
+                        building_scope_mode=mode,
+                    )
+                    self.assertTrue(chunked.uses_chunked_preprocessing(job))
             with self.assertRaisesRegex(ValueError, "legacy, shadow, or selected"):
                 MapBuildPipeline(
                     PipelinePaths(root, root / "work", root / "packs"),
@@ -756,6 +772,154 @@ class MapBuildingContractTests(unittest.TestCase):
                 ValueError, "building preprocessing mode is invalid"
             ):
                 MapJob.from_dict(serialized)
+
+    def test_chunked_parent_promotes_workload_scans_and_keeps_resource_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            job = self._service(store).create_job(self._request())
+            source_pbf = root / "source.pbf"
+            source_pbf.write_bytes(b"source")
+            source_sha = hashlib.sha256(b"source").hexdigest()
+            task_store = BuildingTaskStore(root / "building-tasks.sqlite3")
+            pipeline = MapBuildPipeline(
+                PipelinePaths(
+                    Path(__file__).resolve().parents[3],
+                    root / "work",
+                    root / "packs",
+                ),
+                building_task_store=task_store,
+                building_scope_mode="chunked",
+            )
+
+            def fake_calibration(_source, sha, scope, **_kwargs):
+                identity = selected_calibration_identity(
+                    source_snapshot_sha256=sha,
+                    rules_path=(
+                        pipeline.paths.osm_extract_root
+                        / "conf"
+                        / "building_height_rules.yaml"
+                    ),
+                    scope_plan=scope,
+                )
+                return root / "calibration.json", {
+                    "calibrationKey": identity["calibrationKey"],
+                    "manifestSha256": "a" * 64,
+                    "entrySetSha256": "b" * 64,
+                    "cellCount": 1,
+                }
+
+            source_index = {
+                "indexKey": "c" * 64,
+                "sourceSnapshotSha256": source_sha,
+                "databaseSha256": "d" * 64,
+                "schemaVersion": 1,
+                "algorithmVersion": 2,
+                "nodeCount": 0,
+                "wayCount": 0,
+                "relationCount": 0,
+                "relationMemberCount": 0,
+            }
+
+            def fake_workload(_manifest, sha, _scope, _work_root, **_kwargs):
+                receipt = {
+                    "schemaVersion": 1,
+                    "sourceIndexKey": source_index["indexKey"],
+                    "sourceSnapshotSha256": sha,
+                    "candidateKeys": [],
+                    "requiredRelationKeys": [],
+                    "requiredWayKeys": [],
+                    "requiredNodeKeys": [],
+                    "calibrationTargetCells": [],
+                    "calibrationSampleCells": [],
+                    "closurePlanSha256": "e" * 64,
+                    "relationCount": 0,
+                    "wayCount": 0,
+                    "nodeCount": 0,
+                    "totalObjectCount": 0,
+                    "storedRelationMemberCount": 0,
+                    "wayNodeReferenceCount": 0,
+                    "vertexCount": 0,
+                    "candidateOutlineCount": 0,
+                    "candidatePartCount": 0,
+                    "ringCount": None,
+                    "holeCount": None,
+                }
+                return receipt, {"peakResidentBytes": 123}
+
+            def fake_chunk(job_arg, **kwargs):
+                self.assertIs(job_arg, job)
+                task_id = kwargs["task_id"]
+                claimed_worker = kwargs["worker_id"]
+                lease_token = kwargs["lease_token"]
+                for block in kwargs["scope_plan"].output_blocks:
+                    task_store.publish_receipt(
+                        task_id,
+                        worker_id=claimed_worker,
+                        lease_token=lease_token,
+                        block=(block.x, block.y),
+                        cache_identity_sha256="f" * 64,
+                        content_sha256="0" * 64,
+                        producer_identity={},
+                        validation={},
+                    )
+                task_store.mark_ready(
+                    task_id,
+                    worker_id=claimed_worker,
+                    lease_token=lease_token,
+                    peak_rss_bytes=456,
+                )
+
+            def fake_assemble(*_args, **_kwargs):
+                task_store.set_plan_stage(job.job_id, stage="map_assembly")
+                task_store.set_plan_stage(job.job_id, stage="artifact_validation")
+                task_store.set_plan_stage(job.job_id, stage="artifact_publication")
+                task_store.set_plan_stage(job.job_id, stage="ready")
+                return SimpleNamespace(
+                    artifact_metrics={
+                        "buildingPreprocessing": {"mode": "chunked"}
+                    }
+                )
+
+            with patch.object(
+                pipeline.source_cache,
+                "ensure",
+                return_value=SimpleNamespace(path=source_pbf, sha256=source_sha),
+            ), patch.object(
+                pipeline,
+                "_ensure_selected_calibration_generation",
+                side_effect=fake_calibration,
+            ), patch.object(
+                pipeline,
+                "_prepare_chunked_source_index",
+                return_value=(root / "source-index.json", source_index),
+            ), patch.object(
+                pipeline,
+                "_run_building_workload_scan",
+                side_effect=fake_workload,
+            ), patch.object(
+                pipeline,
+                "build_building_chunk",
+                side_effect=fake_chunk,
+            ), patch.object(
+                pipeline,
+                "assemble_building_chunks",
+                side_effect=fake_assemble,
+            ):
+                result = pipeline.build_chunked(job, worker_id="worker-test")
+
+            self.assertIsNotNone(result)
+            self.assertIn("resource", result.artifact_metrics["buildingPreprocessing"])
+            self.assertRegex(
+                result.artifact_metrics["buildingPreprocessing"]["resource"][
+                    "receiptSetSha256"
+                ],
+                r"^[0-9a-f]{64}$",
+            )
+            self.assertEqual(task_store.get_plan(job.job_id)["state"], "ready")
+            self.assertTrue(
+                all(task.state == "ready" for task in task_store.list_tasks(job.job_id))
+            )
 
     def test_selected_inputs_are_frozen_across_retry_and_source_changes_fail_closed(self):
         request = self._request()

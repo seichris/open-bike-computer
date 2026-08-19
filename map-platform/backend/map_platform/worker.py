@@ -16,6 +16,7 @@ from .jobs import (
 from .models import JobStatus, MapJob
 from .monitoring import MapMonitoringStore, build_map_job_monitoring_event
 from .pipeline import MapBuildPipeline, safe_build_failure
+from .resource_report import worker_resource_report
 from .reuse import SubsetReuseUnavailable
 
 
@@ -128,6 +129,12 @@ class MapWorker:
         )
         if job is None:
             return WorkerResult(worker_id=self.worker_id, job=None, processed=False)
+        try:
+            worker_capability = worker_resource_report().get("capability")
+        except Exception:
+            # Resource reporting is advisory; the coordinator still runs with
+            # legacy admission if the host exposes no readable cgroup data.
+            worker_capability = None
         attempt_started_at = job.updated_at
         attempt_started_monotonic = time.monotonic()
         if self.estimate_coordinator is not None:
@@ -327,33 +334,50 @@ class MapWorker:
                                 outcome_class="full_build",
                                 force=True,
                             )
-                        for parent in self.store.find_subset_reuse_candidates(
-                            job,
-                            build_compatibility_key=reuse_keys.compatibility,
-                        ):
-                            try:
-                                build_result = self.pipeline.build_subset(
+                        if not self.pipeline.uses_chunked_preprocessing(job):
+                            for parent in self.store.find_subset_reuse_candidates(
+                                job,
+                                build_compatibility_key=reuse_keys.compatibility,
+                            ):
+                                try:
+                                    build_result = self.pipeline.build_subset(
+                                        job,
+                                        parent,
+                                        **build_kwargs,
+                                    )
+                                except SubsetReuseUnavailable:
+                                    continue
+                                reuse_strategy = "subset"
+                                reuse_source_job_id = parent.job_id
+                                if self.estimate_coordinator is not None:
+                                    self.estimate_coordinator.publish(
+                                        job.job_id,
+                                        worker_id=self.worker_id,
+                                        phase="reuse_subset",
+                                        outcome_class="subset_reuse",
+                                        force=True,
+                                    )
+                                break
+                        if build_result is None:
+                            if self.pipeline.uses_chunked_preprocessing(job):
+                                build_result = self.pipeline.build_chunked(
                                     job,
-                                    parent,
+                                    worker_id=self.worker_id,
+                                    worker_capability=worker_capability,
                                     **build_kwargs,
                                 )
-                            except SubsetReuseUnavailable:
-                                continue
-                            reuse_strategy = "subset"
-                            reuse_source_job_id = parent.job_id
-                            if self.estimate_coordinator is not None:
-                                self.estimate_coordinator.publish(
-                                    job.job_id,
-                                    worker_id=self.worker_id,
-                                    phase="reuse_subset",
-                                    outcome_class="subset_reuse",
-                                    force=True,
-                                )
-                            break
-                        if build_result is None:
-                            build_result = self.pipeline.build(job, **build_kwargs)
+                            else:
+                                build_result = self.pipeline.build(job, **build_kwargs)
                 else:
-                    build_result = self.pipeline.build(job, **build_kwargs)
+                    if isinstance(self.pipeline, MapBuildPipeline) and self.pipeline.uses_chunked_preprocessing(job):
+                        build_result = self.pipeline.build_chunked(
+                            job,
+                            worker_id=self.worker_id,
+                            worker_capability=worker_capability,
+                            **build_kwargs,
+                        )
+                    else:
+                        build_result = self.pipeline.build(job, **build_kwargs)
                 map_id, archive_path = build_result
             if (
                 isinstance(self.pipeline, MapBuildPipeline)

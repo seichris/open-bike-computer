@@ -66,6 +66,9 @@ def selected_building_identity(
         or calibration_generation["cellCount"] <= 0
     ):
         raise ValueError("building calibration generation identity is invalid")
+    scope_policy = scope.get("policy") or scope.get("chunkPolicy")
+    if not isinstance(scope_policy, dict):
+        raise ValueError("building scope policy is unavailable")
     body = {
         "schemaVersion": BUILDING_PREPROCESSING_IDENTITY_SCHEMA_VERSION,
         "sourceSnapshotSha256": source_snapshot_sha256,
@@ -78,19 +81,19 @@ def selected_building_identity(
         "closureAlgorithmVersion": BUILDING_CLOSURE_ALGORITHM_VERSION,
         "scope": {
             "scopePlanSha256": scope_plan.sha256,
-            "scopePolicyVersion": scope["policy"]["policyVersion"],
-            "blockGridVersion": scope["policy"]["blockGridVersion"],
-            "blockSizeMeters": scope["policy"]["blockSizeMeters"],
-            "geometryBufferMeters": scope["policy"]["geometryBufferMeters"],
-            "relationRetryBufferMeters": scope["policy"]["relationRetryBufferMeters"],
-            "maxGeometryBufferMeters": scope["policy"]["maxGeometryBufferMeters"],
-            "relationClosureMode": scope["policy"]["relationClosureMode"],
-            "selectionSemantics": scope["policy"]["selectionSemantics"],
-            "maxSourceToOutputAreaBasisPoints": scope["policy"][
+            "scopePolicyVersion": scope_policy["policyVersion"],
+            "blockGridVersion": scope_policy["blockGridVersion"],
+            "blockSizeMeters": scope_policy["blockSizeMeters"],
+            "geometryBufferMeters": scope_policy["geometryBufferMeters"],
+            "relationRetryBufferMeters": scope_policy["relationRetryBufferMeters"],
+            "maxGeometryBufferMeters": scope_policy["maxGeometryBufferMeters"],
+            "relationClosureMode": scope_policy["relationClosureMode"],
+            "selectionSemantics": scope_policy["selectionSemantics"],
+            "maxSourceToOutputAreaBasisPoints": scope_policy[
                 "maxSourceToOutputAreaBasisPoints"
             ],
-            "maxSourceAreaM2": scope["policy"]["maxSourceAreaM2"],
-            "maxRelationObjectsPerJob": scope["policy"][
+            "maxSourceAreaM2": scope_policy["maxSourceAreaM2"],
+            "maxRelationObjectsPerJob": scope_policy[
                 "maxRelationObjectsPerJob"
             ],
         },
@@ -160,6 +163,9 @@ def selected_building_block_cache_identity(
     ):
         raise ValueError("building block cache calibration identity is invalid")
     scope = scope_plan.document
+    scope_policy = scope.get("policy") or scope.get("chunkPolicy")
+    if not isinstance(scope_policy, dict):
+        raise ValueError("building scope policy is unavailable")
     body = {
         "schemaVersion": BUILDING_BLOCK_CACHE_SCHEMA_VERSION,
         "sourceSnapshotSha256": source_snapshot_sha256,
@@ -167,12 +173,12 @@ def selected_building_block_cache_identity(
         "buildingProfileVersion": BUILDING_PROFILE_VERSION,
         "rendererFormatVersion": 3,
         "fmbVersion": BUILDING_FMB_VERSION,
-        "blockGridVersion": scope["policy"]["blockGridVersion"],
-        "blockSizeMeters": scope["policy"]["blockSizeMeters"],
-        "selectionSemantics": scope["policy"]["selectionSemantics"],
-        "geometryBufferMeters": scope["policy"]["geometryBufferMeters"],
-        "relationRetryBufferMeters": scope["policy"]["relationRetryBufferMeters"],
-        "maxGeometryBufferMeters": scope["policy"]["maxGeometryBufferMeters"],
+        "blockGridVersion": scope_policy["blockGridVersion"],
+        "blockSizeMeters": scope_policy["blockSizeMeters"],
+        "selectionSemantics": scope_policy["selectionSemantics"],
+        "geometryBufferMeters": scope_policy["geometryBufferMeters"],
+        "relationRetryBufferMeters": scope_policy["relationRetryBufferMeters"],
+        "maxGeometryBufferMeters": scope_policy["maxGeometryBufferMeters"],
         "normalizationAlgorithmVersion": BUILDING_NORMALIZATION_ALGORITHM_VERSION,
         "blockEncodingAlgorithmVersion": BUILDING_BLOCK_ENCODING_ALGORITHM_VERSION,
         "geometryEngine": {

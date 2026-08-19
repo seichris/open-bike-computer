@@ -1,11 +1,14 @@
 import json
 import random
+import tempfile
 import unittest
+from pathlib import Path
 
 from map_platform.building_orchestration import (
     BlockWorkload,
     BuildingChunkPolicy,
     BuildingChunkPlanningError,
+    BuildingPartitionPlan,
     deterministic_runtime_bisection,
     partition_global_building_plan,
 )
@@ -159,6 +162,20 @@ class BuildingOrchestrationTests(unittest.TestCase):
         second = partition_global_building_plan(plan, workloads=dict(shuffled))
         self.assertEqual(first.sha256, second.sha256)
         self.assertEqual(json.loads(first.canonical_bytes()), json.loads(second.canonical_bytes()))
+
+    def test_partition_plan_round_trips_for_resume(self):
+        plan = self.global_plan((121.30, 31.10, 121.33, 31.13))
+        partition = partition_global_building_plan(plan)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "partition-plan.json"
+            partition.write(path)
+            restored = BuildingPartitionPlan.read(
+                path,
+                global_plan_sha256=plan.sha256,
+                expected_blocks=plan.output_blocks,
+            )
+        self.assertEqual(restored.sha256, partition.sha256)
+        self.assertEqual(restored.canonical_bytes(), partition.canonical_bytes())
 
 
 if __name__ == "__main__":

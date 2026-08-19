@@ -24,7 +24,10 @@ from .building_cache_maintenance import (
     DEFAULT_BUILDING_BLOCK_CACHE_RETENTION_DAYS,
     prune_building_block_cache,
 )
-from .building_tasks import BuildingTaskStore
+from .building_tasks import (
+    DEFAULT_BUILDING_TASK_RETENTION_DAYS,
+    BuildingTaskStore,
+)
 from .map_stream_build_identity import (
     image_digest_from_reference,
     verify_map_stream_build_identity,
@@ -225,6 +228,8 @@ def _perform_maintenance(
     monitoring_retention_days: int | None = None,
     building_cache_retention_days: int = DEFAULT_BUILDING_BLOCK_CACHE_RETENTION_DAYS,
     building_cache_max_bytes: int = DEFAULT_BUILDING_BLOCK_CACHE_MAX_BYTES,
+    building_task_store: BuildingTaskStore | None = None,
+    building_task_retention_days: int = DEFAULT_BUILDING_TASK_RETENTION_DAYS,
 ) -> dict[str, object]:
     result: dict[str, object] = {
         "maintenance": True,
@@ -262,6 +267,17 @@ def _perform_maintenance(
             ),
         ),
     )
+    if building_task_store is not None:
+        result["buildingTaskEvidence"] = {}
+        tasks += (
+            (
+                "buildingTaskEvidence",
+                lambda: building_task_store.prune_terminal_evidence(
+                    older_than_days=building_task_retention_days,
+                    max_plans=max_gc_items,
+                ),
+            ),
+        )
     if monitoring_store is not None:
         tasks += (
             (
@@ -361,6 +377,16 @@ def main() -> int:
             os.environ.get(
                 "MAP_PLATFORM_BUILDING_BLOCK_CACHE_MAX_BYTES",
                 str(DEFAULT_BUILDING_BLOCK_CACHE_MAX_BYTES),
+            )
+        ),
+    )
+    maintenance_loop.add_argument(
+        "--building-task-retention-days",
+        type=int,
+        default=int(
+            os.environ.get(
+                "MAP_PLATFORM_BUILDING_TASK_RETENTION_DAYS",
+                str(DEFAULT_BUILDING_TASK_RETENTION_DAYS),
             )
         ),
     )
@@ -708,6 +734,8 @@ def main() -> int:
                         args.building_cache_retention_days
                     ),
                     building_cache_max_bytes=args.building_cache_max_bytes,
+                    building_task_store=building_task_store,
+                    building_task_retention_days=args.building_task_retention_days,
                 )
             except MaintenanceIterationError as exc:
                 maintenance_result = exc.result
