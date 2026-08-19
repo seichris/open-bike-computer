@@ -198,6 +198,11 @@ class GlobalBuildingPlan:
             )
         serialized = {
             **json.loads(self._canonical_payload),
+            # The calibration builder consumes the same canonical scope
+            # envelope as a bounded ScopePlan.  Keep both identities in the
+            # serialized global document: removing either output identity
+            # leaves the exact global canonical payload hash.
+            "scopePlanSha256": self.sha256,
             "globalPlanSha256": self.sha256,
         }
         path.write_bytes(canonical_json(serialized) + b"\n")

@@ -343,6 +343,33 @@ class BuildingScopeTests(unittest.TestCase):
         encoded = json.dumps(written, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
         self.assertEqual(hashlib.sha256(encoded).hexdigest(), digest)
 
+    def test_global_scope_write_is_compatible_with_calibration_scope_loader(self):
+        import tempfile
+
+        plan = self.global_plan(
+            make_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [121.45, 31.20, 121.50, 31.24],
+                }
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "global-scope.json"
+            plan.write(path)
+            written = json.loads(path.read_text())
+        global_digest = written.pop("globalPlanSha256")
+        scope_digest = written.pop("scopePlanSha256")
+        encoded = json.dumps(
+            written,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+        self.assertEqual(global_digest, plan.sha256)
+        self.assertEqual(scope_digest, plan.sha256)
+        self.assertEqual(hashlib.sha256(encoded).hexdigest(), plan.sha256)
+
     def test_unknown_block_grid_version_fails_closed(self):
         job = make_job({"mode": "custom_bbox", "bbox": [121.45, 31.20, 121.50, 31.24]})
         with self.assertRaises(BuildingScopeError) as raised:

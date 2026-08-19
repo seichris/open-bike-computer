@@ -38,8 +38,13 @@ def file_sha256(path: Path) -> str:
 def load_scope(path: Path) -> dict:
     value = json.loads(path.read_bytes())
     expected = value.pop("scopePlanSha256", None)
+    global_identity = value.pop("globalPlanSha256", None)
     actual = hashlib.sha256(canonical_json(value)).hexdigest()
-    if expected != actual or value.get("schemaVersion") != 1:
+    if (
+        expected != actual
+        or (global_identity is not None and global_identity != expected)
+        or value.get("schemaVersion") != 1
+    ):
         raise ValueError("scope plan identity is invalid")
     return value
 
