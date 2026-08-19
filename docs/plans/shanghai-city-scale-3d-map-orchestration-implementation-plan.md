@@ -1033,17 +1033,20 @@ same one-job workflow.
 repository's immutable GHCR workflow and deployed only to the validation
 Coolify app with `chunked_allowlist` and concurrency one. The current
 validation digest is
-`ghcr.io/seichris/open-bike-computer-map-platform@sha256:2c54309c5ee3aca70874a0b8c0ea0aaf8cf6bacc19c189c1c28e1f63f9ee617f`;
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:3775b982c41f4b732050537da422b5a3ad58f91496fc5579ce9a1369572217c8`;
 all three validation containers report healthy. Current-image central job
 `3d7fefb317ba47e88616` and west job `4acd2e89c8714555bb1d` reached `ready` with
 artifact and receipt validation. The full rectangle was deliberately
 cancelled after source-resolution selected the China snapshot; the app-sized
 631.792599 km² Shanghai job `ea72880448e64bb1b932` reached `ready` with its
-artifact and receipt evidence. The follow-up image also passed the live leased-
-containers remain pinned to their prior image digest, and validation
-maintenance repaired the historical cancelled-attempt rows. Physical
-validation, cold central/632 km²/full-bbox coverage, and production promotion
-are still required.
+artifact and receipt evidence. The cancellation follow-up image passed the
+live leased-container regression, and validation maintenance repaired the
+historical cancelled-attempt rows. The branch image also passed a fresh
+16.923717 km² target-3 smoke job `931accca0a6842568af7` with six durable block
+receipts and a 132,003-byte ZIP (`962333e1103b2d36a3ebff38749879c8e06977186b5e904e05779821646013e9`);
+production remains pinned to its existing digest. Physical validation, cold
+central/632 km²/full-bbox coverage, and production promotion are still
+required.
 
 The current-image cold resource evidence includes target-3 job
 `5570a835249f41d4a032` (20 blocks, 2,401,792,000-byte child peak, 20 cold cache
