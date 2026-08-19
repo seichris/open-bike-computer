@@ -205,6 +205,35 @@ def load_source_index_manifest(path: str | Path) -> BuildingSourceIndex:
     return BuildingSourceIndex.from_manifest(path, validate_database=False)
 
 
+def load_closure_plan(
+    path: str | Path,
+    *,
+    index: BuildingSourceIndex,
+    scope_policy: dict,
+) -> dict:
+    """Load a coordinator-issued closure receipt without rescanning SQLite."""
+
+    try:
+        document = json.loads(Path(path).read_bytes())
+        digest = document.pop("closurePlanSha256")
+    except (OSError, TypeError, ValueError, KeyError) as exc:
+        raise BuildingSourceIndexError(
+            "building_relation_incomplete", "closure plan is unavailable"
+        ) from exc
+    if (
+        not isinstance(digest, str)
+        or hashlib.sha256(canonical_json(document)).hexdigest() != digest
+        or document.get("schemaVersion") != 1
+        or document.get("scopePlanSha256") != scope_policy["scopePlanSha256"]
+        or document.get("sourceIndexKey") != index.index_key
+        or document.get("sourceSnapshotSha256") != index.source_snapshot_sha256
+    ):
+        raise BuildingSourceIndexError(
+            "building_relation_incomplete", "closure plan identity is invalid"
+        )
+    return {**document, "closurePlanSha256": digest}
+
+
 def audit_closure(
     handler: BuildingRelationHandler,
     index: BuildingSourceIndex,
@@ -353,6 +382,7 @@ def main() -> None:
     parser.add_argument("output")
     parser.add_argument("--source-index-manifest")
     parser.add_argument("--scope-plan")
+    parser.add_argument("--closure-plan")
     parser.add_argument("--relation-retry-count", type=int, default=0)
     args = parser.parse_args()
     closure_audit = None
@@ -360,6 +390,11 @@ def main() -> None:
         raise BuildingSourceIndexError(
             "building_scope_policy_invalid",
             "source index manifest and scope plan must be supplied together",
+        )
+    if args.closure_plan and not args.source_index_manifest:
+        raise BuildingSourceIndexError(
+            "building_scope_policy_invalid",
+            "closure plan requires source index manifest and scope plan",
         )
     if args.relation_retry_count < 0 or (
         args.relation_retry_count and not args.source_index_manifest
@@ -373,11 +408,19 @@ def main() -> None:
     if args.source_index_manifest:
         index = load_source_index_manifest(args.source_index_manifest)
         scope_policy = load_scope_policy(Path(args.scope_plan))
-        expected = index.closure_for_bounds(
-            scope_policy["outputBoundsE7"],
-            maximum_objects=scope_policy["maximumObjects"],
-            calibration_cell_size_meters=scope_policy["calibrationCellSizeMeters"],
-            calibration_halo_cells=scope_policy["calibrationHaloCells"],
+        expected = (
+            load_closure_plan(
+                args.closure_plan,
+                index=index,
+                scope_policy=scope_policy,
+            )
+            if args.closure_plan
+            else index.closure_for_bounds(
+                scope_policy["outputBoundsE7"],
+                maximum_objects=scope_policy["maximumObjects"],
+                calibration_cell_size_meters=scope_policy["calibrationCellSizeMeters"],
+                calibration_halo_cells=scope_policy["calibrationHaloCells"],
+            )
         )
     handler = BuildingRelationHandler(expected_closure=expected)
     handler.apply_file(args.pbf, locations=False)

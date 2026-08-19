@@ -1284,6 +1284,13 @@ class MapBuildPipeline:
                         "relation_retry_count": len(relation_retries),
                     }
                 )
+                if selected_scope and job.building_preprocessing_mode in {
+                    "chunked_allowlist",
+                    "chunked",
+                }:
+                    conversion_kwargs["building_closure_plan_path"] = (
+                        job_dir / "building-closure-plan.json"
+                    )
             if cancellation_check is not None:
                 conversion_kwargs["cancellation_check"] = cancellation_check
             try:
@@ -3353,6 +3360,7 @@ class MapBuildPipeline:
                 bounds=scope_plan.source_bounds,
                 source_index_manifest=source_index_manifest,
                 scope_plan_path=scope_plan_path,
+                building_closure_plan_path=closure_plan_path,
                 cancellation_check=cancellation_check,
                 parse_building_failures=True,
             )
@@ -5490,6 +5498,7 @@ class MapBuildPipeline:
         bounds=None,
         source_index_manifest: Path | None = None,
         scope_plan_path: Path | None = None,
+        building_closure_plan_path: Path | None = None,
         relation_retry_count: int = 0,
         parse_building_failures: bool = False,
         cancellation_check=None,
@@ -5509,6 +5518,8 @@ class MapBuildPipeline:
         if source_index_manifest is not None:
             if scope_plan_path is None:
                 raise ValueError("source index audit requires a scope plan")
+            if building_closure_plan_path is not None and not building_closure_plan_path.is_file():
+                raise ValueError("building closure plan is unavailable")
             if relation_retry_count < 0:
                 raise ValueError("relation retry count cannot be negative")
             args.extend(
@@ -5518,6 +5529,8 @@ class MapBuildPipeline:
                     str(relation_retry_count),
                 ]
             )
+            if building_closure_plan_path is not None:
+                args.append(str(building_closure_plan_path))
         try:
             self._run_command(
                 args,
