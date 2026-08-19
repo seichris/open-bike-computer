@@ -927,6 +927,7 @@ class MapBuildPipeline:
                 source_pbf,
                 source_snapshot_sha256,
                 scope_plan,
+                temporary_parent=job_dir,
                 **(
                     {"on_phase_progress": on_phase_progress}
                     if on_phase_progress is not None
@@ -1008,6 +1009,7 @@ class MapBuildPipeline:
                         source_pbf,
                         source_snapshot_sha256,
                         scope_plan,
+                        temporary_parent=job_dir,
                         execution_sink=shadow_execution,
                         on_phase_progress=on_phase_progress,
                         cancellation_check=cancellation_check,
@@ -1018,6 +1020,7 @@ class MapBuildPipeline:
                         source_snapshot_sha256,
                         scope_plan,
                         shadow_calibration_generation,
+                        temporary_parent=job_dir,
                         on_phase_progress=on_phase_progress,
                         cancellation_check=cancellation_check,
                     )
@@ -1588,6 +1591,7 @@ class MapBuildPipeline:
                 source_pbf,
                 source_snapshot_sha256,
                 global_plan,
+                temporary_parent=parent_root,
                 on_phase_progress=on_phase_progress,
                 execution_sink=calibration_execution,
                 cancellation_check=cancellation_check,
@@ -3422,6 +3426,7 @@ class MapBuildPipeline:
                 cached_source.path,
                 source_snapshot_sha256,
                 scope_plan,
+                temporary_parent=self.paths.work_root / job.job_id / "reuse",
                 **(
                     {"on_phase_progress": on_phase_progress}
                     if on_phase_progress is not None
@@ -3547,9 +3552,11 @@ class MapBuildPipeline:
         original_map_id = job.map_id
         job.map_id = stable_map_id(job)
         try:
+            reuse_root = self.paths.work_root / job.job_id / "exact-reuse"
+            reuse_root.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(
                 prefix="exact-reuse-validation-",
-                dir=self.paths.work_root,
+                dir=reuse_root,
             ) as temporary:
                 pack_root = Path(temporary) / "pack"
                 manifest = self._stage_subset_pack(job, candidate, pack_root)
@@ -3907,6 +3914,7 @@ class MapBuildPipeline:
                 source_snapshot_sha256,
                 scope_plan,
                 calibration_generation,
+                temporary_parent=self.paths.work_root / job.job_id / "reuse",
                 on_phase_progress=on_phase_progress,
                 cancellation_check=cancellation_check,
             )
@@ -4826,6 +4834,7 @@ class MapBuildPipeline:
         source_snapshot_sha256: str,
         scope_plan: ScopePlan,
         *,
+        temporary_parent: Path,
         on_phase_progress=None,
         execution_sink: dict[str, Any] | None = None,
         cancellation_check=None,
@@ -4875,9 +4884,10 @@ class MapBuildPipeline:
             return sealed_manifest_path, generation
         except ValueError:
             pass
+        temporary_parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
             prefix="building-calibration-generation-",
-            dir=self.paths.work_root,
+            dir=temporary_parent,
         ) as temporary:
             temporary_root = Path(temporary)
             scope_path = temporary_root / "scope-plan.json"
@@ -5135,14 +5145,15 @@ class MapBuildPipeline:
         scope_plan: ScopePlan,
         calibration_generation: dict[str, Any],
         *,
+        temporary_parent: Path,
         on_phase_progress=None,
         cancellation_check=None,
     ) -> dict[str, Any]:
-        self.paths.work_root.mkdir(parents=True, exist_ok=True)
+        temporary_parent.mkdir(parents=True, exist_ok=True)
         scripts_root = self.paths.osm_extract_root / "scripts"
         with tempfile.TemporaryDirectory(
             prefix="building-dependency-metadata-",
-            dir=self.paths.work_root,
+            dir=temporary_parent,
         ) as temporary:
             root = Path(temporary)
             scope_path = root / "scope-plan.json"

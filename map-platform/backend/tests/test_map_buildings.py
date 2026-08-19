@@ -1418,6 +1418,7 @@ class MapBuildingContractTests(unittest.TestCase):
                     source_pbf,
                     source_sha,
                     plan,
+                    temporary_parent=job_dir,
                     execution_sink=cold_execution,
                 )
             )
@@ -1434,6 +1435,7 @@ class MapBuildingContractTests(unittest.TestCase):
                         source_pbf,
                         source_sha,
                         plan,
+                        temporary_parent=job_dir,
                         execution_sink=warm_execution,
                     )
                 )
@@ -1486,6 +1488,7 @@ class MapBuildingContractTests(unittest.TestCase):
                         source_pbf,
                         source_sha,
                         plan,
+                        temporary_parent=job_dir,
                     )
             sealed_manifest_path.write_bytes(sealed_manifest_bytes)
             calibration_manifest, source_index_manifest, metrics = (
