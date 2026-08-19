@@ -1094,17 +1094,16 @@ class BuildingTaskStore:
                 "AND state NOT IN ('cancelled', 'ready')",
                 parent_ids,
             ).fetchall()
-            if not active:
-                connection.commit()
-                return 0
             active_ids = tuple(row[0] for row in active)
-            active_placeholders = ",".join("?" for _ in active_ids)
-            connection.execute(
-                f"UPDATE map_build_plans SET state='cancelled', stage='cancelled', "
-                f"cancellation_generation=cancellation_generation+1, updated_at=? "
-                f"WHERE parent_job_id IN ({active_placeholders})",
-                (now, *active_ids),
-            )
+            if active_ids:
+                active_placeholders = ",".join("?" for _ in active_ids)
+                connection.execute(
+                    f"UPDATE map_build_plans SET state='cancelled', stage='cancelled', "
+                    f"cancellation_generation=cancellation_generation+1, updated_at=? "
+                    f"WHERE parent_job_id IN ({active_placeholders})",
+                    (now, *active_ids),
+                )
+            cancelled_placeholders = ",".join("?" for _ in parent_ids)
             connection.execute(
                 f"""
                 UPDATE map_build_task_attempts
@@ -1112,22 +1111,27 @@ class BuildingTaskStore:
                     typed_failure=COALESCE(typed_failure, 'building_task_cancelled')
                 WHERE task_id IN (
                     SELECT task_id FROM map_build_tasks
-                    WHERE parent_job_id IN ({active_placeholders}) AND state='leased'
-                ) AND finished_at IS NULL
+                    WHERE parent_job_id IN ({cancelled_placeholders})
+                ) AND finished_at IS NULL AND task_id IN (
+                    SELECT t.task_id FROM map_build_tasks t
+                    JOIN map_build_plans p ON p.parent_job_id=t.parent_job_id
+                    WHERE p.state='cancelled'
+                )
                 """,
-                (now, *active_ids),
+                (now, *parent_ids),
             )
             connection.execute(
                 f"UPDATE map_build_tasks SET state='cancelled', lease_owner=NULL, "
                 f"lease_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, "
-                f"updated_at=? WHERE parent_job_id IN ({active_placeholders}) "
-                "AND state IN ('pending','leased')",
-                (now, *active_ids),
+                f"updated_at=? WHERE parent_job_id IN ({cancelled_placeholders}) "
+                "AND state IN ('pending','leased') AND parent_job_id IN "
+                f"(SELECT parent_job_id FROM map_build_plans WHERE state='cancelled')",
+                (now, *parent_ids),
             )
             connection.execute(
                 f"DELETE FROM map_build_resource_reservations "
-                f"WHERE parent_job_id IN ({active_placeholders})",
-                active_ids,
+                f"WHERE parent_job_id IN ({cancelled_placeholders})",
+                parent_ids,
             )
             connection.commit()
             return len(active_ids)

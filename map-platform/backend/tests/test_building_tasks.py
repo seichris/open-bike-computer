@@ -991,6 +991,10 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_plan("job-1")["state"], "cancelled")
         self.assertEqual(self.store.get_task("task-1").state, "cancelled")
         self.assertEqual(self.store.list_resource_reservations("job-1"), ())
+        attempt = self.store.list_attempts("job-1")[0]
+        self.assertEqual(attempt["outcome"], "cancelled")
+        self.assertEqual(attempt["typed_failure"], "building_task_cancelled")
+        self.assertIsNotNone(attempt["finished_at"])
         self.assertEqual(self.store.reconcile_cancelled_plans(("job-1",)), 0)
 
     def test_duplicate_block_ownership_is_rejected(self):
