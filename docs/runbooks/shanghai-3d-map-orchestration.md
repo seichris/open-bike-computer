@@ -80,7 +80,8 @@ Treat this as a source-data or product-policy failure, not as a memory or
 relation-ceiling signal. The extractor now includes the offending source
 relation and up to eight part-member IDs when a `type=building` relation has
 parts but no outline (for example, `source relation r11258294 ...`). Preserve
-that message with the immutable source snapshot identity. Do not silently drop
+that detail from the public job error and preserve it with the immutable source
+snapshot identity. Do not silently drop
 the relation or promote a higher closure limit. The exact full-bbox job may
 proceed only after the source snapshot is corrected or an explicitly reviewed,
 identity-versioned policy for retaining valid standalone parts is enabled.

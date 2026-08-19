@@ -1079,6 +1079,17 @@ the unchanged `a6980506…` digest. This image adds relation identity to
 fail-closed `building_relation_incomplete` diagnostics; it does not relax the
 relation policy.
 
+The next runtime image for commit `6a8722b7` is deployed only to validation at
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:291b609549a2efb4380470d9fd5d3befc617abb232a61326988360dac14169b9`.
+Relation probe `6dbab7a1e2754d4eb608` (26.537229464 km² around the preserved
+Guangfulin relation) failed closed after three attempts with the public error
+`building_relation_incomplete; detail=source relation r11258294 has part
+members but no outline (w813033938)`. Its exact workload receipt contained
+11,477 closure objects; the workload scan peaked at 24,236,032 bytes and the
+failed conversion commands peaked at 3,530,752 bytes, so this is confirmed
+source-shape policy evidence rather than a RAM/ceiling failure. Production was
+rechecked at the unchanged `a6980506…` digest.
+
 The retained cold resource evidence includes target-3 job
 `5570a835249f41d4a032` (20 blocks, 2,401,792,000-byte child peak, 20 cold cache
 misses, 1,837,615-byte ZIP, 20 FMB entries) and job
