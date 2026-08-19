@@ -126,6 +126,19 @@ int main() {
   assert(automaticOffDisabled.update(345'000, noAutomaticOff).current ==
          Mode::DisplayOff);
 
+  Policy disableFromDisplayOff;
+  disableFromDisplayOff.begin(0);
+  assert(disableFromDisplayOff.update(45'000, {}).current ==
+         Mode::DisplayOff);
+  Context automaticOffNowDisabled;
+  automaticOffNowDisabled.automaticDisplayOffEnabled = false;
+  const auto disabledUpdate =
+      disableFromDisplayOff.update(45'001, automaticOffNowDisabled);
+  assert(disabledUpdate.current == Mode::Active);
+  assert(disabledUpdate.displayWakeRequired);
+  assert(!disableFromDisplayOff.update(45'002, automaticOffNowDisabled)
+              .displayWakeRequired);
+
   Policy transfer;
   transfer.begin(0);
   Context transferring;

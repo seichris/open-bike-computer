@@ -84,7 +84,7 @@ The user's active brightness is stored in NVS under namespace
 reboot and display wake, and capped at 20% while dimmed.
 
 Automatic connected-display inactivity is controlled by BLE setting `36` and is
-stored in NVS under `deviceSettings`, key `automaticDisplayOff`. It defaults to
+stored in NVS under `deviceSettings`, key `autoDisplayOff`. It defaults to
 enabled. When disabled, the connected display remains active outside the
 navigation, workout, transfer, and attention holds.
 

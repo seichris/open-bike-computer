@@ -1869,7 +1869,7 @@ private struct HardwareCustomizationSettingsView: View {
         Form {
             Section(
                 header: Text("Device Brightness"),
-                footer: Text("When enabled, the display dims after 15 seconds and turns off after 45 seconds unless navigation or a workout is active.")
+                footer: Text("When enabled, the display dims after 15 seconds and turns off after 45 seconds unless navigation, workout, transfer, or attention activity is active.")
             ) {
                 VStack(alignment: .leading) {
                     HStack {
@@ -1891,6 +1891,7 @@ private struct HardwareCustomizationSettingsView: View {
                             value: newValue ? 1 : 0
                         )
                     }
+                    .disabled(!bleManager.supportsAutomaticDisplayOff)
             }
             .disabled(!bleManager.supportsDeviceSettings)
 

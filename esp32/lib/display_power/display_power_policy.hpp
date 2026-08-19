@@ -6,6 +6,10 @@ namespace display_power {
 
 constexpr uint8_t kAutomaticDisplayOffSettingID = 36;
 constexpr bool kDefaultAutomaticDisplayOffEnabled = true;
+// ESP32 NVS keys are limited to 15 characters (excluding the terminator).
+constexpr char kAutomaticDisplayOffPreferencesKey[] = "autoDisplayOff";
+static_assert(sizeof(kAutomaticDisplayOffPreferencesKey) - 1 <= 15,
+              "automatic display-off NVS key exceeds the ESP32 limit");
 constexpr uint8_t kMinimumBrightnessPercent = 5;
 constexpr uint8_t kMaximumBrightnessPercent = 100;
 constexpr uint8_t kDefaultBrightnessPercent = 100;
@@ -13,6 +17,12 @@ constexpr uint8_t kDefaultDimmedBrightnessPercent = 20;
 
 constexpr bool isBooleanSettingValue(int32_t value) {
   return value == 0 || value == 1;
+}
+
+template <typename Manager>
+bool applyAutomaticDisplayOffSetting(Manager &manager, int32_t value) {
+  return isBooleanSettingValue(value) &&
+         manager.requestAutomaticDisplayOff(value == 1);
 }
 
 constexpr bool isBrightnessPercentInRange(int32_t value) {

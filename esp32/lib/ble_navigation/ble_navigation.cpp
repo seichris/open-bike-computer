@@ -2326,6 +2326,10 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
         device_capabilities_protocol::BIRDS_EYE_PERSPECTIVE_FEATURE |
         device_capabilities_protocol::BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE |
         device_capabilities_protocol::OSM_3D_BUILDINGS_FEATURE;
+#ifdef USE_ARDUINO_GFX
+    featureFlags |=
+        device_capabilities_protocol::AUTOMATIC_DISPLAY_OFF_FEATURE;
+#endif
     if (clientVersion >= device_capabilities_protocol::
                              EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION) {
       featureFlags |= device_capabilities_protocol::
@@ -3085,7 +3089,8 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
       return;
     }
 #ifdef USE_ARDUINO_GFX
-    if (!displayPowerManager.requestAutomaticDisplayOff(settingValue == 1)) {
+    if (!display_power::applyAutomaticDisplayOffSetting(displayPowerManager,
+                                                        settingValue)) {
       Serial.printf("BLE Settings: automatic display-off persistence failed from %s\n",
                     source == nullptr ? "unknown" : source);
       return;

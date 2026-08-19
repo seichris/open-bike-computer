@@ -1,4 +1,5 @@
 #include "display_power.hpp"
+#include "display_power_preferences.hpp"
 
 #include "../panel/WAVESHARE_AMOLED_175.hpp"
 #include "../power_management/power_management.hpp"
@@ -11,9 +12,7 @@
 
 namespace {
 
-constexpr char kPreferencesNamespace[] = "deviceSettings";
 constexpr char kBrightnessKey[] = "brightnessPct";
-constexpr char kAutomaticDisplayOffKey[] = "automaticDisplayOff";
 
 } // namespace
 
@@ -43,18 +42,14 @@ bool DisplayPowerManager::begin() {
   bool hasSavedAutomaticDisplayOff = false;
   bool automaticDisplayOff =
       display_power::kDefaultAutomaticDisplayOffEnabled;
-  if (preferences.begin(kPreferencesNamespace, false)) {
+  if (display_power::beginDeviceSettingsPreferences(preferences)) {
     hasSavedValue = preferences.isKey(kBrightnessKey);
     if (hasSavedValue) {
       savedValue = preferences.getUChar(
           kBrightnessKey, display_power::kDefaultBrightnessPercent);
     }
-    hasSavedAutomaticDisplayOff = preferences.isKey(kAutomaticDisplayOffKey);
-    if (hasSavedAutomaticDisplayOff) {
-      automaticDisplayOff = preferences.getBool(
-          kAutomaticDisplayOffKey,
-          display_power::kDefaultAutomaticDisplayOffEnabled);
-    }
+    automaticDisplayOff = display_power::loadAutomaticDisplayOff(
+        preferences, hasSavedAutomaticDisplayOff);
     preferences.end();
   } else {
     Serial.println("DisplayPower: failed to open device settings NVS");
@@ -86,7 +81,8 @@ bool DisplayPowerManager::requestUserBrightness(int32_t requestedPercent) {
   }
 
   Preferences preferences;
-  const bool opened = preferences.begin(kPreferencesNamespace, false);
+  const bool opened =
+      display_power::beginDeviceSettingsPreferences(preferences);
   const bool persisted =
       opened && preferences.putUChar(kBrightnessKey, normalized) == 1;
   if (opened) {
@@ -121,9 +117,10 @@ bool DisplayPowerManager::requestAutomaticDisplayOff(bool enabled) {
   }
 
   Preferences preferences;
-  const bool opened = preferences.begin(kPreferencesNamespace, false);
+  const bool opened =
+      display_power::beginDeviceSettingsPreferences(preferences);
   const bool persisted =
-      opened && preferences.putBool(kAutomaticDisplayOffKey, enabled) == 1;
+      opened && display_power::persistAutomaticDisplayOff(preferences, enabled);
   if (opened) {
     preferences.end();
   }
