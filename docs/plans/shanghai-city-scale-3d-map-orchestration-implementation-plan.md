@@ -61,6 +61,16 @@ the last command wall/RSS observation on failed task attempts, so the app and
 operator surface report `building_relation_incomplete` rather than hiding it
 behind `map_build_failed`.
 
+The follow-up diagnostic image for commit `d4333e80` is now deployed only to
+validation as
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:7bf08c97a1fc0fceca26355dac5a2069e77c9d3c28554c3c59e20b0fefd0857d`.
+It retains the same fail-closed behavior but names the malformed source
+relation and part members in the typed failure. A fresh 16.923716841 km²
+validation smoke (`ea7d419dca064ce5af7a`) reached `ready` with 6/6 receipts,
+a 131,878-byte ZIP (`3f280a5736ec9ef92390ca758fb477c642a1ece56d5421c395d079d7f8d1eb4f`),
+and zero active reservations. Production remains pinned to the existing
+`a6980506…` digest.
+
 The current validation image
 `ghcr.io/seichris/open-bike-computer-map-platform@sha256:7f7637692c8f53e98dbcfeb033de511edca6effce54636ab9e1c70e433e9cb8f`
 was then exercised with two same-size Shanghai requests. Central job
@@ -1059,6 +1069,15 @@ on the exact deployed image
 production remains pinned to its existing digest. Physical validation, cold
 central/632 km²/full-bbox coverage, and production promotion are still
 required.
+
+After that retained evidence, the diagnostic follow-up image for commit
+`d4333e80` was deployed only to validation at
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:7bf08c97a1fc0fceca26355dac5a2069e77c9d3c28554c3c59e20b0fefd0857d`.
+Smoke job `ea7d419dca064ce5af7a` reached `ready` with 6/6 receipts, a
+131,878-byte ZIP, and zero active reservations. Production was rechecked at
+the unchanged `a6980506…` digest. This image adds relation identity to
+fail-closed `building_relation_incomplete` diagnostics; it does not relax the
+relation policy.
 
 The retained cold resource evidence includes target-3 job
 `5570a835249f41d4a032` (20 blocks, 2,401,792,000-byte child peak, 20 cold cache

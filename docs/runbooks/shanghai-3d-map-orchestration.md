@@ -74,6 +74,17 @@ safe only through the coordinator's reopen operation and only when source,
 image, rules, calibration, and global-plan identities are unchanged. Never
 manually edit SQLite rows or mark a plan ready.
 
+### `building_relation_incomplete`
+
+Treat this as a source-data or product-policy failure, not as a memory or
+relation-ceiling signal. The extractor now includes the offending source
+relation and up to eight part-member IDs when a `type=building` relation has
+parts but no outline (for example, `source relation r11258294 ...`). Preserve
+that message with the immutable source snapshot identity. Do not silently drop
+the relation or promote a higher closure limit. The exact full-bbox job may
+proceed only after the source snapshot is corrected or an explicitly reviewed,
+identity-versioned policy for retaining valid standalone parts is enabled.
+
 ## Completion checks
 
 Before declaring a Shanghai job ready, verify all of the following from
