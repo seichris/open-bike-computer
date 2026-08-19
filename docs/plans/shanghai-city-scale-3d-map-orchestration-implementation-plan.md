@@ -734,7 +734,10 @@ capacity review. The 600,000-object value is validation-only and is not part of
 the production contract. The worker resource report now emits a stable
 versioned capability envelope and identity hash; it is recorded with task
 attempts when a coordinator claims work. The report remains read-only and no
-production heavy-task concurrency is enabled yet.
+production heavy-task concurrency is enabled yet. The validation Coolify
+canary on `d3ae60c2` measured a 12-CPU worker with no cgroup memory cap, a
+4,186,312,704-byte cgroup peak, and a 3,990,401,024-byte source-extraction
+resident peak while host available memory stayed above 41 GiB.
 
 ### Phase 1 — Global planning and workload queries
 
@@ -754,10 +757,13 @@ plans have recorded predicted resource totals.
 **Current status:** global scope planning, deterministic recursive partitioning,
 exact source-index workload counters, durable workload-scan receipt promotion,
 canonical global-to-chunk scope projection, and shadow diagnostics are
-implemented; the central/west/full-bbox workload benchmarks still need to be
-run and wired into the deployed coordinator before this exit gate is complete.
-Shadow failures persist a deterministic parent plan and workload-scan child
-tasks without changing the authoritative monolithic build.
+implemented. The validation canary accepted a 631,792,599 m² request as one
+global plan with 56 output blocks under the 600,000 relation ceiling; the
+source index recorded 903,545 nodes, 156,448 ways, and 892 relations. The
+central/west/full-bbox workload benchmarks still need to be run and wired into
+the deployed coordinator before this exit gate is complete. Shadow failures
+persist a deterministic parent plan and workload-scan child tasks without
+changing the authoritative monolithic build.
 
 ### Phase 2 — Durable coordinator store
 
@@ -790,7 +796,8 @@ policies remain pending.
 Authenticated plan diagnostics now include an observational p95 resource-model
 summary grouped by the stable worker capability identity; groups below the
 reviewed sample count remain explicitly uncalibrated and do not alter
-admission.
+admission. The validation canary produced 56 durable block receipts, retained
+the parent plan, and completed with max heavy-task concurrency one.
 
 **Exit gate:** fault-injection tests prove no double publication, lost task,
 stale-worker receipt, non-monotonic progress, or cancellation resurrection.
@@ -812,8 +819,10 @@ receipt publication are implemented and invoked by the parent worker for
 `chunked_allowlist`/`chunked` jobs. Source-index, calibration, and source
 identity are frozen once per parent; cache hits become zero-work child tasks;
 exact workload scans promote to bounded child execution; and multi-block guard
-failures emit deterministic split tasks. Monolithic-vs-partition golden
-equivalence, measured benchmarks, and allowlist rollout remain pending.
+failures emit deterministic split tasks. The validation Coolify canary ran the
+live `chunked_allowlist` path and published all 56 block receipts without a
+split or retry. Monolithic-vs-partition golden equivalence, measured
+benchmarks, and production allowlist rollout remain pending.
 
 ### Phase 4 — Cache-only final assembly
 
@@ -834,6 +843,9 @@ normalization. Assembly now validates the final ZIP size and published ZIP
 receipt before the parent can enter `ready`. The parent worker invokes this
 assembly after every block receipt is ready, records final ZIP validation and
 receipt-set metrics, and cannot fall back to monolithic building normalization.
+The validation canary produced one 14,948,371-byte ZIP with 56 FMB entries;
+ZIP testing passed and the largest FMB was 623,771 bytes. The recorded artifact
+SHA-256 is `8ea288c0066c210ccb1802029d84b8bd351a2d50c790596e067871517842be17`.
 Final partition-invariant artifact identity, whole-artifact signature/device
 gates, and the high-limit reference comparison remain pending. The coordinator
 also derives a canonical block receipt-set identity ordered by global block
@@ -854,8 +866,10 @@ comparison.
 diagnostics, capability-aware reservations, and retained worker observations
 are implemented. The maintenance loop now prunes only old failed/cancelled
 coordinator evidence while retaining successful plans and canonical cache
-blocks. Alarm thresholds, operator runbooks, and production benchmark evidence
-remain pending.
+blocks. The validation canary retained phase timings, source-extraction peak
+resident memory, cgroup resource reports, cache-hit counts, receipt-set hash,
+and final ZIP validation. Alarm thresholds, operator runbooks, and production
+benchmark evidence remain pending.
 
 **Exit gate:** operators can explain every minute and resource peak of a
 Shanghai build from retained data, while current iOS clients still complete the
@@ -873,6 +887,14 @@ same one-job workflow.
 5. Validate final download, transfer, install, activation, rendering, and route
    navigation on supported physical Bicino targets before broad production
    enablement.
+
+**Current status:** the exact implementation image was published by the
+repository's immutable GHCR workflow and deployed only to the validation
+Coolify app with `chunked_allowlist` and concurrency one. Canary job
+`2ffd2ec5462e482e93b7` reached `ready`; all three validation containers report
+healthy. Production containers remain pinned to their prior image digest.
+Physical validation, central/west/full benchmark coverage, and production
+promotion are still required.
 
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
@@ -1029,6 +1051,8 @@ artifact.
 - [ ] Pass geometry, relation, height, seam, cache, orchestration, fault, and
       compatibility suites.
 - [ ] Pass central, west, and exact full-bbox server benchmarks.
+- [x] Deploy the immutable candidate to validation Coolify and complete one
+      632 km² Shanghai chunked canary with retained resource/artifact evidence.
 - [ ] Promote through immutable image/Coolify allowlist workflow.
 - [ ] Pass physical download, transfer, installation, rendering, and navigation
       gates on supported devices.
