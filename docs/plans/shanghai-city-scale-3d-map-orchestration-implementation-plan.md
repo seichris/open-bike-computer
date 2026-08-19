@@ -1178,7 +1178,7 @@ not deployed over the running benchmark. Production remains pinned to
 
 The receipt-reuse and batched-lookup implementation is now deployed only to
 the isolated validation stack as
-`ghcr.io/seichris/open-bike-computer-map-platform@sha256:ac8094ba412f1ca462b1307899090b2e0b3545d9ff32eb870f40dbdd693a2e41` (commit
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:ac8094ba412f1ca462b1307899090b2b0e3545d9ff32eb870f40dbdd693a2e41` (commit
 `d20d0c3f`). Public health is HTTP 200 and all three validation containers are
 healthy; production is still pinned to `a6980506…`. Exact-bbox validation job
 `d8afbc95c4fd4589ae5f` was created with 442 output blocks and 150 durable
