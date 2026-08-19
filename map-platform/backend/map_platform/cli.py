@@ -453,7 +453,16 @@ def main() -> int:
         "resource-model",
         help="train a reviewable resource model from retained successful attempts",
     )
-    build_plan_resource_model.add_argument("job_id")
+    build_plan_resource_model.add_argument(
+        "job_id",
+        nargs="?",
+        help="parent job to scope observations to (omit with --all-plans)",
+    )
+    build_plan_resource_model.add_argument(
+        "--all-plans",
+        action="store_true",
+        help="aggregate retained observations across every retained parent plan",
+    )
     build_plan_resource_model.add_argument(
         "--minimum-observations",
         type=int,
@@ -510,14 +519,17 @@ def main() -> int:
             )
             print(json.dumps(asdict(task), indent=2, sort_keys=True))
             return 0
-        plan = building_task_store.get_plan(args.job_id)
-        if plan is None:
-            raise SystemExit(f"building plan not found: {args.job_id}")
         if args.build_plan_command == "resource-model":
+            if (args.job_id is None) == (not args.all_plans):
+                raise SystemExit(
+                    "build-plan resource-model requires JOB_ID or --all-plans"
+                )
             print(
                 json.dumps(
                     train_resource_model(
-                        building_task_store.resource_model_observations(args.job_id),
+                        building_task_store.resource_model_observations(
+                            None if args.all_plans else args.job_id
+                        ),
                         minimum_observations=args.minimum_observations,
                         safety_margin=args.safety_margin,
                     ),
@@ -526,6 +538,9 @@ def main() -> int:
                 )
             )
             return 0
+        plan = building_task_store.get_plan(args.job_id)
+        if plan is None:
+            raise SystemExit(f"building plan not found: {args.job_id}")
         if args.build_plan_command == "alerts":
             print(
                 json.dumps(

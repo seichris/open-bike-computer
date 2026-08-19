@@ -114,6 +114,18 @@ now reports zero unfinished attempts, zero leased tasks, and zero active
 reservations; production remains pinned to
 `ghcr.io/seichris/open-bike-computer-map-platform@sha256:a698050644a4d7c0e1290a9e8882a52d6907d5492d6e1794d93e174b06812a74`.
 
+The validation worker then retained eight successful cold target-3 chunk
+observations across the current Shanghai source identity (cache-only children
+remain excluded). The review-only p95 model is now `trained` for capability
+`de3f8eac8c3a71ee74967fe227d92397dc0d5581bd7ef79894fa28d45c51ea4a`, with
+8 observations, a 2,902,016,000-byte p95 measured peak, a 580,100,704-byte
+p95 prediction, and a conservative 5.5029x effective multiplier after the
+10% safety margin. Every retained sample underpredicted, so this artifact is
+evidence for review only: the production worker limit remains unset and heavy
+concurrency remains one. The operator CLI now supports
+`build-plan resource-model --all-plans` to aggregate the retained cohort rather
+than incorrectly calibrating one parent in isolation.
+
 The core decision is:
 
 > Keep one user-visible map job and one deterministic downloadable artifact,
@@ -829,7 +841,9 @@ attempts when a coordinator claims work. The report remains read-only and no
 production heavy-task concurrency is enabled yet. The validation Coolify
 canary on `d3ae60c2` measured a 12-CPU worker with no cgroup memory cap, a
 4,186,312,704-byte cgroup peak, and a 3,990,401,024-byte source-extraction
-resident peak while host available memory stayed above 41 GiB.
+resident peak while host available memory stayed above 41 GiB. The retained
+current-image cold cohort now reaches the eight-observation review floor, but
+its systematic underprediction means no automatic admission change is allowed.
 
 ### Phase 1 — Global planning and workload queries
 
@@ -855,8 +869,9 @@ source index recorded 903,545 nodes, 156,448 ways, and 892 relations. The
 current image has ready central, west, and 631.792599 km² assembly runs with
 durable receipt and artifact evidence. The exact full-bbox plan still needs to
 complete (or fail closed with retained typed evidence), and cold per-block
-resource observations are still below the reviewed training floor, before this
-exit gate is complete. Shadow failures persist a deterministic parent plan and
+resource observations now meet the reviewed eight-sample floor, but the
+resulting p95 model underpredicted every sample and therefore remains
+non-authoritative. Shadow failures persist a deterministic parent plan and
 workload-scan child tasks without changing the authoritative monolithic build.
 
 ### Phase 2 — Durable coordinator store
@@ -1030,6 +1045,18 @@ maintenance repaired the historical cancelled-attempt rows. Physical
 validation, cold central/632 km²/full-bbox coverage, and production promotion
 are still required.
 
+The current-image cold resource evidence includes target-3 job
+`5570a835249f41d4a032` (20 blocks, 2,401,792,000-byte child peak, 20 cold cache
+misses, 1,837,615-byte ZIP, 20 FMB entries) and job
+`237941f2eb4c41958bec` (16 blocks, 1,109,987,328-byte child peak, 16 cold
+cache misses, 419,087-byte ZIP, 16 FMB entries). The latter artifact SHA-256 is
+`475361a14ebd9ee60324e287f9d02bdaf7bc6eb62546522de5d02550c2011877` and ZIP
+testing passed. Two sparse-cell probes failed closed before publication with
+generic chunk-execution errors despite nonzero workload receipts; this is
+retained as a diagnostics/data-shape follow-up, not counted as a memory failure.
+The full-bbox, physical acceptance, and production-promotion gates remain
+open.
+
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
 
@@ -1171,7 +1198,8 @@ artifact.
 - [x] Add transactional parent/task/attempt/receipt orchestration primitives.
 - [x] Add lease fencing, cancellation generations, split transitions, and
       authenticated/CLI task diagnostics.
-- [ ] Version and train the retained resource model and worker capability identity.
+- [x] Version and train the retained resource model and worker capability identity
+      (review-only; admission still uses the conservative floor).
 - [x] Add bounded memory/CPU reservations with a concurrency-one heavy-task default.
 - [x] Add fair scheduling across parent jobs, weighted virtual-finish dispatch,
       admission priority, and a per-parent active-task quota.
