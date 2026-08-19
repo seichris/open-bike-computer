@@ -1145,6 +1145,17 @@ prove unlisted cells empty while lazy manifests remain fail-closed, and adds a
 regression test. A new validation image and rerun are required before this
 benchmark can be marked passed.
 
+The calibration fix is now in validation image
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:e7c4e22a4dd0accee91c5efa3398bf73635208af7c63a5cbe923d12776d137cd`
+(commit `62ac9d2a`). Replacement job `25e477cf532f4ecb8ec5` has passed the
+previously failing region: its first 40-block chunk completed with the
+complete-snapshot edge lookup, a 50,201-object workload receipt, 3,369,889,792
+bytes child peak RSS, and no typed failure. The validation worker cgroup peak
+for that chunk is 6,116,237,312 bytes with `high=0`, `oom=0`, and
+`oom_kill=0`. The replacement parent currently has 40/442 receipts and one
+next workload scan leased; the remaining full-artifact and timing gates are
+still open. Production remains pinned to `a6980506…`.
+
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
 
