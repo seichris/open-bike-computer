@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import sys
 import unittest
 import zipfile
@@ -44,6 +45,20 @@ def firmware_event(sequence=0, fields=None):
 
 
 class RideDiagnosticsTests(unittest.TestCase):
+    def test_swift_and_python_field_allowlists_stay_in_sync(self):
+        swift_source = (
+            REPO_ROOT
+            / "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift"
+        ).read_text()
+        match = re.search(
+            r"allowedKeys: Set<String> = \[(.*?)\n\s*\]",
+            swift_source,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        swift_keys = set(re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', match.group(1)))
+        self.assertEqual(swift_keys, ride_diagnostics.ALLOWED_FIELD_KEYS)
+
     def test_valid_stream_reports_sequence_gaps_and_tail(self):
         data = (json.dumps(event(2)) + "\n" + json.dumps(event(4)) + "\n" + "partial").encode()
         result = ride_diagnostics.validate_jsonl(data, "app/events.jsonl")
