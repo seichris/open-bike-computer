@@ -155,6 +155,31 @@ class BuildingSourceIndexTests(unittest.TestCase):
         self.assertEqual(workload["candidatePartCount"], 0)
         self.assertEqual(workload["closurePlanSha256"], repeat["closurePlanSha256"])
 
+    def test_closure_batches_more_than_one_sqlite_parameter_page(self):
+        nodes, base_ways, _ = records()
+        ways = [
+            {
+                "objectKey": f"w{index:04d}",
+                "tags": {"building": "yes"},
+                "nodes": list(base_ways[0]["nodes"]),
+            }
+            for index in range(401)
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            index = BuildingSourceIndex(root, "3" * 64)
+            index.build(nodes=nodes, ways=ways, relations=[])
+            closure = index.closure_for_bounds(
+                [(0, 0, 500, 500)],
+                maximum_objects=1_000,
+                calibration_cell_size_meters=8192,
+                calibration_halo_cells=1,
+            )
+
+        self.assertEqual(closure["requiredRelationKeys"], [])
+        self.assertEqual(len(closure["requiredWayKeys"]), 401)
+        self.assertEqual(len(closure["requiredNodeKeys"]), 4)
+        self.assertEqual(closure["candidateKeys"], closure["requiredWayKeys"])
+
     def test_output_candidate_extent_adds_its_runtime_calibration_anchor(self):
         nodes = [
             {"objectKey": "n1", "lonE7": 0, "latE7": 0},

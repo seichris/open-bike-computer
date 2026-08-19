@@ -303,61 +303,106 @@ class BuildingSourceIndex:
             pending_objects = list(sorted(seed_ways | seed_relations))
             visited_parents: set[str] = set()
             while pending_objects:
-                member_key = pending_objects.pop()
-                if member_key not in visited_parents:
+                batch: list[str] = []
+                while pending_objects and len(batch) < 400:
+                    member_key = pending_objects.pop()
+                    if member_key in visited_parents:
+                        continue
                     visited_parents.add(member_key)
-                    for parent_key, tags_json in connection.execute(
-                        """
-                        SELECT relation_members.relation_key, relations.tags_json
-                        FROM relation_members
-                        JOIN relations
-                          ON relations.object_key = relation_members.relation_key
-                        WHERE member_key = ? ORDER BY relation_key
-                        """,
-                        (member_key,),
-                    ):
-                        if not _eligible_building_parent(json.loads(tags_json)):
-                            continue
-                        if parent_key not in required_relations:
-                            required_relations.add(parent_key)
-                            pending_objects.append(parent_key)
-                if member_key.startswith("r"):
-                    relation = connection.execute(
-                        "SELECT members_json FROM relations WHERE object_key = ?",
-                        (member_key,),
-                    ).fetchone()
-                    if relation is None:
-                        raise BuildingSourceIndexError(
-                            "building_relation_incomplete", f"source relation {member_key} is unavailable"
+                    batch.append(member_key)
+                if not batch:
+                    continue
+                placeholders = ",".join("?" for _ in batch)
+                parent_rows = connection.execute(
+                    f"""
+                    SELECT relation_members.member_key,
+                           relation_members.relation_key,
+                           relations.tags_json
+                    FROM relation_members
+                    JOIN relations
+                      ON relations.object_key = relation_members.relation_key
+                    WHERE relation_members.member_key IN ({placeholders})
+                    ORDER BY relation_members.member_key,
+                             relation_members.relation_key
+                    """,
+                    tuple(batch),
+                )
+                for member_key, parent_key, tags_json in parent_rows:
+                    if not _eligible_building_parent(json.loads(tags_json)):
+                        continue
+                    if parent_key not in required_relations:
+                        required_relations.add(parent_key)
+                        pending_objects.append(parent_key)
+
+                relation_keys = [key for key in batch if key.startswith("r")]
+                if relation_keys:
+                    relation_placeholders = ",".join(
+                        "?" for _ in relation_keys
+                    )
+                    relation_rows = {
+                        key: members_json
+                        for key, members_json in connection.execute(
+                            f"""
+                            SELECT object_key, members_json
+                            FROM relations
+                            WHERE object_key IN ({relation_placeholders})
+                            ORDER BY object_key
+                            """,
+                            tuple(relation_keys),
                         )
-                    for member in json.loads(relation[0]):
-                        key = member["key"]
-                        if member["type"] == "r" and key not in required_relations:
-                            required_relations.add(key)
-                            pending_objects.append(key)
-                        elif member["type"] == "w" and key not in required_ways:
-                            required_ways.add(key)
-                            pending_objects.append(key)
-                        elif member["type"] == "n":
-                            required_nodes.add(key)
+                    }
+                    for member_key in sorted(relation_keys):
+                        members_json = relation_rows.get(member_key)
+                        if members_json is None:
+                            raise BuildingSourceIndexError(
+                                "building_relation_incomplete",
+                                f"source relation {member_key} is unavailable",
+                            )
+                        for member in json.loads(members_json):
+                            key = member["key"]
+                            if member["type"] == "r" and key not in required_relations:
+                                required_relations.add(key)
+                                pending_objects.append(key)
+                            elif member["type"] == "w" and key not in required_ways:
+                                required_ways.add(key)
+                                pending_objects.append(key)
+                            elif member["type"] == "n":
+                                required_nodes.add(key)
                 if len(required_relations) + len(required_ways) + len(required_nodes) > maximum_objects:
                     raise BuildingSourceIndexError(
                         "building_object_limit_exceeded", "building closure exceeds the job object limit"
                     )
 
-            for way_key in sorted(required_ways):
-                way = connection.execute(
-                    "SELECT nodes_json FROM ways WHERE object_key = ?", (way_key,)
-                ).fetchone()
-                if way is None:
-                    raise BuildingSourceIndexError(
-                        "building_relation_incomplete", f"source way {way_key} is unavailable"
+            way_keys = sorted(required_ways)
+            for offset in range(0, len(way_keys), 400):
+                way_batch = way_keys[offset : offset + 400]
+                placeholders = ",".join("?" for _ in way_batch)
+                way_rows = {
+                    key: nodes_json
+                    for key, nodes_json in connection.execute(
+                        f"""
+                        SELECT object_key, nodes_json
+                        FROM ways
+                        WHERE object_key IN ({placeholders})
+                        ORDER BY object_key
+                        """,
+                        tuple(way_batch),
                     )
-                required_nodes.update(node["key"] for node in json.loads(way[0]))
-                if len(required_relations) + len(required_ways) + len(required_nodes) > maximum_objects:
-                    raise BuildingSourceIndexError(
-                        "building_object_limit_exceeded", "building closure exceeds the job object limit"
+                }
+                for way_key in way_batch:
+                    nodes_json = way_rows.get(way_key)
+                    if nodes_json is None:
+                        raise BuildingSourceIndexError(
+                            "building_relation_incomplete",
+                            f"source way {way_key} is unavailable",
+                        )
+                    required_nodes.update(
+                        node["key"] for node in json.loads(nodes_json)
                     )
+                    if len(required_relations) + len(required_ways) + len(required_nodes) > maximum_objects:
+                        raise BuildingSourceIndexError(
+                            "building_object_limit_exceeded", "building closure exceeds the job object limit"
+                        )
 
             target_cells = set()
             for key in sorted(seed_ways | seed_relations):
