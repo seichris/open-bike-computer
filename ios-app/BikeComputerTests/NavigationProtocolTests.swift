@@ -659,6 +659,7 @@ struct NavigationProtocolTests {
         testBLEManagerParsesDeviceTransferStatus()
         testBLEManagerSendsBrightnessFallbackSetting()
         testBLEManagerResendsBrightnessAfterAuthentication()
+        testBLEManagerSendsAutomaticDisplayOffSetting()
         testBLEManagerSendsDisconnectedSleepTimeoutSetting()
         testBLEManagerSendsDeviceScreenSettings()
         testBLEManagerPersistsNewMapSettings()
@@ -11240,6 +11241,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelTextSizeSettingID, 33, "Map + Navigation street-label size uses setting ID 33")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelOrientationSettingID, 34, "Map + Navigation street-label orientation uses setting ID 34")
         assertEqual(DeviceBLEProtocol.mapPlusNavigation3DBuildingsSettingID, 35, "Map + Navigation 3D buildings use setting ID 35")
+        assertEqual(DeviceBLEProtocol.automaticDisplayOffSettingID, 36, "automatic display-off uses firmware setting ID 36")
         assertEqual(DeviceBLEProtocol.defaultMapStreetLabelsEnabled, true, "Map street labels default to enabled")
         assertEqual(DeviceBLEProtocol.defaultMapPlusNavigationStreetLabelsEnabled, false, "Map + Navigation street labels default to disabled")
         assertEqual(DeviceBLEProtocol.defaultStreetLabelDensity, 2, "street labels default to Balanced density")
@@ -16318,6 +16320,44 @@ struct NavigationProtocolTests {
         assertEqual(value, 70,
                     "authenticated reconnect restores the saved brightness")
         defaults.removeObject(forKey: "deviceSettings.brightnessPercent")
+    }
+
+    static func testBLEManagerSendsAutomaticDisplayOffSetting() {
+        let defaults = UserDefaults.standard
+        let key = "deviceSettings.automaticDisplayOffEnabled"
+        defaults.removeObject(forKey: key)
+
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        assert(manager.automaticDisplayOffEnabled,
+               "automatic display-off defaults to enabled")
+        manager.automaticDisplayOffEnabled = false
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        manager.sendSetting(
+            id: DeviceBLEProtocol.automaticDisplayOffSettingID,
+            value: 0
+        )
+
+        assertEqual(sentPackets.count, 1,
+                    "automatic display-off should send one fallback packet")
+        assertEqual(sentPackets[0][4],
+                    DeviceBLEProtocol.automaticDisplayOffSettingID,
+                    "automatic display-off uses setting ID 36")
+        assertEqual(readInt32LE(sentPackets[0], offset: 5), 0,
+                    "automatic display-off sends the disabled value")
+
+        let reloaded = BLEManager()
+        assert(!reloaded.automaticDisplayOffEnabled,
+               "automatic display-off preference persists")
+        defaults.removeObject(forKey: key)
     }
 
     static func testBLEManagerSendsDeviceScreenSettings() {

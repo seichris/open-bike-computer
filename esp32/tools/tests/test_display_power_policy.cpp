@@ -11,6 +11,13 @@ int main() {
   using display_power::Policy;
   using display_power::State;
 
+  static_assert(display_power::kAutomaticDisplayOffSettingID == 36);
+  static_assert(display_power::kDefaultAutomaticDisplayOffEnabled);
+  static_assert(display_power::isBooleanSettingValue(0));
+  static_assert(display_power::isBooleanSettingValue(1));
+  static_assert(!display_power::isBooleanSettingValue(-1));
+  static_assert(!display_power::isBooleanSettingValue(2));
+
   static_assert(!display_power::isBrightnessPercentInRange(4));
   static_assert(display_power::isBrightnessPercentInRange(5));
   static_assert(display_power::isBrightnessPercentInRange(100));

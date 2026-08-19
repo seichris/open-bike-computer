@@ -38,6 +38,7 @@ constexpr bool shouldPollTouchWhileDisplayInactive(Mode currentMode,
 struct Context {
   bool navigating = false;
   bool workoutActive = false;
+  bool automaticDisplayOffEnabled = true;
   bool transferActive = false;
   bool attentionActive = false;
 };
@@ -100,6 +101,7 @@ public:
     initialized_ = true;
     lastMeaningfulActivityMs_ = nowMs;
     heldAwake_ = false;
+    automaticDisplayOffEnabled_ = true;
     mode_ = Mode::Active;
   }
 
@@ -114,6 +116,14 @@ public:
   Update update(uint32_t nowMs, const Context &context) {
     if (!initialized_) {
       begin(nowMs);
+    }
+
+    if (automaticDisplayOffEnabled_ != context.automaticDisplayOffEnabled) {
+      // Changing this preference is itself a meaningful boundary. Start a
+      // fresh idle interval so enabling automatic display-off never applies
+      // the time spent with the preference disabled retroactively.
+      automaticDisplayOffEnabled_ = context.automaticDisplayOffEnabled;
+      lastMeaningfulActivityMs_ = nowMs;
     }
 
     const bool heldAwake =
@@ -132,6 +142,8 @@ public:
       requested = Mode::Transfer;
     } else if (context.navigating || context.workoutActive ||
                context.attentionActive) {
+      requested = Mode::Active;
+    } else if (!context.automaticDisplayOffEnabled) {
       requested = Mode::Active;
     } else {
       const uint32_t idleMs = elapsedMs(nowMs, lastMeaningfulActivityMs_);
@@ -160,6 +172,7 @@ public:
 private:
   bool initialized_ = false;
   bool heldAwake_ = false;
+  bool automaticDisplayOffEnabled_ = true;
   uint32_t lastMeaningfulActivityMs_ = 0;
   Mode mode_ = Mode::Active;
 };

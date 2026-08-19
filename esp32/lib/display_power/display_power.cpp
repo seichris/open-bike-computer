@@ -13,6 +13,7 @@ namespace {
 
 constexpr char kPreferencesNamespace[] = "deviceSettings";
 constexpr char kBrightnessKey[] = "brightnessPct";
+constexpr char kAutomaticDisplayOffKey[] = "automaticDisplayOff";
 
 } // namespace
 
@@ -39,11 +40,20 @@ bool DisplayPowerManager::begin() {
   Preferences preferences;
   bool hasSavedValue = false;
   uint8_t savedValue = display_power::kDefaultBrightnessPercent;
+  bool hasSavedAutomaticDisplayOff = false;
+  bool automaticDisplayOff =
+      display_power::kDefaultAutomaticDisplayOffEnabled;
   if (preferences.begin(kPreferencesNamespace, false)) {
     hasSavedValue = preferences.isKey(kBrightnessKey);
     if (hasSavedValue) {
       savedValue = preferences.getUChar(
           kBrightnessKey, display_power::kDefaultBrightnessPercent);
+    }
+    hasSavedAutomaticDisplayOff = preferences.isKey(kAutomaticDisplayOffKey);
+    if (hasSavedAutomaticDisplayOff) {
+      automaticDisplayOff = preferences.getBool(
+          kAutomaticDisplayOffKey,
+          display_power::kDefaultAutomaticDisplayOffEnabled);
     }
     preferences.end();
   } else {
@@ -53,6 +63,8 @@ bool DisplayPowerManager::begin() {
   policy_.restoreSavedBrightness(hasSavedValue, savedValue);
   savedBrightnessPersisted_ =
       hasSavedValue && display_power::isBrightnessPercentInRange(savedValue);
+  automaticDisplayOffEnabled_ = automaticDisplayOff;
+  automaticDisplayOffPersisted_ = hasSavedAutomaticDisplayOff;
   initialized_ = true;
   return true;
 }
@@ -88,6 +100,41 @@ bool DisplayPowerManager::requestUserBrightness(int32_t requestedPercent) {
 
   if (!persisted) {
     Serial.println("DisplayPower: failed to persist brightness");
+  } else {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Display);
+  }
+  return persisted;
+}
+
+bool DisplayPowerManager::requestAutomaticDisplayOff(bool enabled) {
+  if (!initialized_ && !begin()) {
+    return false;
+  }
+  if (!lock()) {
+    return false;
+  }
+
+  if (automaticDisplayOffPersisted_ &&
+      automaticDisplayOffEnabled_ == enabled) {
+    unlock();
+    return true;
+  }
+
+  Preferences preferences;
+  const bool opened = preferences.begin(kPreferencesNamespace, false);
+  const bool persisted =
+      opened && preferences.putBool(kAutomaticDisplayOffKey, enabled) == 1;
+  if (opened) {
+    preferences.end();
+  }
+  if (persisted) {
+    automaticDisplayOffEnabled_ = enabled;
+    automaticDisplayOffPersisted_ = true;
+  }
+  unlock();
+
+  if (!persisted) {
+    Serial.println("DisplayPower: failed to persist automatic display-off setting");
   } else {
     ui_scheduler::notify(ui_scheduler::WakeReason::Display);
   }
@@ -132,6 +179,15 @@ uint8_t DisplayPowerManager::effectiveBrightnessPercent() const {
     return display_power::kDefaultBrightnessPercent;
   }
   const uint8_t value = policy_.effectiveBrightnessPercent();
+  unlock();
+  return value;
+}
+
+bool DisplayPowerManager::automaticDisplayOffEnabled() const {
+  if (!lock()) {
+    return display_power::kDefaultAutomaticDisplayOffEnabled;
+  }
+  const bool value = automaticDisplayOffEnabled_;
   unlock();
   return value;
 }

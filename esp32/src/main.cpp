@@ -841,6 +841,8 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
   context.workoutActive =
       bleStats.connected && bleStats.authenticated &&
       workout_telemetry_runtime::isWorkoutActive();
+  context.automaticDisplayOffEnabled =
+      displayPowerManager.automaticDisplayOffEnabled();
   context.transferActive =
       (signals.transferEnabled && signals.transferMode != "debug") ||
       signals.activationRunning;

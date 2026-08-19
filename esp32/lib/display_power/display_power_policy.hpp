@@ -4,10 +4,16 @@
 
 namespace display_power {
 
+constexpr uint8_t kAutomaticDisplayOffSettingID = 36;
+constexpr bool kDefaultAutomaticDisplayOffEnabled = true;
 constexpr uint8_t kMinimumBrightnessPercent = 5;
 constexpr uint8_t kMaximumBrightnessPercent = 100;
 constexpr uint8_t kDefaultBrightnessPercent = 100;
 constexpr uint8_t kDefaultDimmedBrightnessPercent = 20;
+
+constexpr bool isBooleanSettingValue(int32_t value) {
+  return value == 0 || value == 1;
+}
 
 constexpr bool isBrightnessPercentInRange(int32_t value) {
   return value >= kMinimumBrightnessPercent &&

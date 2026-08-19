@@ -353,6 +353,7 @@ enum DeviceBLEProtocol {
     static let mapPlusNavigationLabelTextSizeSettingID: UInt8 = 33
     static let mapPlusNavigationLabelOrientationSettingID: UInt8 = 34
     static let mapPlusNavigation3DBuildingsSettingID: UInt8 = 35
+    static let automaticDisplayOffSettingID: UInt8 = 36
     static let currentScreenMaskMarker: Int32 = 1 << 30
     static let defaultMapStreetLabelsEnabled = true
     static let defaultMapPlusNavigationStreetLabelsEnabled = false
@@ -918,6 +919,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var enabledDeviceScreensMask: Int = DeviceScreen.allScreensMask
     @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
     @Published var deviceBrightnessPercent: Double = 100
+    @Published var automaticDisplayOffEnabled: Bool = true
     @Published var disconnectedSleepTimeout: DisconnectedSleepTimeout = .twoMinutes
     @Published var selectedDeviceSound: DeviceSound = .defaultSelection
     @Published var deviceSoundVolumePercent: Double = DeviceSound.defaultVolumePercent
@@ -1196,6 +1198,7 @@ class BLEManager: NSObject, ObservableObject {
         static let defaultDeviceScreenMigrated = "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1"
         static let batteryStatusScreenMigrated = "deviceSettings.enabledScreensMask.batteryStatus.v1"
         static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
+        static let automaticDisplayOffEnabled = "deviceSettings.automaticDisplayOffEnabled"
         static let disconnectedSleepTimeoutSeconds = "deviceSettings.disconnectedSleepTimeoutSeconds"
         static let watchControllerIDsByDevice =
             "deviceSettings.watchControllerIDsByDevice.v1"
@@ -1426,6 +1429,9 @@ class BLEManager: NSObject, ObservableObject {
         deviceBrightnessPercent = DeviceBLEProtocol.normalizedBrightnessPercent(
             defaults.object(forKey: SettingsKeys.deviceBrightnessPercent) as? Double ?? 100
         )
+        automaticDisplayOffEnabled = defaults.object(
+            forKey: SettingsKeys.automaticDisplayOffEnabled
+        ) as? Bool ?? true
         disconnectedSleepTimeout = DisconnectedSleepTimeout.normalized(
             rawValue: defaults.object(forKey: SettingsKeys.disconnectedSleepTimeoutSeconds) as? Int ?? DisconnectedSleepTimeout.twoMinutes.rawValue
         )
@@ -1709,6 +1715,7 @@ class BLEManager: NSObject, ObservableObject {
             deviceBrightnessPercent
         )
         defaults.set(deviceBrightnessPercent, forKey: SettingsKeys.deviceBrightnessPercent)
+        defaults.set(automaticDisplayOffEnabled, forKey: SettingsKeys.automaticDisplayOffEnabled)
         defaults.set(disconnectedSleepTimeout.rawValue, forKey: SettingsKeys.disconnectedSleepTimeoutSeconds)
         defaults.set(Int(selectedDeviceSound.rawValue), forKey: SettingsKeys.selectedDeviceSound)
         deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(deviceSoundVolumePercent)
@@ -3889,6 +3896,8 @@ class BLEManager: NSObject, ObservableObject {
             deviceBrightnessPercent = DeviceBLEProtocol.normalizedBrightnessPercent(
                 Double(value)
             )
+        } else if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
+            automaticDisplayOffEnabled = value != 0
         }
         if hasReceivedDeviceCapabilities,
            !supportsIndependentMapProfiles,
@@ -3926,6 +3935,8 @@ class BLEManager: NSObject, ObservableObject {
         let deviceValue: Int32
         if id == DeviceBLEProtocol.brightnessSettingID {
             deviceValue = Int32(deviceBrightnessPercent)
+        } else if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
+            deviceValue = value == 0 ? 0 : 1
         } else if id == DeviceBLEProtocol.mapPlusNavigationBirdsEyePerspectiveSettingID {
             let maximum = supportsBirdsEyeMapNavigationStrongerPerspective
                 ? MapNavigationBirdsEyePerspective.maximum.rawValue
@@ -6227,6 +6238,10 @@ class BLEManager: NSObject, ObservableObject {
         sendSetting(
             id: DeviceBLEProtocol.brightnessSettingID,
             value: Int32(deviceBrightnessPercent)
+        )
+        sendSetting(
+            id: DeviceBLEProtocol.automaticDisplayOffSettingID,
+            value: automaticDisplayOffEnabled ? 1 : 0
         )
         sendSetting(
             id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,

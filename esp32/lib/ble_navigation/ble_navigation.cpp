@@ -37,6 +37,7 @@
 #include "../maps/src/maps.hpp"
 #include "../device_transfer/device_transfer_http.hpp"
 #include "../device_debug/device_debug_http.hpp"
+#include "../display_power/display_power_policy.hpp"
 #ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
 #endif
@@ -3074,6 +3075,25 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
 #endif
 #else
     Serial.println("BLE Settings: brightness unsupported on this target");
+#endif
+    return;
+  case display_power::kAutomaticDisplayOffSettingID:
+    if (!display_power::isBooleanSettingValue(settingValue)) {
+      Serial.printf("BLE Settings: rejected automatic display-off value %ld from %s\n",
+                    (long)settingValue,
+                    source == nullptr ? "unknown" : source);
+      return;
+    }
+#ifdef USE_ARDUINO_GFX
+    if (!displayPowerManager.requestAutomaticDisplayOff(settingValue == 1)) {
+      Serial.printf("BLE Settings: automatic display-off persistence failed from %s\n",
+                    source == nullptr ? "unknown" : source);
+      return;
+    }
+    Serial.printf("BLE Settings: automaticDisplayOff = %s (saved)\n",
+                  settingValue == 1 ? "on" : "off");
+#else
+    Serial.println("BLE Settings: automatic display-off unsupported on this target");
 #endif
     return;
   case 13: {
