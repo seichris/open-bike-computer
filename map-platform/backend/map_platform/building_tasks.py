@@ -1035,7 +1035,7 @@ class BuildingTaskStore:
         try:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
-                "UPDATE map_build_plans SET state='cancelled', stage='cancelled', cancellation_generation=cancellation_generation+1, updated_at=? WHERE parent_job_id=?",
+                "UPDATE map_build_plans SET state='cancelled', stage='cancelled', cancellation_generation=cancellation_generation+1, updated_at=? WHERE parent_job_id=? AND state NOT IN ('cancelled', 'ready')",
                 (now, parent_job_id),
             )
             connection.execute(
@@ -1047,6 +1047,66 @@ class BuildingTaskStore:
                 (parent_job_id,),
             )
             connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def reconcile_cancelled_plans(
+        self,
+        parent_job_ids: Iterable[str],
+        *,
+        now: float | None = None,
+    ) -> int:
+        """Fence coordinator state for parents cancelled outside the worker.
+
+        API cancellation normally calls :meth:`cancel_plan` synchronously,
+        but maintenance is the backstop for an interrupted API request,
+        legacy/direct ``JobStore`` cancellation, or a coordinator store that
+        was temporarily unavailable.  Reconciliation is idempotent and
+        releases leases/reservations without touching ready plans.
+        """
+
+        parent_ids = tuple(dict.fromkeys(str(value) for value in parent_job_ids))
+        if not parent_ids:
+            return 0
+        now = self._clock() if now is None else now
+        placeholders = ",".join("?" for _ in parent_ids)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            active = connection.execute(
+                f"SELECT parent_job_id FROM map_build_plans "
+                f"WHERE parent_job_id IN ({placeholders}) "
+                "AND state NOT IN ('cancelled', 'ready')",
+                parent_ids,
+            ).fetchall()
+            if not active:
+                connection.commit()
+                return 0
+            active_ids = tuple(row[0] for row in active)
+            active_placeholders = ",".join("?" for _ in active_ids)
+            connection.execute(
+                f"UPDATE map_build_plans SET state='cancelled', stage='cancelled', "
+                f"cancellation_generation=cancellation_generation+1, updated_at=? "
+                f"WHERE parent_job_id IN ({active_placeholders})",
+                (now, *active_ids),
+            )
+            connection.execute(
+                f"UPDATE map_build_tasks SET state='cancelled', lease_owner=NULL, "
+                f"lease_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, "
+                f"updated_at=? WHERE parent_job_id IN ({active_placeholders}) "
+                "AND state IN ('pending','leased')",
+                (now, *active_ids),
+            )
+            connection.execute(
+                f"DELETE FROM map_build_resource_reservations "
+                f"WHERE parent_job_id IN ({active_placeholders})",
+                active_ids,
+            )
+            connection.commit()
+            return len(active_ids)
         except Exception:
             connection.rollback()
             raise

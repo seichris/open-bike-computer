@@ -942,6 +942,52 @@ class BuildingTaskStoreTests(unittest.TestCase):
                 validation={},
             )
         self.assertEqual(self.store.get_plan("job-1")["state"], "cancelled")
+        self.store.cancel_plan("job-1")
+
+    def test_cancel_does_not_rewrite_ready_plan(self):
+        self.store.add_tasks([self.spec(blocks=((1, 2),))])
+        claimed = self.store.claim_next(worker_id="worker-a")
+        assert claimed is not None
+        self.store.publish_receipt(
+            claimed.task.task_id,
+            worker_id="worker-a",
+            lease_token=claimed.lease_token,
+            block=(1, 2),
+            cache_identity_sha256=SHA,
+            content_sha256=CONTENT,
+            producer_identity={},
+            validation={},
+        )
+        self.store.mark_ready(
+            claimed.task.task_id,
+            worker_id="worker-a",
+            lease_token=claimed.lease_token,
+        )
+        self.store.set_plan_stage("job-1", stage="ready", state="ready")
+
+        self.store.cancel_plan("job-1")
+
+        self.assertEqual(self.store.get_plan("job-1")["state"], "ready")
+
+    def test_reconcile_cancelled_plan_releases_legacy_reservation(self):
+        self.store.add_tasks([self.spec(blocks=((1, 2),))])
+        claimed = self.store.claim_next(
+            worker_id="worker-a",
+            worker_capability={
+                "resourcePool": "pool-a",
+                "memoryLimitBytes": 8_000_000_000,
+                "cpuCount": 8,
+            },
+        )
+        self.assertIsNotNone(claimed)
+        self.assertEqual(len(self.store.list_resource_reservations("job-1")), 1)
+
+        self.assertEqual(self.store.reconcile_cancelled_plans(("job-1",)), 1)
+
+        self.assertEqual(self.store.get_plan("job-1")["state"], "cancelled")
+        self.assertEqual(self.store.get_task("task-1").state, "cancelled")
+        self.assertEqual(self.store.list_resource_reservations("job-1"), ())
+        self.assertEqual(self.store.reconcile_cancelled_plans(("job-1",)), 0)
 
     def test_duplicate_block_ownership_is_rejected(self):
         self.store.add_tasks([self.spec(blocks=((1, 2),))])

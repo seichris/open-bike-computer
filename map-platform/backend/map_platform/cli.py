@@ -270,6 +270,20 @@ def _perform_maintenance(
         ),
     )
     if building_task_store is not None:
+        cancelled_parent_ids = tuple(
+            job.job_id
+            for job in store.list()
+            if getattr(job.status, "value", job.status) == "cancelled"
+        )
+        result["buildingTaskCancellation"] = {}
+        tasks += (
+            (
+                "buildingTaskCancellation",
+                lambda: building_task_store.reconcile_cancelled_plans(
+                    cancelled_parent_ids
+                ),
+            ),
+        )
         result["buildingTaskEvidence"] = {}
         tasks += (
             (
