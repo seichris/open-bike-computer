@@ -827,7 +827,9 @@ normalization. Assembly now validates the final ZIP size and published ZIP
 receipt before the parent can enter `ready`. The parent worker does not invoke
 assembly yet; final partition-invariant artifact identity, whole-artifact
 signature/device gates, and the high-limit reference comparison remain
-pending.
+pending. The coordinator also derives a canonical block receipt-set identity
+ordered by global block coordinates, which is the input to the remaining
+partition-invariant artifact comparison.
 
 ### Phase 5 — Progress, estimates, operations, and retention
 

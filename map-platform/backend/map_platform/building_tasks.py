@@ -1012,6 +1012,44 @@ class BuildingTaskStore:
         finally:
             connection.close()
 
+    def receipt_set_sha256(self, parent_job_id: str) -> str | None:
+        """Return the partition-invariant identity of a complete receipt set."""
+
+        connection = self._connect()
+        try:
+            plan = connection.execute(
+                "SELECT expected_output_block_count FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            if plan is None:
+                return None
+            rows = connection.execute(
+                """
+                SELECT block_x, block_y, cache_identity_sha256, content_sha256
+                FROM map_build_block_receipts
+                WHERE parent_job_id=?
+                ORDER BY block_x, block_y
+                """,
+                (parent_job_id,),
+            ).fetchall()
+            if len(rows) != int(plan["expected_output_block_count"]):
+                return None
+            return hashlib.sha256(
+                _canonical_json(
+                    [
+                        [
+                            int(row["block_x"]),
+                            int(row["block_y"]),
+                            row["cache_identity_sha256"],
+                            row["content_sha256"],
+                        ]
+                        for row in rows
+                    ]
+                )
+            ).hexdigest()
+        finally:
+            connection.close()
+
     def list_workload_receipts(self, parent_job_id: str) -> tuple[dict[str, Any], ...]:
         connection = self._connect()
         try:

@@ -370,6 +370,60 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.assertIn("last_claimed_at", columns)
         self.assertEqual(version, 4)
 
+    def test_receipt_set_identity_is_complete_and_block_ordered(self):
+        path = Path(self.temp.name) / "receipt-identity.sqlite3"
+        store = BuildingTaskStore(path, clock=self.clock)
+        store.create_plan(
+            parent_job_id="job-receipts",
+            global_plan_sha256=SHA,
+            input_identity={},
+            expected_output_block_count=2,
+            policy_version=1,
+            resource_model_version="v1",
+        )
+        store.add_tasks(
+            [
+                BuildingTaskSpec(
+                    task_id="receipt-a",
+                    parent_job_id="job-receipts",
+                    kind="building_chunk",
+                    blocks=((2, 2),),
+                    chunk_plan_sha256=SHA,
+                ),
+                BuildingTaskSpec(
+                    task_id="receipt-b",
+                    parent_job_id="job-receipts",
+                    kind="building_chunk",
+                    blocks=((1, 1),),
+                    chunk_plan_sha256=SHA,
+                ),
+            ]
+        )
+        for worker, block in (("worker-a", (2, 2)), ("worker-b", (1, 1))):
+            claimed = store.claim_next(worker_id=worker)
+            self.assertIsNotNone(claimed)
+            assert claimed is not None
+            store.publish_receipt(
+                claimed.task.task_id,
+                worker_id=worker,
+                lease_token=claimed.lease_token,
+                block=block,
+                cache_identity_sha256=SHA,
+                content_sha256=CONTENT,
+                producer_identity={},
+                validation={},
+            )
+            store.mark_ready(
+                claimed.task.task_id,
+                worker_id=worker,
+                lease_token=claimed.lease_token,
+            )
+
+        identity = store.receipt_set_sha256("job-receipts")
+
+        self.assertRegex(identity or "", r"^[0-9a-f]{64}$")
+        self.assertIsNone(self.store.receipt_set_sha256("job-1"))
+
     def test_readding_the_same_task_is_idempotent_but_identity_changes_fail(self):
         spec = self.spec(blocks=((1, 2),))
         self.store.add_tasks([spec])

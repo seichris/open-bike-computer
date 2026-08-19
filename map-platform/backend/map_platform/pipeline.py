@@ -1812,6 +1812,14 @@ class MapBuildPipeline:
                 "building_chunks_incomplete",
                 "building chunk receipts do not cover the global output block set",
             )
+        receipt_set_sha256 = self.building_task_store.receipt_set_sha256(
+            parent_job_id
+        )
+        if receipt_set_sha256 is None:
+            raise BuildingScopeError(
+                "building_chunks_incomplete",
+                "building chunk receipt set is incomplete",
+            )
         try:
             expected_calibration = selected_calibration_identity(
                 source_snapshot_sha256=source_snapshot_sha256,
@@ -1928,6 +1936,7 @@ class MapBuildPipeline:
             "scopePlanSha256": scope_plan.sha256,
             "blockCount": len(expected_blocks),
             "receiptCount": len(cache_receipts),
+            "receiptSetSha256": receipt_set_sha256,
             "cacheIdentitySha256": cache_identity["cacheIdentitySha256"],
             "sourceExtraction": source_metrics,
         }
