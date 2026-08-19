@@ -192,6 +192,22 @@ class BuildingSourceIndex:
             raise BuildingSourceIndexError("building_relation_incomplete", "source index metadata is invalid")
         return {**manifest, "manifestSha256": digest}
 
+    def validate_manifest_only(self) -> dict[str, Any]:
+        """Validate the immutable manifest without rescanning its database."""
+        try:
+            manifest = json.loads(self.manifest_path.read_bytes())
+            digest = manifest.pop("manifestSha256")
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index manifest is unavailable"
+            ) from exc
+        self._validate_manifest_document(manifest, digest)
+        if not self.database_path.is_file():
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database is unavailable"
+            )
+        return {**manifest, "manifestSha256": digest}
+
     def build(
         self,
         *,
@@ -504,7 +520,9 @@ class BuildingSourceIndex:
             self.index_root.mkdir(parents=True, exist_ok=True)
             with _CacheLock(self.index_root / ".write.lock", timeout_seconds=lock_timeout_seconds):
                 self._cleanup_unpublished_scans_locked()
-                existing = self._validate_or_quarantine_locked()
+                existing = self._validate_or_quarantine_locked(
+                    validate_database=False
+                )
                 if existing is not None:
                     return existing
                 descriptor, temporary_name = tempfile.mkstemp(
@@ -561,13 +579,15 @@ class BuildingSourceIndex:
             if path.is_file() or path.is_symlink():
                 path.unlink(missing_ok=True)
 
-    def _validate_or_quarantine_locked(self):
+    def _validate_or_quarantine_locked(self, *, validate_database: bool = True):
         artifacts = (self.database_path, self.manifest_path)
         if not any(path.exists() for path in artifacts):
             return None
         if all(path.is_file() for path in artifacts):
             try:
-                return self.validate()
+                if validate_database:
+                    return self.validate()
+                return self.validate_manifest_only()
             except BuildingSourceIndexError:
                 pass
         quarantine_id = uuid.uuid4().hex
