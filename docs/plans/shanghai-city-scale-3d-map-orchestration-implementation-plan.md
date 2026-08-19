@@ -1042,8 +1042,8 @@ same one-job workflow.
 repository's immutable GHCR workflow and deployed only to the validation
 Coolify app with `chunked_allowlist` and concurrency one. The current
 validation digest is
-`ghcr.io/seichris/open-bike-computer-map-platform@sha256:3775b982c41f4b732050537da422b5a3ad58f91496fc5579ce9a1369572217c8`;
-all three validation containers report healthy. Current-image central job
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:67b64523becf97649d0b2943508409d485df5b23660160dbb505d9e1cfc494a3`;
+all three validation containers report healthy. Retained central job
 `3d7fefb317ba47e88616` and west job `4acd2e89c8714555bb1d` reached `ready` with
 artifact and receipt validation. The full rectangle was deliberately
 cancelled after source-resolution selected the China snapshot; the app-sized
@@ -1051,21 +1051,26 @@ cancelled after source-resolution selected the China snapshot; the app-sized
 artifact and receipt evidence. The cancellation follow-up image passed the
 live leased-container regression, and validation maintenance repaired the
 historical cancelled-attempt rows. The branch image also passed a fresh
-16.923717 km² target-3 smoke job `931accca0a6842568af7` with six durable block
-receipts and a 132,003-byte ZIP (`962333e1103b2d36a3ebff38749879c8e06977186b5e904e05779821646013e9`);
+16.923717 km² target-3 smoke job `b32b715c316a400c9906` with six durable block
+receipts, a 132,279-byte ZIP (`b32007e0e80934eef4088282c9fc68ec16cb9310e555fa47fbd8c6979d629483`),
+and a 717,205,504-byte source-extraction peak; its typed-preflight code is
+present in the exact deployed image
+`67b64523becf97649d0b2943508409d485df5b23660160dbb505d9e1cfc494a3`;
 production remains pinned to its existing digest. Physical validation, cold
 central/632 km²/full-bbox coverage, and production promotion are still
 required.
 
-The current-image cold resource evidence includes target-3 job
+The retained cold resource evidence includes target-3 job
 `5570a835249f41d4a032` (20 blocks, 2,401,792,000-byte child peak, 20 cold cache
 misses, 1,837,615-byte ZIP, 20 FMB entries) and job
 `237941f2eb4c41958bec` (16 blocks, 1,109,987,328-byte child peak, 16 cold
 cache misses, 419,087-byte ZIP, 16 FMB entries). The latter artifact SHA-256 is
 `475361a14ebd9ee60324e287f9d02bdaf7bc6eb62546522de5d02550c2011877` and ZIP
 testing passed. Two sparse-cell probes failed closed before publication with
-generic chunk-execution errors despite nonzero workload receipts; this is
-retained as a diagnostics/data-shape follow-up, not counted as a memory failure.
+generic chunk-execution errors despite nonzero workload receipts; the new image
+now converts preflight scope, relation, and calibration failures to typed
+records, while the historical rows remain retained as a diagnostics/data-shape
+follow-up and are not counted as a memory failure.
 The full-bbox, physical acceptance, and production-promotion gates remain
 open.
 
