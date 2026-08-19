@@ -93,10 +93,17 @@ class BuildingSourceIndex:
         self.manifest_path = self.index_root / "manifest.json"
 
     @classmethod
-    def from_manifest(cls, path: str | Path) -> "BuildingSourceIndex":
+    def from_manifest(
+        cls,
+        path: str | Path,
+        *,
+        validate_database: bool = True,
+    ) -> "BuildingSourceIndex":
         path = Path(path)
         try:
-            value = json.loads(path.read_bytes())
+            raw = json.loads(path.read_bytes())
+            value = dict(raw)
+            digest = value.pop("manifestSha256")
             source_sha256 = value["sourceSnapshotSha256"]
         except (OSError, TypeError, ValueError, KeyError) as exc:
             raise BuildingSourceIndexError(
@@ -110,8 +117,42 @@ class BuildingSourceIndex:
             raise BuildingSourceIndexError(
                 "building_relation_incomplete", "source index manifest key is invalid"
             )
-        index.validate()
+        index._validate_manifest_document(value, digest)
+        if validate_database:
+            index.validate()
         return index
+
+    def _validate_manifest_document(self, manifest, digest: str) -> None:
+        expected_manifest_keys = set(self.identity) | {
+            "indexKey",
+            "databaseSha256",
+            "nodeCount",
+            "wayCount",
+            "relationCount",
+            "relationMemberCount",
+        }
+        if (
+            set(manifest) != expected_manifest_keys
+            or not _SHA256.fullmatch(str(digest))
+            or hashlib.sha256(canonical_json(manifest)).hexdigest() != digest
+            or any(manifest.get(key) != value for key, value in self.identity.items())
+            or manifest.get("indexKey") != self.index_key
+            or not _SHA256.fullmatch(str(manifest.get("databaseSha256") or ""))
+            or any(
+                isinstance(manifest.get(key), bool)
+                or not isinstance(manifest.get(key), int)
+                or manifest.get(key) < 0
+                for key in (
+                    "nodeCount",
+                    "wayCount",
+                    "relationCount",
+                    "relationMemberCount",
+                )
+            )
+        ):
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index manifest is invalid"
+            )
 
     def validate(self) -> dict[str, Any]:
         try:
@@ -123,26 +164,8 @@ class BuildingSourceIndex:
             database_sha256 = file_sha256(self.database_path)
         except OSError as exc:
             raise BuildingSourceIndexError("building_relation_incomplete", "source index database is unavailable") from exc
-        expected_manifest_keys = set(self.identity) | {
-            "indexKey", "databaseSha256", "nodeCount", "wayCount",
-            "relationCount", "relationMemberCount",
-        }
-        if (
-            set(manifest) != expected_manifest_keys
-            or not _SHA256.fullmatch(str(digest))
-            or hashlib.sha256(canonical_json(manifest)).hexdigest() != digest
-            or any(manifest.get(key) != value for key, value in self.identity.items())
-            or manifest.get("indexKey") != self.index_key
-            or manifest.get("databaseSha256") != database_sha256
-            or any(
-                isinstance(manifest.get(key), bool)
-                or not isinstance(manifest.get(key), int)
-                or manifest.get(key) < 0
-                for key in (
-                    "nodeCount", "wayCount", "relationCount", "relationMemberCount"
-                )
-            )
-        ):
+        self._validate_manifest_document(manifest, digest)
+        if manifest.get("databaseSha256") != database_sha256:
             raise BuildingSourceIndexError("building_relation_incomplete", "source index identity is invalid")
         try:
             connection = sqlite3.connect(f"file:{self.database_path}?mode=ro", uri=True)
