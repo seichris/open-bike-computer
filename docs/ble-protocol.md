@@ -769,6 +769,7 @@ Current setting IDs:
 | `33` | Map + Navigation street-label size | Same values as ID `29` |
 | `34` | Map + Navigation street-label orientation | Same values as ID `30` |
 | `35` | Map + Navigation 3D buildings | `0` flat footprints, `1` LoD1 walls and roofs in the bird's-eye Map + Navigation view; defaults to enabled and is persisted as `nav3DBuild` |
+| `36` | Automatic display off | `0` disabled, `1` enabled; defaults to enabled and is persisted as `autoDisplayOff`. When enabled, the connected display dims after 15 seconds and turns off after 45 seconds without meaningful activity, except for navigation, workout, transfer, or attention holds. |
 
 In a dense scene, firmware reserves its bounded extrusion workspace from the
 nearest eligible buildings outward, preserves global back-to-front drawing,
@@ -995,20 +996,26 @@ and renderer target 3, bit `13` to the explicit invalid GPS-heading sentinel,
 bit `14` to scoped Watch control, bit `15` to the complete RAUT v2
 characteristic/fallback, persistence, and UI/control path, and bit `16` to the
 session-scoped real-device browser-debug service. Bit `17` negotiates the
-GPS-position quality-v1 tail used by ride detection. Bit `19` negotiates
-persistent, privacy-bounded ride diagnostics and the authenticated device-log
-transfer mode. Client version `11` requests bit `13`, version `12` requests
+GPS-position quality-v1 tail used by ride detection. Bit `19` reports
+connected-display automatic inactivity control (setting ID `36`), and bit `20`
+negotiates persistent, privacy-bounded ride diagnostics and the authenticated
+device-log transfer mode. Client version `11` requests bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
 without the newer features. Client version `16` requests bit `18`, the
 authenticated renderer-diagnostics and benchmark-fixture contract below.
-Client version `17` requests bit `19`. Production builds keep bit `15` clear until the
+Client version `17` requests bit `19`, and version `18` requests bit `20`.
+Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
 Firmware sets bit `18` only when `FIRMWARE_DIAGNOSTICS=1`; production builds
-therefore expose neither the snapshot nor experimental profile control. The
-bounded persistent recorder may advertise bit `19` in ordinary and production
-profiles; it never enables USB serial diagnostics or the remote-debug service.
+therefore expose neither the snapshot nor experimental profile control. GFX
+firmware advertises bit `19` for client version `17` and newer; iOS enables the
+toggle and sends ID `36` only after this bit is received, so legacy firmware
+with the generic settings characteristic never receives an unsupported setting.
+The bounded persistent recorder may advertise bit `20` in ordinary and
+production profiles; it never enables USB serial diagnostics or the
+remote-debug service.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). Types are unique;
@@ -1041,8 +1048,11 @@ GPS quality v1, CAP2 schema 1, only feature bit 17:
 Renderer diagnostics, CAP2 schema 1, only feature bit 18:
 43 41 50 32 01 00 00 04 00
 
-Persistent ride diagnostics, CAP2 schema 1, only feature bit 19:
+Automatic display off, CAP2 schema 1, only feature bit 19:
 43 41 50 32 01 00 00 08 00
+
+Persistent ride diagnostics, CAP2 schema 1, only feature bit 20:
+43 41 50 32 01 00 00 10 00
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -1139,6 +1149,11 @@ Firmware without that bit is never offered renderer target 3 and never receives
 the new setting. The setting has no effect unless Buildings is visible, Map +
 Navigation is using bird's-eye projection, and an FMB v4 block supplies
 building records.
+
+ID `36` is sent only after a valid `CAP2` response advertises bit `19`.
+Firmware without that bit is never offered the Automatic Display Off toggle;
+the setting remains app-local until a compatible connected display is
+negotiated.
 
 ## Destination Picker
 
@@ -1292,7 +1307,7 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `DTRN` | iOS -> ESP32 | `enter\|debug` | Enter opt-in real-device browser-debug mode when CAP2 bit `16` is present. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug\|lan1\|` plus bounded binary credentials | Enter browser-debug mode by trying a normal LAN first, with device-hotspot fallback. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug\|h1\|e` | Force the hotspot after authenticated LAN endpoint verification fails; `e` records `endpoint_unreachable`. |
-| `DTRN` | iOS -> ESP32 | `enter\|diagnostics` | Enter the authenticated, read-only device-log transfer mode when CAP2 bit `19` is negotiated. |
+| `DTRN` | iOS -> ESP32 | `enter\|diagnostics` | Enter the authenticated, read-only device-log transfer mode when CAP2 bit `20` is negotiated. |
 | `DTRN` | iOS -> ESP32 | `capture\|<uuid>` | Bind the current random iPhone capture UUID; idempotent on reconnect. |
 | `DTRN` | iOS -> ESP32 | `mark\|<code>` | Persist one predefined issue marker on the device. |
 | `DTRN` | iOS -> ESP32 | `capture_end` | End the active detailed capture binding. |

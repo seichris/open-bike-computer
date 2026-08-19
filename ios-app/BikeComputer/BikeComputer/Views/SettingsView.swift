@@ -1881,7 +1881,10 @@ private struct HardwareCustomizationSettingsView: View {
 
     var body: some View {
         Form {
-            Section(header: Text("Device Brightness")) {
+            Section(
+                header: Text("Device Brightness"),
+                footer: Text("When enabled, the display dims after 15 seconds and turns off after 45 seconds unless navigation, workout, transfer, or attention activity is active.")
+            ) {
                 VStack(alignment: .leading) {
                     HStack {
                         Text("Brightness")
@@ -1894,6 +1897,15 @@ private struct HardwareCustomizationSettingsView: View {
                             bleManager.sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(newValue))
                         }
                 }
+
+                Toggle("Automatic Display Off", isOn: $bleManager.automaticDisplayOffEnabled)
+                    .onChange(of: bleManager.automaticDisplayOffEnabled) { newValue in
+                        bleManager.sendSetting(
+                            id: DeviceBLEProtocol.automaticDisplayOffSettingID,
+                            value: newValue ? 1 : 0
+                        )
+                    }
+                    .disabled(!bleManager.supportsAutomaticDisplayOff)
             }
             .disabled(!bleManager.supportsDeviceSettings)
 

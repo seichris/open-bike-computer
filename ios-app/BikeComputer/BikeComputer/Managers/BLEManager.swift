@@ -310,8 +310,9 @@ enum DeviceBLEProtocol {
     static let remoteDeviceDebugCapabilityMask: UInt32 = 1 << 16
     static let gpsPositionQualityV1CapabilityMask: UInt32 = 1 << 17
     static let rendererDiagnosticsCapabilityMask: UInt32 = 1 << 18
-    static let rideDiagnosticsCapabilityMask: UInt32 = 1 << 19
-    static let deviceCapabilitiesVersion: UInt8 = 17
+    static let automaticDisplayOffCapabilityMask: UInt32 = 1 << 19
+    static let rideDiagnosticsCapabilityMask: UInt32 = 1 << 20
+    static let deviceCapabilitiesVersion: UInt8 = 18
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryOriginFrameLength = 28
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
@@ -321,6 +322,8 @@ enum DeviceBLEProtocol {
         "workout-telemetry-origin"
     static let navigationSnapshotCoalescingKey = "navigation-snapshot"
     static let gpsPositionCoalescingKey = "gps-position"
+    static let automaticDisplayOffSettingCoalescingKey =
+        "automatic-display-off-setting"
     // Large enough for the worst schema-v1 three-favorite catalog at the
     // minimum BLE write length, without retaining a long stale GPS backlog.
     static let fallbackWriteQueueCapacity = 64
@@ -354,6 +357,7 @@ enum DeviceBLEProtocol {
     static let mapPlusNavigationLabelTextSizeSettingID: UInt8 = 33
     static let mapPlusNavigationLabelOrientationSettingID: UInt8 = 34
     static let mapPlusNavigation3DBuildingsSettingID: UInt8 = 35
+    static let automaticDisplayOffSettingID: UInt8 = 36
     static let currentScreenMaskMarker: Int32 = 1 << 30
     static let defaultMapStreetLabelsEnabled = true
     static let defaultMapPlusNavigationStreetLabelsEnabled = false
@@ -790,6 +794,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var isConnected: Bool = false
     @Published var isNavigationReady: Bool = false
     @Published var supportsDeviceSettings: Bool = false
+    @Published private(set) var supportsAutomaticDisplayOff: Bool = false
     @Published var supportsDeviceSounds: Bool = false
     @Published var supportsPowerButtonHonk: Bool = false
     @Published var supportsPowerButtonHonkAcknowledgement: Bool = false
@@ -927,6 +932,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var enabledDeviceScreensMask: Int = DeviceScreen.allScreensMask
     @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
     @Published var deviceBrightnessPercent: Double = 100
+    @Published var automaticDisplayOffEnabled: Bool = true
     @Published var disconnectedSleepTimeout: DisconnectedSleepTimeout = .twoMinutes
     @Published var selectedDeviceSound: DeviceSound = .defaultSelection
     @Published var deviceSoundVolumePercent: Double = DeviceSound.defaultVolumePercent
@@ -1137,6 +1143,7 @@ class BLEManager: NSObject, ObservableObject {
     private var hasSentMapProfileForConnection = false
     private var hasSentMapNavigationProfileForConnection = false
     private var hasSentScreenSettingsForConnection = false
+    private var hasSentAutomaticDisplayOffForConnection = false
     private var isSendingNegotiatedMapProfiles = false
     private var lastSentPhoneBatteryPercent: Int32?
     private var lastSentPhoneBatteryCharging: Bool?
@@ -1205,6 +1212,7 @@ class BLEManager: NSObject, ObservableObject {
         static let defaultDeviceScreenMigrated = "deviceSettings.defaultScreen.mapPlusNavigationDefault.v1"
         static let batteryStatusScreenMigrated = "deviceSettings.enabledScreensMask.batteryStatus.v1"
         static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
+        static let automaticDisplayOffEnabled = "deviceSettings.automaticDisplayOffEnabled"
         static let disconnectedSleepTimeoutSeconds = "deviceSettings.disconnectedSleepTimeoutSeconds"
         static let watchControllerIDsByDevice =
             "deviceSettings.watchControllerIDsByDevice.v1"
@@ -1435,6 +1443,9 @@ class BLEManager: NSObject, ObservableObject {
         deviceBrightnessPercent = DeviceBLEProtocol.normalizedBrightnessPercent(
             defaults.object(forKey: SettingsKeys.deviceBrightnessPercent) as? Double ?? 100
         )
+        automaticDisplayOffEnabled = defaults.object(
+            forKey: SettingsKeys.automaticDisplayOffEnabled
+        ) as? Bool ?? true
         disconnectedSleepTimeout = DisconnectedSleepTimeout.normalized(
             rawValue: defaults.object(forKey: SettingsKeys.disconnectedSleepTimeoutSeconds) as? Int ?? DisconnectedSleepTimeout.twoMinutes.rawValue
         )
@@ -1718,6 +1729,7 @@ class BLEManager: NSObject, ObservableObject {
             deviceBrightnessPercent
         )
         defaults.set(deviceBrightnessPercent, forKey: SettingsKeys.deviceBrightnessPercent)
+        defaults.set(automaticDisplayOffEnabled, forKey: SettingsKeys.automaticDisplayOffEnabled)
         defaults.set(disconnectedSleepTimeout.rawValue, forKey: SettingsKeys.disconnectedSleepTimeoutSeconds)
         defaults.set(Int(selectedDeviceSound.rawValue), forKey: SettingsKeys.selectedDeviceSound)
         deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(deviceSoundVolumePercent)
@@ -3892,12 +3904,15 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     /// Persist and send a runtime map setting to ESP32 when supported.
+    @discardableResult
     func sendSetting(id: UInt8, value: Int32,
-                     synchronizeLegacyProfile: Bool = true) {
+                     synchronizeLegacyProfile: Bool = true) -> Bool {
         if id == DeviceBLEProtocol.brightnessSettingID {
             deviceBrightnessPercent = DeviceBLEProtocol.normalizedBrightnessPercent(
                 Double(value)
             )
+        } else if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
+            automaticDisplayOffEnabled = value != 0
         }
         if hasReceivedDeviceCapabilities,
            !supportsIndependentMapProfiles,
@@ -3907,34 +3922,41 @@ class BLEManager: NSObject, ObservableObject {
             synchronizeMapPlusNavigationProfileWithMap(for: id)
         }
         saveSettings()
+        if id == DeviceBLEProtocol.automaticDisplayOffSettingID,
+           (!hasReceivedDeviceCapabilities || !supportsAutomaticDisplayOff) {
+            log("Automatic display-off setting not sent: connected firmware does not advertise support")
+            return false
+        }
         if Self.isIndependentMapProfileSetting(id),
            (!hasReceivedDeviceCapabilities || !supportsIndependentMapProfiles) {
             log("Independent map setting id=\(id) not sent: connected firmware does not advertise support")
-            return
+            return false
         }
         if id == DeviceBLEProtocol.mapPlusNavigationBirdsEyeViewSettingID,
-           (!hasReceivedDeviceCapabilities || !supportsBirdsEyeMapNavigation) {
+            (!hasReceivedDeviceCapabilities || !supportsBirdsEyeMapNavigation) {
             log("Bird's-eye map setting not sent: connected firmware does not advertise support")
-            return
+            return false
         }
         if id == DeviceBLEProtocol.mapPlusNavigationBirdsEyePerspectiveSettingID,
-           (!hasReceivedDeviceCapabilities || !supportsBirdsEyeMapNavigationPerspective) {
+            (!hasReceivedDeviceCapabilities || !supportsBirdsEyeMapNavigationPerspective) {
             log("Bird's-eye perspective setting not sent: connected firmware does not advertise support")
-            return
+            return false
         }
         if id == DeviceBLEProtocol.mapPlusNavigation3DBuildingsSettingID,
-           (!hasReceivedDeviceCapabilities || !supports3DBuildings) {
+            (!hasReceivedDeviceCapabilities || !supports3DBuildings) {
             log("3D buildings setting not sent: connected firmware does not advertise support")
-            return
+            return false
         }
         if Self.isStreetLabelSetting(id),
            (!hasReceivedDeviceCapabilities || !supportsStreetLabels) {
             log("Street-label setting id=\(id) not sent: connected firmware does not advertise support")
-            return
+            return false
         }
         let deviceValue: Int32
         if id == DeviceBLEProtocol.brightnessSettingID {
             deviceValue = Int32(deviceBrightnessPercent)
+        } else if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
+            deviceValue = value == 0 ? 0 : 1
         } else if id == DeviceBLEProtocol.mapPlusNavigationBirdsEyePerspectiveSettingID {
             let maximum = supportsBirdsEyeMapNavigationStrongerPerspective
                 ? MapNavigationBirdsEyePerspective.maximum.rawValue
@@ -3949,8 +3971,12 @@ class BLEManager: NSObject, ObservableObject {
         }
         guard sendSettingPacket(id: id, value: deviceValue, label: "setting id=\(id)") else {
             log("Settings characteristic unsupported; saved local setting id=\(id), value=\(value)")
-            return
+            return false
         }
+        if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
+            hasSentAutomaticDisplayOffForConnection = true
+        }
+        return true
     }
 
     func sendStreetLabelDensity(for screen: DeviceScreen) {
@@ -3989,16 +4015,37 @@ class BLEManager: NSObject, ObservableObject {
         var fallback = Data(DeviceBLEProtocol.settingsFallbackPrefix.utf8)
         fallback.append(data)
 
+        let coalescingKey = id == DeviceBLEProtocol.automaticDisplayOffSettingID
+            ? DeviceBLEProtocol.automaticDisplayOffSettingCoalescingKey
+            : nil
+        let onDrop: (() -> Void)? = id == DeviceBLEProtocol.automaticDisplayOffSettingID
+            ? { [weak self] in
+                guard let self else { return }
+                self.hasSentAutomaticDisplayOffForConnection = false
+                self.log("Automatic display-off setting was dropped before transmission")
+            }
+            : nil
+
         return DevicePacketRouting.sendPreferredThenFallback(
             preferred: {
-                sendNativeMapTransferPacket(data, label: label)
+                sendNativeMapTransferPacket(
+                    data,
+                    label: label,
+                    coalescingKey: coalescingKey,
+                    onDrop: onDrop
+                )
             },
             fallback: {
                 guard fallback.count <= (navigationWriteEndpoint?.maximumWriteLength ?? 0) else {
                     log("Cannot send \(label): write limit exceeded")
                     return false
                 }
-                return sendFallbackMapPacket(fallback, label: label)
+                return sendFallbackMapPacket(
+                    fallback,
+                    label: label,
+                    coalescingKey: coalescingKey,
+                    onDrop: onDrop
+                )
             }
         )
     }
@@ -4168,6 +4215,7 @@ class BLEManager: NSObject, ObservableObject {
 
     func useDeviceCapabilitiesFallback() {
         guard isConnected, isNavigationReady, !hasReceivedDeviceCapabilities else { return }
+        supportsAutomaticDisplayOff = false
         supportsIndependentMapProfiles = false
         supportsExtendedMapVisibility = false
         supportsBirdsEyeMapNavigation = false
@@ -4339,6 +4387,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func sendScreenSettingsAfterCapabilityNegotiation() {
+        sendAutomaticDisplayOffSettingAfterCapabilityNegotiation()
         guard supportsDeviceSettings,
               hasReceivedDeviceCapabilities,
               !hasSentScreenSettingsForConnection else {
@@ -4350,6 +4399,19 @@ class BLEManager: NSObject, ObservableObject {
         if supportsBatteryStatusScreen {
             sendPhoneBatteryStatus(force: true)
         }
+    }
+
+    private func sendAutomaticDisplayOffSettingAfterCapabilityNegotiation() {
+        guard supportsDeviceSettings,
+              hasReceivedDeviceCapabilities,
+              supportsAutomaticDisplayOff,
+              !hasSentAutomaticDisplayOffForConnection else {
+            return
+        }
+        _ = sendSetting(
+            id: DeviceBLEProtocol.automaticDisplayOffSettingID,
+            value: automaticDisplayOffEnabled ? 1 : 0
+        )
     }
 
     @discardableResult
@@ -5011,6 +5073,7 @@ class BLEManager: NSObject, ObservableObject {
         isConnected = false
         isConnecting = false
         supportsDeviceSettings = false
+        supportsAutomaticDisplayOff = false
         connectedPeripheral = nil
         connectedDeviceID = nil
         navigationCharacteristic = nil
@@ -5108,6 +5171,7 @@ class BLEManager: NSObject, ObservableObject {
         firmwareUpdateTotalBytes = 0
         firmwareUpdateLastError = nil
         supportsDeviceSounds = false
+        supportsAutomaticDisplayOff = false
         supportsPowerButtonHonk = false
         supportsPowerButtonHonkAcknowledgement = false
         supportsIndependentMapProfiles = false
@@ -5143,6 +5207,7 @@ class BLEManager: NSObject, ObservableObject {
         hasSentMapProfileForConnection = false
         hasSentMapNavigationProfileForConnection = false
         hasSentScreenSettingsForConnection = false
+        hasSentAutomaticDisplayOffForConnection = false
         isSendingNegotiatedMapProfiles = false
         clearPendingPowerButtonHonkConfiguration()
     }
@@ -5219,6 +5284,26 @@ class BLEManager: NSObject, ObservableObject {
             maxCount: maxCount,
             priorityMaxCount: priorityMaxCount
         )
+    }
+
+    @discardableResult
+    func enqueueProtectedNavigationWriteForTesting(_ data: Data) -> Bool {
+        guard let endpoint = navigationWriteEndpoint else { return false }
+        return enqueueNavigationWrite(
+            data,
+            endpoint: endpoint,
+            label: "test protected transfer",
+            writeClass: .transfer,
+            atomically: true,
+            transportWrite: endpoint.write,
+            transportCanSend: endpoint.canSend,
+            transportExpectsWriteResponse: endpoint.expectsWriteResponse
+        )
+    }
+
+    func flushPendingNavigationWritesForTesting() {
+        guard let endpoint = navigationWriteEndpoint else { return }
+        flushPendingNavigationWrites(endpoint: endpoint)
     }
 
     func installNavigationWriteStallRecoveryForTesting(
@@ -6300,6 +6385,7 @@ class BLEManager: NSObject, ObservableObject {
             id: DeviceBLEProtocol.brightnessSettingID,
             value: Int32(deviceBrightnessPercent)
         )
+        sendAutomaticDisplayOffSettingAfterCapabilityNegotiation()
         sendSetting(
             id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
             value: disconnectedSleepTimeout.settingValue
@@ -6489,7 +6575,8 @@ class BLEManager: NSObject, ObservableObject {
         label: String,
         writeClass: NavigationWriteClass = .settingsControl,
         coalescingKey: String? = nil,
-        prioritized: Bool = false
+        prioritized: Bool = false,
+        onDrop: (() -> Void)? = nil
     ) -> Bool {
         guard isConnected,
               isNavigationReady,
@@ -6531,7 +6618,8 @@ class BLEManager: NSObject, ObservableObject {
                     ? !self.writeWithResponseInFlight
                     : peripheral.canSendWriteWithoutResponse
             },
-            transportExpectsWriteResponse: expectsWriteResponse
+            transportExpectsWriteResponse: expectsWriteResponse,
+            onDrop: onDrop
         ) else { return false }
         log("Queued native \(label): \(data.count) bytes")
         return true
@@ -6586,6 +6674,15 @@ class BLEManager: NSObject, ObservableObject {
         } else if Date().timeIntervalSince(lastNavigationQueuePendingLogAt) >= 1 {
             log("Navigation write queue pending: \(navigationWriteQueue.count)")
             lastNavigationQueuePendingLogAt = Date()
+        }
+        if madeProgress,
+           hasReceivedDeviceCapabilities,
+           supportsDeviceSettings,
+           supportsAutomaticDisplayOff,
+           !hasSentAutomaticDisplayOffForConnection {
+            DispatchQueue.main.async { [weak self] in
+                self?.sendAutomaticDisplayOffSettingAfterCapabilityNegotiation()
+            }
         }
     }
 
@@ -7124,6 +7221,7 @@ extension BLEManager: CBCentralManagerDelegate {
         isConnected = false
         isConnecting = false
         supportsDeviceSettings = false
+        supportsAutomaticDisplayOff = false
         hardwareLabel = ""
         deviceInformation.removeAll()
         connectedPeripheral = nil
@@ -7586,6 +7684,7 @@ extension BLEManager: CBPeripheralDelegate {
 
     private func rejectDeviceCapabilities(_ message: String) {
         supportsDeviceSounds = false
+        supportsAutomaticDisplayOff = false
         supportsPowerButtonHonk = false
         supportsPowerButtonHonkAcknowledgement = false
         supportsIndependentMapProfiles = false
@@ -7613,6 +7712,7 @@ extension BLEManager: CBPeripheralDelegate {
         updateWorkoutTelemetryCapability(false)
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
+        hasSentAutomaticDisplayOffForConnection = false
         hasSentMapProfileForConnection = false
         hasSentMapNavigationProfileForConnection = false
         clearPendingPowerButtonHonkConfiguration()
@@ -7733,6 +7833,8 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.gpsPositionQualityV1CapabilityMask != 0
         let hasRendererDiagnostics =
             flags & DeviceBLEProtocol.rendererDiagnosticsCapabilityMask != 0
+        let hasAutomaticDisplayOff =
+            flags & DeviceBLEProtocol.automaticDisplayOffCapabilityMask != 0
         let hasRideDiagnostics =
             flags & DeviceBLEProtocol.rideDiagnosticsCapabilityMask != 0
         if has3DBuildings && shouldApply3DBuildingVisibilityDefault {
@@ -7798,7 +7900,12 @@ extension BLEManager: CBPeripheralDelegate {
             supportsBatteryStatusScreen != hasBatteryStatusScreen {
             hasSentScreenSettingsForConnection = false
         }
+        if hasReceivedDeviceCapabilities &&
+            supportsAutomaticDisplayOff != hasAutomaticDisplayOff {
+            hasSentAutomaticDisplayOffForConnection = false
+        }
         supportsDeviceSounds = hasDeviceSounds
+        supportsAutomaticDisplayOff = hasAutomaticDisplayOff
         supportsPowerButtonHonk = hasPowerButtonHonk
         supportsPowerButtonHonkAcknowledgement = hasPowerButtonHonkAcknowledgement
         supportsIndependentMapProfiles = hasIndependentMapProfiles

@@ -10,11 +10,13 @@ class DisplayPowerManager {
 public:
   bool begin();
   bool requestUserBrightness(int32_t requestedPercent);
+  bool requestAutomaticDisplayOff(bool enabled);
   void requestState(display_power::State state);
 
   display_power::State state() const;
   uint8_t savedBrightnessPercent() const;
   uint8_t effectiveBrightnessPercent() const;
+  bool automaticDisplayOffEnabled() const;
 
   bool initializePanel();
   bool applyPendingPanelChange();
@@ -28,6 +30,9 @@ private:
   mutable SemaphoreHandle_t mutex_ = nullptr;
   display_power::Policy policy_;
   bool savedBrightnessPersisted_ = false;
+  bool automaticDisplayOffEnabled_ =
+      display_power::kDefaultAutomaticDisplayOffEnabled;
+  bool automaticDisplayOffPersisted_ = false;
   bool initialized_ = false;
 };
 

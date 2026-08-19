@@ -659,6 +659,10 @@ struct NavigationProtocolTests {
         testBLEManagerParsesDeviceTransferStatus()
         testBLEManagerSendsBrightnessFallbackSetting()
         testBLEManagerResendsBrightnessAfterAuthentication()
+        testBLEManagerGatesAutomaticDisplayOffForLegacyFirmware()
+        testBLEManagerSendsAutomaticDisplayOffAfterCapabilityNegotiation()
+        testBLEManagerSendsAutomaticDisplayOffSetting()
+        testBLEManagerRetriesAutomaticDisplayOffAfterQueuePressure()
         testBLEManagerSendsDisconnectedSleepTimeoutSetting()
         testBLEManagerSendsDeviceScreenSettings()
         testBLEManagerPersistsNewMapSettings()
@@ -10476,6 +10480,21 @@ struct NavigationProtocolTests {
         assertEqual(protectedWrites, [Data([1]), Data([2]), Data([3])],
                     "later queue pressure cannot fragment an accepted atomic message")
 
+        var protectedSettingQueue = NavigationWriteQueue(maxCount: 1)
+        assert(protectedSettingQueue.enqueueAtomically([
+            NavigationWrite(data: Data([5]), label: "protected-transfer")
+        ]), "a protected transfer can occupy the bounded queue")
+        assert(!protectedSettingQueue.enqueueCoalescing(
+            NavigationWrite(
+                data: Data([6]),
+                label: "automatic-display-off",
+                coalescingKey: DeviceBLEProtocol.automaticDisplayOffSettingCoalescingKey
+            ),
+            prioritized: false
+        ), "automatic display-off rejects a full protected queue instead of reporting success")
+        assertEqual(protectedSettingQueue.count, 1,
+                    "a rejected automatic display-off write preserves the protected transfer")
+
         var rejectedCoalescingDropCount = 0
         var fullProtectedCoalescingQueue = NavigationWriteQueue(maxCount: 2)
         assert(fullProtectedCoalescingQueue.enqueueAtomically([
@@ -11193,9 +11212,10 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.remoteDeviceDebugCapabilityMask, 1 << 16, "CAP2 bit 16 advertises remote device debugging without colliding with ride automation")
         assertEqual(DeviceBLEProtocol.gpsPositionQualityV1CapabilityMask, 1 << 17, "CAP2 bit 17 advertises GPS quality v1")
         assertEqual(DeviceBLEProtocol.rendererDiagnosticsCapabilityMask, 1 << 18, "CAP2 bit 18 advertises renderer diagnostics")
-        assertEqual(DeviceBLEProtocol.rideDiagnosticsCapabilityMask, 1 << 19, "CAP2 bit 19 advertises persistent ride diagnostics")
+        assertEqual(DeviceBLEProtocol.automaticDisplayOffCapabilityMask, 1 << 19, "CAP2 bit 19 advertises automatic display-off")
+        assertEqual(DeviceBLEProtocol.rideDiagnosticsCapabilityMask, 1 << 20, "CAP2 bit 20 advertises persistent ride diagnostics")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 17, "capability version negotiates ride diagnostics after renderer diagnostics in version 16")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 18, "capability version negotiates ride diagnostics after automatic display-off in version 17")
         assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
         assertEqual(DeviceBLEProtocol.rendererMetricsResponsePrefix, "RDMT", "renderer metrics responses use RDMT")
         assertEqual(DeviceBLEProtocol.rendererMetricsChunkPrefix, "RDMC", "renderer metrics chunks use RDMC")
@@ -11241,6 +11261,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelTextSizeSettingID, 33, "Map + Navigation street-label size uses setting ID 33")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelOrientationSettingID, 34, "Map + Navigation street-label orientation uses setting ID 34")
         assertEqual(DeviceBLEProtocol.mapPlusNavigation3DBuildingsSettingID, 35, "Map + Navigation 3D buildings use setting ID 35")
+        assertEqual(DeviceBLEProtocol.automaticDisplayOffSettingID, 36, "automatic display-off uses firmware setting ID 36")
         assertEqual(DeviceBLEProtocol.defaultMapStreetLabelsEnabled, true, "Map street labels default to enabled")
         assertEqual(DeviceBLEProtocol.defaultMapPlusNavigationStreetLabelsEnabled, false, "Map + Navigation street labels default to disabled")
         assertEqual(DeviceBLEProtocol.defaultStreetLabelDensity, 2, "street labels default to Balanced density")
@@ -16288,11 +16309,20 @@ struct NavigationProtocolTests {
     static func testBLEManagerResendsBrightnessAfterAuthentication() {
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: "deviceSettings.brightnessPercent")
+        defaults.removeObject(forKey: "deviceSettings.automaticDisplayOffEnabled")
 
         let manager = BLEManager()
         manager.isConnected = true
         manager.isNavigationReady = true
+        manager.supportsDeviceSettings = true
         manager.deviceBrightnessPercent = 70
+        manager.automaticDisplayOffEnabled = false
+        assert(manager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+                Data([1, 0, 0, 8, 0])
+        ), "automatic display-off capability response should be consumed")
+        assert(manager.supportsAutomaticDisplayOff,
+               "CAP2 bit 19 enables automatic display-off")
 
         var sentPackets: [Data] = []
         manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
@@ -16318,7 +16348,192 @@ struct NavigationProtocolTests {
             | (Int32(valueBytes[3]) << 24)
         assertEqual(value, 70,
                     "authenticated reconnect restores the saved brightness")
+        let automaticDisplayOffPackets = sentPackets.filter {
+            $0.count == 9 &&
+            String(data: $0.prefix(4), encoding: .utf8) ==
+                DeviceBLEProtocol.settingsFallbackPrefix &&
+            $0[4] == DeviceBLEProtocol.automaticDisplayOffSettingID
+        }
+        assertEqual(automaticDisplayOffPackets.count, 1,
+                    "authenticated reconnect sends automatic display-off exactly once")
+        assertEqual(readInt32LE(automaticDisplayOffPackets[0], offset: 5), 0,
+                    "authenticated reconnect restores disabled automatic display-off")
         defaults.removeObject(forKey: "deviceSettings.brightnessPercent")
+        defaults.removeObject(forKey: "deviceSettings.automaticDisplayOffEnabled")
+    }
+
+    static func testBLEManagerGatesAutomaticDisplayOffForLegacyFirmware() {
+        let defaults = UserDefaults.standard
+        let key = "deviceSettings.automaticDisplayOffEnabled"
+        defaults.removeObject(forKey: key)
+
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        assert(manager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) + Data([0])
+        ), "legacy capability response should be consumed")
+        assert(!manager.supportsAutomaticDisplayOff,
+               "legacy firmware does not advertise automatic display-off")
+        manager.supportsDeviceSettings = true
+        manager.automaticDisplayOffEnabled = false
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        assert(!manager.sendSetting(
+            id: DeviceBLEProtocol.automaticDisplayOffSettingID,
+            value: 0
+        ), "legacy firmware rejects unsupported automatic display-off writes")
+        assert(sentPackets.isEmpty,
+               "legacy firmware receives no automatic display-off packet")
+        defaults.removeObject(forKey: key)
+    }
+
+    static func testBLEManagerSendsAutomaticDisplayOffAfterCapabilityNegotiation() {
+        let defaults = UserDefaults.standard
+        let key = "deviceSettings.automaticDisplayOffEnabled"
+        defaults.removeObject(forKey: key)
+
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.supportsDeviceSettings = true
+        manager.automaticDisplayOffEnabled = false
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        let capability = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 8, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(capability),
+               "CAP2 capability response should be consumed")
+        let automaticDisplayOffPackets = sentPackets.filter {
+            $0.count == 9 &&
+            String(data: $0.prefix(4), encoding: .utf8) ==
+                DeviceBLEProtocol.settingsFallbackPrefix &&
+            $0[4] == DeviceBLEProtocol.automaticDisplayOffSettingID
+        }
+        assertEqual(automaticDisplayOffPackets.count, 1,
+                    "capability negotiation sends automatic display-off exactly once")
+        assertEqual(readInt32LE(automaticDisplayOffPackets[0], offset: 5), 0,
+                    "capability negotiation sends the saved disabled value")
+
+        assert(manager.handleDeviceCapabilitiesNotification(capability),
+               "duplicate CAP2 capability response should be consumed")
+        let duplicatePackets = sentPackets.filter {
+            $0.count == 9 &&
+            String(data: $0.prefix(4), encoding: .utf8) ==
+                DeviceBLEProtocol.settingsFallbackPrefix &&
+            $0[4] == DeviceBLEProtocol.automaticDisplayOffSettingID
+        }
+        assertEqual(duplicatePackets.count, 1,
+                    "duplicate capability responses do not resend automatic display-off")
+        defaults.removeObject(forKey: key)
+    }
+
+    static func testBLEManagerSendsAutomaticDisplayOffSetting() {
+        let defaults = UserDefaults.standard
+        let key = "deviceSettings.automaticDisplayOffEnabled"
+        defaults.removeObject(forKey: key)
+
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.supportsDeviceSettings = true
+        assert(manager.automaticDisplayOffEnabled,
+               "automatic display-off defaults to enabled")
+        manager.automaticDisplayOffEnabled = false
+        assert(manager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+                Data([1, 0, 0, 8, 0])
+        ), "automatic display-off capability response should be consumed")
+        assert(manager.supportsAutomaticDisplayOff,
+               "CAP2 bit 19 enables automatic display-off")
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        manager.sendSetting(
+            id: DeviceBLEProtocol.automaticDisplayOffSettingID,
+            value: 0
+        )
+
+        assertEqual(sentPackets.count, 1,
+                    "automatic display-off should send one fallback packet")
+        assertEqual(sentPackets[0][4],
+                    DeviceBLEProtocol.automaticDisplayOffSettingID,
+                    "automatic display-off uses setting ID 36")
+        assertEqual(readInt32LE(sentPackets[0], offset: 5), 0,
+                    "automatic display-off sends the disabled value")
+
+        let reloaded = BLEManager()
+        assert(!reloaded.automaticDisplayOffEnabled,
+               "automatic display-off preference persists")
+        defaults.removeObject(forKey: key)
+    }
+
+    static func testBLEManagerRetriesAutomaticDisplayOffAfterQueuePressure() {
+        let defaults = UserDefaults.standard
+        let key = "deviceSettings.automaticDisplayOffEnabled"
+        defaults.removeObject(forKey: key)
+
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.supportsDeviceSettings = true
+        manager.automaticDisplayOffEnabled = false
+
+        assert(manager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+                Data([1, 0, 0, 8, 0])
+        ), "automatic display-off capability response should be consumed")
+
+        var canSend = false
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { canSend },
+            write: { sentPackets.append($0) }
+        ))
+        manager.installNavigationWriteQueueForTesting(maxCount: 1)
+
+        assert(manager.enqueueProtectedNavigationWriteForTesting(Data([0xA1])),
+               "a protected transfer should occupy the test queue")
+        assert(!manager.sendSetting(
+            id: DeviceBLEProtocol.automaticDisplayOffSettingID,
+            value: 0
+        ), "automatic display-off reports queue rejection when no slot is available")
+        assert(sentPackets.isEmpty,
+               "queue pressure must not report an unsent automatic display-off packet")
+
+        canSend = true
+        manager.flushPendingNavigationWritesForTesting()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+        let automaticDisplayOffPackets = sentPackets.filter {
+            $0.count == 9 &&
+            String(data: $0.prefix(4), encoding: .utf8) ==
+                DeviceBLEProtocol.settingsFallbackPrefix &&
+            $0[4] == DeviceBLEProtocol.automaticDisplayOffSettingID
+        }
+        assertEqual(automaticDisplayOffPackets.count, 1,
+                    "automatic display-off retries after protected queue traffic drains")
+        assertEqual(readInt32LE(automaticDisplayOffPackets[0], offset: 5), 0,
+                    "the retried automatic display-off packet preserves the saved value")
+        defaults.removeObject(forKey: key)
     }
 
     static func testBLEManagerSendsDeviceScreenSettings() {
