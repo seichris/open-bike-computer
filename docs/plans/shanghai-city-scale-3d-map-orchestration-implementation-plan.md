@@ -795,8 +795,11 @@ response projects additive coordinator progress and preserves legacy counters,
 while detailed task, receipt, attempt, and reservation diagnostics remain
 authenticated; fair scheduling now uses a durable last-claimed round-robin
 cursor and reserves at most one slot per parent while another parent has
-unrepresented pending work. Weighted quotas and admission-aware priority
-policies remain pending.
+unrepresented pending work. Durable scheduling weights, admission priority,
+virtual-finish dispatch cost, and an optional per-parent active-task quota now
+prevent a large parent from monopolizing a worker pool when concurrency is
+increased; the Shanghai path records weight one and an active-task quota of
+one until measured capacity approves more.
 Authenticated plan diagnostics now include an observational p95 resource-model
 summary grouped by the stable worker capability identity; groups below the
 reviewed sample count remain explicitly uncalibrated and do not alter
@@ -854,11 +857,13 @@ receipt-set metrics, and cannot fall back to monolithic building normalization.
 The validation canary produced one 14,948,371-byte ZIP with 56 FMB entries;
 ZIP testing passed and the largest FMB was 623,771 bytes. The recorded artifact
 SHA-256 is `8ea288c0066c210ccb1802029d84b8bd351a2d50c790596e067871517842be17`.
-Final partition-invariant artifact identity, whole-artifact signature/device
-gates, and the high-limit reference comparison remain pending. The coordinator
-also derives a canonical block receipt-set identity ordered by global block
-coordinates, which is the input to the remaining partition-invariant artifact
-comparison.
+The final assembly summary now records a canonical partition-invariant
+artifact identity derived from source/index, calibration, cache, and ordered
+block receipts; task IDs, chunk boundaries, lease order, timings, and
+cache-warm state are excluded. Whole-artifact signature/device gates, the
+byte-level high-limit reference comparison, and the remaining physical
+acceptance gates remain pending. The coordinator also derives a canonical
+block receipt-set identity ordered by global block coordinates.
 
 ### Phase 5 — Progress, estimates, operations, and retention
 
@@ -1049,12 +1054,15 @@ artifact.
       authenticated/CLI task diagnostics.
 - [ ] Version and train the retained resource model and worker capability identity.
 - [x] Add bounded memory/CPU reservations with a concurrency-one heavy-task default.
-- [x] Add fair scheduling across parent jobs.
+- [x] Add fair scheduling across parent jobs, weighted virtual-finish dispatch,
+      admission priority, and a per-parent active-task quota.
 - [x] Implement chunk-only canonical building block generation.
 - [x] Emit typed multi-block runtime split signals and deterministic bisection.
 - [x] Convert split signals into bounded workload-scan child enqueue transitions.
 - [x] Implement cache-only final assembly and whole-artifact validation.
-- [ ] Preserve partition-invariant block and artifact identity.
+- [ ] Preserve partition-invariant block and artifact identity (canonical
+      receipt-set and artifact-input identities are implemented; byte-level
+      reference equivalence remains).
 - [x] Add public aggregate progress and authenticated operator diagnostics.
 - [x] Add conservative failed/cancelled task-evidence retention without
       deleting reusable canonical cache blocks.

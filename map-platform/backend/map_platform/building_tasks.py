@@ -19,7 +19,7 @@ from .building_resource_model import (
     summarize_resource_observations,
 )
 
-BUILDING_TASK_SCHEMA_VERSION = 4
+BUILDING_TASK_SCHEMA_VERSION = 5
 DEFAULT_BUILDING_TASK_RETENTION_DAYS = 30
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _TASK_STATES = {"pending", "leased", "ready", "split", "failed", "cancelled"}
@@ -57,6 +57,8 @@ _MEMORY_ADMISSION_PERCENT = 85
 _DEFAULT_RESOURCE_POOL = "default"
 _DEFAULT_MAX_CONCURRENT_TASKS = 1
 _DEFAULT_SPLIT_DEPTH_LIMIT = 16
+_DEFAULT_SCHEDULING_WEIGHT = 1
+_DEFAULT_ADMISSION_PRIORITY = 0
 
 
 class BuildingTaskStoreError(RuntimeError):
@@ -163,6 +165,9 @@ class BuildingTaskStore:
         policy_version: int,
         resource_model_version: str,
         stage: str = "planning",
+        scheduling_weight: int = _DEFAULT_SCHEDULING_WEIGHT,
+        admission_priority: int = _DEFAULT_ADMISSION_PRIORITY,
+        active_task_quota: int | None = None,
     ) -> None:
         _require_sha(global_plan_sha256, "global_plan_sha256")
         if not isinstance(parent_job_id, str) or not parent_job_id:
@@ -175,13 +180,18 @@ class BuildingTaskStore:
             raise BuildingTaskStoreError("expected output block count is invalid")
         if stage not in _PLAN_STATES:
             raise BuildingTaskStoreError("plan stage is invalid")
+        _validate_scheduling_policy(
+            scheduling_weight=scheduling_weight,
+            admission_priority=admission_priority,
+            active_task_quota=active_task_quota,
+        )
         now = self._clock()
         payload = _canonical_json(dict(input_identity))
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
-                "SELECT global_plan_sha256, input_identity_json, expected_output_block_count, policy_version, resource_model_version FROM map_build_plans WHERE parent_job_id = ?",
+                "SELECT global_plan_sha256, input_identity_json, expected_output_block_count, policy_version, resource_model_version, scheduling_weight, admission_priority, active_task_quota FROM map_build_plans WHERE parent_job_id = ?",
                 (parent_job_id,),
             ).fetchone()
             if existing is not None:
@@ -191,6 +201,9 @@ class BuildingTaskStore:
                     expected_output_block_count,
                     policy_version,
                     resource_model_version,
+                    scheduling_weight,
+                    admission_priority,
+                    active_task_quota,
                 ):
                     raise BuildingTaskStoreError("parent plan identity changed")
             else:
@@ -200,8 +213,10 @@ class BuildingTaskStore:
                         parent_job_id, global_plan_sha256, input_identity_json,
                         stage, state, expected_output_block_count,
                         policy_version, resource_model_version,
-                        cancellation_generation, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                        cancellation_generation, scheduling_weight,
+                        admission_priority, active_task_quota,
+                        virtual_finish, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 0, ?, ?)
                     """,
                     (
                         parent_job_id,
@@ -212,6 +227,9 @@ class BuildingTaskStore:
                         expected_output_block_count,
                         policy_version,
                         resource_model_version,
+                        scheduling_weight,
+                        admission_priority,
+                        active_task_quota,
                         now,
                         now,
                     ),
@@ -386,10 +404,15 @@ class BuildingTaskStore:
                 params.append(parent_job_id)
             rows = connection.execute(
                 f"""
-                SELECT task.* FROM map_build_tasks task
+                SELECT task.*, plan.scheduling_weight,
+                       plan.admission_priority, plan.active_task_quota,
+                       plan.virtual_finish
+                FROM map_build_tasks task
                 JOIN map_build_plans plan ON plan.parent_job_id = task.parent_job_id
                 WHERE {' AND '.join(where)}
                 ORDER BY
+                    plan.admission_priority DESC,
+                    plan.virtual_finish,
                     CASE WHEN plan.last_claimed_at IS NULL THEN 0 ELSE 1 END,
                     plan.last_claimed_at,
                     plan.parent_job_id,
@@ -417,6 +440,14 @@ class BuildingTaskStore:
             for candidate in rows:
                 if not _worker_can_admit(candidate, worker_capability):
                     continue
+                active_task_quota = candidate["active_task_quota"]
+                if active_task_quota is not None:
+                    active_for_parent = connection.execute(
+                        "SELECT COUNT(*) FROM map_build_tasks WHERE parent_job_id=? AND state='leased'",
+                        (candidate["parent_job_id"],),
+                    ).fetchone()[0]
+                    if int(active_for_parent) >= int(active_task_quota):
+                        continue
                 request = _resource_request(candidate, worker_capability)
                 if request is not None and request["maxConcurrentTasks"] > 1:
                     if (
@@ -459,8 +490,13 @@ class BuildingTaskStore:
                 ),
             )
             connection.execute(
-                "UPDATE map_build_plans SET last_claimed_at=? WHERE parent_job_id=?",
-                (now, row["parent_job_id"]),
+                "UPDATE map_build_plans SET last_claimed_at=?, virtual_finish=? WHERE parent_job_id=?",
+                (
+                    now,
+                    float(row["virtual_finish"] or 0.0)
+                    + _dispatch_cost(row) / float(row["scheduling_weight"]),
+                    row["parent_job_id"],
+                ),
             )
             admission = _resource_admission(row, worker_capability)
             if resource_request is not None:
@@ -1731,6 +1767,10 @@ class BuildingTaskStore:
                     policy_version INTEGER NOT NULL,
                     resource_model_version TEXT NOT NULL,
                     cancellation_generation INTEGER NOT NULL,
+                    scheduling_weight INTEGER NOT NULL DEFAULT 1,
+                    admission_priority INTEGER NOT NULL DEFAULT 0,
+                    active_task_quota INTEGER,
+                    virtual_finish REAL NOT NULL DEFAULT 0,
                     last_claimed_at REAL,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
@@ -1832,6 +1872,22 @@ class BuildingTaskStore:
                 connection.execute(
                     "ALTER TABLE map_build_plans ADD COLUMN last_claimed_at REAL"
                 )
+            if "scheduling_weight" not in plan_columns:
+                connection.execute(
+                    "ALTER TABLE map_build_plans ADD COLUMN scheduling_weight INTEGER NOT NULL DEFAULT 1"
+                )
+            if "admission_priority" not in plan_columns:
+                connection.execute(
+                    "ALTER TABLE map_build_plans ADD COLUMN admission_priority INTEGER NOT NULL DEFAULT 0"
+                )
+            if "active_task_quota" not in plan_columns:
+                connection.execute(
+                    "ALTER TABLE map_build_plans ADD COLUMN active_task_quota INTEGER"
+                )
+            if "virtual_finish" not in plan_columns:
+                connection.execute(
+                    "ALTER TABLE map_build_plans ADD COLUMN virtual_finish REAL NOT NULL DEFAULT 0"
+                )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS map_build_plans_fair_claim
@@ -1849,6 +1905,66 @@ class BuildingTaskStore:
 
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _validate_scheduling_policy(
+    *,
+    scheduling_weight: int,
+    admission_priority: int,
+    active_task_quota: int | None,
+) -> None:
+    if (
+        isinstance(scheduling_weight, bool)
+        or not isinstance(scheduling_weight, int)
+        or not 1 <= scheduling_weight <= 1_000
+    ):
+        raise BuildingTaskStoreError("scheduling weight is invalid")
+    if (
+        isinstance(admission_priority, bool)
+        or not isinstance(admission_priority, int)
+        or not 0 <= admission_priority <= 1_000
+    ):
+        raise BuildingTaskStoreError("admission priority is invalid")
+    if active_task_quota is not None and (
+        isinstance(active_task_quota, bool)
+        or not isinstance(active_task_quota, int)
+        or active_task_quota <= 0
+    ):
+        raise BuildingTaskStoreError("active task quota is invalid")
+
+
+def _dispatch_cost(row: sqlite3.Row) -> float:
+    """Return a bounded virtual-finish cost for weighted fair dispatch.
+
+    A chunk with more blocks represents more work than a one-block chunk, so
+    it advances its parent's virtual finish by that block count.  Callers may
+    provide a reviewed ``quotaUnits`` override in the predicted resource
+    document, but malformed values fail closed to the deterministic block
+    count.  The cost is never zero, which prevents a cache-heavy parent from
+    getting an unbounded sequence of claims at the same virtual finish.
+    """
+
+    try:
+        blocks = json.loads(row["blocks_json"])
+        block_count = len(blocks) if isinstance(blocks, list) else 1
+    except (TypeError, ValueError, json.JSONDecodeError):
+        block_count = 1
+    cost = float(max(1, block_count))
+    predicted = row["predicted_resource_json"]
+    if predicted:
+        try:
+            document = json.loads(predicted)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            document = None
+        if isinstance(document, dict):
+            override = document.get("quotaUnits")
+            if (
+                isinstance(override, int)
+                and not isinstance(override, bool)
+                and override > 0
+            ):
+                cost = float(min(1_000_000, override))
+    return cost
 
 
 def _worker_can_admit(

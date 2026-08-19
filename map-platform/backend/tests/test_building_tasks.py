@@ -263,7 +263,7 @@ class BuildingTaskStoreTests(unittest.TestCase):
             first.task.task_id,
             worker_id="worker-a",
             lease_token=first.lease_token,
-            block=(1, 2),
+            block=first.task.blocks[0],
             cache_identity_sha256=SHA,
             content_sha256=CONTENT,
             producer_identity={},
@@ -412,7 +412,76 @@ class BuildingTaskStoreTests(unittest.TestCase):
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         connection.close()
         self.assertIn("last_claimed_at", columns)
-        self.assertEqual(version, 4)
+        self.assertEqual(version, 5)
+
+    def test_weighted_virtual_finish_and_active_parent_quota_prevent_monopoly(self):
+        self.store.create_plan(
+            parent_job_id="job-weighted",
+            global_plan_sha256="b" * 64,
+            input_identity={"source": "weighted"},
+            expected_output_block_count=3,
+            policy_version=1,
+            resource_model_version="v1",
+            scheduling_weight=1,
+            active_task_quota=1,
+        )
+        self.store.add_tasks(
+            [
+                BuildingTaskSpec(
+                    task_id="weighted-small",
+                    parent_job_id="job-weighted",
+                    kind="building_chunk",
+                    blocks=((2, 2),),
+                    chunk_plan_sha256="b" * 64,
+                ),
+                BuildingTaskSpec(
+                    task_id="weighted-small-2",
+                    parent_job_id="job-weighted",
+                    kind="building_chunk",
+                    blocks=((2, 3),),
+                    chunk_plan_sha256="b" * 64,
+                ),
+            ]
+        )
+        capability = {
+            "resourcePool": "weighted-pool",
+            "memoryLimitBytes": 8_000_000_000,
+            "cpuCount": 8,
+            "maxConcurrentTasks": 2,
+        }
+        first = self.store.claim_next(worker_id="worker-a", worker_capability=capability)
+        self.assertIsNotNone(first)
+        assert first is not None
+        self.assertEqual(first.task.parent_job_id, "job-weighted")
+        # The parent-specific quota blocks a second lease even though the pool
+        # has a second slot. Completing the first task makes the next claim
+        # eligible and weighted virtual finish prefers the smaller parent.
+        self.assertIsNone(
+            self.store.claim_next(worker_id="worker-b", worker_capability=capability)
+        )
+        self.store.publish_receipt(
+            first.task.task_id,
+            worker_id="worker-a",
+            lease_token=first.lease_token,
+            block=first.task.blocks[0],
+            cache_identity_sha256=SHA,
+            content_sha256=CONTENT,
+            producer_identity={},
+            validation={},
+        )
+        # Fail it to release the reservation and exercise the scheduler
+        # handoff to the next weighted task.
+        self.store.fail(
+            first.task.task_id,
+            worker_id="worker-a",
+            lease_token=first.lease_token,
+            typed_failure="test_scheduler_release",
+            transient=False,
+        )
+        second = self.store.claim_next(worker_id="worker-b", worker_capability=capability)
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertEqual(second.task.parent_job_id, "job-weighted")
 
     def test_receipt_set_identity_is_complete_and_block_ordered(self):
         path = Path(self.temp.name) / "receipt-identity.sqlite3"

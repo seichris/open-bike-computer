@@ -77,6 +77,10 @@ from .building_cache_receipts import (
     BuildingBlockReceiptError,
     read_building_block_receipts,
 )
+from .building_artifact_identity import (
+    partition_invariant_artifact_identity,
+    validate_partition_invariant_artifact_identity,
+)
 from .building_tasks import (
     BuildingTaskSpec,
     BuildingTaskStoreError,
@@ -1667,6 +1671,9 @@ class MapBuildPipeline:
             policy_version=partition.policy.policy_version,
             resource_model_version="building-resource-model-untrained-v1",
             stage="chunk_planning",
+            scheduling_weight=1,
+            admission_priority=0,
+            active_task_quota=1,
         )
         self.building_task_store.reopen_failed_plan(
             job.job_id,
@@ -2383,6 +2390,9 @@ class MapBuildPipeline:
             policy_version=partition.policy.policy_version,
             resource_model_version="building-resource-model-untrained-v1",
             stage="chunk_planning",
+            scheduling_weight=1,
+            admission_priority=0,
+            active_task_quota=1,
         )
         task_specs: list[BuildingTaskSpec] = []
         for chunk in partition.chunks:
@@ -2420,6 +2430,7 @@ class MapBuildPipeline:
                             else CONSERVATIVE_MEMORY_MODEL_VERSION
                         ),
                         "estimatedWallSeconds": chunk.workload.estimated_wall_seconds,
+                        "quotaUnits": max(1, chunk.workload.missing_block_count),
                         "requiresExactWorkloadScan": (
                             chunk.workload.requires_exact_workload_scan
                         ),
@@ -2893,6 +2904,17 @@ class MapBuildPipeline:
             scope_plan=global_plan,
             calibration_generation=dict(calibration_generation),
         )
+        partition_identity = partition_invariant_artifact_identity(
+            global_plan_sha256=global_plan.sha256,
+            source_snapshot_sha256=source_snapshot_sha256,
+            source_index_database_sha256=source_index["databaseSha256"],
+            calibration_manifest_sha256=calibration_generation["manifestSha256"],
+            cache_identity_sha256=cache_identity["cacheIdentitySha256"],
+            receipt_set_sha256=self.building_task_store.receipt_set_sha256(
+                parent_job_id
+            )
+            or "",
+        )
         return {
             "mode": "chunked",
             "scope": scope_summary,
@@ -2927,6 +2949,7 @@ class MapBuildPipeline:
                 "receiptSetSha256": self.building_task_store.receipt_set_sha256(
                     parent_job_id
                 ),
+                "partitionInvariantArtifactIdentity": partition_identity,
                 "workloadReceiptCount": len(workloads),
             },
         }
@@ -4194,6 +4217,13 @@ class MapBuildPipeline:
                         raise ValueError("chunked building summary identity is invalid")
                 if chunked["globalPlanSha256"] != scope["scopePlanSha256"]:
                     raise ValueError("chunked global plan identity is inconsistent")
+                partition_identity = chunked.get(
+                    "partitionInvariantArtifactIdentity"
+                )
+                if partition_identity is not None:
+                    validate_partition_invariant_artifact_identity(
+                        partition_identity
+                    )
             summary = {
                 "schemaVersion": 1,
                 "identitySha256": identity["identitySha256"],
@@ -4264,7 +4294,9 @@ class MapBuildPipeline:
                         "globalPlanSha256",
                         "scopePlanSha256",
                         "receiptSetSha256",
+                        "partitionInvariantArtifactIdentity",
                     )
+                    if key in chunked
                 }
             if "attemptScope" in value:
                 attempt_scope = value["attemptScope"]
