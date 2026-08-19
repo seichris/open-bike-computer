@@ -1270,6 +1270,16 @@ class JobStore:
         stop = threading.Event()
 
         def heartbeat_loop() -> None:
+            # Refresh the lease before the long-running phase starts.  Waiting
+            # for the first interval leaves a narrow window in which a worker
+            # can be reclaimed even though it has already entered the guarded
+            # phase (especially with short test or development leases).
+            try:
+                self.heartbeat_unless_cancelled(job_id, worker_id=worker_id)
+                if on_heartbeat is not None:
+                    on_heartbeat()
+            except (KeyError, RuntimeError):
+                return
             while not stop.wait(interval_seconds):
                 try:
                     self.heartbeat_unless_cancelled(job_id, worker_id=worker_id)

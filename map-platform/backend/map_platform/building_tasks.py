@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-BUILDING_TASK_SCHEMA_VERSION = 1
+BUILDING_TASK_SCHEMA_VERSION = 2
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _TASK_STATES = {"pending", "leased", "ready", "split", "failed", "cancelled"}
 _PLAN_STATES = {
@@ -58,6 +58,7 @@ class BuildingTaskRecord:
     typed_error: str | None
     next_eligible_at: float | None
     output_receipt_set_sha256: str | None
+    predicted_resource: Mapping[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -410,6 +411,143 @@ class BuildingTaskStore:
         finally:
             connection.close()
 
+    def complete_workload_scan(
+        self,
+        task_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        workload_receipt: Mapping[str, Any],
+        actual_resource: Mapping[str, Any] | None = None,
+        phase_timings: Mapping[str, Any] | None = None,
+        peak_rss_bytes: int | None = None,
+        now: float | None = None,
+    ) -> BuildingTaskRecord:
+        """Persist an exact source-index workload and release the scan task.
+
+        A workload scan is a planning task, not a build result.  Once the
+        immutable receipt is committed, the deterministic task is converted
+        to a pending ``building_chunk`` so the future executor can claim it
+        using the same block set and closure identity.  The receipt itself is
+        retained separately for audit and runtime closure validation.
+        """
+
+        receipt = _validate_workload_receipt(workload_receipt)
+        now = self._clock() if now is None else now
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            task = self._locked_task(connection, task_id, worker_id, lease_token)
+            if task.kind != "building_workload_scan":
+                raise BuildingTaskStoreError(
+                    "task is not an exact workload scan"
+                )
+            payload = _canonical_json(receipt).decode("utf-8")
+            source_identity = _canonical_json(
+                {
+                    "sourceIndexKey": receipt["sourceIndexKey"],
+                    "sourceSnapshotSha256": receipt["sourceSnapshotSha256"],
+                }
+            ).decode("utf-8")
+            existing = connection.execute(
+                "SELECT closure_plan_sha256, source_index_identity_json, workload_json FROM map_build_workload_receipts WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing) != (
+                    receipt["closurePlanSha256"],
+                    source_identity,
+                    payload,
+                ):
+                    raise BuildingTaskStoreError(
+                        "workload receipt identity changed"
+                    )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO map_build_workload_receipts(
+                        task_id, parent_job_id, closure_plan_sha256,
+                        source_index_identity_json, workload_json, recorded_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_id,
+                        task.parent_job_id,
+                        receipt["closurePlanSha256"],
+                        source_identity,
+                        payload,
+                        now,
+                    ),
+                )
+            row = connection.execute(
+                "SELECT predicted_resource_json FROM map_build_tasks WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            predicted: dict[str, Any] = {}
+            if row is not None and row["predicted_resource_json"]:
+                try:
+                    existing_predicted = json.loads(row["predicted_resource_json"])
+                    if isinstance(existing_predicted, dict):
+                        predicted.update(existing_predicted)
+                except (TypeError, ValueError) as exc:
+                    raise BuildingTaskStoreError(
+                        "task predicted resource is invalid"
+                    ) from exc
+            predicted["workloadReceipt"] = {
+                key: receipt[key]
+                for key in (
+                    "relationCount",
+                    "wayCount",
+                    "nodeCount",
+                    "totalObjectCount",
+                    "storedRelationMemberCount",
+                    "wayNodeReferenceCount",
+                    "vertexCount",
+                    "candidateOutlineCount",
+                    "candidatePartCount",
+                    "ringCount",
+                    "holeCount",
+                )
+            }
+            connection.execute(
+                """
+                UPDATE map_build_tasks
+                SET kind='building_chunk', closure_plan_sha256=?, state='pending',
+                    predicted_resource_json=?, typed_error=NULL,
+                    lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
+                    heartbeat_at=NULL, next_eligible_at=?, updated_at=?
+                WHERE task_id=?
+                """,
+                (
+                    receipt["closurePlanSha256"],
+                    _canonical_json(predicted).decode("utf-8"),
+                    now,
+                    now,
+                    task_id,
+                ),
+            )
+            self._finish_attempt(
+                connection,
+                task_id,
+                task.transient_attempts,
+                outcome="workload_scanned",
+                actual_resource=actual_resource,
+                phase_timings=phase_timings,
+                peak_rss_bytes=peak_rss_bytes,
+                now=now,
+            )
+            connection.commit()
+            return self._row_to_task(
+                connection.execute(
+                    "SELECT * FROM map_build_tasks WHERE task_id=?", (task_id,)
+                ).fetchone()
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def mark_ready(
         self,
         task_id: str,
@@ -608,6 +746,22 @@ class BuildingTaskStore:
                 "SELECT * FROM map_build_block_receipts WHERE parent_job_id=? ORDER BY block_x, block_y",
                 (parent_job_id,),
             ).fetchall())
+        finally:
+            connection.close()
+
+    def list_workload_receipts(self, parent_job_id: str) -> tuple[dict[str, Any], ...]:
+        connection = self._connect()
+        try:
+            return tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM map_build_workload_receipts
+                    WHERE parent_job_id=? ORDER BY recorded_at, task_id
+                    """,
+                    (parent_job_id,),
+                ).fetchall()
+            )
         finally:
             connection.close()
 
@@ -873,6 +1027,11 @@ class BuildingTaskStore:
             typed_error=row["typed_error"],
             next_eligible_at=row["next_eligible_at"],
             output_receipt_set_sha256=row["output_receipt_set_sha256"],
+            predicted_resource=(
+                json.loads(row["predicted_resource_json"])
+                if row["predicted_resource_json"]
+                else None
+            ),
         )
 
     def _connect(self) -> sqlite3.Connection:
@@ -959,12 +1118,22 @@ class BuildingTaskStore:
                     typed_failure TEXT,
                     PRIMARY KEY(task_id, attempt_number)
                 );
+                CREATE TABLE IF NOT EXISTS map_build_workload_receipts(
+                    task_id TEXT PRIMARY KEY REFERENCES map_build_tasks(task_id),
+                    parent_job_id TEXT NOT NULL REFERENCES map_build_plans(parent_job_id),
+                    closure_plan_sha256 TEXT NOT NULL,
+                    source_index_identity_json TEXT NOT NULL,
+                    workload_json TEXT NOT NULL,
+                    recorded_at REAL NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS map_build_tasks_pending
                     ON map_build_tasks(state, next_eligible_at, created_at);
                 CREATE INDEX IF NOT EXISTS map_build_tasks_parent
                     ON map_build_tasks(parent_job_id, created_at);
                 CREATE INDEX IF NOT EXISTS map_build_task_attempts_started
                     ON map_build_task_attempts(started_at);
+                CREATE INDEX IF NOT EXISTS map_build_workload_receipts_parent
+                    ON map_build_workload_receipts(parent_job_id, recorded_at);
                 """
             )
             connection.execute(f"PRAGMA user_version={BUILDING_TASK_SCHEMA_VERSION}")
@@ -982,6 +1151,83 @@ def _canonical_json(value: Any) -> bytes:
 
 def _json_or_none(value: Mapping[str, Any] | None) -> str | None:
     return None if value is None else _canonical_json(dict(value)).decode("utf-8")
+
+
+def _validate_workload_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise BuildingTaskStoreError("workload receipt is invalid")
+    receipt = dict(value)
+    required_strings = (
+        "sourceIndexKey",
+        "sourceSnapshotSha256",
+        "closurePlanSha256",
+    )
+    for field in required_strings:
+        if not isinstance(receipt.get(field), str) or not _SHA256.fullmatch(
+            receipt[field]
+        ):
+            raise BuildingTaskStoreError(
+                f"workload receipt {field} is not a lowercase sha256"
+            )
+    counters = (
+        "relationCount",
+        "wayCount",
+        "nodeCount",
+        "totalObjectCount",
+        "storedRelationMemberCount",
+        "wayNodeReferenceCount",
+        "vertexCount",
+        "candidateOutlineCount",
+        "candidatePartCount",
+    )
+    for field in counters:
+        counter = receipt.get(field)
+        if (
+            isinstance(counter, bool)
+            or not isinstance(counter, int)
+            or counter < 0
+        ):
+            raise BuildingTaskStoreError(
+                f"workload receipt {field} is invalid"
+            )
+    if receipt["totalObjectCount"] != sum(
+        receipt[field] for field in ("relationCount", "wayCount", "nodeCount")
+    ):
+        raise BuildingTaskStoreError(
+            "workload receipt totalObjectCount is inconsistent"
+        )
+    for field in ("ringCount", "holeCount"):
+        counter = receipt.get(field)
+        if counter is not None and (
+            isinstance(counter, bool)
+            or not isinstance(counter, int)
+            or counter < 0
+        ):
+            raise BuildingTaskStoreError(
+                f"workload receipt {field} is invalid"
+            )
+    for field in (
+        "candidateKeys",
+        "requiredRelationKeys",
+        "requiredWayKeys",
+        "requiredNodeKeys",
+        "calibrationTargetCells",
+        "calibrationSampleCells",
+    ):
+        entries = receipt.get(field)
+        if not isinstance(entries, list):
+            raise BuildingTaskStoreError(
+                f"workload receipt {field} is invalid"
+            )
+    if receipt["relationCount"] != len(receipt["requiredRelationKeys"]):
+        raise BuildingTaskStoreError(
+            "workload receipt relation count is inconsistent"
+        )
+    if receipt["wayCount"] != len(receipt["requiredWayKeys"]):
+        raise BuildingTaskStoreError("workload receipt way count is inconsistent")
+    if receipt["nodeCount"] != len(receipt["requiredNodeKeys"]):
+        raise BuildingTaskStoreError("workload receipt node count is inconsistent")
+    return receipt
 
 
 def _require_sha(value: str, field: str) -> None:

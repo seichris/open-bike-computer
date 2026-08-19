@@ -484,6 +484,9 @@ def create_app():
                 asdict(task)
                 for task in building_task_store.list_tasks(parent_job_id)
             ],
+            "workloadReceipts": list(
+                building_task_store.list_workload_receipts(parent_job_id)
+            ),
             "receipts": list(building_task_store.list_receipts(parent_job_id)),
             "attempts": list(building_task_store.list_attempts(parent_job_id)),
         }

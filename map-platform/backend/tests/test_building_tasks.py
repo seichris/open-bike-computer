@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -14,10 +16,38 @@ from map_platform.building_orchestration import partition_global_building_plan
 from map_platform.building_scope import plan_global_building_scope
 from map_platform.models import Bounds, GeometryMode, NormalizedGeometry, SourceRegion
 from map_platform.pipeline import MapBuildPipeline, PipelinePaths
+from map_platform.building_scope import canonical_json
+from map_platform.reuse import MapBlock
 
 
 SHA = "a" * 64
 CONTENT = "b" * 64
+
+
+def workload_receipt():
+    return {
+        "schemaVersion": 1,
+        "sourceIndexKey": "c" * 64,
+        "sourceSnapshotSha256": "d" * 64,
+        "candidateKeys": ["w1"],
+        "requiredRelationKeys": ["r1"],
+        "requiredWayKeys": ["w1"],
+        "requiredNodeKeys": ["n1", "n2"],
+        "calibrationTargetCells": [[1, 2]],
+        "calibrationSampleCells": [[0, 1], [1, 2]],
+        "closurePlanSha256": "e" * 64,
+        "relationCount": 1,
+        "wayCount": 1,
+        "nodeCount": 2,
+        "totalObjectCount": 4,
+        "storedRelationMemberCount": 1,
+        "wayNodeReferenceCount": 2,
+        "vertexCount": 2,
+        "candidateOutlineCount": 1,
+        "candidatePartCount": 0,
+        "ringCount": None,
+        "holeCount": None,
+    }
 
 
 class Clock:
@@ -197,6 +227,140 @@ class BuildingTaskStoreTests(unittest.TestCase):
                 worker_id="worker-a",
                 lease_token=claimed.lease_token,
             )
+
+    def test_workload_scan_receipt_is_durable_and_promotes_chunk(self):
+        self.store.add_tasks(
+            [
+                BuildingTaskSpec(
+                    task_id="scan-1",
+                    parent_job_id="job-1",
+                    kind="building_workload_scan",
+                    blocks=((1, 2),),
+                    chunk_plan_sha256=SHA,
+                    predicted_resource={"requiresExactWorkloadScan": True},
+                )
+            ]
+        )
+        claimed = self.store.claim_next(worker_id="scanner", lease_seconds=10)
+        assert claimed is not None
+        promoted = self.store.complete_workload_scan(
+            claimed.task.task_id,
+            worker_id="scanner",
+            lease_token=claimed.lease_token,
+            workload_receipt=workload_receipt(),
+            actual_resource={"peakRssBytes": 123},
+            peak_rss_bytes=123,
+        )
+        self.assertEqual(promoted.kind, "building_chunk")
+        self.assertEqual(promoted.state, "pending")
+        self.assertEqual(promoted.closure_plan_sha256, "e" * 64)
+        self.assertEqual(
+            promoted.predicted_resource["workloadReceipt"]["totalObjectCount"],
+            4,
+        )
+        receipts = self.store.list_workload_receipts("job-1")
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0]["closure_plan_sha256"], "e" * 64)
+        self.assertEqual(self.store.list_attempts("job-1")[0]["outcome"], "workload_scanned")
+
+    def test_workload_scan_rejects_inconsistent_object_totals(self):
+        self.store.add_tasks(
+            [
+                BuildingTaskSpec(
+                    task_id="scan-2",
+                    parent_job_id="job-1",
+                    kind="building_workload_scan",
+                    blocks=((1, 2),),
+                    chunk_plan_sha256=SHA,
+                )
+            ]
+        )
+        claimed = self.store.claim_next(worker_id="scanner")
+        assert claimed is not None
+        invalid = workload_receipt()
+        invalid["totalObjectCount"] = 3
+        with self.assertRaises(BuildingTaskStoreError):
+            self.store.complete_workload_scan(
+                claimed.task.task_id,
+                worker_id="scanner",
+                lease_token=claimed.lease_token,
+                workload_receipt=invalid,
+            )
+
+    def test_chunk_receipts_are_reread_from_cache_before_publication(self):
+        block = MapBlock(12, 34)
+        spec = self.spec(blocks=((block.x, block.y),))
+        self.store.add_tasks([spec])
+        claimed = self.store.claim_next(worker_id="builder")
+        assert claimed is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_root = root / "building-cache"
+            identity_body = {
+                "sourceSnapshotSha256": "c" * 64,
+                "rulesSha256": "d" * 64,
+            }
+            identity_sha = hashlib.sha256(canonical_json(identity_body)).hexdigest()
+            identity = {**identity_body, "cacheIdentitySha256": identity_sha}
+            namespace = (
+                cache_root
+                / "building-block-v1"
+                / identity_body["sourceSnapshotSha256"]
+                / identity_body["rulesSha256"]
+                / identity_sha
+            )
+            section = b"chunk-section"
+            section_sha = hashlib.sha256(section).hexdigest()
+            body = {
+                "schemaVersion": 1,
+                "cacheIdentitySha256": identity_sha,
+                "block": {
+                    "x": block.x,
+                    "y": block.y,
+                    "boundsMeters": [
+                        block.x * 4096,
+                        block.y * 4096,
+                        (block.x + 1) * 4096,
+                        (block.y + 1) * 4096,
+                    ],
+                },
+                "section": {
+                    "path": f"sections/{section_sha}.bin",
+                    "bytes": len(section),
+                    "sha256": section_sha,
+                },
+                "stats": {"recordCount": 0, "sectionBytes": len(section)},
+            }
+            manifest = {
+                **body,
+                "manifestSha256": hashlib.sha256(canonical_json(body)).hexdigest(),
+            }
+            (namespace / "blocks").mkdir(parents=True)
+            (namespace / "sections").mkdir()
+            (namespace / "sections" / f"{section_sha}.bin").write_bytes(section)
+            identity_path = root / "cache-identity.json"
+            identity_path.write_bytes(canonical_json(identity))
+            (namespace / "blocks" / f"{block.x}_{block.y}.json").write_bytes(
+                canonical_json(manifest)
+            )
+            pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"),
+                building_task_store=self.store,
+            )
+            result = pipeline.publish_building_chunk_receipts(
+                task_id=claimed.task.task_id,
+                worker_id="builder",
+                lease_token=claimed.lease_token,
+                cache_identity_path=identity_path,
+                blocks=[block],
+            )
+            self.assertEqual(result["receiptCount"], 1)
+            ready = self.store.mark_ready(
+                claimed.task.task_id,
+                worker_id="builder",
+                lease_token=claimed.lease_token,
+            )
+            self.assertEqual(ready.state, "ready")
 
     def test_expired_lease_returns_task_to_pending_and_fences_old_worker(self):
         self.store.add_tasks([self.spec(blocks=((1, 2),))])

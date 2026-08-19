@@ -19,7 +19,7 @@ from copy import deepcopy
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, Mapping
 
 from .artifacts import (
     BIKE_MAP_STREAM_FORMAT,
@@ -69,6 +69,10 @@ from .building_orchestration import (
     BuildingChunkPlanningError,
     partition_global_building_plan,
 )
+from .building_cache_receipts import (
+    BuildingBlockReceiptError,
+    read_building_block_receipts,
+)
 from .building_tasks import (
     BuildingTaskSpec,
     BuildingTaskStoreError,
@@ -88,6 +92,7 @@ from .monitoring import MapMonitoringStore
 from .preview import render_boundary_preview
 from .reuse import (
     MapReuseKeys,
+    MapBlock,
     SubsetReuseUnavailable,
     aligned_processing_bounds,
     block_from_pack_path,
@@ -284,6 +289,7 @@ _BUILDING_FAILURE_CODES = {
     "building_block_cache_unavailable",
     "building_source_snapshot_changed",
     "building_scope_policy_invalid",
+    "building_workload_receipt_mismatch",
 }
 _BUILDING_FAILURE_MESSAGES = {
     "building_scope_exceeded": "selected building scope exceeds policy",
@@ -295,6 +301,9 @@ _BUILDING_FAILURE_MESSAGES = {
     "building_block_cache_unavailable": "selected building block cache is unavailable",
     "building_source_snapshot_changed": "selected building source snapshot changed",
     "building_scope_policy_invalid": "selected building scope policy is invalid",
+    "building_workload_receipt_mismatch": (
+        "selected building workload receipt does not match the source closure"
+    ),
 }
 
 
@@ -1599,6 +1608,295 @@ class MapBuildPipeline:
                 )
             )
         self.building_task_store.add_tasks(task_specs)
+
+    def publish_building_chunk_receipts(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        lease_token: str,
+        cache_identity_path: Path,
+        blocks: Iterable[MapBlock],
+        validation_context: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Publish only cache entries reread and validated after extraction."""
+
+        if self.building_task_store is None:
+            raise BuildingTaskStoreError(
+                "building task store is required for chunk receipt publication"
+            )
+        try:
+            cache_identity = json.loads(cache_identity_path.read_bytes())
+        except (OSError, TypeError, ValueError) as exc:
+            raise BuildingBlockReceiptError(
+                "building_block_cache_identity_invalid",
+                "building block cache identity is unavailable",
+            ) from exc
+        receipts = read_building_block_receipts(
+            self.paths.building_cache_root,
+            cache_identity,
+            blocks,
+        )
+        context = dict(validation_context or {})
+        for receipt in receipts:
+            validation = receipt.validation()
+            validation.update(context)
+            self.building_task_store.publish_receipt(
+                task_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                block=(receipt.block.x, receipt.block.y),
+                cache_identity_sha256=receipt.cache_identity_sha256,
+                content_sha256=receipt.content_sha256,
+                producer_identity=receipt.producer_identity(),
+                validation=validation,
+            )
+        return {
+            "receiptCount": len(receipts),
+            "blocks": [[receipt.block.x, receipt.block.y] for receipt in receipts],
+            "cacheIdentitySha256": receipts[0].cache_identity_sha256,
+        }
+
+    def build_building_chunk(
+        self,
+        job: MapJob,
+        *,
+        scope_plan: ScopePlan,
+        source_pbf: Path,
+        source_snapshot_sha256: str,
+        source_index_manifest: Path,
+        calibration_manifest: Path,
+        calibration_generation: Mapping[str, Any],
+        workload_receipt: Mapping[str, Any] | None = None,
+        task_id: str | None = None,
+        worker_id: str | None = None,
+        lease_token: str | None = None,
+        on_progress=None,
+        on_phase_progress=None,
+        cancellation_check=None,
+    ) -> dict[str, Any]:
+        """Execute one bounded building chunk and publish canonical receipts.
+
+        This is an explicit coordinator entry point; the ordinary parent
+        ``build`` method does not call it yet.  Source-index and calibration
+        artifacts are supplied by the parent, while closure, conversion, and
+        canonical block encoding remain bounded to this child scope.
+        """
+
+        if renderer_format_version(job.request) != BUILDING_RENDERER_FORMAT_VERSION:
+            raise BuildingScopeError(
+                "building_scope_policy_invalid",
+                "building chunks require renderer format 3",
+            )
+        if not isinstance(scope_plan, ScopePlan) or not scope_plan.output_blocks:
+            raise BuildingScopeError(
+                "building_scope_policy_invalid", "building chunk scope is invalid"
+            )
+        if any(value is None for value in (task_id, worker_id, lease_token)) and any(
+            value is not None for value in (task_id, worker_id, lease_token)
+        ):
+            raise BuildingScopeError(
+                "building_scope_policy_invalid",
+                "chunk task publication identity is incomplete",
+            )
+        if sha256_file(source_pbf) != source_snapshot_sha256:
+            raise BuildingScopeError(
+                "building_source_snapshot_changed",
+                "building source snapshot changed before chunk execution",
+            )
+        try:
+            expected_calibration = selected_calibration_identity(
+                source_snapshot_sha256=source_snapshot_sha256,
+                rules_path=(
+                    self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
+                ),
+                scope_plan=scope_plan,
+            )
+            calibration_generation_document = calibration_generation_from_manifest(
+                calibration_manifest,
+                source_snapshot_sha256=source_snapshot_sha256,
+                calibration_key=expected_calibration["calibrationKey"],
+                calibration_identity=expected_calibration,
+            )
+            if dict(calibration_generation_document) != dict(calibration_generation):
+                raise ValueError("calibration generation identity changed")
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            raise BuildingScopeError(
+                "building_calibration_unavailable",
+                "chunk calibration generation is not compatible",
+            ) from exc
+
+        chunk_root = (
+            self.paths.work_root
+            / job.job_id
+            / "building-chunks"
+            / scope_plan.sha256
+        )
+        if chunk_root.exists():
+            shutil.rmtree(chunk_root)
+        chunk_root.mkdir(parents=True, exist_ok=True)
+        scope_plan_path = chunk_root / "scope-plan.json"
+        scope_plan.write(scope_plan_path)
+        clipped_pbf = chunk_root / "clipped.osm.pbf"
+        geojson_prefix = chunk_root / "features"
+        raw_output_dir = chunk_root / "raw-map"
+        closure_plan_path = chunk_root / "building-closure-plan.json"
+        closure_ids_path = chunk_root / "building-closure-ids.txt"
+        block_cache_identity_path = chunk_root / "building-block-cache-identity.json"
+        block_cache_identity = selected_building_block_cache_identity(
+            source_snapshot_sha256=source_snapshot_sha256,
+            rules_path=(
+                self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
+            ),
+            scope_plan=scope_plan,
+            calibration_generation=dict(calibration_generation_document),
+        )
+        block_cache_identity_path.write_bytes(
+            canonical_building_json(block_cache_identity) + b"\n"
+        )
+        extraction_metrics = self._extract_pbf(
+            job,
+            source_pbf,
+            clipped_pbf,
+            bounds=scope_plan.source_bounds,
+            force_bounds=True,
+            scope_plan=scope_plan,
+            source_snapshot_sha256=source_snapshot_sha256,
+            cancellation_check=cancellation_check,
+        )
+        preprocessing_timings: dict[str, float] = {}
+        closure_output = self._run_preprocessing_command(
+            [
+                sys.executable,
+                str(
+                    self.paths.osm_extract_root
+                    / "scripts"
+                    / "build_building_closure.py"
+                ),
+                "--source-index-manifest",
+                str(source_index_manifest),
+                "--scope-plan",
+                str(scope_plan_path),
+                "--closure-plan",
+                str(closure_plan_path),
+                "--ids-output",
+                str(closure_ids_path),
+            ],
+            cwd=self.paths.osm_extract_root / "scripts",
+            on_phase_progress=on_phase_progress,
+            default_unit="relation_closure",
+            total_blocks=len(scope_plan.output_blocks),
+            timings=preprocessing_timings,
+            cancellation_check=cancellation_check,
+        )
+        try:
+            closure = json.loads(closure_plan_path.read_bytes())
+        except (OSError, TypeError, ValueError) as exc:
+            raise BuildingScopeError(
+                "building_relation_incomplete",
+                "chunk relation closure did not publish valid metadata",
+            ) from exc
+        if closure.get("sourceSnapshotSha256") != source_snapshot_sha256:
+            raise BuildingScopeError(
+                "building_source_snapshot_changed",
+                "chunk relation closure source identity changed",
+            )
+        if workload_receipt is not None:
+            for key in (
+                "requiredRelationKeys",
+                "requiredWayKeys",
+                "requiredNodeKeys",
+            ):
+                if list(closure.get(key, [])) != list(workload_receipt.get(key, [])):
+                    raise BuildingScopeError(
+                        "building_workload_receipt_mismatch",
+                        f"chunk workload receipt {key} does not match closure",
+                    )
+        if closure.get("requiredRelationKeys") or closure.get("requiredWayKeys") or closure.get("requiredNodeKeys"):
+            self._rehydrate_building_closure(
+                source_pbf,
+                clipped_pbf,
+                closure_ids_path,
+                source_snapshot_sha256,
+                chunk_root,
+                cancellation_check=cancellation_check,
+            )
+        self._convert_to_geojson(
+            job,
+            clipped_pbf,
+            geojson_prefix,
+            bounds=scope_plan.source_bounds,
+            source_index_manifest=source_index_manifest,
+            scope_plan_path=scope_plan_path,
+            cancellation_check=cancellation_check,
+        )
+        feature_metrics = self._extract_features(
+            job,
+            geojson_prefix,
+            raw_output_dir,
+            bounds=scope_plan.source_bounds,
+            on_progress=on_progress,
+            scope_plan_path=scope_plan_path,
+            calibration_manifest=calibration_manifest,
+            calibration_source_sha256=source_snapshot_sha256,
+            building_block_cache_identity_path=block_cache_identity_path,
+            on_phase_progress=on_phase_progress,
+            planned_scope_marker=scope_plan.summary(),
+            cancellation_check=cancellation_check,
+        )
+        result: dict[str, Any] = {
+            "scopePlanSha256": scope_plan.sha256,
+            "closurePlanSha256": closure.get("closurePlanSha256"),
+            "workloadClosurePlanSha256": (
+                workload_receipt.get("closurePlanSha256")
+                if workload_receipt is not None
+                else None
+            ),
+            "sourceExtraction": extraction_metrics,
+            "closureCommand": closure_output,
+            "featureMetrics": feature_metrics,
+            "phaseTimings": {
+                key: round(value, 6) for key, value in preprocessing_timings.items()
+            },
+        }
+        if task_id is not None:
+            assert worker_id is not None and lease_token is not None
+            result["receipts"] = self.publish_building_chunk_receipts(
+                task_id=task_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                cache_identity_path=block_cache_identity_path,
+                blocks=scope_plan.output_blocks,
+                validation_context={
+                    "scopePlanSha256": scope_plan.sha256,
+                    "closurePlanSha256": closure.get("closurePlanSha256"),
+                    "workloadClosurePlanSha256": result[
+                        "workloadClosurePlanSha256"
+                    ],
+                },
+            )
+            result["task"] = self.building_task_store.mark_ready(
+                task_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                actual_resource={
+                    "sourceExtraction": extraction_metrics,
+                    "featureMetrics": feature_metrics,
+                },
+                phase_timings=result["phaseTimings"],
+                peak_rss_bytes=(
+                    max(
+                        value.get("peakResidentBytes", 0)
+                        for value in (
+                            extraction_metrics,
+                            self._last_command_execution_metrics(),
+                        )
+                        if isinstance(value, dict)
+                    )
+                    or None
+                ),
+            )
+        return result
 
     @staticmethod
     def _freeze_selected_inputs(

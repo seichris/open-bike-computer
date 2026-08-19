@@ -15,6 +15,7 @@ from map_platform.building_scope import (
     configured_building_max_relation_objects_per_job,
     legacy_building_scope_diagnostics,
     mercator_scale,
+    plan_building_chunk_scope,
     plan_global_building_scope,
     plan_building_scope,
     point_in_ring,
@@ -210,6 +211,52 @@ class BuildingScopeTests(unittest.TestCase):
                 global_policy=GlobalBuildingPlanPolicy(max_output_blocks=1),
             )
         self.assertEqual(raised.exception.code, "building_scope_exceeded")
+
+    def test_chunk_scope_is_canonical_subset_with_local_buffer_and_calibration(self):
+        global_plan = self.global_plan(
+            make_job({
+                "mode": "custom_bbox",
+                "bbox": [121.11, 30.80, 121.25, 30.95],
+            })
+        )
+        selected = global_plan.output_blocks[:2]
+        first = plan_building_chunk_scope(global_plan, selected)
+        second = plan_building_chunk_scope(global_plan, tuple(reversed(selected)))
+        self.assertEqual(first.canonical_bytes(), second.canonical_bytes())
+        self.assertEqual(first.sha256, second.sha256)
+        self.assertEqual(first.document["planKind"], "chunk")
+        self.assertEqual(
+            first.document["globalPlanSha256"], global_plan.sha256
+        )
+        self.assertEqual(first.output_blocks, tuple(sorted(selected)))
+        self.assertLess(
+            first.document["metrics"]["sourceAreaM2"],
+            global_plan.document["metrics"]["sourceAreaM2"],
+        )
+        self.assertTrue(
+            {
+                tuple(cell)
+                for cell in first.document["calibration"]["sampleCells"]
+            }.issubset(
+                {tuple(cell) for cell in global_plan.calibration_sample_cells}
+            )
+        )
+
+    def test_chunk_scope_rejects_block_outside_global_plan(self):
+        global_plan = self.global_plan(
+            make_job({
+                "mode": "custom_bbox",
+                "bbox": [121.45, 31.20, 121.50, 31.24],
+            })
+        )
+        from map_platform.reuse import MapBlock
+
+        with self.assertRaises(BuildingScopeError) as raised:
+            plan_building_chunk_scope(
+                global_plan,
+                (*global_plan.output_blocks, MapBlock(999_999, 999_999)),
+            )
+        self.assertEqual(raised.exception.code, "building_scope_policy_invalid")
 
     def test_polygon_selects_only_intersecting_blocks(self):
         coordinates = [[121.45, 31.20], [121.50, 31.20], [121.50, 31.22], [121.45, 31.20]]

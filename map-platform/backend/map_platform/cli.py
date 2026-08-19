@@ -398,6 +398,15 @@ def main() -> int:
         help="show durable child task state",
     )
     build_plan_tasks.add_argument("job_id")
+    build_plan_workload = build_plan_subparsers.add_parser(
+        "complete-workload-scan",
+        help="commit an exact source-index workload receipt and requeue the chunk",
+    )
+    build_plan_workload.add_argument("task_id")
+    build_plan_workload.add_argument("--worker-id", required=True)
+    build_plan_workload.add_argument("--lease-token", required=True)
+    build_plan_workload.add_argument("--receipt-json", required=True, type=Path)
+    build_plan_workload.add_argument("--peak-rss-bytes", type=int)
     subparsers.add_parser(
         "resource-report",
         help="print a read-only worker cgroup and memory capability report",
@@ -425,6 +434,20 @@ def main() -> int:
     store = JobStore(data_root / "jobs")
     building_task_store = BuildingTaskStore(data_root / "building-tasks.sqlite3")
     if args.command == "build-plan":
+        if args.build_plan_command == "complete-workload-scan":
+            try:
+                receipt = json.loads(args.receipt_json.read_bytes())
+            except (OSError, TypeError, ValueError) as exc:
+                raise SystemExit(f"workload receipt is unavailable: {exc}") from exc
+            task = building_task_store.complete_workload_scan(
+                args.task_id,
+                worker_id=args.worker_id,
+                lease_token=args.lease_token,
+                workload_receipt=receipt,
+                peak_rss_bytes=args.peak_rss_bytes,
+            )
+            print(json.dumps(asdict(task), indent=2, sort_keys=True))
+            return 0
         plan = building_task_store.get_plan(args.job_id)
         if plan is None:
             raise SystemExit(f"building plan not found: {args.job_id}")
@@ -437,6 +460,9 @@ def main() -> int:
                     {
                         "plan": plan,
                         "tasks": tasks,
+                        "workloadReceipts": list(
+                            building_task_store.list_workload_receipts(args.job_id)
+                        ),
                         "receipts": list(
                             building_task_store.list_receipts(args.job_id)
                         ),

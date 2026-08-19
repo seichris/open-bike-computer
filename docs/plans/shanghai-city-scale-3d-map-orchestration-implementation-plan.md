@@ -18,9 +18,11 @@ machine-readable benchmark fixtures, the read-only worker cgroup/resource
 report exists, and Phase 1 global planning has a deterministic shadow path.
 Phase 2's SQLite WAL parent/task/attempt/receipt store, lease fencing, crash
 recovery, authenticated diagnostics, and operator inspection commands are now
-implemented. Production still uses the existing monolithic executor and hard
-ceilings until exact workload scans, chunk execution, cache-only assembly, and
-an explicit worker memory reservation are shipped.
+implemented. The next slice adds a durable exact-workload receipt handoff and
+canonical global-to-chunk scope projection. Production still uses the existing
+monolithic executor and hard ceilings until workload benchmarks, chunk
+execution, cache-only assembly, and an explicit worker memory reservation are
+shipped.
 
 The core decision is:
 
@@ -745,11 +747,12 @@ the central test is split below every hard ceiling; the west and full bbox
 plans have recorded predicted resource totals.
 
 **Current status:** global scope planning, deterministic recursive partitioning,
-exact source-index workload counters, and shadow diagnostics are implemented;
-the central/west/full-bbox workload receipts still need to be wired into the
-deployed coordinator before this exit gate is complete. Shadow failures now
-persist a deterministic parent plan and workload-scan child tasks without
-changing the authoritative monolithic build.
+exact source-index workload counters, durable workload-scan receipt promotion,
+canonical global-to-chunk scope projection, and shadow diagnostics are
+implemented; the central/west/full-bbox workload benchmarks still need to be
+run and wired into the deployed coordinator before this exit gate is complete.
+Shadow failures persist a deterministic parent plan and workload-scan child
+tasks without changing the authoritative monolithic build.
 
 ### Phase 2 — Durable coordinator store
 
@@ -762,11 +765,12 @@ changing the authoritative monolithic build.
 
 **Current status:** the SQLite WAL schema, idempotent plan/task insertion,
 atomic claims, lease heartbeats and expiry recovery, cancellation generation,
-split transitions, immutable block receipts, receipt-set hashes, and
-authenticated/API plus CLI diagnostics are implemented and covered by fault
-and identity tests. Child tasks are not executable yet; they are persisted as
-`building_workload_scan` until exact workload receipts and the chunk executor
-are enabled.
+split transitions, immutable block receipts, receipt-set hashes, durable exact
+workload receipts, and authenticated/API plus CLI diagnostics are implemented
+and covered by fault and identity tests. A workload-scan receipt now promotes
+the deterministic child to a pending `building_chunk`; child execution is not
+enabled by the parent worker yet, and no resource reservation or concurrency
+policy is active.
 
 **Exit gate:** fault-injection tests prove no double publication, lost task,
 stale-worker receipt, non-monotonic progress, or cancellation resurrection.
@@ -781,6 +785,13 @@ stale-worker receipt, non-monotonic progress, or cancellation resurrection.
 
 **Exit gate:** all relation, height, seam, cache, and FMB golden fixtures are
 byte-identical across monolithic and multiple partition layouts.
+
+**Current status:** the canonical chunk scope projection, bounded chunk
+execution entry point, cache-manifest reread, and transactional per-block
+receipt publication are implemented behind an explicit API. The ordinary
+parent build still does not call this path; source-index/calibration reuse,
+runtime split signaling, and monolithic-vs-partition golden equivalence remain
+to be validated before allowlisting it.
 
 ### Phase 4 — Cache-only final assembly
 

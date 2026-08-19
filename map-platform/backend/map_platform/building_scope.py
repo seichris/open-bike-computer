@@ -611,6 +611,166 @@ def plan_global_building_scope(
     )
 
 
+def plan_building_chunk_scope(
+    global_plan: GlobalBuildingPlan,
+    blocks: Iterable[MapBlock],
+    *,
+    requested_approximate_area_m2: int | None = None,
+) -> ScopePlan:
+    """Project a global plan onto one canonical child block set.
+
+    The projection only changes the selected output blocks and their exact
+    buffered source/calibration scopes.  It carries the global plan identity
+    in the child document, so a chunk can be executed and audited without
+    reconstructing a synthetic user request.  Per-chunk object and area
+    ceilings are intentionally not evaluated here; the exact source-index
+    workload receipt is the admission gate for execution.
+    """
+
+    if not isinstance(global_plan, GlobalBuildingPlan):
+        raise BuildingScopeError(
+            "building_scope_policy_invalid", "global plan is invalid"
+        )
+    normalized = tuple(sorted(set(blocks)))
+    if not normalized:
+        raise BuildingScopeError(
+            "building_scope_policy_invalid", "chunk scope has no output blocks"
+        )
+    if any(not isinstance(block, MapBlock) for block in normalized):
+        raise BuildingScopeError(
+            "building_scope_policy_invalid", "chunk output block is invalid"
+        )
+    global_blocks = set(global_plan.output_blocks)
+    if not set(normalized).issubset(global_blocks):
+        raise BuildingScopeError(
+            "building_scope_policy_invalid",
+            "chunk output blocks are outside the global plan",
+        )
+    global_document = global_plan.document
+    chunk_policy = dict(global_document["chunkPolicy"])
+    buffer_meters = chunk_policy["geometryBufferMeters"]
+    limit = math.floor(WEB_MERCATOR_LIMIT_METERS)
+    source_rectangles = tuple(
+        sorted(
+            {
+                (
+                    max(-limit, block.x * MAP_BLOCK_SIZE_METERS - buffer_meters),
+                    max(-limit, block.y * MAP_BLOCK_SIZE_METERS - buffer_meters),
+                    min(
+                        limit,
+                        (block.x + 1) * MAP_BLOCK_SIZE_METERS + buffer_meters,
+                    ),
+                    min(
+                        limit,
+                        (block.y + 1) * MAP_BLOCK_SIZE_METERS + buffer_meters,
+                    ),
+                )
+                for block in normalized
+            }
+        )
+    )
+    output = (
+        min(block.x for block in normalized) * MAP_BLOCK_SIZE_METERS,
+        min(block.y for block in normalized) * MAP_BLOCK_SIZE_METERS,
+        (max(block.x for block in normalized) + 1) * MAP_BLOCK_SIZE_METERS,
+        (max(block.y for block in normalized) + 1) * MAP_BLOCK_SIZE_METERS,
+    )
+    source = (
+        min(rectangle[0] for rectangle in source_rectangles),
+        min(rectangle[1] for rectangle in source_rectangles),
+        max(rectangle[2] for rectangle in source_rectangles),
+        max(rectangle[3] for rectangle in source_rectangles),
+    )
+    source_area = rectangle_union_area(source_rectangles)
+    output_area = len(normalized) * MAP_BLOCK_SIZE_METERS * MAP_BLOCK_SIZE_METERS
+    calibration = global_document["calibration"]
+    cell_size_meters = calibration["cellSizeMeters"]
+    halo_cells = calibration["haloCells"]
+    minimum_samples = calibration["minimumSamples"]
+    target_cells = cells_for_rectangles(source_rectangles, cell_size_meters)
+    sample_cells = cells_with_halo(target_cells, halo_cells)
+    source_bounds = Bounds(
+        x_to_lon(source[0]),
+        y_to_lat(source[1]),
+        x_to_lon(source[2]),
+        y_to_lat(source[3]),
+    )
+    requested_area = (
+        output_area
+        if requested_approximate_area_m2 is None
+        else requested_approximate_area_m2
+    )
+    if (
+        isinstance(requested_area, bool)
+        or not isinstance(requested_area, int)
+        or requested_area <= 0
+    ):
+        raise BuildingScopeError(
+            "building_scope_policy_invalid",
+            "chunk requested area is invalid",
+        )
+    document = {
+        "schemaVersion": BUILDING_SCOPE_SCHEMA_VERSION,
+        "planKind": "chunk",
+        "globalPlanSha256": global_plan.sha256,
+        "policy": chunk_policy,
+        "requestedSelection": {
+            **global_document["requestedSelection"],
+            "areaSemantics": "global_plan_chunk",
+            "chunkBlocks": [[block.x, block.y] for block in normalized],
+        },
+        "outputBlocks": [
+            {
+                "x": block.x,
+                "y": block.y,
+                "boundsMeters": [
+                    block.x * MAP_BLOCK_SIZE_METERS,
+                    block.y * MAP_BLOCK_SIZE_METERS,
+                    (block.x + 1) * MAP_BLOCK_SIZE_METERS,
+                    (block.y + 1) * MAP_BLOCK_SIZE_METERS,
+                ],
+            }
+            for block in normalized
+        ],
+        "outputScope": {"boundsMeters": list(output)},
+        "sourceScope": {
+            "mode": "buffered_block_rectangles",
+            "boundsMeters": list(source),
+            "boundsE7": bounds_e7(source_bounds),
+            "rectanglesMeters": [list(rectangle) for rectangle in source_rectangles],
+        },
+        "calibration": {
+            "cellSizeMeters": cell_size_meters,
+            "haloCells": halo_cells,
+            "minimumSamples": minimum_samples,
+            "targetCells": [list(cell) for cell in target_cells],
+            "sampleCells": [list(cell) for cell in sample_cells],
+        },
+        "metrics": {
+            "requestedApproximateAreaM2": requested_area,
+            "outputAreaM2": output_area,
+            "sourceAreaM2": source_area,
+            "sourceToOutputAreaBasisPoints": ceil_ratio_basis_points(
+                source_area, output_area
+            ),
+            "outputBlockCount": len(normalized),
+            "calibrationCellCount": len(target_cells),
+            "calibrationSampleCellCount": len(sample_cells),
+        },
+    }
+    encoded = canonical_json(document)
+    return ScopePlan(
+        encoded,
+        hashlib.sha256(encoded).hexdigest(),
+        normalized,
+        output,
+        source,
+        source_bounds,
+        target_cells,
+        sample_cells,
+    )
+
+
 def legacy_building_scope_diagnostics(job: MapJob, *, calibration_cell_size_meters: int, calibration_halo_cells: int) -> dict[str, Any]:
     output = aligned_projected_extent(job.geometry.bounds)
     output_area = (output[2] - output[0]) * (output[3] - output[1])
