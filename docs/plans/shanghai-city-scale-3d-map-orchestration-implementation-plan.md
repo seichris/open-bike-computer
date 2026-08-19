@@ -97,6 +97,15 @@ receipts, zero child RSS), so this proves current-image canary publication and
 artifact integrity while the cold per-block resource sample remains a
 separate gate.
 
+Follow-up image `ghcr.io/seichris/open-bike-computer-map-platform@sha256:54bec06298af2bbb67f1f19e60149f92965efb9bc060936387cc8ba2515af45f`
+contains the cancellation-attempt fix. Live validation job
+`3f7059ff3fc742358378` reached a leased workload-scan child before API
+cancellation; the child was fenced, its follow-on attempt was retained as
+`outcome=cancelled` with typed failure `building_task_cancelled` and a
+`finished_at` timestamp, all two child tasks ended `cancelled`, and the
+resource-reservation ledger returned to zero. This is the worker-loss and
+cancellation bookkeeping regression gate; it did not publish an artifact.
+
 The core decision is:
 
 > Keep one user-visible map job and one deterministic downloadable artifact,
@@ -1001,15 +1010,17 @@ same one-job workflow.
 repository's immutable GHCR workflow and deployed only to the validation
 Coolify app with `chunked_allowlist` and concurrency one. The current
 validation digest is
-`ghcr.io/seichris/open-bike-computer-map-platform@sha256:7f7637692c8f53e98dbcfeb033de511edca6effce54636ab9e1c70e433e9cb8f`;
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:54bec06298af2bbb67f1f19e60149f92965efb9bc060936387cc8ba2515af45f`;
 all three validation containers report healthy. Current-image central job
 `3d7fefb317ba47e88616` and west job `4acd2e89c8714555bb1d` reached `ready` with
 artifact and receipt validation. The full rectangle was deliberately
 cancelled after source-resolution selected the China snapshot; the app-sized
 631.792599 km² Shanghai job `ea72880448e64bb1b932` reached `ready` with its
-artifact and receipt evidence. Production containers remain pinned to their
-prior image digest. Physical validation, cold central/632 km²/full-bbox
-coverage, and production promotion are still required.
+artifact and receipt evidence. The follow-up image also passed the live leased-
+child cancellation regression in job `3f7059ff3fc742358378`. Production
+containers remain pinned to their prior image digest. Physical validation,
+cold central/632 km²/full-bbox coverage, and production promotion are still
+required.
 
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
