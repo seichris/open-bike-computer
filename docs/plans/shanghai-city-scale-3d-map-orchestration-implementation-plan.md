@@ -1072,7 +1072,11 @@ on the exact deployed image
 `a6eed22cc5a6c37d18eb37939bbfa0983c3433763d35be5ddff220910d125535`.
 production remains pinned to its existing digest. Physical validation, cold
 central/632 km²/full-bbox coverage, and production promotion are still
-required.
+required. The current validation deployment has since moved to the immutable
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:9fafdf8e1e7bed5ba90b970fddb1bd25e2faf30318c93693f05ef75c0584b866`
+image from commit `0dd2d2ab` after the closure-algorithm-v2 estimate profile
+was refreshed; all three validation containers are healthy and production
+remains on `a6980506…`.
 
 After that retained evidence, the diagnostic follow-up image for commit
 `d4333e80` was deployed only to validation at
@@ -1109,6 +1113,19 @@ stable calibration key and source snapshot identity, rather than generic
 not counted as a memory failure.
 The full-bbox, physical acceptance, and production-promotion gates remain
 open.
+
+The current image's relation-heavy validation probe
+`a932f748a388475ca0e1` (26.537229464 km² around Guangfulin) now reaches
+`ready` with 4/4 receipts, an 894,886-byte ZIP, and artifact SHA-256
+`9f88a32fa8ef4274cd0e0ca330d55fe77f397afa90721bf146b71029607ec2e1`.
+This confirms the reviewed narrow fallback: a malformed `type=building`
+relation with exactly one direct way explicitly tagged `building=yes` is
+retained as a standalone part; ambiguous, multi-part, and untagged cases still
+fail closed. The exact full-bbox retry `c2b1ae53bede438ab02e` is now running
+against the cached China parent snapshot as a 16-chunk, 442-block cold
+acceptance benchmark; its first two chunks have published 48 receipts with no
+retries or splits, and retained cgroup peak is 6,207,524,864 bytes with no
+OOM events. Its final artifact and timing gate remain pending.
 
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
