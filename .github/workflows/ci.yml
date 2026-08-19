@@ -306,6 +306,14 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install host crypto dependencies
         run: |
+          for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            if [ -f "$source" ]; then
+              sudo sed -i \
+                -e 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+                -e 's|https://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+                "$source"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install -y libmbedtls-dev python3-cryptography
       - name: Firmware manifest tests
