@@ -8,6 +8,7 @@ int main() {
   using ride_diagnostics::detail::FaultCapsuleState;
   using ride_diagnostics::detail::formatFaultCapsuleFields;
   using ride_diagnostics::detail::kFaultCapsuleMagic;
+  using ride_diagnostics::detail::validateFieldsJson;
 
   FaultCapsuleState capsule{};
   capsule.magic = kFaultCapsuleMagic;
@@ -47,6 +48,19 @@ int main() {
   assert(!formatFaultCapsuleFields(capsule, output, sizeof(output)));
   capsule.magic = kFaultCapsuleMagic;
   assert(!formatFaultCapsuleFields(capsule, output, 16));
+
+  const char *validFields =
+      "{\"bootSequence\":7,\"ready\":true,"
+      "\"firmwareFingerprint\":\"A1B2C3D4\"}";
+  assert(validateFieldsJson(validFields, std::strlen(validFields)));
+  const char *validEmptyFields = "{}";
+  assert(validateFieldsJson(validEmptyFields, 2));
+  const char *unknownField = "{\"privateValue\":1}";
+  assert(!validateFieldsJson(unknownField, std::strlen(unknownField)));
+  const char *nestedField = "{\"ready\":{\"value\":true}}";
+  assert(!validateFieldsJson(nestedField, std::strlen(nestedField)));
+  const char *malformedField = "{\"ready\":tru}";
+  assert(!validateFieldsJson(malformedField, std::strlen(malformedField)));
 
   std::cout << "ride diagnostics format tests passed\n";
   return 0;

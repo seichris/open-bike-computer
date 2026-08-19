@@ -55,6 +55,7 @@ struct ChunkFile {
 using detail::FaultCapsuleState;
 using detail::formatFaultCapsuleFields;
 using detail::kFaultCapsuleMagic;
+using detail::validateFieldsJson;
 using detail::validFaultCapsule;
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -569,6 +570,10 @@ bool recordInternal(Level level, const char *category, const char *event,
   if (fieldsLength < 2 || fieldsLength >= 320 || fieldsJson[0] != '{' ||
       fieldsJson[fieldsLength - 1] != '}' ||
       strchr(fieldsJson, '\n') != nullptr || strchr(fieldsJson, '\r') != nullptr) {
+    dropped.fetch_add(1);
+    return false;
+  }
+  if (!validateFieldsJson(fieldsJson, fieldsLength)) {
     dropped.fetch_add(1);
     return false;
   }

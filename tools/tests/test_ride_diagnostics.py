@@ -58,6 +58,18 @@ class RideDiagnosticsTests(unittest.TestCase):
         self.assertIsNotNone(match)
         swift_keys = set(re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', match.group(1)))
         self.assertEqual(swift_keys, ride_diagnostics.ALLOWED_FIELD_KEYS)
+        cpp_source = (
+            REPO_ROOT
+            / "esp32/lib/ride_diagnostics/ride_diagnostics_format.hpp"
+        ).read_text()
+        cpp_match = re.search(
+            r"kAllowedFieldKeys\[\] = \{(.*?)\n\};",
+            cpp_source,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(cpp_match)
+        cpp_keys = set(re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', cpp_match.group(1)))
+        self.assertEqual(cpp_keys, ride_diagnostics.ALLOWED_FIELD_KEYS)
 
     def test_valid_stream_reports_sequence_gaps_and_tail(self):
         data = (json.dumps(event(2)) + "\n" + json.dumps(event(4)) + "\n" + "partial").encode()
