@@ -129,12 +129,11 @@ class MapWorker:
         )
         if job is None:
             return WorkerResult(worker_id=self.worker_id, job=None, processed=False)
-        try:
-            worker_capability = worker_resource_report().get("capability")
-        except Exception:
-            # Resource reporting is advisory; the coordinator still runs with
-            # legacy admission if the host exposes no readable cgroup data.
-            worker_capability = None
+        # Start lease heartbeats before the read-only capability probe.  On a
+        # cold host the cgroup/proc walk can exceed a short test or recovery
+        # lease, and a worker must not become reclaimable before its heartbeat
+        # loop is running.
+        worker_capability = None
         attempt_started_at = job.updated_at
         attempt_started_monotonic = time.monotonic()
         if self.estimate_coordinator is not None:
@@ -215,6 +214,13 @@ class MapWorker:
                 interval_seconds=self.heartbeat_interval_seconds,
                 on_heartbeat=self.on_heartbeat,
             ):
+                try:
+                    worker_capability = worker_resource_report().get("capability")
+                except Exception:
+                    # Resource reporting is advisory; the coordinator still
+                    # runs with legacy admission if the host exposes no
+                    # readable cgroup data.
+                    worker_capability = None
                 build_kwargs = {
                     "on_status": update,
                     "on_progress": update_progress,
