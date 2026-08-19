@@ -942,6 +942,10 @@ class BuildingTaskStoreTests(unittest.TestCase):
                 validation={},
             )
         self.assertEqual(self.store.get_plan("job-1")["state"], "cancelled")
+        attempts = self.store.list_attempts("job-1")
+        self.assertEqual(attempts[0]["outcome"], "cancelled")
+        self.assertEqual(attempts[0]["typed_failure"], "building_task_cancelled")
+        self.assertIsNotNone(attempts[0]["finished_at"])
         self.store.cancel_plan("job-1")
 
     def test_cancel_does_not_rewrite_ready_plan(self):

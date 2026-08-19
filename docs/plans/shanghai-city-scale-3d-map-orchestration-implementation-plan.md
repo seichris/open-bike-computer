@@ -43,7 +43,8 @@ also batches the closure-audit lookups instead of issuing one SQLite query per
 object. The replacement benchmark ran on the new immutable validation image and
 reached bounded chunk execution before failing closed on one malformed source
 relation. Cancellation fencing and maintenance reconciliation now release
-child reservations when such an operator stop is required.
+child reservations and close any in-flight attempt with a typed cancellation
+outcome when such an operator stop is required.
 
 The corrected exact-bbox run (`9fc92d71a0c743169af8`) then failed closed after
 three parent attempts with 48 of 442 block receipts. Its third chunk had an
@@ -59,6 +60,42 @@ pipeline change parses typed conversion failures in chunk execution and stores
 the last command wall/RSS observation on failed task attempts, so the app and
 operator surface report `building_relation_incomplete` rather than hiding it
 behind `map_build_failed`.
+
+The current validation image
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:7f7637692c8f53e98dbcfeb033de511edca6effce54636ab9e1c70e433e9cb8f`
+was then exercised with two same-size Shanghai requests. Central job
+`3d7fefb317ba47e88616` reached `ready` in 532.597238 seconds of processing
+(534.967379 seconds total) with 63/63 durable block receipts, 63 cache hits,
+and a 12,394,774-byte ZIP. Its artifact SHA-256 is
+`80e508d2b97c6c4f6064c7bcf9ab42a4af72f21d8a3b285b61a653c1d1e0ed60`; ZIP
+testing passed, with 63 FMB entries and a largest FMB of 507,316 bytes. West
+job `4acd2e89c8714555bb1d` reached `ready` in 283.967580 seconds of processing
+(287.163748 seconds total) with 63/63 receipts, 63 cache hits, and an
+8,873,163-byte ZIP. Its artifact SHA-256 is
+`a97c1c73fa6ecda528f2f458a105e616ed9e3c58e97ab2a982c7183c459b4888`; ZIP
+testing passed, with 63 FMB entries and a largest FMB of 476,207 bytes. These
+two runs are current-image assembly and cache-integrity evidence, not new cold
+heavy-task samples: the durable attempts explicitly record `cacheHit=true` and
+zero RSS for every child.
+
+The requested full rectangle `[121.11, 30.8, 122.02, 31.29]` was not used as a
+benchmark because its corners fall outside the Shanghai Geofabrik source
+geometry and source resolution correctly selected the 1.5-GB China snapshot.
+Validation job `522921419dcd40c59f1c` was cancelled after 403.313141 seconds of
+source resolution; its worker cgroup peaked at 4,629,385,216 bytes and the
+parent was fenced with no artifact publication. The app-sized 631.792599 km²
+bbox then completed against the Shanghai snapshot as validation job
+`ea72880448e64bb1b932`. It reached `ready` with 56/56 durable receipts in
+586.717134 seconds of processing (746.684358 seconds total, including a
+159.967224-second queue wait after a validation-worker restart). The final
+14,953,308-byte ZIP has SHA-256
+`12eec0279cb9c122ead5a97db2efb259233419bd34a190d63d7c2c63528cd09a`; ZIP
+testing passed, with 56 FMB entries and a largest FMB of 623,771 bytes. The
+whole-map source-extraction command recorded a 3,993,960,448-byte peak RSS and
+14.926442 seconds of wall time. Its child attempts were all cache hits (56
+receipts, zero child RSS), so this proves current-image canary publication and
+artifact integrity while the cold per-block resource sample remains a
+separate gate.
 
 The core decision is:
 
@@ -798,10 +835,12 @@ canonical global-to-chunk scope projection, and shadow diagnostics are
 implemented. The validation canary accepted a 631,792,599 m² request as one
 global plan with 56 output blocks under the 600,000 relation ceiling; the
 source index recorded 903,545 nodes, 156,448 ways, and 892 relations. The
-central/west/full-bbox workload benchmarks still need to be run and wired into
-the deployed coordinator before this exit gate is complete. Shadow failures
-persist a deterministic parent plan and workload-scan child tasks without
-changing the authoritative monolithic build.
+current image has ready central, west, and 631.792599 km² assembly runs with
+durable receipt and artifact evidence. The exact full-bbox plan still needs to
+complete (or fail closed with retained typed evidence), and cold per-block
+resource observations are still below the reviewed training floor, before this
+exit gate is complete. Shadow failures persist a deterministic parent plan and
+workload-scan child tasks without changing the authoritative monolithic build.
 
 ### Phase 2 — Durable coordinator store
 
@@ -902,6 +941,12 @@ receipt-set metrics, and cannot fall back to monolithic building normalization.
 The validation canary produced one 14,948,371-byte ZIP with 56 FMB entries;
 ZIP testing passed and the largest FMB was 623,771 bytes. The recorded artifact
 SHA-256 is `8ea288c0066c210ccb1802029d84b8bd351a2d50c790596e067871517842be17`.
+On the current image, 631.792599 km² job `ea72880448e64bb1b932` repeated the
+same cache-only assembly contract with a 14,953,308-byte ZIP and artifact
+SHA-256 `12eec0279cb9c122ead5a97db2efb259233419bd34a190d63d7c2c63528cd09a`;
+its 56/56 receipt set, 56 FMB entries, 623,771-byte largest FMB, and
+3,993,960,448-byte source-extraction peak were retained. Child attempts were
+explicitly cache hits, so a cold per-block resource sample is still pending.
 The final assembly summary now records a canonical partition-invariant
 artifact identity derived from source/index, calibration, cache, and ordered
 block receipts; task IDs, chunk boundaries, lease order, timings, and
@@ -956,12 +1001,15 @@ same one-job workflow.
 repository's immutable GHCR workflow and deployed only to the validation
 Coolify app with `chunked_allowlist` and concurrency one. The current
 validation digest is
-`ghcr.io/seichris/open-bike-computer-map-platform@sha256:a98584d23500af2a420859f139f312e6ef8fed0b9e63d97ea477fc2c8fc101e6`;
-all three validation containers report healthy. Canary job
-`2ffd2ec5462e482e93b7` reached `ready`, and exact-bbox replacement job
-`9fc92d71a0c743169af8` is the active benchmark. Production containers remain
-pinned to their prior image digest. Physical validation, central/west/full
-benchmark coverage, and production promotion are still required.
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:7f7637692c8f53e98dbcfeb033de511edca6effce54636ab9e1c70e433e9cb8f`;
+all three validation containers report healthy. Current-image central job
+`3d7fefb317ba47e88616` and west job `4acd2e89c8714555bb1d` reached `ready` with
+artifact and receipt validation. The full rectangle was deliberately
+cancelled after source-resolution selected the China snapshot; the app-sized
+631.792599 km² Shanghai job `ea72880448e64bb1b932` reached `ready` with its
+artifact and receipt evidence. Production containers remain pinned to their
+prior image digest. Physical validation, cold central/632 km²/full-bbox
+coverage, and production promotion are still required.
 
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.

@@ -1039,6 +1039,18 @@ class BuildingTaskStore:
                 (now, parent_job_id),
             )
             connection.execute(
+                """
+                UPDATE map_build_task_attempts
+                SET finished_at=?, outcome='cancelled',
+                    typed_failure=COALESCE(typed_failure, 'building_task_cancelled')
+                WHERE task_id IN (
+                    SELECT task_id FROM map_build_tasks
+                    WHERE parent_job_id=? AND state='leased'
+                ) AND finished_at IS NULL
+                """,
+                (now, parent_job_id),
+            )
+            connection.execute(
                 "UPDATE map_build_tasks SET state='cancelled', lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, updated_at=? WHERE parent_job_id=? AND state IN ('pending','leased')",
                 (now, parent_job_id),
             )
@@ -1091,6 +1103,18 @@ class BuildingTaskStore:
                 f"UPDATE map_build_plans SET state='cancelled', stage='cancelled', "
                 f"cancellation_generation=cancellation_generation+1, updated_at=? "
                 f"WHERE parent_job_id IN ({active_placeholders})",
+                (now, *active_ids),
+            )
+            connection.execute(
+                f"""
+                UPDATE map_build_task_attempts
+                SET finished_at=?, outcome='cancelled',
+                    typed_failure=COALESCE(typed_failure, 'building_task_cancelled')
+                WHERE task_id IN (
+                    SELECT task_id FROM map_build_tasks
+                    WHERE parent_job_id IN ({active_placeholders}) AND state='leased'
+                ) AND finished_at IS NULL
+                """,
                 (now, *active_ids),
             )
             connection.execute(
