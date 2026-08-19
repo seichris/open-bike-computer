@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from .building_resource_model import summarize_resource_observations
 
 BUILDING_TASK_SCHEMA_VERSION = 4
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -1084,6 +1085,89 @@ class BuildingTaskStore:
             )
         finally:
             connection.close()
+
+    def resource_model_observations(
+        self, parent_job_id: str | None = None
+    ) -> tuple[dict[str, Any], ...]:
+        """Return successful, identity-bound observations for model review."""
+
+        connection = self._connect()
+        try:
+            where = [
+                "attempts.outcome='ready'",
+                "attempts.peak_rss_bytes IS NOT NULL",
+            ]
+            params: list[Any] = []
+            if parent_job_id is not None:
+                where.append("tasks.parent_job_id=?")
+                params.append(parent_job_id)
+            rows = connection.execute(
+                f"""
+                SELECT attempts.task_id, attempts.peak_rss_bytes,
+                       attempts.worker_capability_json,
+                       tasks.parent_job_id, tasks.predicted_resource_json,
+                       plans.resource_model_version
+                FROM map_build_task_attempts attempts
+                JOIN map_build_tasks tasks ON tasks.task_id=attempts.task_id
+                JOIN map_build_plans plans ON plans.parent_job_id=tasks.parent_job_id
+                WHERE {' AND '.join(where)}
+                ORDER BY attempts.started_at, attempts.task_id, attempts.attempt_number
+                """,
+                params,
+            ).fetchall()
+            observations: list[dict[str, Any]] = []
+            for row in rows:
+                try:
+                    capability_document = json.loads(
+                        row["worker_capability_json"]
+                    )
+                    predicted_document = json.loads(
+                        row["predicted_resource_json"] or "{}"
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(capability_document, dict):
+                    continue
+                capability = capability_document.get("capability", {})
+                if not isinstance(capability, dict):
+                    continue
+                if not isinstance(predicted_document, dict):
+                    continue
+                predicted = predicted_document.get("estimatedPeakMemoryBytes")
+                actual = row["peak_rss_bytes"]
+                if (
+                    isinstance(predicted, bool)
+                    or not isinstance(predicted, int)
+                    or predicted < 0
+                    or isinstance(actual, bool)
+                    or not isinstance(actual, int)
+                    or actual < 0
+                ):
+                    continue
+                observations.append(
+                    {
+                        "taskId": row["task_id"],
+                        "parentJobId": row["parent_job_id"],
+                        "resourceModelVersion": row["resource_model_version"],
+                        "workerCapability": capability,
+                        "predictedPeakMemoryBytes": predicted,
+                        "actualPeakMemoryBytes": actual,
+                    }
+                )
+            return tuple(observations)
+        finally:
+            connection.close()
+
+    def resource_model_summary(
+        self,
+        parent_job_id: str | None = None,
+        *,
+        minimum_observations: int = 8,
+    ) -> dict[str, Any]:
+        return summarize_resource_observations(
+            self.resource_model_observations(parent_job_id),
+            minimum_observations=minimum_observations,
+        )
 
     def list_resource_reservations(
         self, parent_job_id: str | None = None

@@ -783,6 +783,10 @@ receipt, attempt, and reservation diagnostics remain authenticated; fair
 scheduling now uses a durable last-claimed round-robin cursor and reserves at
 most one slot per parent while another parent has unrepresented pending work.
 Weighted quotas and admission-aware priority policies remain pending.
+Authenticated plan diagnostics now include an observational p95 resource-model
+summary grouped by the stable worker capability identity; groups below the
+reviewed sample count remain explicitly uncalibrated and do not alter
+admission.
 
 **Exit gate:** fault-injection tests prove no double publication, lost task,
 stale-worker receipt, non-monotonic progress, or cancellation resurrection.

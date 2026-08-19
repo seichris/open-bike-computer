@@ -480,6 +480,9 @@ def main() -> int:
                         "attempts": list(
                             building_task_store.list_attempts(args.job_id)
                         ),
+                        "resourceModel": building_task_store.resource_model_summary(
+                            args.job_id
+                        ),
                         "resourceReservations": list(
                             building_task_store.list_resource_reservations(args.job_id)
                         ),

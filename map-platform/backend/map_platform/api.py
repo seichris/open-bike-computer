@@ -519,6 +519,7 @@ def create_app():
             ),
             "receipts": list(building_task_store.list_receipts(parent_job_id)),
             "attempts": list(building_task_store.list_attempts(parent_job_id)),
+            "resourceModel": building_task_store.resource_model_summary(parent_job_id),
             "resourceReservations": list(
                 building_task_store.list_resource_reservations(parent_job_id)
             ),
