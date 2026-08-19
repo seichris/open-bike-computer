@@ -153,6 +153,18 @@ def load_scope_policy(path: Path) -> dict:
     }
 
 
+def load_source_index_manifest(path: str | Path) -> BuildingSourceIndex:
+    """Open a sealed source index without rescanning its database.
+
+    The source-index builder validates and seals the database before
+    publishing this manifest. Chunk workers verify the manifest identity and
+    reuse it; calling ``validate()`` here would hash and audit the
+    multi-gigabyte SQLite database once per chunk.
+    """
+
+    return BuildingSourceIndex.from_manifest(path, validate_database=False)
+
+
 def audit_closure(
     handler: BuildingRelationHandler,
     index: BuildingSourceIndex,
@@ -267,7 +279,7 @@ def main() -> None:
     scope_policy = None
     expected = None
     if args.source_index_manifest:
-        index = BuildingSourceIndex.from_manifest(args.source_index_manifest)
+        index = load_source_index_manifest(args.source_index_manifest)
         scope_policy = load_scope_policy(Path(args.scope_plan))
         expected = index.closure_for_bounds(
             scope_policy["outputBoundsE7"],

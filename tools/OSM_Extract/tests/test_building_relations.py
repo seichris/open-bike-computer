@@ -7,12 +7,16 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from building_calibration_cache import canonical_json  # noqa: E402
 from building_source_index import BuildingSourceIndex  # noqa: E402
 from build_building_source_index import scan_source  # noqa: E402
-from extract_building_relations import BuildingRelationHandler  # noqa: E402
+from extract_building_relations import (  # noqa: E402
+    BuildingRelationHandler,
+    load_source_index_manifest,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +25,18 @@ SCRIPT = ROOT / "scripts" / "extract_building_relations.py"
 
 
 class BuildingRelationIngressTests(unittest.TestCase):
+    def test_source_index_manifest_loader_skips_full_database_rescan(self):
+        sentinel = object()
+        with patch(
+            "extract_building_relations.BuildingSourceIndex.from_manifest",
+            return_value=sentinel,
+        ) as from_manifest:
+            self.assertIs(load_source_index_manifest("sealed-manifest.json"), sentinel)
+        from_manifest.assert_called_once_with(
+            "sealed-manifest.json",
+            validate_database=False,
+        )
+
     @staticmethod
     def relation(relation_id, members):
         class Tags(list):

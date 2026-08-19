@@ -45,7 +45,13 @@ def main() -> None:
     parser.add_argument("--calibration-halo-cells", required=True, type=int)
     parser.add_argument("--result-json", required=True, type=Path)
     args = parser.parse_args()
-    index = BuildingSourceIndex.from_manifest(args.source_index_manifest)
+    # The source-index builder validates and seals this immutable manifest
+    # before publication. Reusing it per chunk must not rehash and audit the
+    # multi-gigabyte SQLite database.
+    index = BuildingSourceIndex.from_manifest(
+        args.source_index_manifest,
+        validate_database=False,
+    )
     workload = index.workload_for_bounds(
         _bounds(args.bounds_e7_json),
         maximum_objects=args.maximum_objects,
