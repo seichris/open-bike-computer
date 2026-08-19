@@ -1156,6 +1156,26 @@ for that chunk is 6,116,237,312 bytes with `high=0`, `oom=0`, and
 next workload scan leased; the remaining full-artifact and timing gates are
 still open. Production remains pinned to `a6980506…`.
 
+The live replacement run retained an additional exact resource observation:
+its second 45-block workload scan contained 429,955 closure objects and took
+2,894.870334 seconds, with 106,532,864 bytes child RSS. The subsequent bounded
+chunk is now leased. The validation worker cgroup peaked at 6,922,547,200
+bytes, with `memory.current` sampled around 4.44 GB and `low=0`, `high=0`,
+`max=0`, `oom=0`, and `oom_kill=0`; the host reported about 43.4 GB available.
+This confirms the remaining bottleneck is repeated source-index closure work,
+not relation-ceiling or RAM exhaustion.
+
+Commits `56ad9c39` and `6d327408` close that implementation gap: chunk builds
+now reconstruct and verify the canonical closure directly from a durable exact
+workload receipt instead of re-running the same multi-minute query, and source
+index closure/member lookups are batched in bounded SQLite parameter pages.
+The combined backend and targeted source-index regressions pass (449 backend
+tests, one skipped; 35 relation/index/scanner tests). The immutable candidate
+for `6d327408` is built as
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:a2ac30289d98cc184aaae27f063dfb5aea4a14f0de93b998a9a301c1826a3abd` but is
+not deployed over the running benchmark. Production remains pinned to
+`a6980506…`.
+
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
 
