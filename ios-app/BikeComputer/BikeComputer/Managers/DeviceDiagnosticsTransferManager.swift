@@ -186,7 +186,19 @@ final class DeviceDiagnosticsTransferManager {
 
     private static func isValidJSONL(_ data: Data) -> Bool {
         guard data.count <= 12 * 1024 * 1024 else { return false }
-        let lines = data.split(separator: 0x0a, omittingEmptySubsequences: true)
+        var lines = data.split(
+            separator: 0x0a,
+            omittingEmptySubsequences: true
+        )
+        guard !lines.isEmpty else { return false }
+        if data.last != 0x0a,
+           let last = lines.last,
+           (try? JSONSerialization.jsonObject(with: Data(last))) == nil {
+            // A reset can leave only the final JSONL record incomplete. The
+            // closed chunk is still useful; middle-line corruption remains a
+            // hard failure below.
+            lines.removeLast()
+        }
         guard !lines.isEmpty else { return false }
         var previousSequence: UInt64?
         for rawLine in lines {

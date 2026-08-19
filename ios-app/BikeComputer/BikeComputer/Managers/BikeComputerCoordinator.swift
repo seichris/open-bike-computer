@@ -82,6 +82,8 @@ class BikeComputerCoordinator: ObservableObject {
     private let now: () -> Date
     private var workoutDeviceRelay: WorkoutDeviceRelay?
 
+    weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
+
     // MARK: - Published State (UI Observable)
 
     // BLE Connection
@@ -214,9 +216,20 @@ class BikeComputerCoordinator: ObservableObject {
         navEngine.$isNavigating
             .sink { [weak self] navigating in
                 guard let self = self else { return }
+                let navigationChanged = self.wasNavigating != navigating
                 self.isNavigating = navigating
                 if self.startServices {
                     self.locationManager.setNavigating(navigating && !self.navEngine.isSimulationMode)
+                }
+                if navigationChanged {
+                    self.diagnosticsRecorder?.record(
+                        category: .navigation,
+                        event: navigating ? "started" : "stopped",
+                        fields: [
+                            "simulation": String(self.navEngine.isSimulationMode),
+                            "routeLoaded": String(self.currentRoute != nil),
+                        ]
+                    )
                 }
                 let didStopNavigation = self.wasNavigating && !navigating
                 self.wasNavigating = navigating

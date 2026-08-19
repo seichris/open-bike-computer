@@ -397,7 +397,8 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
         queue.async { [weak self] in
             guard let self else { return }
             self.activeCaptureId = UUID()
-            self.detailedTraceExpiry = self.now().addingTimeInterval(4 * 60 * 60)
+            let expiry = self.now().addingTimeInterval(4 * 60 * 60)
+            self.detailedTraceExpiry = expiry
             self.detailedTraceActive = true
             self.publishDetailedState()
             self.recordOnQueue(
@@ -406,6 +407,13 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
                 event: "detailed_trace_started",
                 fields: ["durationLimit": "4h"]
             )
+            self.queue.asyncAfter(deadline: .now() + 4 * 60 * 60) { [weak self] in
+                guard let self,
+                      self.detailedTraceActive,
+                      self.detailedTraceExpiry == expiry else { return }
+                self.expireDetailedTraceIfNeeded(force: true)
+                self.flushOnQueue()
+            }
         }
     }
 
@@ -819,10 +827,10 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
         }.max()
     }
 
-    private func expireDetailedTraceIfNeeded() {
+    private func expireDetailedTraceIfNeeded(force: Bool = false) {
         guard detailedTraceActive,
               let expires = detailedTraceExpiry,
-              now() >= expires else { return }
+              (force || now() >= expires) else { return }
         recordOnQueue(
             category: .user,
             event: "detailed_trace_ended",
