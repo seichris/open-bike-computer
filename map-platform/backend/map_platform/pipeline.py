@@ -1825,6 +1825,8 @@ class MapBuildPipeline:
                         lease_token=claimed.lease_token,
                         typed_failure=exc.code,
                         transient=False,
+                        actual_resource=self._last_task_failure_resource(),
+                        peak_rss_bytes=self._last_task_failure_peak_rss(),
                     )
                     raise
                 except Exception as exc:
@@ -1837,6 +1839,8 @@ class MapBuildPipeline:
                         lease_token=claimed.lease_token,
                         typed_failure=str(typed_failure),
                         transient=False,
+                        actual_resource=self._last_task_failure_resource(),
+                        peak_rss_bytes=self._last_task_failure_peak_rss(),
                     )
                     raise
                 progress = self.building_task_store.progress(job.job_id)
@@ -1899,6 +1903,23 @@ class MapBuildPipeline:
             except Exception:
                 pass
             raise
+
+    def _last_task_failure_resource(self) -> dict[str, Any] | None:
+        """Return the last child-command observation for a failed task.
+
+        A chunk can fail before it reaches ``mark_ready`` (for example while
+        a conversion subprocess emits a typed relation failure). Preserve the
+        command wall time and peak RSS in the durable attempt row so a failed
+        task remains useful for resource-model training and diagnosis.
+        """
+
+        metrics = self._last_command_execution_metrics()
+        return {"lastCommand": metrics} if metrics else None
+
+    def _last_task_failure_peak_rss(self) -> int | None:
+        metrics = self._last_command_execution_metrics()
+        value = metrics.get("peakResidentBytes")
+        return value if isinstance(value, int) and value >= 0 else None
 
     def _plan_chunked_scope(self, job: MapJob, calibration=None) -> GlobalBuildingPlan:
         calibration = calibration or load_building_calibration_window(
@@ -3164,6 +3185,7 @@ class MapBuildPipeline:
                 source_index_manifest=source_index_manifest,
                 scope_plan_path=scope_plan_path,
                 cancellation_check=cancellation_check,
+                parse_building_failures=True,
             )
             feature_metrics = self._extract_features(
                 job,
@@ -5300,6 +5322,7 @@ class MapBuildPipeline:
         source_index_manifest: Path | None = None,
         scope_plan_path: Path | None = None,
         relation_retry_count: int = 0,
+        parse_building_failures: bool = False,
         cancellation_check=None,
     ) -> None:
         bounds = bounds or job.geometry.bounds
@@ -5326,11 +5349,30 @@ class MapBuildPipeline:
                     str(relation_retry_count),
                 ]
             )
-        self._run_command(
-            args,
-            cwd=self.paths.osm_extract_root / "scripts",
-            cancellation_check=cancellation_check,
-        )
+        try:
+            self._run_command(
+                args,
+                cwd=self.paths.osm_extract_root / "scripts",
+                cancellation_check=cancellation_check,
+            )
+        except subprocess.CalledProcessError as exc:
+            if not parse_building_failures:
+                raise
+            output = "\n".join(
+                value
+                for value in (
+                    getattr(exc, "stdout", None),
+                    getattr(exc, "stderr", None),
+                    getattr(exc, "output", None),
+                )
+                if isinstance(value, str)
+            )
+            failure = parse_building_failure(output)
+            if failure is not None:
+                raise BuildingScopeError(
+                    failure["code"], failure["message"]
+                ) from exc
+            raise
 
     def _extract_features(
         self,

@@ -40,9 +40,25 @@ of worker cgroup memory without advancing. Commit `296c445c` makes both
 relation-audit and workload consumers verify the sealed manifest and reuse the
 immutable index without a multi-gigabyte database rescan; commit `d34190e3`
 also batches the closure-audit lookups instead of issuing one SQLite query per
-object. The replacement benchmark is running on the new immutable validation image. Cancellation
-fencing and maintenance reconciliation now release child reservations when
-such an operator stop is required.
+object. The replacement benchmark ran on the new immutable validation image and
+reached bounded chunk execution before failing closed on one malformed source
+relation. Cancellation fencing and maintenance reconciliation now release
+child reservations when such an operator stop is required.
+
+The corrected exact-bbox run (`9fc92d71a0c743169af8`) then failed closed after
+three parent attempts with 48 of 442 block receipts. Its third chunk had an
+exact workload receipt of 30,378 closure objects (22 relations, 4,071 ways,
+and 26,285 nodes), so neither the relation-object ceiling nor host RAM was the
+cause. Reproducing the preserved clipped PBF showed source relation `r11258294`
+(`Guangfulin Culture Exhibition Hall`) is tagged `type=building` but contains
+only a `part` member and no outline. That is an invalid/incomplete relation and
+is correctly non-publishable under the fail-closed relation policy. The worker
+cgroup peaked at 6,121,091,072 bytes during the final retry, with no OOM event;
+the prior generic task error also exposed a diagnostics gap. The follow-up
+pipeline change parses typed conversion failures in chunk execution and stores
+the last command wall/RSS observation on failed task attempts, so the app and
+operator surface report `building_relation_incomplete` rather than hiding it
+behind `map_build_failed`.
 
 The core decision is:
 
@@ -859,7 +875,10 @@ reuse the sealed source-index manifest; a replacement run reached ordinary
 validation. On the current image, the first bounded chunk completed all 24
 block encodings with 24 durable receipts, no split/retry, 1,819,049,984 bytes
 peak RSS, and a 2,190,176,256-byte worker cgroup peak. The full timing and
-artifact evidence remain pending.
+artifact evidence remain pending. The third chunk's invalid source relation is
+now retained as a deterministic fail-closed fixture; a full-bbox ready artifact
+requires either corrected source data or an explicit, reviewed product policy
+for handling malformed OSM building relations.
 
 ### Phase 4 — Cache-only final assembly
 

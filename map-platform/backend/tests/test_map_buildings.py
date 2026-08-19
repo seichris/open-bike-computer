@@ -1750,6 +1750,42 @@ class MapBuildingContractTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "building_relation_incomplete")
             self.assertEqual(observed_buffers, [256, 512, 2048])
 
+    def test_chunk_conversion_preserves_typed_building_failure(self):
+        request = self._request()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(request)
+
+            class FailingRunner:
+                def run(self, args, *, cwd=None):
+                    del args, cwd
+                    raise subprocess.CalledProcessError(
+                        2,
+                        ["pbf_to_geojson"],
+                        output=(
+                            'BUILDING_PREPROCESS_FAILURE:{"code":"building_relation_incomplete",'
+                            '"message":"output building relation has ambiguous or missing explicit parents"}\n'
+                        ),
+                    )
+
+            pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"),
+                runner=FailingRunner(),
+                building_scope_mode="chunked",
+            )
+            with self.assertRaises(BuildingScopeError) as raised:
+                pipeline._convert_to_geojson(
+                    job,
+                    root / "clipped.osm.pbf",
+                    root / "features",
+                    source_index_manifest=root / "source-index.json",
+                    scope_plan_path=root / "scope-plan.json",
+                    parse_building_failures=True,
+                )
+
+            self.assertEqual(raised.exception.code, "building_relation_incomplete")
+            self.assertIn("ambiguous or missing", str(raised.exception))
+
     def test_target_three_is_forwarded_and_requires_both_stats_records(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
