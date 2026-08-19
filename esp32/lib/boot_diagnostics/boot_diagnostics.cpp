@@ -214,6 +214,23 @@ void begin() {
 
 bool safeModeActive() { return runtimeSafeMode; }
 
+Snapshot snapshot() {
+  if (!initialized) {
+    return {0, 0, 0, Stage::None, Stage::None, 0, false, false, false};
+  }
+  return {
+      persistentState.bootSequence,
+      persistentState.firmwareFingerprint,
+      persistentState.resetReason,
+      static_cast<Stage>(persistentState.activeStage),
+      static_cast<Stage>(persistentState.completedStage),
+      persistentState.consecutiveEarlyFailures,
+      policy::isReady(persistentState),
+      policy::isSafeMode(persistentState),
+      policy::isDiagnosticHold(persistentState),
+  };
+}
+
 void enterStage(Stage stage) {
   if (!initialized || runtimeSafeMode) {
     return;

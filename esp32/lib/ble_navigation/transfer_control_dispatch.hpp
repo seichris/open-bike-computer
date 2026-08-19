@@ -13,6 +13,7 @@ enum class Action : uint8_t {
   DisableAll = 4,
   EnableDebug = 5,
   DisableOnBleDisconnect = 6,
+  EnableDiagnostics = 7,
 };
 
 enum Notification : uint8_t {

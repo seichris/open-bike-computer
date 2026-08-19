@@ -310,7 +310,8 @@ enum DeviceBLEProtocol {
     static let remoteDeviceDebugCapabilityMask: UInt32 = 1 << 16
     static let gpsPositionQualityV1CapabilityMask: UInt32 = 1 << 17
     static let rendererDiagnosticsCapabilityMask: UInt32 = 1 << 18
-    static let deviceCapabilitiesVersion: UInt8 = 16
+    static let rideDiagnosticsCapabilityMask: UInt32 = 1 << 19
+    static let deviceCapabilitiesVersion: UInt8 = 17
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryOriginFrameLength = 28
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
@@ -813,6 +814,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsRemoteDeviceDebug: Bool = false
     @Published private(set) var supportsGPSPositionQualityV1: Bool = false
     @Published private(set) var supportsRendererDiagnostics: Bool = false
+    @Published private(set) var supportsRideDiagnostics: Bool = false
     @Published private(set) var rendererDiagnosticsSnapshotJSON: String?
     @Published private(set) var rendererDiagnosticsStatus = "unavailable"
     @Published private(set) var rendererDiagnosticsRevision: UInt64 = 0
@@ -841,6 +843,13 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceOperationDeviceID: String?
     @Published private(set) var deviceFeedbackDeviceID: String?
     @Published var debugEvents: [String] = []
+    weak var diagnosticsRecorder: RideDiagnosticsRecorder? {
+        didSet {
+            DispatchQueue.main.async { [weak self] in
+                self?.sendDiagnosticsCaptureBindingIfNeeded()
+            }
+        }
+    }
     @Published var mapTransferModeEnabled: Bool = false
     @Published var mapTransferBaseURL: URL?
     @Published var mapTransferAccessPointSSID: String?
@@ -4177,6 +4186,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
         supportsRendererDiagnostics = false
+        supportsRideDiagnostics = false
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
         rendererDiagnosticsStatus = "unsupported"
@@ -4580,6 +4590,53 @@ class BLEManager: NSObject, ObservableObject {
             label: "device transfer status",
             coalescingKey: "transfer.device.status"
         )
+    }
+
+    @discardableResult
+    func sendDiagnosticsCaptureBinding(_ captureID: UUID? = nil) -> Bool {
+        guard supportsRideDiagnostics,
+              let captureID = captureID ?? diagnosticsRecorder?.currentCaptureID else {
+            return false
+        }
+        let packet = Data(
+            "\(DeviceBLEProtocol.deviceTransferControlPrefix)capture|\(captureID.uuidString.lowercased())".utf8
+        )
+        return sendTransferControlPacket(
+            packet,
+            label: "diagnostics capture binding",
+            coalescingKey: "transfer.diagnostics.capture"
+        )
+    }
+
+    @discardableResult
+    func sendDiagnosticsIssueMarker(_ code: RideIssueCode) -> Bool {
+        guard supportsRideDiagnostics else { return false }
+        let packet = Data(
+            "\(DeviceBLEProtocol.deviceTransferControlPrefix)mark|\(code.rawValue)".utf8
+        )
+        return sendTransferControlPacket(
+            packet,
+            label: "diagnostics issue marker",
+            coalescingKey: "transfer.diagnostics.marker"
+        )
+    }
+
+    @discardableResult
+    func endDiagnosticsCapture() -> Bool {
+        guard supportsRideDiagnostics else { return false }
+        let packet = Data(
+            "\(DeviceBLEProtocol.deviceTransferControlPrefix)capture_end".utf8
+        )
+        return sendTransferControlPacket(
+            packet,
+            label: "diagnostics capture end",
+            coalescingKey: "transfer.diagnostics.capture"
+        )
+    }
+
+    private func sendDiagnosticsCaptureBindingIfNeeded() {
+        guard isConnected, isNavigationReady, supportsRideDiagnostics else { return }
+        _ = sendDiagnosticsCaptureBinding()
     }
 
     @discardableResult
@@ -5073,6 +5130,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
         supportsRendererDiagnostics = false
+        supportsRideDiagnostics = false
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
         rendererDiagnosticsStatus = "unavailable"
@@ -5100,6 +5158,19 @@ class BLEManager: NSObject, ObservableObject {
 
     private func log(_ message: String) {
         print(message)
+        let messageDigest = SHA256.hash(data: Data(message.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        diagnosticsRecorder?.record(
+            level: .debug,
+            category: .ble,
+            event: "debug_message",
+            fields: [
+                "messageBytes": String(message.utf8.count),
+                "messageDigest": messageDigest,
+            ],
+            captureId: diagnosticsRecorder?.currentCaptureID
+        )
 
         let timestamp = DateFormatter.bleDebugTimestamp.string(from: Date())
         let line = "\(timestamp) \(message)"
@@ -6145,6 +6216,7 @@ class BLEManager: NSObject, ObservableObject {
         isPairingMode = false
         isConnected = true
         isNavigationReady = true
+        sendDiagnosticsCaptureBindingIfNeeded()
         supportsDeviceSettings = true
         authRetryTimer?.invalidate()
         authRetryTimer = nil
@@ -7534,6 +7606,7 @@ extension BLEManager: CBPeripheralDelegate {
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
         supportsRendererDiagnostics = false
+        supportsRideDiagnostics = false
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
         rendererDiagnosticsStatus = "invalid capabilities"
@@ -7660,6 +7733,8 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.gpsPositionQualityV1CapabilityMask != 0
         let hasRendererDiagnostics =
             flags & DeviceBLEProtocol.rendererDiagnosticsCapabilityMask != 0
+        let hasRideDiagnostics =
+            flags & DeviceBLEProtocol.rideDiagnosticsCapabilityMask != 0
         if has3DBuildings && shouldApply3DBuildingVisibilityDefault {
             shouldApply3DBuildingVisibilityDefault = false
             UserDefaults.standard.set(
@@ -7742,6 +7817,10 @@ extension BLEManager: CBPeripheralDelegate {
         supportsRemoteDeviceDebug = hasRemoteDeviceDebug
         supportsGPSPositionQualityV1 = hasGPSPositionQualityV1
         supportsRendererDiagnostics = hasRendererDiagnostics
+        supportsRideDiagnostics = hasRideDiagnostics
+        if hasRideDiagnostics {
+            sendDiagnosticsCaptureBindingIfNeeded()
+        }
         if !hasRendererDiagnostics {
             rendererDiagnosticsChunks.reset()
             rendererDiagnosticsSnapshotJSON = nil

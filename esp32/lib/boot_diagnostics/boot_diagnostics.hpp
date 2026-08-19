@@ -12,6 +12,22 @@ constexpr std::size_t kStructuredSerialTxBufferSize =
 // in RTC no-init memory and reports the previous unfinished stage.
 void begin();
 
+struct Snapshot {
+  uint32_t bootSequence;
+  uint32_t firmwareFingerprint;
+  uint32_t resetReason;
+  Stage activeStage;
+  Stage completedStage;
+  uint8_t consecutiveEarlyFailures;
+  bool ready;
+  bool safeMode;
+  bool diagnosticHold;
+};
+
+// Read-only runtime state for structured post-storage diagnostics. This does
+// not change the early-boot RTC state machine or touch peripheral ownership.
+Snapshot snapshot();
+
 bool safeModeActive();
 void enterStage(Stage stage);
 void completeStage(Stage stage);

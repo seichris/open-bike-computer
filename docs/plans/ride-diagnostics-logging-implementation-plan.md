@@ -2,9 +2,11 @@
 
 ## Status and baseline
 
-This document is an implementation plan only. It is based on freshly fetched
-GitHub `main` at commit `3d18a0baf9bb3f420275660d4206540f6cd0c21d`
-(2026-08-19).
+This document is the implementation plan and acceptance contract for the
+ride-diagnostics delivery. The implementation branch starts from freshly
+fetched GitHub `main` at commit `4630ce5f7b9c0ada7a1026e6b458508dfcbfb9d3`
+(2026-08-19); the original dirty checkout is intentionally not used as the
+implementation base.
 
 The current baseline already provides useful pieces, but none of them is a
 durable ride log:

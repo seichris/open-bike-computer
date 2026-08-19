@@ -16,6 +16,7 @@ struct DeviceTransferSession: Equatable {
         case map
         case firmware
         case debug
+        case diagnostics
     }
 
     let mode: Mode
@@ -443,6 +444,71 @@ final class DeviceTransferManager {
 
     func exitFirmwareTransfer(bleManager: BLEManager) {
         bleManager.requestDeviceTransferExit()
+        removeJoinedAccessPointIfNeeded()
+    }
+
+    func enterDiagnostics(
+        bleManager: BLEManager,
+        status: @escaping @MainActor (String) -> Void
+    ) async throws -> DeviceTransferSession {
+        status("requesting device diagnostics")
+        guard bleManager.isNavigationReady else {
+            throw RemoteDeviceDebugError.deviceNotReady
+        }
+        guard bleManager.supportsRideDiagnostics else {
+            throw RemoteDeviceDebugError.unsupportedFirmware
+        }
+        let initialRevision = bleManager.deviceTransferStatusRevision
+        var enterWasQueued = false
+        guard bleManager.requestDeviceTransferMode(.diagnostics) else {
+            throw RemoteDeviceDebugError.transferCommandNotSent
+        }
+        enterWasQueued = true
+        do {
+            for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
+                if bleManager.deviceTransferStatusRevision != initialRevision,
+                   bleManager.deviceTransferMode == DeviceTransferSession.Mode.diagnostics.rawValue,
+                   let baseURL = bleManager.deviceTransferBaseURL,
+                   let token = bleManager.deviceTransferSessionToken,
+                   !token.isEmpty {
+                    let session = DeviceTransferSession(
+                        mode: .diagnostics,
+                        baseURL: baseURL,
+                        accessPointSSID: bleManager.deviceTransferAccessPointSSID,
+                        accessPointPassphrase: bleManager.deviceTransferAccessPointPassphrase,
+                        sessionToken: token,
+                        networkTransport: bleManager.deviceTransferNetworkTransport,
+                        networkSSID: bleManager.deviceTransferNetworkSSID,
+                        hotspotFallback: bleManager.deviceTransferUsedHotspotFallback,
+                        hotspotFallbackReason: bleManager.deviceTransferHotspotFallbackReason
+                    )
+                    try await joinDeviceNetworkIfNeeded(
+                        session: session,
+                        statusPath: "device-diagnostics/v1/index",
+                        sessionToken: session.sessionToken,
+                        status: status
+                    )
+                    return session
+                }
+                if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
+                    _ = bleManager.requestDeviceTransferStatus()
+                }
+                try await Task.sleep(
+                    nanoseconds: DeviceTransferHandshakePolicy.retryIntervalNanoseconds
+                )
+            }
+            throw RemoteDeviceDebugError.missingSession
+        } catch {
+            if enterWasQueued {
+                await exitDiagnostics(bleManager: bleManager)
+            }
+            throw error
+        }
+    }
+
+    func exitDiagnostics(bleManager: BLEManager) async {
+        _ = bleManager.requestDeviceTransferExit()
+        _ = await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2)
         removeJoinedAccessPointIfNeeded()
     }
 

@@ -25,6 +25,8 @@ struct SettingsView: View {
         CyclingSensorDetectionCoordinator
     @ObservedObject private var rideDetectionSettingsStore:
         RideDetectionSettingsStore
+    @ObservedObject private var rideDiagnosticsRecorder:
+        RideDiagnosticsRecorder
     @FocusState private var focusedSavedMapFilename: String?
     let locationAuthorizationStatus: CLAuthorizationStatus
     let locationAccuracyAuthorization: CLAccuracyAuthorization
@@ -46,6 +48,7 @@ struct SettingsView: View {
         cyclingSensorDetectionCoordinator:
             CyclingSensorDetectionCoordinator? = nil,
         rideDetectionSettingsStore: RideDetectionSettingsStore? = nil,
+        rideDiagnosticsRecorder: RideDiagnosticsRecorder? = nil,
         onRequestLocationAuthorization: @escaping () -> Void = {},
         onStartTestNavigation: @escaping (String) -> Void
     ) {
@@ -72,6 +75,9 @@ struct SettingsView: View {
         _rideDetectionSettingsStore = ObservedObject(
             wrappedValue:
                 rideDetectionSettingsStore ?? RideDetectionSettingsStore()
+        )
+        _rideDiagnosticsRecorder = ObservedObject(
+            wrappedValue: rideDiagnosticsRecorder ?? RideDiagnosticsRecorder()
         )
         self.onStartTestNavigation = onStartTestNavigation
     }
@@ -170,6 +176,14 @@ struct SettingsView: View {
                         )
                     } label: {
                         Label("Developer Settings", systemImage: "wrench.and.screwdriver")
+                    }
+
+                    NavigationLink {
+                        RideDiagnosticsSettingsView(
+                            recorder: rideDiagnosticsRecorder
+                        )
+                    } label: {
+                        Label("Diagnostics", systemImage: "stethoscope")
                     }
                 }
 

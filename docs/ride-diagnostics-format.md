@@ -1,0 +1,57 @@
+# Ride diagnostics format
+
+Ride diagnostics are local-only, structured evidence. They are not an
+analytics stream and are never uploaded automatically.
+
+## Event record
+
+Each stream is UTF-8 JSON Lines. Every complete line is one object with
+`schema: 1` and these required fields:
+
+```json
+{
+  "schema": 1,
+  "source": "ios",
+  "sequence": 42,
+  "level": "info",
+  "category": "ble",
+  "event": "connected",
+  "wallTime": "2026-08-19T08:20:31.412Z",
+  "uptimeMs": 381231,
+  "processId": "123e4567-e89b-12d3-a456-426614174000",
+  "captureId": "123e4567-e89b-12d3-a456-426614174001",
+  "fields": {"rssiBucket": "good"}
+}
+```
+
+`wallTime`, `uptimeMs`, `processId`, `captureId`, and `fields` are optional
+when the producer cannot provide them, but a producer must not invent a wall
+clock. `sequence` is monotonically increasing within one stream. Firmware
+additionally includes `bootSequence` and `firmwareFingerprint` in `fields`.
+
+Allowed sources are `ios`, `firmware`, and `host`. Levels are `debug`, `info`,
+`warning`, and `error`. Categories are `lifecycle`, `boot`, `ble`,
+`navigation`, `gps`, `workout`, `rideAutomation`, `storage`, `map`, `power`,
+`transfer`, `user`, and `logger`.
+
+The event name and fields are deliberately typed at each call site. Unknown
+fields are rejected by the host validator. A truncated final line is reported
+and ignored; a truncated line in the middle of a stream is an error.
+
+## Privacy boundary
+
+Never persist exact coordinates, addresses, route instructions, destination
+names, Wi-Fi credentials, transfer tokens, owner keys, raw HealthKit values,
+raw IMU arrays, or complete BLE/HTTP payloads. Use stable codes, lengths,
+latencies, counters, freshness/accuracy buckets, and random per-capture IDs.
+
+The detailed ride trace may use the normalized fields already allowed by
+`docs/ride-automation-traces.md`; it still contains no coordinates or raw
+health/sensor stream.
+
+## Bundle
+
+An exported stored-ZIP contains `manifest.json`, `checksums.sha256`, `app/`,
+`device/`, and `summary/`. The manifest records source schema versions,
+capture/boot IDs, UTC/uptime anchors, chunk hashes, drop counts, and truncation
+warnings. It must not contain secrets or forbidden private values.

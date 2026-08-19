@@ -78,6 +78,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "map_transfer.hpp"
 #include "map_transfer_http.hpp"
 #include "renderer_diagnostics.hpp"
+#include "ride_diagnostics.hpp"
 
 // BLE Navigation for iOS route overlay
 #include "ble_navigation.hpp"
@@ -94,6 +95,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "power_management.hpp"
 #include "route_overlay.hpp"
 #include "ride_automation_runtime.hpp"
+#include "ride_diagnostics_http.hpp"
 #include "ui_scheduler.hpp"
 #include "waitingScr.hpp"
 #include "workout_telemetry_runtime.hpp"
@@ -115,6 +117,7 @@ device_transfer::HttpTransferServer deviceTransferHttp;
 map_transfer::MapTransferHttpServer mapTransferHttp;
 firmware_update::FirmwareUpdateHttpServer firmwareUpdateHttp;
 device_debug::DeviceDebugHttp deviceDebugHttp;
+ride_diagnostics::RideDiagnosticsHttp rideDiagnosticsHttp;
 
 static lv_obj_t *mapActivationProgressPanel = nullptr;
 static lv_obj_t *mapActivationProgressLabel = nullptr;
@@ -1489,6 +1492,37 @@ void setup() {
     storage.initSPIFFS();
   }
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  const boot_diagnostics::Snapshot diagnosticBoot = boot_diagnostics::snapshot();
+  ride_diagnostics::begin(
+      storage,
+      diagnosticBoot.bootSequence,
+      diagnosticBoot.firmwareFingerprint);
+  char diagnosticBootFields[320] = {};
+  snprintf(
+      diagnosticBootFields, sizeof(diagnosticBootFields),
+      "{\"bootSequence\":%lu,\"firmwareFingerprint\":\"%08lX\","
+      "\"resetReason\":%lu,\"activeStage\":%u,\"completedStage\":%u,"
+      "\"consecutiveEarlyFailures\":%u,\"ready\":%s,\"safeMode\":%s,"
+      "\"diagnosticHold\":%s}",
+      static_cast<unsigned long>(diagnosticBoot.bootSequence),
+      static_cast<unsigned long>(diagnosticBoot.firmwareFingerprint),
+      static_cast<unsigned long>(diagnosticBoot.resetReason),
+      static_cast<unsigned>(diagnosticBoot.activeStage),
+      static_cast<unsigned>(diagnosticBoot.completedStage),
+      static_cast<unsigned>(diagnosticBoot.consecutiveEarlyFailures),
+      diagnosticBoot.ready ? "true" : "false",
+      diagnosticBoot.safeMode ? "true" : "false",
+      diagnosticBoot.diagnosticHold ? "true" : "false");
+  ride_diagnostics::record(ride_diagnostics::Level::Info, "boot",
+                           "boot_snapshot", diagnosticBootFields);
+#else
+  ride_diagnostics::begin(storage, 1, 1);
+#endif
+  ride_diagnostics::record(
+      ride_diagnostics::Level::Info, "storage", "mount_checked",
+      storage.getSdLoaded() ? "{\"available\":true}"
+                            : "{\"available\":false}");
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   boot_diagnostics::completeStage(boot_diagnostics::Stage::Storage);
   boot_diagnostics::enterStage(boot_diagnostics::Stage::MapRecovery);
 #endif
@@ -1550,6 +1584,8 @@ void setup() {
                                             storage.getSdLoaded());
   firmwareUpdateHttp.configure(&deviceTransferHttp);
   deviceDebugHttp.configure(&deviceTransferHttp);
+  rideDiagnosticsHttp.configure(&deviceTransferHttp);
+  deviceTransferHttp.registerHandler("/device-diagnostics/", &rideDiagnosticsHttp);
 
   createGpxFolders();
 
@@ -1646,6 +1682,8 @@ void setup() {
 #endif
 
   log_i("Setup Complete");
+  ride_diagnostics::record(ride_diagnostics::Level::Info, "lifecycle",
+                           "ready", "{}");
   firmwareUpdateHttp.markRunningAppValid();
   mapTransferHttp.resumePendingActivations();
   power_management::completeStartup();
@@ -1667,6 +1705,7 @@ void loop() {
   }
 #endif
   uint32_t now = millis();
+  ride_diagnostics::process(now);
   const uint32_t wakeReasons =
       pendingUiWakeReasons | ui_scheduler::wait(0);
   pendingUiWakeReasons = 0;

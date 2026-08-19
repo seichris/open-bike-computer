@@ -46,6 +46,7 @@
 #include "../map_transfer/map_stream_compiled_trust.hpp"
 #include "../power_metrics/power_metrics.hpp"
 #include "../renderer_diagnostics/renderer_diagnostics.hpp"
+#include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "../route_overlay/route_overlay.hpp"
 #include "../speaker/speaker.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
@@ -109,10 +110,12 @@ static bool bleSessionSupportsStreetLabels = false;
 static bool bleSessionSupports3DBuildings = false;
 static std::atomic<bool> bleSessionSupportsExplicitInvalidGpsHeading{false};
 static std::atomic<bool> bleSessionSupportsRendererDiagnostics{false};
+static std::atomic<bool> bleSessionSupportsRideDiagnostics{false};
 static std::atomic<uint32_t> lastRendererMetricsRequestMs{0};
 static std::atomic<uint32_t> lastRendererWindowRequestMs{0};
 static std::atomic<uint8_t> lastRendererWindowRequestProfile{
     renderer_diagnostics_ble_protocol::CURRENT_PROFILE};
+static std::atomic<uint32_t> lastRideDiagnosticsGpsLogMs{0};
 static portMUX_TYPE rendererWindowRequestMux = portMUX_INITIALIZER_UNLOCKED;
 static renderer_diagnostics_ble_protocol::WindowRequest
     pendingRendererWindowRequest;
@@ -963,6 +966,8 @@ static bool unwrapOwnerAuthenticatedPayload(
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRideDiagnostics.store(false,
+                                            std::memory_order_release);
     clearRendererWindowRequest();
     bleDebugStats.authenticated = false;
     ownershipDisconnectPending = true;
@@ -1083,6 +1088,8 @@ static void completeBleSessionAuthentication() {
   bleDebugStats.authenticated = true;
   bleDebugStats.authSuccessCount++;
   bleDebugStats.lastAuthSuccessMs = millis();
+  ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
+                           "authenticated", "{}");
   queueOwnershipUiUpdate();
 }
 
@@ -1237,6 +1244,8 @@ static void handleAuthPayload(const std::string &frame) {
           false, std::memory_order_release);
       bleSessionSupportsRendererDiagnostics.store(false,
                                                   std::memory_order_release);
+      bleSessionSupportsRideDiagnostics.store(false,
+                                              std::memory_order_release);
       clearRendererWindowRequest();
       bleDebugStats.authenticated = false;
       ownershipDisconnectPending = true;
@@ -1354,6 +1363,8 @@ static void handleAuthPayload(const std::string &frame) {
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRideDiagnostics.store(false,
+                                            std::memory_order_release);
     lastRendererMetricsRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestProfile.store(
@@ -2148,7 +2159,8 @@ static void processPendingTransferControl() {
     bool disabled = true;
     if (mode == "map") {
       disabled = mapTransferHttp.setEnabled(false);
-    } else if (mode == "debug" || device_debug::frameStore().active()) {
+    } else if (mode == "debug" || mode == "diagnostics" ||
+               device_debug::frameStore().active()) {
       disabled = stopActiveDeviceTransfer();
     }
     Serial.printf("BLE Device Transfer: disconnect cleanup applied, "
@@ -2225,6 +2237,29 @@ static void processPendingTransferControl() {
       const bool enabled = startRemoteDeviceDebugSession();
       Serial.printf("BLE Device Transfer: debug enter applied, enabled=%d\n",
                     enabled);
+    }
+    break;
+  }
+  case ble_transfer::Action::EnableDiagnostics: {
+    const device_transfer::HttpTransferStatus transferStatus =
+        deviceTransferHttp.status();
+    if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire)) {
+      deviceTransferHttp.setLastError(
+          "ride_diagnostics_unsupported",
+          "this firmware or client has no ride diagnostics capability");
+      Serial.println("BLE Device Transfer: diagnostics unsupported");
+    } else if (transferStatus.enabled && transferStatus.mode != "diagnostics") {
+      deviceTransferHttp.setLastError("transfer_busy",
+                                      "another transfer mode is active");
+      Serial.println(
+          "BLE Device Transfer: diagnostics enter rejected, transfer is busy");
+    } else if (transferStatus.enabled && transferStatus.mode == "diagnostics") {
+      Serial.println("BLE Device Transfer: diagnostics enter already applied");
+    } else {
+      const bool enabled = deviceTransferHttp.setEnabled(true, "diagnostics");
+      Serial.printf(
+          "BLE Device Transfer: diagnostics enter applied, enabled=%d\n",
+          enabled);
     }
     break;
   }
@@ -2363,6 +2398,12 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
           device_capabilities_protocol::RENDERER_DIAGNOSTICS_FEATURE;
     }
 #endif
+#if PERSISTENT_RIDE_DIAGNOSTICS
+    if (clientVersion >= device_capabilities_protocol::
+                             RIDE_DIAGNOSTICS_CLIENT_VERSION) {
+      featureFlags |= device_capabilities_protocol::RIDE_DIAGNOSTICS_FEATURE;
+    }
+#endif
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
@@ -2443,6 +2484,17 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
 #else
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRideDiagnostics.store(false,
+                                            std::memory_order_release);
+#endif
+#if PERSISTENT_RIDE_DIAGNOSTICS
+    bleSessionSupportsRideDiagnostics.store(
+        clientVersion >= device_capabilities_protocol::
+                          RIDE_DIAGNOSTICS_CLIENT_VERSION,
+        std::memory_order_release);
+#else
+    bleSessionSupportsRideDiagnostics.store(false,
+                                            std::memory_order_release);
 #endif
     notifyDeviceCapabilities(pChar, includePowerButtonConfig, clientVersion);
   }
@@ -2751,6 +2803,62 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
     return;
   }
 
+  if (command == "enter|diagnostics") {
+#if PERSISTENT_RIDE_DIAGNOSTICS
+    if (bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire)) {
+      deviceTransferHttp.clearPreferredNetwork();
+      queueTransferControl(ble_transfer::Action::EnableDiagnostics,
+                           ble_transfer::NotifyGeneric);
+      Serial.println("BLE Device Transfer: diagnostics enter queued");
+    } else {
+      deviceTransferHttp.setLastError(
+          "ride_diagnostics_unsupported",
+          "diagnostics capability was not negotiated");
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    }
+#else
+    deviceTransferHttp.setLastError(
+        "ride_diagnostics_unsupported",
+        "this firmware has no persistent ride diagnostics");
+    queueTransferControl(ble_transfer::Action::None,
+                         ble_transfer::NotifyGeneric);
+#endif
+    return;
+  }
+
+  if (command.rfind("capture|", 0) == 0) {
+    const std::string capture = command.substr(8);
+    if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) ||
+        !ride_diagnostics::bindCapture(capture.c_str())) {
+      deviceTransferHttp.setLastError("capture_rejected",
+                                      "capture binding was malformed or unsupported");
+    }
+    queueTransferControl(ble_transfer::Action::None,
+                         ble_transfer::NotifyGeneric);
+    return;
+  }
+
+  if (command.rfind("mark|", 0) == 0) {
+    const std::string code = command.substr(5);
+    if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) ||
+        !ride_diagnostics::markIssue(code.c_str())) {
+      deviceTransferHttp.setLastError("marker_rejected",
+                                      "issue marker was malformed or unsupported");
+    }
+    queueTransferControl(ble_transfer::Action::None,
+                         ble_transfer::NotifyGeneric);
+    return;
+  }
+
+  if (command == "capture_end") {
+    if (bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire))
+      ride_diagnostics::clearCapture();
+    queueTransferControl(ble_transfer::Action::None,
+                         ble_transfer::NotifyGeneric);
+    return;
+  }
+
   if (command == "enter|debug|h1|e") {
 #if DEVICE_REMOTE_DEBUG
     if (deviceDebugHttp.initialized() &&
@@ -2895,6 +3003,26 @@ static void handleGpsPayload(
   bleDebugStats.lastGpsPacketMs = gpsFreshnessState.lastPacketMs;
   bleDebugStats.lastGpsPacketGapMs = gpsFreshnessState.lastGapMs;
   bleDebugStats.maximumGpsPacketGapMs = gpsFreshnessState.maximumGapMs;
+
+  const uint32_t nowMs = millis();
+  const uint32_t previousDiagnosticGpsLogMs =
+      lastRideDiagnosticsGpsLogMs.load(std::memory_order_acquire);
+  if (previousDiagnosticGpsLogMs == 0 ||
+      static_cast<uint32_t>(nowMs - previousDiagnosticGpsLogMs) >= 30'000U) {
+    lastRideDiagnosticsGpsLogMs.store(nowMs, std::memory_order_release);
+    char fields[192] = {};
+    snprintf(fields, sizeof(fields),
+             "{\"fixValid\":%s,\"speedAvailable\":%s,"
+             "\"accuracyAvailable\":%s,\"lastGapMs\":%lu,"
+             "\"maximumGapMs\":%lu}",
+             packet.fixValid ? "true" : "false",
+             packet.hasSpeed ? "true" : "false",
+             packet.hasHorizontalAccuracy ? "true" : "false",
+             static_cast<unsigned long>(bleDebugStats.lastGpsPacketGapMs),
+             static_cast<unsigned long>(bleDebugStats.maximumGpsPacketGapMs));
+    ride_diagnostics::record(ride_diagnostics::Level::Info, "gps",
+                             "quality_checkpoint", fields);
+  }
 
   if (packet.hasRideDetectionQuality && arrivals.packetCount > 0) {
     GpsRideObservation observation{};
@@ -3482,6 +3610,8 @@ public:
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRideDiagnostics.store(false,
+                                            std::memory_order_release);
     lastRendererMetricsRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestProfile.store(
@@ -3507,6 +3637,8 @@ public:
       xSemaphoreGive(destinationCatalogReassemblerMutex);
     }
     Serial.println("BLE: iOS client connected!");
+    ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
+                             "connected", "{}");
     ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     // Stop advertising when connected
     NimBLEDevice::stopAdvertising();
@@ -3554,6 +3686,8 @@ public:
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRideDiagnostics.store(false,
+                                            std::memory_order_release);
     lastRendererMetricsRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestProfile.store(
@@ -3567,6 +3701,9 @@ public:
     ownershipDisconnectPending = false;
     bleDebugStats.connected = false;
     bleDebugStats.authenticated = false;
+    ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
+                             "disconnected", "{}");
+    ride_diagnostics::clearCapture();
     ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     bleDebugStats.disconnectCount++;
     bleDebugStats.lastDisconnectMs = millis();
@@ -4393,6 +4530,8 @@ bool BLENavigationServer::forgetOwner() {
                                                     std::memory_order_release);
   bleSessionSupportsRendererDiagnostics.store(false,
                                               std::memory_order_release);
+  bleSessionSupportsRideDiagnostics.store(false,
+                                          std::memory_order_release);
   lastRendererMetricsRequestMs.store(0, std::memory_order_release);
   lastRendererWindowRequestMs.store(0, std::memory_order_release);
   lastRendererWindowRequestProfile.store(

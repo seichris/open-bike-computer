@@ -32,6 +32,7 @@ struct BikeComputerApp: App {
                 routeLibrary: appDelegate.routeLibrary,
                 liveActivityDiagnostics:
                     appDelegate.workoutLiveActivityDiagnostics,
+                rideDiagnosticsRecorder: appDelegate.rideDiagnosticsRecorder,
                 onApplicationActiveChange: {
                     appDelegate.setApplicationActive($0)
                 }
@@ -54,6 +55,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     let routeLibrary: PhoneRouteLibrary
     let destinationStore: SavedDestinationStore
     let locationManager = CurrentLocationManager()
+    let rideDiagnosticsRecorder: RideDiagnosticsRecorder
     let workoutLiveActivityDiagnostics =
         WorkoutLiveActivityDiagnosticStore()
     private var workoutLiveActivityController: AnyObject?
@@ -84,6 +86,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         let watchConnectivityCoordinator =
             PhoneWatchConnectivityCoordinator()
         let destinationStore = SavedDestinationStore()
+        let rideDiagnosticsRecorder = RideDiagnosticsRecorder()
         let watchAvailability = WorkoutWatchAvailabilityMonitor(
             heartRateZoneDefaults: .standard,
             connectivityCoordinator: watchConnectivityCoordinator,
@@ -96,6 +99,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         self.rideDetectionSettingsStore = rideDetectionSettingsStore
         self.watchConnectivityCoordinator = watchConnectivityCoordinator
         self.destinationStore = destinationStore
+        self.rideDiagnosticsRecorder = rideDiagnosticsRecorder
         self.watchAvailability = watchAvailability
         routeLibrary = PhoneRouteLibrary(
             connectivity: watchConnectivityCoordinator
@@ -141,9 +145,35 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         
         // Configure for background location updates
         print("Bicino app launched")
+        rideDiagnosticsRecorder.recordApplicationLifecycle(
+            "app_launched",
+            state: application.applicationState == .active ? "active" : "background"
+        )
         _ = coordinator
         _ = rideAutomationCoordinator
         let bleManager = coordinator.bleManager
+        bleManager.diagnosticsRecorder = rideDiagnosticsRecorder
+        rideDiagnosticsRecorder.$detailedTraceEnabled
+            .removeDuplicates()
+            .sink { [weak bleManager, weak rideDiagnosticsRecorder] enabled in
+                if enabled {
+                    _ = bleManager?.sendDiagnosticsCaptureBinding(
+                        rideDiagnosticsRecorder?.currentCaptureID
+                    )
+                } else {
+                    _ = bleManager?.endDiagnosticsCapture()
+                }
+            }
+            .store(in: &cancellables)
+        coordinator.$isNavigating
+            .scan((previous: false, current: false)) { state, navigating in
+                (previous: state.current, current: navigating)
+            }
+            .filter { $0.previous && !$0.current }
+            .sink { [weak rideDiagnosticsRecorder] _ in
+                rideDiagnosticsRecorder?.endDetailedTrace(reason: "ride_ended")
+            }
+            .store(in: &cancellables)
         bleManager.bindWatchConnectivityCoordinator(
             watchConnectivityCoordinator
         )
@@ -219,11 +249,19 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
+        rideDiagnosticsRecorder.recordApplicationLifecycle(
+            "app_active",
+            state: "active"
+        )
         coordinator.applicationDidBecomeActive()
         setApplicationActive(true)
     }
     
     func applicationDidEnterBackground(_ application: UIApplication) {
+        rideDiagnosticsRecorder.recordApplicationLifecycle(
+            "app_backgrounded",
+            state: "background"
+        )
         coordinator.setViewingMap(false)
         setApplicationActive(false)
         print("App entered background - navigation continues")
@@ -240,6 +278,10 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     }
     
     func applicationWillEnterForeground(_ application: UIApplication) {
+        rideDiagnosticsRecorder.recordApplicationLifecycle(
+            "app_foregrounding",
+            state: "foregrounding"
+        )
         print("App entering foreground")
     }
 

@@ -995,16 +995,20 @@ and renderer target 3, bit `13` to the explicit invalid GPS-heading sentinel,
 bit `14` to scoped Watch control, bit `15` to the complete RAUT v2
 characteristic/fallback, persistence, and UI/control path, and bit `16` to the
 session-scoped real-device browser-debug service. Bit `17` negotiates the
-GPS-position quality-v1 tail used by ride detection. Client version `11` requests
-bit `13`, version `12` requests bit `14`, version `13` requests bit `15`, and
-version `14` requests bit `16`; version `15` requests bit `17`. Version `10`
-remains a valid CAP2 client without the newer features. Client version `16`
-requests bit `18`, the authenticated renderer-diagnostics and benchmark-fixture
-contract below. Production builds keep bit `15` clear until the
+GPS-position quality-v1 tail used by ride detection. Bit `19` negotiates
+persistent, privacy-bounded ride diagnostics and the authenticated device-log
+transfer mode. Client version `11` requests bit `13`, version `12` requests
+bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
+version `15` requests bit `17`. Version `10` remains a valid CAP2 client
+without the newer features. Client version `16` requests bit `18`, the
+authenticated renderer-diagnostics and benchmark-fixture contract below.
+Client version `17` requests bit `19`. Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
 Firmware sets bit `18` only when `FIRMWARE_DIAGNOSTICS=1`; production builds
-therefore expose neither the snapshot nor experimental profile control.
+therefore expose neither the snapshot nor experimental profile control. The
+bounded persistent recorder may advertise bit `19` in ordinary and production
+profiles; it never enables USB serial diagnostics or the remote-debug service.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). Types are unique;
@@ -1036,6 +1040,9 @@ GPS quality v1, CAP2 schema 1, only feature bit 17:
 
 Renderer diagnostics, CAP2 schema 1, only feature bit 18:
 43 41 50 32 01 00 00 04 00
+
+Persistent ride diagnostics, CAP2 schema 1, only feature bit 19:
+43 41 50 32 01 00 00 08 00
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -1285,7 +1292,11 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `DTRN` | iOS -> ESP32 | `enter\|debug` | Enter opt-in real-device browser-debug mode when CAP2 bit `16` is present. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug\|lan1\|` plus bounded binary credentials | Enter browser-debug mode by trying a normal LAN first, with device-hotspot fallback. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug\|h1\|e` | Force the hotspot after authenticated LAN endpoint verification fails; `e` records `endpoint_unreachable`. |
-| `DTRN` | iOS -> ESP32 | `exit` | Exit the active map, firmware, or debug transfer mode. |
+| `DTRN` | iOS -> ESP32 | `enter\|diagnostics` | Enter the authenticated, read-only device-log transfer mode when CAP2 bit `19` is negotiated. |
+| `DTRN` | iOS -> ESP32 | `capture\|<uuid>` | Bind the current random iPhone capture UUID; idempotent on reconnect. |
+| `DTRN` | iOS -> ESP32 | `mark\|<code>` | Persist one predefined issue marker on the device. |
+| `DTRN` | iOS -> ESP32 | `capture_end` | End the active detailed capture binding. |
+| `DTRN` | iOS -> ESP32 | `exit` | Exit the active map, firmware, debug, or diagnostics transfer mode. |
 | `DSTS` | iOS -> ESP32 | empty | Request generic device-transfer status and the current HTTP credential. |
 
 When the settings characteristic advertises acknowledged writes, iOS uses them
@@ -1369,6 +1380,26 @@ part of an HTTP response or copied session diagnostics. It protects hotspot
 traffic from passive nearby observers. LAN debug traffic is plain HTTP and is
 supported only on a trusted local network; it does not defend against other
 LAN clients or administrators observing the bearer token.
+
+### Device diagnostics transfer
+
+When `DTRNenter|diagnostics` is accepted, the same session-scoped transfer
+server uses a fresh WPA2 hotspot password (or the configured trusted LAN) and
+the existing bearer token. The read-only API is:
+
+| Method | Path | Meaning |
+| --- | --- | --- |
+| `GET` | `/device-diagnostics/v1/index` | Bounded list of closed firmware JSONL chunks, byte sizes, SHA-256 hashes, boot sequence, and recorder counters. |
+| `GET` | `/device-diagnostics/v1/chunks/{boot}/{chunk}` | Download one immutable closed chunk; path components are strict unsigned integers. |
+| `GET` | `/device-diagnostics/v1/active-tail` | Returns `404`; the initial contract does not expose an active mutable tail. |
+| `POST` | `/device-diagnostics/v1/session/exit` | Revoke the transfer session after the response completes; request bodies are rejected. |
+
+Every route requires the authenticated transfer token and an active
+`diagnostics` mode. The device never accepts an arbitrary filesystem path or a
+remote-delete request. iOS downloads one bounded chunk at a time, verifies its
+length, SHA-256, JSONL schema/source, and sequence ordering, then atomically
+retains it under its local diagnostics root. Repeating a download skips an
+already-imported chunk with the same hash.
 
 The browser API and binary RGB565 frame contract are documented in
 [Remote device debugging](remote-device-debugging.md). BLE exit, browser exit,
