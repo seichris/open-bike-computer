@@ -106,6 +106,14 @@ cancellation; the child was fenced, its follow-on attempt was retained as
 resource-reservation ledger returned to zero. This is the worker-loss and
 cancellation bookkeeping regression gate; it did not publish an artifact.
 
+The reconciliation follow-up image
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:2c54309c5ee3aca70874a0b8c0ea0aaf8cf6bacc19c189c1c28e1f63f9ee617f`
+was deployed to validation and its maintenance pass repaired four historical
+cancelled parents left by the pre-fix image. The retained coordinator database
+now reports zero unfinished attempts, zero leased tasks, and zero active
+reservations; production remains pinned to
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:a698050644a4d7c0e1290a9e8882a52d6907d5492d6e1794d93e174b06812a74`.
+
 The core decision is:
 
 > Keep one user-visible map job and one deterministic downloadable artifact,
@@ -1010,17 +1018,17 @@ same one-job workflow.
 repository's immutable GHCR workflow and deployed only to the validation
 Coolify app with `chunked_allowlist` and concurrency one. The current
 validation digest is
-`ghcr.io/seichris/open-bike-computer-map-platform@sha256:54bec06298af2bbb67f1f19e60149f92965efb9bc060936387cc8ba2515af45f`;
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:2c54309c5ee3aca70874a0b8c0ea0aaf8cf6bacc19c189c1c28e1f63f9ee617f`;
 all three validation containers report healthy. Current-image central job
 `3d7fefb317ba47e88616` and west job `4acd2e89c8714555bb1d` reached `ready` with
 artifact and receipt validation. The full rectangle was deliberately
 cancelled after source-resolution selected the China snapshot; the app-sized
 631.792599 km² Shanghai job `ea72880448e64bb1b932` reached `ready` with its
 artifact and receipt evidence. The follow-up image also passed the live leased-
-child cancellation regression in job `3f7059ff3fc742358378`. Production
-containers remain pinned to their prior image digest. Physical validation,
-cold central/632 km²/full-bbox coverage, and production promotion are still
-required.
+containers remain pinned to their prior image digest, and validation
+maintenance repaired the historical cancelled-attempt rows. Physical
+validation, cold central/632 km²/full-bbox coverage, and production promotion
+are still required.
 
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
