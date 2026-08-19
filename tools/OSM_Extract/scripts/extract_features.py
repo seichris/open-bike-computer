@@ -45,6 +45,11 @@ parser.add_argument("--calibration-source-sha256")
 parser.add_argument("--building-block-cache-root")
 parser.add_argument("--building-block-cache-identity")
 parser.add_argument("--building-block-workers", type=int, default=4)
+parser.add_argument(
+    "--building-cache-only",
+    action="store_true",
+    help="fail on any cache miss instead of normalizing buildings",
+)
 args = parser.parse_args()
 
 if not 1 <= args.building_block_workers <= 16:
@@ -53,6 +58,8 @@ if (args.building_block_cache_root is None) != (
     args.building_block_cache_identity is None
 ):
     parser.error("building block cache root and identity must be supplied together")
+if args.building_cache_only and args.building_block_cache_identity is None:
+    parser.error("cache-only assembly requires the building block cache")
 
 LINES_INPUT_FILE = "{}_lines.geojson".format(args.geojson_prefix)
 POLYGONS_INPUT_FILE = "{}_polygons.geojson".format(args.geojson_prefix)
@@ -215,9 +222,13 @@ building_cache_generation_seconds = 0.0
 if args.renderer_format == 3:
     rules_path = os.path.join(os.path.dirname(__file__), "..", "conf", "building_height_rules.yaml")
     building_rules, building_rules_sha256 = load_rules(rules_path)
-    relation_index = load_relation_index(
-        f"{args.geojson_prefix}_building_relations.json",
-        require_closure=scope_plan is not None,
+    relation_index = (
+        {}
+        if args.building_cache_only
+        else load_relation_index(
+            f"{args.geojson_prefix}_building_relations.json",
+            require_closure=scope_plan is not None,
+        )
     )
     calibration_cache = (
         CalibrationCache.from_manifest(args.calibration_manifest)
@@ -228,7 +239,7 @@ if args.renderer_format == 3:
         raise ValueError("calibration manifest and source identity must be supplied together")
     if scope_plan is not None and calibration_cache is None:
         raise ValueError("plan-aware target 3 requires immutable calibration")
-    if scope_plan is not None:
+    if scope_plan is not None and not args.building_cache_only:
         closure_audit = relation_index["closureAudit"]
         if (
             closure_audit["scopePlanSha256"] != scope_hash
@@ -363,6 +374,20 @@ if args.renderer_format == 3:
                 ),
                 flush=True,
             )
+            if args.building_cache_only and missing_building_blocks:
+                print(
+                    "BUILDING_PREPROCESS_FAILURE:"
+                    + json.dumps(
+                        {
+                            "code": "building_chunks_incomplete",
+                            "message": "cache-only assembly is missing building blocks",
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    flush=True,
+                )
+                raise SystemExit(2)
         except (BuildingBlockCacheError, KeyError, OSError, TypeError) as exc:
             print(
                 "BUILDING_PREPROCESS_FAILURE:"

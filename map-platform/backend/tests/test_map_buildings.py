@@ -32,7 +32,8 @@ from map_platform.pipeline import (
     PipelinePaths,
     _coalesce_projected_rectangles,
 )
-from map_platform.building_scope import plan_building_scope
+from map_platform.building_scope import plan_building_scope, plan_global_building_scope
+from map_platform.building_tasks import BuildingTaskStore
 from map_platform.building_scope import BuildingScopeError, BuildingScopePolicy
 from map_platform.building_identity import (
     canonical_json as canonical_building_json,
@@ -189,6 +190,75 @@ class MapBuildingContractTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(ValueError, "BUILDING_BLOCK_WORKERS"):
                     building_block_workers()
+
+    def test_cache_only_assembly_forwards_fail_closed_extractor_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = CapturingRunner()
+            pipeline = MapBuildPipeline(
+                PipelinePaths(
+                    Path(__file__).resolve().parents[3],
+                    root / "work",
+                    root / "packs",
+                ),
+                runner=runner,
+            )
+            job = self._service(JobStore(root / "jobs")).create_job(
+                self._request()
+            )
+            pipeline._extract_features(
+                job,
+                root / "features",
+                root / "raw",
+                calibration_manifest=root / "calibration.json",
+                calibration_source_sha256="3" * 64,
+                building_block_cache_identity_path=root / "cache-identity.json",
+                building_cache_only=True,
+            )
+            self.assertIn("--building-cache-only", runner.args)
+
+    def test_chunk_assembly_rejects_missing_receipts_before_preprocessing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(
+                self._request()
+            )
+            global_plan = plan_global_building_scope(
+                job,
+                calibration_cell_size_meters=8192,
+                calibration_halo_cells=1,
+                calibration_minimum_samples=3,
+            )
+            task_store = BuildingTaskStore(root / "building-tasks.sqlite3")
+            task_store.create_plan(
+                parent_job_id=job.job_id,
+                global_plan_sha256=global_plan.sha256,
+                input_identity={},
+                expected_output_block_count=len(global_plan.output_blocks),
+                policy_version=1,
+                resource_model_version="v1",
+                stage="chunk_planning",
+            )
+            source_pbf = root / "source.pbf"
+            source_pbf.write_bytes(b"source")
+            pipeline = MapBuildPipeline(
+                PipelinePaths(
+                    Path(__file__).resolve().parents[3],
+                    root / "work",
+                    root / "packs",
+                ),
+                building_task_store=task_store,
+            )
+            with self.assertRaises(BuildingScopeError) as raised:
+                pipeline.assemble_building_chunks(
+                    job,
+                    global_plan=global_plan,
+                    source_pbf=source_pbf,
+                    source_snapshot_sha256=hashlib.sha256(b"source").hexdigest(),
+                    calibration_manifest=root / "missing-calibration.json",
+                    calibration_generation={},
+                )
+            self.assertEqual(raised.exception.code, "building_chunks_incomplete")
 
     def test_building_block_cache_identity_is_scope_independent_and_hash_bound(self):
         with tempfile.TemporaryDirectory() as tmp:

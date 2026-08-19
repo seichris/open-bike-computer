@@ -23,7 +23,8 @@ global-to-chunk scope projection, monotonic parent stages, receipt-based
 aggregate block progress, and capability-aware memory/CPU reservations with a
 concurrency-one default for heavy work. Production still uses the existing
 monolithic executor and hard ceilings until workload benchmarks, chunk-only
-execution, cache-only assembly, and fair multi-parent scheduling are shipped.
+execution, cache-only assembly validation, and fair multi-parent scheduling are
+shipped.
 
 The core decision is:
 
@@ -809,6 +810,14 @@ to be validated before allowlisting it.
 
 **Exit gate:** one multi-chunk request produces the same validated artifact as
 a high-limit reference build; deleting one receipt prevents publication.
+
+**Current status:** an explicit cache-only assembly entry point now requires
+every global block receipt, rereads and matches the canonical cache manifests,
+extracts whole-map roads/labels, and passes a fail-closed cache-only flag to the
+extractor. A cache miss cannot silently re-enter monolithic building
+normalization. The parent worker does not invoke assembly yet; final
+partition-invariant artifact identity, whole-artifact size/signature gates, and
+the high-limit reference comparison remain pending.
 
 ### Phase 5 — Progress, estimates, operations, and retention
 

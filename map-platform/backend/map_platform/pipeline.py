@@ -58,8 +58,10 @@ from .map_buildings import (
 )
 from .building_scope import (
     BuildingScopeError,
+    GlobalBuildingPlan,
     ScopePlan,
     legacy_building_scope_diagnostics,
+    plan_building_chunk_scope,
     plan_global_building_scope,
     plan_building_scope,
     x_to_lon,
@@ -287,6 +289,7 @@ _BUILDING_FAILURE_CODES = {
     "building_relation_incomplete",
     "building_calibration_unavailable",
     "building_block_cache_unavailable",
+    "building_chunks_incomplete",
     "building_source_snapshot_changed",
     "building_scope_policy_invalid",
     "building_workload_receipt_mismatch",
@@ -299,6 +302,7 @@ _BUILDING_FAILURE_MESSAGES = {
     "building_relation_incomplete": "selected building relation closure is incomplete",
     "building_calibration_unavailable": "selected building calibration is unavailable",
     "building_block_cache_unavailable": "selected building block cache is unavailable",
+    "building_chunks_incomplete": "selected building chunks are incomplete",
     "building_source_snapshot_changed": "selected building source snapshot changed",
     "building_scope_policy_invalid": "selected building scope policy is invalid",
     "building_workload_receipt_mismatch": (
@@ -1656,6 +1660,219 @@ class MapBuildPipeline:
             "blocks": [[receipt.block.x, receipt.block.y] for receipt in receipts],
             "cacheIdentitySha256": receipts[0].cache_identity_sha256,
         }
+
+    def assemble_building_chunks(
+        self,
+        job: MapJob,
+        *,
+        global_plan: GlobalBuildingPlan,
+        source_pbf: Path,
+        source_snapshot_sha256: str,
+        calibration_manifest: Path,
+        calibration_generation: Mapping[str, Any],
+        parent_job_id: str | None = None,
+        on_progress=None,
+        on_phase_progress=None,
+        artifact_publication_lease=None,
+        on_artifact_pending=None,
+        cancellation_check=None,
+    ) -> MapBuildResult:
+        """Assemble one map using only validated canonical building blocks.
+
+        This entry point deliberately has no fallback to building
+        normalization.  The coordinator must have a receipt for every global
+        output block before whole-map roads/labels are extracted and packaged.
+        It is opt-in while the parent worker remains on the monolithic path.
+        """
+
+        if renderer_format_version(job.request) != BUILDING_RENDERER_FORMAT_VERSION:
+            raise BuildingScopeError(
+                "building_scope_policy_invalid",
+                "building chunk assembly requires renderer format 3",
+            )
+        if not isinstance(global_plan, GlobalBuildingPlan):
+            raise BuildingScopeError(
+                "building_scope_policy_invalid", "global building plan is invalid"
+            )
+        if self.building_task_store is None:
+            raise BuildingTaskStoreError(
+                "building task store is required for chunk assembly"
+            )
+        parent_job_id = parent_job_id or job.job_id
+        if not parent_job_id:
+            raise BuildingTaskStoreError("parent job ID is required for chunk assembly")
+        if sha256_file(source_pbf) != source_snapshot_sha256:
+            raise BuildingScopeError(
+                "building_source_snapshot_changed",
+                "building source snapshot changed before chunk assembly",
+            )
+        scope_plan = plan_building_chunk_scope(
+            global_plan, global_plan.output_blocks
+        )
+        expected_blocks = tuple(sorted(global_plan.output_blocks))
+        plan_record = self.building_task_store.get_plan(parent_job_id)
+        if plan_record is None or plan_record["state"] in {
+            "cancelled",
+            "failed",
+        }:
+            raise BuildingScopeError(
+                "building_chunks_incomplete",
+                "building parent plan is not assembleable",
+            )
+        unfinished_tasks = tuple(
+            task
+            for task in self.building_task_store.list_tasks(parent_job_id)
+            if task.kind in {"building_chunk", "building_workload_scan"}
+            and task.state not in {"ready", "split", "cancelled"}
+        )
+        if unfinished_tasks:
+            raise BuildingScopeError(
+                "building_chunks_incomplete",
+                "building chunk tasks are not all ready for assembly",
+            )
+        receipt_rows = self.building_task_store.list_receipts(parent_job_id)
+        receipt_by_block = {
+            (int(row["block_x"]), int(row["block_y"])): row
+            for row in receipt_rows
+        }
+        expected_keys = {(block.x, block.y) for block in expected_blocks}
+        if set(receipt_by_block) != expected_keys:
+            raise BuildingScopeError(
+                "building_chunks_incomplete",
+                "building chunk receipts do not cover the global output block set",
+            )
+        try:
+            expected_calibration = selected_calibration_identity(
+                source_snapshot_sha256=source_snapshot_sha256,
+                rules_path=(
+                    self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
+                ),
+                scope_plan=scope_plan,
+            )
+            calibration_document = calibration_generation_from_manifest(
+                calibration_manifest,
+                source_snapshot_sha256=source_snapshot_sha256,
+                calibration_key=expected_calibration["calibrationKey"],
+                calibration_identity=expected_calibration,
+            )
+            if dict(calibration_document) != dict(calibration_generation):
+                raise ValueError("calibration generation identity changed")
+            cache_identity = selected_building_block_cache_identity(
+                source_snapshot_sha256=source_snapshot_sha256,
+                rules_path=(
+                    self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
+                ),
+                scope_plan=scope_plan,
+                calibration_generation=calibration_document,
+            )
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            raise BuildingScopeError(
+                "building_calibration_unavailable",
+                "chunk assembly calibration generation is not compatible",
+            ) from exc
+
+        try:
+            cache_receipts = read_building_block_receipts(
+                self.paths.building_cache_root,
+                cache_identity,
+                expected_blocks,
+            )
+        except BuildingBlockReceiptError as exc:
+            raise BuildingScopeError(exc.code, str(exc)) from exc
+        for receipt in cache_receipts:
+            row = receipt_by_block[(receipt.block.x, receipt.block.y)]
+            if (
+                row["cache_identity_sha256"] != receipt.cache_identity_sha256
+                or row["content_sha256"] != receipt.content_sha256
+            ):
+                raise BuildingScopeError(
+                    "building_chunks_incomplete",
+                    "building chunk receipt does not match the canonical cache",
+                )
+
+        self.building_task_store.set_plan_stage(
+            parent_job_id, stage="map_assembly"
+        )
+        assembly_root = (
+            self.paths.work_root
+            / job.job_id
+            / "building-assembly"
+            / global_plan.sha256
+        )
+        if assembly_root.exists():
+            shutil.rmtree(assembly_root)
+        assembly_root.mkdir(parents=True, exist_ok=True)
+        scope_plan_path = assembly_root / "scope-plan.json"
+        scope_plan.write(scope_plan_path)
+        cache_identity_path = assembly_root / "building-block-cache-identity.json"
+        cache_identity_path.write_bytes(canonical_building_json(cache_identity) + b"\n")
+        clipped_pbf = assembly_root / "clipped.osm.pbf"
+        geojson_prefix = assembly_root / "features"
+        raw_output_dir = assembly_root / "raw-map"
+        pack_root = assembly_root / "pack"
+        map_id = job.map_id or stable_map_id(job)
+        job.map_id = map_id
+        vectmap_output = pack_root / "VECTMAP" / map_id
+        archive_path = assembly_root / f"{map_id}.zip"
+
+        source_metrics = self._extract_pbf(
+            job,
+            source_pbf,
+            clipped_pbf,
+            bounds=scope_plan.source_bounds,
+            force_bounds=True,
+            scope_plan=scope_plan,
+            source_snapshot_sha256=source_snapshot_sha256,
+            cancellation_check=cancellation_check,
+        )
+        self._convert_to_geojson(
+            job,
+            clipped_pbf,
+            geojson_prefix,
+            bounds=scope_plan.source_bounds,
+            cancellation_check=cancellation_check,
+        )
+        metrics = self._extract_features(
+            job,
+            geojson_prefix,
+            raw_output_dir,
+            bounds=scope_plan.source_bounds,
+            on_progress=on_progress,
+            scope_plan_path=scope_plan_path,
+            calibration_manifest=calibration_manifest,
+            calibration_source_sha256=source_snapshot_sha256,
+            building_block_cache_identity_path=cache_identity_path,
+            building_cache_only=True,
+            on_phase_progress=on_phase_progress,
+            planned_scope_marker=scope_plan.summary(),
+            cancellation_check=cancellation_check,
+        )
+        self._stage_vectmap(raw_output_dir, vectmap_output)
+        self.building_task_store.set_plan_stage(
+            parent_job_id, stage="artifact_validation"
+        )
+        metrics["buildingAssembly"] = {
+            "schemaVersion": 1,
+            "globalPlanSha256": global_plan.sha256,
+            "scopePlanSha256": scope_plan.sha256,
+            "blockCount": len(expected_blocks),
+            "receiptCount": len(cache_receipts),
+            "cacheIdentitySha256": cache_identity["cacheIdentitySha256"],
+            "sourceExtraction": source_metrics,
+        }
+        self.building_task_store.set_plan_stage(
+            parent_job_id, stage="artifact_publication"
+        )
+        result = self._package_map(
+            job,
+            pack_root,
+            archive_path,
+            artifact_publication_lease=artifact_publication_lease,
+            on_artifact_pending=on_artifact_pending,
+            build_metrics=metrics,
+        )
+        self.building_task_store.set_plan_stage(parent_job_id, stage="ready")
+        return result
 
     def build_building_chunk(
         self,
@@ -3930,6 +4147,7 @@ class MapBuildPipeline:
         calibration_manifest: Path | None = None,
         calibration_source_sha256: str | None = None,
         building_block_cache_identity_path: Path | None = None,
+        building_cache_only: bool = False,
         on_phase_progress=None,
         planned_scope_marker: dict[str, Any] | None = None,
         cancellation_check=None,
@@ -3977,6 +4195,12 @@ class MapBuildPipeline:
                     "--building-block-workers",
                     str(self.building_block_workers),
                 ]
+            )
+            if building_cache_only:
+                args.append("--building-cache-only")
+        elif building_cache_only:
+            raise ValueError(
+                "cache-only building assembly requires a block cache identity"
             )
         if (
             format_version == BUILDING_RENDERER_FORMAT_VERSION
