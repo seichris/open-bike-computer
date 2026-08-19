@@ -34,6 +34,37 @@ enum RideDiagnosticCategory: String, Codable, CaseIterable {
     case logger
 }
 
+/// Closed vocabulary shared by the recorder and device-chunk validator. A
+/// field must be added here before a producer can persist it, keeping the
+/// privacy contract reviewable at one call site.
+enum RideDiagnosticsFieldPolicy {
+    static let allowedKeys: Set<String> = [
+        "accuracy", "accuracyAvailable", "accuracyBucket", "activeStage",
+        "acknowledgedKind", "ageMs", "alertMode", "autoPauseEnabled",
+        "authorization", "authorized", "available",
+        "background", "bootSequence", "bytes", "chunk", "code",
+        "completedStage", "consecutiveEarlyFailures", "diagnosticHold",
+        "domain", "droppedCount", "durationLimit", "eventCount",
+        "firstMissingUptimeMs", "firmwareBuild", "firmwareFingerprint",
+        "firmwareTarget", "fixValid", "importedCount", "lastCriticalCategory",
+        "lastCriticalEvent", "lastGapMs", "lastMissingUptimeMs",
+        "maximumGapMs", "messageBytes", "messageDigest", "kind", "mode",
+        "networkTransport", "navigating",
+        "profileVersion", "reason", "resetReason", "rideDetectionArmed",
+        "rideGeneration", "routeLoaded", "rssiBucket", "sampleCount",
+        "safeMode", "scope", "sequence", "sha256Prefix", "simulation",
+        "sourceHealthMask", "speedAvailable", "state", "startMode", "storage",
+        "connectionState", "pendingControl", "sessionPresent", "active",
+        "transition", "result", "origin", "expectedState", "decisionSequence",
+        "fallback",
+        "viewingMap", "workoutActive",
+    ]
+
+    static func isAllowed(_ key: String) -> Bool {
+        allowedKeys.contains(key)
+    }
+}
+
 enum RideIssueCode: String, CaseIterable, Identifiable {
     case navigationWrong = "navigation_wrong"
     case deviceBlank = "device_blank"
@@ -919,7 +950,8 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
         for (key, value) in fields.prefix(32) {
             let normalizedKey = key.replacingOccurrences(of: "-", with: "_").lowercased()
             let normalizedValue = value.lowercased()
-            guard !forbidden.contains(where: { normalizedKey.contains($0) }),
+            guard RideDiagnosticsFieldPolicy.isAllowed(key),
+                  !forbidden.contains(where: { normalizedKey.contains($0) }),
                   !normalizedValue.contains("bearer "),
                   !normalizedValue.contains("x-bikecomputer-transfer-token"),
                   !value.contains("\n"),

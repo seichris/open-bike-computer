@@ -51,7 +51,7 @@ struct ContentView: View {
     // MARK: - State
     
     @StateObject private var coordinator: BikeComputerCoordinator
-    @StateObject private var offlineMapManager = OfflineMapManager()
+    @StateObject private var offlineMapManager: OfflineMapManager
     @StateObject private var watchAvailability: WorkoutWatchAvailabilityMonitor
     @ObservedObject private var routeLibrary: PhoneRouteLibrary
     @ObservedObject private var workoutStore: WorkoutMetricsStore
@@ -181,6 +181,11 @@ struct ContentView: View {
         )
         _coordinator = StateObject(
             wrappedValue: coordinator
+        )
+        _offlineMapManager = StateObject(
+            wrappedValue: OfflineMapManager(
+                diagnosticsRecorder: rideDiagnosticsRecorder
+            )
         )
     }
     

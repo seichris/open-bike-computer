@@ -155,6 +155,9 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         bleManager.diagnosticsRecorder = rideDiagnosticsRecorder
         locationManager.diagnosticsRecorder = rideDiagnosticsRecorder
         coordinator.diagnosticsRecorder = rideDiagnosticsRecorder
+        workoutMirrorManager.store.diagnosticsRecorder = rideDiagnosticsRecorder
+        rideAutomationCoordinator.diagnosticsRecorder = rideDiagnosticsRecorder
+        coordinator.firmwareUpdateManager.diagnosticsRecorder = rideDiagnosticsRecorder
         rideDiagnosticsRecorder.$detailedTraceEnabled
             .removeDuplicates()
             .sink { [weak bleManager, weak rideDiagnosticsRecorder] enabled in

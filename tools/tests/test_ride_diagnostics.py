@@ -47,6 +47,10 @@ class RideDiagnosticsTests(unittest.TestCase):
         with self.assertRaises(ride_diagnostics.DiagnosticError):
             ride_diagnostics.validate_event(event(fields={"latitude": 1.0}))
 
+    def test_rejects_unknown_nested_fields(self):
+        with self.assertRaises(ride_diagnostics.DiagnosticError):
+            ride_diagnostics.validate_event(event(fields={"futureField": "no"}))
+
     def test_rejects_unknown_event_fields(self):
         payload = event()
         payload["secret"] = "no"
@@ -58,16 +62,23 @@ class RideDiagnosticsTests(unittest.TestCase):
             root = Path(directory)
             stream = (json.dumps(event()) + "\n").encode()
             manifest = {"schema": 1, "sourceStreams": ["app/events.jsonl"]}
+            manifest_data = json.dumps(manifest).encode()
             checksum = hashlib.sha256(stream).hexdigest()
+            manifest_checksum = hashlib.sha256(manifest_data).hexdigest()
             bundle = root / "bundle.zip"
             with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_STORED) as archive:
-                archive.writestr("manifest.json", json.dumps(manifest))
+                archive.writestr("manifest.json", manifest_data)
                 archive.writestr("app/events.jsonl", stream)
-                archive.writestr("checksums.sha256", f"{checksum}  app/events.jsonl\n")
+                archive.writestr(
+                    "checksums.sha256",
+                    f"{manifest_checksum}  manifest.json\n{checksum}  app/events.jsonl\n",
+                )
             output = root / "summary"
             ride_diagnostics.summarize(bundle, output)
             self.assertIn('"event": "connected"', (output / "timeline.jsonl").read_text())
             self.assertEqual(json.loads((output / "summary.json").read_text())["eventCount"], 1)
+            self.assertEqual((output / "raw" / "manifest.json").read_bytes(), manifest_data)
+            self.assertEqual((output / "raw" / "app" / "events.jsonl").read_bytes(), stream)
 
     def test_timeline_filters_by_time_window(self):
         with TemporaryDirectory() as directory:
@@ -77,12 +88,17 @@ class RideDiagnosticsTests(unittest.TestCase):
                 for sequence in (0, 1)
             ) + b"\n"
             manifest = {"schema": 1, "sourceStreams": ["app/events.jsonl"]}
+            manifest_data = json.dumps(manifest).encode()
             checksum = hashlib.sha256(stream).hexdigest()
+            manifest_checksum = hashlib.sha256(manifest_data).hexdigest()
             bundle = root / "bundle.zip"
             with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_STORED) as archive:
-                archive.writestr("manifest.json", json.dumps(manifest))
+                archive.writestr("manifest.json", manifest_data)
                 archive.writestr("app/events.jsonl", stream)
-                archive.writestr("checksums.sha256", f"{checksum}  app/events.jsonl\n")
+                archive.writestr(
+                    "checksums.sha256",
+                    f"{manifest_checksum}  manifest.json\n{checksum}  app/events.jsonl\n",
+                )
             output = root / "timeline"
             ride_diagnostics.summarize(
                 bundle,
@@ -97,9 +113,14 @@ class RideDiagnosticsTests(unittest.TestCase):
             root = Path(directory)
             bundle = root / "bundle.zip"
             with zipfile.ZipFile(bundle, "w") as archive:
-                archive.writestr("manifest.json", '{"schema":1}')
+                manifest_data = b'{"schema":1}'
+                archive.writestr("manifest.json", manifest_data)
                 archive.writestr("app/events.jsonl", json.dumps(event()) + "\n")
-                archive.writestr("checksums.sha256", "0" * 64 + "  app/events.jsonl\n")
+                manifest_checksum = hashlib.sha256(manifest_data).hexdigest()
+                archive.writestr(
+                    "checksums.sha256",
+                    f"{manifest_checksum}  manifest.json\n{'0' * 64}  app/events.jsonl\n",
+                )
             with self.assertRaises(ride_diagnostics.DiagnosticError):
                 ride_diagnostics.validate_bundle(bundle)
 

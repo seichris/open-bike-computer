@@ -56,6 +56,12 @@ final class DeviceDiagnosticsTransferManager {
         recorder: RideDiagnosticsRecorder,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> Int {
+        transferManager.diagnosticsRecorder = recorder
+        recorder.record(
+            category: .transfer,
+            event: "diagnostics_download_started",
+            fields: ["mode": DeviceTransferSession.Mode.diagnostics.rawValue]
+        )
         let session = try await transferManager.enterDiagnostics(
             bleManager: bleManager,
             status: status
@@ -128,6 +134,14 @@ final class DeviceDiagnosticsTransferManager {
         )
         await transferManager.exitDiagnostics(bleManager: bleManager)
         exited = true
+        recorder.record(
+            category: .transfer,
+            event: "diagnostics_download_completed",
+            fields: [
+                "mode": DeviceTransferSession.Mode.diagnostics.rawValue,
+                "importedCount": String(imported),
+            ]
+        )
         return imported
     }
 
@@ -253,7 +267,10 @@ final class DeviceDiagnosticsTransferManager {
             for (key, child) in dictionary {
                 let normalized = key.replacingOccurrences(of: "-", with: "_")
                     .lowercased()
-                guard !forbidden.contains(where: { normalized.contains($0) }),
+                guard RideDiagnosticsFieldPolicy.isAllowed(key),
+                      !(child is [String: Any]),
+                      !(child is [Any]),
+                      !forbidden.contains(where: { normalized.contains($0) }),
                       isPrivacySafe(child) else { return false }
             }
             return true

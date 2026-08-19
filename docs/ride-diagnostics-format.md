@@ -35,8 +35,11 @@ Allowed sources are `ios`, `firmware`, and `host`. Levels are `debug`, `info`,
 `transfer`, `user`, and `logger`.
 
 The event name and fields are deliberately typed at each call site. Unknown
-fields are rejected by the host validator. A truncated final line is reported
-and ignored; a truncated line in the middle of a stream is an error.
+fields are rejected by the host validator and by the iOS device-chunk
+validator. Fields are flat scalar values from the closed vocabulary maintained
+in `tools/ride_diagnostics.py` and `RideDiagnosticsFieldPolicy`; nested objects
+and arrays are not accepted. A truncated final line is reported and ignored; a
+truncated line in the middle of a stream is an error.
 
 ## Privacy boundary
 
@@ -52,6 +55,8 @@ health/sensor stream.
 ## Bundle
 
 An exported stored-ZIP contains `manifest.json`, `checksums.sha256`, `app/`,
-`device/`, and `summary/`. The manifest records source schema versions,
+`device/`, and `summary/`. The Mac summarizer extracts every validated archive
+member byte-for-byte under `raw/` before writing derived files, so filtering or
+timeline sorting never rewrites the evidence. The manifest records source schema versions,
 capture/boot IDs, UTC/uptime anchors, chunk hashes, drop counts, and truncation
 warnings. It must not contain secrets or forbidden private values.

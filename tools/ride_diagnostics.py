@@ -19,6 +19,7 @@ SCHEMA = 1
 MAX_BUNDLE_BYTES = 100 * 1024 * 1024
 MAX_ENTRY_BYTES = 12 * 1024 * 1024
 MAX_LINE_BYTES = 8 * 1024
+MAX_COMPRESSION_RATIO = 1_000
 ALLOWED_SOURCES = {"ios", "firmware", "host"}
 ALLOWED_LEVELS = {"debug", "info", "warning", "error"}
 ALLOWED_CATEGORIES = {
@@ -38,6 +39,82 @@ ALLOWED_CATEGORIES = {
 }
 REQUIRED_KEYS = {"schema", "source", "sequence", "level", "category", "event"}
 OPTIONAL_KEYS = {"wallTime", "uptimeMs", "processId", "captureId", "fields"}
+# Fields are intentionally a closed vocabulary.  Producers must add a field
+# here and to the Swift transfer validator before it can enter an exported
+# bundle; this prevents a future call site from quietly widening the privacy
+# boundary.
+ALLOWED_FIELD_KEYS = {
+    "accuracy",
+    "accuracyAvailable",
+    "accuracyBucket",
+    "active",
+    "activeStage",
+    "acknowledgedKind",
+    "ageMs",
+    "alertMode",
+    "autoPauseEnabled",
+    "authorization",
+    "authorized",
+    "available",
+    "background",
+    "bootSequence",
+    "bytes",
+    "chunk",
+    "code",
+    "connectionState",
+    "completedStage",
+    "consecutiveEarlyFailures",
+    "diagnosticHold",
+    "domain",
+    "droppedCount",
+    "durationLimit",
+    "eventCount",
+    "firstMissingUptimeMs",
+    "firmwareBuild",
+    "firmwareFingerprint",
+    "firmwareTarget",
+    "fixValid",
+    "importedCount",
+    "lastCriticalCategory",
+    "lastCriticalEvent",
+    "lastGapMs",
+    "lastMissingUptimeMs",
+    "maximumGapMs",
+    "messageBytes",
+    "messageDigest",
+    "kind",
+    "mode",
+    "networkTransport",
+    "navigating",
+    "profileVersion",
+    "pendingControl",
+    "reason",
+    "resetReason",
+    "rideGeneration",
+    "rideDetectionArmed",
+    "routeLoaded",
+    "rssiBucket",
+    "sampleCount",
+    "safeMode",
+    "scope",
+    "sequence",
+    "sessionPresent",
+    "sha256Prefix",
+    "simulation",
+    "sourceHealthMask",
+    "speedAvailable",
+    "state",
+    "startMode",
+    "storage",
+    "fallback",
+    "transition",
+    "result",
+    "origin",
+    "expectedState",
+    "decisionSequence",
+    "viewingMap",
+    "workoutActive",
+}
 UUID_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 FORBIDDEN_KEY_PARTS = (
     "latitude",
@@ -70,6 +147,10 @@ def _fail(message: str) -> None:
 def _check_privacy(value: Any, path: str = "fields") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
+            if path == "fields" and key not in ALLOWED_FIELD_KEYS:
+                _fail(f"unknown field {path}.{key}")
+            if path.startswith("fields") and isinstance(child, (dict, list)):
+                _fail(f"nested value at {path}.{key} is not allowed")
             normalized = str(key).replace("-", "_").lower()
             if any(part in normalized for part in FORBIDDEN_KEY_PARTS):
                 _fail(f"forbidden field {path}.{key}")
@@ -179,7 +260,7 @@ def _read_manifest(archive: zipfile.ZipFile) -> dict[str, Any]:
         _fail(f"manifest.json is invalid: {error}")
     if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
         _fail("manifest schema is unsupported")
-    _check_privacy(manifest)
+    _check_privacy(manifest, path="manifest")
     return manifest
 
 
@@ -193,16 +274,29 @@ def validate_bundle(bundle: Path) -> tuple[dict[str, Any], tuple[StreamResult, .
         members = archive.infolist()
         if len(members) > 1024:
             _fail("bundle has too many entries")
+        names = [member.filename for member in members]
+        if len(names) != len(set(names)):
+            _fail("bundle has duplicate entries")
+        total_entry_bytes = 0
         for member in members:
             if not _safe_member(member.filename):
                 _fail(f"unsafe bundle path: {member.filename}")
             if member.file_size > MAX_ENTRY_BYTES:
                 _fail(f"bundle entry exceeds size limit: {member.filename}")
+            total_entry_bytes += member.file_size
+            if total_entry_bytes > MAX_BUNDLE_BYTES:
+                _fail("bundle entries exceed size limit")
+            if member.file_size and (
+                member.compress_size == 0
+                or member.file_size > member.compress_size * MAX_COMPRESSION_RATIO
+            ):
+                _fail(f"bundle entry has unsafe compression ratio: {member.filename}")
         manifest = _read_manifest(archive)
         try:
             checksums = archive.read("checksums.sha256").decode("utf-8")
         except (KeyError, UnicodeDecodeError) as error:
             _fail(f"checksums.sha256 is invalid: {error}")
+        checksum_names: set[str] = set()
         for line in checksums.splitlines():
             parts = line.split("  ", 1)
             if len(parts) != 2:
@@ -210,6 +304,9 @@ def validate_bundle(bundle: Path) -> tuple[dict[str, Any], tuple[StreamResult, .
             digest, member_name = parts
             if not re.fullmatch(r"[0-9a-fA-F]{64}", digest) or not _safe_member(member_name):
                 _fail("invalid checksum entry")
+            if member_name in checksum_names or member_name == "checksums.sha256":
+                _fail(f"duplicate checksum entry: {member_name}")
+            checksum_names.add(member_name)
             try:
                 payload = archive.read(member_name)
             except KeyError:
@@ -222,6 +319,13 @@ def validate_bundle(bundle: Path) -> tuple[dict[str, Any], tuple[StreamResult, .
                     "ios" if member_name.startswith("app/") else None
                 )
                 streams.append(validate_jsonl(payload, member_name, expected_source))
+        expected_checksum_names = {
+            member.filename for member in members if member.filename != "checksums.sha256"
+        }
+        if checksum_names != expected_checksum_names:
+            missing = sorted(expected_checksum_names - checksum_names)
+            extra = sorted(checksum_names - expected_checksum_names)
+            _fail(f"checksum coverage mismatch missing={missing} extra={extra}")
     return manifest, tuple(streams)
 
 
@@ -271,6 +375,7 @@ def summarize(
 ) -> None:
     manifest, streams = validate_bundle(bundle)
     output.mkdir(parents=True, exist_ok=True)
+    _extract_raw_entries(bundle, output / "raw")
     events = [event for stream in streams for event in stream.events]
     if category:
         events = [event for event in events if event["category"] == category]
@@ -334,10 +439,26 @@ def summarize(
         f"Events: {len(events)}",
         f"Streams: {len(streams)}",
         "",
-        "Raw JSONL files are preserved beside this report. Sequence gaps and recoverable tails are reported in `summary.json`.",
+        "Immutable raw archive entries are preserved under `raw/`. Sequence gaps and recoverable tails are reported in `summary.json`.",
         "",
     ]
     (output / "report.md").write_text("\n".join(report_lines))
+
+
+def _extract_raw_entries(bundle: Path, raw_output: Path) -> None:
+    """Extract validated archive members without changing their bytes."""
+    with zipfile.ZipFile(bundle) as archive:
+        for member in archive.infolist():
+            if member.is_dir():
+                continue
+            payload = archive.read(member.filename)
+            destination = raw_output / member.filename
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                if not destination.is_file() or destination.read_bytes() != payload:
+                    _fail(f"raw extraction would overwrite different data: {member.filename}")
+                continue
+            destination.write_bytes(payload)
 
 
 def main(argv: Iterable[str] | None = None) -> int:

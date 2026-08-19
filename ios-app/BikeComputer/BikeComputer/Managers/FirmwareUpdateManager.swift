@@ -154,6 +154,12 @@ final class FirmwareUpdateManager: ObservableObject {
     @Published private(set) var lastManifestURLString: String = ""
     @Published private(set) var isBusy = false
 
+    weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)? {
+        didSet {
+            deviceTransferManager.diagnosticsRecorder = diagnosticsRecorder
+        }
+    }
+
     private enum Defaults {
         static let manifestBaseURLKey = "firmware.manifestBaseURL"
         static let allowDowngradeKey = "firmware.allowDeveloperDowngrade"

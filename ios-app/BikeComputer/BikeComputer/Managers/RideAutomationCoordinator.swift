@@ -18,6 +18,8 @@ final class RideAutomationCoordinator: ObservableObject {
     @Published private(set) var confirmedDeviceSettings:
         RideDetectionSettings?
 
+    weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
+
     private let bleManager: any RideAutomationBLETransport
     private let workoutManager: any RideAutomationWorkoutControlling
     private let settingsStore: RideDetectionSettingsStore
@@ -161,6 +163,11 @@ final class RideAutomationCoordinator: ObservableObject {
     }
 
     private func handle(_ frame: RideAutomationFrame) {
+        diagnosticsRecorder?.record(
+            category: .rideAutomation,
+            event: "frame_received",
+            fields: diagnosticFields(for: frame)
+        )
         guard let deviceID = bleManager.connectedDeviceID else { return }
         if frame.kind == .decision,
            let pending = pendingDecision,
@@ -584,31 +591,38 @@ final class RideAutomationCoordinator: ObservableObject {
         result: RideAutomationResult,
         sessionID: UUID? = nil
     ) -> Bool {
-        bleManager.sendRideAutomationFrame(
-            RideAutomationFrame(
-                kind: kind,
-                transition: request.transition,
-                origin: request.origin,
-                result: result,
-                rideGeneration: request.rideGeneration,
-                decisionSequence: request.decisionSequence,
-                evidenceMask: request.evidenceMask,
-                profileVersion: request.profileVersion,
-                sessionID: sessionID ?? request.sessionID,
-                watermarkOrConfigGeneration:
-                    settingsStore.generation,
-                startMode: settingsStore.settings.startMode,
-                autoPauseEnabled:
-                    settingsStore.settings.autoPauseEnabled,
-                alertMode: settingsStore.settings.alertMode,
-                candidateBeganSeconds: request.candidateBeganSeconds,
-                monotonicSeconds: request.monotonicSeconds,
-                sourceHealthMask: request.sourceHealthMask,
-                acknowledgedKind: kind == .acknowledgement
-                    ? request.kind
-                    : nil
-            )
+        let response = RideAutomationFrame(
+            kind: kind,
+            transition: request.transition,
+            origin: request.origin,
+            result: result,
+            rideGeneration: request.rideGeneration,
+            decisionSequence: request.decisionSequence,
+            evidenceMask: request.evidenceMask,
+            profileVersion: request.profileVersion,
+            sessionID: sessionID ?? request.sessionID,
+            watermarkOrConfigGeneration:
+                settingsStore.generation,
+            startMode: settingsStore.settings.startMode,
+            autoPauseEnabled:
+                settingsStore.settings.autoPauseEnabled,
+            alertMode: settingsStore.settings.alertMode,
+            candidateBeganSeconds: request.candidateBeganSeconds,
+            monotonicSeconds: request.monotonicSeconds,
+            sourceHealthMask: request.sourceHealthMask,
+            acknowledgedKind: kind == .acknowledgement
+                ? request.kind
+                : nil
         )
+        let sent = bleManager.sendRideAutomationFrame(response)
+        diagnosticsRecorder?.record(
+            level: sent ? .debug : .warning,
+            category: .rideAutomation,
+            event: sent ? "frame_sent" : "frame_send_failed",
+            fields: diagnosticFields(for: response),
+            captureId: nil
+        )
+        return sent
     }
 
     private func trimWatermarks(keeping currentGenerationKey: String) {
@@ -743,6 +757,17 @@ final class RideAutomationCoordinator: ObservableObject {
             result: result,
             sessionID: sessionID
         ) else { return }
+        diagnosticsRecorder?.record(
+            category: .rideAutomation,
+            event: "decision_resolved",
+            fields: [
+                "result": String(result.rawValue),
+                "transition": String(resolved.frame.transition.rawValue),
+                "rideGeneration": String(resolved.identity.rideGeneration),
+                "decisionSequence": String(resolved.identity.decisionSequence),
+                "expectedState": resolved.expectedState?.rawValue ?? "none",
+            ]
+        )
         publishPendingResolution(resolved, result: result)
     }
 
@@ -832,6 +857,17 @@ final class RideAutomationCoordinator: ObservableObject {
                 self.schedulePendingTimeout(for: current)
                 return
             }
+            self.diagnosticsRecorder?.record(
+                level: .warning,
+                category: .rideAutomation,
+                event: "pending_timeout",
+                fields: [
+                    "transition": String(pending.frame.transition.rawValue),
+                    "rideGeneration": String(pending.identity.rideGeneration),
+                    "decisionSequence": String(pending.identity.decisionSequence),
+                ],
+                captureId: nil
+            )
             self.resolvePendingDecision(
                 result: pending.expectedState == nil
                     ? .rejected
@@ -1037,6 +1073,15 @@ final class RideAutomationCoordinator: ObservableObject {
             && frame.watermarkOrConfigGeneration == settingsStore.generation
             && deviceSettings == settingsStore.settings
         if matches {
+            diagnosticsRecorder?.record(
+                category: .rideAutomation,
+                event: "configuration_acknowledged",
+                fields: [
+                    "result": String(frame.result.rawValue),
+                    "rideGeneration": String(frame.rideGeneration),
+                    "sequence": String(frame.watermarkOrConfigGeneration),
+                ]
+            )
             confirmedConfigurationGenerationByDevice[deviceID] =
                 frame.watermarkOrConfigGeneration
             confirmedDeviceSettings = deviceSettings
@@ -1076,6 +1121,17 @@ final class RideAutomationCoordinator: ObservableObject {
             return
         }
         configurationRetryCountByDevice[deviceID] = retryCount + 1
+        diagnosticsRecorder?.record(
+            level: .warning,
+            category: .rideAutomation,
+            event: "configuration_rejected",
+            fields: [
+                "result": String(frame.result.rawValue),
+                "rideGeneration": String(frame.rideGeneration),
+                "sequence": String(frame.watermarkOrConfigGeneration),
+            ],
+            captureId: nil
+        )
         sendConfigurationAndResynchronize()
     }
 
@@ -1103,5 +1159,25 @@ final class RideAutomationCoordinator: ObservableObject {
             return
         }
         clearPendingDecision()
+    }
+
+    private func diagnosticFields(for frame: RideAutomationFrame)
+        -> [String: String] {
+        var fields: [String: String] = [
+            "kind": String(frame.kind.rawValue),
+            "transition": String(frame.transition.rawValue),
+            "origin": String(frame.origin.rawValue),
+            "result": String(frame.result.rawValue),
+            "rideGeneration": String(frame.rideGeneration),
+            "decisionSequence": String(frame.decisionSequence),
+            "profileVersion": String(frame.profileVersion),
+            "startMode": String(frame.startMode.rawValue),
+            "autoPauseEnabled": String(frame.autoPauseEnabled),
+            "sourceHealthMask": String(frame.sourceHealthMask),
+        ]
+        if let acknowledgedKind = frame.acknowledgedKind {
+            fields["acknowledgedKind"] = String(acknowledgedKind.rawValue)
+        }
+        return fields
     }
 }

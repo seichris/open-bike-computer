@@ -294,12 +294,28 @@ enum DeviceNetworkJoinPolicy {
 
 @MainActor
 final class DeviceTransferManager {
+    weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
     private var joinedAccessPointSSID: String?
+
+    private func record(
+        mode: DeviceTransferSession.Mode,
+        event: String,
+        fields: [String: String] = [:]
+    ) {
+        var fields = fields
+        fields["mode"] = mode.rawValue
+        diagnosticsRecorder?.record(
+            category: .transfer,
+            event: event,
+            fields: fields
+        )
+    }
 
     func enterMapTransfer(
         bleManager: BLEManager,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> DeviceTransferSession {
+        record(mode: .map, event: "transfer_requested")
         status("requesting device transfer mode")
         guard bleManager.isNavigationReady else {
             throw OfflineMapPlatformError.missingTransferBaseURL
@@ -343,6 +359,14 @@ final class DeviceTransferManager {
                     await exitMapTransfer(bleManager: bleManager)
                     throw error
                 }
+                record(
+                    mode: .map,
+                    event: "transfer_ready",
+                    fields: [
+                        "networkTransport": session.networkTransport ?? "unknown",
+                        "fallback": String(session.hotspotFallback),
+                    ]
+                )
                 return session
             }
             if DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(
@@ -386,12 +410,14 @@ final class DeviceTransferManager {
             _ = await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2)
         }
         removeJoinedAccessPointIfNeeded()
+        record(mode: .map, event: "transfer_exited")
     }
 
     func enterFirmwareTransfer(
         bleManager: BLEManager,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> DeviceTransferSession {
+        record(mode: .firmware, event: "transfer_requested")
         status("requesting firmware transfer mode")
         guard bleManager.isNavigationReady else {
             throw FirmwareUpdateError.deviceNotReady
@@ -427,6 +453,14 @@ final class DeviceTransferManager {
                     exitFirmwareTransfer(bleManager: bleManager)
                     throw error
                 }
+                record(
+                    mode: .firmware,
+                    event: "transfer_ready",
+                    fields: [
+                        "networkTransport": session.networkTransport ?? "unknown",
+                        "fallback": String(session.hotspotFallback),
+                    ]
+                )
                 return session
             }
             if DeviceTransferHandshakePolicy.shouldRequestStatus(
@@ -445,12 +479,14 @@ final class DeviceTransferManager {
     func exitFirmwareTransfer(bleManager: BLEManager) {
         bleManager.requestDeviceTransferExit()
         removeJoinedAccessPointIfNeeded()
+        record(mode: .firmware, event: "transfer_exited")
     }
 
     func enterDiagnostics(
         bleManager: BLEManager,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> DeviceTransferSession {
+        record(mode: .diagnostics, event: "transfer_requested")
         status("requesting device diagnostics")
         guard bleManager.isNavigationReady else {
             throw RemoteDeviceDebugError.deviceNotReady
@@ -488,6 +524,14 @@ final class DeviceTransferManager {
                         sessionToken: session.sessionToken,
                         status: status
                     )
+                    record(
+                        mode: .diagnostics,
+                        event: "transfer_ready",
+                        fields: [
+                            "networkTransport": session.networkTransport ?? "unknown",
+                            "fallback": String(session.hotspotFallback),
+                        ]
+                    )
                     return session
                 }
                 if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
@@ -510,6 +554,7 @@ final class DeviceTransferManager {
         _ = bleManager.requestDeviceTransferExit()
         _ = await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2)
         removeJoinedAccessPointIfNeeded()
+        record(mode: .diagnostics, event: "transfer_exited")
     }
 
     func enterRemoteDebug(
@@ -517,6 +562,7 @@ final class DeviceTransferManager {
         lanCredentials: RemoteDebugLANCredentials? = nil,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> DeviceTransferSession {
+        record(mode: .debug, event: "transfer_requested")
         status(lanCredentials == nil
             ? "requesting device hotspot"
             : "trying local Wi-Fi")
@@ -548,11 +594,27 @@ final class DeviceTransferManager {
                 // route must not tear down a session another LAN client can
                 // already reach.
                 status("local Wi-Fi ready")
+                record(
+                    mode: .debug,
+                    event: "transfer_ready",
+                    fields: [
+                        "networkTransport": session.networkTransport ?? "unknown",
+                        "fallback": String(session.hotspotFallback),
+                    ]
+                )
                 return session
             }
             status(session.hotspotFallback
                 ? "device hotspot fallback ready"
                 : "remote debug session ready")
+            record(
+                mode: .debug,
+                event: "transfer_ready",
+                fields: [
+                    "networkTransport": session.networkTransport ?? "unknown",
+                    "fallback": String(session.hotspotFallback),
+                ]
+            )
             return session
         } catch {
             // The enter command may already be running even when its status

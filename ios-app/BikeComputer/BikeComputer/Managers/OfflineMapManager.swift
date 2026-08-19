@@ -1602,6 +1602,8 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var lastTransferMapId: String
     @Published private(set) var lastTransferOutcome: String
 
+    weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
+
     var activityProgress: Double? {
         OfflineMapProgressPresentation.value(
             job: currentJob,
@@ -1696,7 +1698,8 @@ final class OfflineMapManager: ObservableObject {
         },
         metadataSave: @escaping SavedMapArtifactMetadataSaveOperation = { metadata, url in
             try SavedMapArtifactMetadataStore.save(metadata, for: url)
-        }
+        },
+        diagnosticsRecorder: (any RideDiagnosticsEventSink)? = nil
     ) {
         OfflineMapPackCompatibilityArchive.removeOrphans()
         self.defaults = defaults
@@ -1741,6 +1744,8 @@ final class OfflineMapManager: ObservableObject {
         defaults.set(lastTransferOutcome, forKey: OfflineMapDefaults.lastTransferOutcomeKey)
         refreshCachedPacks()
         restoreLastTransferPresentation()
+        self.diagnosticsRecorder = diagnosticsRecorder
+        self.deviceTransferManager.diagnosticsRecorder = diagnosticsRecorder
 #if os(iOS)
         backgroundUploadObserver = NotificationCenter.default.publisher(
             for: BackgroundMapUploadStateStore.didChangeNotification
