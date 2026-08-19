@@ -32,6 +32,18 @@ cache/receipt runbook are also implemented. Production still uses the existing
 monolithic executor and hard ceilings until the benchmark, golden-equivalence,
 deployment, and physical acceptance gates are complete.
 
+The first exact full-bbox validation attempt exposed and fixed one remaining
+warm-path bug: the standalone relation-audit consumer still called the
+source-index database validator for every chunk. That job
+(`1304ad1a9aa94f1ead49`) was cancelled after the audit path held about 3.59 GiB
+of worker cgroup memory without advancing. Commit `296c445c` makes both
+relation-audit and workload consumers verify the sealed manifest and reuse the
+immutable index without a multi-gigabyte database rescan; commit `d34190e3`
+also batches the closure-audit lookups instead of issuing one SQLite query per
+object. The replacement benchmark is running on the new immutable validation image. Cancellation
+fencing and maintenance reconciliation now release child reservations when
+such an operator stop is required.
+
 The core decision is:
 
 > Keep one user-visible map job and one deterministic downloadable artifact,
@@ -144,6 +156,12 @@ Phase 0 policy decision:
   on internal chunks; and
 - add an explicit worker cgroup memory limit and resource report before any
   concurrency or production ceiling change.
+
+The cancelled full-bbox attempt is retained as an incident observation, not a
+successful benchmark: it reached the first relation-closure task with a
+3,588,866,048-byte cgroup peak and no OOM event, but the missed manifest-only
+call made its wall time non-representative. The corrected run is the benchmark
+of record.
 
 ### Existing components to preserve
 
@@ -835,6 +853,14 @@ different task groupings and completion order; monolithic-vs-partition
 byte-level golden equivalence, measured benchmarks, and production allowlist
 rollout remain pending.
 
+The exact-bbox run also verified that relation-audit and closure workers now
+reuse the sealed source-index manifest; a replacement run reached ordinary
+`osmium extract` chunk execution instead of repeating the full source-index
+validation. On the current image, the first bounded chunk completed all 24
+block encodings with 24 durable receipts, no split/retry, 1,819,049,984 bytes
+peak RSS, and a 2,190,176,256-byte worker cgroup peak. The full timing and
+artifact evidence remain pending.
+
 ### Phase 4 — Cache-only final assembly
 
 1. Add an assembly mode that requires every building receipt.
@@ -886,6 +912,10 @@ leases and heartbeats, OOM/cache-integrity failures, memory-headroom warnings,
 and incomplete receipt sets; the operator runbook documents safe recovery and
 publication gates. Production benchmark evidence remains pending.
 
+Cancellation is now fenced at the public job boundary, with maintenance
+reconciliation as a second durable backstop: cancelled parents cannot leave
+leased child tasks or resource reservations active until lease expiry.
+
 **Exit gate:** operators can explain every minute and resource peak of a
 Shanghai build from retained data, while current iOS clients still complete the
 same one-job workflow.
@@ -905,11 +935,14 @@ same one-job workflow.
 
 **Current status:** the exact implementation image was published by the
 repository's immutable GHCR workflow and deployed only to the validation
-Coolify app with `chunked_allowlist` and concurrency one. Canary job
-`2ffd2ec5462e482e93b7` reached `ready`; all three validation containers report
-healthy. Production containers remain pinned to their prior image digest.
-Physical validation, central/west/full benchmark coverage, and production
-promotion are still required.
+Coolify app with `chunked_allowlist` and concurrency one. The current
+validation digest is
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:a98584d23500af2a420859f139f312e6ef8fed0b9e63d97ea477fc2c8fc101e6`;
+all three validation containers report healthy. Canary job
+`2ffd2ec5462e482e93b7` reached `ready`, and exact-bbox replacement job
+`9fc92d71a0c743169af8` is the active benchmark. Production containers remain
+pinned to their prior image digest. Physical validation, central/west/full
+benchmark coverage, and production promotion are still required.
 
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
