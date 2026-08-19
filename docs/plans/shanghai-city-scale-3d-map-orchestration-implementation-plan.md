@@ -1176,6 +1176,27 @@ for `6d327408` is built as
 not deployed over the running benchmark. Production remains pinned to
 `a6980506…`.
 
+The receipt-reuse and batched-lookup implementation is now deployed only to
+the isolated validation stack as
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:ac8094ba412f1ca462b1307899090b2e0b3545d9ff32eb870f40dbdd693a2e41` (commit
+`d20d0c3f`). Public health is HTTP 200 and all three validation containers are
+healthy; production is still pinned to `a6980506…`. Exact-bbox validation job
+`d8afbc95c4fd4589ae5f` was created with 442 output blocks and 150 durable
+tasks: 142 cache-hit block tasks and eight heavy workload/chunk tasks.
+
+Its first two heavy chunks have completed 65/442 blocks with no retries,
+splits, or typed failures. The 30-block chunk recorded a 36,858-object closure
+receipt, 141.912420 seconds of closure-scan time, 5,446,459,392 bytes child
+peak RSS during source extraction, and 37.044897 seconds of block-cache
+generation. The 35-block chunk recorded a 410,173-object closure receipt,
+154.774376 seconds of closure-scan time, 4,085,542,912 bytes child peak RSS,
+and 358.919161 seconds of block-cache generation. Both chunks reused their
+durable closure plans for relation audit; their live worker cgroup peak so far
+is 8,704,212,992 bytes, with `low=0`, `high=0`, `max=0`, `oom=0`, and
+`oom_kill=0`. The host has retained more than 41 GiB available memory. The
+full-bbox artifact, final ZIP receipts, and the remaining performance and
+physical gates are still pending.
+
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
 
