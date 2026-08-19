@@ -67,6 +67,44 @@ def write_block_cache_identity(
 
 
 class Target3CLITests(unittest.TestCase):
+    def test_target_three_preflight_failures_use_typed_protocol(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            invalid_scope = root / "invalid-scope.json"
+            invalid_scope.write_text("not-json", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "extract_features.py"),
+                    "0",
+                    "0",
+                    "0.01",
+                    "0.01",
+                    str(root / "features"),
+                    str(root / "map"),
+                    "--renderer-format",
+                    "3",
+                    "--scope-plan",
+                    str(invalid_scope),
+                ],
+                cwd=ROOT / "scripts",
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            marker = next(
+                line.split(":", 1)[1]
+                for line in result.stdout.splitlines()
+                if line.startswith("BUILDING_PREPROCESS_FAILURE:")
+            )
+            self.assertEqual(
+                json.loads(marker),
+                {
+                    "code": "building_scope_policy_invalid",
+                    "message": "scope plan is unavailable or invalid",
+                },
+            )
+
     def test_ogr_untagged_relation_outline_reaches_strict_target_three(self):
         host_font = next(
             (path for path in HOST_FONT_CANDIDATES if path.is_file()),

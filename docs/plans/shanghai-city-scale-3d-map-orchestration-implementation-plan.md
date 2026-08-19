@@ -985,7 +985,16 @@ block receipts; task IDs, chunk boundaries, lease order, timings, and
 cache-warm state are excluded. Whole-artifact signature/device gates, the
 byte-level high-limit reference comparison, and the remaining physical
 acceptance gates remain pending. The coordinator also derives a canonical
-block receipt-set identity ordered by global block coordinates.
+block receipt-set identity ordered by global block coordinates. The extractor
+now emits typed `BUILDING_PREPROCESS_FAILURE` records for scope-plan,
+relation-closure, and calibration preflight failures, so malformed sparse
+inputs are retained as actionable data-shape diagnostics instead of generic
+chunk execution errors. `map-platform/tools/compare_building_equivalence.py`
+provides the review-gate comparator for retained monolithic and chunked run
+records: it compares canonical FMB bytes and artifact payload bytes while
+ignoring task layout, lease order, timing, cache-hit, and producer metadata.
+The comparator is covered by backend tests; the live high-limit reference run
+is still required before this acceptance gate can be checked.
 
 ### Phase 5 — Progress, estimates, operations, and retention
 

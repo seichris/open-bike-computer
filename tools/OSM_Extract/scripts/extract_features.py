@@ -73,6 +73,31 @@ BUILDING_SCOPE_POLICY_VERSION = 5
 mapblock_mask  = pow( 2, MAPBLOCK_SIZE_BITS) - 1     # ...00000000111111111111
 mapfolder_mask = pow( 2, MAPFOLDER_SIZE_BITS) - 1    # ...00001111
 
+
+def fail_building_preprocess(code, message):
+    """Emit a machine-readable target-3 preflight failure before exiting.
+
+    Scope-plan, relation-closure, and calibration validation happens before
+    the normal building preparation try/except below.  Keep those failures on
+    the same typed protocol so the coordinator can distinguish malformed
+    inputs from worker/resource failures instead of reporting a generic
+    ``building_chunk_execution_failed``.
+    """
+
+    print(
+        "BUILDING_PREPROCESS_FAILURE:"
+        + json.dumps(
+            {
+                "code": code,
+                "message": str(message)[:1024],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+    raise SystemExit(2)
+
 conf = yaml.safe_load( open( CONF_FEATURES, "r"))
 styles = yaml.safe_load( open(CONF_STYLES, "r"))
 
@@ -91,29 +116,36 @@ scope_plan = None
 scope_block_positions = None
 selection_policy = None
 if args.scope_plan:
-    with open(args.scope_plan, "rb") as scope_file:
-        serialized_scope = json.load(scope_file)
+    try:
+        with open(args.scope_plan, "rb") as scope_file:
+            serialized_scope = json.load(scope_file)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        fail_building_preprocess("building_scope_policy_invalid", "scope plan is unavailable or invalid")
+    if not isinstance(serialized_scope, dict):
+        fail_building_preprocess("building_scope_policy_invalid", "scope plan is not an object")
     scope_hash = serialized_scope.pop("scopePlanSha256", None)
+    scope_policy = serialized_scope.get("policy")
     if (
         not isinstance(scope_hash, str)
         or hashlib.sha256(canonical_json(serialized_scope)).hexdigest() != scope_hash
         or serialized_scope.get("schemaVersion") != 1
-        or serialized_scope.get("policy", {}).get("policyVersion")
+        or not isinstance(scope_policy, dict)
+        or scope_policy.get("policyVersion")
         != BUILDING_SCOPE_POLICY_VERSION
-        or serialized_scope.get("policy", {}).get("blockGridVersion") != 1
-        or serialized_scope.get("policy", {}).get("blockSizeMeters") != 4096
+        or scope_policy.get("blockGridVersion") != 1
+        or scope_policy.get("blockSizeMeters") != 4096
     ):
-        raise ValueError("scope plan identity or policy is invalid")
+        fail_building_preprocess("building_scope_policy_invalid", "scope plan identity or policy is invalid")
     if args.renderer_format != 3:
-        raise ValueError("scope plans are only supported by renderer format 3")
+        fail_building_preprocess("building_scope_policy_invalid", "scope plans are only supported by renderer format 3")
     output_blocks = serialized_scope.get("outputBlocks")
     if not isinstance(output_blocks, list) or not output_blocks:
-        raise ValueError("scope plan output blocks are invalid")
+        fail_building_preprocess("building_scope_policy_invalid", "scope plan output blocks are invalid")
     scope_block_positions = []
     previous_block = None
     for block in output_blocks:
         if not isinstance(block, dict) or set(block) != {"x", "y", "boundsMeters"}:
-            raise ValueError("scope plan output block is invalid")
+            fail_building_preprocess("building_scope_policy_invalid", "scope plan output block is invalid")
         x, y, bounds = block["x"], block["y"], block["boundsMeters"]
         if (
             isinstance(x, bool) or not isinstance(x, int)
@@ -121,13 +153,13 @@ if args.scope_plan:
             or bounds != [x * 4096, y * 4096, (x + 1) * 4096, (y + 1) * 4096]
             or (previous_block is not None and (x, y) <= previous_block)
         ):
-            raise ValueError("scope plan output blocks are not canonical")
+            fail_building_preprocess("building_scope_policy_invalid", "scope plan output blocks are not canonical")
         previous_block = (x, y)
         scope_block_positions.append((x * 4096, y * 4096))
     scope_plan = serialized_scope
     selection_policy = serialized_scope["policy"].get("selectionSemantics")
     if selection_policy != "complete_blocks_no_selection_edge_clipping":
-        raise ValueError("scope plan selection semantics are unsupported")
+        fail_building_preprocess("building_scope_policy_invalid", "scope plan selection semantics are unsupported")
     scope_metrics = serialized_scope.get("metrics", {})
     scope_marker = {
         "scopePlanSha256": scope_hash,
@@ -169,9 +201,11 @@ block_positions = tuple(
 )
 total = len(block_positions)
 if total <= 0:
+    if scope_plan is not None:
+        fail_building_preprocess("building_scope_policy_invalid", "map extraction has no output blocks")
     raise ValueError("map extraction has no output blocks")
 if scope_plan is not None and args.building_block_cache_root is None:
-    raise ValueError("plan-aware target 3 requires the building block cache")
+    fail_building_preprocess("building_block_cache_unavailable", "plan-aware target 3 requires the building block cache")
 
 if args.renderer_format == 3:
     print(
@@ -222,31 +256,37 @@ building_cache_generation_seconds = 0.0
 if args.renderer_format == 3:
     rules_path = os.path.join(os.path.dirname(__file__), "..", "conf", "building_height_rules.yaml")
     building_rules, building_rules_sha256 = load_rules(rules_path)
-    relation_index = (
-        {}
-        if args.building_cache_only
-        else load_relation_index(
-            f"{args.geojson_prefix}_building_relations.json",
-            require_closure=scope_plan is not None,
-        )
-    )
-    calibration_cache = (
-        CalibrationCache.from_manifest(args.calibration_manifest)
-        if args.calibration_manifest
-        else None
-    )
+    if args.building_cache_only:
+        relation_index = {}
+    else:
+        try:
+            relation_index = load_relation_index(
+                f"{args.geojson_prefix}_building_relations.json",
+                require_closure=scope_plan is not None,
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            fail_building_preprocess("building_relation_incomplete", str(exc))
+    if args.calibration_manifest:
+        try:
+            calibration_cache = CalibrationCache.from_manifest(args.calibration_manifest)
+        except (CalibrationCacheError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            fail_building_preprocess("building_calibration_unavailable", str(exc))
+    else:
+        calibration_cache = None
     if (calibration_cache is None) != (args.calibration_source_sha256 is None):
-        raise ValueError("calibration manifest and source identity must be supplied together")
+        fail_building_preprocess("building_calibration_unavailable", "calibration manifest and source identity must be supplied together")
     if scope_plan is not None and calibration_cache is None:
-        raise ValueError("plan-aware target 3 requires immutable calibration")
+        fail_building_preprocess("building_calibration_unavailable", "plan-aware target 3 requires immutable calibration")
     if scope_plan is not None and not args.building_cache_only:
-        closure_audit = relation_index["closureAudit"]
+        closure_audit = relation_index.get("closureAudit")
+        if not isinstance(closure_audit, dict):
+            fail_building_preprocess("building_relation_incomplete", "building relation closure audit is missing")
         if (
             closure_audit["scopePlanSha256"] != scope_hash
             or closure_audit["sourceSnapshotSha256"]
             != args.calibration_source_sha256
         ):
-            raise ValueError("building relation closure identity is incompatible")
+            fail_building_preprocess("building_relation_incomplete", "building relation closure identity is incompatible")
         scope_calibration = scope_plan.get("calibration", {})
         required_calibration_cells = {
             tuple(cell) for cell in scope_calibration.get("sampleCells", [])
@@ -258,7 +298,7 @@ if args.renderer_format == 3:
             or not required_calibration_cells
             or not required_calibration_cells.issubset(calibration_cache.bound_cells())
         ):
-            raise ValueError("scope plan calibration inputs are incomplete or incompatible")
+            fail_building_preprocess("building_calibration_unavailable", "scope plan calibration inputs are incomplete or incompatible")
 
     def publish_building_complexity(value):
         building_complexity.update(value)
