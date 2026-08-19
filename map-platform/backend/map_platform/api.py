@@ -480,6 +480,7 @@ def create_app():
             raise HTTPException(status_code=404, detail="building plan not found")
         return {
             "plan": plan,
+            "progress": building_task_store.progress(parent_job_id),
             "tasks": [
                 asdict(task)
                 for task in building_task_store.list_tasks(parent_job_id)
@@ -489,6 +490,9 @@ def create_app():
             ),
             "receipts": list(building_task_store.list_receipts(parent_job_id)),
             "attempts": list(building_task_store.list_attempts(parent_job_id)),
+            "resourceReservations": list(
+                building_task_store.list_resource_reservations(parent_job_id)
+            ),
         }
 
     @app.get(

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-BUILDING_TASK_SCHEMA_VERSION = 2
+BUILDING_TASK_SCHEMA_VERSION = 3
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _TASK_STATES = {"pending", "leased", "ready", "split", "failed", "cancelled"}
 _PLAN_STATES = {
@@ -30,6 +30,25 @@ _PLAN_STATES = {
     "failed",
     "cancelled",
 }
+_PLAN_STAGE_ORDER = {
+    "global_scope_planning": 0,
+    "source_preparation": 1,
+    "chunk_planning": 2,
+    "planning": 2,
+    "building_chunks": 3,
+    "map_assembly": 4,
+    "assembly": 4,
+    "artifact_validation": 5,
+    "artifact_publication": 6,
+    "ready": 7,
+    "failed": 7,
+    "cancelled": 7,
+}
+_TERMINAL_PLAN_STATES = {"ready", "failed", "cancelled"}
+_MEMORY_ADMISSION_FRACTION = 0.85
+_MEMORY_ADMISSION_PERCENT = 85
+_DEFAULT_RESOURCE_POOL = "default"
+_DEFAULT_MAX_CONCURRENT_TASKS = 1
 
 
 class BuildingTaskStoreError(RuntimeError):
@@ -218,6 +237,57 @@ class BuildingTaskStore:
         finally:
             connection.close()
 
+    def set_plan_stage(
+        self,
+        parent_job_id: str,
+        *,
+        stage: str,
+        state: str | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Advance the parent coordinator stage without permitting regression."""
+
+        if stage not in _PLAN_STATES:
+            raise BuildingTaskStoreError("plan stage is invalid")
+        next_state = stage if state is None else state
+        if next_state not in _PLAN_STATES:
+            raise BuildingTaskStoreError("plan state is invalid")
+        now = self._clock() if now is None else now
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT stage, state FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            if row is None:
+                raise BuildingTaskStoreError("parent plan not found")
+            current_stage = row["stage"]
+            current_state = row["state"]
+            if (
+                current_state in _TERMINAL_PLAN_STATES
+                and (current_state != next_state or current_stage != stage)
+            ):
+                raise BuildingTaskStoreError("parent plan is terminal")
+            if _PLAN_STAGE_ORDER[stage] < _PLAN_STAGE_ORDER[current_stage]:
+                raise BuildingTaskStoreError("plan stage cannot move backwards")
+            connection.execute(
+                "UPDATE map_build_plans SET stage=?, state=?, updated_at=? WHERE parent_job_id=?",
+                (stage, next_state, now, parent_job_id),
+            )
+            connection.commit()
+            return dict(
+                connection.execute(
+                    "SELECT * FROM map_build_plans WHERE parent_job_id=?",
+                    (parent_job_id,),
+                ).fetchone()
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def claim_next(
         self,
         *,
@@ -242,16 +312,30 @@ class BuildingTaskStore:
             if parent_job_id is not None:
                 where.append("task.parent_job_id = ?")
                 params.append(parent_job_id)
-            row = connection.execute(
+            rows = connection.execute(
                 f"""
                 SELECT task.* FROM map_build_tasks task
                 JOIN map_build_plans plan ON plan.parent_job_id = task.parent_job_id
                 WHERE {' AND '.join(where)}
                 ORDER BY task.parent_job_id, task.created_at, task.task_id
-                LIMIT 1
                 """,
                 params,
-            ).fetchone()
+            ).fetchall()
+            row = None
+            resource_request = None
+            for candidate in rows:
+                if not _worker_can_admit(candidate, worker_capability):
+                    continue
+                request = _resource_request(candidate, worker_capability)
+                if request is None:
+                    row = candidate
+                    break
+                if _resource_capacity_available(
+                    connection, request, now=now
+                ):
+                    row = candidate
+                    resource_request = request
+                    break
             if row is None:
                 connection.commit()
                 return None
@@ -276,6 +360,47 @@ class BuildingTaskStore:
                     row["task_id"],
                 ),
             )
+            admission = _resource_admission(row, worker_capability)
+            if resource_request is not None:
+                active = _resource_capacity_snapshot(
+                    connection, resource_request["resourcePool"], now=now
+                )
+                admission.update(
+                    {
+                        "activeReservations": active["count"],
+                        "activeMemoryReservationBytes": active["memoryBytes"],
+                        "activeCpuWeight": active["cpuWeight"],
+                        "reservationAccepted": True,
+                    }
+                )
+                connection.execute(
+                    """
+                    INSERT INTO map_build_resource_reservations(
+                        task_id, parent_job_id, lease_token, worker_id,
+                        resource_pool, memory_reservation_bytes,
+                        memory_limit_bytes, cpu_weight, cpu_capacity,
+                        max_concurrent_tasks, capability_json,
+                        reserved_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["task_id"],
+                        row["parent_job_id"],
+                        lease_token,
+                        worker_id,
+                        resource_request["resourcePool"],
+                        resource_request["memoryReservationBytes"],
+                        resource_request["memoryLimitBytes"],
+                        resource_request["cpuWeight"],
+                        resource_request["cpuCapacity"],
+                        resource_request["maxConcurrentTasks"],
+                        _canonical_json(dict(worker_capability or {})).decode(
+                            "utf-8"
+                        ),
+                        now,
+                        expires,
+                    ),
+                )
             connection.execute(
                 """
                 INSERT INTO map_build_task_attempts(
@@ -292,6 +417,7 @@ class BuildingTaskStore:
                         {
                             "workerId": worker_id,
                             "capability": dict(worker_capability or {}),
+                            "admission": admission,
                         }
                     ).decode("utf-8"),
                     now,
@@ -330,6 +456,10 @@ class BuildingTaskStore:
             connection.execute(
                 "UPDATE map_build_tasks SET lease_expires_at=?, heartbeat_at=?, updated_at=? WHERE task_id=?",
                 (expires, now, now, task_id),
+            )
+            connection.execute(
+                "UPDATE map_build_resource_reservations SET expires_at=? WHERE task_id=? AND lease_token=?",
+                (expires, task_id, lease_token),
             )
             connection.commit()
             return self._row_to_task(
@@ -526,6 +656,10 @@ class BuildingTaskStore:
                     task_id,
                 ),
             )
+            connection.execute(
+                "DELETE FROM map_build_resource_reservations WHERE task_id=? AND lease_token=?",
+                (task_id, lease_token),
+            )
             self._finish_attempt(
                 connection,
                 task_id,
@@ -644,6 +778,10 @@ class BuildingTaskStore:
                 "UPDATE map_build_tasks SET state='split', typed_error=?, lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, updated_at=? WHERE task_id=?",
                 (reason, now, task_id),
             )
+            connection.execute(
+                "DELETE FROM map_build_resource_reservations WHERE task_id=? AND lease_token=?",
+                (task_id, lease_token),
+            )
             self._finish_attempt(
                 connection,
                 task_id,
@@ -684,6 +822,10 @@ class BuildingTaskStore:
                 "UPDATE map_build_tasks SET state='cancelled', lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, updated_at=? WHERE parent_job_id=? AND state IN ('pending','leased')",
                 (now, parent_job_id),
             )
+            connection.execute(
+                "DELETE FROM map_build_resource_reservations WHERE parent_job_id=?",
+                (parent_job_id,),
+            )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -697,7 +839,7 @@ class BuildingTaskStore:
         try:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
-                "SELECT task_id, parent_job_id, transient_attempts FROM map_build_tasks WHERE state='leased' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?",
+                "SELECT task_id, parent_job_id, transient_attempts FROM map_build_tasks WHERE state='leased' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?",
                 (now,),
             ).fetchall()
             for row in rows:
@@ -709,6 +851,10 @@ class BuildingTaskStore:
                 connection.execute(
                     "UPDATE map_build_tasks SET state=?, lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, updated_at=? WHERE task_id=?",
                     (new_state, now, row["task_id"]),
+                )
+                connection.execute(
+                    "DELETE FROM map_build_resource_reservations WHERE task_id=?",
+                    (row["task_id"],),
                 )
                 self._finish_attempt(
                     connection,
@@ -784,6 +930,24 @@ class BuildingTaskStore:
         finally:
             connection.close()
 
+    def list_resource_reservations(
+        self, parent_job_id: str | None = None
+    ) -> tuple[dict[str, Any], ...]:
+        connection = self._connect()
+        try:
+            if parent_job_id is None:
+                rows = connection.execute(
+                    "SELECT * FROM map_build_resource_reservations ORDER BY reserved_at, task_id"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM map_build_resource_reservations WHERE parent_job_id=? ORDER BY reserved_at, task_id",
+                    (parent_job_id,),
+                ).fetchall()
+            return tuple(dict(row) for row in rows)
+        finally:
+            connection.close()
+
     def get_plan(self, parent_job_id: str) -> dict[str, Any] | None:
         connection = self._connect()
         try:
@@ -791,6 +955,51 @@ class BuildingTaskStore:
                 "SELECT * FROM map_build_plans WHERE parent_job_id=?", (parent_job_id,)
             ).fetchone()
             return dict(row) if row is not None else None
+        finally:
+            connection.close()
+
+    def progress(self, parent_job_id: str) -> dict[str, Any] | None:
+        """Return additive parent-facing progress from validated receipts."""
+
+        connection = self._connect()
+        try:
+            plan = connection.execute(
+                "SELECT stage, state, expected_output_block_count FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            if plan is None:
+                return None
+            completed_blocks = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM map_build_block_receipts WHERE parent_job_id=?",
+                    (parent_job_id,),
+                ).fetchone()[0]
+            )
+            task_counts = connection.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN state='leased' THEN 1 ELSE 0 END) AS active_chunks,
+                    SUM(CASE WHEN state='ready' THEN 1 ELSE 0 END) AS ready_chunks,
+                    SUM(CASE WHEN state NOT IN ('split', 'cancelled') THEN 1 ELSE 0 END) AS total_chunks
+                FROM map_build_tasks
+                WHERE parent_job_id=? AND kind IN ('building_chunk', 'building_workload_scan')
+                """,
+                (parent_job_id,),
+            ).fetchone()
+            expected = int(plan["expected_output_block_count"])
+            return {
+                "phase": plan["stage"],
+                "unit": "blocks",
+                "completed": min(completed_blocks, expected),
+                "total": expected,
+                "completedBlocks": min(completed_blocks, expected),
+                "totalBlocks": expected,
+                "activeChunks": int(task_counts["active_chunks"] or 0),
+                "readyChunks": int(task_counts["ready_chunks"] or 0),
+                "totalChunks": int(task_counts["total_chunks"] or 0),
+                "indeterminate": False,
+                "state": plan["state"],
+            }
         finally:
             connection.close()
 
@@ -868,6 +1077,10 @@ class BuildingTaskStore:
             connection.execute(
                 "UPDATE map_build_tasks SET output_receipt_set_sha256=? WHERE task_id=?",
                 (receipt_set_sha256, task_id),
+            )
+            connection.execute(
+                "DELETE FROM map_build_resource_reservations WHERE task_id=? AND lease_token=?",
+                (task_id, lease_token),
             )
             self._finish_attempt(
                 connection,
@@ -1126,6 +1339,21 @@ class BuildingTaskStore:
                     workload_json TEXT NOT NULL,
                     recorded_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS map_build_resource_reservations(
+                    task_id TEXT PRIMARY KEY REFERENCES map_build_tasks(task_id),
+                    parent_job_id TEXT NOT NULL REFERENCES map_build_plans(parent_job_id),
+                    lease_token TEXT NOT NULL,
+                    worker_id TEXT NOT NULL,
+                    resource_pool TEXT NOT NULL,
+                    memory_reservation_bytes INTEGER NOT NULL,
+                    memory_limit_bytes INTEGER,
+                    cpu_weight REAL NOT NULL,
+                    cpu_capacity REAL,
+                    max_concurrent_tasks INTEGER NOT NULL,
+                    capability_json TEXT NOT NULL,
+                    reserved_at REAL NOT NULL,
+                    expires_at REAL NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS map_build_tasks_pending
                     ON map_build_tasks(state, next_eligible_at, created_at);
                 CREATE INDEX IF NOT EXISTS map_build_tasks_parent
@@ -1134,6 +1362,8 @@ class BuildingTaskStore:
                     ON map_build_task_attempts(started_at);
                 CREATE INDEX IF NOT EXISTS map_build_workload_receipts_parent
                     ON map_build_workload_receipts(parent_job_id, recorded_at);
+                CREATE INDEX IF NOT EXISTS map_build_resource_reservations_pool
+                    ON map_build_resource_reservations(resource_pool, expires_at);
                 """
             )
             connection.execute(f"PRAGMA user_version={BUILDING_TASK_SCHEMA_VERSION}")
@@ -1147,6 +1377,219 @@ class BuildingTaskStore:
 
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _worker_can_admit(
+    row: sqlite3.Row,
+    worker_capability: Mapping[str, Any] | None,
+) -> bool:
+    if worker_capability is None:
+        return True
+    if not isinstance(worker_capability, Mapping):
+        raise BuildingTaskStoreError("worker capability is invalid")
+    if not {
+        "memoryLimitBytes",
+        "configuredMemoryLimitBytes",
+        "cgroupMemoryLimitBytes",
+        "cgroupMemory",
+        "cpuCount",
+        "cpuCapacity",
+        "maxConcurrentTasks",
+        "resourcePool",
+    }.intersection(worker_capability):
+        return True
+    return _resource_request(row, worker_capability) is not None
+
+
+def _resource_request(
+    row: sqlite3.Row,
+    worker_capability: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Normalize a worker/task pair into a reservation request.
+
+    A capability without any resource fields keeps the legacy unbounded
+    admission behavior. Once a worker reports a resource pool, memory, CPU,
+    or concurrency limit, every claimed task consumes a reservation in that
+    pool. The default concurrency is intentionally one for this heavy-task
+    coordinator.
+    """
+
+    if worker_capability is None:
+        return None
+    if not isinstance(worker_capability, Mapping):
+        raise BuildingTaskStoreError("worker capability is invalid")
+    resource_fields = {
+        "memoryLimitBytes",
+        "configuredMemoryLimitBytes",
+        "cgroupMemoryLimitBytes",
+        "cgroupMemory",
+        "cpuCount",
+        "cpuCapacity",
+        "maxConcurrentTasks",
+        "resourcePool",
+    }
+    if not resource_fields.intersection(worker_capability):
+        return None
+    limit = _capability_memory_limit(worker_capability)
+    predicted = _predicted_memory(row)
+    if limit is not None and predicted > _memory_admission_limit(limit):
+        return None
+    pool = worker_capability.get("resourcePool", _DEFAULT_RESOURCE_POOL)
+    if not isinstance(pool, str) or not pool or len(pool) > 128:
+        raise BuildingTaskStoreError("worker resource pool is invalid")
+    max_concurrent = worker_capability.get(
+        "maxConcurrentTasks", _DEFAULT_MAX_CONCURRENT_TASKS
+    )
+    if (
+        isinstance(max_concurrent, bool)
+        or not isinstance(max_concurrent, int)
+        or max_concurrent <= 0
+    ):
+        raise BuildingTaskStoreError("worker concurrency capability is invalid")
+    cpu_weight = worker_capability.get("cpuWeight", 1.0)
+    if isinstance(cpu_weight, bool) or not isinstance(cpu_weight, (int, float)):
+        raise BuildingTaskStoreError("worker CPU reservation is invalid")
+    if cpu_weight <= 0:
+        raise BuildingTaskStoreError("worker CPU reservation is invalid")
+    cpu_capacity = worker_capability.get(
+        "cpuCapacity", worker_capability.get("cpuCount")
+    )
+    if cpu_capacity is not None:
+        if isinstance(cpu_capacity, bool) or not isinstance(cpu_capacity, (int, float)):
+            raise BuildingTaskStoreError("worker CPU capacity is invalid")
+        if cpu_capacity <= 0:
+            raise BuildingTaskStoreError("worker CPU capacity is invalid")
+    return {
+        "resourcePool": pool,
+        "memoryReservationBytes": predicted,
+        "memoryLimitBytes": limit,
+        "cpuWeight": float(cpu_weight),
+        "cpuCapacity": float(cpu_capacity) if cpu_capacity is not None else None,
+        "maxConcurrentTasks": max_concurrent,
+    }
+
+
+def _predicted_memory(row: sqlite3.Row) -> int:
+    predicted = row["predicted_resource_json"]
+    if not predicted:
+        return 0
+    try:
+        document = json.loads(predicted)
+    except (TypeError, ValueError) as exc:
+        raise BuildingTaskStoreError("task predicted resource is invalid") from exc
+    if not isinstance(document, dict):
+        raise BuildingTaskStoreError("task predicted resource is invalid")
+    estimate = document.get("estimatedPeakMemoryBytes")
+    if estimate is None:
+        return 0
+    if isinstance(estimate, bool) or not isinstance(estimate, int) or estimate < 0:
+        raise BuildingTaskStoreError("task memory estimate is invalid")
+    return estimate
+
+
+def _resource_capacity_snapshot(
+    connection: sqlite3.Connection,
+    resource_pool: str,
+    *,
+    now: float | None = None,
+) -> dict[str, Any]:
+    where = "resource_pool=?"
+    params: list[Any] = [resource_pool]
+    if now is not None:
+        where += " AND expires_at > ?"
+        params.append(now)
+    row = connection.execute(
+        f"""
+        SELECT COUNT(*) AS count,
+               COALESCE(SUM(memory_reservation_bytes), 0) AS memory_bytes,
+               COALESCE(SUM(cpu_weight), 0) AS cpu_weight
+        FROM map_build_resource_reservations
+        WHERE {where}
+        """,
+        params,
+    ).fetchone()
+    return {
+        "count": int(row["count"] or 0),
+        "memoryBytes": int(row["memory_bytes"] or 0),
+        "cpuWeight": float(row["cpu_weight"] or 0),
+    }
+
+
+def _resource_capacity_available(
+    connection: sqlite3.Connection,
+    request: Mapping[str, Any],
+    *,
+    now: float,
+) -> bool:
+    active = _resource_capacity_snapshot(
+        connection, request["resourcePool"], now=now
+    )
+    if active["count"] >= request["maxConcurrentTasks"]:
+        return False
+    limit = request["memoryLimitBytes"]
+    if limit is not None:
+        if (
+            active["memoryBytes"] + request["memoryReservationBytes"]
+            > _memory_admission_limit(limit)
+        ):
+            return False
+    capacity = request["cpuCapacity"]
+    if capacity is not None and active["cpuWeight"] + request["cpuWeight"] > capacity:
+        return False
+    return True
+
+
+def _resource_admission(
+    row: sqlite3.Row,
+    worker_capability: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    request = _resource_request(row, worker_capability)
+    predicted = _predicted_memory(row)
+    if request is None:
+        return {
+            "memoryLimitBytes": _capability_memory_limit(worker_capability or {}),
+            "memoryReservationBytes": predicted,
+            "memoryHeadroomFraction": _MEMORY_ADMISSION_FRACTION,
+            "reservationAccepted": False,
+        }
+    return {
+        "resourcePool": request["resourcePool"],
+        "memoryLimitBytes": request["memoryLimitBytes"],
+        "memoryReservationBytes": request["memoryReservationBytes"],
+        "memoryHeadroomFraction": _MEMORY_ADMISSION_FRACTION,
+        "cpuWeight": request["cpuWeight"],
+        "cpuCapacity": request["cpuCapacity"],
+        "maxConcurrentTasks": request["maxConcurrentTasks"],
+        "reservationAccepted": False,
+    }
+
+
+def _memory_admission_limit(limit: int) -> int:
+    return (limit * _MEMORY_ADMISSION_PERCENT) // 100
+
+
+def _capability_memory_limit(capability: Mapping[str, Any]) -> int | None:
+    for field in (
+        "memoryLimitBytes",
+        "configuredMemoryLimitBytes",
+        "cgroupMemoryLimitBytes",
+    ):
+        value = capability.get(field)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise BuildingTaskStoreError("worker memory capability is invalid")
+        return value
+    nested = capability.get("cgroupMemory")
+    if isinstance(nested, Mapping):
+        for field in ("limitBytes", "configuredLimitBytes"):
+            value = nested.get(field)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise BuildingTaskStoreError("worker memory capability is invalid")
+            return value
+    return None
 
 
 def _json_or_none(value: Mapping[str, Any] | None) -> str | None:

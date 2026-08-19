@@ -1,4 +1,6 @@
 import os
+import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -28,6 +30,22 @@ class ResourceReportTests(unittest.TestCase):
         self.assertEqual(report["processMemory"]["rssBytes"], 12 * 1024)
         self.assertEqual(report["processMemory"]["peakRssBytes"], 34 * 1024)
         self.assertEqual(report["hostMemory"]["totalBytes"], 100 * 1024)
+        capability = report["capability"]
+        self.assertEqual(capability["memoryLimitBytes"], 8192)
+        self.assertEqual(capability["cgroupMemoryLimitBytes"], None)
+        self.assertEqual(capability["maxConcurrentTasks"], 1)
+        expected_identity = hashlib.sha256(
+            json.dumps(
+                {
+                    key: capability[key]
+                    for key in capability
+                    if key != "identitySha256"
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        self.assertEqual(capability["identitySha256"], expected_identity)
 
     def test_invalid_configured_limit_is_reported_as_unset(self):
         with patch.dict(os.environ, {"MAP_PLATFORM_WORKER_MEMORY_LIMIT_BYTES": "nope"}, clear=False):

@@ -18,11 +18,12 @@ machine-readable benchmark fixtures, the read-only worker cgroup/resource
 report exists, and Phase 1 global planning has a deterministic shadow path.
 Phase 2's SQLite WAL parent/task/attempt/receipt store, lease fencing, crash
 recovery, authenticated diagnostics, and operator inspection commands are now
-implemented. The next slice adds a durable exact-workload receipt handoff and
-canonical global-to-chunk scope projection. Production still uses the existing
-monolithic executor and hard ceilings until workload benchmarks, chunk
-execution, cache-only assembly, and an explicit worker memory reservation are
-shipped.
+implemented, including the durable exact-workload receipt handoff, canonical
+global-to-chunk scope projection, monotonic parent stages, receipt-based
+aggregate block progress, and capability-aware memory/CPU reservations with a
+concurrency-one default for heavy work. Production still uses the existing
+monolithic executor and hard ceilings until workload benchmarks, chunk-only
+execution, cache-only assembly, and fair multi-parent scheduling are shipped.
 
 The core decision is:
 
@@ -727,9 +728,10 @@ they control admission or execution.
 **Current status:** evidence and policy fixtures are implemented and tested;
 the production worker memory limit remains intentionally unset pending host
 capacity review. The 600,000-object value is validation-only and is not part of
-the production contract. The worker capability report is recorded with task
-attempts when a coordinator claims work, but no heavy-task concurrency is
-enabled yet.
+the production contract. The worker resource report now emits a stable
+versioned capability envelope and identity hash; it is recorded with task
+attempts when a coordinator claims work. The report remains read-only and no
+production heavy-task concurrency is enabled yet.
 
 ### Phase 1 — Global planning and workload queries
 
@@ -766,11 +768,15 @@ tasks without changing the authoritative monolithic build.
 **Current status:** the SQLite WAL schema, idempotent plan/task insertion,
 atomic claims, lease heartbeats and expiry recovery, cancellation generation,
 split transitions, immutable block receipts, receipt-set hashes, durable exact
-workload receipts, and authenticated/API plus CLI diagnostics are implemented
-and covered by fault and identity tests. A workload-scan receipt now promotes
-the deterministic child to a pending `building_chunk`; child execution is not
-enabled by the parent worker yet, and no resource reservation or concurrency
-policy is active.
+workload receipts, monotonic parent-stage transitions, receipt-based aggregate
+progress, and authenticated/API plus CLI diagnostics are implemented and
+covered by fault and identity tests. Claims can now record a worker capability,
+refuse tasks above the 85% memory headroom threshold, and reserve memory/CPU in
+a durable resource-pool ledger; reservations are released on heartbeat expiry,
+completion, split, cancellation, or lease recovery. The default heavy-task
+concurrency is one. A workload-scan receipt now promotes the deterministic
+child to a pending `building_chunk`; child execution is not enabled by the
+parent worker yet, and fair scheduling across parent jobs remains pending.
 
 **Exit gate:** fault-injection tests prove no double publication, lost task,
 stale-worker receipt, non-monotonic progress, or cancellation resurrection.
@@ -972,7 +978,8 @@ artifact.
 - [x] Add lease fencing, cancellation generations, split transitions, and
       authenticated/CLI task diagnostics.
 - [ ] Version and train the retained resource model and worker capability identity.
-- [ ] Add fairness and resource reservations with concurrency one.
+- [x] Add bounded memory/CPU reservations with a concurrency-one heavy-task default.
+- [ ] Add fair scheduling across parent jobs.
 - [ ] Implement chunk-only canonical building block generation.
 - [ ] Convert deterministic guard failures into bounded recursive splits.
 - [ ] Implement cache-only final assembly and whole-artifact validation.

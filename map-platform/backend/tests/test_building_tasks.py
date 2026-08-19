@@ -134,6 +134,147 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.assertRegex(ready.output_receipt_set_sha256 or "", r"^[0-9a-f]{64}$")
         self.assertEqual(len(self.store.list_receipts("job-1")), 1)
 
+    def test_parent_stage_and_progress_are_monotonic_and_receipt_based(self):
+        self.store.add_tasks([self.spec(blocks=((1, 2),))])
+        stage = self.store.set_plan_stage("job-1", stage="building_chunks")
+        self.assertEqual(stage["stage"], "building_chunks")
+        with self.assertRaises(BuildingTaskStoreError):
+            self.store.set_plan_stage("job-1", stage="chunk_planning")
+        claimed = self.store.claim_next(worker_id="worker-a")
+        assert claimed is not None
+        self.store.publish_receipt(
+            claimed.task.task_id,
+            worker_id="worker-a",
+            lease_token=claimed.lease_token,
+            block=(1, 2),
+            cache_identity_sha256=SHA,
+            content_sha256=CONTENT,
+            producer_identity={},
+            validation={"valid": True},
+        )
+        self.store.mark_ready(
+            claimed.task.task_id,
+            worker_id="worker-a",
+            lease_token=claimed.lease_token,
+        )
+        progress = self.store.progress("job-1")
+        self.assertEqual(progress["completedBlocks"], 1)
+        self.assertEqual(progress["totalBlocks"], 3)
+        self.assertEqual(progress["readyChunks"], 1)
+        self.assertEqual(progress["totalChunks"], 1)
+        self.assertFalse(progress["indeterminate"])
+
+    def test_memory_capability_admission_skips_heavy_task(self):
+        self.store.add_tasks(
+            [
+                BuildingTaskSpec(
+                    task_id="heavy-task",
+                    parent_job_id="job-1",
+                    kind="building_chunk",
+                    blocks=((1, 2),),
+                    chunk_plan_sha256=SHA,
+                    predicted_resource={"estimatedPeakMemoryBytes": 4_000_000_000},
+                )
+            ]
+        )
+        self.assertIsNone(
+            self.store.claim_next(
+                worker_id="small-worker",
+                worker_capability={"memoryLimitBytes": 4_000_000_000},
+            )
+        )
+        claimed = self.store.claim_next(
+            worker_id="large-worker",
+            worker_capability={"memoryLimitBytes": 8_000_000_000},
+        )
+        self.assertIsNotNone(claimed)
+        attempts = self.store.list_attempts("job-1")
+        admission = json.loads(attempts[0]["worker_capability_json"])["admission"]
+        self.assertEqual(admission["memoryLimitBytes"], 8_000_000_000)
+        self.assertEqual(admission["memoryReservationBytes"], 4_000_000_000)
+
+    def test_resource_reservation_defaults_to_one_heavy_task_and_releases(self):
+        self.store.add_tasks(
+            [
+                self.spec("task-1", ((1, 2),)),
+                self.spec("task-2", ((1, 3),)),
+            ]
+        )
+        capability = {
+            "resourcePool": "coolify-worker-a",
+            "memoryLimitBytes": 8_000_000_000,
+            "cpuCount": 8,
+        }
+        first = self.store.claim_next(
+            worker_id="worker-a", worker_capability=capability
+        )
+        self.assertIsNotNone(first)
+        assert first is not None
+        self.assertEqual(len(self.store.list_resource_reservations("job-1")), 1)
+        self.assertIsNone(
+            self.store.claim_next(worker_id="worker-b", worker_capability=capability)
+        )
+        self.store.publish_receipt(
+            first.task.task_id,
+            worker_id="worker-a",
+            lease_token=first.lease_token,
+            block=(1, 2),
+            cache_identity_sha256=SHA,
+            content_sha256=CONTENT,
+            producer_identity={},
+            validation={"valid": True},
+        )
+        self.store.mark_ready(
+            first.task.task_id,
+            worker_id="worker-a",
+            lease_token=first.lease_token,
+        )
+        self.assertEqual(self.store.list_resource_reservations("job-1"), ())
+        self.assertIsNotNone(
+            self.store.claim_next(worker_id="worker-b", worker_capability=capability)
+        )
+
+    def test_resource_reservation_recovery_and_memory_sum_are_fenced(self):
+        self.store.add_tasks(
+            [
+                BuildingTaskSpec(
+                    task_id="task-1",
+                    parent_job_id="job-1",
+                    kind="building_chunk",
+                    blocks=((1, 2),),
+                    chunk_plan_sha256=SHA,
+                    predicted_resource={"estimatedPeakMemoryBytes": 4_000_000_000},
+                ),
+                BuildingTaskSpec(
+                    task_id="task-2",
+                    parent_job_id="job-1",
+                    kind="building_chunk",
+                    blocks=((1, 3),),
+                    chunk_plan_sha256=SHA,
+                    predicted_resource={"estimatedPeakMemoryBytes": 4_000_000_000},
+                ),
+            ]
+        )
+        capability = {
+            "resourcePool": "coolify-worker-b",
+            "memoryLimitBytes": 8_000_000_000,
+            "cpuCount": 8,
+            "maxConcurrentTasks": 2,
+        }
+        first = self.store.claim_next(
+            worker_id="worker-a", lease_seconds=10, worker_capability=capability
+        )
+        self.assertIsNotNone(first)
+        self.assertIsNone(
+            self.store.claim_next(worker_id="worker-b", worker_capability=capability)
+        )
+        self.clock.value = 111
+        self.assertEqual(self.store.recover_expired(now=111), 1)
+        self.assertEqual(self.store.list_resource_reservations("job-1"), ())
+        self.assertIsNotNone(
+            self.store.claim_next(worker_id="worker-b", worker_capability=capability)
+        )
+
     def test_readding_the_same_task_is_idempotent_but_identity_changes_fail(self):
         spec = self.spec(blocks=((1, 2),))
         self.store.add_tasks([spec])

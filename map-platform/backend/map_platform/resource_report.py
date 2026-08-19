@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from pathlib import Path
 import time
@@ -9,6 +11,7 @@ from typing import Any
 
 
 RESOURCE_REPORT_SCHEMA_VERSION = 1
+WORKER_CAPABILITY_SCHEMA_VERSION = 1
 
 
 def worker_resource_report(
@@ -24,6 +27,10 @@ def worker_resource_report(
     process = _process_memory(proc_root / "self" / "status")
     host = _meminfo(proc_root / "meminfo")
     configured = _configured_memory_limit()
+    capability = _worker_capability(
+        cgroup=cgroup,
+        configured_memory_limit_bytes=configured,
+    )
     return {
         "schemaVersion": RESOURCE_REPORT_SCHEMA_VERSION,
         "reportedAtEpochSeconds": round(time.time(), 3),
@@ -36,6 +43,43 @@ def worker_resource_report(
             "configuredLimitBytes": configured,
         },
         "processMemory": process,
+        "capability": capability,
+    }
+
+
+def _worker_capability(
+    *,
+    cgroup: dict[str, Any],
+    configured_memory_limit_bytes: int | None,
+) -> dict[str, Any]:
+    """Return stable worker admission fields plus their identity hash.
+
+    Dynamic RSS/current/peak values intentionally stay outside this document;
+    they belong to the evidence report, not to the worker class identity used
+    for resource-model comparisons.
+    """
+
+    cpu_count = os.cpu_count() or 1
+    cgroup_limit = cgroup.get("limitBytes")
+    memory_limit = configured_memory_limit_bytes or cgroup_limit
+    body = {
+        "schemaVersion": WORKER_CAPABILITY_SCHEMA_VERSION,
+        "workerClass": os.environ.get("MAP_PLATFORM_WORKER_CLASS", "default"),
+        "resourcePool": os.environ.get(
+            "MAP_PLATFORM_WORKER_RESOURCE_POOL", "default"
+        ),
+        "cpuCount": cpu_count,
+        "memoryLimitBytes": memory_limit,
+        "configuredMemoryLimitBytes": configured_memory_limit_bytes,
+        "cgroupMemoryLimitBytes": cgroup_limit,
+        "maxConcurrentTasks": _configured_max_concurrent_tasks(),
+    }
+    encoded = json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return {
+        **body,
+        "identitySha256": hashlib.sha256(encoded).hexdigest(),
     }
 
 
@@ -48,6 +92,17 @@ def _configured_memory_limit() -> int | None:
     except ValueError:
         return None
     return value if value > 0 else None
+
+
+def _configured_max_concurrent_tasks() -> int:
+    raw = os.environ.get("MAP_PLATFORM_WORKER_MAX_CONCURRENT_TASKS")
+    if raw is None or not raw.strip():
+        return 1
+    try:
+        value = int(raw)
+    except ValueError:
+        return 1
+    return value if value > 0 else 1
 
 
 def _cgroup_memory(root: Path) -> dict[str, Any]:
@@ -138,4 +193,3 @@ def _meminfo(path: Path) -> dict[str, int | None]:
             continue
         values["totalBytes" if key == "MemTotal" else "availableBytes"] = value
     return values
-

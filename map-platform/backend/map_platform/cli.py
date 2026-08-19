@@ -453,12 +453,23 @@ def main() -> int:
             raise SystemExit(f"building plan not found: {args.job_id}")
         tasks = [asdict(task) for task in building_task_store.list_tasks(args.job_id)]
         if args.build_plan_command == "tasks":
-            print(json.dumps({"plan": plan, "tasks": tasks}, indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    {
+                        "plan": plan,
+                        "progress": building_task_store.progress(args.job_id),
+                        "tasks": tasks,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
         else:
             print(
                 json.dumps(
                     {
                         "plan": plan,
+                        "progress": building_task_store.progress(args.job_id),
                         "tasks": tasks,
                         "workloadReceipts": list(
                             building_task_store.list_workload_receipts(args.job_id)
@@ -468,6 +479,9 @@ def main() -> int:
                         ),
                         "attempts": list(
                             building_task_store.list_attempts(args.job_id)
+                        ),
+                        "resourceReservations": list(
+                            building_task_store.list_resource_reservations(args.job_id)
                         ),
                     },
                     indent=2,
