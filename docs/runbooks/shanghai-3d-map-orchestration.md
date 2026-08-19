@@ -25,6 +25,12 @@ executor until the rollout gates in the implementation plan are complete.
 3. Record the exact image digest and source/index/calibration identities before
    restarting anything. A changed identity is a new build, not a retry.
 
+Child leases are refreshed every 30 seconds while a workload scan or building
+command is running. A healthy long-running task should therefore show a recent
+`heartbeat_at`; a stale timestamp is actionable evidence of worker loss or an
+older image without the heartbeat fix, not a reason to extend the relation
+ceiling.
+
 ## Typed alerts
 
 ### `stale_lease` or `stale_heartbeat`

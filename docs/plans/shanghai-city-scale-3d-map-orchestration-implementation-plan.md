@@ -918,7 +918,10 @@ unrepresented pending work. Durable scheduling weights, admission priority,
 virtual-finish dispatch cost, and an optional per-parent active-task quota now
 prevent a large parent from monopolizing a worker pool when concurrency is
 increased; the Shanghai path records weight one and an active-task quota of
-one until measured capacity approves more.
+one until measured capacity approves more. Each leased workload-scan or
+building-chunk task also refreshes its fenced lease every 30 seconds while the
+long-running command is active, so operator diagnostics distinguish a live
+multi-minute task from a lost worker without changing the admission ceilings.
 Authenticated plan diagnostics now include an observational p95 resource-model
 summary grouped by the stable worker capability identity; groups below the
 reviewed sample count remain explicitly uncalibrated and do not alter
