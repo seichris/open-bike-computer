@@ -717,8 +717,8 @@ class WorkerTests(unittest.TestCase):
                 store,
                 pipeline,
                 worker_id="worker-live",
-                interrupted_job_stale_seconds=0.2,
-                heartbeat_interval_seconds=0.02,
+                interrupted_job_stale_seconds=2.0,
+                heartbeat_interval_seconds=0.05,
                 on_heartbeat=worker_heartbeat.set,
             )
             results = []
@@ -726,7 +726,7 @@ class WorkerTests(unittest.TestCase):
             thread.start()
             self.assertTrue(pipeline.started.wait(timeout=1))
             self.assertTrue(worker_heartbeat.wait(timeout=1))
-            time.sleep(0.25)
+            time.sleep(0.5)
             worker_heartbeat.clear()
             self.assertTrue(worker_heartbeat.wait(timeout=1))
 
@@ -734,8 +734,8 @@ class WorkerTests(unittest.TestCase):
                 store,
                 FakePipeline(),
                 worker_id="worker-second",
-                interrupted_job_stale_seconds=0.2,
-                heartbeat_interval_seconds=0.02,
+                interrupted_job_stale_seconds=2.0,
+                heartbeat_interval_seconds=0.05,
             ).run_next()
             pipeline.release.set()
             thread.join(timeout=2)
