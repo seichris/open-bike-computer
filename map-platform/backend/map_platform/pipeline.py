@@ -658,7 +658,18 @@ def safe_build_failure(job: MapJob, exc: Exception) -> tuple[str, str]:
             identifiers.append(f"calibrationKey={calibration_key}")
         if isinstance(source_sha256, str):
             identifiers.append(f"sourceSnapshotSha256={source_sha256}")
-    return f"{_BUILDING_FAILURE_MESSAGES[code]}; {'; '.join(identifiers)}", code
+    message = _BUILDING_FAILURE_MESSAGES[code]
+    # Preserve the bounded, typed source diagnostic for relation failures.
+    # This is intentionally limited to the relation code: other exception
+    # strings may contain paths, command output, or untrusted data that should
+    # not become part of the public job error. The extractor caps relation
+    # member detail to eight IDs, and this final bound keeps the API response
+    # stable even if a future producer changes that limit.
+    if code == "building_relation_incomplete":
+        detail = re.sub(r"\s+", " ", str(exc)).strip()
+        if detail and detail != message:
+            message += f"; detail={detail[:512]}"
+    return f"{message}; {'; '.join(identifiers)}", code
 
 
 def _parse_structured_stats(line: str, prefix: str) -> dict[str, Any] | None:

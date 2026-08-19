@@ -25,6 +25,7 @@ from map_platform.pipeline import (
     parse_building_complexity,
     parse_building_scope,
     parse_map_progress,
+    safe_build_failure,
 )
 from map_platform.sources import SourceIndex
 
@@ -101,6 +102,23 @@ class BuildingPhaseStreamingRunner:
 
 
 class PipelineProgressTests(unittest.TestCase):
+    def test_relation_failure_preserves_bounded_source_detail(self):
+        message, code = safe_build_failure(
+            SimpleNamespace(
+                job_id="job-123",
+                building_preprocessing_inputs=None,
+            ),
+            BuildingScopeError(
+                "building_relation_incomplete",
+                "source relation r11258294 has part members but no outline (w813033938)",
+            ),
+        )
+
+        self.assertEqual(code, "building_relation_incomplete")
+        self.assertIn("source relation r11258294", message)
+        self.assertIn("w813033938", message)
+        self.assertIn("jobId=job-123", message)
+
     def test_pipeline_uses_relocated_osm_extract_tool(self):
         repo_root = Path("/repo")
         paths = PipelinePaths(
