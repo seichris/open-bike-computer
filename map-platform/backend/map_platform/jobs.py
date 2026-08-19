@@ -1472,6 +1472,7 @@ class MapJobService:
         generation_profile_policy: GenerationProfilePolicy | None = None,
         deployment_channel: str = "production",
         estimate_coordinator=None,
+        building_task_store=None,
     ):
         self.source_index = source_index
         self.store = store
@@ -1482,6 +1483,7 @@ class MapJobService:
         self.generation_profile_policy = generation_profile_policy
         self.deployment_channel = deployment_channel
         self.estimate_coordinator = estimate_coordinator
+        self.building_task_store = building_task_store
 
     def supported_renderer_format_versions(
         self,
@@ -1713,7 +1715,19 @@ class MapJobService:
         return max(candidates, key=lambda job: job.created_at)
 
     def cancel_job(self, job_id: str) -> MapJob:
-        return self.store.cancel_if_active(job_id)
+        job = self.store.cancel_if_active(job_id)
+        if job.status == JobStatus.CANCELLED and self.building_task_store is not None:
+            try:
+                # Fence leased/pending child tasks immediately.  The worker's
+                # cancellation check remains the normal path, but an API
+                # cancellation can race a long read-only scan and otherwise
+                # leave its resource reservation active until lease expiry.
+                self.building_task_store.cancel_plan(job_id)
+            except Exception:
+                # Cancellation of the public job must remain idempotent even
+                # if the optional coordinator store is temporarily unavailable.
+                pass
+        return job
 
     def update_user_label_for_installation(
         self,

@@ -606,6 +606,7 @@ def main() -> int:
         source_index,
         store,
         estimate_coordinator=estimate_coordinator,
+        building_task_store=building_task_store,
         **generation_controls,
     )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)

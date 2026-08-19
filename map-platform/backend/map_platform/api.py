@@ -268,6 +268,7 @@ def create_app():
         generation_profile_policy=generation_profile_policy,
         deployment_channel=deployment_channel,
         estimate_coordinator=estimate_coordinator,
+        building_task_store=building_task_store,
     )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
     pipeline = MapBuildPipeline(

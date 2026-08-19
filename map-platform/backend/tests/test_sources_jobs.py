@@ -715,6 +715,30 @@ class SourceAndJobTests(unittest.TestCase):
             self.assertNotIn("completed", response)
             self.assertNotIn("fraction", response)
 
+    def test_cancel_job_fences_optional_building_plan(self):
+        class TaskStore:
+            def __init__(self):
+                self.cancelled = []
+
+            def cancel_plan(self, job_id):
+                self.cancelled.append(job_id)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task_store = TaskStore()
+            service = MapJobService(
+                SourceIndex([self.singapore]),
+                JobStore(Path(tmp)),
+                building_task_store=task_store,
+            )
+            job = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+
+            cancelled = service.cancel_job(job.job_id)
+
+            self.assertEqual(cancelled.status, JobStatus.CANCELLED)
+            self.assertEqual(task_store.cancelled, [job.job_id])
+
     def test_create_job_enforces_active_job_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = MapJobService(SourceIndex([self.singapore]), JobStore(Path(tmp)), limits=JobLimits(max_active_jobs=1))
