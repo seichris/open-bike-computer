@@ -540,6 +540,44 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.assertEqual(states["child-a"], "pending")
         self.assertEqual(states["child-b"], "pending")
 
+    def test_runtime_split_enqueues_deterministic_workload_scans(self):
+        self.store.add_tasks(
+            [self.spec(blocks=((1, 2), (1, 3), (1, 4), (1, 5)))]
+        )
+        claimed = self.store.claim_next(worker_id="worker-a")
+        assert claimed is not None
+        children = self.store.split_runtime_task(
+            claimed.task.task_id,
+            worker_id="worker-a",
+            lease_token=claimed.lease_token,
+            reason="building_object_limit_exceeded",
+        )
+        self.assertEqual(len(children), 2)
+        self.assertTrue(
+            all(child.kind == "building_workload_scan" for child in children)
+        )
+        self.assertEqual(
+            tuple(sorted(block for child in children for block in child.blocks)),
+            ((1, 2), (1, 3), (1, 4), (1, 5)),
+        )
+        self.assertEqual(
+            [child.task_id for child in children],
+            [
+                deterministic_building_task_id(
+                    parent_job_id="job-1",
+                    kind="building_workload_scan",
+                    blocks=child.blocks,
+                    chunk_plan_sha256=SHA,
+                    split_depth=1,
+                )
+                for child in children
+            ],
+        )
+        parent = self.store.get_task("task-1")
+        self.assertIsNotNone(parent)
+        assert parent is not None
+        self.assertEqual(parent.state, "split")
+
     def test_cancel_fences_active_task(self):
         self.store.add_tasks([self.spec(blocks=((1, 2),))])
         claimed = self.store.claim_next(worker_id="worker-a")

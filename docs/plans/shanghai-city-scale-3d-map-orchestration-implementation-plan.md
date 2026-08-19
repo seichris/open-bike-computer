@@ -798,9 +798,10 @@ execution entry point, cache-manifest reread, and transactional per-block
 receipt publication are implemented behind an explicit API. The ordinary
 parent build still does not call this path; source-index/calibration reuse,
 runtime split signaling for multi-block guard failures, and a deterministic
-longer-axis bisection helper are implemented behind explicit APIs. Coordinator
-child-enqueue wiring, source-index/calibration reuse, and monolithic-vs-
-partition golden equivalence remain to be validated before allowlisting it.
+longer-axis bisection helper, and durable workload-scan child enqueue
+transition are implemented behind explicit APIs. Source-index/calibration
+reuse and monolithic-vs-partition golden equivalence remain to be validated
+before allowlisting it.
 
 ### Phase 4 — Cache-only final assembly
 
@@ -993,7 +994,7 @@ artifact.
 - [ ] Add fair scheduling across parent jobs.
 - [ ] Implement chunk-only canonical building block generation.
 - [x] Emit typed multi-block runtime split signals and deterministic bisection.
-- [ ] Convert split signals into bounded coordinator child enqueue transitions.
+- [x] Convert split signals into bounded workload-scan child enqueue transitions.
 - [ ] Implement cache-only final assembly and whole-artifact validation.
 - [ ] Preserve partition-invariant block and artifact identity.
 - [ ] Add public aggregate progress and authenticated operator diagnostics.

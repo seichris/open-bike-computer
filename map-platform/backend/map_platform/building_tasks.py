@@ -49,6 +49,7 @@ _MEMORY_ADMISSION_FRACTION = 0.85
 _MEMORY_ADMISSION_PERCENT = 85
 _DEFAULT_RESOURCE_POOL = "default"
 _DEFAULT_MAX_CONCURRENT_TASKS = 1
+_DEFAULT_SPLIT_DEPTH_LIMIT = 16
 
 
 class BuildingTaskStoreError(RuntimeError):
@@ -809,6 +810,82 @@ class BuildingTaskStore:
         finally:
             connection.close()
 
+    def split_runtime_task(
+        self,
+        task_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        reason: str,
+        now: float | None = None,
+        split_depth_limit: int = _DEFAULT_SPLIT_DEPTH_LIMIT,
+    ) -> tuple[BuildingTaskRecord, ...]:
+        """Convert a deterministic multi-block failure into scan children.
+
+        The parent task is fenced and marked ``split`` by :meth:`split` in the
+        same transaction that inserts the children.  Children deliberately
+        begin as workload scans so their exact closure receipt is refreshed
+        before another building attempt; this is not a transient retry.
+        """
+
+        if (
+            isinstance(split_depth_limit, bool)
+            or not isinstance(split_depth_limit, int)
+            or split_depth_limit <= 0
+        ):
+            raise BuildingTaskStoreError("split depth limit is invalid")
+        task = self.get_task(task_id)
+        if task is None:
+            raise BuildingTaskStoreError("task not found")
+        if (
+            task.state != "leased"
+            or task.lease_owner != worker_id
+            or task.lease_token != lease_token
+        ):
+            raise StaleLeaseError("task lease is no longer valid")
+        if task.kind != "building_chunk":
+            raise BuildingTaskStoreError("only building chunks can be runtime split")
+        if task.split_depth >= split_depth_limit:
+            raise BuildingTaskStoreError("building task split depth limit reached")
+        from .building_orchestration import deterministic_runtime_bisection
+        from .reuse import MapBlock
+
+        left, right = deterministic_runtime_bisection(
+            tuple(MapBlock(x, y) for x, y in task.blocks)
+        )
+        children: list[BuildingTaskSpec] = []
+        for child_blocks in (left, right):
+            blocks = tuple((block.x, block.y) for block in child_blocks)
+            children.append(
+                BuildingTaskSpec(
+                    task_id=deterministic_building_task_id(
+                        parent_job_id=task.parent_job_id,
+                        kind="building_workload_scan",
+                        blocks=blocks,
+                        chunk_plan_sha256=task.chunk_plan_sha256,
+                        split_depth=task.split_depth + 1,
+                    ),
+                    parent_job_id=task.parent_job_id,
+                    kind="building_workload_scan",
+                    blocks=blocks,
+                    chunk_plan_sha256=task.chunk_plan_sha256,
+                    split_depth=task.split_depth + 1,
+                    predicted_resource={
+                        "requiresExactWorkloadScan": True,
+                        "splitFromTaskId": task.task_id,
+                        "splitReason": reason,
+                    },
+                )
+            )
+        return self.split(
+            task_id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            children=children,
+            reason=reason,
+            now=now,
+        )
+
     def cancel_plan(self, parent_job_id: str, *, now: float | None = None) -> None:
         now = self._clock() if now is None else now
         connection = self._connect()
@@ -882,6 +959,16 @@ class BuildingTaskStore:
                     (parent_job_id,),
                 ).fetchall()
             )
+        finally:
+            connection.close()
+
+    def get_task(self, task_id: str) -> BuildingTaskRecord | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM map_build_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            return self._row_to_task(row) if row is not None else None
         finally:
             connection.close()
 
