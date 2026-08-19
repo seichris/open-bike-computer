@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
@@ -146,6 +147,56 @@ class MapBuildResult:
     def __iter__(self):
         yield self.map_id
         yield self.legacy_archive_path
+
+
+class _TaskLeaseHeartbeat:
+    """Refresh one durable child lease while its command runs."""
+
+    def __init__(
+        self,
+        store: BuildingTaskStore,
+        *,
+        task_id: str,
+        worker_id: str,
+        lease_token: str,
+        lease_seconds: float,
+        interval_seconds: float = 30.0,
+    ) -> None:
+        self._store = store
+        self._task_id = task_id
+        self._worker_id = worker_id
+        self._lease_token = lease_token
+        self._lease_seconds = lease_seconds
+        self._interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"building-task-heartbeat-{task_id[:12]}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=max(self._interval_seconds, 1.0) + 1.0)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval_seconds):
+            try:
+                self._store.heartbeat(
+                    self._task_id,
+                    worker_id=self._worker_id,
+                    lease_token=self._lease_token,
+                    lease_seconds=self._lease_seconds,
+                )
+            except Exception:
+                # The completion/failure operation remains fenced by the same
+                # lease token. A lost lease must never be revived by this
+                # best-effort reporter.
+                return
 
 
 class CommandRunner:
@@ -1756,6 +1807,14 @@ class MapBuildPipeline:
                     global_plan,
                     tuple(MapBlock(x, y) for x, y in task.blocks),
                 )
+                lease_heartbeat = _TaskLeaseHeartbeat(
+                    self.building_task_store,
+                    task_id=task.task_id,
+                    worker_id=worker_id,
+                    lease_token=claimed.lease_token,
+                    lease_seconds=6 * 60 * 60,
+                )
+                lease_heartbeat.start()
                 try:
                     if task.kind == "building_workload_scan":
                         receipt, scan_metrics = self._run_building_workload_scan(
@@ -1808,6 +1867,7 @@ class MapBuildPipeline:
                     else:
                         raise BuildingTaskStoreError("unknown building task kind")
                 except BuildingChunkSplitRequired as exc:
+                    lease_heartbeat.stop()
                     self.building_task_store.split_runtime_task(
                         task.task_id,
                         worker_id=worker_id,
@@ -1815,6 +1875,7 @@ class MapBuildPipeline:
                         reason=exc.code,
                     )
                 except BuildingScopeError as exc:
+                    lease_heartbeat.stop()
                     if (
                         exc.code in _CHUNK_SPLIT_FAILURE_CODES
                         and len(task.blocks) > 1
@@ -1838,6 +1899,7 @@ class MapBuildPipeline:
                     )
                     raise
                 except Exception as exc:
+                    lease_heartbeat.stop()
                     typed_failure = getattr(exc, "code", None) or (
                         "building_chunk_execution_failed"
                     )
@@ -1851,6 +1913,8 @@ class MapBuildPipeline:
                         peak_rss_bytes=self._last_task_failure_peak_rss(),
                     )
                     raise
+                else:
+                    lease_heartbeat.stop()
                 progress = self.building_task_store.progress(job.job_id)
                 if progress is not None:
                     self._emit_phase_progress(

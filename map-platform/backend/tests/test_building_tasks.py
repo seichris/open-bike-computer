@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 
@@ -16,7 +17,7 @@ from map_platform.building_tasks import (
 from map_platform.building_orchestration import partition_global_building_plan
 from map_platform.building_scope import plan_global_building_scope
 from map_platform.models import Bounds, GeometryMode, NormalizedGeometry, SourceRegion
-from map_platform.pipeline import MapBuildPipeline, PipelinePaths
+from map_platform.pipeline import MapBuildPipeline, PipelinePaths, _TaskLeaseHeartbeat
 from map_platform.building_scope import canonical_json
 from map_platform.reuse import MapBlock
 
@@ -134,6 +135,27 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.assertEqual(ready.state, "ready")
         self.assertRegex(ready.output_receipt_set_sha256 or "", r"^[0-9a-f]{64}$")
         self.assertEqual(len(self.store.list_receipts("job-1")), 1)
+
+    def test_task_lease_heartbeat_refreshes_long_running_child(self):
+        self.store.add_tasks([self.spec(blocks=((1, 2),))])
+        claimed = self.store.claim_next(worker_id="worker-a", lease_seconds=10)
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        initial = claimed.task.heartbeat_at
+        heartbeat = _TaskLeaseHeartbeat(
+            self.store,
+            task_id=claimed.task.task_id,
+            worker_id="worker-a",
+            lease_token=claimed.lease_token,
+            lease_seconds=10,
+            interval_seconds=0.01,
+        )
+        heartbeat.start()
+        self.clock.value = 101.0
+        time.sleep(0.05)
+        heartbeat.stop()
+        refreshed = self.store.list_tasks("job-1")[0]
+        self.assertGreater(refreshed.heartbeat_at or 0, initial or 0)
 
     def test_parent_stage_and_progress_are_monotonic_and_receipt_based(self):
         self.store.add_tasks([self.spec(blocks=((1, 2),))])
