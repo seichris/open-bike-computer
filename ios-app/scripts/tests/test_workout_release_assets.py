@@ -95,6 +95,14 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             / "releases"
             / "watchos-workout-companion.md"
         ).read_text()
+        release_candidate = re.search(
+            r"Release candidate: \*\*(?P<version>[^ ]+) \((?P<build>\d+)\)\*\*",
+            release_notes,
+        )
+        self.assertIsNotNone(release_candidate)
+        assert release_candidate is not None
+        expected_version = release_candidate.group("version")
+        expected_build = release_candidate.group("build")
 
         development = load_xcconfig(
             IOS_PROJECT / "Configuration" / "Development.xcconfig"
@@ -165,13 +173,16 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
                 with self.subTest(
                     target=target_name, configuration=configuration_name
                 ):
-                    self.assertIn("CURRENT_PROJECT_VERSION = 10;", settings)
-                    self.assertIn("MARKETING_VERSION = 1.3;", settings)
+                    self.assertIn(
+                        f"CURRENT_PROJECT_VERSION = {expected_build};", settings
+                    )
+                    self.assertIn(
+                        f"MARKETING_VERSION = {expected_version};", settings
+                    )
                     self.assertIn(
                         f'PRODUCT_BUNDLE_IDENTIFIER = "$({variable})";',
                         settings,
                     )
-        self.assertIn("Release candidate: **1.3 (10)**", release_notes)
 
     def test_privacy_policy_is_reachable_and_covers_release_obligations(self):
         shared_policy = (
