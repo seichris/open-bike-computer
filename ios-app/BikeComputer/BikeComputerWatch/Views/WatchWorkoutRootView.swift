@@ -39,7 +39,7 @@ struct WatchWorkoutRootView: View {
                           manager.state == .ended {
                     WorkoutSummaryView(
                         summary: summary,
-                        isAwaitingSessionCleanup: manager.isAwaitingDetachedSessionCleanup,
+                        cleanupState: manager.terminalCleanupState,
                         onRetryCleanup: manager.retryDetachedSessionCleanup,
                         onDone: manager.dismissSummary
                     )
@@ -55,10 +55,12 @@ struct WatchWorkoutRootView: View {
             }
         }
         .onAppear {
+            manager.retryPendingTerminalCleanupIfPossible()
             manager.refreshAuthorizationIfNeeded()
         }
         .onChange(of: scenePhase) { _, newValue in
             guard newValue == .active else { return }
+            manager.retryPendingTerminalCleanupIfPossible()
             manager.refreshAuthorizationIfNeeded()
         }
     }
