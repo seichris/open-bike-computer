@@ -127,6 +127,34 @@ class BuildingSourceIndexTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, "building_object_limit_exceeded")
 
+    def test_workload_scan_returns_exact_counts_and_stable_closure_identity(self):
+        nodes, ways, relations = records()
+        with tempfile.TemporaryDirectory() as root:
+            index = BuildingSourceIndex(root, "1" * 64)
+            index.build(nodes=nodes, ways=ways, relations=relations)
+            workload = index.workload_for_bounds(
+                [(0, 0, 500, 500)],
+                maximum_objects=100,
+                calibration_cell_size_meters=8192,
+                calibration_halo_cells=1,
+            )
+            repeat = index.workload_for_bounds(
+                [(0, 0, 500, 500)],
+                maximum_objects=100,
+                calibration_cell_size_meters=8192,
+                calibration_halo_cells=1,
+            )
+        self.assertEqual(workload["relationCount"], 1)
+        self.assertEqual(workload["wayCount"], 1)
+        self.assertEqual(workload["nodeCount"], 4)
+        self.assertEqual(workload["totalObjectCount"], 6)
+        self.assertEqual(workload["storedRelationMemberCount"], 1)
+        self.assertEqual(workload["wayNodeReferenceCount"], 5)
+        self.assertEqual(workload["vertexCount"], 5)
+        self.assertEqual(workload["candidateOutlineCount"], 1)
+        self.assertEqual(workload["candidatePartCount"], 0)
+        self.assertEqual(workload["closurePlanSha256"], repeat["closurePlanSha256"])
+
     def test_output_candidate_extent_adds_its_runtime_calibration_anchor(self):
         nodes = [
             {"objectKey": "n1", "lonE7": 0, "latE7": 0},

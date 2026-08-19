@@ -364,6 +364,117 @@ class BuildingSourceIndex:
         finally:
             connection.close()
 
+    def workload_for_bounds(
+        self,
+        bounds_e7: Iterable[tuple[int, int, int, int]],
+        *,
+        maximum_objects: int,
+        calibration_cell_size_meters: int,
+        calibration_halo_cells: int,
+    ) -> dict[str, Any]:
+        """Return exact closure counters without decoding source geometry.
+
+        The closure ID sets are still materialized because they are the
+        correctness receipt used by execution.  Geometry payloads are not
+        decoded; the additional counters come from indexed JSON lengths and
+        tags, making this operation suitable for planner admission.
+        """
+
+        closure = self.closure_for_bounds(
+            bounds_e7,
+            maximum_objects=maximum_objects,
+            calibration_cell_size_meters=calibration_cell_size_meters,
+            calibration_halo_cells=calibration_halo_cells,
+        )
+        relation_keys = tuple(closure["requiredRelationKeys"])
+        way_keys = tuple(closure["requiredWayKeys"])
+        node_keys = tuple(closure["requiredNodeKeys"])
+        connection = sqlite3.connect(f"file:{self.database_path}?mode=ro", uri=True)
+        try:
+            connection.execute(
+                "CREATE TEMP TABLE workload_relation_keys(object_key TEXT PRIMARY KEY)"
+            )
+            connection.executemany(
+                "INSERT INTO workload_relation_keys(object_key) VALUES (?)",
+                ((key,) for key in relation_keys),
+            )
+            connection.execute(
+                "CREATE TEMP TABLE workload_way_keys(object_key TEXT PRIMARY KEY)"
+            )
+            connection.executemany(
+                "INSERT INTO workload_way_keys(object_key) VALUES (?)",
+                ((key,) for key in way_keys),
+            )
+            relation_members = 0
+            if relation_keys:
+                relation_members = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM relation_members members
+                        JOIN workload_relation_keys selected
+                          ON selected.object_key = members.relation_key
+                        """
+                    ).fetchone()[0]
+                )
+            way_node_references = 0
+            vertex_count = 0
+            part_count = 0
+            outline_count = 0
+            if way_keys:
+                rows = connection.execute(
+                    """
+                    SELECT ways.tags_json, ways.nodes_json
+                    FROM ways
+                    JOIN workload_way_keys selected
+                      ON selected.object_key = ways.object_key
+                    ORDER BY ways.object_key
+                    """
+                )
+                for tags_json, nodes_json in rows:
+                    tags = json.loads(tags_json)
+                    nodes = json.loads(nodes_json)
+                    references = len(nodes)
+                    way_node_references += references
+                    vertex_count += references
+                    if tags.get("building:part") not in (None, "", "no"):
+                        part_count += 1
+                    elif _building_tags(tags):
+                        outline_count += 1
+            closure_body = {
+                "schemaVersion": SOURCE_INDEX_SCHEMA_VERSION,
+                "sourceIndexKey": self.index_key,
+                "sourceSnapshotSha256": self.source_snapshot_sha256,
+                "candidateKeys": closure["candidateKeys"],
+                "requiredRelationKeys": relation_keys,
+                "requiredWayKeys": way_keys,
+                "requiredNodeKeys": node_keys,
+            }
+            closure_plan_sha256 = hashlib.sha256(
+                canonical_json(closure_body)
+            ).hexdigest()
+            return {
+                **closure,
+                "closurePlanSha256": closure_plan_sha256,
+                "relationCount": len(relation_keys),
+                "wayCount": len(way_keys),
+                "nodeCount": len(node_keys),
+                "totalObjectCount": len(relation_keys) + len(way_keys) + len(node_keys),
+                "storedRelationMemberCount": relation_members,
+                "wayNodeReferenceCount": way_node_references,
+                "vertexCount": vertex_count,
+                "candidateOutlineCount": outline_count,
+                "candidatePartCount": part_count,
+                "ringCount": None,
+                "holeCount": None,
+            }
+        except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError) as exc:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "building workload query failed"
+            ) from exc
+        finally:
+            connection.close()
+
     def build_with_scanner(self, scanner, *, lock_timeout_seconds: float | None = None):
         """Run the expensive source scan once, while holding the artifact lock."""
         try:

@@ -60,9 +60,20 @@ from .building_scope import (
     BuildingScopeError,
     ScopePlan,
     legacy_building_scope_diagnostics,
+    plan_global_building_scope,
     plan_building_scope,
     x_to_lon,
     y_to_lat,
+)
+from .building_orchestration import (
+    BuildingChunkPlanningError,
+    partition_global_building_plan,
+)
+from .building_tasks import (
+    BuildingTaskSpec,
+    BuildingTaskStoreError,
+    BuildingTaskStore,
+    deterministic_building_task_id,
 )
 from .building_identity import (
     calibration_generation_from_manifest,
@@ -583,6 +594,7 @@ class MapBuildPipeline:
         source_preview_geometry_resolver: Callable[[SourceRegion], dict[str, Any] | None] | None = None,
         building_scope_mode: str = "shadow",
         building_block_workers: int = 4,
+        building_task_store: BuildingTaskStore | None = None,
     ):
         self.paths = paths
         self.runner = runner or CommandRunner()
@@ -592,6 +604,7 @@ class MapBuildPipeline:
         self.producer_build_sha256 = producer_build_sha256
         self.producer_image_digest = producer_image_digest
         self.source_preview_geometry_resolver = source_preview_geometry_resolver
+        self.building_task_store = building_task_store
         if building_scope_mode not in {"legacy", "shadow", "selected"}:
             raise ValueError("building scope mode must be legacy, shadow, or selected")
         self.building_scope_mode = building_scope_mode
@@ -693,6 +706,12 @@ class MapBuildPipeline:
                         "errorCode": exc.code,
                         "legacyScope": legacy_scope,
                     }
+                    if exc.code == "building_scope_exceeded":
+                        self._record_shadow_global_plan(
+                            job,
+                            calibration=calibration,
+                            scope_diagnostics=scope_diagnostics,
+                        )
             selected_scope = self.building_scope_mode == "selected"
             if selected_scope:
                 if scope_plan is None:
@@ -885,6 +904,15 @@ class MapBuildPipeline:
                             exc, "code", "building_shadow_measurement_unavailable"
                         )
                     }
+                    if getattr(exc, "code", None) in {
+                        "building_object_limit_exceeded",
+                        "building_scope_exceeded",
+                    }:
+                        self._record_shadow_global_plan(
+                            job,
+                            calibration=calibration,
+                            scope_diagnostics=scope_diagnostics,
+                        )
                 finally:
                     scope_diagnostics["shadowMeasurementExecution"] = {
                         "durationSeconds": round(
@@ -1419,6 +1447,158 @@ class MapBuildPipeline:
                     "frozen building scope changed before retry",
                 )
         return scope_plan
+
+    def _record_shadow_global_plan(
+        self,
+        job: MapJob,
+        *,
+        calibration,
+        scope_diagnostics: dict[str, Any],
+    ) -> None:
+        try:
+            global_plan = plan_global_building_scope(
+                job,
+                calibration_cell_size_meters=calibration.cell_size_meters,
+                calibration_halo_cells=calibration.halo_cells,
+                calibration_minimum_samples=calibration.minimum_samples,
+            )
+            partition = partition_global_building_plan(global_plan)
+            try:
+                self._persist_shadow_building_partition(
+                    job,
+                    global_plan=global_plan,
+                    partition=partition,
+                )
+            except (BuildingTaskStoreError, OSError, TypeError, ValueError) as task_exc:
+                scope_diagnostics["globalTaskStoreError"] = {
+                    "code": getattr(
+                        task_exc,
+                        "code",
+                        "building_task_store_unavailable",
+                    )
+                }
+            scope_diagnostics["globalPlan"] = global_plan.summary()
+            scope_diagnostics["globalPartition"] = {
+                "partitionPlanSha256": partition.sha256,
+                "chunkCount": len(partition.chunks),
+                "cacheHitBlockCount": len(partition.cache_hit_blocks),
+                "requiresExactWorkloadScan": sum(
+                    1
+                    for chunk in partition.chunks
+                    if chunk.workload.requires_exact_workload_scan
+                ),
+                "chunks": [
+                    {
+                        "chunkId": chunk.chunk_id,
+                        "blockCount": len(chunk.blocks),
+                        "sourceAreaM2": chunk.workload.source_area_m2,
+                        "targetViolations": list(chunk.workload.target_violations),
+                        "hardViolations": list(chunk.workload.hard_violations),
+                        "requiresExactWorkloadScan": (
+                            chunk.workload.requires_exact_workload_scan
+                        ),
+                    }
+                    for chunk in partition.chunks
+                ],
+            }
+            print(
+                "BUILDING_GLOBAL_PLAN:"
+                + canonical_building_json(
+                    {
+                        "globalPlanSha256": global_plan.sha256,
+                        **global_plan.summary(),
+                        "partitionPlanSha256": partition.sha256,
+                        "chunkCount": len(partition.chunks),
+                        "requiresExactWorkloadScan": sum(
+                            1
+                            for chunk in partition.chunks
+                            if chunk.workload.requires_exact_workload_scan
+                        ),
+                    }
+                ).decode("utf-8"),
+                flush=True,
+            )
+        except (
+            BuildingScopeError,
+            BuildingChunkPlanningError,
+            TypeError,
+            ValueError,
+        ) as global_exc:
+            scope_diagnostics["globalPlanError"] = {
+                "code": getattr(
+                    global_exc,
+                    "code",
+                    "building_global_plan_unavailable",
+                )
+            }
+
+    def _persist_shadow_building_partition(
+        self,
+        job: MapJob,
+        *,
+        global_plan,
+        partition,
+    ) -> None:
+        """Record a shadow plan without changing the authoritative build path."""
+
+        if self.building_task_store is None:
+            return
+        input_identity = {
+            "request": job.request,
+            "geometry": job.geometry.to_dict(),
+            "sourceRegion": {
+                "id": job.source_region.id,
+                "checksum": job.source_region.checksum,
+            },
+            "globalPlanSha256": global_plan.sha256,
+        }
+        self.building_task_store.create_plan(
+            parent_job_id=job.job_id,
+            global_plan_sha256=global_plan.sha256,
+            input_identity=input_identity,
+            expected_output_block_count=len(global_plan.output_blocks),
+            policy_version=partition.policy.policy_version,
+            resource_model_version="building-resource-model-untrained-v1",
+            stage="chunk_planning",
+        )
+        task_specs: list[BuildingTaskSpec] = []
+        for chunk in partition.chunks:
+            kind = (
+                "building_workload_scan"
+                if chunk.workload.requires_exact_workload_scan
+                else "building_chunk"
+            )
+            task_id = deterministic_building_task_id(
+                parent_job_id=job.job_id,
+                kind=kind,
+                blocks=tuple((block.x, block.y) for block in chunk.blocks),
+                chunk_plan_sha256=partition.sha256,
+                split_depth=chunk.split_depth,
+            )
+            task_specs.append(
+                BuildingTaskSpec(
+                    task_id=task_id,
+                    parent_job_id=job.job_id,
+                    kind=kind,
+                    blocks=tuple((block.x, block.y) for block in chunk.blocks),
+                    chunk_plan_sha256=partition.sha256,
+                    split_depth=chunk.split_depth,
+                    predicted_resource={
+                        "sourceAreaM2": chunk.workload.source_area_m2,
+                        "closureObjects": chunk.workload.closure_objects,
+                        "estimatedPeakMemoryBytes": (
+                            chunk.workload.estimated_peak_memory_bytes
+                        ),
+                        "estimatedWallSeconds": chunk.workload.estimated_wall_seconds,
+                        "requiresExactWorkloadScan": (
+                            chunk.workload.requires_exact_workload_scan
+                        ),
+                        "targetViolations": list(chunk.workload.target_violations),
+                        "hardViolations": list(chunk.workload.hard_violations),
+                    },
+                )
+            )
+        self.building_task_store.add_tasks(task_specs)
 
     @staticmethod
     def _freeze_selected_inputs(

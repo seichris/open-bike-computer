@@ -35,6 +35,9 @@ BUILDING_MAX_RELATION_OBJECTS_PER_JOB_ENV_CEILING = 2_000_000
 BUILDING_SELECTION_SEMANTICS = "complete_blocks_no_selection_edge_clipping"
 BUILDING_RELATION_CLOSURE_MODE = "source_snapshot_index"
 BUILDING_SCOPE_SCHEMA_VERSION = 1
+GLOBAL_BUILDING_SCOPE_SCHEMA_VERSION = 1
+GLOBAL_BUILDING_PLAN_POLICY_VERSION = 1
+GLOBAL_BUILDING_MAX_OUTPUT_BLOCKS = 1_024
 
 
 class BuildingScopeError(RuntimeError):
@@ -158,6 +161,86 @@ class ScopePlan:
             "geometryBufferMeters": policy["geometryBufferMeters"],
             "maxRelationObjectsPerJob": policy["maxRelationObjectsPerJob"],
             "sourceBoundsE7": document["sourceScope"]["boundsE7"],
+        }
+
+
+@dataclass(frozen=True)
+class GlobalBuildingPlan:
+    """Unbounded-by-chunk global scope used to plan large parent requests.
+
+    A global plan intentionally carries the normal per-chunk policy as
+    ``chunkPolicy`` for downstream partitioning, but does not apply its source
+    area or closure-object ceilings.  It is never accepted by the monolithic
+    executor; the chunk coordinator must validate every child independently.
+    """
+
+    _canonical_payload: bytes
+    sha256: str
+    output_blocks: tuple[MapBlock, ...]
+    output_projected_bounds: tuple[int, int, int, int]
+    source_projected_bounds: tuple[int, int, int, int]
+    source_bounds: Bounds
+    calibration_cells: tuple[tuple[int, int], ...]
+    calibration_sample_cells: tuple[tuple[int, int], ...]
+
+    @property
+    def document(self) -> dict[str, Any]:
+        return json.loads(self._canonical_payload)
+
+    def canonical_bytes(self) -> bytes:
+        return self._canonical_payload
+
+    def write(self, path) -> None:
+        if hashlib.sha256(self._canonical_payload).hexdigest() != self.sha256:
+            raise BuildingScopeError(
+                "building_scope_policy_invalid",
+                "global building plan identity changed before serialization",
+            )
+        serialized = {
+            **json.loads(self._canonical_payload),
+            "globalPlanSha256": self.sha256,
+        }
+        path.write_bytes(canonical_json(serialized) + b"\n")
+
+    def summary(self) -> dict[str, Any]:
+        document = json.loads(self._canonical_payload)
+        metrics = document["metrics"]
+        return {
+            "schemaVersion": GLOBAL_BUILDING_SCOPE_SCHEMA_VERSION,
+            "globalPlanPolicyVersion": document["globalPolicy"]["policyVersion"],
+            "globalPlanSha256": self.sha256,
+            **metrics,
+            "geometryBufferMeters": document["chunkPolicy"]["geometryBufferMeters"],
+            "maxOutputBlocks": document["globalPolicy"]["maxOutputBlocks"],
+            "sourceBoundsE7": document["sourceScope"]["boundsE7"],
+        }
+
+
+@dataclass(frozen=True)
+class GlobalBuildingPlanPolicy:
+    """Admission-only policy for a user-visible global map request."""
+
+    policy_version: int = GLOBAL_BUILDING_PLAN_POLICY_VERSION
+    max_output_blocks: int = GLOBAL_BUILDING_MAX_OUTPUT_BLOCKS
+
+    def validate(self) -> None:
+        if (
+            isinstance(self.policy_version, bool)
+            or not isinstance(self.policy_version, int)
+            or self.policy_version != GLOBAL_BUILDING_PLAN_POLICY_VERSION
+            or isinstance(self.max_output_blocks, bool)
+            or not isinstance(self.max_output_blocks, int)
+            or self.max_output_blocks <= 0
+        ):
+            raise BuildingScopeError(
+                "building_scope_policy_invalid",
+                "global building plan policy is invalid",
+            )
+
+    def to_document(self) -> dict[str, int]:
+        return {
+            "policyVersion": self.policy_version,
+            "maxOutputBlocks": self.max_output_blocks,
         }
 
 
@@ -300,6 +383,231 @@ def plan_building_scope(
     return ScopePlan(
         encoded, hashlib.sha256(encoded).hexdigest(), blocks, output, source,
         source_bounds, target_cells, sample_cells,
+    )
+
+
+def plan_global_building_scope(
+    job: MapJob,
+    *,
+    calibration_cell_size_meters: int,
+    calibration_halo_cells: int,
+    calibration_minimum_samples: int,
+    chunk_policy: BuildingScopePolicy | None = None,
+    global_policy: GlobalBuildingPlanPolicy | None = None,
+    geometry_buffer_meters: int | None = None,
+) -> GlobalBuildingPlan:
+    """Plan a complete user selection without applying per-chunk ceilings.
+
+    This function is deliberately planning-only.  It does not make a large
+    selection executable by the existing monolithic pipeline.  Callers must
+    partition the returned block set and validate each child with
+    :func:`plan_building_scope` (or the future exact workload planner) before
+    any source extraction or building conversion begins.
+    """
+
+    chunk_policy = chunk_policy or BuildingScopePolicy(
+        max_relation_objects_per_job=configured_building_max_relation_objects_per_job()
+    )
+    chunk_policy.validate()
+    global_policy = global_policy or GlobalBuildingPlanPolicy()
+    global_policy.validate()
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in (
+            calibration_cell_size_meters,
+            calibration_halo_cells,
+            calibration_minimum_samples,
+        )
+    ) or calibration_cell_size_meters <= 0 or not 0 <= calibration_halo_cells <= 8 or calibration_minimum_samples <= 0:
+        raise BuildingScopeError(
+            "building_scope_policy_invalid",
+            "calibration scope settings are invalid",
+        )
+    buffer_meters = (
+        chunk_policy.geometry_buffer_meters
+        if geometry_buffer_meters is None
+        else geometry_buffer_meters
+    )
+    if (
+        isinstance(buffer_meters, bool)
+        or not isinstance(buffer_meters, int)
+        or not 0 <= buffer_meters <= chunk_policy.max_geometry_buffer_meters
+    ):
+        raise BuildingScopeError(
+            "building_scope_policy_invalid",
+            "geometry buffer is outside the policy range",
+        )
+
+    canonical_geometry = canonical_selection_geometry(job.geometry.geometry)
+    corridor_width_mm = (
+        None
+        if job.geometry.corridor_width_m is None
+        else int(round(job.geometry.corridor_width_m * 1_000))
+    )
+    selection = _projected_selection(job, canonical_geometry, corridor_width_mm)
+    min_x, min_y, max_x, max_y = aligned_projected_extent(job.geometry.bounds)
+    maximum_blocks = global_policy.max_output_blocks
+    if job.geometry.mode in {GeometryMode.CUSTOM_BBOX, GeometryMode.CURATED_REGION}:
+        candidate_count = (
+            (max_x - min_x) // MAP_BLOCK_SIZE_METERS
+            * (max_y - min_y) // MAP_BLOCK_SIZE_METERS
+        )
+        if candidate_count > maximum_blocks:
+            raise BuildingScopeError(
+                "building_scope_exceeded",
+                "global output scope exceeds configured map policy",
+            )
+        blocks = tuple(
+            MapBlock(x, y)
+            for x in range(min_x // MAP_BLOCK_SIZE_METERS, max_x // MAP_BLOCK_SIZE_METERS)
+            for y in range(min_y // MAP_BLOCK_SIZE_METERS, max_y // MAP_BLOCK_SIZE_METERS)
+        )
+    elif selection["type"] == "line":
+        blocks = blocks_for_route(selection, maximum_blocks)
+    else:
+        blocks = blocks_for_polygons(selection, maximum_blocks)
+    if not blocks:
+        raise BuildingScopeError(
+            "building_scope_policy_invalid",
+            "selection does not intersect an output block",
+        )
+
+    output = (
+        min(block.x for block in blocks) * MAP_BLOCK_SIZE_METERS,
+        min(block.y for block in blocks) * MAP_BLOCK_SIZE_METERS,
+        (max(block.x for block in blocks) + 1) * MAP_BLOCK_SIZE_METERS,
+        (max(block.y for block in blocks) + 1) * MAP_BLOCK_SIZE_METERS,
+    )
+    region = project_bounds(job.source_region.bounds)
+    if (
+        region[0] > output[0]
+        or region[1] > output[1]
+        or region[2] < output[2]
+        or region[3] < output[3]
+    ):
+        raise BuildingScopeError(
+            "building_scope_exceeded",
+            "source region does not cover complete global output blocks",
+        )
+    limit = math.floor(WEB_MERCATOR_LIMIT_METERS)
+    source_rectangles = tuple(
+        sorted(
+            {
+                (
+                    max(-limit, block.x * MAP_BLOCK_SIZE_METERS - buffer_meters),
+                    max(-limit, block.y * MAP_BLOCK_SIZE_METERS - buffer_meters),
+                    min(
+                        limit,
+                        (block.x + 1) * MAP_BLOCK_SIZE_METERS + buffer_meters,
+                    ),
+                    min(
+                        limit,
+                        (block.y + 1) * MAP_BLOCK_SIZE_METERS + buffer_meters,
+                    ),
+                )
+                for block in blocks
+            }
+        )
+    )
+    if any(
+        region[0] > rect[0]
+        or region[1] > rect[1]
+        or region[2] < rect[2]
+        or region[3] < rect[3]
+        for rect in source_rectangles
+    ):
+        raise BuildingScopeError(
+            "building_scope_exceeded",
+            "source region does not cover the global correctness buffer",
+        )
+    source = (
+        min(rect[0] for rect in source_rectangles),
+        min(rect[1] for rect in source_rectangles),
+        max(rect[2] for rect in source_rectangles),
+        max(rect[3] for rect in source_rectangles),
+    )
+    if source[2] <= source[0] or source[3] <= source[1]:
+        raise BuildingScopeError(
+            "building_scope_exceeded",
+            "source scope is empty",
+        )
+    output_area = len(blocks) * MAP_BLOCK_SIZE_METERS * MAP_BLOCK_SIZE_METERS
+    source_area = rectangle_union_area(source_rectangles)
+    ratio = ceil_ratio_basis_points(source_area, output_area)
+    target_cells = cells_for_rectangles(
+        source_rectangles, calibration_cell_size_meters
+    )
+    sample_cells = cells_with_halo(target_cells, calibration_halo_cells)
+    source_bounds = Bounds(
+        x_to_lon(source[0]),
+        y_to_lat(source[1]),
+        x_to_lon(source[2]),
+        y_to_lat(source[3]),
+    )
+    document = {
+        "schemaVersion": GLOBAL_BUILDING_SCOPE_SCHEMA_VERSION,
+        "planKind": "global",
+        "globalPolicy": global_policy.to_document(),
+        "chunkPolicy": {
+            **chunk_policy.to_document(),
+            "geometryBufferMeters": buffer_meters,
+        },
+        "requestedSelection": {
+            "mode": job.geometry.mode.value,
+            "boundsE7": bounds_e7(job.geometry.bounds),
+            "geometry": canonical_geometry,
+            "corridorWidthMillimeters": corridor_width_mm,
+            "areaSemantics": "normalized_request_bounds_approximation",
+        },
+        "outputBlocks": [
+            {
+                "x": block.x,
+                "y": block.y,
+                "boundsMeters": [
+                    block.x * MAP_BLOCK_SIZE_METERS,
+                    block.y * MAP_BLOCK_SIZE_METERS,
+                    (block.x + 1) * MAP_BLOCK_SIZE_METERS,
+                    (block.y + 1) * MAP_BLOCK_SIZE_METERS,
+                ],
+            }
+            for block in blocks
+        ],
+        "outputScope": {"boundsMeters": list(output)},
+        "sourceScope": {
+            "mode": "buffered_block_rectangles",
+            "boundsMeters": list(source),
+            "boundsE7": bounds_e7(source_bounds),
+            "rectanglesMeters": [list(rect) for rect in source_rectangles],
+        },
+        "calibration": {
+            "cellSizeMeters": calibration_cell_size_meters,
+            "haloCells": calibration_halo_cells,
+            "minimumSamples": calibration_minimum_samples,
+            "targetCells": [list(cell) for cell in target_cells],
+            "sampleCells": [list(cell) for cell in sample_cells],
+        },
+        "metrics": {
+            "requestedApproximateAreaM2": max(
+                1, int(round(job.geometry.area_km2 * 1_000_000))
+            ),
+            "outputAreaM2": output_area,
+            "sourceAreaM2": source_area,
+            "sourceToOutputAreaBasisPoints": ratio,
+            "outputBlockCount": len(blocks),
+            "calibrationCellCount": len(target_cells),
+            "calibrationSampleCellCount": len(sample_cells),
+        },
+    }
+    encoded = canonical_json(document)
+    return GlobalBuildingPlan(
+        encoded,
+        hashlib.sha256(encoded).hexdigest(),
+        blocks,
+        output,
+        source,
+        source_bounds,
+        target_cells,
+        sample_cells,
     )
 
 

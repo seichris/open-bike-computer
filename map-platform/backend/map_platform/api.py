@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import secrets
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ else:
 
 from .admin_inventory import map_inventory
 from .artifacts import BIKE_MAP_STREAM_FORMAT, create_artifact_store_from_environment
+from .building_tasks import BuildingTaskStore
 from .downloads import DownloadSigner, DownloadTokenError
 from .generation_profiles import (
     configured_deployment_channel,
@@ -221,6 +223,7 @@ def create_app():
     limits = JobLimits(max_active_jobs=int(os.environ.get("MAP_PLATFORM_MAX_ACTIVE_JOBS", "25")))
     source_provider = GeofabrikSourceProvider.from_environment(data_root)
     job_store = JobStore(data_root / "jobs")
+    building_task_store = BuildingTaskStore(data_root / "building-tasks.sqlite3")
     preprocessing_scope_mode = building_preprocessing_scope_mode()
     estimate_coordinator = load_estimate_coordinator(
         repo_root=repo_root,
@@ -251,6 +254,7 @@ def create_app():
             if source_provider is not None
             else None
         ),
+        building_task_store=building_task_store,
     )
 
     app = FastAPI(title="Open Bike Computer Offline Map Platform", version="0.1.0")
@@ -261,6 +265,7 @@ def create_app():
     app.state.artifact_store = artifact_store
     app.state.installation_store = installation_store
     app.state.job_store = service.store
+    app.state.building_task_store = building_task_store
     app.state.monitoring_store = monitoring_store
     app.state.preparation_estimate_mode = estimate_coordinator.mode.value
     app.state.map_stream_rollout = map_stream_rollout
@@ -464,6 +469,23 @@ def create_app():
             pseudonym_secret=installation_secret or download_secret,
             include_undownloaded=includeUndownloaded,
         )
+
+    @app.get(
+        "/v1/admin/building-plans/{parent_job_id}",
+        dependencies=[Depends(require_admin_token)],
+    )
+    def admin_building_plan(parent_job_id: str) -> dict[str, Any]:
+        plan = building_task_store.get_plan(parent_job_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="building plan not found")
+        return {
+            "plan": plan,
+            "tasks": [
+                asdict(task)
+                for task in building_task_store.list_tasks(parent_job_id)
+            ],
+            "receipts": list(building_task_store.list_receipts(parent_job_id)),
+        }
 
     @app.get(
         "/v1/admin/map-monitoring",

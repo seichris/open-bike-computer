@@ -2,7 +2,7 @@
 
 ## Status and scope
 
-This document is a planning artifact only. It was authored on branch
+This document is the implementation contract and rollout plan. It was authored on branch
 `docs/shanghai-3d-map-long-term-plan` from `origin/main` at
 `796b35c9b94c436a3269feffe1c30adffca2f7d9`.
 
@@ -12,6 +12,15 @@ and 1,200 km² source-area hard cap already exist. This plan begins at that
 shipped boundary. It defines the remaining architecture needed to generate one
 large 3D map of Shanghai without raising a monolithic job's memory limits until
 it happens to pass.
+
+Implementation status as of 2026-08-19: Phase 0 evidence is checked in as
+machine-readable benchmark fixtures, the read-only worker cgroup/resource
+report exists, and Phase 1 global planning has a deterministic shadow path.
+Phase 2's SQLite WAL parent/task/attempt/receipt store, lease fencing, crash
+recovery, authenticated diagnostics, and operator inspection commands are now
+implemented. Production still uses the existing monolithic executor and hard
+ceilings until exact workload scans, chunk execution, cache-only assembly, and
+an explicit worker memory reservation are shipped.
 
 The core decision is:
 
@@ -88,6 +97,43 @@ job deterministically exceeded the independent object guard. Therefore:
    in addition to area.
 4. A deterministic limit breach must split work; it must not retry the same
    monolithic inputs.
+
+### Phase 0 boundary evidence on 2026-08-19
+
+The validation deployment then measured the exact user-sized Shanghai request,
+the larger China request that was attempted from the app, and the bounded
+development override. These observations are retained as the first version of
+the Phase 0 benchmark contract:
+
+| Measurement | Shanghai at current policy | Shanghai with bounded dev override | Larger China request |
+| --- | ---: | ---: | ---: |
+| Job ID | `d7fc2b82dc924107aa09` | `e79c891c12d44ac882f8` | `707d717d591145c6a731` |
+| Requested area | 631.792599 km² | 631.792599 km² | 3,344.321671 km² |
+| Derived source scope | 971.243520 km² | 971.243520 km² | Rejected before source planning |
+| Output blocks | 56 | 56 | 285 candidate blocks |
+| Closure objects | 552,499 | 552,499 | Not measured |
+| Relation-object policy | 500,000 | 600,000, dev-only | Not reached |
+| Result | Failed closed | Ready | Failed `building_scope_exceeded` |
+| Processing time | N/A | 929.889504 s | 0.210659 s across three attempts |
+| Worker cgroup peak | N/A | 4,033,191,936 bytes (~3.76 GiB) | No extraction started |
+| Artifact bytes | N/A | 14,948,080 | N/A |
+
+The successful 600,000-object run is a calibration observation, not a
+production policy change: its worker cgroup had `memory.max=max`, so it does
+not establish a safe memory reservation. The 3,344 km² request was rejected by
+the current monolithic output-area gate (285 candidate blocks versus a maximum
+of 71 at the 1,200 km² source-area policy), before relation closure or source
+extraction. No production environment was changed.
+
+Phase 0 policy decision:
+
+- retain 1,200 km² and 500,000 closure objects as production per-task hard
+  ceilings;
+- retain 600,000 only as a bounded validation override while benchmarking;
+- admit a large user request through a global plan, then enforce those limits
+  on internal chunks; and
+- add an explicit worker cgroup memory limit and resource report before any
+  concurrency or production ceiling change.
 
 ### Existing components to preserve
 
@@ -676,6 +722,13 @@ below one global block.
 **Exit gate:** evidence is reproducible and policy values are reviewed before
 they control admission or execution.
 
+**Current status:** evidence and policy fixtures are implemented and tested;
+the production worker memory limit remains intentionally unset pending host
+capacity review. The 600,000-object value is validation-only and is not part of
+the production contract. The worker capability report is recorded with task
+attempts when a coordinator claims work, but no heavy-task concurrency is
+enabled yet.
+
 ### Phase 1 — Global planning and workload queries
 
 1. Refactor `building_scope.py` into global and chunk planning without changing
@@ -691,6 +744,13 @@ they control admission or execution.
 the central test is split below every hard ceiling; the west and full bbox
 plans have recorded predicted resource totals.
 
+**Current status:** global scope planning, deterministic recursive partitioning,
+exact source-index workload counters, and shadow diagnostics are implemented;
+the central/west/full-bbox workload receipts still need to be wired into the
+deployed coordinator before this exit gate is complete. Shadow failures now
+persist a deterministic parent plan and workload-scan child tasks without
+changing the authoritative monolithic build.
+
 ### Phase 2 — Durable coordinator store
 
 1. Implement transactional parent/task/attempt/receipt tables and migrations.
@@ -699,6 +759,14 @@ plans have recorded predicted resource totals.
 3. Project internal state into the existing parent `MapJob` API without
    exposing child maps.
 4. Add fairness and resource reservations with concurrency one.
+
+**Current status:** the SQLite WAL schema, idempotent plan/task insertion,
+atomic claims, lease heartbeats and expiry recovery, cancellation generation,
+split transitions, immutable block receipts, receipt-set hashes, and
+authenticated/API plus CLI diagnostics are implemented and covered by fault
+and identity tests. Child tasks are not executable yet; they are persisted as
+`building_workload_scan` until exact workload receipts and the chunk executor
+are enabled.
 
 **Exit gate:** fault-injection tests prove no double publication, lost task,
 stale-worker receipt, non-monotonic progress, or cancellation resurrection.
@@ -884,13 +952,16 @@ artifact.
 
 ## Execution checklist
 
-- [ ] Retain central/west validation evidence and the full-bbox scope fixture.
-- [ ] Version global, chunk, resource-model, and worker-capability policies.
-- [ ] Separate global scope admission from chunk safety validation.
-- [ ] Add exact source-index workload/closure receipts.
-- [ ] Implement deterministic resource-aware partitioning and shadow compare.
-- [ ] Add transactional parent/task/attempt/receipt orchestration.
-- [ ] Add lease fencing, cancellation generations, fairness, and reservations.
+- [x] Retain central/west validation evidence and the full-bbox scope fixture.
+- [x] Version global and chunk policies plus a read-only worker resource report.
+- [x] Separate global scope admission from chunk safety validation.
+- [x] Add exact source-index workload/closure receipts.
+- [x] Implement deterministic resource-aware partitioning and shadow compare.
+- [x] Add transactional parent/task/attempt/receipt orchestration primitives.
+- [x] Add lease fencing, cancellation generations, split transitions, and
+      authenticated/CLI task diagnostics.
+- [ ] Version and train the retained resource model and worker capability identity.
+- [ ] Add fairness and resource reservations with concurrency one.
 - [ ] Implement chunk-only canonical building block generation.
 - [ ] Convert deterministic guard failures into bounded recursive splits.
 - [ ] Implement cache-only final assembly and whole-artifact validation.

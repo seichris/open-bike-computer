@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 from .artifacts import create_artifact_store_from_environment
@@ -23,7 +24,7 @@ from .building_cache_maintenance import (
     DEFAULT_BUILDING_BLOCK_CACHE_RETENTION_DAYS,
     prune_building_block_cache,
 )
-from .map_signing import load_map_artifact_signer_from_environment
+from .building_tasks import BuildingTaskStore
 from .map_stream_build_identity import (
     image_digest_from_reference,
     verify_map_stream_build_identity,
@@ -36,6 +37,7 @@ from .monitoring import (
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .preparation_estimates import load_estimate_coordinator
 from .rate_limits import purge_expired_rate_limits
+from .resource_report import worker_resource_report
 from .source_cache import SourceCache, default_backend_data_root
 from .sources import SourceIndex
 from .worker import (
@@ -378,8 +380,33 @@ def main() -> int:
     expire.add_argument("--older-than-days", type=int, default=30)
 
     subparsers.add_parser("cleanup-work")
+    build_plan = subparsers.add_parser(
+        "build-plan",
+        help="inspect durable internal building chunk plans",
+    )
+    build_plan_subparsers = build_plan.add_subparsers(
+        dest="build_plan_command",
+        required=True,
+    )
+    build_plan_inspect = build_plan_subparsers.add_parser(
+        "inspect",
+        help="show the parent plan, tasks, and block receipts",
+    )
+    build_plan_inspect.add_argument("job_id")
+    build_plan_tasks = build_plan_subparsers.add_parser(
+        "tasks",
+        help="show durable child task state",
+    )
+    build_plan_tasks.add_argument("job_id")
+    subparsers.add_parser(
+        "resource-report",
+        help="print a read-only worker cgroup and memory capability report",
+    )
 
     args = parser.parse_args()
+    if args.command == "resource-report":
+        print(json.dumps(worker_resource_report(), indent=2, sort_keys=True))
+        return 0
     repo_root = Path(args.repo_root).resolve()
     data_root = (
         Path(args.data_root).resolve()
@@ -396,6 +423,29 @@ def main() -> int:
         / "source-regions.json"
     )
     store = JobStore(data_root / "jobs")
+    building_task_store = BuildingTaskStore(data_root / "building-tasks.sqlite3")
+    if args.command == "build-plan":
+        plan = building_task_store.get_plan(args.job_id)
+        if plan is None:
+            raise SystemExit(f"building plan not found: {args.job_id}")
+        tasks = [asdict(task) for task in building_task_store.list_tasks(args.job_id)]
+        if args.build_plan_command == "tasks":
+            print(json.dumps({"plan": plan, "tasks": tasks}, indent=2, sort_keys=True))
+        else:
+            print(
+                json.dumps(
+                    {
+                        "plan": plan,
+                        "tasks": tasks,
+                        "receipts": list(
+                            building_task_store.list_receipts(args.job_id)
+                        ),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        return 0
     monitoring_retention_days = int(
         os.environ.get(
             "MAP_PLATFORM_MONITORING_RETENTION_DAYS",
@@ -445,6 +495,8 @@ def main() -> int:
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
 
     def create_pipeline() -> MapBuildPipeline:
+        from .map_signing import load_map_artifact_signer_from_environment
+
         map_signer = load_map_artifact_signer_from_environment()
         worker_image_reference = os.environ.get(
             "MAP_PLATFORM_WORKER_IMAGE_REFERENCE",
@@ -475,6 +527,7 @@ def main() -> int:
                 if source_provider is not None
                 else None
             ),
+            building_task_store=building_task_store,
         )
         estimate_coordinator.producer_build_sha256 = producer_build_sha256
         estimate_coordinator.producer_image_digest = producer_image_digest
