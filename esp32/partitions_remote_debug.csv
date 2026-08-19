@@ -1,0 +1,9 @@
+# Remote-debug images include the renderer/input service in addition to the
+# persistent diagnostics recorder. Keep both OTA slots equal and leave the
+# ordinary/production partition table unchanged.
+# Name,   Type, SubType, Offset, Size, Flags
+nvs,      data, nvs,     ,      0x5000,
+otadata,  data, ota,     ,      0x2000,
+app0,     app,  ota_0,   ,      0x310000,
+app1,     app,  ota_1,   ,      0x310000,
+ffat,     data, fat,     ,      0x900000,
