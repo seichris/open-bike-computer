@@ -38,6 +38,46 @@ class BackendDependencyHintTests(unittest.TestCase):
         )
 
 
+class BuildingProgressProjectionTests(unittest.TestCase):
+    def test_projection_adds_coordinator_fields_without_rewriting_legacy_counters(self):
+        result = {
+            "progress": {
+                "phase": "block_encoding",
+                "completedBlocks": 4,
+                "totalBlocks": 9,
+            }
+        }
+        coordinator_progress = {
+            "phase": "building_chunks",
+            "unit": "blocks",
+            "completed": 7,
+            "total": 12,
+            "completedBlocks": 7,
+            "totalBlocks": 12,
+            "activeChunks": 1,
+            "readyChunks": 2,
+            "totalChunks": 5,
+            "indeterminate": False,
+            "state": "building_chunks",
+        }
+
+        api_module._project_building_progress(result, coordinator_progress)
+
+        self.assertEqual(result["progress"]["phase"], "block_encoding")
+        self.assertEqual(result["progress"]["completedBlocks"], 4)
+        self.assertEqual(result["progress"]["totalBlocks"], 9)
+        self.assertEqual(result["progress"]["activeChunks"], 1)
+        self.assertEqual(result["progress"]["readyChunks"], 2)
+        self.assertEqual(result["buildingProgress"], coordinator_progress)
+
+    def test_projection_is_noop_without_a_durable_plan(self):
+        result = {"progress": None}
+
+        api_module._project_building_progress(result, None)
+
+        self.assertEqual(result, {"progress": None})
+
+
 class MapJobRunAPITests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

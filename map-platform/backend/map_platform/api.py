@@ -5,7 +5,7 @@ import secrets
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
@@ -77,6 +77,31 @@ from .source_cache import (
 )
 from .sources import SourceIndex
 from .worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
+
+
+def _project_building_progress(
+    result: dict[str, Any],
+    building_progress: Mapping[str, Any] | None,
+) -> None:
+    """Project coordinator progress into the existing parent-job response.
+
+    The durable coordinator owns aggregate block receipts, but older workers
+    may still persist the legacy ``progress`` counters on the parent job.  Add
+    only fields that are not already present so those counters retain their
+    original meaning while new clients can consume chunk-level telemetry.
+    ``buildingProgress`` is an explicit, additive copy for clients that need
+    the coordinator state without guessing which producer supplied a field.
+    """
+
+    if not isinstance(building_progress, Mapping):
+        return
+    projected = dict(building_progress)
+    existing = result.get("progress")
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    for key, value in projected.items():
+        merged.setdefault(key, value)
+    result["progress"] = merged
+    result["buildingProgress"] = projected
 
 
 def create_app():
@@ -332,6 +357,10 @@ def create_app():
         client_app_build_sha256: str | None,
     ) -> dict[str, Any]:
         result = job.to_dict()
+        _project_building_progress(
+            result,
+            building_task_store.progress(job.job_id),
+        )
         public_artifacts: list[dict[str, Any]] = []
         stream_allowed = False
         for artifact in result.get("artifacts", []):

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-BUILDING_TASK_SCHEMA_VERSION = 3
+BUILDING_TASK_SCHEMA_VERSION = 4
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _TASK_STATES = {"pending", "leased", "ready", "split", "failed", "cancelled"}
 _PLAN_STATES = {
@@ -318,16 +318,42 @@ class BuildingTaskStore:
                 SELECT task.* FROM map_build_tasks task
                 JOIN map_build_plans plan ON plan.parent_job_id = task.parent_job_id
                 WHERE {' AND '.join(where)}
-                ORDER BY task.parent_job_id, task.created_at, task.task_id
+                ORDER BY
+                    CASE WHEN plan.last_claimed_at IS NULL THEN 0 ELSE 1 END,
+                    plan.last_claimed_at,
+                    plan.parent_job_id,
+                    task.created_at,
+                    task.task_id
                 """,
                 params,
             ).fetchall()
             row = None
             resource_request = None
+            fair_parent_ids = {
+                candidate["parent_job_id"]
+                for candidate in rows
+                if _worker_can_admit(candidate, worker_capability)
+            }
+            active_parent_ids: set[str] = set()
+            if worker_capability is not None:
+                active_parent_ids = _active_reservation_parent_ids(
+                    connection,
+                    resource_pool=str(
+                        worker_capability.get("resourcePool", _DEFAULT_RESOURCE_POOL)
+                    ),
+                    now=now,
+                )
             for candidate in rows:
                 if not _worker_can_admit(candidate, worker_capability):
                     continue
                 request = _resource_request(candidate, worker_capability)
+                if request is not None and request["maxConcurrentTasks"] > 1:
+                    if (
+                        len(fair_parent_ids) > 1
+                        and candidate["parent_job_id"] in active_parent_ids
+                        and fair_parent_ids - active_parent_ids
+                    ):
+                        continue
                 if request is None:
                     row = candidate
                     break
@@ -360,6 +386,10 @@ class BuildingTaskStore:
                     now,
                     row["task_id"],
                 ),
+            )
+            connection.execute(
+                "UPDATE map_build_plans SET last_claimed_at=? WHERE parent_job_id=?",
+                (now, row["parent_job_id"]),
             )
             admission = _resource_admission(row, worker_capability)
             if resource_request is not None:
@@ -1361,6 +1391,7 @@ class BuildingTaskStore:
                     policy_version INTEGER NOT NULL,
                     resource_model_version TEXT NOT NULL,
                     cancellation_generation INTEGER NOT NULL,
+                    last_claimed_at REAL,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
@@ -1451,6 +1482,20 @@ class BuildingTaskStore:
                     ON map_build_workload_receipts(parent_job_id, recorded_at);
                 CREATE INDEX IF NOT EXISTS map_build_resource_reservations_pool
                     ON map_build_resource_reservations(resource_pool, expires_at);
+                """
+            )
+            plan_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(map_build_plans)")
+            }
+            if "last_claimed_at" not in plan_columns:
+                connection.execute(
+                    "ALTER TABLE map_build_plans ADD COLUMN last_claimed_at REAL"
+                )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS map_build_plans_fair_claim
+                    ON map_build_plans(last_claimed_at, parent_job_id)
                 """
             )
             connection.execute(f"PRAGMA user_version={BUILDING_TASK_SCHEMA_VERSION}")
@@ -1600,6 +1645,23 @@ def _resource_capacity_snapshot(
         "memoryBytes": int(row["memory_bytes"] or 0),
         "cpuWeight": float(row["cpu_weight"] or 0),
     }
+
+
+def _active_reservation_parent_ids(
+    connection: sqlite3.Connection,
+    *,
+    resource_pool: str,
+    now: float,
+) -> set[str]:
+    rows = connection.execute(
+        """
+        SELECT DISTINCT parent_job_id
+        FROM map_build_resource_reservations
+        WHERE resource_pool=? AND expires_at > ?
+        """,
+        (resource_pool, now),
+    ).fetchall()
+    return {str(row["parent_job_id"]) for row in rows}
 
 
 def _resource_capacity_available(

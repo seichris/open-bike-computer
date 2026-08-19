@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -274,6 +275,100 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.assertIsNotNone(
             self.store.claim_next(worker_id="worker-b", worker_capability=capability)
         )
+
+    def test_resource_claims_round_robin_across_parent_jobs(self):
+        self.store.create_plan(
+            parent_job_id="job-2",
+            global_plan_sha256="b" * 64,
+            input_identity={"source": "source-sha-2"},
+            expected_output_block_count=2,
+            policy_version=1,
+            resource_model_version="v1",
+        )
+        self.store.add_tasks(
+            [
+                self.spec("job-1-task-1", ((1, 2),)),
+                self.spec("job-1-task-2", ((1, 3),)),
+                BuildingTaskSpec(
+                    task_id="job-2-task-1",
+                    parent_job_id="job-2",
+                    kind="building_chunk",
+                    blocks=((2, 2),),
+                    chunk_plan_sha256=SHA,
+                ),
+                BuildingTaskSpec(
+                    task_id="job-2-task-2",
+                    parent_job_id="job-2",
+                    kind="building_chunk",
+                    blocks=((2, 3),),
+                    chunk_plan_sha256=SHA,
+                ),
+            ]
+        )
+        capability = {
+            "resourcePool": "fair-pool",
+            "memoryLimitBytes": 8_000_000_000,
+            "cpuCount": 8,
+            "maxConcurrentTasks": 4,
+        }
+
+        claimed = [
+            self.store.claim_next(
+                worker_id=f"worker-{index}",
+                worker_capability=capability,
+            )
+            for index in range(4)
+        ]
+
+        self.assertEqual(
+            [item.task.parent_job_id for item in claimed if item is not None],
+            ["job-1", "job-2", "job-1", "job-2"],
+        )
+        self.assertEqual(
+            [
+                plan["last_claimed_at"]
+                for plan in (
+                    self.store.get_plan("job-1"),
+                    self.store.get_plan("job-2"),
+                )
+            ],
+            [100.0, 100.0],
+        )
+
+    def test_schema_v3_migrates_fair_claim_cursor(self):
+        path = Path(self.temp.name) / "legacy-tasks.sqlite3"
+        connection = sqlite3.connect(path)
+        connection.executescript(
+            """
+            CREATE TABLE map_build_plans(
+                parent_job_id TEXT PRIMARY KEY,
+                global_plan_sha256 TEXT NOT NULL,
+                input_identity_json TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                state TEXT NOT NULL,
+                expected_output_block_count INTEGER NOT NULL,
+                policy_version INTEGER NOT NULL,
+                resource_model_version TEXT NOT NULL,
+                cancellation_generation INTEGER NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            PRAGMA user_version=3;
+            """
+        )
+        connection.close()
+
+        BuildingTaskStore(path)
+
+        connection = sqlite3.connect(path)
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(map_build_plans)")
+        }
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        connection.close()
+        self.assertIn("last_claimed_at", columns)
+        self.assertEqual(version, 4)
 
     def test_readding_the_same_task_is_idempotent_but_identity_changes_fail(self):
         spec = self.spec(blocks=((1, 2),))

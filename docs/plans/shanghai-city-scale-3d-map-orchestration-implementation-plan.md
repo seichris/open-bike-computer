@@ -777,7 +777,12 @@ a durable resource-pool ledger; reservations are released on heartbeat expiry,
 completion, split, cancellation, or lease recovery. The default heavy-task
 concurrency is one. A workload-scan receipt now promotes the deterministic
 child to a pending `building_chunk`; child execution is not enabled by the
-parent worker yet, and fair scheduling across parent jobs remains pending.
+parent worker yet. The public parent-job response now projects additive
+coordinator progress and preserves legacy counters, while detailed task,
+receipt, attempt, and reservation diagnostics remain authenticated; fair
+scheduling now uses a durable last-claimed round-robin cursor and reserves at
+most one slot per parent while another parent has unrepresented pending work.
+Weighted quotas and admission-aware priority policies remain pending.
 
 **Exit gate:** fault-injection tests prove no double publication, lost task,
 stale-worker receipt, non-monotonic progress, or cancellation resurrection.
@@ -991,13 +996,13 @@ artifact.
       authenticated/CLI task diagnostics.
 - [ ] Version and train the retained resource model and worker capability identity.
 - [x] Add bounded memory/CPU reservations with a concurrency-one heavy-task default.
-- [ ] Add fair scheduling across parent jobs.
+- [x] Add fair scheduling across parent jobs.
 - [ ] Implement chunk-only canonical building block generation.
 - [x] Emit typed multi-block runtime split signals and deterministic bisection.
 - [x] Convert split signals into bounded workload-scan child enqueue transitions.
 - [ ] Implement cache-only final assembly and whole-artifact validation.
 - [ ] Preserve partition-invariant block and artifact identity.
-- [ ] Add public aggregate progress and authenticated operator diagnostics.
+- [x] Add public aggregate progress and authenticated operator diagnostics.
 - [ ] Pass geometry, relation, height, seam, cache, orchestration, fault, and
       compatibility suites.
 - [ ] Pass central, west, and exact full-bbox server benchmarks.
