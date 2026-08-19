@@ -6,6 +6,7 @@ from map_platform.building_orchestration import (
     BlockWorkload,
     BuildingChunkPolicy,
     BuildingChunkPlanningError,
+    deterministic_runtime_bisection,
     partition_global_building_plan,
 )
 from map_platform.building_scope import (
@@ -123,6 +124,21 @@ class BuildingOrchestrationTests(unittest.TestCase):
                     MapBlock(999, 999): BlockWorkload(block=MapBlock(999, 999))
                 },
             )
+
+    def test_runtime_bisection_prefers_longer_axis_and_is_stable(self):
+        blocks = (MapBlock(8, 4), MapBlock(10, 4), MapBlock(9, 4), MapBlock(8, 5))
+        left, right = deterministic_runtime_bisection(blocks)
+        self.assertEqual(left, (MapBlock(8, 4), MapBlock(8, 5)))
+        self.assertEqual(right, (MapBlock(9, 4), MapBlock(10, 4)))
+        self.assertEqual(
+            deterministic_runtime_bisection(tuple(reversed(blocks))),
+            (left, right),
+        )
+
+    def test_runtime_bisection_fails_closed_for_one_block(self):
+        with self.assertRaises(BuildingChunkPlanningError) as raised:
+            deterministic_runtime_bisection((MapBlock(1, 1),))
+        self.assertEqual(raised.exception.code, "building_pathological_block")
 
     def test_partition_hash_is_stable_under_workload_input_order(self):
         plan = self.global_plan((121.30, 31.10, 121.57, 31.32))

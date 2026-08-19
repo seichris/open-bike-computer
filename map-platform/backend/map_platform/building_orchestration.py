@@ -36,6 +36,41 @@ class BuildingChunkPlanningError(ValueError):
         super().__init__(message)
 
 
+def deterministic_runtime_bisection(
+    blocks: Sequence[MapBlock],
+) -> tuple[tuple[MapBlock, ...], tuple[MapBlock, ...]]:
+    """Split a multi-block runtime failure at a stable spatial midpoint.
+
+    The longer projected axis is preferred; ties use the x axis, then stable
+    coordinate order.  This helper does not claim that either child is safe;
+    the coordinator must rescan each child and apply the normal hard ceilings.
+    """
+
+    normalized = tuple(sorted(set(blocks)))
+    if len(normalized) < 2:
+        raise BuildingChunkPlanningError(
+            "building_pathological_block",
+            "a runtime split requires at least two output blocks",
+        )
+    x_span = normalized[-1].x - normalized[0].x
+    y_span = max(block.y for block in normalized) - min(
+        block.y for block in normalized
+    )
+    axis = "x" if x_span >= y_span else "y"
+    ordered = tuple(
+        sorted(
+            normalized,
+            key=(
+                (lambda block: (block.x, block.y))
+                if axis == "x"
+                else (lambda block: (block.y, block.x))
+            ),
+        )
+    )
+    midpoint = len(ordered) // 2
+    return ordered[:midpoint], ordered[midpoint:]
+
+
 @dataclass(frozen=True)
 class BuildingChunkPolicy:
     """Targets and hard ceilings applied to every internal building chunk."""

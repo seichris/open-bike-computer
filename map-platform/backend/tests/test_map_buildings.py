@@ -28,6 +28,7 @@ from map_platform.map_buildings import (
 )
 from map_platform.models import Bounds, MapJob, SourceRegion
 from map_platform.pipeline import (
+    BuildingChunkSplitRequired,
     MapBuildPipeline,
     PipelinePaths,
     _coalesce_projected_rectangles,
@@ -259,6 +260,39 @@ class MapBuildingContractTests(unittest.TestCase):
                     calibration_generation={},
                 )
             self.assertEqual(raised.exception.code, "building_chunks_incomplete")
+
+    def test_multi_block_guard_failure_becomes_split_signal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(
+                self._request()
+            )
+            scope_plan = plan_building_scope(
+                job,
+                calibration_cell_size_meters=8192,
+                calibration_halo_cells=1,
+                calibration_minimum_samples=3,
+            )
+            pipeline = MapBuildPipeline(
+                PipelinePaths(
+                    Path(__file__).resolve().parents[3],
+                    root / "work",
+                    root / "packs",
+                )
+            )
+            with self.assertRaises(BuildingChunkSplitRequired) as raised:
+                pipeline._raise_chunk_split_if_needed(
+                    BuildingScopeError(
+                        "building_object_limit_exceeded", "too many objects"
+                    ),
+                    task_id="task-1",
+                    scope_plan=scope_plan,
+                )
+            self.assertEqual(raised.exception.task_id, "task-1")
+            self.assertEqual(
+                raised.exception.blocks,
+                tuple((block.x, block.y) for block in scope_plan.output_blocks),
+            )
 
     def test_building_block_cache_identity_is_scope_independent_and_hash_bound(self):
         with tempfile.TemporaryDirectory() as tmp:

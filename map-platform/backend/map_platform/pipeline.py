@@ -309,6 +309,25 @@ _BUILDING_FAILURE_MESSAGES = {
         "selected building workload receipt does not match the source closure"
     ),
 }
+_CHUNK_SPLIT_FAILURE_CODES = frozenset(
+    {"building_object_limit_exceeded", "building_scope_exceeded"}
+)
+
+
+class BuildingChunkSplitRequired(BuildingScopeError):
+    """Typed coordinator signal for a deterministic multi-block split."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        task_id: str,
+        blocks: tuple[tuple[int, int], ...],
+    ):
+        super().__init__(code, message)
+        self.task_id = task_id
+        self.blocks = blocks
 
 
 def _coalesce_projected_rectangles(
@@ -1874,6 +1893,27 @@ class MapBuildPipeline:
         self.building_task_store.set_plan_stage(parent_job_id, stage="ready")
         return result
 
+    @staticmethod
+    def _raise_chunk_split_if_needed(
+        exc: BuildingScopeError,
+        *,
+        task_id: str | None,
+        scope_plan: ScopePlan,
+    ) -> None:
+        if (
+            task_id is not None
+            and exc.code in _CHUNK_SPLIT_FAILURE_CODES
+            and len(scope_plan.output_blocks) > 1
+        ):
+            raise BuildingChunkSplitRequired(
+                exc.code,
+                str(exc),
+                task_id=task_id,
+                blocks=tuple(
+                    (block.x, block.y) for block in scope_plan.output_blocks
+                ),
+            ) from exc
+
     def build_building_chunk(
         self,
         job: MapJob,
@@ -1982,30 +2022,36 @@ class MapBuildPipeline:
             cancellation_check=cancellation_check,
         )
         preprocessing_timings: dict[str, float] = {}
-        closure_output = self._run_preprocessing_command(
-            [
-                sys.executable,
-                str(
-                    self.paths.osm_extract_root
-                    / "scripts"
-                    / "build_building_closure.py"
-                ),
-                "--source-index-manifest",
-                str(source_index_manifest),
-                "--scope-plan",
-                str(scope_plan_path),
-                "--closure-plan",
-                str(closure_plan_path),
-                "--ids-output",
-                str(closure_ids_path),
-            ],
-            cwd=self.paths.osm_extract_root / "scripts",
-            on_phase_progress=on_phase_progress,
-            default_unit="relation_closure",
-            total_blocks=len(scope_plan.output_blocks),
-            timings=preprocessing_timings,
-            cancellation_check=cancellation_check,
-        )
+        try:
+            closure_output = self._run_preprocessing_command(
+                [
+                    sys.executable,
+                    str(
+                        self.paths.osm_extract_root
+                        / "scripts"
+                        / "build_building_closure.py"
+                    ),
+                    "--source-index-manifest",
+                    str(source_index_manifest),
+                    "--scope-plan",
+                    str(scope_plan_path),
+                    "--closure-plan",
+                    str(closure_plan_path),
+                    "--ids-output",
+                    str(closure_ids_path),
+                ],
+                cwd=self.paths.osm_extract_root / "scripts",
+                on_phase_progress=on_phase_progress,
+                default_unit="relation_closure",
+                total_blocks=len(scope_plan.output_blocks),
+                timings=preprocessing_timings,
+                cancellation_check=cancellation_check,
+            )
+        except BuildingScopeError as exc:
+            self._raise_chunk_split_if_needed(
+                exc, task_id=task_id, scope_plan=scope_plan
+            )
+            raise
         try:
             closure = json.loads(closure_plan_path.read_bytes())
         except (OSError, TypeError, ValueError) as exc:
@@ -2038,29 +2084,35 @@ class MapBuildPipeline:
                 chunk_root,
                 cancellation_check=cancellation_check,
             )
-        self._convert_to_geojson(
-            job,
-            clipped_pbf,
-            geojson_prefix,
-            bounds=scope_plan.source_bounds,
-            source_index_manifest=source_index_manifest,
-            scope_plan_path=scope_plan_path,
-            cancellation_check=cancellation_check,
-        )
-        feature_metrics = self._extract_features(
-            job,
-            geojson_prefix,
-            raw_output_dir,
-            bounds=scope_plan.source_bounds,
-            on_progress=on_progress,
-            scope_plan_path=scope_plan_path,
-            calibration_manifest=calibration_manifest,
-            calibration_source_sha256=source_snapshot_sha256,
-            building_block_cache_identity_path=block_cache_identity_path,
-            on_phase_progress=on_phase_progress,
-            planned_scope_marker=scope_plan.summary(),
-            cancellation_check=cancellation_check,
-        )
+        try:
+            self._convert_to_geojson(
+                job,
+                clipped_pbf,
+                geojson_prefix,
+                bounds=scope_plan.source_bounds,
+                source_index_manifest=source_index_manifest,
+                scope_plan_path=scope_plan_path,
+                cancellation_check=cancellation_check,
+            )
+            feature_metrics = self._extract_features(
+                job,
+                geojson_prefix,
+                raw_output_dir,
+                bounds=scope_plan.source_bounds,
+                on_progress=on_progress,
+                scope_plan_path=scope_plan_path,
+                calibration_manifest=calibration_manifest,
+                calibration_source_sha256=source_snapshot_sha256,
+                building_block_cache_identity_path=block_cache_identity_path,
+                on_phase_progress=on_phase_progress,
+                planned_scope_marker=scope_plan.summary(),
+                cancellation_check=cancellation_check,
+            )
+        except BuildingScopeError as exc:
+            self._raise_chunk_split_if_needed(
+                exc, task_id=task_id, scope_plan=scope_plan
+            )
+            raise
         result: dict[str, Any] = {
             "scopePlanSha256": scope_plan.sha256,
             "closurePlanSha256": closure.get("closurePlanSha256"),
