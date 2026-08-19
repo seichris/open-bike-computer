@@ -296,7 +296,10 @@ if args.renderer_format == 3:
             or scope_calibration.get("haloCells") != building_rules.halo_cells
             or scope_calibration.get("minimumSamples") != building_rules.minimum_samples
             or not required_calibration_cells
-            or not required_calibration_cells.issubset(calibration_cache.bound_cells())
+            or any(
+                not calibration_cache.can_resolve_cell(cell)
+                for cell in required_calibration_cells
+            )
         ):
             fail_building_preprocess("building_calibration_unavailable", "scope plan calibration inputs are incomplete or incompatible")
 

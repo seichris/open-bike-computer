@@ -1124,11 +1124,26 @@ The current image's relation-heavy validation probe
 This confirms the reviewed narrow fallback: a malformed `type=building`
 relation with exactly one direct way explicitly tagged `building=yes` is
 retained as a standalone part; ambiguous, multi-part, and untagged cases still
-fail closed. The exact full-bbox retry `c2b1ae53bede438ab02e` is now running
+fail closed. The exact full-bbox retry `c2b1ae53bede438ab02e` was then run
 against the cached China parent snapshot as a 16-chunk, 442-block cold
-acceptance benchmark; its first two chunks have published 48 receipts with no
-retries or splits, and retained cgroup peak is 6,207,524,864 bytes with no
-OOM events. Its final artifact and timing gate remain pending.
+acceptance benchmark. Its first two chunks published 48 receipts with no
+retries or splits before the calibration edge failure described below; the
+retained cgroup peak was 6,678,048,768 bytes with no OOM events.
+
+The exact full-bbox retry then reached 102/442 receipts before chunk
+`x=3297..3303,y=880..883` failed three times as
+`building_calibration_unavailable`. The retained workload receipt was only
+25,213 closure objects (2 relations, 4,460 ways, and 20,751 nodes), the
+failing command peaked at 366,202,880 bytes RSS, and the worker cgroup still
+reported `oom=0`, `oom_kill=0`, and `high=0` with about 42 GiB host memory
+available. Inspection of the sealed complete calibration manifest found that
+scope cell `(1653,439)` is intentionally outside the source-derived domain and
+therefore absent, but the reader treated that proven-empty cell as missing and
+failed preflight. The job was cancelled through the supported API after the
+third retry; no artifact was published. The fix now lets complete snapshots
+prove unlisted cells empty while lazy manifests remain fail-closed, and adds a
+regression test. A new validation image and rerun are required before this
+benchmark can be marked passed.
 
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.

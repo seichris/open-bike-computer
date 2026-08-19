@@ -156,6 +156,26 @@ class CalibrationCacheTests(unittest.TestCase):
             reader = CalibrationCache.from_manifest(full.key_root / "manifest.json")
             self.assertEqual(reader.local_median_meters((0, 0), "office"), 10.0)
 
+    def test_complete_manifest_treats_unlisted_cells_as_proven_empty(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = CalibrationCache(root, identity())
+            cache.materialize_cells(
+                [(0, 0)],
+                {
+                    (0, 0): [
+                        CalibrationSample("w1", "office", 100),
+                        CalibrationSample("w2", "office", 100),
+                        CalibrationSample("w3", "office", 100),
+                    ]
+                },
+                complete_source_snapshot=True,
+                complete_domain_cells=[(0, 0)],
+            )
+            reader = CalibrationCache.from_manifest(cache.key_root / "manifest.json")
+            self.assertTrue(reader.can_resolve_cell((3, 3)))
+            self.assertEqual(reader.local_median_meters((3, 3), "office"), None)
+            self.assertEqual(reader.local_median_meters((1, 0), "office"), 10.0)
+
     def test_corrupt_cell_is_quarantined_and_rebuilt(self):
         with tempfile.TemporaryDirectory() as root:
             cache = CalibrationCache(root, identity())
