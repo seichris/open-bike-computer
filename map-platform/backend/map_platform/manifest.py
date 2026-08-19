@@ -187,7 +187,7 @@ def build_manifest(
     map_id = job.map_id or stable_map_id(job)
     files = collect_map_files(map_root, map_id)
     preview_bytes = render_boundary_preview(
-        job.source_region.preview_geometry or job.geometry.geometry,
+        job.geometry.geometry,
         job.geometry.bounds,
     )
     preview_path = map_root / DEFAULT_PREVIEW_PATH

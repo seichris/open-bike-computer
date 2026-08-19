@@ -192,7 +192,7 @@ class ManifestTests(unittest.TestCase):
             with zipfile.ZipFile(archive) as zip_archive:
                 self.assertNotIn("preview.png", zip_archive.namelist())
 
-    def test_preview_uses_source_boundary_and_requested_bounds_fallback(self):
+    def test_preview_uses_requested_geometry_and_bounds_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             job = fake_job()
@@ -250,7 +250,28 @@ class ManifestTests(unittest.TestCase):
             source_data = base64.b64decode(source_manifest["preview"]["dataBase64"])
             self.assertEqual(
                 source_data,
+                render_boundary_preview(requested_geometry, job.geometry.bounds),
+            )
+            self.assertNotEqual(
+                source_data,
                 render_boundary_preview(source_geometry, job.geometry.bounds),
+            )
+
+            bbox_job = fake_job()
+            bbox_job.map_id = stable_map_id(bbox_job)
+            bbox_job.source_region = SourceRegion(
+                id=bbox_job.source_region.id,
+                provider=bbox_job.source_region.provider,
+                name=bbox_job.source_region.name,
+                url=bbox_job.source_region.url,
+                bounds=bbox_job.source_region.bounds,
+                preview_geometry=source_geometry,
+            )
+            bbox_manifest = build_manifest(bbox_job, root, PipelineMetadata())
+            bbox_data = base64.b64decode(bbox_manifest["preview"]["dataBase64"])
+            self.assertEqual(
+                bbox_data,
+                render_boundary_preview(None, bbox_job.geometry.bounds),
             )
 
     def test_map_id_includes_custom_polygon_geometry(self):
