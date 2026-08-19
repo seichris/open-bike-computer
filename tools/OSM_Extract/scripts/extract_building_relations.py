@@ -38,6 +38,10 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         self.building_relations: set[str] = set()
         self.part_parent_candidates: dict[str, set[str]] = {}
         self.parts_without_outline: set[str] = set()
+        # Keep the relation identity alongside the legacy part set. The set is
+        # used for closure intersection; this detail map makes a fail-closed
+        # source diagnostic actionable without dumping a whole relation/PBF.
+        self.incomplete_relation_parts: dict[str, tuple[str, ...]] = {}
 
     def node(self, node) -> None:
         key = f"n{node.id}"
@@ -98,6 +102,7 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         if not outlines or not parts:
             if self.audit_enabled and parts and not outlines:
                 self.parts_without_outline.update(parts)
+                self.incomplete_relation_parts[relation_key] = tuple(parts)
             return
         self.relations += 1
         parent = outlines[0]
@@ -192,6 +197,26 @@ def audit_closure(
             required_ways | required_relations
         )
         if ambiguous_parts or missing_parent_parts:
+            incomplete_relations = [
+                (relation_key, handler.incomplete_relation_parts[relation_key])
+                for relation_key in sorted(handler.incomplete_relation_parts)
+                if set(handler.incomplete_relation_parts[relation_key])
+                & (required_ways | required_relations)
+            ]
+            if incomplete_relations:
+                relation_key, parts = incomplete_relations[0]
+                detail = (
+                    f"source relation {relation_key} has part members but no outline"
+                )
+                if parts:
+                    detail += f" ({','.join(parts[:8])}"
+                    if len(parts) > 8:
+                        detail += ",..."
+                    detail += ")"
+                raise BuildingSourceIndexError(
+                    "building_relation_incomplete",
+                    detail,
+                )
             raise BuildingSourceIndexError(
                 "building_relation_incomplete",
                 "output building relation has ambiguous or missing explicit parents",

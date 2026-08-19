@@ -112,6 +112,19 @@ class BuildingRelationIngressTests(unittest.TestCase):
         self.assertFalse(handler.part_parents)
         self.assertEqual(handler.parts_without_outline, {"w21"})
 
+    def test_part_only_relation_keeps_actionable_relation_identity(self):
+        handler = BuildingRelationHandler(
+            expected_closure={"requiredRelationKeys": ["r106"]}
+        )
+        handler.relation(
+            self.relation(
+                106,
+                [{"type": "w", "ref": 30, "role": "part"}],
+            )
+        )
+        self.assertEqual(handler.parts_without_outline, {"w30"})
+        self.assertEqual(handler.incomplete_relation_parts, {"r106": ("w30",)})
+
     def test_cli_indexes_real_osm_building_relations_deterministically(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "building-relations.json"
@@ -210,6 +223,36 @@ class BuildingRelationIngressTests(unittest.TestCase):
             self.assertEqual(audit["relationRetryCount"], 0)
             self.assertEqual(audit["closureRelationCount"], 4)
             self.assertEqual(audit["sourceSnapshotSha256"], source_sha)
+
+            malformed_source = root / "malformed.osm"
+            malformed_source.write_text(
+                clean_source.read_text().replace(
+                    "</osm>",
+                    '<relation id="106" version="1">'
+                    '<member type="way" ref="20" role="part" />'
+                    '<tag k="type" v="building" />'
+                    "</relation></osm>",
+                )
+            )
+            malformed_sha = hashlib.sha256(malformed_source.read_bytes()).hexdigest()
+            malformed_index = BuildingSourceIndex(root / "malformed-cache", malformed_sha)
+            malformed_index.build_with_scanner(
+                lambda path: scan_source(malformed_source, path)
+            )
+            malformed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(malformed_source),
+                    str(root / "malformed.json"),
+                    "--source-index-manifest", str(malformed_index.manifest_path),
+                    "--scope-plan", str(scope_path),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(malformed.returncode, 2, malformed.stdout + malformed.stderr)
+            self.assertIn("source relation r106 has part members but no outline", malformed.stdout)
 
             incomplete_fixture = root / "incomplete.osm"
             incomplete_fixture.write_text(
