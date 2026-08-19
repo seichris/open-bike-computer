@@ -293,6 +293,8 @@ _BUILDING_FAILURE_CODES = {
     "building_source_snapshot_changed",
     "building_scope_policy_invalid",
     "building_workload_receipt_mismatch",
+    "building_artifact_too_large",
+    "building_artifact_validation_failed",
 }
 _BUILDING_FAILURE_MESSAGES = {
     "building_scope_exceeded": "selected building scope exceeds policy",
@@ -308,10 +310,13 @@ _BUILDING_FAILURE_MESSAGES = {
     "building_workload_receipt_mismatch": (
         "selected building workload receipt does not match the source closure"
     ),
+    "building_artifact_too_large": "selected building artifact exceeds the format limit",
+    "building_artifact_validation_failed": "selected building artifact failed final validation",
 }
 _CHUNK_SPLIT_FAILURE_CODES = frozenset(
     {"building_object_limit_exceeded", "building_scope_exceeded"}
 )
+MAX_FINAL_ASSEMBLY_ARCHIVE_BYTES = 512 * 1024 * 1024
 
 
 class BuildingChunkSplitRequired(BuildingScopeError):
@@ -328,6 +333,53 @@ class BuildingChunkSplitRequired(BuildingScopeError):
         super().__init__(code, message)
         self.task_id = task_id
         self.blocks = blocks
+
+
+def validate_final_assembly_artifact(
+    archive_path: Path,
+    artifacts: Iterable[ArtifactRecord],
+    *,
+    max_archive_bytes: int = MAX_FINAL_ASSEMBLY_ARCHIVE_BYTES,
+) -> dict[str, Any]:
+    """Validate the final ZIP receipt before the parent becomes ready."""
+
+    try:
+        archive_bytes = archive_path.stat().st_size
+    except OSError as exc:
+        raise BuildingScopeError(
+            "building_artifact_validation_failed",
+            "final map archive is unavailable for validation",
+        ) from exc
+    if archive_bytes <= 0:
+        raise BuildingScopeError(
+            "building_artifact_validation_failed",
+            "final map archive is empty",
+        )
+    if archive_bytes > max_archive_bytes:
+        raise BuildingScopeError(
+            "building_artifact_too_large",
+            "final map archive exceeds the assembly size limit",
+        )
+    archive_sha256 = sha256_file(archive_path)
+    zip_records = [
+        artifact
+        for artifact in artifacts
+        if artifact.format == ZIP_STORED_FORMAT
+    ]
+    if zip_records:
+        record = zip_records[0]
+        if record.bytes != archive_bytes or record.sha256 != archive_sha256:
+            raise BuildingScopeError(
+                "building_artifact_validation_failed",
+                "final map archive receipt does not match the published file",
+            )
+    return {
+        "schemaVersion": 1,
+        "archiveBytes": archive_bytes,
+        "archiveSha256": archive_sha256,
+        "maxArchiveBytes": max_archive_bytes,
+        "zipReceiptValidated": bool(zip_records),
+    }
 
 
 def _coalesce_projected_rectangles(
@@ -1889,7 +1941,15 @@ class MapBuildPipeline:
             artifact_publication_lease=artifact_publication_lease,
             on_artifact_pending=on_artifact_pending,
             build_metrics=metrics,
+            max_archive_bytes=MAX_FINAL_ASSEMBLY_ARCHIVE_BYTES,
         )
+        if result.artifact_metrics is not None:
+            result.artifact_metrics["finalArtifactValidation"] = (
+                validate_final_assembly_artifact(
+                    archive_path,
+                    result.artifacts,
+                )
+            )
         self.building_task_store.set_plan_stage(parent_job_id, stage="ready")
         return result
 
@@ -2885,6 +2945,7 @@ class MapBuildPipeline:
         artifact_publication_lease=None,
         on_artifact_pending=None,
         build_metrics: dict[str, Any] | None = None,
+        max_archive_bytes: int | None = None,
     ) -> MapBuildResult:
         map_id = job.map_id or stable_map_id(job)
         job.map_id = map_id
@@ -2912,6 +2973,13 @@ class MapBuildPipeline:
         ):
             raise RuntimeError("map preview changed after build identity reservation")
         write_pack_archive(pack_root, manifest, archive_path)
+        if max_archive_bytes is not None:
+            archive_bytes = archive_path.stat().st_size
+            if archive_bytes > max_archive_bytes:
+                raise BuildingScopeError(
+                    "building_artifact_too_large",
+                    "final map archive exceeds the assembly size limit",
+                )
         artifacts: list[ArtifactRecord] = []
         packaging_seconds = time.perf_counter() - packaging_started
         if renderer_format_version(job.request) in {

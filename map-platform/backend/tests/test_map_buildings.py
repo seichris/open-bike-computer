@@ -12,6 +12,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from map_platform.jobs import JobStore, MapJobService
+from map_platform.artifacts import (
+    ArtifactRecord,
+    ZIP_MEDIA_TYPE,
+    ZIP_STORED_FORMAT,
+    zip_object_key,
+)
 from map_platform.manifest import (
     PipelineMetadata,
     build_manifest,
@@ -32,6 +38,7 @@ from map_platform.pipeline import (
     MapBuildPipeline,
     PipelinePaths,
     _coalesce_projected_rectangles,
+    validate_final_assembly_artifact,
 )
 from map_platform.building_scope import plan_building_scope, plan_global_building_scope
 from map_platform.building_tasks import BuildingTaskStore
@@ -260,6 +267,48 @@ class MapBuildingContractTests(unittest.TestCase):
                     calibration_generation={},
                 )
             self.assertEqual(raised.exception.code, "building_chunks_incomplete")
+
+    def test_final_assembly_artifact_validates_size_and_zip_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "map.zip"
+            archive.write_bytes(b"assembled-map")
+            archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+            record = ArtifactRecord(
+                format=ZIP_STORED_FORMAT,
+                media_type=ZIP_MEDIA_TYPE,
+                filename="map.zip",
+                object_key=zip_object_key("map", archive_sha256),
+                bytes=archive.stat().st_size,
+                sha256=archive_sha256,
+            )
+
+            summary = validate_final_assembly_artifact(archive, [record])
+
+            self.assertEqual(summary["archiveBytes"], archive.stat().st_size)
+            self.assertEqual(summary["archiveSha256"], archive_sha256)
+            self.assertTrue(summary["zipReceiptValidated"])
+            with self.assertRaises(BuildingScopeError) as too_large:
+                validate_final_assembly_artifact(
+                    archive,
+                    [record],
+                    max_archive_bytes=archive.stat().st_size - 1,
+                )
+            self.assertEqual(too_large.exception.code, "building_artifact_too_large")
+
+            mismatched = ArtifactRecord(
+                format=ZIP_STORED_FORMAT,
+                media_type=ZIP_MEDIA_TYPE,
+                filename="map.zip",
+                object_key=zip_object_key("map", "f" * 64),
+                bytes=record.bytes,
+                sha256="f" * 64,
+            )
+            with self.assertRaises(BuildingScopeError) as invalid:
+                validate_final_assembly_artifact(archive, [mismatched])
+            self.assertEqual(
+                invalid.exception.code,
+                "building_artifact_validation_failed",
+            )
 
     def test_multi_block_guard_failure_becomes_split_signal(self):
         with tempfile.TemporaryDirectory() as tmp:

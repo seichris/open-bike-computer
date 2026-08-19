@@ -823,9 +823,11 @@ a high-limit reference build; deleting one receipt prevents publication.
 every global block receipt, rereads and matches the canonical cache manifests,
 extracts whole-map roads/labels, and passes a fail-closed cache-only flag to the
 extractor. A cache miss cannot silently re-enter monolithic building
-normalization. The parent worker does not invoke assembly yet; final
-partition-invariant artifact identity, whole-artifact size/signature gates, and
-the high-limit reference comparison remain pending.
+normalization. Assembly now validates the final ZIP size and published ZIP
+receipt before the parent can enter `ready`. The parent worker does not invoke
+assembly yet; final partition-invariant artifact identity, whole-artifact
+signature/device gates, and the high-limit reference comparison remain
+pending.
 
 ### Phase 5 — Progress, estimates, operations, and retention
 
