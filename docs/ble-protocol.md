@@ -1398,7 +1398,7 @@ LAN clients or administrators observing the bearer token.
 
 ### Device diagnostics transfer
 
-When `DTRNenter|diagnostics` is accepted, the same session-scoped transfer
+When `DTRN enter|diagnostics` is accepted, the same session-scoped transfer
 server uses a fresh WPA2 hotspot password (or the configured trusted LAN) and
 the existing bearer token. The read-only API is:
 

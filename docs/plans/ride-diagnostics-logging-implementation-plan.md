@@ -25,6 +25,10 @@ durable ride log:
 - GPS packets already carry Unix time and periodically synchronize the device
   RTC, which gives the two recorders a useful clock anchor.
 
+The implementation worktree was later reconciled with the subsequent
+`origin/main` display-inactivity change before the feature commits were
+published, while the original dirty checkout remained untouched.
+
 ## Outcome
 
 During an ordinary ride, the iPhone and Bicino independently retain bounded,

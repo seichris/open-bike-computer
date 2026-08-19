@@ -28,6 +28,21 @@ def event(sequence=0, source="ios", fields=None):
     }
 
 
+def firmware_event(sequence=0, fields=None):
+    return event(
+        sequence=sequence,
+        source="firmware",
+        fields=fields
+        or {
+            "bootSequence": 7,
+            "firmwareFingerprint": "A1B2C3D4",
+            "ready": True,
+            "safeMode": False,
+            "storageErrorCount": 2,
+        },
+    )
+
+
 class RideDiagnosticsTests(unittest.TestCase):
     def test_valid_stream_reports_sequence_gaps_and_tail(self):
         data = (json.dumps(event(2)) + "\n" + json.dumps(event(4)) + "\n" + "partial").encode()
@@ -56,6 +71,28 @@ class RideDiagnosticsTests(unittest.TestCase):
         payload["secret"] = "no"
         with self.assertRaises(ride_diagnostics.DiagnosticError):
             ride_diagnostics.validate_event(payload)
+
+    def test_accepts_firmware_boot_and_storage_gap_fields(self):
+        boot = ride_diagnostics.validate_event(firmware_event())
+        self.assertEqual(boot["source"], "firmware")
+        gap = ride_diagnostics.validate_event(
+            firmware_event(
+                fields={
+                    "bootSequence": 6,
+                    "firstMissingUptimeMs": 100,
+                    "lastMissingUptimeMs": 200,
+                    "eventCount": 3,
+                    "droppedCount": 1,
+                    "storageErrorCount": 2,
+                    "resetReason": 5,
+                    "activeStage": 4,
+                    "completedStage": 3,
+                    "lastCriticalCategory": "storage",
+                    "lastCriticalEvent": "write_failed",
+                }
+            )
+        )
+        self.assertEqual(gap["fields"]["storageErrorCount"], 2)
 
     def test_bundle_hashes_and_summary(self):
         with TemporaryDirectory() as directory:
