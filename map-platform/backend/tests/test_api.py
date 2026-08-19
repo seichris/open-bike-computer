@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 import map_platform.api as api_module
 from map_platform.api import create_app
 from map_platform.downloads import DownloadSigner
+from map_platform.building_tasks import BuildingTaskSpec
 from map_platform.models import JobStatus, MapJob
 
 
@@ -229,6 +230,38 @@ class MapJobRunAPITests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         return response.json()["jobId"]
+
+    def test_admin_building_plan_alerts_is_authenticated_and_read_only(self):
+        task_store = self.client.app.state.building_task_store
+        task_store.create_plan(
+            parent_job_id="job-admin-alerts",
+            global_plan_sha256="b" * 64,
+            input_identity={},
+            expected_output_block_count=1,
+            policy_version=1,
+            resource_model_version="v1",
+        )
+        task_store.add_tasks(
+            [
+                BuildingTaskSpec(
+                    task_id="task-admin-alerts",
+                    parent_job_id="job-admin-alerts",
+                    kind="building_chunk",
+                    blocks=((1, 1),),
+                    chunk_plan_sha256="b" * 64,
+                )
+            ]
+        )
+
+        denied = self.client.get("/v1/admin/building-plans/job-admin-alerts/alerts")
+        self.assertEqual(denied.status_code, 401)
+        response = self.client.get(
+            "/v1/admin/building-plans/job-admin-alerts/alerts",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["alertCount"], 0)
+        self.assertEqual(task_store.get_plan("job-admin-alerts")["state"], "planning")
 
     def test_preparation_estimate_rollout_modes_control_public_field(self):
         observations = {}

@@ -28,6 +28,8 @@ from .building_tasks import (
     DEFAULT_BUILDING_TASK_RETENTION_DAYS,
     BuildingTaskStore,
 )
+from .building_resource_model import train_resource_model
+from .building_operations import building_plan_alerts
 from .map_stream_build_identity import (
     image_digest_from_reference,
     verify_map_stream_build_identity,
@@ -433,6 +435,26 @@ def main() -> int:
     build_plan_workload.add_argument("--lease-token", required=True)
     build_plan_workload.add_argument("--receipt-json", required=True, type=Path)
     build_plan_workload.add_argument("--peak-rss-bytes", type=int)
+    build_plan_resource_model = build_plan_subparsers.add_parser(
+        "resource-model",
+        help="train a reviewable resource model from retained successful attempts",
+    )
+    build_plan_resource_model.add_argument("job_id")
+    build_plan_resource_model.add_argument(
+        "--minimum-observations",
+        type=int,
+        default=8,
+    )
+    build_plan_resource_model.add_argument(
+        "--safety-margin",
+        type=float,
+        default=1.10,
+    )
+    build_plan_alerts_command = build_plan_subparsers.add_parser(
+        "alerts",
+        help="show read-only operator alerts for a building plan",
+    )
+    build_plan_alerts_command.add_argument("job_id")
     subparsers.add_parser(
         "resource-report",
         help="print a read-only worker cgroup and memory capability report",
@@ -477,6 +499,28 @@ def main() -> int:
         plan = building_task_store.get_plan(args.job_id)
         if plan is None:
             raise SystemExit(f"building plan not found: {args.job_id}")
+        if args.build_plan_command == "resource-model":
+            print(
+                json.dumps(
+                    train_resource_model(
+                        building_task_store.resource_model_observations(args.job_id),
+                        minimum_observations=args.minimum_observations,
+                        safety_margin=args.safety_margin,
+                    ),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.build_plan_command == "alerts":
+            print(
+                json.dumps(
+                    building_plan_alerts(building_task_store, args.job_id),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
         tasks = [asdict(task) for task in building_task_store.list_tasks(args.job_id)]
         if args.build_plan_command == "tasks":
             print(

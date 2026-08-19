@@ -1310,7 +1310,10 @@ class BuildingTaskStore:
         try:
             where = [
                 "attempts.outcome='ready'",
+                # Cache-only children record zero work rather than a measured
+                # worker peak; they must not train the execution model.
                 "attempts.peak_rss_bytes IS NOT NULL",
+                "attempts.peak_rss_bytes > 0",
             ]
             params: list[Any] = []
             if parent_job_id is not None:

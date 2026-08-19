@@ -20,6 +20,7 @@ else:
 from .admin_inventory import map_inventory
 from .artifacts import BIKE_MAP_STREAM_FORMAT, create_artifact_store_from_environment
 from .building_tasks import BuildingTaskStore
+from .building_operations import building_plan_alerts
 from .downloads import DownloadSigner, DownloadTokenError
 from .generation_profiles import (
     configured_deployment_channel,
@@ -524,6 +525,18 @@ def create_app():
                 building_task_store.list_resource_reservations(parent_job_id)
             ),
         }
+
+    @app.get(
+        "/v1/admin/building-plans/{parent_job_id}/alerts",
+        dependencies=[Depends(require_admin_token)],
+    )
+    def admin_building_plan_alerts(parent_job_id: str) -> dict[str, Any]:
+        if building_task_store.get_plan(parent_job_id) is None:
+            raise HTTPException(status_code=404, detail="building plan not found")
+        try:
+            return building_plan_alerts(building_task_store, parent_job_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get(
         "/v1/admin/map-monitoring",

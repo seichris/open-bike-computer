@@ -468,6 +468,84 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.assertRegex(identity or "", r"^[0-9a-f]{64}$")
         self.assertIsNone(self.store.receipt_set_sha256("job-1"))
 
+    def test_receipt_set_identity_is_partition_invariant_across_task_layouts(self):
+        def build_store(path, specs):
+            store = BuildingTaskStore(path, clock=self.clock)
+            store.create_plan(
+                parent_job_id="job-layout",
+                global_plan_sha256=SHA,
+                input_identity={"globalPlan": SHA},
+                expected_output_block_count=3,
+                policy_version=1,
+                resource_model_version="v1",
+            )
+            store.add_tasks(specs)
+            for worker in ("worker-a", "worker-b", "worker-c"):
+                claimed = store.claim_next(worker_id=worker)
+                if claimed is None:
+                    break
+                for block in claimed.task.blocks:
+                    store.publish_receipt(
+                        claimed.task.task_id,
+                        worker_id=worker,
+                        lease_token=claimed.lease_token,
+                        block=block,
+                        cache_identity_sha256=SHA,
+                        content_sha256=CONTENT,
+                        producer_identity={"producer": "same"},
+                        validation={"valid": True},
+                    )
+                store.mark_ready(
+                    claimed.task.task_id,
+                    worker_id=worker,
+                    lease_token=claimed.lease_token,
+                )
+            return store
+
+        with tempfile.TemporaryDirectory() as directory:
+            first = build_store(
+                Path(directory) / "first.sqlite3",
+                [
+                    BuildingTaskSpec(
+                        task_id="first-a",
+                        parent_job_id="job-layout",
+                        kind="building_chunk",
+                        blocks=((2, 2), (1, 1)),
+                        chunk_plan_sha256=SHA,
+                    ),
+                    BuildingTaskSpec(
+                        task_id="first-b",
+                        parent_job_id="job-layout",
+                        kind="building_chunk",
+                        blocks=((3, 3),),
+                        chunk_plan_sha256=SHA,
+                    ),
+                ],
+            )
+            second = build_store(
+                Path(directory) / "second.sqlite3",
+                [
+                    BuildingTaskSpec(
+                        task_id="second-a",
+                        parent_job_id="job-layout",
+                        kind="building_chunk",
+                        blocks=((3, 3), (1, 1)),
+                        chunk_plan_sha256=SHA,
+                    ),
+                    BuildingTaskSpec(
+                        task_id="second-b",
+                        parent_job_id="job-layout",
+                        kind="building_chunk",
+                        blocks=((2, 2),),
+                        chunk_plan_sha256=SHA,
+                    ),
+                ],
+            )
+            self.assertEqual(
+                first.receipt_set_sha256("job-layout"),
+                second.receipt_set_sha256("job-layout"),
+            )
+
     def test_readding_the_same_task_is_idempotent_but_identity_changes_fail(self):
         spec = self.spec(blocks=((1, 2),))
         self.store.add_tasks([spec])

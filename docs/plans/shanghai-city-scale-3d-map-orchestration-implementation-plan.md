@@ -24,9 +24,13 @@ aggregate block progress, and capability-aware memory/CPU reservations with a
 concurrency-one default for heavy work. The parent worker now dispatches the
 chunked path behind an explicit rollout mode, reopens failed plans for retry,
 executes cache-aware child tasks, and performs fail-closed cache-only assembly.
-Production still uses the existing monolithic executor and hard ceilings until
-the benchmark, golden-equivalence, retention/runbook, deployment, and physical
-acceptance gates are complete.
+The retained-observation path now emits a reviewable, capability-bound p95
+calibration artifact without changing admission automatically; zero-work cache
+hits are excluded from training observations. Read-only operator alerts,
+authenticated alert diagnostics, a CLI alert surface, and an OOM/split/lease/
+cache/receipt runbook are also implemented. Production still uses the existing
+monolithic executor and hard ceilings until the benchmark, golden-equivalence,
+deployment, and physical acceptance gates are complete.
 
 The core decision is:
 
@@ -796,8 +800,10 @@ policies remain pending.
 Authenticated plan diagnostics now include an observational p95 resource-model
 summary grouped by the stable worker capability identity; groups below the
 reviewed sample count remain explicitly uncalibrated and do not alter
-admission. The validation canary produced 56 durable block receipts, retained
-the parent plan, and completed with max heavy-task concurrency one.
+admission. `build-plan resource-model` produces a versioned calibration
+artifact only after the sample floor is met. The validation canary produced 56
+durable block receipts, retained the parent plan, and completed with max
+heavy-task concurrency one.
 
 **Exit gate:** fault-injection tests prove no double publication, lost task,
 stale-worker receipt, non-monotonic progress, or cancellation resurrection.
@@ -821,8 +827,10 @@ identity are frozen once per parent; cache hits become zero-work child tasks;
 exact workload scans promote to bounded child execution; and multi-block guard
 failures emit deterministic split tasks. The validation Coolify canary ran the
 live `chunked_allowlist` path and published all 56 block receipts without a
-split or retry. Monolithic-vs-partition golden equivalence, measured
-benchmarks, and production allowlist rollout remain pending.
+split or retry. The durable receipt-set hash is explicitly tested across
+different task groupings and completion order; monolithic-vs-partition
+byte-level golden equivalence, measured benchmarks, and production allowlist
+rollout remain pending.
 
 ### Phase 4 — Cache-only final assembly
 
@@ -868,8 +876,10 @@ are implemented. The maintenance loop now prunes only old failed/cancelled
 coordinator evidence while retaining successful plans and canonical cache
 blocks. The validation canary retained phase timings, source-extraction peak
 resident memory, cgroup resource reports, cache-hit counts, receipt-set hash,
-and final ZIP validation. Alarm thresholds, operator runbooks, and production
-benchmark evidence remain pending.
+and final ZIP validation. Read-only alerts cover failed/split tasks, stale
+leases and heartbeats, OOM/cache-integrity failures, memory-headroom warnings,
+and incomplete receipt sets; the operator runbook documents safe recovery and
+publication gates. Production benchmark evidence remains pending.
 
 **Exit gate:** operators can explain every minute and resource peak of a
 Shanghai build from retained data, while current iOS clients still complete the
@@ -1048,6 +1058,8 @@ artifact.
 - [x] Add public aggregate progress and authenticated operator diagnostics.
 - [x] Add conservative failed/cancelled task-evidence retention without
       deleting reusable canonical cache blocks.
+- [x] Add read-only coordinator alerts and an operator runbook for splits,
+      OOMs, stale leases, corrupt cache, and final receipt/size failures.
 - [ ] Pass geometry, relation, height, seam, cache, orchestration, fault, and
       compatibility suites.
 - [ ] Pass central, west, and exact full-bbox server benchmarks.
