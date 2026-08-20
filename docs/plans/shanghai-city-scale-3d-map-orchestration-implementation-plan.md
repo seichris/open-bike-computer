@@ -38,9 +38,14 @@ public job; cgroup-v1's kernel unlimited sentinel is not treated as a real cap.
 Durable, token-fenced parent-phase reservations place source preparation and
 whole-map assembly in the same resource pool as child scans/builds. They
 heartbeat, recover after expiry, appear in bounded diagnostics, and yield the
-public parent without consuming another retry when the pool is occupied. Both
-phases reserve a reviewed 5 GiB floor, above the retained 4,128,673,792-byte
-cold source-extraction peak, instead of the unknown-workload 512 MiB default.
+public parent without consuming another retry when the pool is occupied. A
+capacity miss atomically records a durable parent-stage eligibility row even
+before a coordinator plan or child rows exist; claim admission consults that
+row only when the current worker's parent-phase capacity can make progress.
+Active rows are token-fenced and expiry recovery returns them to waiting, while
+terminal plan/reconciliation paths remove them. Both phases reserve a reviewed
+5 GiB floor, above the retained 4,128,673,792-byte cold source-extraction peak,
+instead of the unknown-workload 512 MiB default.
 
 Exact workload scans now recompute conservative memory and wall estimates,
 split multi-block work that exceeds the 70% memory or ten-minute wall target,
@@ -61,7 +66,11 @@ to `pending`, and restores a conservative nonzero reservation before rebuild.
 Pre-execution storage admission checks retention quotas, live disk headroom,
 and a reserve before preparation begins. Cold source downloads for different
 regions share one data-volume lock from admission through checksum and atomic
-publication, so concurrent downloads cannot spend the same reserve.
+publication, so concurrent downloads cannot spend the same reserve. The cold
+source cache keeps download, temporary hashing, expected-checksum validation,
+and atomic replacement inside one cleanup boundary: every unsuccessful
+publication removes the complete `.tmp` file and leaves any prior stable target
+untouched.
 
 The retained resource model uses the p95 of paired actual/predicted ratios for
 one worker capability identity, refuses to train on a positive actual with a
@@ -825,6 +834,11 @@ The implemented scheduler considers both fairness and reserved resources:
 - exclude yielded parents whose only pending children are still in retry
   backoff, while retaining failed-child and receipt-complete parents so they can
   surface a terminal failure or assemble;
+- persist a `map_build_parent_stage_eligibility` waiting row atomically when a
+  source-preparation or assembly reservation cannot be admitted, including a
+  planless parent, and whitelist that parent only when the current worker can
+  actually reserve the phase; active rows are token-fenced and expiry recovery
+  returns them to waiting;
 - reserve memory and CPU weight before leasing;
 - reserve source preparation and final assembly in that same pool, with
   heartbeat renewal, expiry recovery, and a final token fence;
@@ -1535,6 +1549,10 @@ image and production worker class.
 - Two workers cannot own or publish the same task attempt.
 - Two workers cannot overlap source preparation, assembly, or a child task in
   the concurrency-one heavy resource pool.
+- A planless parent-stage waiter is durable and is admitted only after the
+  shared pool can progress; an occupied pool leaves all waiting parents quiet,
+  while failed-child evidence still surfaces and receipt-complete assembly is
+  re-admitted when capacity returns.
 - A stale worker cannot publish after lease expiry or cancellation.
 - The next scheduler/claim pass automatically requeues expired work, closes its
   old attempt, and releases its reservation before another worker can claim it.
@@ -1659,6 +1677,8 @@ artifact.
 - [x] Add bounded memory/CPU reservations with a concurrency-one heavy-task default.
 - [x] Extend the durable reservation pool to source preparation and final
       assembly with heartbeat, fencing, expiry recovery, and scheduler yield.
+- [x] Persist atomic parent-stage eligibility for planless source-preparation
+      waiters and capacity-gate yielded source/assembly parents on resumption.
 - [x] Add fair scheduling across parent jobs, weighted virtual-finish dispatch,
       one-task parent yields, admission priority, and a per-parent active-task quota.
 - [x] Implement chunk-only canonical building block generation.

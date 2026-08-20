@@ -489,6 +489,108 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.assertEqual(admission["memoryLimitBytes"], 8_000_000_000)
         self.assertEqual(admission["memoryReservationBytes"], 4_000_000_000)
 
+    def test_cache_hit_claims_without_heavy_reservation_when_pool_is_occupied(self):
+        self.store.create_plan(
+            parent_job_id="cache-parent",
+            global_plan_sha256="c" * 64,
+            input_identity={"source": "source-sha-cache"},
+            expected_output_block_count=1,
+            policy_version=1,
+            resource_model_version="v1",
+        )
+        self.store.add_tasks(
+            [
+                BuildingTaskSpec(
+                    task_id="heavy-blocker",
+                    parent_job_id="job-1",
+                    kind="building_chunk",
+                    blocks=((1, 2),),
+                    chunk_plan_sha256=SHA,
+                    predicted_resource={"estimatedPeakMemoryBytes": 4_000_000_000},
+                ),
+                BuildingTaskSpec(
+                    task_id="cache-hit",
+                    parent_job_id="cache-parent",
+                    kind="building_chunk",
+                    blocks=((2, 2),),
+                    chunk_plan_sha256="c" * 64,
+                    predicted_resource={
+                        "cacheHit": True,
+                        "cacheIdentitySha256": SHA,
+                        "estimatedPeakMemoryBytes": 0,
+                        "memoryEstimateSource": "cache_receipt",
+                    },
+                ),
+            ]
+        )
+        capability = {
+            "resourcePool": "shared-cache-pool",
+            "memoryLimitBytes": 8_000_000_000,
+            "cpuCount": 8,
+            "maxConcurrentTasks": 1,
+        }
+        blocker = self.store.claim_next(
+            worker_id="heavy-worker", worker_capability=capability
+        )
+        self.assertIsNotNone(blocker)
+        claimed = self.store.claim_next(
+            worker_id="cache-worker", worker_capability=capability
+        )
+        self.assertIsNotNone(claimed)
+        self.assertEqual(self.store.list_resource_reservations("cache-parent"), ())
+        assert claimed is not None
+        admission = json.loads(
+            self.store.list_attempts("cache-parent")[0]["worker_capability_json"]
+        )["admission"]
+        self.assertFalse(admission["reservationRequired"])
+        self.assertTrue(admission["reservationAccepted"])
+
+    def test_receipt_complete_assembly_precedes_pending_child_parent(self):
+        self.store.create_plan(
+            parent_job_id="pending-parent",
+            global_plan_sha256="d" * 64,
+            input_identity={"source": "source-sha-pending"},
+            expected_output_block_count=1,
+            policy_version=1,
+            resource_model_version="v1",
+        )
+        self.store.add_tasks(
+            [
+                self.spec(blocks=((1, 2), (1, 3), (1, 4))),
+                BuildingTaskSpec(
+                    task_id="pending-child",
+                    parent_job_id="pending-parent",
+                    kind="building_chunk",
+                    blocks=((2, 2),),
+                    chunk_plan_sha256="d" * 64,
+                    predicted_resource={"estimatedPeakMemoryBytes": 1},
+                ),
+            ]
+        )
+        claimed = self.store.claim_next(worker_id="receipt-worker")
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        for block in claimed.task.blocks:
+            self.store.publish_receipt(
+                claimed.task.task_id,
+                worker_id="receipt-worker",
+                lease_token=claimed.lease_token,
+                block=block,
+                cache_identity_sha256=SHA,
+                content_sha256=CONTENT,
+                producer_identity={},
+                validation={"valid": True},
+            )
+        self.store.mark_ready(
+            claimed.task.task_id,
+            worker_id="receipt-worker",
+            lease_token=claimed.lease_token,
+        )
+        self.assertEqual(
+            self.store.resumable_parent_ids(),
+            ("job-1", "pending-parent"),
+        )
+
     def test_resource_reservation_defaults_to_one_heavy_task_and_releases(self):
         self.store.add_tasks(
             [
@@ -597,6 +699,329 @@ class BuildingTaskStoreTests(unittest.TestCase):
         assert reservation is not None
         row = self.store.list_parent_phase_reservations("job-1")[0]
         self.assertEqual(row["memory_reservation_bytes"], 5 * 1024**3)
+
+    def test_planless_parent_stage_waiter_is_admitted_only_after_pool_frees(self):
+        capability = {
+            "resourcePool": "parent-stage-pool",
+            "memoryLimitBytes": 8 * 1024**3,
+            "cpuCount": 8,
+            "maxConcurrentTasks": 1,
+        }
+        blocker = self.store.acquire_parent_phase_reservation(
+            parent_job_id="blocker",
+            phase="source_preparation",
+            worker_id="worker-a",
+            worker_capability=capability,
+        )
+        self.assertIsNotNone(blocker)
+        waiter = self.store.acquire_parent_phase_reservation(
+            parent_job_id="planless-parent",
+            phase="source_preparation",
+            worker_id="worker-b",
+            worker_capability=capability,
+        )
+        self.assertIsNone(waiter)
+        self.assertEqual(
+            self.store.list_parent_stage_eligibility("planless-parent"),
+            (
+                {
+                    "parent_job_id": "planless-parent",
+                    "phase": "source_preparation",
+                    "state": "waiting",
+                    "worker_id": None,
+                    "created_at": 100.0,
+                    "updated_at": 100.0,
+                },
+            ),
+        )
+        self.assertNotIn(
+            "planless-parent",
+            self.store.resumable_parent_ids(worker_capability=capability),
+        )
+
+        assert blocker is not None
+        self.store.release_parent_phase_reservation(
+            parent_job_id="blocker",
+            phase="source_preparation",
+            worker_id="worker-a",
+            lease_token=blocker.lease_token,
+        )
+        self.assertIn(
+            "planless-parent",
+            self.store.resumable_parent_ids(worker_capability=capability),
+        )
+        admitted = self.store.acquire_parent_phase_reservation(
+            parent_job_id="planless-parent",
+            phase="source_preparation",
+            worker_id="worker-b",
+            worker_capability=capability,
+        )
+        self.assertIsNotNone(admitted)
+        self.assertEqual(
+            self.store.list_parent_stage_eligibility("planless-parent")[0]["state"],
+            "active",
+        )
+        assert admitted is not None
+        self.store.release_parent_phase_reservation(
+            parent_job_id="planless-parent",
+            phase="source_preparation",
+            worker_id="worker-b",
+            lease_token=admitted.lease_token,
+        )
+        self.assertEqual(
+            self.store.list_parent_stage_eligibility("planless-parent"), ()
+        )
+
+    def test_terminal_stage_transitions_clear_parent_stage_eligibility(self):
+        capability = {
+            "resourcePool": "terminal-stage-pool",
+            "memoryLimitBytes": 8 * 1024**3,
+            "cpuCount": 8,
+            "maxConcurrentTasks": 1,
+        }
+        for parent_job_id in ("failed-stage-parent", "advanced-failed-parent"):
+            self.store.create_plan(
+                parent_job_id=parent_job_id,
+                global_plan_sha256=(parent_job_id[0] * 64),
+                input_identity={"source": parent_job_id},
+                expected_output_block_count=1,
+                policy_version=1,
+                resource_model_version="v1",
+            )
+        blocker = self.store.acquire_parent_phase_reservation(
+            parent_job_id="terminal-stage-blocker",
+            phase="source_preparation",
+            worker_id="worker-blocker",
+            worker_capability=capability,
+        )
+        self.assertIsNotNone(blocker)
+        for parent_job_id in ("failed-stage-parent", "advanced-failed-parent"):
+            self.assertIsNone(
+                self.store.acquire_parent_phase_reservation(
+                    parent_job_id=parent_job_id,
+                    phase="source_preparation",
+                    worker_id="worker-waiter",
+                    worker_capability=capability,
+                )
+            )
+        self.assertEqual(
+            len(self.store.list_parent_stage_eligibility()), 3
+        )
+        self.store.set_plan_stage(
+            "failed-stage-parent", stage="failed", state="failed"
+        )
+        self.store.advance_plan_stage(
+            "advanced-failed-parent", stage="failed", state="failed"
+        )
+        self.assertEqual(
+            self.store.list_parent_stage_eligibility("failed-stage-parent"), ()
+        )
+        self.assertEqual(
+            self.store.list_parent_stage_eligibility("advanced-failed-parent"), ()
+        )
+        assert blocker is not None
+        self.store.release_parent_phase_reservation(
+            parent_job_id="terminal-stage-blocker",
+            phase="source_preparation",
+            worker_id="worker-blocker",
+            lease_token=blocker.lease_token,
+        )
+
+    def test_ready_reconciliation_clears_planless_parent_stage_waiter(self):
+        capability = {
+            "resourcePool": "planless-reconcile-pool",
+            "memoryLimitBytes": 8 * 1024**3,
+            "cpuCount": 8,
+            "maxConcurrentTasks": 1,
+        }
+        blocker = self.store.acquire_parent_phase_reservation(
+            parent_job_id="planless-reconcile-blocker",
+            phase="source_preparation",
+            worker_id="worker-blocker",
+            worker_capability=capability,
+        )
+        self.assertIsNotNone(blocker)
+        self.assertIsNone(
+            self.store.acquire_parent_phase_reservation(
+                parent_job_id="planless-reconcile-parent",
+                phase="source_preparation",
+                worker_id="worker-waiter",
+                worker_capability=capability,
+            )
+        )
+        self.assertEqual(
+            self.store.reconcile_ready_plans(("planless-reconcile-parent",)), 0
+        )
+        self.assertEqual(
+            self.store.list_parent_stage_eligibility("planless-reconcile-parent"),
+            (),
+        )
+        assert blocker is not None
+        self.store.release_parent_phase_reservation(
+            parent_job_id="planless-reconcile-blocker",
+            phase="source_preparation",
+            worker_id="worker-blocker",
+            lease_token=blocker.lease_token,
+        )
+
+    def test_reopen_failed_plan_clears_stale_parent_stage_waiter(self):
+        self.store.set_plan_stage("job-1", stage="failed", state="failed")
+        connection = sqlite3.connect(self.store.path)
+        connection.execute(
+            """
+            INSERT INTO map_build_parent_stage_eligibility(
+                parent_job_id, phase, state, lease_token, worker_id,
+                created_at, updated_at
+            ) VALUES ('job-1', 'source_preparation', 'waiting', NULL, NULL, 100, 100)
+            """
+        )
+        connection.commit()
+        connection.close()
+
+        self.store.reopen_failed_plan("job-1")
+
+        self.assertEqual(self.store.list_parent_stage_eligibility("job-1"), ())
+
+    def test_two_waiting_parent_stages_are_quietly_handed_between_workers(self):
+        capability = {
+            "resourcePool": "two-worker-parent-pool",
+            "memoryLimitBytes": 8 * 1024**3,
+            "cpuCount": 8,
+            "maxConcurrentTasks": 1,
+        }
+        blocker = self.store.acquire_parent_phase_reservation(
+            parent_job_id="blocker-two-worker",
+            phase="source_preparation",
+            worker_id="worker-blocker",
+            worker_capability=capability,
+        )
+        self.assertIsNotNone(blocker)
+        for parent_job_id, worker_id in (
+            ("parent-a", "worker-a"),
+            ("parent-b", "worker-b"),
+        ):
+            self.assertIsNone(
+                self.store.acquire_parent_phase_reservation(
+                    parent_job_id=parent_job_id,
+                    phase="source_preparation",
+                    worker_id=worker_id,
+                    worker_capability=capability,
+                )
+            )
+        assert blocker is not None
+        self.store.release_parent_phase_reservation(
+            parent_job_id="blocker-two-worker",
+            phase="source_preparation",
+            worker_id="worker-blocker",
+            lease_token=blocker.lease_token,
+        )
+
+        first_candidates = self.store.resumable_parent_ids(
+            worker_capability=capability
+        )
+        self.assertEqual(first_candidates, ("parent-a", "parent-b"))
+        first = self.store.acquire_parent_phase_reservation(
+            parent_job_id="parent-a",
+            phase="source_preparation",
+            worker_id="worker-a",
+            worker_capability=capability,
+        )
+        self.assertIsNotNone(first)
+        self.assertEqual(
+            self.store.resumable_parent_ids(worker_capability=capability), ()
+        )
+        assert first is not None
+        self.store.release_parent_phase_reservation(
+            parent_job_id="parent-a",
+            phase="source_preparation",
+            worker_id="worker-a",
+            lease_token=first.lease_token,
+        )
+        self.assertEqual(
+            self.store.resumable_parent_ids(worker_capability=capability),
+            ("parent-b",),
+        )
+
+    def test_receipt_complete_assembly_waits_for_parent_pool_capacity(self):
+        self.store.add_tasks([self.spec(blocks=((1, 2), (1, 3), (1, 4)))])
+        claimed = self.store.claim_next(worker_id="worker-receipt")
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        for block in claimed.task.blocks:
+            self.store.publish_receipt(
+                claimed.task.task_id,
+                worker_id="worker-receipt",
+                lease_token=claimed.lease_token,
+                block=block,
+                cache_identity_sha256=SHA,
+                content_sha256=CONTENT,
+                producer_identity={},
+                validation={"valid": True},
+            )
+        self.store.mark_ready(
+            claimed.task.task_id,
+            worker_id="worker-receipt",
+            lease_token=claimed.lease_token,
+        )
+        capability = {
+            "resourcePool": "assembly-pool",
+            "memoryLimitBytes": 8 * 1024**3,
+            "cpuCount": 8,
+            "maxConcurrentTasks": 1,
+        }
+        blocker = self.store.acquire_parent_phase_reservation(
+            parent_job_id="assembly-blocker",
+            phase="source_preparation",
+            worker_id="worker-blocker",
+            worker_capability=capability,
+        )
+        self.assertIsNotNone(blocker)
+        self.assertNotIn(
+            "job-1",
+            self.store.resumable_parent_ids(worker_capability=capability),
+        )
+        assert blocker is not None
+        self.store.release_parent_phase_reservation(
+            parent_job_id="assembly-blocker",
+            phase="source_preparation",
+            worker_id="worker-blocker",
+            lease_token=blocker.lease_token,
+        )
+        self.assertIn(
+            "job-1",
+            self.store.resumable_parent_ids(worker_capability=capability),
+        )
+
+    def test_pending_child_parent_waits_for_shared_pool_capacity(self):
+        self.store.add_tasks([self.spec(blocks=((1, 2),))])
+        capability = {
+            "resourcePool": "pending-child-pool",
+            "memoryLimitBytes": 8 * 1024**3,
+            "cpuCount": 8,
+            "maxConcurrentTasks": 1,
+        }
+        blocker = self.store.acquire_parent_phase_reservation(
+            parent_job_id="pending-child-blocker",
+            phase="source_preparation",
+            worker_id="worker-blocker",
+            worker_capability=capability,
+        )
+        self.assertIsNotNone(blocker)
+        self.assertNotIn(
+            "job-1",
+            self.store.resumable_parent_ids(worker_capability=capability),
+        )
+        assert blocker is not None
+        self.store.release_parent_phase_reservation(
+            parent_job_id="pending-child-blocker",
+            phase="source_preparation",
+            worker_id="worker-blocker",
+            lease_token=blocker.lease_token,
+        )
+        self.assertIn(
+            "job-1",
+            self.store.resumable_parent_ids(worker_capability=capability),
+        )
 
     def test_resource_reservation_recovery_and_memory_sum_are_fenced(self):
         self.store.add_tasks(
@@ -1023,12 +1448,12 @@ class BuildingTaskStoreTests(unittest.TestCase):
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         connection.close()
         self.assertIn("last_claimed_at", columns)
-        self.assertEqual(version, 6)
+        self.assertEqual(version, 7)
 
     def test_future_schema_is_rejected_before_any_schema_mutation(self):
         path = Path(self.temp.name) / "future-tasks.sqlite3"
         connection = sqlite3.connect(path)
-        connection.execute("PRAGMA user_version=7")
+        connection.execute("PRAGMA user_version=8")
         connection.commit()
         connection.close()
 
@@ -1044,7 +1469,7 @@ class BuildingTaskStoreTests(unittest.TestCase):
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
         connection.close()
-        self.assertEqual(version, 7)
+        self.assertEqual(version, 8)
         self.assertEqual(tables, [])
 
     def test_concurrent_legacy_initializers_serialize_migrations(self):
@@ -1094,7 +1519,7 @@ class BuildingTaskStoreTests(unittest.TestCase):
             for row in connection.execute("PRAGMA table_info(map_build_plans)")
         }
         connection.close()
-        self.assertEqual(version, 6)
+        self.assertEqual(version, 7)
         self.assertIn("scheduling_weight", columns)
         self.assertIn("last_claimed_at", columns)
 
@@ -2033,6 +2458,15 @@ class BuildingTaskStoreTests(unittest.TestCase):
             (),
         )
         self.assertEqual(self.store.get_task("task-1").state, "cancelled")
+
+    def test_reconcile_ready_does_not_promote_observed_plan(self):
+        observed = self.store.mark_plan_observed("job-1")
+        self.assertEqual(observed["state"], "observed")
+
+        self.assertEqual(self.store.reconcile_ready_plans(("job-1",)), 0)
+
+        self.assertEqual(self.store.get_plan("job-1")["state"], "observed")
+        self.assertEqual(self.store.get_plan("job-1")["stage"], "observed")
 
     def test_reconcile_cancelled_plan_releases_legacy_reservation(self):
         self.store.add_tasks([self.spec(blocks=((1, 2),))])

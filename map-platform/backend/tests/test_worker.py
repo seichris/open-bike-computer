@@ -270,6 +270,48 @@ class QuantumChunkedPipeline(MapBuildPipeline):
         return MapBuildResult(f"map-{job.job_id}", pack_path, [])
 
 
+class ParentStagePipeline(MapBuildPipeline):
+    """Minimal chunked pipeline that exercises source-phase admission only."""
+
+    def __init__(self, paths, task_store):
+        super().__init__(
+            paths,
+            building_scope_mode="chunked",
+            building_task_store=task_store,
+        )
+        self.calls = []
+
+    def uses_selected_preprocessing(self, job):
+        del job
+        return False
+
+    def uses_chunked_preprocessing(self, job):
+        del job
+        return True
+
+    def reuse_keys(
+        self, job, *, on_phase_progress=None, cancellation_check=None
+    ):
+        del on_phase_progress
+        with self._parent_phase_reservation(
+            parent_job_id=job.job_id,
+            phase="source_preparation",
+            worker_id=job.worker_id,
+            worker_capability=self._job_worker_capability(job),
+            cancellation_check=cancellation_check,
+        ):
+            pass
+        return None
+
+    def build_chunked(self, job, **kwargs):
+        del kwargs
+        self.calls.append(job.job_id)
+        pack_path = self.paths.work_root / f"{job.job_id}.zip"
+        pack_path.parent.mkdir(parents=True, exist_ok=True)
+        pack_path.write_bytes(b"parent-stage-map")
+        return MapBuildResult(f"map-{job.job_id}", pack_path, [])
+
+
 class CompletionBoundaryPipeline(MapBuildPipeline):
     def __init__(self, paths, task_store):
         super().__init__(
@@ -430,6 +472,89 @@ class WorkerTests(unittest.TestCase):
                 self.assertEqual(completed.status, JobStatus.READY)
                 self.assertEqual(completed.attempts, 1)
                 self.assertFalse(completed.scheduler_yielded)
+
+    def test_planless_parent_stage_yield_resumes_across_two_workers_after_pool_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            jobs = [
+                service.create_job(
+                    {
+                        "mode": "custom_bbox",
+                        "bbox": [103.75, 1.24, 103.93, 1.37],
+                    }
+                )
+                for _ in range(2)
+            ]
+            task_store = BuildingTaskStore(root / "building-tasks.sqlite3")
+            pipeline = ParentStagePipeline(
+                PipelinePaths(root, root / "work", root / "packs"),
+                task_store,
+            )
+            blocker = task_store.acquire_parent_phase_reservation(
+                parent_job_id="external-blocker",
+                phase="source_preparation",
+                worker_id="worker-blocker",
+                worker_capability=TEST_CHUNK_CAPABILITY,
+            )
+            self.assertIsNotNone(blocker)
+
+            with patch(
+                "map_platform.worker.worker_capability_snapshot",
+                return_value=TEST_CHUNK_CAPABILITY,
+            ):
+                first = MapWorker(
+                    store, pipeline, worker_id="worker-a"
+                ).run_next()
+                second = MapWorker(
+                    store, pipeline, worker_id="worker-b"
+                ).run_next()
+                quiet = MapWorker(
+                    store, pipeline, worker_id="worker-a"
+                ).run_next()
+
+            self.assertTrue(first.processed)
+            self.assertTrue(second.processed)
+            self.assertFalse(quiet.processed)
+            self.assertEqual(
+                [store.get(job.job_id).scheduler_yielded for job in jobs],
+                [True, True],
+            )
+            self.assertEqual(
+                {
+                    row["parent_job_id"]
+                    for row in task_store.list_parent_stage_eligibility()
+                    if row["state"] == "waiting"
+                },
+                {job.job_id for job in jobs},
+            )
+
+            assert blocker is not None
+            task_store.release_parent_phase_reservation(
+                parent_job_id="external-blocker",
+                phase="source_preparation",
+                worker_id="worker-blocker",
+                lease_token=blocker.lease_token,
+            )
+            with patch(
+                "map_platform.worker.worker_capability_snapshot",
+                return_value=TEST_CHUNK_CAPABILITY,
+            ):
+                resumed_first = MapWorker(
+                    store, pipeline, worker_id="worker-a"
+                ).run_next()
+                resumed_second = MapWorker(
+                    store, pipeline, worker_id="worker-b"
+                ).run_next()
+
+            self.assertEqual(resumed_first.job.status, JobStatus.READY)
+            self.assertEqual(resumed_second.job.status, JobStatus.READY)
+            self.assertEqual(pipeline.calls, [job.job_id for job in jobs])
+            self.assertEqual(
+                [store.get(job.job_id).attempts for job in jobs], [1, 1]
+            )
+            self.assertEqual(task_store.list_parent_stage_eligibility(), ())
 
     def test_older_yielded_parent_runs_before_continuous_new_admission(self):
         with tempfile.TemporaryDirectory() as tmp:

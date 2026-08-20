@@ -21,7 +21,7 @@ from .building_resource_model import (
     summarize_resource_observations,
 )
 
-BUILDING_TASK_SCHEMA_VERSION = 6
+BUILDING_TASK_SCHEMA_VERSION = 7
 DEFAULT_BUILDING_TASK_RETENTION_DAYS = 30
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _TASK_STATES = {"pending", "leased", "ready", "split", "failed", "cancelled"}
@@ -560,6 +560,11 @@ class BuildingTaskStore:
                 "UPDATE map_build_plans SET stage=?, state=?, updated_at=? WHERE parent_job_id=?",
                 (stage, next_state, now, parent_job_id),
             )
+            if next_state in _TERMINAL_PLAN_STATES:
+                connection.execute(
+                    "DELETE FROM map_build_parent_stage_eligibility WHERE parent_job_id=?",
+                    (parent_job_id,),
+                )
             connection.commit()
             return dict(
                 connection.execute(
@@ -606,6 +611,10 @@ class BuildingTaskStore:
                 raise BuildingTaskStoreError("parent plan not found")
             if row["state"] in _TERMINAL_PLAN_STATES:
                 if row["state"] == next_state and row["stage"] == stage:
+                    connection.execute(
+                        "DELETE FROM map_build_parent_stage_eligibility WHERE parent_job_id=?",
+                        (parent_job_id,),
+                    )
                     connection.commit()
                     return dict(row)
                 raise BuildingTaskStoreError("parent plan is terminal")
@@ -616,6 +625,11 @@ class BuildingTaskStore:
                 "UPDATE map_build_plans SET stage=?, state=?, updated_at=? WHERE parent_job_id=?",
                 (stage, next_state, now, parent_job_id),
             )
+            if next_state in _TERMINAL_PLAN_STATES:
+                connection.execute(
+                    "DELETE FROM map_build_parent_stage_eligibility WHERE parent_job_id=?",
+                    (parent_job_id,),
+                )
             result = connection.execute(
                 "SELECT * FROM map_build_plans WHERE parent_job_id=?",
                 (parent_job_id,),
@@ -674,6 +688,10 @@ class BuildingTaskStore:
                     "DELETE FROM map_build_parent_phase_reservations WHERE parent_job_id=?",
                     (parent_job_id,),
                 )
+                connection.execute(
+                    "DELETE FROM map_build_parent_stage_eligibility WHERE parent_job_id=?",
+                    (parent_job_id,),
+                )
             result = connection.execute(
                 "SELECT * FROM map_build_plans WHERE parent_job_id=?",
                 (parent_job_id,),
@@ -720,6 +738,10 @@ class BuildingTaskStore:
             connection.execute(
                 "UPDATE map_build_tasks SET state='cancelled', typed_error='building_shadow_observed', updated_at=? WHERE parent_job_id=?",
                 (now, parent_job_id),
+            )
+            connection.execute(
+                "DELETE FROM map_build_parent_stage_eligibility WHERE parent_job_id=?",
+                (parent_job_id,),
             )
             connection.execute(
                 "UPDATE map_build_plans SET stage='observed', state='observed', updated_at=? WHERE parent_job_id=?",
@@ -801,6 +823,10 @@ class BuildingTaskStore:
                 "UPDATE map_build_plans SET stage=?, state=?, updated_at=? WHERE parent_job_id=?",
                 (stage, stage, now, parent_job_id),
             )
+            connection.execute(
+                "DELETE FROM map_build_parent_stage_eligibility WHERE parent_job_id=?",
+                (parent_job_id,),
+            )
             result = connection.execute(
                 "SELECT * FROM map_build_plans WHERE parent_job_id=?",
                 (parent_job_id,),
@@ -842,11 +868,25 @@ class BuildingTaskStore:
                 SELECT parent_job_id
                 FROM map_build_plans
                 WHERE parent_job_id IN ({placeholders})
-                  AND state NOT IN ('ready', 'failed', 'cancelled')
+                  AND state NOT IN ('ready', 'failed', 'cancelled', 'observed')
                 """,
                 parent_ids,
             ).fetchall()
             ready_ids = tuple(str(row["parent_job_id"]) for row in rows)
+            connection.execute(
+                f"""
+                DELETE FROM map_build_parent_stage_eligibility
+                WHERE parent_job_id IN ({placeholders})
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM map_build_plans plans
+                      WHERE plans.parent_job_id=
+                            map_build_parent_stage_eligibility.parent_job_id
+                        AND plans.state='observed'
+                  )
+                """,
+                parent_ids,
+            )
             if ready_ids:
                 ready_placeholders = ",".join("?" for _ in ready_ids)
                 connection.execute(
@@ -888,6 +928,11 @@ class BuildingTaskStore:
                 )
                 connection.execute(
                     f"DELETE FROM map_build_parent_phase_reservations "
+                    f"WHERE parent_job_id IN ({ready_placeholders})",
+                    ready_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM map_build_parent_stage_eligibility "
                     f"WHERE parent_job_id IN ({ready_placeholders})",
                     ready_ids,
                 )
@@ -977,6 +1022,12 @@ class BuildingTaskStore:
                     if int(active_for_parent) >= int(active_task_quota):
                         continue
                 request = _resource_request(candidate, effective_capability)
+                if request is not None and not request["reservationRequired"]:
+                    # A verified cache-hit task only publishes an existing
+                    # receipt. It remains claimable while the heavy pool is
+                    # occupied and deliberately creates no reservation row.
+                    row = candidate
+                    break
                 if request is not None and request["maxConcurrentTasks"] > 1:
                     if (
                         len(fair_parent_ids) > 1
@@ -1153,7 +1204,26 @@ class BuildingTaskStore:
                 "failed",
             }:
                 raise BuildingTaskStoreError("parent plan is terminal")
+            existing_stage = connection.execute(
+                """
+                SELECT state FROM map_build_parent_stage_eligibility
+                WHERE parent_job_id=?
+                """,
+                (parent_job_id,),
+            ).fetchone()
+            if existing_stage is not None and existing_stage["state"] == "active":
+                # A parent cannot overlap source preparation and assembly. The
+                # active reservation remains the authoritative capacity fence;
+                # do not overwrite its durable stage row with a waiting phase.
+                connection.commit()
+                return None
             if not _resource_capacity_available(connection, request, now=now):
+                self._upsert_parent_stage_eligibility_locked(
+                    connection,
+                    parent_job_id=parent_job_id,
+                    phase=phase,
+                    now=now,
+                )
                 connection.commit()
                 return None
             lease_token = uuid.uuid4().hex
@@ -1183,6 +1253,14 @@ class BuildingTaskStore:
                     now,
                     expires,
                 ),
+            )
+            self._set_parent_stage_eligibility_active_locked(
+                connection,
+                parent_job_id=parent_job_id,
+                phase=phase,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                now=now,
             )
             connection.commit()
             return ParentPhaseReservation(
@@ -1285,6 +1363,14 @@ class BuildingTaskStore:
                 """,
                 (parent_job_id, phase, lease_token),
             )
+            connection.execute(
+                """
+                DELETE FROM map_build_parent_stage_eligibility
+                WHERE parent_job_id=? AND phase=? AND state='active'
+                  AND lease_token=?
+                """,
+                (parent_job_id, phase, lease_token),
+            )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -1324,6 +1410,43 @@ class BuildingTaskStore:
         except Exception:
             connection.rollback()
             raise
+        finally:
+            connection.close()
+
+    def list_parent_stage_eligibility(
+        self, parent_job_id: str | None = None
+    ) -> tuple[dict[str, Any], ...]:
+        """Return safe projections of durable parent-stage waiters.
+
+        The lease token is intentionally omitted. Waiting rows may exist before
+        a coordinator plan or child task has been created, so this collection is
+        the durable bridge between a yielded public parent and the heavy-phase
+        scheduler.
+        """
+
+        connection = self._connect()
+        try:
+            if parent_job_id is None:
+                rows = connection.execute(
+                    """
+                    SELECT parent_job_id, phase, state, worker_id,
+                           created_at, updated_at
+                    FROM map_build_parent_stage_eligibility
+                    ORDER BY updated_at, parent_job_id
+                    """
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT parent_job_id, phase, state, worker_id,
+                           created_at, updated_at
+                    FROM map_build_parent_stage_eligibility
+                    WHERE parent_job_id=?
+                    ORDER BY updated_at, parent_job_id
+                    """,
+                    (parent_job_id,),
+                ).fetchall()
+            return tuple(dict(row) for row in rows)
         finally:
             connection.close()
 
@@ -1388,8 +1511,10 @@ class BuildingTaskStore:
 
         Deferred-only and currently leased-only plans are intentionally absent,
         preventing the public queue from reclaiming and immediately yielding
-        the same parent in a hot loop.  Receipt-complete parents remain present
-        even without pending children so they can run final assembly.
+        the same parent in a hot loop. Durable parent-stage waiters are admitted
+        only when the shared parent-phase pool can accept their source
+        preparation or assembly request. Receipt-complete parents remain
+        present even without pending children so they can run final assembly.
         """
 
         effective_capability = _normalize_resource_capability(worker_capability)
@@ -1422,10 +1547,45 @@ class BuildingTaskStore:
             result: list[str] = []
             for row in eligible_rows:
                 parent_job_id = str(row["parent_job_id"])
-                if (
-                    parent_job_id not in result
-                    and _worker_can_admit(row, effective_capability)
+                if parent_job_id in result:
+                    continue
+                request = _resource_request(row, effective_capability)
+                if request is None:
+                    continue
+                if request["reservationRequired"] and not _resource_capacity_available(
+                    connection, request, now=now
                 ):
+                    continue
+                result.append(parent_job_id)
+
+            parent_stage_rows = connection.execute(
+                """
+                SELECT eligibility.parent_job_id, eligibility.phase
+                FROM map_build_parent_stage_eligibility AS eligibility
+                LEFT JOIN map_build_plans AS plan
+                  ON plan.parent_job_id=eligibility.parent_job_id
+                WHERE eligibility.state='waiting'
+                  AND eligibility.phase IN ('source_preparation', 'map_assembly')
+                  AND (plan.parent_job_id IS NULL OR plan.state NOT IN (
+                      'observed', 'cancelled', 'failed', 'ready'
+                  ))
+                ORDER BY eligibility.updated_at, eligibility.parent_job_id
+                """
+            ).fetchall()
+            for row in parent_stage_rows:
+                try:
+                    request, _ = _parent_phase_resource_request(
+                        effective_capability,
+                        estimated_peak_memory_bytes=(
+                            _DEFAULT_PARENT_PHASE_MEMORY_RESERVATION_BYTES
+                        ),
+                    )
+                except BuildingTaskStoreError:
+                    continue
+                if not _resource_capacity_available(connection, request, now=now):
+                    continue
+                parent_job_id = str(row["parent_job_id"])
+                if parent_job_id not in result:
                     result.append(parent_job_id)
 
             terminal_child_rows = connection.execute(
@@ -1441,7 +1601,7 @@ class BuildingTaskStore:
             ).fetchall()
             assembly_rows = connection.execute(
                 """
-                SELECT plan.parent_job_id
+                SELECT plan.parent_job_id, plan.updated_at
                 FROM map_build_plans plan
                 WHERE plan.state NOT IN ('observed', 'cancelled', 'failed', 'ready')
                   AND NOT EXISTS (
@@ -1456,10 +1616,37 @@ class BuildingTaskStore:
                 ORDER BY plan.updated_at, plan.parent_job_id
                 """
             ).fetchall()
-            for row in (*terminal_child_rows, *assembly_rows):
+            for row in terminal_child_rows:
                 parent_job_id = str(row["parent_job_id"])
                 if parent_job_id not in result:
                     result.append(parent_job_id)
+            try:
+                assembly_request, _ = _parent_phase_resource_request(
+                    effective_capability,
+                    estimated_peak_memory_bytes=(
+                        _DEFAULT_PARENT_PHASE_MEMORY_RESERVATION_BYTES
+                    ),
+                )
+            except BuildingTaskStoreError:
+                assembly_request = None
+            assembly_parent_ids: list[str] = []
+            if assembly_request is not None and _resource_capacity_available(
+                connection, assembly_request, now=now
+            ):
+                for row in assembly_rows:
+                    parent_job_id = str(row["parent_job_id"])
+                    if parent_job_id not in assembly_parent_ids:
+                        assembly_parent_ids.append(parent_job_id)
+            if assembly_parent_ids:
+                assembly_ids = set(assembly_parent_ids)
+                # Completed receipts are the shortest path to a published
+                # artifact. Prefer assembly over pending child quanta while
+                # retaining the durable ordering of every other candidate.
+                result = assembly_parent_ids + [
+                    parent_job_id
+                    for parent_job_id in result
+                    if parent_job_id not in assembly_ids
+                ]
             connection.commit()
             return tuple(result)
         except Exception:
@@ -2157,6 +2344,10 @@ class BuildingTaskStore:
                 "DELETE FROM map_build_parent_phase_reservations WHERE parent_job_id=?",
                 (parent_job_id,),
             )
+            connection.execute(
+                "DELETE FROM map_build_parent_stage_eligibility WHERE parent_job_id=?",
+                (parent_job_id,),
+            )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -2234,6 +2425,11 @@ class BuildingTaskStore:
             )
             connection.execute(
                 f"DELETE FROM map_build_parent_phase_reservations "
+                f"WHERE parent_job_id IN ({cancelled_placeholders})",
+                parent_ids,
+            )
+            connection.execute(
+                f"DELETE FROM map_build_parent_stage_eligibility "
                 f"WHERE parent_job_id IN ({cancelled_placeholders})",
                 parent_ids,
             )
@@ -2711,6 +2907,10 @@ class BuildingTaskStore:
                     )
                 connection.execute(
                     "DELETE FROM map_build_parent_phase_reservations WHERE parent_job_id=?",
+                    (parent_job_id,),
+                )
+                connection.execute(
+                    "DELETE FROM map_build_parent_stage_eligibility WHERE parent_job_id=?",
                     (parent_job_id,),
                 )
                 connection.execute(
@@ -3229,6 +3429,23 @@ class BuildingTaskStore:
             "DELETE FROM map_build_parent_phase_reservations WHERE expires_at <= ?",
             (now,),
         ).rowcount
+        connection.execute(
+            """
+            UPDATE map_build_parent_stage_eligibility
+            SET state='waiting', lease_token=NULL, worker_id=NULL, updated_at=?
+            WHERE state='active'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM map_build_parent_phase_reservations reservations
+                  WHERE reservations.parent_job_id=
+                        map_build_parent_stage_eligibility.parent_job_id
+                    AND reservations.phase=map_build_parent_stage_eligibility.phase
+                    AND reservations.lease_token=
+                        map_build_parent_stage_eligibility.lease_token
+              )
+            """,
+            (now,),
+        )
         rows = connection.execute(
             "SELECT task_id, parent_job_id, transient_attempts FROM map_build_tasks WHERE state='leased' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?",
             (now,),
@@ -3428,6 +3645,58 @@ class BuildingTaskStore:
             predicted_resource=task.predicted_resource,
         )
 
+    def _upsert_parent_stage_eligibility_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        parent_job_id: str,
+        phase: str,
+        now: float,
+    ) -> None:
+        if phase not in _PARENT_RESOURCE_PHASES:
+            raise BuildingTaskStoreError("parent resource phase is invalid")
+        connection.execute(
+            """
+            INSERT INTO map_build_parent_stage_eligibility(
+                parent_job_id, phase, state, lease_token, worker_id,
+                created_at, updated_at
+            ) VALUES (?, ?, 'waiting', NULL, NULL, ?, ?)
+            ON CONFLICT(parent_job_id) DO UPDATE SET
+                phase=excluded.phase,
+                state='waiting',
+                lease_token=NULL,
+                worker_id=NULL,
+                updated_at=excluded.updated_at
+            """,
+            (parent_job_id, phase, now, now),
+        )
+
+    def _set_parent_stage_eligibility_active_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        parent_job_id: str,
+        phase: str,
+        worker_id: str,
+        lease_token: str,
+        now: float,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO map_build_parent_stage_eligibility(
+                parent_job_id, phase, state, lease_token, worker_id,
+                created_at, updated_at
+            ) VALUES (?, ?, 'active', ?, ?, ?, ?)
+            ON CONFLICT(parent_job_id) DO UPDATE SET
+                phase=excluded.phase,
+                state='active',
+                lease_token=excluded.lease_token,
+                worker_id=excluded.worker_id,
+                updated_at=excluded.updated_at
+            """,
+            (parent_job_id, phase, lease_token, worker_id, now, now),
+        )
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5.0)
         connection.execute("PRAGMA busy_timeout=5000")
@@ -3573,6 +3842,15 @@ class BuildingTaskStore:
                     expires_at REAL NOT NULL,
                     PRIMARY KEY(parent_job_id, phase)
                 );
+                CREATE TABLE IF NOT EXISTS map_build_parent_stage_eligibility(
+                    parent_job_id TEXT PRIMARY KEY,
+                    phase TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    lease_token TEXT,
+                    worker_id TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS map_build_tasks_pending
                     ON map_build_tasks(state, next_eligible_at, created_at);
                 CREATE INDEX IF NOT EXISTS map_build_tasks_parent
@@ -3585,6 +3863,8 @@ class BuildingTaskStore:
                     ON map_build_resource_reservations(resource_pool, expires_at);
                 CREATE INDEX IF NOT EXISTS map_build_parent_phase_reservations_pool
                     ON map_build_parent_phase_reservations(resource_pool, expires_at);
+                CREATE INDEX IF NOT EXISTS map_build_parent_stage_eligibility_waiting
+                    ON map_build_parent_stage_eligibility(state, updated_at, parent_job_id);
                 """
             for statement in base_schema.split(";"):
                 if statement.strip():
@@ -3721,9 +4001,10 @@ def _resource_request(
 ) -> dict[str, Any] | None:
     """Normalize a worker/task pair into a reservation request.
 
-    Every chunk task consumes a durable reservation. Missing legacy capability
-    metadata is represented by the default concurrency-one pool; it never
-    selects an unbounded compatibility path.
+    Heavy chunk tasks consume a durable reservation. Verified zero-work cache
+    hits remain claimable without one, while missing legacy capability metadata
+    still uses the default concurrency-one pool and never selects an unbounded
+    compatibility path.
     """
 
     effective_capability = _normalize_resource_capability(worker_capability)
@@ -3761,6 +4042,7 @@ def _resource_request(
         "cpuWeight": float(cpu_weight),
         "cpuCapacity": float(cpu_capacity) if cpu_capacity is not None else None,
         "maxConcurrentTasks": max_concurrent,
+        "reservationRequired": not _cache_hit_without_work(row),
     }
 
 
@@ -3838,6 +4120,23 @@ def _predicted_memory(row: sqlite3.Row) -> int:
     if isinstance(estimate, bool) or not isinstance(estimate, int) or estimate < 0:
         raise BuildingTaskStoreError("task memory estimate is invalid")
     return estimate
+
+
+def _cache_hit_without_work(row: sqlite3.Row) -> bool:
+    """Return whether a task is a verified zero-work cache-hit child."""
+
+    predicted = row["predicted_resource_json"]
+    if not predicted:
+        return False
+    try:
+        document = json.loads(predicted)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(document, dict)
+        and document.get("cacheHit") is True
+        and document.get("estimatedPeakMemoryBytes") == 0
+    )
 
 
 def _resource_capacity_snapshot(
@@ -3971,7 +4270,20 @@ def _resource_admission(
             "memoryLimitBytes": _capability_memory_limit(worker_capability or {}),
             "memoryReservationBytes": predicted,
             "memoryHeadroomFraction": _MEMORY_ADMISSION_FRACTION,
+            "reservationRequired": True,
             "reservationAccepted": False,
+        }
+    if not request["reservationRequired"]:
+        return {
+            "resourcePool": request["resourcePool"],
+            "memoryLimitBytes": request["memoryLimitBytes"],
+            "memoryReservationBytes": 0,
+            "memoryHeadroomFraction": _MEMORY_ADMISSION_FRACTION,
+            "cpuWeight": 0.0,
+            "cpuCapacity": request["cpuCapacity"],
+            "maxConcurrentTasks": request["maxConcurrentTasks"],
+            "reservationRequired": False,
+            "reservationAccepted": True,
         }
     return {
         "resourcePool": request["resourcePool"],
@@ -3981,6 +4293,7 @@ def _resource_admission(
         "cpuWeight": request["cpuWeight"],
         "cpuCapacity": request["cpuCapacity"],
         "maxConcurrentTasks": request["maxConcurrentTasks"],
+        "reservationRequired": True,
         "reservationAccepted": False,
     }
 

@@ -52,9 +52,17 @@ Source preparation and whole-map assembly hold durable parent-phase leases in
 the same heavy resource pool. They refresh every 30 seconds, are token-fenced
 on release, and participate in the same concurrency, effective-memory, and
 CPU-capacity snapshot as child reservations. If the pool is busy, the public
-parent yields and resumes without consuming another retry. An expired
-parent-phase lease is removed by the normal recovery pass; do not add a second
-worker or manually delete the reservation.
+parent yields and resumes without consuming another retry. The reservation
+miss and parent-stage wait are one durable transaction: a planless parent gets
+a `map_build_parent_stage_eligibility` waiting row before any coordinator plan
+or child rows exist. A worker whitelists that row only when its current
+parent-phase capacity can progress; an occupied pool therefore keeps all such
+parents quiet instead of creating a reclaim/yield loop. Active rows are
+token-fenced, expiry recovery returns them to waiting, and terminal/reconciled
+parents remove them. Failed-child evidence still surfaces immediately, while
+receipt-complete assembly is admitted only after the assembly pool is free. An
+expired parent-phase lease is removed by the normal recovery pass; do not add a
+second worker or manually delete the reservation.
 
 The worker executes at most one child task for a claimed parent before yielding
 the parent job. The next global claim is selected across eligible parents using
@@ -150,6 +158,13 @@ do not lower the reserve, bypass quotas, or start preparation until the complete
 model passes again. Different cold source downloads serialize admission,
 checksum, and atomic publication through one data-volume lock, so adding a
 second worker is not a way to bypass the reserve.
+
+The source cache's cold publication boundary covers download, temporary-file
+hashing, expected-checksum validation, and the final atomic replace. Any
+unsuccessful publication (including cancellation, hash/checksum failure, or a
+replace error) removes the complete `.tmp` file and leaves an existing stable
+target unchanged. A `.tmp` file is never a valid cache hit; let the next
+coordinator attempt download and publish again through the same boundary.
 
 ### `missing_receipts` or `receipt_overflow`
 
