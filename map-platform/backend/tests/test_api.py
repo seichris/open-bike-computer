@@ -347,16 +347,17 @@ class MapJobRunAPITests(unittest.TestCase):
         )
         connection.commit()
         connection.close()
+        capability = {
+            "memoryLimitBytes": 12_000_000_000,
+            "cpuCount": 1,
+            "resourcePool": "admin-page",
+            "maxConcurrentTasks": 1,
+        }
         reservation = task_store.acquire_parent_phase_reservation(
             parent_job_id="job-admin-page",
             phase="source_preparation",
             worker_id="worker-admin-page",
-            worker_capability={
-                "memoryLimitBytes": 12_000_000_000,
-                "cpuCount": 1,
-                "resourcePool": "admin-page",
-                "maxConcurrentTasks": 1,
-            },
+            worker_capability=capability,
         )
         self.assertIsNotNone(reservation)
 
@@ -377,6 +378,10 @@ class MapJobRunAPITests(unittest.TestCase):
             document["parentPhaseReservations"][0]["phase"],
             "source_preparation",
         )
+        self.assertNotIn(
+            "lease_token", document["parentPhaseReservations"][0]
+        )
+        self.assertNotIn(reservation.lease_token, response.text)
         self.assertEqual(len(document["workloadReceipts"]), 1)
         self.assertGreater(
             document["workloadReceipts"][0]["workload_bytes"],
@@ -386,6 +391,38 @@ class MapJobRunAPITests(unittest.TestCase):
             all("workload_json" not in row for row in document["workloadReceipts"])
         )
         self.assertLess(len(response.content), 50_000)
+
+        task_store.release_parent_phase_reservation(
+            parent_job_id="job-admin-page",
+            phase="source_preparation",
+            worker_id="worker-admin-page",
+            lease_token=reservation.lease_token,
+        )
+        claimed = task_store.claim_next(
+            worker_id="worker-admin-child",
+            parent_job_id="job-admin-page",
+            worker_capability=capability,
+        )
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+
+        active_response = self.client.get(
+            "/v1/admin/building-plans/job-admin-page?limit=1&offset=0",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+
+        self.assertEqual(active_response.status_code, 200)
+        active_document = active_response.json()
+        self.assertNotIn("lease_token", active_document["tasks"][0])
+        self.assertEqual(len(active_document["resourceReservations"]), 1)
+        self.assertNotIn(
+            "lease_token", active_document["resourceReservations"][0]
+        )
+        self.assertNotIn(claimed.lease_token, active_response.text)
+        self.assertEqual(
+            task_store.get_task(claimed.task.task_id).lease_token,
+            claimed.lease_token,
+        )
 
         rejected = self.client.get(
             "/v1/admin/building-plans/job-admin-page?limit=101",

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -15,7 +16,9 @@ from map_platform.artifacts import (
     FileSystemArtifactStore,
 )
 from map_platform.jobs import JobStore, MapJobService
+from map_platform.building_scope import BuildingScopeError
 from map_platform.map_signing import P256MapArtifactSigner
+from map_platform.manifest import stable_map_id
 from map_platform.models import Bounds, SourceRegion
 from map_platform.pipeline import MapBuildPipeline, PipelinePaths
 from map_platform.preview import render_boundary_preview
@@ -62,6 +65,60 @@ class FixtureMapBuildPipeline(MapBuildPipeline):
 
 
 class PipelineArtifactTests(unittest.TestCase):
+    def test_final_zip_validation_precedes_all_immutable_uploads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = SourceRegion(
+                id="sg",
+                provider="test",
+                name="Singapore",
+                url="https://example.invalid/sg.osm.pbf",
+                bounds=Bounds(103.0, 1.0, 104.5, 1.8),
+            )
+            job = MapJobService(
+                SourceIndex([source]), JobStore(root / "jobs")
+            ).create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            artifact_store = FileSystemArtifactStore(root / "artifacts")
+            pipeline = FixtureMapBuildPipeline(
+                PipelinePaths(
+                    repo_root=Path(__file__).resolve().parents[3],
+                    work_root=root / "work",
+                    pack_root=root / "packs",
+                ),
+                artifact_store=artifact_store,
+            )
+            map_id = stable_map_id(job)
+            pack_root = root / "pack"
+            block = pack_root / "VECTMAP" / map_id / "1" / "2.fmb"
+            block.parent.mkdir(parents=True)
+            block.write_bytes(b"FMB\x02" + b"x" * 11)
+            pending = []
+            validated = []
+
+            with patch(
+                "map_platform.pipeline.validate_final_assembly_artifact",
+                side_effect=BuildingScopeError(
+                    "building_artifact_validation_failed",
+                    "injected invalid ZIP",
+                ),
+            ), self.assertRaisesRegex(BuildingScopeError, "injected invalid ZIP"):
+                pipeline._package_map(
+                    job,
+                    pack_root,
+                    root / "work" / "invalid.zip",
+                    on_artifact_pending=pending.append,
+                    validate_final_artifact=True,
+                    on_archive_validated=lambda: validated.append(True),
+                )
+
+            self.assertEqual(pending, [])
+            self.assertEqual(validated, [])
+            self.assertFalse(
+                any(path.is_file() for path in artifact_store.root.rglob("*"))
+            )
+
     def test_preview_resolution_fallback_is_frozen_at_key_reservation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

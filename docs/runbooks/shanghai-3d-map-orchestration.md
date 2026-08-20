@@ -59,9 +59,13 @@ worker or manually delete the reservation.
 The worker executes at most one child task for a claimed parent before yielding
 the parent job. The next global claim is selected across eligible parents using
 admission priority, weighted virtual finish, last-claim ordering, and the
-per-parent quota. Repeatedly draining one parent's children while another
-eligible parent never receives a claim is therefore a scheduler incident, not
-expected chunk behavior.
+per-parent quota. Never-started and yielded parents are merged by their durable
+waiting timestamps, so continuous arrivals do not bypass an older yielded
+parent. A parent whose only pending child is still in retry backoff is not
+claimable until that deadline; this is expected quiet time, not worker loss.
+Receipt-complete parents remain claimable for assembly. Repeatedly draining one
+parent's children while another eligible parent never receives a claim is
+therefore a scheduler incident, not expected chunk behavior.
 
 ## Typed alerts
 
@@ -83,7 +87,9 @@ reservation is being held by a healthy replacement.
 The parent-phase variants identify `source_preparation` or `map_assembly` and
 the owning worker without exposing the lease token. They are read-only evidence:
 normal scheduling removes an expired parent-phase lease transactionally, so do
-not release or replace it manually.
+not release or replace it manually. The authenticated task, resource-reservation,
+and parent-phase diagnostic projections also omit every live fencing token;
+never add those credentials to logs or incident tickets.
 
 ### `task_split`
 
@@ -141,7 +147,9 @@ two source-sized working copies; it must fit the attempt quota, and live free
 space must cover that attempt estimate plus the reserve. Freeing unrelated
 validation data through its normal retention policy may make a retry admissible;
 do not lower the reserve, bypass quotas, or start preparation until the complete
-model passes again.
+model passes again. Different cold source downloads serialize admission,
+checksum, and atomic publication through one data-volume lock, so adding a
+second worker is not a way to bypass the reserve.
 
 ### `missing_receipts` or `receipt_overflow`
 
@@ -155,7 +163,10 @@ requires an incident review before any cleanup.
 Read the typed task failure and the latest attempt chain. A job-level retry is
 safe only through the coordinator's reopen operation and only when source,
 image, rules, calibration, and global-plan identities are unchanged. Never
-manually edit SQLite rows or mark a plan ready.
+manually edit SQLite rows or mark a plan ready. A
+`building_chunk_retry_exhausted` failure is terminal: its public error retains
+the task ID and root failure code, and another public retry cannot make that
+child executable.
 
 ### Terminal shadow observation
 
@@ -188,6 +199,8 @@ following from retained evidence:
 
 - every expected global block has one matching canonical cache receipt;
 - the receipt-set SHA-256 and preprocessing identity are present;
+- retained metrics confirm the local ZIP passed the complete structural,
+  manifest, content, and size validator before the first immutable upload;
 - the published file is a positive-size, parseable ZIP whose CRC test passes,
   whose paths are safe, unique, stored, and exactly match a schema-1
   `manifest.json`; every declared map file and preview must match its manifest
@@ -203,7 +216,11 @@ following from retained evidence:
 Public job completion is durable before the coordinator marker moves from
 `artifact_publication` to `ready`. If the public job is already ready but the
 coordinator marker remains behind, let the maintenance reconciliation advance
-it; do not mark the plan ready manually.
+it; do not mark the plan ready manually. This also repairs a yielded plan that
+became ready by exact reuse: unfinished children are cancelled, active attempts
+are closed, and child/parent-phase reservations are released in the same
+transaction. A reconciliation error must leave the public job ready for the
+next maintenance pass.
 
 Server `ready` is not signed product acceptance when validation stream rollout
 is disabled. Only after the applicable signing gate passes should the ordinary

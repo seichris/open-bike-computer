@@ -49,13 +49,19 @@ transient store fault only while its lease remains safely fenced; confirmed or
 imminent lease loss cancels the complete process group before capacity can be
 reused. Transient process/filesystem failures receive at most three persisted
 per-task attempts with deterministic exponential backoff and jitter, while
-typed deterministic failures remain terminal. Cache readers, writers, and
-eviction share a stable namespace lease outside the removable directory;
+typed deterministic failures remain terminal. Exhausting those attempts now
+surfaces one typed, non-retryable public failure with the causal task and root
+failure code instead of consuming impossible parent retries. Deferred-only
+parents are excluded from public claims until a child is eligible, while
+receipt-complete parents remain resumable for assembly. Cache readers, writers,
+and eviction share a stable namespace lease outside the removable directory;
 maintenance also protects identities referenced by nonterminal plans. A cache
 miss or mismatch transactionally removes stale receipts, returns affected work
 to `pending`, and restores a conservative nonzero reservation before rebuild.
 Pre-execution storage admission checks retention quotas, live disk headroom,
-and a reserve before preparation begins.
+and a reserve before preparation begins. Cold source downloads for different
+regions share one data-volume lock from admission through checksum and atomic
+publication, so concurrent downloads cannot spend the same reserve.
 
 The retained resource model uses the p95 of paired actual/predicted ratios for
 one worker capability identity, refuses to train on a positive actual with a
@@ -64,16 +70,21 @@ assembly now requires a real, CRC-valid ZIP with safe unique stored paths, a
 schema-1 manifest, a complete path/size/SHA-256 identity for every declared map
 file and preview, no undeclared entries, at least one nonempty FMB, per-FMB and
 whole-archive size limits, exactly one matching ZIP receipt, and matching byte
-count/SHA-256. Operator diagnostics page each task,
+count/SHA-256. The complete local ZIP validation runs before the first immutable
+object-store write. Operator diagnostics page each task,
 attempt, receipt, and reservation collection at no more than 100 evidence rows
-and omit raw workload-object arrays. Alert computation consumes the same
-bounded evidence page and reports its cursor/counts. Command evidence retains
+and omit raw workload-object arrays and every live fencing token. Alert
+computation consumes the same bounded evidence page and reports its
+cursor/counts. Command evidence retains
 bounded process-tree peak RSS plus cgroup `memory.events` deltas; only a
 positive OOM counter delta is classified as `building_worker_oom`. Public
 `ready` is persisted before the coordinator advances from
 `artifact_publication` to `ready`, with maintenance reconciliation as the
-durable backstop. Production still uses the existing monolithic executor and
-hard ceilings until the 90-minute, retained monolithic-versus-chunked
+durable backstop. That reconciliation can terminalize any superseded
+nonterminal plan after exact reuse, cancelling unfinished children and
+releasing their resource leases; a reconciliation fault cannot demote the
+already-ready public job. Production still uses the existing monolithic
+executor and hard ceilings until the 90-minute, retained monolithic-versus-chunked
 equivalence, signing, deployment, and physical acceptance gates are complete.
 
 The authoritative retained validation baseline in this document is the final
@@ -454,7 +465,11 @@ status values expected by existing clients:
 Only the parent can publish a map artifact or transition the public job to
 `ready`. The coordinator remains at `artifact_publication` until public
 completion is durable, then moves to `ready`; the maintenance pass reconciles
-that additive marker if the worker stops between the two stores.
+that additive marker if the worker stops between the two stores. Exact reuse
+may make a previously yielded public parent ready from an earlier immutable
+artifact; in that case the same reconciliation transaction marks its
+nonterminal coordinator ready, cancels unfinished children, closes active
+attempts, and releases child and parent-phase reservations.
 
 ### Global scope plan
 
@@ -485,6 +500,8 @@ Predictions are admission aids, not wire-format exceptions. Chunked execution
 now performs storage admission before preparation, using the estimated archive,
 two cache copies, three archive-sized temporary copies, two source working
 copies, the configured cache/attempt quotas, live free bytes, and a reserve.
+Cold downloads serialize their reserve check and write under a shared
+data-volume lock even when they target different source regions.
 Final exact sizes are checked again before publication and, when enabled,
 signing. If the Shanghai artifact exceeds a hard format limit, fail typed; do
 not truncate features. A later format-sharding plan would then be required.
@@ -760,10 +777,12 @@ Add an explicit assembly mode to the current pipeline:
 4. Produce FMA1 and current ZIP/Bike Map Stream artifacts.
 5. Require a CRC-valid ZIP, a nonempty `manifest.json`, at least one FMB, every
    FMB no larger than 2 MiB, the ZIP no larger than 512 MiB, and exactly one ZIP
-   receipt whose bytes and SHA-256 match the published file. Bike Map Stream
-   signing and its manifest validation remain a separate rollout gate when
-   enabled.
-6. Publish once under the parent job's artifact-publication lease.
+   receipt whose bytes and SHA-256 match the prospective file. Run this complete
+   structural, manifest, content, and size validation on the local archive
+   before any immutable upload. Bike Map Stream signing and its manifest
+   validation remain a separate rollout gate when enabled.
+6. Advance to `artifact_publication` only after local validation succeeds, then
+   publish once under the parent job's artifact-publication lease.
 
 Road and label preparation remain whole-map stages initially because current
 Shanghai evidence does not show a safety failure there. Keep the task-kind
@@ -800,6 +819,12 @@ The implemented scheduler considers both fairness and reserved resources:
   weighted virtual finish, process one child-task quantum, yield that public
   parent back to the job queue, and select again instead of draining one city
   job;
+- merge never-started jobs and yielded parents by their durable waiting
+  timestamps, so sustained arrivals cannot indefinitely starve an existing
+  parent;
+- exclude yielded parents whose only pending children are still in retry
+  backoff, while retaining failed-child and receipt-complete parents so they can
+  surface a terminal failure or assemble;
 - reserve memory and CPU weight before leasing;
 - reserve source preparation and final assembly in that same pool, with
   heartbeat renewal, expiry recovery, and a final token fence;
@@ -909,12 +934,12 @@ Alert on:
 | Hard guard exceeded by one block | Fail parent with `building_pathological_block` |
 | Source snapshot/index/calibration identity changed | Fail parent; a new request resolves a new identity |
 | Worker process lost or lease expired | Scheduler automatically records `lease_expired`, releases the reservation, requeues the task, and fences the old token |
-| Transient filesystem/process error | Bounded exponential retry with jitter |
+| Transient filesystem/process error | Bounded exponential retry with jitter; after the third child attempt, fail the public job once with non-retryable `building_chunk_retry_exhausted` and retain the causal task/root code |
 | Invalid/incomplete relation | Fail closed; do not publish affected blocks |
 | Cache entry missing/corrupt | Under the namespace lease, atomically invalidate affected receipts, requeue owning tasks with conservative reservations, and regenerate |
 | Parent cancelled | Stop new leases, cooperatively stop active work, never assemble |
 | Assembly sees missing receipt | Return to chunk coordination; do not build buildings monolithically |
-| ZIP/FMB/receipt validation fails | Fail parent and retain diagnostic receipts |
+| ZIP/FMB/receipt validation fails | Fail before immutable upload and retain diagnostic receipts |
 | Storage quota/headroom admission fails | Fail before preparation with `building_storage_admission` |
 | Stream signature validation fails when enabled | Fail parent; do not reinterpret server ZIP readiness as signed acceptance |
 | Final stream exceeds 512 MiB | Fail typed; require product/format decision |

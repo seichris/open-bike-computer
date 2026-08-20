@@ -15,7 +15,7 @@ from map_platform.cli import (
     _safe_error_summary,
     main,
 )
-from map_platform.building_tasks import BuildingTaskStore
+from map_platform.building_tasks import BuildingTaskSpec, BuildingTaskStore
 from map_platform.jobs import ArtifactGarbageCollectionError
 from map_platform.map_stream_build_identity import MapStreamBuildIdentity
 from map_platform.worker import (
@@ -93,16 +93,28 @@ class BuildingPlanCLITests(unittest.TestCase):
                 policy_version=1,
                 resource_model_version="v1",
             )
+            store.add_tasks(
+                [
+                    BuildingTaskSpec(
+                        task_id="task-cli-parent-phase",
+                        parent_job_id="job-cli-parent-phase",
+                        kind="building_chunk",
+                        blocks=((1, 2),),
+                        chunk_plan_sha256="a" * 64,
+                    )
+                ]
+            )
+            capability = {
+                "memoryLimitBytes": 12_000_000_000,
+                "cpuCount": 1,
+                "resourcePool": "cli",
+                "maxConcurrentTasks": 1,
+            }
             reservation = store.acquire_parent_phase_reservation(
                 parent_job_id="job-cli-parent-phase",
                 phase="source_preparation",
                 worker_id="worker-cli",
-                worker_capability={
-                    "memoryLimitBytes": 12_000_000_000,
-                    "cpuCount": 1,
-                    "resourcePool": "cli",
-                    "maxConcurrentTasks": 1,
-                },
+                worker_capability=capability,
                 lease_seconds=1,
                 now=1.0,
             )
@@ -131,6 +143,10 @@ class BuildingPlanCLITests(unittest.TestCase):
                 self.assertEqual(main(), 0)
             inspect_document = json.loads(inspect_output.getvalue())
             self.assertEqual(len(inspect_document["parentPhaseReservations"]), 1)
+            self.assertNotIn(
+                "lease_token", inspect_document["parentPhaseReservations"][0]
+            )
+            self.assertNotIn(reservation.lease_token, inspect_output.getvalue())
 
             alerts_output = io.StringIO()
             with (
@@ -157,6 +173,45 @@ class BuildingPlanCLITests(unittest.TestCase):
             self.assertIn(
                 "parent_phase_lease_expired",
                 {alert["code"] for alert in alerts_document["alerts"]},
+            )
+
+            claimed = store.claim_next(
+                worker_id="worker-cli-child",
+                parent_job_id="job-cli-parent-phase",
+                worker_capability=capability,
+            )
+            self.assertIsNotNone(claimed)
+            assert claimed is not None
+            active_output = io.StringIO()
+            with (
+                patch(
+                    "sys.argv",
+                    [
+                        "map-platform",
+                        "--repo-root",
+                        str(repo_root),
+                        "--data-root",
+                        str(data_root),
+                        "build-plan",
+                        "inspect",
+                        "job-cli-parent-phase",
+                        "--limit",
+                        "1",
+                    ],
+                ),
+                redirect_stdout(active_output),
+            ):
+                self.assertEqual(main(), 0)
+            active_document = json.loads(active_output.getvalue())
+            self.assertNotIn("lease_token", active_document["tasks"][0])
+            self.assertEqual(len(active_document["resourceReservations"]), 1)
+            self.assertNotIn(
+                "lease_token", active_document["resourceReservations"][0]
+            )
+            self.assertNotIn(claimed.lease_token, active_output.getvalue())
+            self.assertEqual(
+                store.get_task(claimed.task.task_id).lease_token,
+                claimed.lease_token,
             )
 
             with (

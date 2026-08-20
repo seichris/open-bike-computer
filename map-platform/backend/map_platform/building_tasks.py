@@ -65,7 +65,8 @@ _DEFAULT_SCHEDULING_WEIGHT = 1
 _DEFAULT_ADMISSION_PRIORITY = 0
 _PARENT_RESOURCE_PHASES = frozenset({"source_preparation", "map_assembly"})
 _DEFAULT_PARENT_PHASE_MEMORY_RESERVATION_BYTES = 5 * 1024 * 1024 * 1024
-_MAX_TRANSIENT_TASK_ATTEMPTS = 3
+MAX_TRANSIENT_TASK_ATTEMPTS = 3
+_MAX_TRANSIENT_TASK_ATTEMPTS = MAX_TRANSIENT_TASK_ATTEMPTS
 _TRANSIENT_RETRY_BASE_SECONDS = 5.0
 _TRANSIENT_RETRY_JITTER_FRACTION = 0.25
 
@@ -91,6 +92,28 @@ class BuildingTaskRecord:
     transient_attempts: int
     lease_owner: str | None
     lease_token: str | None
+    lease_expires_at: float | None
+    heartbeat_at: float | None
+    typed_error: str | None
+    next_eligible_at: float | None
+    output_receipt_set_sha256: str | None
+    predicted_resource: Mapping[str, Any] | None
+
+
+@dataclass(frozen=True)
+class BuildingTaskDiagnosticRecord:
+    """Operator-safe task projection that omits the fencing credential."""
+
+    task_id: str
+    parent_job_id: str
+    kind: str
+    blocks: tuple[tuple[int, int], ...]
+    chunk_plan_sha256: str
+    closure_plan_sha256: str | None
+    state: str
+    split_depth: int
+    transient_attempts: int
+    lease_owner: str | None
     lease_expires_at: float | None
     heartbeat_at: float | None
     typed_error: str | None
@@ -796,7 +819,15 @@ class BuildingTaskStore:
         *,
         now: float | None = None,
     ) -> int:
-        """Finalize coordinator publication after the public jobs are ready."""
+        """Fence all unfinished coordinator work after public READY wins.
+
+        Public job completion is authoritative across the two durable stores.
+        Exact reuse can make a previously yielded parent READY before its child
+        plan reaches artifact publication, and maintenance must be able to
+        repair the same crash boundary.  The plan transition, unfinished-task
+        cancellation, attempt finalization, and reservation release therefore
+        happen in one SQLite transaction.
+        """
 
         parent_ids = tuple(dict.fromkeys(str(value) for value in parent_job_ids))
         if not parent_ids:
@@ -811,7 +842,7 @@ class BuildingTaskStore:
                 SELECT parent_job_id
                 FROM map_build_plans
                 WHERE parent_job_id IN ({placeholders})
-                  AND state='artifact_publication'
+                  AND state NOT IN ('ready', 'failed', 'cancelled')
                 """,
                 parent_ids,
             ).fetchall()
@@ -820,10 +851,52 @@ class BuildingTaskStore:
                 ready_placeholders = ",".join("?" for _ in ready_ids)
                 connection.execute(
                     f"""
+                    UPDATE map_build_task_attempts
+                    SET finished_at=?, outcome='superseded',
+                        typed_failure=COALESCE(
+                            typed_failure,
+                            'building_task_superseded_by_public_ready'
+                        )
+                    WHERE finished_at IS NULL AND task_id IN (
+                        SELECT task_id FROM map_build_tasks
+                        WHERE parent_job_id IN ({ready_placeholders})
+                          AND state='leased'
+                    )
+                    """,
+                    (now, *ready_ids),
+                )
+                connection.execute(
+                    f"""
+                    UPDATE map_build_tasks
+                    SET state='cancelled', lease_owner=NULL, lease_token=NULL,
+                        lease_expires_at=NULL, heartbeat_at=NULL,
+                        next_eligible_at=NULL,
+                        typed_error=COALESCE(
+                            typed_error,
+                            'building_task_superseded_by_public_ready'
+                        ),
+                        updated_at=?
+                    WHERE parent_job_id IN ({ready_placeholders})
+                      AND state IN ('pending', 'leased')
+                    """,
+                    (now, *ready_ids),
+                )
+                connection.execute(
+                    f"DELETE FROM map_build_resource_reservations "
+                    f"WHERE parent_job_id IN ({ready_placeholders})",
+                    ready_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM map_build_parent_phase_reservations "
+                    f"WHERE parent_job_id IN ({ready_placeholders})",
+                    ready_ids,
+                )
+                connection.execute(
+                    f"""
                     UPDATE map_build_plans
                     SET stage='ready', state='ready', updated_at=?
                     WHERE parent_job_id IN ({ready_placeholders})
-                      AND state='artifact_publication'
+                      AND state NOT IN ('ready', 'failed', 'cancelled')
                     """,
                     (now, *ready_ids),
                 )
@@ -1299,6 +1372,96 @@ class BuildingTaskStore:
             )
             connection.commit()
             return parent_job_id
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def resumable_parent_ids(
+        self,
+        *,
+        worker_capability: Mapping[str, Any] | None = None,
+        now: float | None = None,
+    ) -> tuple[str, ...]:
+        """Return yielded parents that can make progress on this worker.
+
+        Deferred-only and currently leased-only plans are intentionally absent,
+        preventing the public queue from reclaiming and immediately yielding
+        the same parent in a hot loop.  Receipt-complete parents remain present
+        even without pending children so they can run final assembly.
+        """
+
+        effective_capability = _normalize_resource_capability(worker_capability)
+        now = self._clock() if now is None else now
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._recover_expired_locked(connection, now=now)
+            eligible_rows = connection.execute(
+                """
+                SELECT task.*, plan.scheduling_weight,
+                       plan.admission_priority, plan.active_task_quota,
+                       plan.virtual_finish
+                FROM map_build_tasks task
+                JOIN map_build_plans plan
+                  ON plan.parent_job_id = task.parent_job_id
+                WHERE task.state='pending'
+                  AND (task.next_eligible_at IS NULL OR task.next_eligible_at <= ?)
+                  AND plan.state NOT IN ('observed', 'cancelled', 'failed', 'ready')
+                ORDER BY plan.admission_priority DESC,
+                         plan.virtual_finish,
+                         CASE WHEN plan.last_claimed_at IS NULL THEN 0 ELSE 1 END,
+                         plan.last_claimed_at,
+                         plan.parent_job_id,
+                         task.created_at,
+                         task.task_id
+                """,
+                (now,),
+            ).fetchall()
+            result: list[str] = []
+            for row in eligible_rows:
+                parent_job_id = str(row["parent_job_id"])
+                if (
+                    parent_job_id not in result
+                    and _worker_can_admit(row, effective_capability)
+                ):
+                    result.append(parent_job_id)
+
+            terminal_child_rows = connection.execute(
+                """
+                SELECT DISTINCT plan.parent_job_id
+                FROM map_build_plans plan
+                JOIN map_build_tasks task
+                  ON task.parent_job_id=plan.parent_job_id
+                WHERE task.state='failed'
+                  AND plan.state NOT IN ('observed', 'cancelled', 'failed', 'ready')
+                ORDER BY plan.parent_job_id
+                """
+            ).fetchall()
+            assembly_rows = connection.execute(
+                """
+                SELECT plan.parent_job_id
+                FROM map_build_plans plan
+                WHERE plan.state NOT IN ('observed', 'cancelled', 'failed', 'ready')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM map_build_tasks task
+                      WHERE task.parent_job_id=plan.parent_job_id
+                        AND task.state IN ('pending', 'leased', 'failed')
+                  )
+                  AND (
+                      SELECT COUNT(*) FROM map_build_block_receipts receipt
+                      WHERE receipt.parent_job_id=plan.parent_job_id
+                  ) = plan.expected_output_block_count
+                ORDER BY plan.updated_at, plan.parent_job_id
+                """
+            ).fetchall()
+            for row in (*terminal_child_rows, *assembly_rows):
+                parent_job_id = str(row["parent_job_id"])
+                if parent_job_id not in result:
+                    result.append(parent_job_id)
+            connection.commit()
+            return tuple(result)
         except Exception:
             connection.rollback()
             raise
@@ -2754,7 +2917,7 @@ class BuildingTaskStore:
                 )
 
             tasks = tuple(
-                self._row_to_task(row)
+                self._row_to_diagnostic_task(row)
                 for row in connection.execute(
                     "SELECT * FROM map_build_tasks WHERE parent_job_id=? ORDER BY created_at, task_id LIMIT ? OFFSET ?",
                     (parent_job_id, limit, offset),
@@ -2801,16 +2964,30 @@ class BuildingTaskStore:
             reservations = tuple(
                 dict(row)
                 for row in connection.execute(
-                    "SELECT * FROM map_build_resource_reservations WHERE parent_job_id=? ORDER BY reserved_at, task_id LIMIT ? OFFSET ?",
+                    """
+                    SELECT task_id, parent_job_id, worker_id, resource_pool,
+                           memory_reservation_bytes, memory_limit_bytes,
+                           cpu_weight, cpu_capacity, max_concurrent_tasks,
+                           capability_json, reserved_at, expires_at
+                    FROM map_build_resource_reservations
+                    WHERE parent_job_id=?
+                    ORDER BY reserved_at, task_id LIMIT ? OFFSET ?
+                    """,
                     (parent_job_id, limit, offset),
                 ).fetchall()
             )
             parent_phase_reservations = tuple(
                 dict(row)
                 for row in connection.execute(
-                    "SELECT * FROM map_build_parent_phase_reservations "
-                    "WHERE parent_job_id=? "
-                    "ORDER BY reserved_at, phase LIMIT ? OFFSET ?",
+                    """
+                    SELECT parent_job_id, phase, worker_id, resource_pool,
+                           memory_reservation_bytes, memory_limit_bytes,
+                           cpu_weight, cpu_capacity, max_concurrent_tasks,
+                           capability_json, reserved_at, heartbeat_at, expires_at
+                    FROM map_build_parent_phase_reservations
+                    WHERE parent_job_id=?
+                    ORDER BY reserved_at, phase LIMIT ? OFFSET ?
+                    """,
                     (parent_job_id, limit, offset),
                 ).fetchall()
             )
@@ -3226,6 +3403,29 @@ class BuildingTaskStore:
                 if row["predicted_resource_json"]
                 else None
             ),
+        )
+
+    def _row_to_diagnostic_task(
+        self, row: sqlite3.Row
+    ) -> BuildingTaskDiagnosticRecord:
+        task = self._row_to_task(row)
+        return BuildingTaskDiagnosticRecord(
+            task_id=task.task_id,
+            parent_job_id=task.parent_job_id,
+            kind=task.kind,
+            blocks=task.blocks,
+            chunk_plan_sha256=task.chunk_plan_sha256,
+            closure_plan_sha256=task.closure_plan_sha256,
+            state=task.state,
+            split_depth=task.split_depth,
+            transient_attempts=task.transient_attempts,
+            lease_owner=task.lease_owner,
+            lease_expires_at=task.lease_expires_at,
+            heartbeat_at=task.heartbeat_at,
+            typed_error=task.typed_error,
+            next_eligible_at=task.next_eligible_at,
+            output_receipt_set_sha256=task.output_receipt_set_sha256,
+            predicted_resource=task.predicted_resource,
         )
 
     def _connect(self) -> sqlite3.Connection:

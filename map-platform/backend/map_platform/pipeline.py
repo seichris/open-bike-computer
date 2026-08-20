@@ -87,6 +87,7 @@ from .building_tasks import (
     BuildingTaskSpec,
     BuildingTaskStoreError,
     BuildingTaskStore,
+    MAX_TRANSIENT_TASK_ATTEMPTS,
     StaleLeaseError,
     deterministic_building_task_id,
 )
@@ -643,6 +644,7 @@ _BUILDING_FAILURE_CODES = {
     "building_workload_receipt_mismatch",
     "building_resource_admission",
     "building_chunk_execution_failed",
+    "building_chunk_retry_exhausted",
     "building_chunk_wall_time_exceeded",
     "building_pathological_block",
     "building_storage_admission",
@@ -669,6 +671,9 @@ _BUILDING_FAILURE_MESSAGES = {
         "selected building worker capacity cannot admit the next chunk"
     ),
     "building_chunk_execution_failed": "selected building chunk execution failed",
+    "building_chunk_retry_exhausted": (
+        "selected building chunk exhausted its internal retry budget"
+    ),
     "building_chunk_wall_time_exceeded": "selected building chunk exceeded the hard wall-time policy",
     "building_pathological_block": "one selected building block exceeds a hard worker policy",
     "building_storage_admission": "selected building attempt exceeds storage capacity",
@@ -728,6 +733,18 @@ class BuildingChunkSplitRequired(BuildingScopeError):
 
 class BuildingChunkSchedulingYield(RuntimeError):
     """One task quantum completed and another public parent may now run."""
+
+
+class BuildingChunkRetryExhausted(BuildingScopeError):
+    """Terminal child failure with a bounded, durable causal identity."""
+
+    def __init__(self, *, task_id: str, root_failure_code: str):
+        super().__init__(
+            "building_chunk_retry_exhausted",
+            "building chunk exhausted its internal retry budget",
+        )
+        self.task_id = task_id
+        self.root_failure_code = root_failure_code
 
 
 class BuildingCacheRetryRequired(RuntimeError):
@@ -1193,6 +1210,13 @@ def safe_build_failure(job: MapJob, exc: Exception) -> tuple[str, str]:
         if isinstance(source_sha256, str):
             identifiers.append(f"sourceSnapshotSha256={source_sha256}")
     message = _BUILDING_FAILURE_MESSAGES[code]
+    if isinstance(exc, BuildingChunkRetryExhausted):
+        identifiers.extend(
+            (
+                f"taskId={exc.task_id}",
+                f"rootFailureCode={exc.root_failure_code}",
+            )
+        )
     # Preserve the bounded, typed source diagnostic for relation failures.
     # This is intentionally limited to the relation code: other exception
     # strings may contain paths, command output, or untrusted data that should
@@ -2490,10 +2514,7 @@ class MapBuildPipeline:
                         if task.state == "failed"
                     )
                     if failed:
-                        raise BuildingScopeError(
-                            "building_chunks_incomplete",
-                            "one or more building chunk tasks failed",
-                        )
+                        raise self._terminal_chunk_failure(failed[0])
                     break
                 task = claimed.task
                 child_scope = plan_building_chunk_scope(
@@ -2662,6 +2683,8 @@ class MapBuildPipeline:
                     if failed_task.state == "pending":
                         yield_after_quantum()
                         continue
+                    if self._chunk_failure_is_transient(exc, typed_failure):
+                        raise self._terminal_chunk_failure(failed_task) from exc
                     raise
                 except Exception as exc:
                     lease_heartbeat.stop()
@@ -2686,6 +2709,8 @@ class MapBuildPipeline:
                     if failed_task.state == "pending":
                         yield_after_quantum()
                         continue
+                    if transient:
+                        raise self._terminal_chunk_failure(failed_task) from exc
                     raise
                 else:
                     lease_heartbeat.stop()
@@ -2840,6 +2865,21 @@ class MapBuildPipeline:
                 return True
             current = current.__cause__ or current.__context__
         return False
+
+    @staticmethod
+    def _terminal_chunk_failure(task) -> BuildingScopeError:
+        root_failure_code = task.typed_error or "building_chunk_execution_failed"
+        if task.transient_attempts >= MAX_TRANSIENT_TASK_ATTEMPTS:
+            return BuildingChunkRetryExhausted(
+                task_id=task.task_id,
+                root_failure_code=root_failure_code,
+            )
+        if root_failure_code not in _BUILDING_FAILURE_CODES:
+            root_failure_code = "building_chunk_execution_failed"
+        return BuildingScopeError(
+            root_failure_code,
+            "building chunk has a terminal durable failure",
+        )
 
     def _last_task_failure_peak_rss(self) -> int | None:
         return self._maximum_command_peak_rss(
@@ -3784,10 +3824,12 @@ class MapBuildPipeline:
                 cache_identity=cache_identity,
                 parent_job_id=parent_job_id,
             )
-        if not coordinator_already_ready:
-            self.building_task_store.advance_plan_stage(
-                parent_job_id, stage="artifact_publication"
-            )
+        def mark_artifact_publication() -> None:
+            if not coordinator_already_ready:
+                self.building_task_store.advance_plan_stage(
+                    parent_job_id, stage="artifact_publication"
+                )
+
         result = self._package_map(
             job,
             pack_root,
@@ -3796,14 +3838,9 @@ class MapBuildPipeline:
             on_artifact_pending=on_artifact_pending,
             build_metrics=metrics,
             max_archive_bytes=MAX_FINAL_ASSEMBLY_ARCHIVE_BYTES,
+            validate_final_artifact=True,
+            on_archive_validated=mark_artifact_publication,
         )
-        if result.artifact_metrics is not None:
-            result.artifact_metrics["finalArtifactValidation"] = (
-                validate_final_assembly_artifact(
-                    archive_path,
-                    result.artifacts,
-                )
-            )
         return result
 
     def _chunked_preprocessing_summary(
@@ -5142,6 +5179,8 @@ class MapBuildPipeline:
         on_artifact_pending=None,
         build_metrics: dict[str, Any] | None = None,
         max_archive_bytes: int | None = None,
+        validate_final_artifact: bool = False,
+        on_archive_validated=None,
     ) -> MapBuildResult:
         map_id = job.map_id or stable_map_id(job)
         job.map_id = map_id
@@ -5189,11 +5228,31 @@ class MapBuildPipeline:
             building_phase_timings = metrics.setdefault("buildingPhaseTimings", {})
             if isinstance(building_phase_timings, dict):
                 building_phase_timings["packaging"] = packaging_seconds
-        if self.artifact_store is not None:
+        zip_sha256 = None
+        zip_record = None
+        if self.artifact_store is not None or validate_final_artifact:
             hashing_started = time.perf_counter()
             zip_sha256 = sha256_file(archive_path)
             metrics["zipHashingSeconds"] = time.perf_counter() - hashing_started
             zip_key = zip_object_key(map_id, zip_sha256)
+            zip_record = ArtifactRecord(
+                format=ZIP_STORED_FORMAT,
+                media_type=ZIP_MEDIA_TYPE,
+                filename=archive_path.name,
+                object_key=zip_key,
+                bytes=archive_path.stat().st_size,
+                sha256=zip_sha256,
+            )
+        if validate_final_artifact:
+            assert zip_record is not None
+            metrics["finalArtifactValidation"] = validate_final_assembly_artifact(
+                archive_path,
+                (zip_record,),
+            )
+        if on_archive_validated is not None:
+            on_archive_validated()
+        if self.artifact_store is not None:
+            assert zip_sha256 is not None and zip_record is not None
             lease = (
                 artifact_publication_lease(zip_key)
                 if artifact_publication_lease
@@ -5210,16 +5269,7 @@ class MapBuildPipeline:
                     media_type=ZIP_MEDIA_TYPE,
                 )
             metrics["zipStorageSeconds"] = time.perf_counter() - storage_started
-            artifacts.append(
-                ArtifactRecord(
-                    format=ZIP_STORED_FORMAT,
-                    media_type=ZIP_MEDIA_TYPE,
-                    filename=archive_path.name,
-                    object_key=zip_key,
-                    bytes=archive_path.stat().st_size,
-                    sha256=zip_sha256,
-                )
-            )
+            artifacts.append(zip_record)
 
         if self.map_signer is not None:
             stream_path = job_dir / f"{map_id}.bmap"
@@ -7259,6 +7309,16 @@ def run_job(
             # Observability must never turn a completed map into a failed map.
             pass
 
+    def reconcile_public_ready() -> None:
+        if pipeline.building_task_store is None:
+            return
+        try:
+            pipeline.building_task_store.reconcile_ready_plans((job_id,))
+        except Exception:
+            # The public artifact is already terminal. Maintenance retries and
+            # reports this additive cross-store coordinator repair.
+            pass
+
     def update(status: JobStatus) -> None:
         store.update_status_unless_cancelled(job_id, status, worker_id=worker_id)
         if estimate_coordinator is not None:
@@ -7416,6 +7476,7 @@ def run_job(
                             ),
                         )
                         if reused is not None:
+                            reconcile_public_ready()
                             record_monitoring(reused)
                             return reused
                     build_result = None
@@ -7502,13 +7563,7 @@ def run_job(
             reuse_strategy=reuse_strategy,
             reuse_source_job_id=reuse_source_job_id,
         )
-        if pipeline.building_task_store is not None:
-            try:
-                pipeline.building_task_store.reconcile_ready_plans((job_id,))
-            except BuildingTaskStoreError:
-                # Public completion is authoritative; maintenance reconciles
-                # this additive coordinator marker on the next pass.
-                pass
+        reconcile_public_ready()
         record_monitoring(finished)
         return finished
     except BuildingChunkSchedulingYield:
@@ -7522,6 +7577,11 @@ def run_job(
             except OSError:
                 pass
         current = store.get(job_id)
+        if current.status == JobStatus.READY:
+            # Never demote a published artifact because an additive action
+            # after complete_job failed.
+            record_monitoring(current)
+            return current
         if current.status == JobStatus.CANCELLED or current.worker_id != worker_id:
             if (
                 current.status == JobStatus.CANCELLED

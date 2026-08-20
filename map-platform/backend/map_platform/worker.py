@@ -13,7 +13,6 @@ from .jobs import (
     JobRecordEnumerationError,
     JobStore,
 )
-from .building_tasks import BuildingTaskStoreError
 from .models import JobStatus, MapJob
 from .monitoring import MapMonitoringStore, build_map_job_monitoring_event
 from .pipeline import (
@@ -33,6 +32,7 @@ _NON_RETRYABLE_BUILD_ERROR_CODES = frozenset(
         "building_artifact_admission",
         "building_artifact_validation_failed",
         "building_calibration_unavailable",
+        "building_chunk_retry_exhausted",
         "building_chunk_wall_time_exceeded",
         "building_pathological_block",
         "building_relation_incomplete",
@@ -159,17 +159,22 @@ class MapWorker:
                 # diagnostic behavior.
                 worker_capability = None
         preferred_job_id = None
+        resumable_job_ids = None
         if (
             isinstance(self.pipeline, MapBuildPipeline)
             and self.pipeline.building_task_store is not None
         ):
-            preferred_job_id = self.pipeline.building_task_store.next_pending_parent(
+            resumable_job_ids = self.pipeline.building_task_store.resumable_parent_ids(
                 worker_capability=worker_capability
+            )
+            preferred_job_id = (
+                resumable_job_ids[0] if resumable_job_ids else None
             )
         job = self.store.claim_next(
             self.worker_id,
             interrupted_job_stale_seconds=self.interrupted_job_stale_seconds,
             preferred_job_id=preferred_job_id,
+            resumable_job_ids=resumable_job_ids,
         )
         if job is None:
             return WorkerResult(worker_id=self.worker_id, job=None, processed=False)
@@ -361,6 +366,7 @@ class MapWorker:
                                 ),
                             )
                             if finished is not None:
+                                self._reconcile_public_ready(job.job_id)
                                 monitoring_event = self._monitoring_event(
                                     finished,
                                     attempt_started_at,
@@ -473,18 +479,7 @@ class MapWorker:
                 reuse_strategy=reuse_strategy,
                 reuse_source_job_id=reuse_source_job_id,
             )
-            if (
-                isinstance(self.pipeline, MapBuildPipeline)
-                and self.pipeline.building_task_store is not None
-            ):
-                try:
-                    self.pipeline.building_task_store.reconcile_ready_plans(
-                        (job.job_id,)
-                    )
-                except BuildingTaskStoreError:
-                    # The public job is already durable and downloadable.
-                    # Maintenance retries this additive coordinator marker.
-                    pass
+            self._reconcile_public_ready(job.job_id)
             monitoring_event = self._monitoring_event(
                 finished,
                 attempt_started_at,
@@ -543,6 +538,25 @@ class MapWorker:
                     except RuntimeError:
                         pass
             current = self.store.get(job.job_id)
+            if current.status == JobStatus.READY:
+                # Public READY is terminal and authoritative. Any exception
+                # after complete_job (coordinator reconciliation, telemetry,
+                # or another additive hook) must never demote the artifact to
+                # queued/failed; maintenance repairs coordinator state.
+                try:
+                    monitoring_event = self._monitoring_event(
+                        current,
+                        attempt_started_at,
+                        outcome="ready",
+                    )
+                except Exception:
+                    monitoring_event = None
+                return WorkerResult(
+                    worker_id=self.worker_id,
+                    job=current,
+                    processed=True,
+                    monitoring_event=monitoring_event,
+                )
             if current.status == JobStatus.CANCELLED or current.worker_id != self.worker_id:
                 if (
                     current.status == JobStatus.CANCELLED
@@ -597,6 +611,19 @@ class MapWorker:
                 processed=True,
                 monitoring_event=monitoring_event,
             )
+
+    def _reconcile_public_ready(self, job_id: str) -> None:
+        if (
+            not isinstance(self.pipeline, MapBuildPipeline)
+            or self.pipeline.building_task_store is None
+        ):
+            return
+        try:
+            self.pipeline.building_task_store.reconcile_ready_plans((job_id,))
+        except Exception:
+            # Public completion is authoritative. Maintenance retries this
+            # additive cross-store coordinator marker and reports any failure.
+            pass
 
     def _monitoring_event(
         self,

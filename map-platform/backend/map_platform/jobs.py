@@ -1316,13 +1316,20 @@ class JobStore:
         *,
         interrupted_job_stale_seconds: float | None = None,
         preferred_job_id: str | None = None,
+        resumable_job_ids: Iterable[str] | None = None,
     ) -> MapJob | None:
         with self._queue_lock():
             jobs = self.list()
-            # Admit never-started public work first so it can materialize a
-            # durable child plan. Resumable chunked parents are then selected
-            # by the coordinator's global weighted scheduler when possible;
-            # the timestamp fallback is a durable round robin.
+            allowed_resumable_ids = (
+                None
+                if resumable_job_ids is None
+                else frozenset(str(value) for value in resumable_job_ids)
+            )
+            # Merge initial admission and yielded parents by their durable
+            # waiting timestamp. A completed quantum refreshes updated_at, so
+            # an older never-started job runs next; admitting it in turn leaves
+            # an older yielded parent next. This gives both classes a bounded
+            # turn under sustained arrivals without adding volatile state.
             never_started = sorted(
                 (
                     job
@@ -1337,6 +1344,10 @@ class JobStore:
                 job
                 for job in jobs
                 if job.scheduler_yielded and job.worker_id is None
+                and (
+                    allowed_resumable_ids is None
+                    or job.job_id in allowed_resumable_ids
+                )
             ]
             if preferred_job_id is not None:
                 resumable.sort(
@@ -1358,7 +1369,27 @@ class JobStore:
                 ),
                 key=lambda job: (job.updated_at, job.job_id),
             )
-            for job in (*never_started, *resumable, *queued_retries):
+            initial_and_resumable: list[MapJob] = []
+            while never_started or resumable:
+                if not never_started:
+                    initial_and_resumable.append(resumable.pop(0))
+                    continue
+                if not resumable:
+                    initial_and_resumable.append(never_started.pop(0))
+                    continue
+                never_started_key = (
+                    never_started[0].created_at,
+                    never_started[0].job_id,
+                )
+                resumable_key = (
+                    resumable[0].updated_at,
+                    resumable[0].job_id,
+                )
+                if never_started_key <= resumable_key:
+                    initial_and_resumable.append(never_started.pop(0))
+                else:
+                    initial_and_resumable.append(resumable.pop(0))
+            for job in (*initial_and_resumable, *queued_retries):
                 if job.scheduler_yielded:
                     return self._resume_yielded_unlocked(job, worker_id)
                 claimed = self._claim_unlocked(job, worker_id)

@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import asdict
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -20,6 +21,7 @@ from map_platform.building_scope import plan_global_building_scope
 from map_platform.models import Bounds, GeometryMode, NormalizedGeometry, SourceRegion
 from map_platform.pipeline import MapBuildPipeline, PipelinePaths, _TaskLeaseHeartbeat
 from map_platform.pipeline import (
+    BuildingChunkRetryExhausted,
     BuildingChunkSchedulingYield,
     _ParentPhaseLeaseHeartbeat,
 )
@@ -375,12 +377,20 @@ class BuildingTaskStoreTests(unittest.TestCase):
                 self.assertEqual(failed.state, "pending")
                 assert failed.next_eligible_at is not None
                 delays.append(failed.next_eligible_at - self.clock.value)
+                self.assertNotIn(
+                    "job-1",
+                    self.store.resumable_parent_ids(),
+                )
                 self.assertEqual(
                     self.store.pending_task_availability("job-1"),
                     {"eligible": 0, "deferred": 1},
                 )
                 self.assertIsNone(self.store.claim_next(worker_id="too-early"))
                 self.clock.value = failed.next_eligible_at
+                self.assertIn(
+                    "job-1",
+                    self.store.resumable_parent_ids(),
+                )
             else:
                 self.assertEqual(failed.state, "failed")
                 self.assertIsNone(failed.next_eligible_at)
@@ -391,6 +401,40 @@ class BuildingTaskStoreTests(unittest.TestCase):
             [row["outcome"] for row in self.store.list_attempts("job-1")],
             ["failed_transient", "failed_transient", "failed_retry_exhausted"],
         )
+        terminal = MapBuildPipeline._terminal_chunk_failure(failed)
+        self.assertIsInstance(terminal, BuildingChunkRetryExhausted)
+        assert isinstance(terminal, BuildingChunkRetryExhausted)
+        self.assertEqual(terminal.task_id, "task-1")
+        self.assertEqual(
+            terminal.root_failure_code,
+            "building_chunk_execution_failed",
+        )
+
+    def test_receipt_complete_parent_remains_resumable_for_assembly(self):
+        self.store.add_tasks(
+            [self.spec(blocks=((1, 2), (1, 3), (1, 4)))]
+        )
+        claimed = self.store.claim_next(worker_id="worker-a")
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        for block in claimed.task.blocks:
+            self.store.publish_receipt(
+                claimed.task.task_id,
+                worker_id="worker-a",
+                lease_token=claimed.lease_token,
+                block=block,
+                cache_identity_sha256=SHA,
+                content_sha256=CONTENT,
+                producer_identity={},
+                validation={"valid": True},
+            )
+        self.store.mark_ready(
+            claimed.task.task_id,
+            worker_id="worker-a",
+            lease_token=claimed.lease_token,
+        )
+
+        self.assertIn("job-1", self.store.resumable_parent_ids())
 
     def test_terminal_retention_prunes_failed_history_but_not_cache_policy(self):
         self.store.add_tasks([self.spec(blocks=((1, 2),))])
@@ -726,6 +770,60 @@ class BuildingTaskStoreTests(unittest.TestCase):
                 worker_id="worker-parent",
                 worker_capability=capability,
             )
+        )
+
+    def test_diagnostic_page_redacts_active_fencing_tokens(self):
+        capability = {
+            "resourcePool": "diagnostic-redaction",
+            "memoryLimitBytes": 12_000_000_000,
+            "cpuCount": 4,
+            "maxConcurrentTasks": 1,
+        }
+        self.store.add_tasks([self.spec(task_id="redacted-task")])
+        claimed = self.store.claim_next(
+            worker_id="worker-child",
+            worker_capability=capability,
+        )
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+
+        child_page = self.store.diagnostic_page("job-1")
+
+        self.assertEqual(
+            self.store.get_task(claimed.task.task_id).lease_token,
+            claimed.lease_token,
+        )
+        self.assertNotIn("lease_token", asdict(child_page["tasks"][0]))
+        self.assertNotIn(
+            "lease_token", child_page["resourceReservations"][0]
+        )
+
+        self.store.fail(
+            claimed.task.task_id,
+            worker_id="worker-child",
+            lease_token=claimed.lease_token,
+            typed_failure="test_failure",
+            transient=False,
+        )
+        parent = self.store.acquire_parent_phase_reservation(
+            parent_job_id="job-1",
+            phase="source_preparation",
+            worker_id="worker-parent",
+            worker_capability=capability,
+        )
+        self.assertIsNotNone(parent)
+        assert parent is not None
+
+        parent_page = self.store.diagnostic_page("job-1")
+
+        self.assertNotIn(
+            "lease_token", parent_page["parentPhaseReservations"][0]
+        )
+        self.store.release_parent_phase_reservation(
+            parent_job_id="job-1",
+            phase="source_preparation",
+            worker_id="worker-parent",
+            lease_token=parent.lease_token,
         )
 
     def test_parent_phase_expiry_heartbeat_and_token_fencing(self):
@@ -1867,6 +1965,74 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.store.cancel_plan("job-1")
 
         self.assertEqual(self.store.get_plan("job-1")["state"], "ready")
+
+    def test_reconcile_ready_plan_fences_leased_child_and_reservation(self):
+        self.store.add_tasks([self.spec(blocks=((1, 2),))])
+        claimed = self.store.claim_next(
+            worker_id="worker-a",
+            worker_capability={
+                "resourcePool": "pool-a",
+                "memoryLimitBytes": 8_000_000_000,
+                "cpuCount": 8,
+                "maxConcurrentTasks": 1,
+            },
+        )
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        self.assertEqual(len(self.store.list_resource_reservations("job-1")), 1)
+
+        self.assertEqual(self.store.reconcile_ready_plans(("job-1",)), 1)
+
+        self.assertEqual(self.store.get_plan("job-1")["state"], "ready")
+        superseded = self.store.get_task(claimed.task.task_id)
+        self.assertIsNotNone(superseded)
+        assert superseded is not None
+        self.assertEqual(superseded.state, "cancelled")
+        self.assertEqual(
+            superseded.typed_error,
+            "building_task_superseded_by_public_ready",
+        )
+        self.assertEqual(self.store.list_resource_reservations("job-1"), ())
+        attempt = self.store.list_attempts("job-1")[0]
+        self.assertEqual(attempt["outcome"], "superseded")
+        self.assertEqual(
+            attempt["typed_failure"],
+            "building_task_superseded_by_public_ready",
+        )
+        with self.assertRaises(StaleLeaseError):
+            self.store.mark_ready(
+                claimed.task.task_id,
+                worker_id="worker-a",
+                lease_token=claimed.lease_token,
+            )
+        self.assertEqual(self.store.reconcile_ready_plans(("job-1",)), 0)
+
+    def test_reconcile_ready_plan_releases_parent_phase_reservation(self):
+        self.store.add_tasks([self.spec(blocks=((1, 2),))])
+        reservation = self.store.acquire_parent_phase_reservation(
+            parent_job_id="job-1",
+            phase="source_preparation",
+            worker_id="worker-parent",
+            worker_capability={
+                "resourcePool": "pool-a",
+                "memoryLimitBytes": 8_000_000_000,
+                "cpuCount": 8,
+                "maxConcurrentTasks": 1,
+            },
+        )
+        self.assertIsNotNone(reservation)
+        self.assertEqual(
+            len(self.store.list_parent_phase_reservations("job-1")),
+            1,
+        )
+
+        self.assertEqual(self.store.reconcile_ready_plans(("job-1",)), 1)
+
+        self.assertEqual(
+            self.store.list_parent_phase_reservations("job-1"),
+            (),
+        )
+        self.assertEqual(self.store.get_task("task-1").state, "cancelled")
 
     def test_reconcile_cancelled_plan_releases_legacy_reservation(self):
         self.store.add_tasks([self.spec(blocks=((1, 2),))])
