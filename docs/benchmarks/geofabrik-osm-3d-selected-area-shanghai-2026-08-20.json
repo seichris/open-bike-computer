@@ -1,0 +1,187 @@
+{
+  "schemaVersion": 1,
+  "status": "pass",
+  "benchmarkKind": "selected-area-target3-rebaseline",
+  "runDate": "2026-08-20",
+  "sourceIdentity": {
+    "url": "https://download.geofabrik.de/asia/china/shanghai-260819.osm.pbf",
+    "publishedAt": "2026-08-19T23:00:01Z",
+    "sha256": "c34e4f36f03a598480fe2f4671ca2e43939931234899cc5b17e50f7c1bbbc561",
+    "bytes": 25665956
+  },
+  "workerIdentity": {
+    "gitHead": "fa1e84aa30407efc726a84badd413fe36de3d11e",
+    "workspaceContentSha256": "512a04821125e3717b081a08f7e15b32ef744bc0fba0ff36c369091eb1f8bf35",
+    "platform": "Linux-7.0.14-orbstack-00380-ga7e0a2dc9535-aarch64-with-glibc2.35",
+    "python": "3.10.12",
+    "osmium": "osmium version 1.14.0",
+    "gdal": "GDAL 3.4.1, released 2021/12/27",
+    "workerFingerprintSha256": "86d0e7eb0b3885c5290fbace72707253ca8e7ce98866f8bda21d4d65b1b1ffbe"
+  },
+  "image": {
+    "localTag": "open-bike-map-platform-pr267:latest",
+    "digest": "sha256:bd2b1dce543e5e8c71d6535e9421bcf6ed131a67e7f5aa8ce7a38b62c260d9a6",
+    "sourceFixCommit": "fa1e84aa",
+    "schedulerFixCommit": "1373debc"
+  },
+  "cache": {
+    "coldOutcome": "rebuilt",
+    "warmOutcome": "hit"
+  },
+  "measurements": {
+    "requestedAreaM2": 23840377,
+    "outputAreaM2": 100663296,
+    "legacySourceAreaM2": 805306368,
+    "selectedSourceAreaM2": 111411200,
+    "sourceReductionBasisPoints": 8616,
+    "selectedSourceToOutputAreaBasisPoints": 11068,
+    "sourceQueryByteReductionBasisPoints": 7139,
+    "legacyWarmFirstBlockProgressMilliseconds": 25584,
+    "selectedWarmFirstBlockProgressMilliseconds": 7992,
+    "selectedWarmFirstPreprocessingProgressMilliseconds": 2,
+    "legacyColdWallMilliseconds": 42914,
+    "legacyWarmWallMilliseconds": 37773,
+    "selectedColdWallMilliseconds": 82059,
+    "selectedWarmWallMilliseconds": 13815,
+    "legacyColdPeakResidentBytes": 3990798336,
+    "legacyWarmPeakResidentBytes": 3992608768,
+    "selectedColdPeakResidentBytes": 3793612800,
+    "selectedWarmPeakResidentBytes": 3783749632
+  },
+  "fmbStableAcrossColdWarm": {
+    "legacy": true,
+    "selected": true
+  },
+  "artifactReceipts": {
+    "legacyCold": {
+      "manifestReceipt": "57dda5c2d4ce8573368bece636ab96034291100c4c083c81a39b95b301991f28",
+      "signedManifestReceipt": "6f7c08356e37a8e027ae46985a4b23b164a2b7b9d14b190f4744cc6174d2cc43"
+    },
+    "legacyWarm": {
+      "manifestReceipt": "9068a03566e9ae35aafa41f9758c4ff6b5cca9cf129add09d09fce5cdf9eb617",
+      "signedManifestReceipt": "e0aed1daab9cd4773f397da86209527826320a033147374dec8248ce23420308"
+    },
+    "selectedCold": {
+      "manifestReceipt": "445211116271a0bd66a2b24e70efed7bf52f34f6e0e7a8366be0e8802ca075d8",
+      "signedManifestReceipt": "3c69e1350197916bf7f89531567333516f79b1d600feb4e13f1de0f7a345bd08"
+    },
+    "selectedWarm": {
+      "manifestReceipt": "445211116271a0bd66a2b24e70efed7bf52f34f6e0e7a8366be0e8802ca075d8",
+      "signedManifestReceipt": "3c69e1350197916bf7f89531567333516f79b1d600feb4e13f1de0f7a345bd08"
+    }
+  },
+  "runs": {
+    "legacyCold": {
+      "mode": "legacy",
+      "timings": {
+        "wallMilliseconds": 42914,
+        "firstPreprocessingProgressMilliseconds": 6758,
+        "firstBlockProgressMilliseconds": 29302
+      },
+      "peakResidentBytes": 3990798336,
+      "sourceQueryBytes": 8329998,
+      "sourceQueryObjects": {
+        "nodes": 841557,
+        "ways": 131596,
+        "relations": 7653
+      },
+      "zip": {
+        "bytes": 4271451,
+        "sha256": "8e9bf141e7d13003c480adfa429844967d680715365aaa8703e7482a3e1a6199"
+      },
+      "fmbSha256ByPath": {
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_14.fmb": "8f0d42720e410c85c6fc36403e71f17947b06934b99879f45bd38fcdc7d46aec",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_15.fmb": "91265fdc9d99ad9e4c18ace4d5ac6ff2c1ec2f70e3a581ffd3e9af4530f654e8",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_14.fmb": "f217ae0ef57dd0992661de53ecd70ff654d0cf23bdfa595f7bf5e57f7429237b",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_15.fmb": "11a29421cabdb2ec6529b24b57aa21fed32688ac10fc4af2a5c6cc79537d612f",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/4_0.fmb": "4e00bbab95c8e966ece60a3ca5e8d4e531afb297df61ce573e4d838df92b9aa6",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/5_0.fmb": "9fc18b1d0c736646a9bbc89460d6414e4c6909ae810be79fef02e8b656c6108d"
+      }
+    },
+    "legacyWarm": {
+      "mode": "legacy",
+      "timings": {
+        "wallMilliseconds": 37773,
+        "firstPreprocessingProgressMilliseconds": 5807,
+        "firstBlockProgressMilliseconds": 25584
+      },
+      "peakResidentBytes": 3992608768,
+      "sourceQueryBytes": 8329998,
+      "sourceQueryObjects": {
+        "nodes": 841557,
+        "ways": 131596,
+        "relations": 7653
+      },
+      "zip": {
+        "bytes": 4271451,
+        "sha256": "3d7b2806c6f302b5dae6158ca0198438a9e6fad180b15b3212decf4139b22780"
+      },
+      "fmbSha256ByPath": {
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_14.fmb": "8f0d42720e410c85c6fc36403e71f17947b06934b99879f45bd38fcdc7d46aec",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_15.fmb": "91265fdc9d99ad9e4c18ace4d5ac6ff2c1ec2f70e3a581ffd3e9af4530f654e8",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_14.fmb": "f217ae0ef57dd0992661de53ecd70ff654d0cf23bdfa595f7bf5e57f7429237b",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_15.fmb": "11a29421cabdb2ec6529b24b57aa21fed32688ac10fc4af2a5c6cc79537d612f",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/4_0.fmb": "4e00bbab95c8e966ece60a3ca5e8d4e531afb297df61ce573e4d838df92b9aa6",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/5_0.fmb": "9fc18b1d0c736646a9bbc89460d6414e4c6909ae810be79fef02e8b656c6108d"
+      }
+    },
+    "selectedCold": {
+      "mode": "selected",
+      "timings": {
+        "wallMilliseconds": 82059,
+        "firstPreprocessingProgressMilliseconds": 2,
+        "firstBlockProgressMilliseconds": 77024
+      },
+      "peakResidentBytes": 3793612800,
+      "sourceQueryBytes": 2382623,
+      "sourceQueryObjects": {
+        "nodes": 220254,
+        "ways": 32321,
+        "relations": 2193
+      },
+      "zip": {
+        "bytes": 3224323,
+        "sha256": "6e521beeecd653a465323a9d17a089079fdf7b3879b6aa258a68ffa23ac38410"
+      },
+      "fmbSha256ByPath": {
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_14.fmb": "ba54a94aade5727c163d8494be9bce4c77f6c497ae5129985f5d203be6adbb7c",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_15.fmb": "e5b6082c76381e832fa637889d7ec56295dafa6d90070f63c1108bb651bd973f",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_14.fmb": "c54ab6c9dc6b1533f7581d411eb2a9c15efa25cb3c371544b2f3603700d082f2",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_15.fmb": "54617328c7ea16097fe28b0da82702340f18af3c850843727165097d4079945d",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/4_0.fmb": "2c6c39d869959e8f024f5537e685d950bb6031eeb0e4cf0ce8dafee5912d447a",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/5_0.fmb": "b8b3be2953a06e65995afec4d0b306c94637620c1c59b1d7ea66cece0005e116"
+      }
+    },
+    "selectedWarm": {
+      "mode": "selected",
+      "timings": {
+        "wallMilliseconds": 13815,
+        "firstPreprocessingProgressMilliseconds": 2,
+        "firstBlockProgressMilliseconds": 7992
+      },
+      "peakResidentBytes": 3783749632,
+      "sourceQueryBytes": 2382623,
+      "sourceQueryObjects": {
+        "nodes": 220254,
+        "ways": 32321,
+        "relations": 2193
+      },
+      "zip": {
+        "bytes": 3224323,
+        "sha256": "6e521beeecd653a465323a9d17a089079fdf7b3879b6aa258a68ffa23ac38410"
+      },
+      "fmbSha256ByPath": {
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_14.fmb": "ba54a94aade5727c163d8494be9bce4c77f6c497ae5129985f5d203be6adbb7c",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/4_15.fmb": "e5b6082c76381e832fa637889d7ec56295dafa6d90070f63c1108bb651bd973f",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_14.fmb": "c54ab6c9dc6b1533f7581d411eb2a9c15efa25cb3c371544b2f3603700d082f2",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+055/5_15.fmb": "54617328c7ea16097fe28b0da82702340f18af3c850843727165097d4079945d",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/4_0.fmb": "2c6c39d869959e8f024f5537e685d950bb6031eeb0e4cf0ce8dafee5912d447a",
+        "VECTMAP/shanghai-selected-area-3d-benchmark-0888580842/+206+056/5_0.fmb": "b8b3be2953a06e65995afec4d0b306c94637620c1c59b1d7ea66cece0005e116"
+      }
+    }
+  },
+  "notes": [
+    "The full four-run validator returned pass: legacy/selected cold and warm runs used one source and worker identity, cold and warm FMB hashes were stable within each mode, and selected calibration changed from rebuilt to hit.",
+    "This is a selected-area six-block rebaseline. It is not the retained 442-block exact-cold run and does not close the 90-minute, retained monolithic-vs-chunked, signing, deployment/production, or physical-device gates."
+  ]
+}

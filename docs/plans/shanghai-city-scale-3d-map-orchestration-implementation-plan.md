@@ -103,6 +103,21 @@ The authoritative retained validation baseline in this document is the final
 checkpoints, not statements of the current live deployment or validation of
 later source commits.
 
+The current-image selected-area rebaseline on 2026-08-20 is retained in
+`docs/benchmarks/geofabrik-osm-3d-selected-area-shanghai-2026-08-20.json`. It
+used the immutable Shanghai snapshot `shanghai-260819.osm.pbf` (25,665,956
+bytes, SHA-256 `c34e4f36f03a598480fe2f4671ca2e43939931234899cc5b17e50f7c1bbbc561`)
+and image `open-bike-map-platform-pr267:latest` at
+`sha256:bd2b1dce543e5e8c71d6535e9421bcf6ed131a67e7f5aa8ce7a38b62c260d9a6`,
+whose source head is `fa1e84aa`. The full legacy-cold/legacy-warm and
+selected-cold/selected-warm validator passed: wall times were 42.914/37.773 s
+and 82.059/13.815 s respectively; selected warm first block progress was
+7.992 s versus legacy warm 25.584 s (6,876 basis points improvement); source
+area and query-byte reductions were 8,616 and 7,139 basis points; and all
+within-mode cold/warm FMB hashes were identical. This rebaseline is a
+six-block selected-area contract check, not the retained 442-block exact-cold
+performance run, so it does not close the 90-minute or other release gates.
+
 The first exact full-bbox validation attempt exposed and fixed one remaining
 warm-path bug: the standalone relation-audit consumer still called the
 source-index database validator for every chunk. That job

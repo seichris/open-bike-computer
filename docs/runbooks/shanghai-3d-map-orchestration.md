@@ -292,3 +292,18 @@ explicitly misses the unchanged 90-minute performance objective. It is not
 production or physical-device acceptance: validation stream rollout was
 disabled, production was untouched, and the signed-manifest, install, render,
 and route gates remain open.
+
+### Current-image selected-area rebaseline
+
+The separate four-run selected-area target-3 rebaseline is retained at
+`docs/benchmarks/geofabrik-osm-3d-selected-area-shanghai-2026-08-20.json`. It
+used the pinned `shanghai-260819.osm.pbf` snapshot (25,665,956 bytes,
+SHA-256 `c34e4f36f03a598480fe2f4671ca2e43939931234899cc5b17e50f7c1bbbc561`)
+and current validation image `sha256:bd2b1dce543e5e8c71d6535e9421bcf6ed131a67e7f5aa8ce7a38b62c260d9a6` at
+source head `fa1e84aa`. The harness validator returned `pass`: legacy cold/warm
+wall time was 42.914/37.773 seconds, selected cold/warm was 82.059/13.815
+seconds, selected warm reached first block progress in 7.992 seconds versus
+25.584 seconds for legacy warm, and cold/warm FMB bytes were stable within each
+mode. This is a six-block selected-area rebaseline only; it does not replace
+the retained 442-block exact-cold evidence or close the 90-minute,
+monolithic-vs-chunked, signing, deployment/production, or physical gates.
