@@ -149,6 +149,12 @@ class FontPackBuilder:
             raise FontAssetError("font face IDs must be non-empty and unique")
         self._face_by_id = {face.face_id: face for face in self.faces}
         self._font_data = {face.face_id: face.path.read_bytes() for face in self.faces}
+        # HarfBuzz faces/fonts are immutable after their scale is configured.
+        # Reusing them avoids rebuilding three native font objects for every
+        # uncached label while preserving the same per-label buffer and glyph
+        # allocation order.
+        self._hb_faces: dict[tuple[int, int], hb.Face] = {}
+        self._hb_fonts: dict[tuple[int, int], hb.Font] = {}
         profile = _canonical_profile(self.languages, self.faces)
         self.profile_fingerprint = int.from_bytes(
             hashlib.sha256(profile).digest()[:4], "little"
@@ -198,6 +204,19 @@ class FontPackBuilder:
         self._asset_id_by_key[key] = asset_id
         return asset_id
 
+    def _harfbuzz_font(self, face: FontFaceSpec, pixel_size: int) -> hb.Font:
+        key = (face.face_id, pixel_size)
+        cached = self._hb_fonts.get(key)
+        if cached is not None:
+            return cached
+        hb_face = hb.Face(self._font_data[face.face_id], face.collection_index)
+        font = hb.Font(hb_face)
+        font.scale = (pixel_size * 64, pixel_size * 64)
+        hb.ot_font_set_funcs(font)
+        self._hb_faces[key] = hb_face
+        self._hb_fonts[key] = font
+        return font
+
     def shape(self, text: str, language: str | None = None) -> tuple[ShapedRun, ...]:
         self.shape_calls += 1
         cache_key = (text, language)
@@ -208,13 +227,9 @@ class FontPackBuilder:
         started = time.perf_counter()
         try:
             face = self._face_for(text, language)
-            data = self._font_data[face.face_id]
             runs: list[ShapedRun] = []
             for size_id, pixel_size in enumerate(FONT_SIZES):
-                hb_face = hb.Face(data, face.collection_index)
-                font = hb.Font(hb_face)
-                font.scale = (pixel_size * 64, pixel_size * 64)
-                hb.ot_font_set_funcs(font)
+                font = self._harfbuzz_font(face, pixel_size)
                 buffer = hb.Buffer()
                 buffer.add_str(text)
                 if language:

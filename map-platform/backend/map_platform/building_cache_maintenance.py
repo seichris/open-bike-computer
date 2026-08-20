@@ -4,14 +4,48 @@ from __future__ import annotations
 
 import fcntl
 import os
+import re
+from contextlib import contextmanager
 from pathlib import Path
 import shutil
 import time
+from typing import Iterable, Iterator
 
 
 BUILDING_BLOCK_CACHE_DIRECTORY = "building-block-v1"
 DEFAULT_BUILDING_BLOCK_CACHE_RETENTION_DAYS = 14
 DEFAULT_BUILDING_BLOCK_CACHE_MAX_BYTES = 20 * 1024 * 1024 * 1024
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def building_block_cache_namespace_lease_path(namespace: Path) -> Path:
+    """Return the stable lease inode shared by readers, writers, and eviction."""
+
+    return namespace.parent / f".{namespace.name}.lease.lock"
+
+
+@contextmanager
+def building_block_cache_namespace_lease(
+    namespace: Path,
+    *,
+    exclusive: bool,
+    nonblocking: bool = False,
+    create_parent: bool = False,
+) -> Iterator[None]:
+    """Fence one cache namespace for its complete read, write, or removal."""
+
+    lease_path = building_block_cache_namespace_lease_path(namespace)
+    if create_parent:
+        lease_path.parent.mkdir(parents=True, exist_ok=True)
+    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    if nonblocking:
+        operation |= fcntl.LOCK_NB
+    with lease_path.open("a+b") as lease:
+        fcntl.flock(lease.fileno(), operation)
+        try:
+            yield
+        finally:
+            fcntl.flock(lease.fileno(), fcntl.LOCK_UN)
 
 
 def prune_building_block_cache(
@@ -20,6 +54,8 @@ def prune_building_block_cache(
     older_than_days: int = DEFAULT_BUILDING_BLOCK_CACHE_RETENTION_DAYS,
     max_bytes: int = DEFAULT_BUILDING_BLOCK_CACHE_MAX_BYTES,
     max_items: int = 100,
+    protected_cache_identity_sha256s: Iterable[str] = (),
+    protect_all: bool = False,
     now: float | None = None,
 ) -> dict[str, int]:
     if (
@@ -32,8 +68,15 @@ def prune_building_block_cache(
         or isinstance(max_items, bool)
         or not isinstance(max_items, int)
         or max_items < 1
+        or not isinstance(protect_all, bool)
     ):
         raise ValueError("building block cache retention settings are invalid")
+    protected_identities = frozenset(protected_cache_identity_sha256s)
+    if any(
+        not isinstance(identity, str) or not _SHA256.fullmatch(identity)
+        for identity in protected_identities
+    ):
+        raise ValueError("protected building block cache identity is invalid")
     cache_root = building_cache_root / BUILDING_BLOCK_CACHE_DIRECTORY
     if not cache_root.exists():
         return {
@@ -68,13 +111,21 @@ def prune_building_block_cache(
     selected: list[tuple[float, str, Path, int]] = []
     selected_paths: set[Path] = set()
     for candidate in candidates:
-        if candidate[0] < cutoff:
+        if (
+            not protect_all
+            and candidate[2].name not in protected_identities
+            and candidate[0] < cutoff
+        ):
             selected.append(candidate)
             selected_paths.add(candidate[2])
     projected_bytes = retained_bytes - sum(item[3] for item in selected)
     if projected_bytes > max_bytes:
         for candidate in candidates:
-            if candidate[2] in selected_paths:
+            if (
+                protect_all
+                or candidate[2].name in protected_identities
+                or candidate[2] in selected_paths
+            ):
                 continue
             selected.append(candidate)
             selected_paths.add(candidate[2])
@@ -89,19 +140,22 @@ def prune_building_block_cache(
         # This is deliberately outside the removable namespace, matching the
         # cache reader/writer. The locked inode therefore remains stable for
         # the full eviction even if another process recreates the namespace.
-        lease_path = namespace.parent / f".{namespace.name}.lease.lock"
         try:
-            lease_path.parent.mkdir(parents=True, exist_ok=True)
-            with lease_path.open("a+b") as lease:
-                try:
-                    fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    skipped_leased += 1
-                    continue
-                if namespace.exists():
-                    shutil.rmtree(namespace)
-                    removed_namespaces += 1
-                    removed_bytes += measured_size
+            try:
+                lease = building_block_cache_namespace_lease(
+                    namespace,
+                    exclusive=True,
+                    nonblocking=True,
+                    create_parent=True,
+                )
+                with lease:
+                    if namespace.exists():
+                        shutil.rmtree(namespace)
+                        removed_namespaces += 1
+                        removed_bytes += measured_size
+            except BlockingIOError:
+                skipped_leased += 1
+                continue
         except FileNotFoundError:
             continue
     return {

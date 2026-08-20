@@ -12,9 +12,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from map_platform.jobs import JobStore, MapJobService
-from map_platform.building_scope import BuildingScopeError
+from map_platform.building_scope import BuildingScopeError, plan_building_scope
 from map_platform.models import Bounds, SourceRegion
 from map_platform.pipeline import (
+    BuildingChunkSplitRequired,
     CommandRunner,
     MapBuildPipeline,
     PipelinePaths,
@@ -25,6 +26,7 @@ from map_platform.pipeline import (
     parse_building_complexity,
     parse_building_scope,
     parse_map_progress,
+    safe_build_failure,
 )
 from map_platform.sources import SourceIndex
 
@@ -101,6 +103,99 @@ class BuildingPhaseStreamingRunner:
 
 
 class PipelineProgressTests(unittest.TestCase):
+    def test_chunk_runtime_hard_deadline_is_typed_and_parent_cancel_wins(self):
+        self.assertTrue(
+            MapBuildPipeline._chunk_task_cancellation_requested(
+                cancellation_check=lambda: True,
+                started_monotonic=10.0,
+                hard_seconds=1_800,
+                now_monotonic=10.0,
+            )
+        )
+        with self.assertRaises(BuildingScopeError) as raised:
+            MapBuildPipeline._chunk_task_cancellation_requested(
+                cancellation_check=lambda: False,
+                started_monotonic=10.0,
+                hard_seconds=1_800,
+                now_monotonic=1_811.0,
+            )
+        self.assertEqual(raised.exception.code, "building_chunk_wall_time_exceeded")
+
+    def test_chunk_retry_classification_is_narrow_and_deterministic(self):
+        self.assertTrue(
+            MapBuildPipeline._chunk_failure_is_transient(
+                OSError("temporary filesystem fault"),
+                "building_chunk_execution_failed",
+            )
+        )
+        self.assertTrue(
+            MapBuildPipeline._chunk_failure_is_transient(
+                subprocess.CalledProcessError(1, ["tool"]),
+                "building_chunk_execution_failed",
+            )
+        )
+        self.assertFalse(
+            MapBuildPipeline._chunk_failure_is_transient(
+                BuildingScopeError(
+                    "building_relation_incomplete",
+                    "deterministic closure failure",
+                ),
+                "building_relation_incomplete",
+            )
+        )
+        relation_process_failure = BuildingScopeError(
+            "building_relation_incomplete",
+            "deterministic producer relation failure",
+        )
+        relation_process_failure.__cause__ = subprocess.CalledProcessError(
+            2,
+            ["producer"],
+        )
+        self.assertFalse(
+            MapBuildPipeline._chunk_failure_is_transient(
+                relation_process_failure,
+                "building_relation_incomplete",
+            )
+        )
+        self.assertFalse(
+            MapBuildPipeline._chunk_failure_is_transient(
+                BuildingScopeError("building_worker_oom", "cgroup OOM"),
+                "building_worker_oom",
+            )
+        )
+        self.assertFalse(
+            MapBuildPipeline._chunk_failure_is_transient(
+                RuntimeError("deterministic Python bug"),
+                "building_chunk_execution_failed",
+            )
+        )
+        self.assertTrue(
+            MapBuildPipeline._chunk_failure_is_transient(
+                BuildingScopeError(
+                    "building_block_cache_unavailable",
+                    "temporary cache filesystem failure",
+                ),
+                "building_block_cache_unavailable",
+            )
+        )
+
+    def test_relation_failure_preserves_bounded_source_detail(self):
+        message, code = safe_build_failure(
+            SimpleNamespace(
+                job_id="job-123",
+                building_preprocessing_inputs=None,
+            ),
+            BuildingScopeError(
+                "building_relation_incomplete",
+                "source relation r11258294 has part members but no outline (w813033938)",
+            ),
+        )
+
+        self.assertEqual(code, "building_relation_incomplete")
+        self.assertIn("source relation r11258294", message)
+        self.assertIn("w813033938", message)
+        self.assertIn("jobId=job-123", message)
+
     def test_pipeline_uses_relocated_osm_extract_tool(self):
         repo_root = Path("/repo")
         paths = PipelinePaths(
@@ -212,6 +307,268 @@ class PipelineProgressTests(unittest.TestCase):
         self.assertIn("MAP_PROGRESS:2:2", output)
         self.assertIn("wallSeconds", runner.last_execution_metrics)
         self.assertGreaterEqual(runner.last_execution_metrics["wallSeconds"], 0)
+
+    @unittest.skipUnless(Path("/proc/self/status").is_file(), "requires Linux procfs")
+    def test_streaming_runner_measures_intermediate_child_process_peak(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = CommandRunner(
+                memory_events_path=Path(tmp) / "missing-memory.events"
+            )
+            runner.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import subprocess,sys; "
+                        "subprocess.run([sys.executable, '-c', "
+                        "'import time; payload=bytearray(64*1024*1024); "
+                        "time.sleep(0.5)'], check=True)"
+                    ),
+                ]
+            )
+
+        self.assertGreater(
+            runner.last_execution_metrics["peakResidentBytes"],
+            48 * 1024 * 1024,
+        )
+
+    def test_streaming_runner_exposes_confirmed_cgroup_oom_as_typed_failure(self):
+        baseline = {
+            "low": 0,
+            "high": 0,
+            "max": 0,
+            "oom": 0,
+            "oom_kill": 0,
+            "oom_group_kill": 0,
+        }
+        for event_key in ("oom", "oom_kill", "oom_group_kill"):
+            with self.subTest(event_key=event_key):
+                runner = CommandRunner()
+                after = {**baseline, event_key: 1}
+                with patch.object(
+                    runner,
+                    "_read_memory_events",
+                    side_effect=[baseline, after],
+                ), self.assertRaises(BuildingScopeError) as raised:
+                    runner.run([sys.executable, "-c", "pass"])
+
+                self.assertEqual(raised.exception.code, "building_worker_oom")
+                self.assertEqual(
+                    runner.last_execution_metrics["memoryEventsDelta"][event_key],
+                    1,
+                )
+
+                split_scope = SimpleNamespace(
+                    output_blocks=(
+                        SimpleNamespace(x=1, y=2),
+                        SimpleNamespace(x=1, y=3),
+                    )
+                )
+                with self.assertRaises(BuildingChunkSplitRequired) as split:
+                    MapBuildPipeline._raise_chunk_split_if_needed(
+                        raised.exception,
+                        task_id="task-oom",
+                        scope_plan=split_scope,
+                    )
+                self.assertEqual(split.exception.code, "building_worker_oom")
+                self.assertEqual(split.exception.blocks, ((1, 2), (1, 3)))
+
+    def test_streaming_runner_does_not_infer_oom_from_generic_failure(self):
+        memory_events = {
+            "low": 0,
+            "high": 0,
+            "max": 0,
+            "oom": 7,
+            "oom_kill": 3,
+            "oom_group_kill": 1,
+        }
+        runner = CommandRunner()
+        with patch.object(
+            runner,
+            "_read_memory_events",
+            side_effect=[memory_events, memory_events],
+        ), self.assertRaises(subprocess.CalledProcessError):
+            runner.run([sys.executable, "-c", "raise SystemExit(9)"])
+
+        self.assertEqual(
+            runner.last_execution_metrics["memoryEventsDelta"]["oom_kill"],
+            0,
+        )
+
+    def test_command_metrics_history_is_bounded_and_cursor_addressable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = CommandRunner(
+                memory_events_path=Path(tmp) / "missing-memory.events",
+                metrics_history_limit=2,
+            )
+            for _ in range(3):
+                runner.run([sys.executable, "-c", "pass"])
+
+        self.assertEqual(
+            [item["sequence"] for item in runner.execution_metrics_history],
+            [2, 3],
+        )
+        self.assertEqual(
+            [item["sequence"] for item in runner.execution_metrics_since(1)],
+            [2, 3],
+        )
+
+    @unittest.skipUnless(Path("/proc/self/status").is_file(), "requires Linux procfs")
+    def test_building_chunk_persists_peak_across_every_child_phase(self):
+        source = SourceRegion(
+            id="sg",
+            provider="test",
+            name="Singapore",
+            url="https://example.invalid/sg.osm.pbf",
+            bounds=Bounds(103.0, 1.0, 104.5, 1.8),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_root = Path(__file__).resolve().parents[3]
+            job = MapJobService(
+                SourceIndex([source]),
+                JobStore(root / "jobs"),
+                label_target2_enabled=True,
+                building_target3_enabled=True,
+            ).create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.80, 1.30, 103.81, 1.31],
+                    "target": {
+                        "renderer": "esp32-fmb",
+                        "rendererFormatVersion": 3,
+                    },
+                    "labels": {
+                        "profileVersion": 1,
+                        "preferredLanguages": ["en"],
+                        "internationalFallback": "en",
+                    },
+                }
+            )
+            scope_plan = plan_building_scope(
+                job,
+                calibration_cell_size_meters=8192,
+                calibration_halo_cells=1,
+                calibration_minimum_samples=3,
+            )
+            source_pbf = root / "source.osm.pbf"
+            source_pbf.write_bytes(b"source")
+            source_sha256 = hashlib.sha256(b"source").hexdigest()
+            calibration_generation = {"generation": "test"}
+            captured_ready = {}
+
+            class CapturingTaskStore:
+                def mark_ready(self, task_id, **kwargs):
+                    captured_ready.update({"taskId": task_id, **kwargs})
+                    return {"taskId": task_id, "state": "ready"}
+
+            runner = CommandRunner(
+                memory_events_path=root / "missing-memory.events"
+            )
+            pipeline = MapBuildPipeline(
+                PipelinePaths(repo_root, root / "work", root / "packs"),
+                runner=runner,
+                building_task_store=CapturingTaskStore(),
+            )
+
+            def run_light_phase(*_args, **_kwargs):
+                runner.run([sys.executable, "-c", "pass"])
+
+            def extract_phase(*_args, **_kwargs):
+                run_light_phase()
+                return {
+                    "peakResidentBytes": runner.last_execution_metrics[
+                        "peakResidentBytes"
+                    ]
+                }
+
+            def conversion_phase(*_args, **_kwargs):
+                runner.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "import subprocess,sys; "
+                            "subprocess.run([sys.executable, '-c', "
+                            "'import time; payload=bytearray(64*1024*1024); "
+                            "time.sleep(0.5)'], check=True)"
+                        ),
+                    ]
+                )
+
+            def feature_phase(*_args, **_kwargs):
+                run_light_phase()
+                return {}
+
+            def materialize_closure(
+                _scope_plan,
+                _workload_receipt,
+                closure_plan_path,
+                closure_ids_path,
+                snapshot_sha256,
+            ):
+                closure = {
+                    "sourceSnapshotSha256": snapshot_sha256,
+                    "closurePlanSha256": "c" * 64,
+                    "requiredRelationKeys": [],
+                    "requiredWayKeys": [],
+                    "requiredNodeKeys": [],
+                }
+                closure_plan_path.write_text(json.dumps(closure), encoding="utf-8")
+                closure_ids_path.write_text("", encoding="ascii")
+                return closure
+
+            with patch(
+                "map_platform.pipeline.selected_calibration_identity",
+                return_value={"calibrationKey": "a" * 64},
+            ), patch(
+                "map_platform.pipeline.calibration_generation_from_manifest",
+                return_value=calibration_generation,
+            ), patch(
+                "map_platform.pipeline.selected_building_block_cache_identity",
+                return_value={
+                    "schemaVersion": 1,
+                    "cacheIdentitySha256": "b" * 64,
+                },
+            ), patch.object(
+                pipeline, "_extract_pbf", side_effect=extract_phase
+            ), patch.object(
+                pipeline,
+                "_materialize_workload_closure",
+                side_effect=materialize_closure,
+            ), patch.object(
+                pipeline, "_convert_to_geojson", side_effect=conversion_phase
+            ), patch.object(
+                pipeline, "_extract_features", side_effect=feature_phase
+            ), patch.object(
+                pipeline,
+                "publish_building_chunk_receipts",
+                return_value=(),
+            ):
+                result = pipeline.build_building_chunk(
+                    job,
+                    scope_plan=scope_plan,
+                    source_pbf=source_pbf,
+                    source_snapshot_sha256=source_sha256,
+                    source_index_manifest=root / "source-index.json",
+                    calibration_manifest=root / "calibration.json",
+                    calibration_generation=calibration_generation,
+                    workload_receipt={"closurePlanSha256": "c" * 64},
+                    task_id="task-1",
+                    worker_id="worker-1",
+                    lease_token="lease-1",
+                )
+
+        command_metrics = result["commandMetrics"]
+        peaks = [item["peakResidentBytes"] for item in command_metrics]
+        self.assertEqual(len(peaks), 3)
+        self.assertEqual(peaks[1], max(peaks))
+        self.assertGreater(peaks[1], max(peaks[0], peaks[2]) + 32 * 1024 * 1024)
+        self.assertEqual(captured_ready["peak_rss_bytes"], peaks[1])
+        self.assertEqual(
+            captured_ready["actual_resource"]["commandMetrics"],
+            command_metrics,
+        )
 
     def test_streaming_runner_cancels_silent_preprocessing_promptly(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -491,6 +848,58 @@ class PipelineProgressTests(unittest.TestCase):
                         total_blocks=12,
                     )
                 self.assertEqual(context.exception.code, expected_code)
+
+    def test_extractor_translates_typed_preflight_failure(self):
+        source = SourceRegion(
+            id="sg",
+            provider="test",
+            name="Singapore",
+            url="https://example.invalid/sg.osm.pbf",
+            bounds=Bounds(103.0, 1.0, 104.5, 1.8),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = MapJobService(
+                SourceIndex([source]),
+                JobStore(root / "jobs"),
+                label_target2_enabled=True,
+                building_target3_enabled=True,
+            ).create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                    "target": {
+                        "renderer": "esp32-fmb",
+                        "rendererFormatVersion": 3,
+                    },
+                    "labels": {
+                        "profileVersion": 1,
+                        "preferredLanguages": ["en"],
+                        "internationalFallback": "en",
+                    },
+                }
+            )
+            pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"),
+                runner=FailingBuildingStreamingRunner(
+                    'BUILDING_PREPROCESS_FAILURE:{"code":"building_calibration_unavailable",'
+                    '"message":"scope plan calibration inputs are incomplete"}\n'
+                ),
+            )
+            with self.assertRaises(BuildingScopeError) as context:
+                pipeline._extract_features(
+                    job,
+                    root / "features",
+                    root / "raw-map",
+                    on_progress=lambda *_progress: None,
+                )
+            self.assertEqual(
+                context.exception.code, "building_calibration_unavailable"
+            )
+            self.assertEqual(
+                str(context.exception),
+                "scope plan calibration inputs are incomplete",
+            )
 
     def test_unpinned_legacy_target_does_not_emit_building_cache_progress(self):
         source = SourceRegion(

@@ -36,8 +36,14 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         self.building_ways: set[str] = set()
         self.relation_members: dict[str, list[dict[str, str]]] = {}
         self.building_relations: set[str] = set()
+        self.way_tags: dict[str, dict[str, str]] = {}
         self.part_parent_candidates: dict[str, set[str]] = {}
         self.parts_without_outline: set[str] = set()
+        # Keep the relation identity alongside the legacy part set. The set is
+        # used for closure intersection; this detail map makes a fail-closed
+        # source diagnostic actionable without dumping a whole relation/PBF.
+        self.incomplete_relation_parts: dict[str, tuple[str, ...]] = {}
+        self.standalone_part_keys: set[str] = set()
 
     def node(self, node) -> None:
         key = f"n{node.id}"
@@ -51,6 +57,7 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         if key not in self.required_ways:
             return
         self.way_nodes[key] = [f"n{node.ref}" for node in way.nodes]
+        self.way_tags[key] = dict(sorted((tag.k, tag.v) for tag in way.tags))
         if (
             way.tags.get("building") not in (None, "", "no")
             or way.tags.get("building:part") not in (None, "", "no")
@@ -98,6 +105,7 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         if not outlines or not parts:
             if self.audit_enabled and parts and not outlines:
                 self.parts_without_outline.update(parts)
+                self.incomplete_relation_parts[relation_key] = tuple(parts)
             return
         self.relations += 1
         parent = outlines[0]
@@ -119,6 +127,38 @@ class BuildingRelationHandler(osmium.SimpleHandler):
                 self.part_parents[part] = min(existing, parent)
             else:
                 self.part_parents[part] = parent
+
+    def finalize(self) -> None:
+        """Apply the narrow standalone-part normalization after all ways arrive.
+
+        OSM objects are normally delivered ways before relations, but the
+        policy must not depend on callback order. Only a single direct way
+        member with an explicit ``building`` tag qualifies. Any part shared
+        with another malformed relation remains fail-closed rather than being
+        silently reinterpreted.
+        """
+
+        qualified_relations = {
+            relation_key
+            for relation_key, parts in self.incomplete_relation_parts.items()
+            if len(parts) == 1
+            and parts[0].startswith("w")
+            and self.way_tags.get(parts[0], {}).get("building")
+            not in (None, "", "no")
+        }
+        unsafe_parts = {
+            part
+            for relation_key, parts in self.incomplete_relation_parts.items()
+            if relation_key not in qualified_relations
+            for part in parts
+        }
+        self.standalone_part_keys = {
+            part
+            for relation_key in qualified_relations
+            for part in self.incomplete_relation_parts[relation_key]
+            if part not in unsafe_parts
+        }
+        self.parts_without_outline.difference_update(self.standalone_part_keys)
 
 
 def load_scope_policy(path: Path) -> dict:
@@ -153,6 +193,47 @@ def load_scope_policy(path: Path) -> dict:
     }
 
 
+def load_source_index_manifest(path: str | Path) -> BuildingSourceIndex:
+    """Open a verified source index without rescanning its database.
+
+    The source-index builder binds the database hash to a stable-file receipt.
+    Chunk workers verify that receipt and current file identity; calling
+    ``validate()`` here would hash and audit the multi-gigabyte SQLite database
+    once per chunk.
+    """
+
+    return BuildingSourceIndex.from_manifest(path, validate_database=False)
+
+
+def load_closure_plan(
+    path: str | Path,
+    *,
+    index: BuildingSourceIndex,
+    scope_policy: dict,
+) -> dict:
+    """Load a coordinator-issued closure receipt without rescanning SQLite."""
+
+    try:
+        document = json.loads(Path(path).read_bytes())
+        digest = document.pop("closurePlanSha256")
+    except (OSError, TypeError, ValueError, KeyError) as exc:
+        raise BuildingSourceIndexError(
+            "building_relation_incomplete", "closure plan is unavailable"
+        ) from exc
+    if (
+        not isinstance(digest, str)
+        or hashlib.sha256(canonical_json(document)).hexdigest() != digest
+        or document.get("schemaVersion") != 1
+        or document.get("scopePlanSha256") != scope_policy["scopePlanSha256"]
+        or document.get("sourceIndexKey") != index.index_key
+        or document.get("sourceSnapshotSha256") != index.source_snapshot_sha256
+    ):
+        raise BuildingSourceIndexError(
+            "building_relation_incomplete", "closure plan identity is invalid"
+        )
+    return {**document, "closurePlanSha256": digest}
+
+
 def audit_closure(
     handler: BuildingRelationHandler,
     index: BuildingSourceIndex,
@@ -160,7 +241,7 @@ def audit_closure(
     relation_retry_count: int,
     expected: dict | None = None,
 ) -> dict[str, int | str]:
-    connection = sqlite3.connect(f"file:{index.database_path}?mode=ro", uri=True)
+    connection = index.connect_verified_database()
     try:
         expected = expected or index.closure_for_bounds(
                 scope_policy["outputBoundsE7"],
@@ -180,34 +261,57 @@ def audit_closure(
             required_ways | required_relations
         )
         if ambiguous_parts or missing_parent_parts:
+            incomplete_relations = [
+                (relation_key, handler.incomplete_relation_parts[relation_key])
+                for relation_key in sorted(handler.incomplete_relation_parts)
+                if set(handler.incomplete_relation_parts[relation_key])
+                & (required_ways | required_relations)
+            ]
+            if incomplete_relations:
+                relation_key, parts = incomplete_relations[0]
+                detail = (
+                    f"source relation {relation_key} has part members but no outline"
+                )
+                if parts:
+                    detail += f" ({','.join(parts[:8])}"
+                    if len(parts) > 8:
+                        detail += ",..."
+                    detail += ")"
+                raise BuildingSourceIndexError(
+                    "building_relation_incomplete",
+                    detail,
+                )
             raise BuildingSourceIndexError(
                 "building_relation_incomplete",
                 "output building relation has ambiguous or missing explicit parents",
             )
-        for relation_key in sorted(required_relations):
-            row = connection.execute(
-                "SELECT members_json FROM relations WHERE object_key = ?",
-                (relation_key,),
-            ).fetchone()
-            if row is None:
+        for relation_key, members_json in _closure_rows(
+            connection,
+            table="relations",
+            value_column="members_json",
+            keys=required_relations,
+        ):
+            if members_json is None:
                 raise BuildingSourceIndexError(
                     "building_relation_incomplete", f"source relation {relation_key} is unavailable"
                 )
-            source_members = json.loads(row[0])
+            source_members = json.loads(members_json)
             if handler.relation_members.get(relation_key) != source_members:
                 raise BuildingSourceIndexError(
                     "building_relation_incomplete", f"source relation {relation_key} is incomplete"
                 )
 
-        for way_key in sorted(required_ways):
-            row = connection.execute(
-                "SELECT nodes_json FROM ways WHERE object_key = ?", (way_key,)
-            ).fetchone()
-            if row is None:
+        for way_key, nodes_json in _closure_rows(
+            connection,
+            table="ways",
+            value_column="nodes_json",
+            keys=required_ways,
+        ):
+            if nodes_json is None:
                 raise BuildingSourceIndexError(
                     "building_relation_incomplete", f"source way {way_key} is unavailable"
                 )
-            source_nodes = [node["key"] for node in json.loads(row[0])]
+            source_nodes = [node["key"] for node in json.loads(nodes_json)]
             if handler.way_nodes.get(way_key) != source_nodes:
                 raise BuildingSourceIndexError(
                     "building_relation_incomplete", f"source way {way_key} is incomplete"
@@ -233,6 +337,36 @@ def audit_closure(
         }
     finally:
         connection.close()
+        index.verify_database_unchanged()
+
+
+def _closure_rows(
+    connection: sqlite3.Connection,
+    *,
+    table: str,
+    value_column: str,
+    keys: set[str],
+    batch_size: int = 500,
+):
+    """Yield closure rows using bounded ``IN`` queries instead of N+1 reads."""
+
+    if table not in {"relations", "ways"} or value_column not in {
+        "members_json",
+        "nodes_json",
+    }:
+        raise ValueError("invalid closure row selector")
+    ordered_keys = tuple(sorted(keys))
+    for offset in range(0, len(ordered_keys), batch_size):
+        batch = ordered_keys[offset : offset + batch_size]
+        placeholders = ",".join("?" for _ in batch)
+        rows = connection.execute(
+            f"SELECT object_key, {value_column} FROM {table} "
+            f"WHERE object_key IN ({placeholders}) ORDER BY object_key",
+            batch,
+        ).fetchall()
+        values = {row[0]: row[1] for row in rows}
+        for key in batch:
+            yield key, values.get(key)
 
 
 def is_building_relation(tags: dict[str, str]) -> bool:
@@ -249,6 +383,7 @@ def main() -> None:
     parser.add_argument("output")
     parser.add_argument("--source-index-manifest")
     parser.add_argument("--scope-plan")
+    parser.add_argument("--closure-plan")
     parser.add_argument("--relation-retry-count", type=int, default=0)
     args = parser.parse_args()
     closure_audit = None
@@ -256,6 +391,11 @@ def main() -> None:
         raise BuildingSourceIndexError(
             "building_scope_policy_invalid",
             "source index manifest and scope plan must be supplied together",
+        )
+    if args.closure_plan and not args.source_index_manifest:
+        raise BuildingSourceIndexError(
+            "building_scope_policy_invalid",
+            "closure plan requires source index manifest and scope plan",
         )
     if args.relation_retry_count < 0 or (
         args.relation_retry_count and not args.source_index_manifest
@@ -267,16 +407,25 @@ def main() -> None:
     scope_policy = None
     expected = None
     if args.source_index_manifest:
-        index = BuildingSourceIndex.from_manifest(args.source_index_manifest)
+        index = load_source_index_manifest(args.source_index_manifest)
         scope_policy = load_scope_policy(Path(args.scope_plan))
-        expected = index.closure_for_bounds(
-            scope_policy["outputBoundsE7"],
-            maximum_objects=scope_policy["maximumObjects"],
-            calibration_cell_size_meters=scope_policy["calibrationCellSizeMeters"],
-            calibration_halo_cells=scope_policy["calibrationHaloCells"],
+        expected = (
+            load_closure_plan(
+                args.closure_plan,
+                index=index,
+                scope_policy=scope_policy,
+            )
+            if args.closure_plan
+            else index.closure_for_bounds(
+                scope_policy["outputBoundsE7"],
+                maximum_objects=scope_policy["maximumObjects"],
+                calibration_cell_size_meters=scope_policy["calibrationCellSizeMeters"],
+                calibration_halo_cells=scope_policy["calibrationHaloCells"],
+            )
         )
     handler = BuildingRelationHandler(expected_closure=expected)
     handler.apply_file(args.pbf, locations=False)
+    handler.finalize()
     if index is not None:
         closure_audit = audit_closure(
             handler,
@@ -292,6 +441,8 @@ def main() -> None:
         "relations": handler.relations,
         "ambiguousParts": handler.ambiguous_parts,
     }
+    if handler.standalone_part_keys:
+        result["standalonePartKeys"] = sorted(handler.standalone_part_keys)
     if closure_audit is not None:
         result["closureAudit"] = closure_audit
     Path(args.output).write_text(

@@ -11,7 +11,11 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from build_building_calibration import scan_pbf, source_cell_domain  # noqa: E402
+from build_building_calibration import (  # noqa: E402
+    load_scope,
+    scan_pbf,
+    source_cell_domain,
+)
 from build_building_source_index import scan_source  # noqa: E402
 from building_pipeline import (  # noqa: E402
     _calibration_cell,
@@ -43,6 +47,38 @@ class BuildingSourceScannerTests(unittest.TestCase):
             source_cell_domain(self.source, 8192, 1),
             tuple((x, y) for x in range(-1, 2) for y in range(-1, 2)),
         )
+
+    def test_calibration_scope_loader_accepts_global_plan_identity_alias(self):
+        body = {
+            "schemaVersion": 1,
+            "calibration": {
+                "cellSizeMeters": 8192,
+                "haloCells": 1,
+                "minimumSamples": 3,
+                "sampleCells": [[0, 0]],
+            },
+        }
+        encoded = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+        digest = hashlib.sha256(encoded).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "global-scope.json"
+            path.write_bytes(
+                json.dumps(
+                    {
+                        **body,
+                        "scopePlanSha256": digest,
+                        "globalPlanSha256": digest,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            )
+            self.assertEqual(load_scope(path), body)
 
     def test_complete_calibration_domain_has_a_hard_cell_cap(self):
         with patch("build_building_calibration.MAX_COMPLETE_CALIBRATION_CELLS", 8):

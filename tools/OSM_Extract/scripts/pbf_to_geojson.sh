@@ -12,10 +12,10 @@ set -euo pipefail
 
 
 # Extract the lines and polygons from the clipped pbf file
-if [ "$#" -ne 6 ] && [ "$#" -ne 9 ]; then
+if [ "$#" -ne 6 ] && [ "$#" -ne 9 ] && [ "$#" -ne 10 ]; then
     echo "Invalid arguments."
     echo " Usage:"
-    echo "      $0 <min_lon> <min_lat> <max_lon> <max_lat> <pbf input file> <output file name> [source index manifest] [scope plan] [relation retry count]"
+    echo "      $0 <min_lon> <min_lat> <max_lon> <max_lat> <pbf input file> <output file name> [source index manifest] [scope plan] [relation retry count] [closure plan]"
     echo ""
     exit 1
 fi
@@ -31,11 +31,18 @@ if [ "$#" -eq 9 ]; then
     selected_osm_config="$(cd "$(dirname "$0")/../conf" && pwd)/osmconf-selected-building-closure.ini"
     ogr_options+=(--config OSM_CONFIG_FILE "$selected_osm_config")
 fi
+if [ "$#" -eq 10 ]; then
+    ogr_options+=(--config OSM_CONFIG_FILE "$(cd "$(dirname "$0")/../conf" && pwd)/osmconf-selected-building-closure.ini")
+fi
 ogr2ogr "${ogr_options[@]}" -t_srs EPSG:3857 -spat "$1" "$2" "$3" "$4" "${6}_lines.geojson" "$5" lines
 ogr2ogr "${ogr_options[@]}" -t_srs EPSG:3857 -spat "$1" "$2" "$3" "$4" "${6}_polygons.geojson" "$5" multipolygons
 if [ "$#" -eq 9 ]; then
     python "$(dirname "$0")/extract_building_relations.py" "$5" "${6}_building_relations.json" \
         --source-index-manifest "$7" --scope-plan "$8" --relation-retry-count "$9"
+elif [ "$#" -eq 10 ]; then
+    python "$(dirname "$0")/extract_building_relations.py" "$5" "${6}_building_relations.json" \
+        --source-index-manifest "$7" --scope-plan "$8" --relation-retry-count "$9" \
+        --closure-plan "${10}"
 else
     python "$(dirname "$0")/extract_building_relations.py" "$5" "${6}_building_relations.json"
 fi

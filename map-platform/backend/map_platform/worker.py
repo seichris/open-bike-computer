@@ -15,7 +15,12 @@ from .jobs import (
 )
 from .models import JobStatus, MapJob
 from .monitoring import MapMonitoringStore, build_map_job_monitoring_event
-from .pipeline import MapBuildPipeline, safe_build_failure
+from .pipeline import (
+    BuildingChunkSchedulingYield,
+    MapBuildPipeline,
+    safe_build_failure,
+)
+from .resource_report import worker_capability_snapshot, worker_resource_report
 from .reuse import SubsetReuseUnavailable
 
 
@@ -23,8 +28,19 @@ _NON_RETRYABLE_BUILD_ERROR_CODES = frozenset(
     {
         "building_scope_exceeded",
         "building_object_limit_exceeded",
+        "building_artifact_too_large",
+        "building_artifact_admission",
+        "building_artifact_validation_failed",
+        "building_calibration_unavailable",
+        "building_chunk_retry_exhausted",
+        "building_chunk_wall_time_exceeded",
+        "building_pathological_block",
+        "building_relation_incomplete",
         "building_source_snapshot_changed",
         "building_scope_policy_invalid",
+        "building_storage_admission",
+        "building_worker_oom",
+        "building_workload_receipt_mismatch",
     }
 )
 
@@ -121,13 +137,56 @@ class MapWorker:
         self.estimate_coordinator = estimate_coordinator
 
     def run_next(self) -> WorkerResult:
-        self.store.requeue_retryable_failures()
+        self.store.requeue_retryable_failures(
+            non_retryable_error_codes=_NON_RETRYABLE_BUILD_ERROR_CODES
+        )
+        executable_chunked = (
+            isinstance(self.pipeline, MapBuildPipeline)
+            and self.pipeline.building_scope_mode
+            in {"chunked_allowlist", "chunked"}
+        )
+        if executable_chunked:
+            # Chunked work is resource-admitted. A missing or malformed report
+            # must stop before the public job is claimed rather than silently
+            # selecting the old unbounded path.
+            worker_capability = worker_capability_snapshot()
+        else:
+            worker_capability = None
+            try:
+                worker_capability = worker_resource_report().get("capability")
+            except Exception:
+                # Legacy/non-chunk execution retains its existing best-effort
+                # diagnostic behavior.
+                worker_capability = None
+        preferred_job_id = None
+        resumable_job_ids = None
+        if (
+            isinstance(self.pipeline, MapBuildPipeline)
+            and self.pipeline.building_task_store is not None
+        ):
+            resumable_job_ids = self.pipeline.building_task_store.resumable_parent_ids(
+                worker_capability=worker_capability
+            )
+            preferred_job_id = (
+                resumable_job_ids[0] if resumable_job_ids else None
+            )
         job = self.store.claim_next(
             self.worker_id,
             interrupted_job_stale_seconds=self.interrupted_job_stale_seconds,
+            preferred_job_id=preferred_job_id,
+            resumable_job_ids=resumable_job_ids,
         )
         if job is None:
             return WorkerResult(worker_id=self.worker_id, job=None, processed=False)
+        if executable_chunked:
+            # Reuse-key preparation can acquire a parent resource lease before
+            # build_chunked is entered. Preserve the exact validated snapshot
+            # for every phase of this public attempt.
+            job._worker_capability_snapshot = worker_capability
+        # Start lease heartbeats before the read-only capability probe.  On a
+        # cold host the cgroup/proc walk can exceed a short test or recovery
+        # lease, and a worker must not become reclaimable before its heartbeat
+        # loop is running.
         attempt_started_at = job.updated_at
         attempt_started_monotonic = time.monotonic()
         if self.estimate_coordinator is not None:
@@ -307,6 +366,7 @@ class MapWorker:
                                 ),
                             )
                             if finished is not None:
+                                self._reconcile_public_ready(job.job_id)
                                 monitoring_event = self._monitoring_event(
                                     finished,
                                     attempt_started_at,
@@ -327,33 +387,52 @@ class MapWorker:
                                 outcome_class="full_build",
                                 force=True,
                             )
-                        for parent in self.store.find_subset_reuse_candidates(
-                            job,
-                            build_compatibility_key=reuse_keys.compatibility,
-                        ):
-                            try:
-                                build_result = self.pipeline.build_subset(
+                        if not self.pipeline.uses_chunked_preprocessing(job):
+                            for parent in self.store.find_subset_reuse_candidates(
+                                job,
+                                build_compatibility_key=reuse_keys.compatibility,
+                            ):
+                                try:
+                                    build_result = self.pipeline.build_subset(
+                                        job,
+                                        parent,
+                                        **build_kwargs,
+                                    )
+                                except SubsetReuseUnavailable:
+                                    continue
+                                reuse_strategy = "subset"
+                                reuse_source_job_id = parent.job_id
+                                if self.estimate_coordinator is not None:
+                                    self.estimate_coordinator.publish(
+                                        job.job_id,
+                                        worker_id=self.worker_id,
+                                        phase="reuse_subset",
+                                        outcome_class="subset_reuse",
+                                        force=True,
+                                    )
+                                break
+                        if build_result is None:
+                            if self.pipeline.uses_chunked_preprocessing(job):
+                                build_result = self.pipeline.build_chunked(
                                     job,
-                                    parent,
+                                    worker_id=self.worker_id,
+                                    worker_capability=worker_capability,
+                                    max_tasks_per_run=1,
                                     **build_kwargs,
                                 )
-                            except SubsetReuseUnavailable:
-                                continue
-                            reuse_strategy = "subset"
-                            reuse_source_job_id = parent.job_id
-                            if self.estimate_coordinator is not None:
-                                self.estimate_coordinator.publish(
-                                    job.job_id,
-                                    worker_id=self.worker_id,
-                                    phase="reuse_subset",
-                                    outcome_class="subset_reuse",
-                                    force=True,
-                                )
-                            break
-                        if build_result is None:
-                            build_result = self.pipeline.build(job, **build_kwargs)
+                            else:
+                                build_result = self.pipeline.build(job, **build_kwargs)
                 else:
-                    build_result = self.pipeline.build(job, **build_kwargs)
+                    if isinstance(self.pipeline, MapBuildPipeline) and self.pipeline.uses_chunked_preprocessing(job):
+                        build_result = self.pipeline.build_chunked(
+                            job,
+                            worker_id=self.worker_id,
+                            worker_capability=worker_capability,
+                            max_tasks_per_run=1,
+                            **build_kwargs,
+                        )
+                    else:
+                        build_result = self.pipeline.build(job, **build_kwargs)
                 map_id, archive_path = build_result
             if (
                 isinstance(self.pipeline, MapBuildPipeline)
@@ -400,6 +479,7 @@ class MapWorker:
                 reuse_strategy=reuse_strategy,
                 reuse_source_job_id=reuse_source_job_id,
             )
+            self._reconcile_public_ready(job.job_id)
             monitoring_event = self._monitoring_event(
                 finished,
                 attempt_started_at,
@@ -414,6 +494,25 @@ class MapWorker:
                 job=finished,
                 processed=True,
                 monitoring_event=monitoring_event,
+            )
+        except BuildingChunkSchedulingYield:
+            if (
+                job.building_preprocessing_inputs is not None
+                and job.building_preprocessing_runtime is not None
+            ):
+                self.store.freeze_building_preprocessing_inputs_unless_cancelled(
+                    job.job_id,
+                    worker_id=self.worker_id,
+                    building_preprocessing_inputs=job.building_preprocessing_inputs,
+                    building_preprocessing_runtime=job.building_preprocessing_runtime,
+                )
+            yielded = self.store.yield_chunked_job(
+                job.job_id, worker_id=self.worker_id
+            )
+            return WorkerResult(
+                worker_id=self.worker_id,
+                job=yielded,
+                processed=True,
             )
         except Exception as exc:
             if isinstance(self.pipeline, MapBuildPipeline):
@@ -439,6 +538,25 @@ class MapWorker:
                     except RuntimeError:
                         pass
             current = self.store.get(job.job_id)
+            if current.status == JobStatus.READY:
+                # Public READY is terminal and authoritative. Any exception
+                # after complete_job (coordinator reconciliation, telemetry,
+                # or another additive hook) must never demote the artifact to
+                # queued/failed; maintenance repairs coordinator state.
+                try:
+                    monitoring_event = self._monitoring_event(
+                        current,
+                        attempt_started_at,
+                        outcome="ready",
+                    )
+                except Exception:
+                    monitoring_event = None
+                return WorkerResult(
+                    worker_id=self.worker_id,
+                    job=current,
+                    processed=True,
+                    monitoring_event=monitoring_event,
+                )
             if current.status == JobStatus.CANCELLED or current.worker_id != self.worker_id:
                 if (
                     current.status == JobStatus.CANCELLED
@@ -493,6 +611,19 @@ class MapWorker:
                 processed=True,
                 monitoring_event=monitoring_event,
             )
+
+    def _reconcile_public_ready(self, job_id: str) -> None:
+        if (
+            not isinstance(self.pipeline, MapBuildPipeline)
+            or self.pipeline.building_task_store is None
+        ):
+            return
+        try:
+            self.pipeline.building_task_store.reconcile_ready_plans((job_id,))
+        except Exception:
+            # Public completion is authoritative. Maintenance retries this
+            # additive cross-store coordinator marker and reports any failure.
+            pass
 
     def _monitoring_event(
         self,

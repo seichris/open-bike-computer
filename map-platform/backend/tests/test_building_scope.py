@@ -1,7 +1,9 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from map_platform.building_scope import (
     BuildingScopeError,
@@ -9,8 +11,12 @@ from map_platform.building_scope import (
     BUILDING_BLOCK_GRID_VERSION,
     BUILDING_MAX_SOURCE_AREA_M2,
     BUILDING_SCOPE_POLICY_VERSION,
+    GlobalBuildingPlanPolicy,
+    configured_building_max_relation_objects_per_job,
     legacy_building_scope_diagnostics,
     mercator_scale,
+    plan_building_chunk_scope,
+    plan_global_building_scope,
     plan_building_scope,
     point_in_ring,
     segment_rectangle_distance,
@@ -38,6 +44,15 @@ def make_job(geometry_request, *, source_bounds=Bounds(120, 20, 125, 35)):
 class BuildingScopeTests(unittest.TestCase):
     def plan(self, job, **kwargs):
         return plan_building_scope(
+            job,
+            calibration_cell_size_meters=8192,
+            calibration_halo_cells=1,
+            calibration_minimum_samples=3,
+            **kwargs,
+        )
+
+    def global_plan(self, job, **kwargs):
+        return plan_global_building_scope(
             job,
             calibration_cell_size_meters=8192,
             calibration_halo_cells=1,
@@ -89,6 +104,41 @@ class BuildingScopeTests(unittest.TestCase):
             self.plan(job, policy=BuildingScopePolicy(max_source_area_m2=732_000_000))
         self.assertEqual(raised.exception.code, "building_scope_exceeded")
 
+    def test_relation_object_ceiling_can_be_temporarily_overridden(self):
+        with patch.dict(
+            os.environ,
+            {"MAP_PLATFORM_BUILDING_MAX_RELATION_OBJECTS_PER_JOB": "600000"},
+            clear=False,
+        ):
+            self.assertEqual(
+                configured_building_max_relation_objects_per_job(), 600_000
+            )
+            plan = self.plan(
+                make_job({
+                    "mode": "custom_bbox",
+                    "bbox": [
+                        121.30632294659607,
+                        31.158348295222982,
+                        121.52266583255309,
+                        31.31010442485655,
+                    ],
+                })
+            )
+            self.assertEqual(
+                plan.document["policy"]["maxRelationObjectsPerJob"], 600_000
+            )
+            self.assertEqual(plan.summary()["maxRelationObjectsPerJob"], 600_000)
+
+    def test_relation_object_ceiling_override_is_bounded(self):
+        with patch.dict(
+            os.environ,
+            {"MAP_PLATFORM_BUILDING_MAX_RELATION_OBJECTS_PER_JOB": "2000001"},
+            clear=False,
+        ):
+            with self.assertRaises(BuildingScopeError) as raised:
+                configured_building_max_relation_objects_per_job()
+            self.assertEqual(raised.exception.code, "building_scope_policy_invalid")
+
     def test_default_policy_accepts_source_scope_between_800_and_1200_square_kilometers(self):
         job = make_job({
             "mode": "custom_bbox",
@@ -112,6 +162,134 @@ class BuildingScopeTests(unittest.TestCase):
                 policy=BuildingScopePolicy(max_source_area_m2=1_090_000_000),
             )
         self.assertEqual(raised.exception.code, "building_scope_exceeded")
+
+    def test_global_plan_accepts_full_shanghai_without_weakening_chunk_policy(self):
+        fixture = json.loads(
+            (
+                Path(__file__).parent
+                / "fixtures"
+                / "shanghai_city_scale_scope.json"
+            ).read_text()
+        )
+        plan = self.global_plan(make_job(fixture["request"]))
+        expected = fixture["expected"]
+        metrics = plan.document["metrics"]
+        self.assertEqual(plan.document["planKind"], "global")
+        self.assertEqual(metrics["requestedApproximateAreaM2"], expected["requestedApproximateAreaM2"])
+        self.assertEqual(metrics["outputAreaM2"], expected["outputAreaM2"])
+        self.assertEqual(metrics["sourceAreaM2"], expected["sourceAreaM2"])
+        self.assertEqual(metrics["sourceToOutputAreaBasisPoints"], expected["sourceToOutputAreaBasisPoints"])
+        self.assertEqual(metrics["outputBlockCount"], expected["outputBlockCount"])
+        self.assertEqual(metrics["calibrationCellCount"], expected["calibrationCellCount"])
+        self.assertEqual(metrics["calibrationSampleCellCount"], expected["calibrationSampleCellCount"])
+        self.assertEqual(
+            plan.document["globalPolicy"]["maxOutputBlocks"],
+            1_024,
+        )
+        self.assertEqual(
+            plan.document["globalPolicy"]["policyVersion"],
+            2,
+        )
+        self.assertLess(
+            plan.document["metrics"]["estimatedArchiveBytes"],
+            plan.document["globalPolicy"]["archiveAdmissionLimitBytes"],
+        )
+        self.assertEqual(
+            plan.document["chunkPolicy"]["maxSourceAreaM2"],
+            BUILDING_MAX_SOURCE_AREA_M2,
+        )
+        self.assertEqual(
+            plan.document["chunkPolicy"]["maxRelationObjectsPerJob"],
+            500_000,
+        )
+        self.assertEqual(
+            len({block.x for block in plan.output_blocks}),
+            expected["outputBlockGrid"]["xCount"],
+        )
+        self.assertEqual(
+            len({block.y for block in plan.output_blocks}),
+            expected["outputBlockGrid"]["yCount"],
+        )
+        self.assertGreater(metrics["sourceAreaM2"], BUILDING_MAX_SOURCE_AREA_M2)
+
+    def test_global_plan_policy_remains_bounded(self):
+        with self.assertRaises(BuildingScopeError) as raised:
+            self.global_plan(
+                make_job({"mode": "custom_bbox", "bbox": [121.45, 31.20, 121.50, 31.24]}),
+                global_policy=GlobalBuildingPlanPolicy(max_output_blocks=1),
+            )
+        self.assertEqual(raised.exception.code, "building_scope_exceeded")
+
+    def test_global_plan_rejects_predicted_archive_before_execution(self):
+        with self.assertRaises(BuildingScopeError) as raised:
+            self.global_plan(
+                make_job(
+                    {
+                        "mode": "custom_bbox",
+                        "bbox": [121.45, 31.20, 121.50, 31.24],
+                    }
+                ),
+                global_policy=GlobalBuildingPlanPolicy(
+                    max_archive_bytes=2 * 1024 * 1024,
+                    archive_headroom_basis_points=9_000,
+                    estimated_fmb_bytes_per_block=1024 * 1024,
+                    archive_fixed_bytes=1024 * 1024,
+                ),
+            )
+        self.assertEqual(raised.exception.code, "building_artifact_admission")
+
+    def test_global_plan_policy_rejects_per_block_prediction_above_format_limit(self):
+        with self.assertRaises(BuildingScopeError) as raised:
+            GlobalBuildingPlanPolicy(
+                estimated_fmb_bytes_per_block=2 * 1024 * 1024 + 1
+            ).validate()
+        self.assertEqual(raised.exception.code, "building_scope_policy_invalid")
+
+    def test_chunk_scope_is_canonical_subset_with_local_buffer_and_calibration(self):
+        global_plan = self.global_plan(
+            make_job({
+                "mode": "custom_bbox",
+                "bbox": [121.11, 30.80, 121.25, 30.95],
+            })
+        )
+        selected = global_plan.output_blocks[:2]
+        first = plan_building_chunk_scope(global_plan, selected)
+        second = plan_building_chunk_scope(global_plan, tuple(reversed(selected)))
+        self.assertEqual(first.canonical_bytes(), second.canonical_bytes())
+        self.assertEqual(first.sha256, second.sha256)
+        self.assertEqual(first.document["planKind"], "chunk")
+        self.assertEqual(
+            first.document["globalPlanSha256"], global_plan.sha256
+        )
+        self.assertEqual(first.output_blocks, tuple(sorted(selected)))
+        self.assertLess(
+            first.document["metrics"]["sourceAreaM2"],
+            global_plan.document["metrics"]["sourceAreaM2"],
+        )
+        self.assertTrue(
+            {
+                tuple(cell)
+                for cell in first.document["calibration"]["sampleCells"]
+            }.issubset(
+                {tuple(cell) for cell in global_plan.calibration_sample_cells}
+            )
+        )
+
+    def test_chunk_scope_rejects_block_outside_global_plan(self):
+        global_plan = self.global_plan(
+            make_job({
+                "mode": "custom_bbox",
+                "bbox": [121.45, 31.20, 121.50, 31.24],
+            })
+        )
+        from map_platform.reuse import MapBlock
+
+        with self.assertRaises(BuildingScopeError) as raised:
+            plan_building_chunk_scope(
+                global_plan,
+                (*global_plan.output_blocks, MapBlock(999_999, 999_999)),
+            )
+        self.assertEqual(raised.exception.code, "building_scope_policy_invalid")
 
     def test_polygon_selects_only_intersecting_blocks(self):
         coordinates = [[121.45, 31.20], [121.50, 31.20], [121.50, 31.22], [121.45, 31.20]]
@@ -197,6 +375,33 @@ class BuildingScopeTests(unittest.TestCase):
         digest = written.pop("scopePlanSha256")
         encoded = json.dumps(written, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
         self.assertEqual(hashlib.sha256(encoded).hexdigest(), digest)
+
+    def test_global_scope_write_is_compatible_with_calibration_scope_loader(self):
+        import tempfile
+
+        plan = self.global_plan(
+            make_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [121.45, 31.20, 121.50, 31.24],
+                }
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "global-scope.json"
+            plan.write(path)
+            written = json.loads(path.read_text())
+        global_digest = written.pop("globalPlanSha256")
+        scope_digest = written.pop("scopePlanSha256")
+        encoded = json.dumps(
+            written,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+        self.assertEqual(global_digest, plan.sha256)
+        self.assertEqual(scope_digest, plan.sha256)
+        self.assertEqual(hashlib.sha256(encoded).hexdigest(), plan.sha256)
 
     def test_unknown_block_grid_version_fails_closed(self):
         job = make_job({"mode": "custom_bbox", "bbox": [121.45, 31.20, 121.50, 31.24]})

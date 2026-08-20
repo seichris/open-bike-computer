@@ -211,6 +211,13 @@ expanded source cut-out. Set it to `selected` to use the immutable source index,
 sealed calibration generation, relation closure, and selected/aligned blocks
 plus the bounded correctness buffer. Set it to `legacy` for emergency rollback
 without shadow planning. Invalid values fail startup.
+The `chunked_allowlist` mode enables the durable one-parent/many-internal-chunk
+coordinator for an explicitly validated development or installation canary;
+`chunked` is the full rollout mode. Both preserve the global source, relation,
+memory, and artifact ceilings per internal task and require the shared durable
+building-task store. Keep production on `shadow` until the benchmark, golden
+equivalence, and device acceptance gates in the Shanghai orchestration plan are
+complete.
 `MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST` is reserved for production canaries
 and accepts exact registered installation IDs. It has no effect in development,
 where target 3 is already globally available, and it cannot enable a profile the
