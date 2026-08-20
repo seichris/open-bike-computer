@@ -1,9 +1,11 @@
 # Shanghai 3D map orchestration runbook
 
-This runbook covers the internal `chunked_allowlist`/`chunked` coordinator.
-It is intentionally read-only until an operator has reviewed the evidence and
-chosen an explicit recovery action. Production remains on the monolithic
-executor until the rollout gates in the implementation plan are complete.
+This runbook covers the internal `shadow`/`chunked_allowlist`/`chunked`
+coordinator. Its operator surfaces are intentionally read-only. Lease expiry,
+cache rebuild, and public/coordinator ready reconciliation use bounded,
+transactional recovery paths rather than manual database changes. Production
+remains on the monolithic executor until the rollout gates in the
+implementation plan are complete.
 
 ## First response
 
@@ -14,7 +16,8 @@ executor until the rollout gates in the implementation plan are complete.
    model, and alerts:
 
    ```sh
-   map-platform build-plan inspect JOB_ID
+   map-platform build-plan inspect JOB_ID --limit 100 --offset 0
+   map-platform build-plan tasks JOB_ID --limit 100 --offset 0
    map-platform build-plan alerts JOB_ID
    map-platform resource-report
    ```
@@ -22,49 +25,105 @@ executor until the rollout gates in the implementation plan are complete.
    The same information is available from the authenticated API endpoint
    `/v1/admin/building-plans/JOB_ID` and the read-only
    `/v1/admin/building-plans/JOB_ID/alerts` endpoint.
+   Inspect/task pages are limited to 100 rows and report total counts and
+   `hasMore`; advance `offset` until the retained result is complete. Raw
+   workload-object arrays are deliberately omitted. Retain their identity and
+   byte-count fields instead of trying to reconstruct them from diagnostics.
 3. Record the exact image digest and source/index/calibration identities before
    restarting anything. A changed identity is a new build, not a retry.
 
 Child leases are refreshed every 30 seconds while a workload scan or building
-command is running. A healthy long-running task should therefore show a recent
-`heartbeat_at`; a stale timestamp is actionable evidence of worker loss or an
-older image without the heartbeat fix, not a reason to extend the relation
-ceiling.
+command is running. This lease cadence is separate from the 30-minute hard
+command deadline. A healthy task should show a recent `heartbeat_at`; a stale
+timestamp is actionable evidence of worker loss or an older image without the
+heartbeat fix, not a reason to extend the relation ceiling.
+
+Source preparation and whole-map assembly hold durable parent-phase leases in
+the same heavy resource pool. They refresh every 30 seconds, are token-fenced
+on release, and participate in the same concurrency, effective-memory, and
+CPU-capacity snapshot as child reservations. If the pool is busy, the public
+parent yields and resumes without consuming another retry. An expired
+parent-phase lease is removed by the normal recovery pass; do not add a second
+worker or manually delete the reservation.
+
+The worker executes at most one child task for a claimed parent before yielding
+the parent job. The next global claim is selected across eligible parents using
+admission priority, weighted virtual finish, last-claim ordering, and the
+per-parent quota. Repeatedly draining one parent's children while another
+eligible parent never receives a claim is therefore a scheduler incident, not
+expected chunk behavior.
 
 ## Typed alerts
 
 ### `stale_lease` or `stale_heartbeat`
 
 Confirm the worker container is alive and inspect its health/heartbeat and
-resource report. If the lease has expired, let the coordinator's normal
-recovery path requeue it; do not publish a receipt using an old lease token.
-If the worker is unhealthy, restart only the validation worker after checking
-that no active reservation is being held by a healthy replacement.
+resource report. Every global scheduling or claim pass automatically recovers
+expired leases in the same transaction: it closes the old attempt as
+`lease_expired` with `building_task_lease_expired`, releases its reservation,
+and returns active-plan work to `pending`. Heartbeats, receipts, transitions,
+and cache recovery also reject an expired token before a replacement claim, so
+do not publish with or manually requeue an old lease. If the worker is
+unhealthy, restart only the validation worker after checking that no active
+reservation is being held by a healthy replacement.
 
 ### `task_split`
 
-This is expected for dense or relation-heavy work. Verify that the parent
-still owns the same global plan, that completed receipts remain present, and
-that child workload scans are pending. Do not raise the relation/object guard
-or retry the same oversized task. Repeated splits at the configured depth are
-a capacity incident and require a new benchmark review.
+This is expected for dense or relation-heavy work. An exact post-scan estimate
+above 70% of effective memory or ten minutes of predicted wall time causes a
+deterministic multi-block target split. The 85% memory limit and 30-minute
+runtime deadline are hard: a multi-block breach uses the bounded split path,
+while a singleton is pathological. Verify that the parent still owns the same
+global plan, that completed receipts remain present, and that child workload
+scans are pending. Do not raise the relation/object guard or retry the same
+oversized task. Repeated splits at the configured depth are a capacity incident
+and require a new benchmark review.
 
 ### `worker_oom` or `memory_headroom`
 
-Record peak RSS, cgroup limit, predicted reservation, worker capability
-identity, and task workload counters. Keep heavy-task concurrency at one.
-Do not increase the production memory or relation ceiling based on a single
-run. If the task is deterministic and still within policy, allow the bounded
-split/retry path to proceed; otherwise fail the parent closed and retain the
-attempt evidence.
+Record configured memory, cgroup memory, and the strict minimum of the available
+positive caps as the effective cap, along with predicted reservation, worker
+capability identity, and task workload counters. Admission refuses work above
+85% of that effective cap.
+
+Retain the bounded process-group/descendant peak RSS history, command wall time,
+and before/after cgroup `memory.events` snapshots. Only a positive delta in
+`oom`, `oom_kill`, or `oom_group_kill` confirms `building_worker_oom`; a generic
+command failure with unchanged counters is not OOM evidence. Keep heavy-task
+concurrency at one. Do not increase production memory or relation ceilings from
+a single run. If the task remains within policy, allow the bounded split/retry
+path; otherwise fail closed and retain the attempt evidence.
+
+When reviewing the resource-model report, use the p95 of each retained
+attempt's paired actual/predicted ratio, including the explicit safety margin;
+do not divide independent p95 values. A positive actual paired with a zero
+prediction makes that capability cohort untrainable. The report remains
+review-only and never changes admission automatically.
 
 ### `cache_integrity`
 
-Stop publication for the parent. Preserve the cache identity, block
-coordinate, producer image digest, and validation error. Rebuild only the
-affected canonical block after verifying source/index/calibration identity and
-free disk. Never delete the complete cache namespace while a task or receipt
-still leases it.
+Stop publication for the parent. Preserve the cache identity, block coordinate,
+producer image digest, and validation error. Readers and writers hold a shared
+lease on the stable namespace lock outside the removable directory; garbage
+collection needs a nonblocking exclusive lease. Maintenance also protects any
+cache identity referenced by a nonterminal receipt or cache-hit task and fails
+safe for ambiguous legacy identities. A missing or mismatched cache read
+transactionally deletes stale receipts, clears the cache-hit identity, restores
+a conservative nonzero memory estimate, releases reservations, and requeues
+affected work. Let that coordinator path rebuild only the affected canonical
+blocks. Never manually delete a namespace while it is leased or protected.
+
+### `building_storage_admission`
+
+This failure occurs before source preparation. Retain the estimated archive
+and source sizes, cache and attempt quotas, live free bytes, and configured
+reserve. The cache estimate budgets two archive-sized copies. The attempt
+estimate combines those two copies, three archive-sized temporary copies, and
+two source-sized working copies; it must fit the attempt quota, and live free
+space must cover that attempt estimate plus the reserve. Freeing unrelated
+validation data through its normal retention policy may make a retry admissible;
+do not lower the reserve, bypass quotas, or start preparation until the complete
+model passes again.
 
 ### `missing_receipts` or `receipt_overflow`
 
@@ -79,6 +138,16 @@ Read the typed task failure and the latest attempt chain. A job-level retry is
 safe only through the coordinator's reopen operation and only when source,
 image, rules, calibration, and global-plan identities are unchanged. Never
 manually edit SQLite rows or mark a plan ready.
+
+### Terminal shadow observation
+
+A shadow plan ends as `observed`, and every proposed child is cancelled with
+`building_shadow_observed`. It is retained as nonclaimable terminal evidence
+under the bounded evidence-retention policy and is exposed as
+`buildingPlanObservation`; it never replaces the monolithic job's authoritative
+`progress`. Do not reopen or execute a retained observation. A later executable
+activation may replace only a disposable observation that has no execution
+evidence.
 
 ### `building_relation_incomplete`
 
@@ -96,14 +165,75 @@ source data or an explicit product-policy review.
 
 ## Completion checks
 
-Before declaring a Shanghai job ready, verify all of the following from
-retained evidence:
+Before accepting a Shanghai job's server-side ZIP as ready, verify all of the
+following from retained evidence:
 
 - every expected global block has one matching canonical cache receipt;
 - the receipt-set SHA-256 and preprocessing identity are present;
-- every FMB entry is below 2 MiB and the ZIP is below the 512 MiB stream limit;
-- final artifact and signed-manifest validation passed; and
+- the published file is a positive-size, parseable ZIP whose CRC test passes,
+  whose `manifest.json` is nonempty, which contains at least one FMB, whose FMB
+  entries are each no larger than 2 MiB, and whose total size is no larger than
+  512 MiB;
+- exactly one ZIP receipt exists and its byte count and SHA-256 match the
+  published file;
+- when stream signing is enabled, the separate signed-manifest validation
+  passed; and
 - no active lease, reservation, split child, or failed task remains.
+- the bounded diagnostics show no active child or parent-phase reservation.
 
-Only then should the ordinary iOS download, transfer, installation, render,
-and route-navigation acceptance gates be started.
+Public job completion is durable before the coordinator marker moves from
+`artifact_publication` to `ready`. If the public job is already ready but the
+coordinator marker remains behind, let the maintenance reconciliation advance
+it; do not mark the plan ready manually.
+
+Server `ready` is not signed product acceptance when validation stream rollout
+is disabled. Only after the applicable signing gate passes should the ordinary
+iOS download, transfer, installation, render, and route-navigation acceptance
+gates be started.
+
+## Monolithic-versus-chunked equivalence
+
+Run the retained-artifact comparison from `map-platform/backend`:
+
+```sh
+python tools/compare_building_equivalence.py \
+  --reference-zip MONOLITHIC.zip \
+  --candidate-zip CHUNKED.zip \
+  --output equivalence-report.json
+```
+
+The canonical equality gate is only the exact sorted set of safe relative
+`.fmb` paths and the SHA-256 of each entry's uncompressed bytes. A missing,
+extra, renamed, unsafe, or content-changed FMB fails closed. Raw ZIP byte counts
+and SHA-256 digests remain in the report as provenance evidence, but are not
+equality inputs because legitimate orchestration metadata in `manifest.json`
+may differ. Comparing an artifact with itself exercises the comparator; it does
+not satisfy the retained monolithic-versus-chunked gate.
+
+## Retained validation baseline
+
+The validation-only exact cold run on 2026-08-20 is job
+`242ab1e1cd76478bbbd7`, map
+`shanghai-exact-cold-candidate-de7fbf0ea9`. It completed all 442 blocks and
+16 chunks under `memory.max=12,884,901,888`, with peak cgroup memory
+8,929,234,944 bytes and every `memory.events` counter at zero. Its immutable
+ZIP receipt is 25,894,124 bytes with SHA-256
+`79f49da19b0fea20ed4894a0d339bb5bc30b334ccd5a0370ae1c9477ed26234e`;
+the retained object path is
+`/data/artifacts/maps/shanghai-exact-cold-candidate-de7fbf0ea9/zip-stored-v1/79f49da19b0fea20ed4894a0d339bb5bc30b334ccd5a0370ae1c9477ed26234e.zip`,
+and the measured worker container is `67fca6c98e67`. The archive contains
+420 FMB entries, the largest is 507,316 bytes, and its canonical FMB path/hash
+digest is
+`5983a6bb7f79f6d276574e99a8c7da87edbf05c84bf38d2f197d5e2f8fac92cb`.
+The receipt-set SHA-256 is
+`648dcefa710fdbc5ccc85dd42ad72a2d0a5f752b56c608cf026abe9686f8ae90`
+and the partition-invariant artifact identity is
+`04d22a29beed417b94bf7ccc617997631e76f49d51f797afbf79d05d214c07a4`.
+
+Processing took 10,957.745211 seconds. Including the 2.017497-second queue
+wait, total service time was 10,959.762708 seconds (182.66 minutes), so this run
+proves the cold functional, artifact-integrity, and capped-resource gates but
+explicitly misses the unchanged 90-minute performance objective. It is not
+production or physical-device acceptance: validation stream rollout was
+disabled, production was untouched, and the signed-manifest, install, render,
+and route gates remain open.

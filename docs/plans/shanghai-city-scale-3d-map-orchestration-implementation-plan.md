@@ -13,24 +13,53 @@ shipped boundary. It defines the remaining architecture needed to generate one
 large 3D map of Shanghai without raising a monolithic job's memory limits until
 it happens to pass.
 
-Implementation status as of 2026-08-19: Phase 0 evidence is checked in as
+Implementation status as of 2026-08-20: Phase 0 evidence is checked in as
 machine-readable benchmark fixtures, the read-only worker cgroup/resource
 report exists, and Phase 1 global planning has a deterministic shadow path.
+Shadow plans are retained as terminal `observed` records: their proposed child
+tasks are cancelled with `building_shadow_observed`, cannot be claimed, and are
+exposed as `buildingPlanObservation` rather than authoritative public progress.
+They remain available under the bounded terminal-evidence retention policy.
+
 Phase 2's SQLite WAL parent/task/attempt/receipt store, lease fencing, crash
 recovery, authenticated diagnostics, and operator inspection commands are now
-implemented, including durable exact-workload receipt handoff, canonical
-global-to-chunk scope projection, monotonic parent stages, receipt-based
-aggregate block progress, and capability-aware memory/CPU reservations with a
-concurrency-one default for heavy work. The parent worker now dispatches the
-chunked path behind an explicit rollout mode, reopens failed plans for retry,
-executes cache-aware child tasks, and performs fail-closed cache-only assembly.
-The retained-observation path now emits a reviewable, capability-bound p95
-calibration artifact without changing admission automatically; zero-work cache
-hits are excluded from training observations. Read-only operator alerts,
-authenticated alert diagnostics, a CLI alert surface, and an OOM/split/lease/
-cache/receipt runbook are also implemented. Production still uses the existing
-monolithic executor and hard ceilings until the benchmark, golden-equivalence,
-deployment, and physical acceptance gates are complete.
+implemented, including automatic expired-lease recovery, durable exact-workload
+receipt handoff, canonical global-to-chunk scope projection, monotonic parent
+stages, receipt-based aggregate block progress, and capability-aware memory/CPU
+reservations. The worker executes one child-task quantum before yielding the
+public parent, so the global weighted virtual-finish scheduler can choose among
+parents instead of draining one city job. The effective worker memory cap is
+the strict minimum of configured and observed cgroup limits; admission uses 85%
+of that cap and keeps heavy concurrency at one by default.
+Durable, token-fenced parent-phase reservations place source preparation and
+whole-map assembly in the same resource pool as child scans/builds. They
+heartbeat, recover after expiry, appear in bounded diagnostics, and yield the
+public parent without consuming another retry when the pool is occupied.
+
+Exact workload scans now recompute conservative memory and wall estimates,
+split multi-block work that exceeds the 70% memory or ten-minute wall target,
+and enforce a separate 30-minute runtime deadline. Cache readers, writers, and
+eviction share a stable namespace lease outside the removable directory;
+maintenance also protects identities referenced by nonterminal plans. A cache
+miss or mismatch transactionally removes stale receipts, returns affected work
+to `pending`, and restores a conservative nonzero reservation before rebuild.
+Pre-execution storage admission checks retention quotas, live disk headroom,
+and a reserve before preparation begins.
+
+The retained resource model uses the p95 of paired actual/predicted ratios for
+one worker capability identity, refuses to train on a positive actual with a
+zero prediction, and remains review-only until explicitly adopted. Final
+assembly now requires a real, CRC-valid ZIP with a nonempty manifest, at least
+one FMB, per-FMB and whole-archive size limits, exactly one matching ZIP
+receipt, and matching byte count/SHA-256. Operator diagnostics are paged at
+most 100 rows and omit raw workload-object arrays. Command evidence retains
+bounded process-tree peak RSS plus cgroup `memory.events` deltas; only a positive
+OOM counter delta is classified as `building_worker_oom`. Public `ready` is
+persisted before the coordinator advances from `artifact_publication` to
+`ready`, with maintenance reconciliation as the durable backstop. Production
+still uses the existing monolithic executor and hard ceilings until the
+90-minute, retained monolithic-versus-chunked equivalence, signing, deployment,
+and physical acceptance gates are complete.
 
 The first exact full-bbox validation attempt exposed and fixed one remaining
 warm-path bug: the standalone relation-audit consumer still called the
@@ -130,13 +159,15 @@ reservations; production remains pinned to
 
 The validation worker then retained eight successful cold target-3 chunk
 observations across the current Shanghai source identity (cache-only children
-remain excluded). The review-only p95 model is now `trained` for capability
+remain excluded). The historical pre-review p95 model was `trained` for capability
 `de3f8eac8c3a71ee74967fe227d92397dc0d5581bd7ef79894fa28d45c51ea4a`, with
 8 observations, a 2,902,016,000-byte p95 measured peak, a 580,100,704-byte
 p95 prediction, and a conservative 5.5029x effective multiplier after the
-10% safety margin. Every retained sample underpredicted, so this artifact is
-evidence for review only: the production worker limit remains unset and heavy
-concurrency remains one. The operator CLI now supports
+10% safety margin. That multiplier used the now-superseded ratio of independent
+p95 values; the implemented model must regenerate it from the p95 of paired
+actual/predicted observations. Every retained sample underpredicted, so this
+artifact is evidence for review only: the production worker limit remains unset
+and heavy concurrency remains one. The operator CLI now supports
 `build-plan resource-model --all-plans` to aggregate the retained cohort rather
 than incorrectly calibrating one parent in isolation.
 
@@ -381,7 +412,7 @@ flowchart TD
     C2 --> B
     CN --> B
     B --> A["Single map assembly: roads + labels + cached buildings"]
-    A --> V["Whole-artifact validation and signing"]
+    A --> V["Strict ZIP validation; optional signing gate"]
     V --> D["One downloadable Shanghai map"]
 ```
 
@@ -399,7 +430,9 @@ status values expected by existing clients:
 7. `artifact_publication`
 
 Only the parent can publish a map artifact or transition the public job to
-`ready`.
+`ready`. The coordinator remains at `artifact_publication` until public
+completion is durable, then moves to `ready`; the maintenance pass reconciles
+that additive marker if the worker stops between the two stores.
 
 ### Global scope plan
 
@@ -422,13 +455,17 @@ Initial global admission should require all of the following:
 - the artifact-size estimator predicts the final Bike Map Stream payload below
   512 MiB with a safety margin;
 - no individual FMB block is predicted to exceed 2 MiB;
-- source and cache retention quotas can hold the attempt; and
+- source/cache/attempt retention quotas and live disk headroom can hold the
+  predicted working set plus the configured reserve; and
 - the installation/request rate limits and active-job quota pass.
 
-Predictions are admission aids, not wire-format exceptions. Final exact sizes
-are checked again before signing. If the Shanghai artifact exceeds a hard
-format limit, fail with a typed `map_artifact_limit_exceeded`; do not truncate
-features. A later format-sharding plan would then be required.
+Predictions are admission aids, not wire-format exceptions. Chunked execution
+now performs storage admission before preparation, using the estimated archive,
+two cache copies, three archive-sized temporary copies, two source working
+copies, the configured cache/attempt quotas, live free bytes, and a reserve.
+Final exact sizes are checked again before publication and, when enabled,
+signing. If the Shanghai artifact exceeds a hard format limit, fail typed; do
+not truncate features. A later format-sharding plan would then be required.
 
 ## Multi-dimensional chunk policy
 
@@ -443,7 +480,7 @@ host:
 | Source area | 800,000,000 m² | 1,200,000,000 m² | Retain the deployed hard cap while leaving buffer/variance headroom |
 | Closure objects | 350,000 | 500,000 | West Shanghai succeeded at 325,093; central failed at 560,791 |
 | Estimated peak resident memory | 70% of worker cgroup limit | 85% reservation refusal; cgroup remains absolute | West Shanghai peaked near 3.89 GiB |
-| Predicted task wall time | 10 minutes | 30-minute lease window with heartbeat renewal | Keeps recovery bounded without killing healthy work by estimate alone |
+| Predicted task wall time | 10 minutes | 30-minute hard runtime deadline; lease heartbeat remains separate | Splits above the target and fails closed at the deadline |
 | Missing building blocks | 48 | Area/complexity ceilings remain authoritative | Prevents one cold chunk from owning most of a city build |
 
 Targets influence partitioning. Hard ceilings reject a task at both plan and
@@ -458,10 +495,15 @@ and block-cache misses. No single scalar replaces the raw counters.
 
 ### Worker memory contract
 
-Add an explicit memory limit to the production worker container and record it
-in worker capability/benchmark identity. The scheduler reserves memory before
-leasing a chunk. It must never start two roughly 4 GiB tasks merely because two
-CPU slots are idle.
+Worker capability records the configured limit and the actual cgroup limit
+separately and uses their minimum as the effective `memoryLimitBytes`. The
+scheduler re-derives that minimum rather than trusting a looser summary, refuses
+a task above 85%, and reserves memory before leasing. Source preparation and
+final assembly use token-fenced parent-phase reservations in the same durable
+pool, so they cannot overlap a child or another parent phase while heavy
+concurrency is one. Validation now has an explicit 12 GiB cgroup cap; setting
+and validating the production cap remains a promotion gate. It must never
+start two roughly 4 GiB tasks merely because two CPU slots are idle.
 
 Start production chunk concurrency at one. Raise it only when retained
 benchmarks prove the sum of reservations, API/maintenance overhead, filesystem
@@ -506,15 +548,20 @@ be rebuilt atomically and must not be reused across identities.
 
 ### Memory/performance model
 
-Add a versioned chunk resource model beside the existing preparation estimator.
-Train/calibrate it only from retained successful tasks with the same relevant
-algorithm and worker class. Until it has enough observations, use conservative
-coefficients and split earlier.
+The versioned chunk resource model is trained only from retained successful
+non-cache tasks with the same model and stable worker-capability identity.
+Calibration uses the p95 of each observation's paired
+`actualPeakMemoryBytes / predictedPeakMemoryBytes` ratio, not the ratio of two
+independent p95 values. A positive actual paired with a zero prediction makes
+the group untrainable. The reviewed sample floor and safety margin remain
+explicit, and the artifact never changes admission automatically.
 
-The model predicts peak RSS and wall time from raw workload counters. Its
-prediction never overrides the hard source/object limits. An OOM or material
-underprediction downgrades confidence and triggers a smaller retry partition,
-not a larger worker limit.
+Conservative memory and wall estimates come from the exact post-scan counters.
+The ten-minute wall and 70%-of-effective-memory targets cause deterministic
+multi-block bisection before build execution; the 85% memory ceiling and
+30-minute runtime deadline remain hard. These predictions never override the
+source/object limits. Confirmed OOM or material underprediction triggers a
+smaller partition, not a larger worker limit.
 
 ## Deterministic partitioning
 
@@ -555,9 +602,16 @@ query-envelope and union areas.
 Planning and execution use the same immutable index, but runtime can still
 discover underestimated geometry cost.
 
+- After an exact workload scan, recompute conservative peak-memory and wall
+  estimates from the retained counters. A multi-block scan above the 70%
+  effective-memory or ten-minute wall target is transactionally marked split
+  and replaced with deterministic workload-scan children.
 - If a deterministic object/memory/geometry guard is hit and the chunk owns
   two or more missing blocks, mark it `split_required`, partition it into
   smaller children, and retain all block receipts already published.
+- Enforce the policy's 1,800-second hard deadline during both scan and build
+  commands. A multi-block deadline or confirmed cgroup OOM enters the same
+  deterministic split path; a single-block failure is pathological.
 - Do not consume the ordinary transient retry budget for that split.
 - If one global block alone exceeds a hard guard, fail with
   `building_pathological_block` including the block coordinates and workload
@@ -627,10 +681,14 @@ chunk-policy version, and split generation. A transient retry reuses the task
 ID. A deterministic split creates new child IDs and permanently marks the
 parent task `split`.
 
-Claims are atomic. A worker renews a short lease while it reports progress. An
-expired lease makes the task eligible again only after its attempt directory is
-fenced by lease token. Stale workers cannot publish receipts after ownership
-changes.
+Claims are atomic. A worker renews a short lease while it reports progress.
+Every global scheduling/claim pass first recovers expired leases in the same
+transaction: it finishes the old attempt as `lease_expired` with typed failure
+`building_task_lease_expired`, releases the reservation, clears ownership, and
+returns active-plan work to `pending`. Every heartbeat, receipt, transition,
+and cache-recovery write rejects an expired token even before another worker
+claims the task, so a stale worker cannot publish after expiry or ownership
+change.
 
 ### Cancellation
 
@@ -643,14 +701,15 @@ temporary manifests and the final artifact are removed by retention policy.
 ## Chunk execution and block publication
 
 1. Revalidate source/index/calibration/chunk identities and lease token.
-2. Recheck the canonical block cache. Concurrent jobs may have satisfied some
-   or all misses after planning.
+2. Recheck the canonical block cache under the namespace's shared lease.
+   Concurrent jobs may have satisfied some or all misses after planning.
 3. Materialize exact bounded source plus the retained relation closure receipt.
 4. Run current deterministic relation association, containment fallback,
    height resolution, topology normalization, seam-safe clipping, and FMB v4
    building encoding.
-5. Publish each canonical block section through existing per-block locks and
-   atomic content-hash manifests.
+5. Publish each canonical block section through existing per-block locks,
+   atomic content-hash manifests, and the same namespace lease used by readers
+   and eviction.
 6. Record one block receipt only after rereading and validating the cache entry.
 7. Mark the chunk ready when every assigned missing block has a valid receipt.
 
@@ -670,11 +729,16 @@ Add an explicit assembly mode to the current pipeline:
    output scope.
 3. Compose FMB files by reading building sections from the canonical cache in
    global block order. Assembly must not fall back to monolithic building
-   normalization on a cache miss; it returns `building_chunks_incomplete` to
-   the coordinator.
+   normalization on a cache miss. A missing or mismatched entry atomically
+   deletes the affected durable receipts, resets the owning tasks to `pending`
+   with conservative reservations, returns the plan to `building_chunks`, and
+   rebuilds through the normal coordinator path.
 4. Produce FMA1 and current ZIP/Bike Map Stream artifacts.
-5. Validate every FMB block, whole manifest, signatures, content lengths,
-   artifact receipts, 2 MiB block ceiling, and 512 MiB stream ceiling.
+5. Require a CRC-valid ZIP, a nonempty `manifest.json`, at least one FMB, every
+   FMB no larger than 2 MiB, the ZIP no larger than 512 MiB, and exactly one ZIP
+   receipt whose bytes and SHA-256 match the published file. Bike Map Stream
+   signing and its manifest validation remain a separate rollout gate when
+   enabled.
 6. Publish once under the parent job's artifact-publication lease.
 
 Road and label preparation remain whole-map stages initially because current
@@ -705,19 +769,25 @@ same block content and produce the same map bytes.
 
 ## Scheduling and fairness
 
-Use a scheduler that considers both fairness and reserved resources:
+The implemented scheduler considers both fairness and reserved resources:
 
 - limit active chunk tasks per parent;
-- alternate ready work across parent jobs instead of draining one city job;
+- select the globally preferred pending parent by admission priority and
+  weighted virtual finish, process one child-task quantum, yield that public
+  parent back to the job queue, and select again instead of draining one city
+  job;
 - reserve memory and CPU weight before leasing;
+- reserve source preparation and final assembly in that same pool, with
+  heartbeat renewal, expiry recovery, and a final token fence;
 - prioritize final assembly when all building receipts are ready so completed
   work does not sit unpublished;
 - allow cache-hit tasks to complete without a heavy-worker slot; and
 - apply existing installation/job quotas to the parent, not every internal
   chunk.
 
-Start with one heavy building task at a time. After evidence supports
-concurrency two, cap one parent at one slot when another parent is waiting.
+Heavy concurrency remains one. If evidence later supports concurrency two,
+the active-parent check and per-parent quota keep one parent at one slot while
+another eligible parent is waiting.
 
 ## Progress and user experience
 
@@ -743,6 +813,12 @@ Completed blocks count validated cache receipts, not tasks or source objects.
 If a chunk splits, total blocks and completed blocks remain monotonic. Chunk
 count may grow and is advisory.
 
+Shadow planning is not executable progress. A shadow plan is terminalized as
+`observed`, all proposed children are made nonclaimable, and the public API
+returns it separately as `buildingPlanObservation` while preserving the
+authoritative monolithic progress. At completion, the public job becomes
+durably `ready` first; coordinator `ready` is an additive reconciled marker.
+
 Preparation estimates aggregate:
 
 - remaining uncached block workload;
@@ -753,6 +829,9 @@ Preparation estimates aggregate:
 
 Do not add internal task IDs or source object keys to the public response.
 Expose detailed plans through authenticated operator diagnostics and CLI only.
+Those surfaces accept `limit`/`offset`, cap a page at 100 rows, return total
+counts and `hasMore`, and replace potentially huge workload-object arrays with
+receipt identity and serialized-byte metadata.
 
 ## Observability
 
@@ -764,11 +843,13 @@ Persist and surface:
 - seed and closure node/way/relation counts;
 - outlines, parts, rings, holes, vertices, containment candidates, and encoded
   points;
-- predicted versus actual wall time and peak RSS;
+- predicted versus actual wall time, process-tree peak RSS, and cgroup
+  `memory.events` deltas;
 - cache hits, misses, race hits, bytes, lock wait, and receipts;
 - duplicate closure work across chunks;
 - scheduler wait, lease renewals/expiry, transient retries, and cancellations;
-- label, assembly, validation, signing, storage, and total parent timings; and
+- label, assembly, ZIP validation, optional signing, storage admission, and
+  total parent timings; and
 - final artifact bytes, files, FMB maximum block bytes, and manifest receipts.
 
 Add operator commands such as:
@@ -800,13 +881,15 @@ Alert on:
 | Hard guard exceeded with multiple blocks | Mark task split and enqueue smaller children |
 | Hard guard exceeded by one block | Fail parent with `building_pathological_block` |
 | Source snapshot/index/calibration identity changed | Fail parent; a new request resolves a new identity |
-| Worker process lost or lease expired | Retry same task after fencing stale attempt |
+| Worker process lost or lease expired | Scheduler automatically records `lease_expired`, releases the reservation, requeues the task, and fences the old token |
 | Transient filesystem/process error | Bounded exponential retry with jitter |
 | Invalid/incomplete relation | Fail closed; do not publish affected blocks |
-| Cache entry corrupt | Quarantine and regenerate the affected block |
+| Cache entry missing/corrupt | Under the namespace lease, atomically invalidate affected receipts, requeue owning tasks with conservative reservations, and regenerate |
 | Parent cancelled | Stop new leases, cooperatively stop active work, never assemble |
 | Assembly sees missing receipt | Return to chunk coordination; do not build buildings monolithically |
-| FMB/manifest/signature validation fails | Fail parent and retain diagnostic receipts |
+| ZIP/FMB/receipt validation fails | Fail parent and retain diagnostic receipts |
+| Storage quota/headroom admission fails | Fail before preparation with `building_storage_admission` |
+| Stream signature validation fails when enabled | Fail parent; do not reinterpret server ZIP readiness as signed acceptance |
 | Final stream exceeds 512 MiB | Fail typed; require product/format decision |
 
 Transient task attempts default to three. Deterministic splits have their own
@@ -819,10 +902,14 @@ below one global block.
   cannot multiply the client's quota consumption or bypass it.
 - Cap output blocks, retained bytes, active parents, active tasks, and split
   depth server-side.
+- Refuse chunked preparation unless the predicted cache/attempt working set,
+  live free bytes, and configured reserve pass storage admission.
 - Validate every serialized block coordinate, integer area/count, hash,
   policy version, and task transition.
 - Never expose local source/cache paths, Coolify metadata, secrets, or raw OSM
   object sets through public errors.
+- Keep ordinary authenticated diagnostics bounded to 100 rows and omit raw
+  workload key arrays; use pagination for the rest.
 - Fence publication by lease token and parent cancellation generation.
 - Treat source/index/cache/task artifacts as untrusted after disk reads and
   verify schema, identity, path containment, length, and content hash.
@@ -881,12 +968,16 @@ implemented. The validation canary accepted a 631,792,599 m² request as one
 global plan with 56 output blocks under the 600,000 relation ceiling; the
 source index recorded 903,545 nodes, 156,448 ways, and 892 relations. The
 current image has ready central, west, and 631.792599 km² assembly runs with
-durable receipt and artifact evidence. The exact full-bbox plan still needs to
-complete (or fail closed with retained typed evidence), and cold per-block
-resource observations now meet the reviewed eight-sample floor, but the
-resulting p95 model underpredicted every sample and therefore remains
-non-authoritative. Shadow failures persist a deterministic parent plan and
-workload-scan child tasks without changing the authoritative monolithic build.
+durable receipt and artifact evidence. A later capped exact full-bbox cold run
+also reached server `ready` with the retained evidence below, but missed the
+90-minute objective and did not perform the retained monolithic comparison,
+signing, production, or physical gates. Cold per-block resource observations
+meet the reviewed eight-sample floor, but the resulting model underpredicted
+every sample and remains non-authoritative. Shadow observations persist a deterministic terminal
+`observed` parent plan and nonclaimable cancelled child proposals without
+changing or projecting over the authoritative monolithic build. They remain
+reviewable until the bounded terminal-evidence retention pass removes old
+observations.
 
 ### Phase 2 — Durable coordinator store
 
@@ -898,7 +989,7 @@ workload-scan child tasks without changing the authoritative monolithic build.
 4. Add fairness and resource reservations with concurrency one.
 
 **Current status:** the SQLite WAL schema, idempotent plan/task insertion,
-atomic claims, lease heartbeats and expiry recovery, cancellation generation,
+atomic claims, lease heartbeats and automatic expiry recovery, cancellation generation,
 split transitions, immutable block receipts, receipt-set hashes, durable exact
 workload receipts, monotonic parent-stage transitions, receipt-based aggregate
 progress, and authenticated/API plus CLI diagnostics are implemented and
@@ -912,23 +1003,29 @@ scans, resumes failed plans without discarding successful receipts, and records
 runtime resource summaries and receipt-set identity. The public parent-job
 response projects additive coordinator progress and preserves legacy counters,
 while detailed task, receipt, attempt, and reservation diagnostics remain
-authenticated; fair scheduling now uses a durable last-claimed round-robin
-cursor and reserves at most one slot per parent while another parent has
-unrepresented pending work. Durable scheduling weights, admission priority,
-virtual-finish dispatch cost, and an optional per-parent active-task quota now
-prevent a large parent from monopolizing a worker pool when concurrency is
-increased; the Shanghai path records weight one and an active-task quota of
-one until measured capacity approves more. Each leased workload-scan or
+authenticated and paged at no more than 100 rows. The worker processes one
+child-task quantum and yields its public parent; the next job claim consults
+the coordinator's global admission-priority/weighted-virtual-finish choice.
+Durable scheduling weights, last-claim time, dispatch cost, and an optional
+per-parent active-task quota therefore prevent a large parent from monopolizing
+the worker across job claims; the Shanghai path records weight one and an
+active-task quota of one until measured capacity approves more. Each leased workload-scan or
 building-chunk task also refreshes its fenced lease every 30 seconds while the
 long-running command is active, so operator diagnostics distinguish a live
 multi-minute task from a lost worker without changing the admission ceilings.
-Authenticated plan diagnostics now include an observational p95 resource-model
-summary grouped by the stable worker capability identity; groups below the
-reviewed sample count remain explicitly uncalibrated and do not alter
-admission. `build-plan resource-model` produces a versioned calibration
-artifact only after the sample floor is met. The validation canary produced 56
-durable block receipts, retained the parent plan, and completed with max
-heavy-task concurrency one.
+Each scheduler/claim pass first transactionally requeues expired work, closes
+the old attempt as `building_task_lease_expired`, and releases its reservation;
+all lease-bound mutations independently reject an already-expired token.
+Authenticated plan diagnostics now include an observational resource-model
+summary grouped by the stable worker capability identity. Its multiplier is
+the p95 of paired actual/predicted ratios, a positive-actual/zero-prediction
+sample prevents training, and groups below the reviewed sample count remain
+explicitly uncalibrated. `build-plan resource-model` produces a versioned
+review artifact only after the sample floor is met and never changes admission
+automatically. The effective memory limit is the minimum of the configured and
+cgroup caps, and the task store re-derives that minimum before applying the 85%
+admission threshold. The validation canary produced 56 durable block receipts,
+retained the parent plan, and completed with max heavy-task concurrency one.
 
 **Exit gate:** fault-injection tests prove no double publication, lost task,
 stale-worker receipt, non-monotonic progress, or cancellation resurrection.
@@ -941,8 +1038,9 @@ stale-worker receipt, non-monotonic progress, or cancellation resurrection.
 4. Publish validated per-block receipts transactionally.
 5. Convert runtime deterministic guard failures into coordinator split signals.
 
-**Exit gate:** all relation, height, seam, cache, and FMB golden fixtures are
-byte-identical across monolithic and multiple partition layouts.
+**Exit gate:** all relation, height, seam, cache, and FMB golden fixtures have
+the same canonical FMB paths and uncompressed bytes across monolithic and
+multiple partition layouts.
 
 **Current status:** the canonical chunk scope projection, bounded chunk
 execution entry point, cache-manifest reread, and transactional per-block
@@ -950,12 +1048,17 @@ receipt publication are implemented and invoked by the parent worker for
 `chunked_allowlist`/`chunked` jobs. Source-index, calibration, and source
 identity are frozen once per parent; cache hits become zero-work child tasks;
 exact workload scans promote to bounded child execution; and multi-block guard
-failures emit deterministic split tasks. The validation Coolify canary ran the
-live `chunked_allowlist` path and published all 56 block receipts without a
-split or retry. The durable receipt-set hash is explicitly tested across
-different task groupings and completion order; monolithic-vs-partition
-byte-level golden equivalence, measured benchmarks, and production allowlist
-rollout remain pending.
+failures emit deterministic split tasks. Post-scan exact counters now recompute
+the conservative memory/wall estimates, split multi-block work above the 70%
+memory or ten-minute wall target, and enforce a 30-minute hard runtime deadline.
+Cache readers, writers, and eviction use a stable external namespace lease;
+maintenance protects namespaces referenced by active receipts/cache-hit tasks,
+and cache loss transactionally requeues affected work for rebuild. The
+validation Coolify canary ran the live `chunked_allowlist` path and published
+all 56 block receipts without a split or retry. The durable receipt-set hash is
+explicitly tested across different task groupings and completion order;
+retained monolithic-versus-partition canonical FMB equivalence, measured
+benchmarks, and production allowlist rollout remain pending.
 
 The exact-bbox run also verified that relation-audit and closure workers now
 reuse the sealed source-index manifest; a replacement run reached ordinary
@@ -973,20 +1076,27 @@ for handling malformed OSM building relations.
 1. Add an assembly mode that requires every building receipt.
 2. Keep ordinary features and labels whole-map and compose cached building
    sections.
-3. Validate and sign one parent artifact under the existing publication lease.
+3. Strictly validate one parent ZIP under the existing publication lease; run
+   stream signing and signed-manifest validation only when that rollout is
+   enabled.
 4. Add exact final format/device size checks.
 
-**Exit gate:** one multi-chunk request produces the same validated artifact as
-a high-limit reference build; deleting one receipt prevents publication.
+**Exit gate:** one multi-chunk request and a high-limit reference build both
+pass strict ZIP validation and have the same canonical FMB payload; deleting
+one receipt prevents publication.
 
 **Current status:** an explicit cache-only assembly entry point now requires
 every global block receipt, rereads and matches the canonical cache manifests,
 extracts whole-map roads/labels, and passes a fail-closed cache-only flag to the
 extractor. A cache miss cannot silently re-enter monolithic building
-normalization. Assembly now validates the final ZIP size and published ZIP
-receipt before the parent can enter `ready`. The parent worker invokes this
-assembly after every block receipt is ready, records final ZIP validation and
-receipt-set metrics, and cannot fall back to monolithic building normalization.
+normalization. Assembly now rejects non-ZIP bytes, CRC failure, a missing/empty
+manifest, no FMB entries, an FMB above 2 MiB, a ZIP above 512 MiB,
+duplicate/missing ZIP receipts, or a ZIP receipt whose byte count/SHA-256
+differs. The parent worker invokes this assembly after every block receipt is
+ready, records final ZIP validation and receipt-set metrics, and cannot fall
+back to monolithic building normalization. Public job `ready` is committed
+before coordinator `ready`, with maintenance reconciliation if that second
+additive write is interrupted.
 The validation canary produced one 14,948,371-byte ZIP with 56 FMB entries;
 ZIP testing passed and the largest FMB was 623,771 bytes. The recorded artifact
 SHA-256 is `8ea288c0066c210ccb1802029d84b8bd351a2d50c790596e067871517842be17`.
@@ -1008,10 +1118,13 @@ relation-closure, and calibration preflight failures, so malformed sparse
 inputs are retained as actionable data-shape diagnostics instead of generic
 chunk execution errors. `map-platform/tools/compare_building_equivalence.py`
 provides the review-gate comparator for retained monolithic and chunked run
-records: it compares canonical FMB bytes and artifact payload bytes while
-ignoring task layout, lease order, timing, cache-hit, and producer metadata.
-The comparator is covered by backend tests; the live high-limit reference run
-is still required before this acceptance gate can be checked.
+records. Its canonical comparison is exact equality of the sorted safe relative
+FMB path to SHA-256-of-uncompressed-bytes mapping. Raw ZIP byte counts and
+SHA-256 digests for both sides remain evidence, but are not equality inputs
+because legitimate orchestration metadata can change ZIP bytes. Any missing,
+extra, or changed FMB path/content fails closed. The comparator is covered by
+backend tests; the retained monolithic-versus-chunked reference comparison is
+still required before this acceptance gate can be checked.
 
 ### Phase 5 — Progress, estimates, operations, and retention
 
@@ -1023,20 +1136,28 @@ is still required before this acceptance gate can be checked.
 4. Add alarms and runbooks for splits, OOMs, stale leases, corrupt cache, and
    final size limits.
 
-**Current status:** additive parent progress, authenticated plan/task/resource
-diagnostics, capability-aware reservations, and retained worker observations
-are implemented. The maintenance loop now prunes only old failed/cancelled
-coordinator evidence while retaining successful plans and canonical cache
-blocks. The validation canary retained phase timings, source-extraction peak
-resident memory, cgroup resource reports, cache-hit counts, receipt-set hash,
-and final ZIP validation. Read-only alerts cover failed/split tasks, stale
-leases and heartbeats, OOM/cache-integrity failures, memory-headroom warnings,
-and incomplete receipt sets; the operator runbook documents safe recovery and
-publication gates. Production benchmark evidence remains pending.
+**Current status:** additive parent progress, authenticated paged
+plan/task/resource diagnostics, capability-aware reservations, and retained
+worker observations are implemented. The maintenance loop bounds old
+`observed`/failed/cancelled coordinator evidence while retaining successful
+plans. Cache eviction separately protects every identity referenced by a
+nonterminal receipt or cache-hit task, fails closed by protecting all when a
+legacy identity is ambiguous, and skips a namespace whose shared lease is
+active. The validation canary retained phase timings, process-tree peak RSS,
+cgroup `memory.events` deltas, cache-hit counts, receipt-set hash, storage
+admission, and strict final ZIP validation. Positive `oom`, `oom_kill`, or
+`oom_group_kill` deltas produce typed OOM evidence; a generic subprocess error
+with unchanged counters is not relabeled as OOM. Read-only alerts cover
+failed/split tasks, stale leases and heartbeats, OOM/cache-integrity failures,
+memory-headroom warnings, and incomplete receipt sets; the operator runbook
+documents safe recovery and publication gates. Production benchmark evidence
+remains pending.
 
 Cancellation is now fenced at the public job boundary, with maintenance
 reconciliation as a second durable backstop: cancelled parents cannot leave
 leased child tasks or resource reservations active until lease expiry.
+The same maintenance pass reconciles an `artifact_publication` coordinator to
+`ready` only when the public job is already durably ready.
 
 **Exit gate:** operators can explain every minute and resource peak of a
 Shanghai build from retained data, while current iOS clients still complete the
@@ -1073,9 +1194,9 @@ receipts, a 132,325-byte ZIP (`4ce50f649ae1709ed556eb973efdfe0b9f4ccc5068d173677
 and a 703,766,528-byte source-extraction peak; its final ZIP validation passed
 on the exact deployed image
 `a6eed22cc5a6c37d18eb37939bbfa0983c3433763d35be5ddff220910d125535`.
-production remains pinned to its existing digest. Physical validation, cold
-central/632 km²/full-bbox coverage, and production promotion are still
-required. The current validation deployment has since moved to the immutable
+production remains pinned to its existing digest. At that point physical
+validation, cold central/632 km²/full-bbox coverage, and production promotion
+were still required. The current validation deployment has since moved to the immutable
 `ghcr.io/seichris/open-bike-computer-map-platform@sha256:9fafdf8e1e7bed5ba90b970fddb1bd25e2faf30318c93693f05ef75c0584b866`
 image from commit `0dd2d2ab` after the closure-algorithm-v2 estimate profile
 was refreshed; all three validation containers are healthy and production
@@ -1114,8 +1235,9 @@ image now preserves the typed preflight result end-to-end: sparse rerun
 stable calibration key and source snapshot identity, rather than generic
 `map_build_failed`; the historical rows remain retained as diagnostics and are
 not counted as a memory failure.
-The full-bbox, physical acceptance, and production-promotion gates remain
-open.
+At that point the full-bbox, physical acceptance, and production-promotion
+gates remained open; later retained server runs below close only the functional
+full-bbox portion.
 
 The current image's relation-heavy validation probe
 `a932f748a388475ca0e1` (26.537229464 km² around Guangfulin) now reaches
@@ -1193,9 +1315,10 @@ generation. The 35-block chunk recorded a 410,173-object closure receipt,
 and 358.919161 seconds of block-cache generation. Both chunks reused their
 durable closure plans for relation audit; their live worker cgroup peak so far
 is 8,704,212,992 bytes, with `low=0`, `high=0`, `max=0`, `oom=0`, and
-`oom_kill=0`. The host has retained more than 41 GiB available memory. The
-full-bbox artifact, final ZIP receipts, and the remaining performance and
-physical gates are still pending.
+`oom_kill=0`. The host has retained more than 41 GiB available memory. At this
+snapshot the full-bbox artifact, final ZIP receipts, and the remaining
+performance and physical gates were still pending; the next paragraph records
+the later server completion.
 
 The exact-bbox validation job then completed successfully on the same immutable
 candidate. Job `d8afbc95c4fd4589ae5f` reached `ready` with 442/442 completed
@@ -1224,14 +1347,14 @@ partitioned retained artifact comparison is still required before the
 partition-invariant byte gate can be checked.
 The retained resource-model report also matters for rollout: all eight heavy
 tasks were underpredicted, with p95 predicted peak 761,323,296 bytes versus
-5,446,459,392 bytes actual and a calibrated conservative multiplier of 7.1539.
-The worker had no cgroup memory limit, so these reservations did not create a
-false safety claim; this model must be retrained/reviewed before production
+5,446,459,392 bytes actual. The historical report divided those independent
+p95 values to produce 7.1539 and then 7.8693 with the 1.10 safety margin; those
+multipliers are superseded by the paired-ratio correction and must not be used
+for admission. The current trainer takes the p95 of each task's paired
+actual/predicted ratio, applies the explicit safety margin, and still does not
+mutate policy. The worker had no cgroup memory limit, so this cohort must be
+regenerated/reviewed under the strict effective cap before production
 allowlisting or concurrency increases.
-The review-only trainer produces calibrated model
-`building-resource-model-calibrated-v1` with effective multiplier `7.8693`
-(1.10 safety margin); it was generated without mutating admission policy and
-is not yet enabled in validation or production.
 
 ### Validation image follow-up on 2026-08-20
 
@@ -1274,6 +1397,49 @@ policy: `memory.max=12,884,901,888` bytes (12 GiB), configured worker limit
 health endpoint remains HTTP 200. This cap is validation-only; production is
 still pinned to its existing immutable image and has not been promoted.
 
+The exact cold-cache validation job then completed on that capped validation
+worker. Job `242ab1e1cd76478bbbd7`
+(`shanghai-exact-cold-candidate-de7fbf0ea9`) reached `ready` with all 442
+blocks, 16/16 durable chunks, 442 canonical receipts, and no typed failure.
+Its global-plan SHA-256 was
+`21bf7837506bbdec6e530e5bbd202fa60a5165d97b4712bcaea9948eb01daa14`,
+partition-plan SHA-256 was
+`fd845df7c81188fa249827fa381b06820919828d202e73e6a761d5066b166a70`,
+receipt-set SHA-256 was
+`648dcefa710fdbc5ccc85dd42ad72a2d0a5f752b56c608cf026abe9686f8ae90`,
+and partition-invariant artifact identity was
+`04d22a29beed417b94bf7ccc617997631e76f49d51f797afbf79d05d214c07a4`.
+The source snapshot SHA-256 was
+`8c6e8c7370b8bee3688f9820c88f5930c206d8b95aa762d552513edc3a354aea`
+and the source-index database SHA-256 was
+`375c47614777f1e6beb0f1a1c0386da5235da7c11f95776ffbd534fb43859420`.
+
+The final ZIP was 25,894,124 bytes with SHA-256
+`79f49da19b0fea20ed4894a0d339bb5bc30b334ccd5a0370ae1c9477ed26234e`.
+Its retained validation object is
+`/data/artifacts/maps/shanghai-exact-cold-candidate-de7fbf0ea9/zip-stored-v1/79f49da19b0fea20ed4894a0d339bb5bc30b334ccd5a0370ae1c9477ed26234e.zip`,
+and the measured worker container was `67fca6c98e67`.
+A read-only remote validation found 425 archive entries, 420 FMB entries, no
+unsafe paths, and a maximum FMB size of 507,316 bytes. The canonical FMB
+path/hash digest was
+`5983a6bb7f79f6d276574e99a8c7da87edbf05c84bf38d2f197d5e2f8fac92cb`,
+and the ZIP comparator self-check passed. Source extraction took 79.261865
+seconds and peaked at 4,128,673,792 child bytes; block encoding took
+1,675.184162 seconds, label candidate generation 68.569854 seconds, label
+normalization 53.213013 seconds, label shaping 6.952599 seconds, and packaging
+8.302237 seconds. The 12 GiB worker cgroup finished at 451,944,448 bytes,
+peaked at 8,929,234,944 bytes, and recorded zero `low`, `high`, `max`, `oom`,
+`oom_kill`, or `oom_group_kill` events.
+
+The job spent 10,957.745211 seconds processing and 10,959.762708 seconds in
+the service including its 2.017497-second queue wait: 182.66 minutes. This is
+the retained exact cold functional, artifact-integrity, and capped-resource
+result, but it misses the unchanged 90-minute concurrency-one performance
+objective by 92.66 minutes. The run therefore does not close the performance
+gate and does not justify relaxing it. Validation stream rollout remained
+disabled, production was untouched, and signed-manifest plus physical-device
+acceptance remain open.
+
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
 
@@ -1299,14 +1465,26 @@ image and production worker class.
 - Artificial block clip edges never gain facade walls.
 - The same block generated monolithically, alone, and in at least three chunk
   layouts has the same canonical building-section hash.
-- Final FMB/FMA1/ZIP/stream manifests are byte-identical when canonical inputs
-  match, regardless of task ordering and cache warmth.
+- The equivalence gate compares the exact sorted FMB relative-path/content-hash
+  mapping. Missing, extra, or changed FMBs fail closed; raw ZIP size/SHA-256 can
+  differ because of orchestration-only manifest metadata and remains evidence,
+  not an equality input.
+- FMA1, whole-manifest, stream-signing, and device acceptance remain separate
+  gates; FMB equivalence does not imply they passed.
 - Existing renderer targets 1 and 2 remain byte-compatible.
 
 ### Orchestration and faults
 
 - Two workers cannot own or publish the same task attempt.
+- Two workers cannot overlap source preparation, assembly, or a child task in
+  the concurrency-one heavy resource pool.
 - A stale worker cannot publish after lease expiry or cancellation.
+- The next scheduler/claim pass automatically requeues expired work, closes its
+  old attempt, and releases its reservation before another worker can claim it.
+- A shadow observation is terminal, retained, nonclaimable, and never replaces
+  authoritative parent progress.
+- One child-task quantum is processed before the parent yields so another
+  globally eligible parent can run.
 - Process kill at every phase resumes without losing valid completed blocks.
 - Deterministic splits do not decrement completed blocks or consume transient
   attempts.
@@ -1314,6 +1492,10 @@ image and production worker class.
 - Parent cancellation stops scheduling and prevents final publication.
 - Cache corruption, disk-full, source change, OOM, invalid relation, missing
   receipt, signing failure, and oversized artifact paths are tested.
+- Cache retention cannot remove an active namespace, and an evicted/corrupt
+  cache receipt transactionally returns affected work to the build queue.
+- Public/coordinator ready-state reconciliation is idempotent across a process
+  stop between the two durable stores.
 
 ### Performance and resource gates
 
@@ -1418,16 +1600,23 @@ artifact.
 - [x] Version and train the retained resource model and worker capability identity
       (review-only; admission still uses the conservative floor).
 - [x] Add bounded memory/CPU reservations with a concurrency-one heavy-task default.
+- [x] Extend the durable reservation pool to source preparation and final
+      assembly with heartbeat, fencing, expiry recovery, and scheduler yield.
 - [x] Add fair scheduling across parent jobs, weighted virtual-finish dispatch,
-      admission priority, and a per-parent active-task quota.
+      one-task parent yields, admission priority, and a per-parent active-task quota.
 - [x] Implement chunk-only canonical building block generation.
 - [x] Emit typed multi-block runtime split signals and deterministic bisection.
 - [x] Convert split signals into bounded workload-scan child enqueue transitions.
-- [x] Implement cache-only final assembly and whole-artifact validation.
-- [ ] Preserve partition-invariant block and artifact identity (canonical
-      receipt-set and artifact-input identities plus ZIP-to-record comparison
-      are implemented; byte-level monolithic-versus-partitioned reference
-      evidence remains).
+- [x] Implement cache-only final assembly and strict final ZIP validation.
+- [x] Add namespace-leased cache retention, active-identity protection, and
+      transactional cache-loss rebuild recovery.
+- [x] Add post-scan memory/wall target splitting, the 30-minute hard deadline,
+      and strict effective configured/cgroup memory admission.
+- [x] Add storage admission, bounded diagnostics, process-tree/cgroup OOM
+      evidence, and public/coordinator ready reconciliation.
+- [ ] Preserve partition-invariant building payload (canonical receipt-set and
+      artifact-input identities plus FMB-only comparison are implemented; the
+      retained monolithic-versus-partitioned comparison remains).
 - [x] Add public aggregate progress and authenticated operator diagnostics.
 - [x] Add conservative failed/cancelled task-evidence retention without
       deleting reusable canonical cache blocks.
