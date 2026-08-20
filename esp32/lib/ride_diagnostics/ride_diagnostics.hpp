@@ -32,6 +32,9 @@ constexpr uint8_t kRetentionBoots = 20;
 constexpr uint8_t kRetentionDays = 14;
 
 void begin(Storage &storage, uint32_t bootSequence, uint32_t firmwareFingerprint);
+// Start persistent SD writes after boot-time map recovery has released storage.
+// Events recorded between begin() and this handoff remain queued.
+void startWriter();
 void process(uint32_t nowMs);
 
 bool record(Level level, const char *category, const char *event,

@@ -1573,6 +1573,9 @@ void setup() {
                     activeStatus.code.c_str(), activeStatus.message.c_str());
     }
   }
+  // Map recovery owns the SD card during this phase. Start the diagnostics
+  // writer only after recovery has released it; boot events remain queued.
+  ride_diagnostics::startWriter();
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   boot_diagnostics::completeStage(boot_diagnostics::Stage::MapRecovery);
   boot_diagnostics::enterStage(

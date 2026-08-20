@@ -487,6 +487,15 @@ void writerTask(void *) {
   }
 }
 
+void startWriterTask() {
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  if (queue != nullptr && writerTaskHandle == nullptr) {
+    xTaskCreatePinnedToCore(writerTask, "ride_diag_writer", 4096, nullptr, 1,
+                            &writerTaskHandle, 0);
+  }
+#endif
+}
+
 bool enqueue(QueuedEvent &event) {
   if (queue == nullptr) {
     dropped.fetch_add(1);
@@ -523,10 +532,6 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
   lastStorageAvailable.store(storage->getSdLoaded(), std::memory_order_release);
   if (queue == nullptr)
     queue = xQueueCreate(kQueueCapacity, sizeof(QueuedEvent));
-  if (queue != nullptr && writerTaskHandle == nullptr) {
-    xTaskCreatePinnedToCore(writerTask, "ride_diag_writer", 4096, nullptr,
-                            1, &writerTaskHandle, 0);
-  }
   char fields[320] = {};
   snprintf(fields, sizeof(fields),
            "{\"bootSequence\":%lu,\"firmwareFingerprint\":\"%08lX\",\"firmwareTarget\":\"%s\",\"firmwareBuild\":%lu}",
@@ -540,6 +545,12 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
   (void)storageRef;
   (void)bootSequenceRef;
   (void)firmwareFingerprintRef;
+#endif
+}
+
+void startWriter() {
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  startWriterTask();
 #endif
 }
 
