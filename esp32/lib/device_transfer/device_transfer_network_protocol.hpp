@@ -12,6 +12,10 @@ inline constexpr size_t kMinLanPasswordBytes = 8;
 inline constexpr size_t kMaxLanPasswordBytes = 63;
 inline constexpr char kRemoteDebugLanCommandPrefix[] =
     "enter|debug|lan1|";
+inline constexpr char kDiagnosticsLanCommandPrefix[] =
+    "enter|diagnostics|lan1|";
+
+enum class LanSessionMode : uint8_t { Debug = 0, Diagnostics = 1 };
 
 struct LanCredentials {
   std::string ssid;
@@ -46,15 +50,36 @@ inline const char *lanFallbackReasonForStatus(int stationStatus,
   return "association_timeout";
 }
 
-inline LanCommandParseResult parseRemoteDebugLanCommand(
-    const uint8_t *data, size_t length, LanCredentials &credentials) {
-  constexpr size_t prefixLength = sizeof(kRemoteDebugLanCommandPrefix) - 1;
-  if (data == nullptr || length < prefixLength ||
+inline LanCommandParseResult parseTransferLanCommand(
+    const uint8_t *data, size_t length, LanSessionMode &mode,
+    LanCredentials &credentials) {
+  if (data == nullptr)
+    return LanCommandParseResult::NotLanCommand;
+  const char *prefix = nullptr;
+  size_t prefixLength = 0;
+  constexpr size_t debugPrefixLength =
+      sizeof(kRemoteDebugLanCommandPrefix) - 1;
+  constexpr size_t diagnosticsPrefixLength =
+      sizeof(kDiagnosticsLanCommandPrefix) - 1;
+  if (length >= debugPrefixLength &&
       std::char_traits<char>::compare(
           reinterpret_cast<const char *>(data),
-          kRemoteDebugLanCommandPrefix, prefixLength) != 0) {
+          kRemoteDebugLanCommandPrefix, debugPrefixLength) == 0) {
+    prefix = kRemoteDebugLanCommandPrefix;
+    prefixLength = debugPrefixLength;
+    mode = LanSessionMode::Debug;
+  } else if (length >= diagnosticsPrefixLength &&
+             std::char_traits<char>::compare(
+                 reinterpret_cast<const char *>(data),
+                 kDiagnosticsLanCommandPrefix,
+                 diagnosticsPrefixLength) == 0) {
+    prefix = kDiagnosticsLanCommandPrefix;
+    prefixLength = diagnosticsPrefixLength;
+    mode = LanSessionMode::Diagnostics;
+  } else {
     return LanCommandParseResult::NotLanCommand;
   }
+  (void)prefix;
   if (length < prefixLength + 2) {
     return LanCommandParseResult::Invalid;
   }
@@ -76,6 +101,16 @@ inline LanCommandParseResult parseRemoteDebugLanCommand(
   }
   credentials = std::move(parsed);
   return LanCommandParseResult::Valid;
+}
+
+inline LanCommandParseResult parseRemoteDebugLanCommand(
+    const uint8_t *data, size_t length, LanCredentials &credentials) {
+  LanSessionMode mode = LanSessionMode::Debug;
+  const LanCommandParseResult result =
+      parseTransferLanCommand(data, length, mode, credentials);
+  if (result == LanCommandParseResult::Valid && mode != LanSessionMode::Debug)
+    return LanCommandParseResult::NotLanCommand;
+  return result;
 }
 
 } // namespace device_transfer

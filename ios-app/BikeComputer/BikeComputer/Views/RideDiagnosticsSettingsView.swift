@@ -65,6 +65,10 @@ struct RideDiagnosticsSettingsView: View {
 
             Section {
                 Toggle("Detailed Ride Trace", isOn: detailedTraceBinding)
+                    .disabled(
+                        !bleManager.supportsRideAutomation &&
+                            !recorder.detailedTraceEnabled
+                    )
                 if recorder.detailedTraceEnabled,
                    let expiry = recorder.detailedTraceExpiresAt {
                     Text("Automatically stops \(expiry.formatted(date: .abbreviated, time: .shortened)).")
@@ -74,7 +78,9 @@ struct RideDiagnosticsSettingsView: View {
             } header: {
                 Text("Optional detailed capture")
             } footer: {
-                Text("Adds normalized ride-automation decisions for one ride, for up to four hours. It never records coordinates, route text, health values, or raw sensors.")
+                Text(bleManager.supportsRideAutomation
+                    ? "Adds normalized ride-automation decisions for one ride, for up to four hours. It never records coordinates, route text, health values, or raw sensors."
+                    : "Detailed ride-automation capture requires development firmware. Standard privacy-safe diagnostics remain active.")
             }
 
             Section {
@@ -155,7 +161,9 @@ struct RideDiagnosticsSettingsView: View {
             get: { recorder.detailedTraceEnabled },
             set: { enabled in
                 if enabled {
-                    recorder.beginDetailedTrace()
+                    if bleManager.supportsRideAutomation {
+                        recorder.beginDetailedTrace()
+                    }
                 } else {
                     recorder.endDetailedTrace()
                 }

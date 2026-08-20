@@ -230,7 +230,8 @@ basic export behind `#if DEBUG`. It should show:
 - **Download Device Logs**;
 - **Export Support Bundle**;
 - **Detailed Ride Trace** with its scope, privacy notice, automatic expiry,
-  and remaining time; and
+  remaining time, and an explicit unavailable state on production firmware
+  that omits the read-only ride-automation shadow producer; and
 - **Delete iPhone Logs**, with explicit confirmation and wording that
   already-exported files are unaffected and device-side chunks age out under
   their independent bounded retention policy.
@@ -267,8 +268,10 @@ Primary storage is the removable SD card:
   boots/<boot-sequence>/events-000002.jsonl
 ```
 
-Use 256 KiB closed chunks, a 4 KiB write buffer, and a conservative initial
-retention ceiling of 32 MiB, 20 ride captures, or 14 days. Make these constants
+Use 256 KiB closed chunks, bounded fixed record buffers, and a conservative
+initial retention ceiling of 32 MiB, 20 persistent boot streams, or 14 days.
+The iPhone independently retains 20 correlated capture IDs across app and
+imported-device chunks. Make these constants
 host-tested and revise them only after physical power/storage measurements.
 Retention deletes only closed chunks, oldest first, and never touches map or
 firmware-transfer paths.
@@ -336,7 +339,7 @@ Update all three protocol owners together:
 - `ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift` plus
   `Utilities/NavigationProtocol.swift`.
 
-Define fixed, versioned, authenticated binary control frames for:
+Define bounded, versioned, authenticated control commands for:
 
 - bind/rebind capture UUID;
 - mark issue with a predefined code and sequence;

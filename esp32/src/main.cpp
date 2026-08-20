@@ -1502,12 +1502,11 @@ void setup() {
   char diagnosticBootFields[320] = {};
   snprintf(
       diagnosticBootFields, sizeof(diagnosticBootFields),
-      "{\"bootSequence\":%lu,\"firmwareFingerprint\":\"%08lX\","
+      "{\"runtimeBootSequence\":%lu,"
       "\"resetReason\":%lu,\"activeStage\":%u,\"completedStage\":%u,"
       "\"consecutiveEarlyFailures\":%u,\"ready\":%s,\"safeMode\":%s,"
       "\"diagnosticHold\":%s}",
       static_cast<unsigned long>(diagnosticBoot.bootSequence),
-      static_cast<unsigned long>(diagnosticBoot.firmwareFingerprint),
       static_cast<unsigned long>(diagnosticBoot.resetReason),
       static_cast<unsigned>(diagnosticBoot.activeStage),
       static_cast<unsigned>(diagnosticBoot.completedStage),

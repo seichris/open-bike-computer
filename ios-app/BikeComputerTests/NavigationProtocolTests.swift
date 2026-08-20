@@ -12789,6 +12789,16 @@ struct NavigationProtocolTests {
                     "transfer handshake retains its eight-second readiness window")
         assertEqual(DeviceTransferHandshakePolicy.remoteDebugAttemptCount, 64,
                     "LAN-first debug startup allows station timeout plus hotspot fallback")
+        assertEqual(
+            DeviceTransferHandshakePolicy.diagnosticsAttemptCount(lanFirst: true),
+            DeviceTransferHandshakePolicy.remoteDebugAttemptCount,
+            "LAN-first diagnostics allows station timeout plus hotspot fallback"
+        )
+        assertEqual(
+            DeviceTransferHandshakePolicy.diagnosticsAttemptCount(lanFirst: false),
+            DeviceTransferHandshakePolicy.attemptCount,
+            "hotspot-only diagnostics keeps the ordinary readiness window"
+        )
         assertEqual(DeviceTransferHandshakePolicy.remoteDebugExitAttemptCount, 32,
                     "debug teardown allows the worker's bounded stop path to finish")
         assert(DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 4),
@@ -12822,28 +12832,36 @@ struct NavigationProtocolTests {
             message: "System denied configuration"
         ), "System denied configuration [NEHotspotConfigurationErrorDomain 17]",
                     "join failures retain their actionable domain and code")
-#if os(iOS)
-        let securedConfiguration = DeviceNetworkJoinPolicy.hotspotConfiguration(
+        let securedConfiguration = DeviceNetworkJoinPolicy.makeHotspotConfiguration(
             ssid: "BikeComputer-Transfer",
-            passphrase: "0123456789abcdef"
+            passphrase: "0123456789abcdef",
+            open: { "open:\($0)" },
+            secured: { "wpa2:\($0):\($1)" }
         )
         assertEqual(
-            securedConfiguration.SSID,
-            "BikeComputer-Transfer",
-            "diagnostics hotspot configuration keeps the device SSID"
+            securedConfiguration,
+            "wpa2:BikeComputer-Transfer:0123456789abcdef",
+            "a diagnostics passphrase selects the WPA2 configuration path"
         )
-        assert(!securedConfiguration.joinOnce,
-               "diagnostics hotspot configuration remains persistent during transfer")
-        let openConfiguration = DeviceNetworkJoinPolicy.hotspotConfiguration(
+        let openConfiguration = DeviceNetworkJoinPolicy.makeHotspotConfiguration(
             ssid: "BikeComputer-Transfer",
-            passphrase: nil
+            passphrase: nil,
+            open: { "open:\($0)" },
+            secured: { "wpa2:\($0):\($1)" }
         )
         assertEqual(
-            openConfiguration.SSID,
-            "BikeComputer-Transfer",
-            "open transfer configuration keeps the device SSID"
+            openConfiguration,
+            "open:BikeComputer-Transfer",
+            "a missing passphrase preserves legacy open-network behavior"
         )
-#endif
+        let emptyConfiguration = DeviceNetworkJoinPolicy.makeHotspotConfiguration(
+            ssid: "BikeComputer-Transfer",
+            passphrase: "",
+            open: { "open:\($0)" },
+            secured: { "wpa2:\($0):\($1)" }
+        )
+        assertEqual(emptyConfiguration, "open:BikeComputer-Transfer",
+                    "an empty passphrase never constructs an invalid WPA2 join")
     }
 
     static func testDeviceCapabilitiesProtocol() {
@@ -15645,13 +15663,32 @@ struct NavigationProtocolTests {
                "NUL bytes are rejected before BLE transmission")
 
         assert(manager.requestDeviceTransferMode(
+            .diagnostics,
+            remoteDebugLANCredentials: credentials
+        ), "LAN-first diagnostics command should fit one authenticated BLE write")
+        let diagnosticsLANPacket = sentPackets[5]
+        assert(
+            diagnosticsLANPacket.starts(with: Data("DTRNenter|diagnostics|lan1|".utf8)),
+            "LAN-first diagnostics uses its versioned binary envelope"
+        )
+
+        assert(manager.requestDeviceTransferMode(
             .debug,
             remoteDebugHotspotFallbackReason: .endpointUnreachable
         ), "endpoint-unreachable fallback command should fit one BLE write")
         assertEqual(
-            String(data: sentPackets[5], encoding: .utf8),
+            String(data: sentPackets[6], encoding: .utf8),
             "DTRNenter|debug|h1|e",
             "endpoint fallback reason is persisted by firmware, not only iOS"
+        )
+        assert(manager.requestDeviceTransferMode(
+            .diagnostics,
+            remoteDebugHotspotFallbackReason: .endpointUnreachable
+        ), "diagnostics endpoint fallback command should fit one BLE write")
+        assertEqual(
+            String(data: sentPackets[7], encoding: .utf8),
+            "DTRNenter|diagnostics|h1|e",
+            "diagnostics endpoint fallback requests a protected hotspot"
         )
 
         let session = DeviceTransferSession(

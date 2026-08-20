@@ -43,6 +43,7 @@ enum RideDiagnosticsFieldPolicy {
         "acknowledgedKind", "ageMs", "alertMode", "autoPauseEnabled",
         "authorization", "authorized", "available",
         "background", "bootSequence", "bytes", "chunk", "code",
+        "clockSynchronized",
         "completedStage", "consecutiveEarlyFailures", "diagnosticHold",
         "domain", "droppedCount", "durationLimit", "eventCount",
         "firstMissingUptimeMs", "firmwareBuild", "firmwareFingerprint",
@@ -53,6 +54,7 @@ enum RideDiagnosticsFieldPolicy {
         "networkTransport", "navigating",
         "profileVersion", "ready", "reason", "resetReason", "rideDetectionArmed",
         "rideGeneration", "routeLoaded", "rssiBucket", "sampleCount",
+        "runtimeBootSequence",
         "safeMode", "scope", "sequence", "sha256Prefix", "simulation",
         "sourceHealthMask", "speedAvailable", "state", "startMode", "storage",
         "connectionState", "pendingControl", "sessionPresent", "active",
@@ -113,6 +115,7 @@ struct RideDiagnosticEvent: Codable, Equatable, Identifiable {
 }
 
 protocol RideDiagnosticsEventSink: AnyObject {
+    var isDetailedTraceEnabled: Bool { get }
     func record(
         level: RideDiagnosticLevel,
         category: RideDiagnosticCategory,
@@ -123,6 +126,8 @@ protocol RideDiagnosticsEventSink: AnyObject {
 }
 
 extension RideDiagnosticsEventSink {
+    var isDetailedTraceEnabled: Bool { false }
+
     func record(
         category: RideDiagnosticCategory,
         event: String,
@@ -144,6 +149,7 @@ struct RideDiagnosticsRecorderHealth: Codable, Equatable {
     let processId: String
     let retainedBytes: Int
     let retainedChunkCount: Int
+    let retainedCaptureCount: Int
     let oldestWallTime: String?
     let newestWallTime: String?
     let droppedEventCount: Int
@@ -177,9 +183,15 @@ enum RideDiagnosticsStoredZipWriter {
     }
 
     static func write(entries: [(String, Data)], to url: URL) throws {
-        guard entries.count <= Int(UInt16.max),
-              Set(entries.map(\.0)).count == entries.count else {
+        guard entries.count <= Int(UInt16.max) else {
             throw RideDiagnosticsError.invalidArchiveEntry
+        }
+        let names = entries.map(\.0)
+        if let duplicate = Dictionary(grouping: names, by: { $0 })
+            .first(where: { $0.value.count > 1 })?.key {
+            throw RideDiagnosticsError.unavailable(
+                "The diagnostics bundle contains duplicate path \(duplicate)."
+            )
         }
         let output = FileManager.default
         guard output.createFile(atPath: url.path, contents: nil) else {
@@ -191,8 +203,12 @@ enum RideDiagnosticsStoredZipWriter {
         var offset: UInt64 = 0
         var central: [CentralEntry] = []
         for (path, data) in entries {
-            guard isSafePath(path),
-                  data.count <= Int(UInt32.max),
+            guard isSafePath(path) else {
+                throw RideDiagnosticsError.unavailable(
+                    "The diagnostics bundle contains unsafe path \(path)."
+                )
+            }
+            guard data.count <= Int(UInt32.max),
                   offset <= UInt64(UInt32.max) else {
                 throw RideDiagnosticsError.invalidArchiveEntry
             }
@@ -303,8 +319,11 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
     static let schema = 1
     static let chunkLimit = 256 * 1024
     static let retainedBytesLimit = 50 * 1024 * 1024
-    static let retainedChunkLimit = 20
+    static let retainedCaptureLimit = 20
     static let retentionAge: TimeInterval = 14 * 24 * 60 * 60
+    static let pendingRecordLimit = 256
+    private static let deviceDigestSaltDefaultsKey =
+        "rideDiagnostics.deviceDigestSalt.v1"
 
     @Published private(set) var recentEvents: [RideDiagnosticEvent] = []
     @Published private(set) var retainedBytes: Int = 0
@@ -321,10 +340,13 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
     private let startUptime: TimeInterval
     private let isoFormatter: ISO8601DateFormatter
     private let userDefaults: UserDefaults
+    private let privacyDigestKey = SymmetricKey(size: .bits256)
+    private let deviceDigestKey: SymmetricKey
     private var sequence = 0
     private var chunkNumber = 1
     private var currentChunkURL: URL?
     private var currentChunkBytes = 0
+    private var preDetailedContextURL: URL?
     private let standardCaptureId: UUID
     private var activeCaptureId: UUID?
     private var detailedTraceActive = false
@@ -333,6 +355,19 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
     // Queue-confined storage state. The @Published value is a main-thread UI
     // snapshot and must never be mutated from the recorder queue.
     private var retainedBytesOnQueue = 0
+    private struct PendingRecord {
+        let level: RideDiagnosticLevel
+        let category: RideDiagnosticCategory
+        let event: String
+        let fields: [String: String]
+        let captureId: UUID?
+
+        var isCritical: Bool { level == .warning || level == .error }
+    }
+    private let pendingLock = NSLock()
+    private var pendingRecords: [PendingRecord] = []
+    private var pendingDrainScheduled = false
+    private var pendingAdmissionDrops = 0
 
     init(
         rootURL: URL? = nil,
@@ -348,6 +383,9 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
             qos: .utility
         )
         self.userDefaults = userDefaults
+        self.deviceDigestKey = Self.loadOrCreateDeviceDigestKey(
+            userDefaults: userDefaults
+        )
         self.isoFormatter = ISO8601DateFormatter()
         self.isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         if let rootURL {
@@ -384,10 +422,28 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
         currentCaptureID?.uuidString.lowercased()
     }
 
+    var isDetailedTraceEnabled: Bool {
+        queue.sync { detailedTraceActive }
+    }
+
     var health: RideDiagnosticsRecorderHealth {
         queue.sync {
             healthOnQueue()
         }
+    }
+
+    func privacyDigest(_ data: Data) -> String {
+        HMAC<SHA256>.authenticationCode(
+            for: data,
+            using: privacyDigestKey
+        ).map { String(format: "%02x", $0) }.joined()
+    }
+
+    func deviceDigest(for stableIdentifier: String) -> String {
+        String(HMAC<SHA256>.authenticationCode(
+            for: Data(stableIdentifier.lowercased().utf8),
+            using: deviceDigestKey
+        ).map { String(format: "%02x", $0) }.joined().prefix(16))
     }
 
     func record(
@@ -400,30 +456,90 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
         let safeEvent = Self.safeEventName(event)
         let safeFields = Self.sanitize(fields: fields)
         guard !safeEvent.isEmpty else { return }
-        queue.async { [weak self] in
-            guard let self else { return }
+        enqueue(PendingRecord(
+            level: level,
+            category: category,
+            event: safeEvent,
+            fields: safeFields,
+            captureId: captureId
+        ))
+    }
+
+    private func enqueue(_ pending: PendingRecord) {
+        var scheduleDrain = false
+        pendingLock.lock()
+        if pendingRecords.count >= Self.pendingRecordLimit {
+            if pending.isCritical,
+               let expendable = pendingRecords.firstIndex(where: { !$0.isCritical }) {
+                pendingRecords.remove(at: expendable)
+                pendingAdmissionDrops += 1
+            } else {
+                pendingAdmissionDrops += 1
+                pendingLock.unlock()
+                return
+            }
+        }
+        pendingRecords.append(pending)
+        if !pendingDrainScheduled {
+            pendingDrainScheduled = true
+            scheduleDrain = true
+        }
+        pendingLock.unlock()
+        if scheduleDrain {
+            queue.async { [weak self] in self?.drainPendingRecords() }
+        }
+    }
+
+    private func drainPendingRecords() {
+        while true {
+            let pending: PendingRecord
+            let admissionDrops: Int
+            pendingLock.lock()
+            admissionDrops = pendingAdmissionDrops
+            pendingAdmissionDrops = 0
+            if pendingRecords.isEmpty {
+                pendingDrainScheduled = false
+                pendingLock.unlock()
+                if admissionDrops > 0 {
+                    totalDropped += admissionDrops
+                    publishDropCount()
+                }
+                return
+            }
+            pending = pendingRecords.removeFirst()
+            pendingLock.unlock()
+
+            if admissionDrops > 0 {
+                totalDropped += admissionDrops
+                publishDropCount()
+            }
             do {
-                self.expireDetailedTraceIfNeeded()
+                expireDetailedTraceIfNeeded()
                 let event = RideDiagnosticEvent(
                     schema: Self.schema,
                     source: "ios",
-                    sequence: self.sequence,
-                    level: level,
-                    category: category,
-                    event: safeEvent,
-                    wallTime: self.isoFormatter.string(from: self.now()),
-                    uptimeMs: max(0, Int((ProcessInfo.processInfo.systemUptime - self.startUptime) * 1000)),
-                    processId: self.processId.uuidString.lowercased(),
-                    captureId: (captureId ?? self.activeCaptureId ?? self.standardCaptureId).uuidString.lowercased(),
-                    fields: safeFields
+                    sequence: sequence,
+                    level: pending.level,
+                    category: pending.category,
+                    event: pending.event,
+                    wallTime: isoFormatter.string(from: now()),
+                    uptimeMs: max(
+                        0,
+                        Int((ProcessInfo.processInfo.systemUptime - startUptime) * 1000)
+                    ),
+                    processId: processId.uuidString.lowercased(),
+                    captureId: (
+                        pending.captureId ?? activeCaptureId ?? standardCaptureId
+                    ).uuidString.lowercased(),
+                    fields: pending.fields
                 )
-                self.sequence += 1
-                try self.append(event)
-                self.publish(event)
+                sequence += 1
+                try append(event)
+                publish(event)
             } catch {
-                self.totalDropped += 1
-                self.publishDropCount()
-                self.publishError(error.localizedDescription)
+                totalDropped += 1
+                publishDropCount()
+                publishError(error.localizedDescription)
             }
         }
     }
@@ -431,6 +547,9 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
     func beginDetailedTrace() {
         queue.async { [weak self] in
             guard let self else { return }
+            guard !self.detailedTraceActive else { return }
+            self.preDetailedContextURL = self.currentChunkURL
+            self.rotateChunk()
             self.activeCaptureId = UUID()
             let expiry = self.now().addingTimeInterval(4 * 60 * 60)
             self.detailedTraceExpiry = expiry
@@ -442,6 +561,7 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
                 event: "detailed_trace_started",
                 fields: ["durationLimit": "4h"]
             )
+            self.flushOnQueue()
             self.queue.asyncAfter(deadline: .now() + 4 * 60 * 60) { [weak self] in
                 guard let self,
                       self.detailedTraceActive,
@@ -455,13 +575,16 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
     func endDetailedTrace(reason: String = "user") {
         queue.async { [weak self] in
             guard let self else { return }
+            guard self.detailedTraceActive else { return }
             self.recordOnQueue(
                 level: .info,
                 category: .user,
                 event: "detailed_trace_ended",
                 fields: ["reason": Self.safeEnum(reason)]
             )
+            self.rotateChunk()
             self.activeCaptureId = nil
+            self.preDetailedContextURL = nil
             self.detailedTraceExpiry = nil
             self.detailedTraceActive = false
             self.publishDetailedState()
@@ -487,25 +610,87 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
         )
     }
 
-    func hasImportedDeviceChunk(bootSequence: UInt32, chunk: UInt32, sha256: String) -> Bool {
+    func hasImportedDeviceChunk(
+        deviceDigest: String,
+        bootSequence: UInt32,
+        chunk: UInt32,
+        sha256: String
+    ) -> Bool {
         queue.sync {
-            importedChunkURL(bootSequence: bootSequence, chunk: chunk, sha256: sha256)
+            importedChunkURL(
+                deviceDigest: deviceDigest,
+                bootSequence: bootSequence,
+                chunk: chunk,
+                sha256: sha256
+            )
                 .map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        }
+    }
+
+    func importedDeviceChunkData(
+        deviceDigest: String,
+        bootSequence: UInt32,
+        chunk: UInt32,
+        sha256: String
+    ) -> Data? {
+        queue.sync {
+            guard let url = importedChunkURL(
+                deviceDigest: deviceDigest,
+                bootSequence: bootSequence,
+                chunk: chunk,
+                sha256: sha256
+            ) else { return nil }
+            return try? Data(contentsOf: url)
+        }
+    }
+
+    func importDeviceRecorderHealth(
+        deviceDigest: String,
+        bootSequence: UInt32,
+        data: Data,
+        enforceRetention: Bool = true
+    ) throws {
+        try queue.sync {
+            guard Self.isValidDeviceDigest(deviceDigest),
+                  bootSequence > 0, data.count <= 64 * 1024,
+                  (try? JSONSerialization.jsonObject(with: data)) is [String: Any] else {
+                throw RideDiagnosticsError.unavailable(
+                    "The device recorder-health snapshot is invalid."
+                )
+            }
+            let directory = rootURL
+                .appendingPathComponent("imported-device", isDirectory: true)
+                .appendingPathComponent(deviceDigest, isDirectory: true)
+                .appendingPathComponent(String(bootSequence), isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            let url = directory.appendingPathComponent("recorder-health.json")
+            try data.write(to: url, options: .atomic)
+            applyFileProtection(to: url)
+            if enforceRetention {
+                updateRetainedBytes()
+                try pruneRetention()
+            }
         }
     }
 
     @discardableResult
     func importDeviceChunk(
+        deviceDigest: String,
         bootSequence: UInt32,
         chunk: UInt32,
         data: Data,
-        sha256 expectedHash: String
+        sha256 expectedHash: String,
+        enforceRetention: Bool = true
     ) throws -> URL {
         try queue.sync {
-            guard bootSequence > 0, chunk > 0,
+            guard Self.isValidDeviceDigest(deviceDigest),
+                  bootSequence > 0, chunk > 0,
                   expectedHash.count == 64,
                   expectedHash.allSatisfy({ $0.isHexDigit }),
-                  data.count <= 12 * 1024 * 1024 else {
+                  data.count <= Self.chunkLimit else {
                 throw RideDiagnosticsError.unavailable("The device chunk metadata is invalid.")
             }
             let actualHash = sha256(data)
@@ -514,27 +699,48 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
             }
             let directory = rootURL
                 .appendingPathComponent("imported-device", isDirectory: true)
+                .appendingPathComponent(deviceDigest, isDirectory: true)
                 .appendingPathComponent(String(bootSequence), isDirectory: true)
             let normalizedHash = expectedHash.lowercased()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let url = directory.appendingPathComponent(
                 String(format: "events-%06u-%@.jsonl", chunk, String(normalizedHash.prefix(16)))
             )
-            if !FileManager.default.fileExists(atPath: url.path) {
-                try data.write(to: url, options: .atomic)
-                applyFileProtection(to: url)
+            // The caller has already validated the complete body and digest.
+            // Always replace the destination atomically so a truncated or
+            // otherwise corrupted cached file can recover on the next pull.
+            try data.write(to: url, options: .atomic)
+            applyFileProtection(to: url)
+            if enforceRetention {
+                recordOnQueue(
+                    category: .transfer,
+                    event: "device_chunk_imported",
+                    fields: [
+                        "bootSequence": String(bootSequence),
+                        "chunk": String(chunk),
+                        "bytes": String(data.count),
+                        "sha256Prefix": String(expectedHash.prefix(16)),
+                    ]
+                )
             }
-            recordOnQueue(
-                category: .transfer,
-                event: "device_chunk_imported",
-                fields: [
-                    "bootSequence": String(bootSequence),
-                    "chunk": String(chunk),
-                    "bytes": String(data.count),
-                    "sha256Prefix": String(expectedHash.prefix(16)),
-                ]
-            )
+            if enforceRetention {
+                updateRetainedBytes()
+                try pruneRetention()
+            }
             return url
+        }
+    }
+
+    func enforceRetention() throws {
+        try queue.sync {
+            updateRetainedBytes()
+            try pruneRetention()
+        }
+    }
+
+    func flush() {
+        queue.sync {
+            flushOnQueue()
         }
     }
 
@@ -542,16 +748,12 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
         try queue.sync {
             flushOnQueue()
             let fileManager = FileManager.default
-            let exportRoot = fileManager.temporaryDirectory
-                .appendingPathComponent("Bicino-Diagnostics-\(UUID().uuidString)", isDirectory: true)
-            try fileManager.createDirectory(at: exportRoot, withIntermediateDirectories: true)
-            defer { try? fileManager.removeItem(at: exportRoot) }
-
             let entries = try exportEntries()
             let outputURL = fileManager.temporaryDirectory
                 .appendingPathComponent(exportFilename())
             try? fileManager.removeItem(at: outputURL)
             try RideDiagnosticsStoredZipWriter.write(entries: entries, to: outputURL)
+            applyFileProtection(to: outputURL)
             return outputURL
         }
     }
@@ -564,6 +766,7 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
             chunkNumber = 1
             currentChunkURL = nil
             currentChunkBytes = 0
+            preDetailedContextURL = nil
             totalDropped = 0
             publishDropCount()
             recordOnQueue(
@@ -620,6 +823,14 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
         guard data.count <= 8 * 1024 else {
             throw RideDiagnosticsError.unavailable("Diagnostic event exceeded the record limit.")
         }
+        if retainedBytesOnQueue + data.count > Self.retainedBytesLimit {
+            try pruneRetention(reserving: data.count)
+            guard retainedBytesOnQueue + data.count <= Self.retainedBytesLimit else {
+                throw RideDiagnosticsError.unavailable(
+                    "Diagnostic retention is full while the active capture is protected."
+                )
+            }
+        }
         if currentChunkURL == nil || currentChunkBytes + data.count > Self.chunkLimit {
             rotateChunk()
         }
@@ -627,17 +838,26 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
             throw RideDiagnosticsError.unavailable("Diagnostic storage is unavailable.")
         }
         if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+            guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+                throw RideDiagnosticsError.unavailable(
+                    "Unable to create the diagnostic event chunk."
+                )
+            }
+            applyFileProtection(to: url)
         }
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
         try handle.seekToEnd()
         try handle.write(contentsOf: data)
         currentChunkBytes += data.count
-        updateRetainedBytes()
-        try pruneRetention()
+        retainedBytesOnQueue += data.count
+        publishRetainedBytes(retainedBytesOnQueue)
+        let shouldPrune = event.sequence == 0 ||
+            retainedBytesOnQueue > Self.retainedBytesLimit
         if sequence % 16 == 0 {
-            try writeManifest()
+            try writeManifest(enforceRetention: shouldPrune)
+        } else if shouldPrune {
+            try pruneRetention()
         }
     }
 
@@ -684,10 +904,16 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
     }
 
     private func flushOnQueue() {
+        if let currentChunkURL,
+           FileManager.default.fileExists(atPath: currentChunkURL.path),
+           let handle = try? FileHandle(forWritingTo: currentChunkURL) {
+            try? handle.synchronize()
+            try? handle.close()
+        }
         try? writeManifest()
     }
 
-    private func writeManifest() throws {
+    private func writeManifest(enforceRetention: Bool = true) throws {
         let manifest: [String: Any] = [
             "schema": Self.schema,
             "source": "ios",
@@ -695,7 +921,7 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
             "createdAt": isoFormatter.string(from: now()),
             "chunkLimitBytes": Self.chunkLimit,
             "retentionBytes": Self.retainedBytesLimit,
-            "retentionChunkCount": Self.retainedChunkLimit,
+            "retentionCaptureCount": Self.retainedCaptureLimit,
             "retentionAgeDays": 14,
             "droppedEventCount": totalDropped,
         ]
@@ -706,6 +932,10 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
             .appendingPathComponent("manifest.json")
         try data.write(to: url, options: .atomic)
         applyFileProtection(to: url)
+        updateRetainedBytes()
+        if enforceRetention || retainedBytesOnQueue > Self.retainedBytesLimit {
+            try pruneRetention()
+        }
     }
 
     private func exportEntries() throws -> [(String, Data)] {
@@ -714,17 +944,24 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
         let appRoot = rootURL.appendingPathComponent("app", isDirectory: true)
         if let files = fileManager.enumerator(at: appRoot, includingPropertiesForKeys: [.isRegularFileKey]) {
             for case let file as URL in files {
-                guard file.pathExtension == "jsonl" || file.lastPathComponent == "manifest.json" else { continue }
-                let relative = file.path.replacingOccurrences(of: appRoot.path + "/", with: "app/")
-                entries.append((relative, try Data(contentsOf: file)))
+                guard file.pathExtension == "jsonl" || file.pathExtension == "json" else { continue }
+                guard let relative = archiveRelativePath(file, under: appRoot) else {
+                    throw RideDiagnosticsError.invalidArchiveEntry
+                }
+                entries.append(("app/" + relative, try Data(contentsOf: file)))
             }
         }
         let importedRoot = rootURL.appendingPathComponent("imported-device", isDirectory: true)
         if let files = fileManager.enumerator(at: importedRoot, includingPropertiesForKeys: [.isRegularFileKey]) {
             for case let file as URL in files {
-                guard file.pathExtension == "jsonl" || file.lastPathComponent == "manifest.json" else { continue }
-                let relative = file.path.replacingOccurrences(of: rootURL.path + "/", with: "")
-                entries.append(("device/" + relative.replacingOccurrences(of: "imported-device/", with: ""), try Data(contentsOf: file)))
+                guard file.pathExtension == "jsonl" || file.pathExtension == "json" else { continue }
+                guard let relative = archiveRelativePath(
+                    file,
+                    under: importedRoot
+                ) else {
+                    throw RideDiagnosticsError.invalidArchiveEntry
+                }
+                entries.append(("device/" + relative, try Data(contentsOf: file)))
             }
         }
 
@@ -750,6 +987,15 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
         return entries.sorted { $0.0 < $1.0 }
     }
 
+    private func archiveRelativePath(_ file: URL, under root: URL) -> String? {
+        let resolvedFile = file.resolvingSymlinksInPath().standardizedFileURL.path
+        let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL.path
+        let prefix = resolvedRoot.hasSuffix("/") ? resolvedRoot : resolvedRoot + "/"
+        guard resolvedFile.hasPrefix(prefix) else { return nil }
+        let relative = String(resolvedFile.dropFirst(prefix.count))
+        return relative.isEmpty ? nil : relative
+    }
+
     private func exportFilename() -> String {
         let stamp = isoFormatter.string(from: now())
             .replacingOccurrences(of: ":", with: "")
@@ -770,15 +1016,27 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
         ))?.filter { $0.pathExtension == "jsonl" }.sorted { $0.lastPathComponent < $1.lastPathComponent } ?? []
     }
 
-    private func allAppChunkFiles() -> [URL] {
-        let appRoot = rootURL.appendingPathComponent("app", isDirectory: true)
+    private func allDiagnosticRetentionFiles() -> [URL] {
+        let importedPrefix = rootURL
+            .appendingPathComponent("imported-device", isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        let appPrefix = rootURL
+            .appendingPathComponent("app", isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL.path + "/"
         guard let files = FileManager.default.enumerator(
-            at: appRoot,
+            at: rootURL,
             includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
             options: [.skipsHiddenFiles]
         ) else { return [] }
         return files.compactMap { item -> URL? in
-            guard let url = item as? URL, url.pathExtension == "jsonl" else {
+            guard let url = item as? URL else { return nil }
+            let resolvedPath = url.resolvingSymlinksInPath().standardizedFileURL.path
+            let isChunk = url.pathExtension == "jsonl"
+            let isDeviceHealth = resolvedPath.hasPrefix(importedPrefix) &&
+                url.lastPathComponent == "recorder-health.json"
+            let isAppManifest = resolvedPath.hasPrefix(appPrefix) &&
+                url.lastPathComponent == "manifest.json"
+            guard isChunk || isDeviceHealth || isAppManifest else {
                 return nil
             }
             return url
@@ -794,15 +1052,31 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
         }
     }
 
+    private func allDiagnosticChunkFiles() -> [URL] {
+        allDiagnosticRetentionFiles().filter { $0.pathExtension == "jsonl" }
+    }
+
+    private func allAppChunkFiles() -> [URL] {
+        let prefix = rootURL
+            .appendingPathComponent("app", isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        return allDiagnosticChunkFiles().filter {
+            $0.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(prefix)
+        }
+    }
+
     private func importedChunkURL(
+        deviceDigest: String,
         bootSequence: UInt32,
         chunk: UInt32,
         sha256: String
     ) -> URL? {
-        guard sha256.count == 64,
+        guard Self.isValidDeviceDigest(deviceDigest),
+              sha256.count == 64,
               sha256.allSatisfy({ $0.isHexDigit }) else { return nil }
         return rootURL
             .appendingPathComponent("imported-device", isDirectory: true)
+            .appendingPathComponent(deviceDigest, isDirectory: true)
             .appendingPathComponent(String(bootSequence), isDirectory: true)
             .appendingPathComponent(
                 String(format: "events-%06u-%@.jsonl", chunk, String(sha256.lowercased().prefix(16)))
@@ -810,44 +1084,164 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
     }
 
     private func updateRetainedBytes() {
-        retainedBytesOnQueue = allAppChunkFiles().reduce(0) { total, url in
+        retainedBytesOnQueue = allDiagnosticRetentionFiles().reduce(0) { total, url in
             total + ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         }
         publishRetainedBytes(retainedBytesOnQueue)
     }
 
-    private func pruneRetention() throws {
+    private func captureIDs(in url: URL) -> Set<String> {
+        if url.lastPathComponent == "recorder-health.json" ||
+            url.lastPathComponent == "manifest.json" {
+            let siblingChunks = (try? FileManager.default.contentsOfDirectory(
+                at: url.deletingLastPathComponent(),
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ))?.filter { $0.pathExtension == "jsonl" } ?? []
+            let siblingCaptures = siblingChunks.reduce(into: Set<String>()) {
+                $0.formUnion(captureIDs(in: $1))
+            }
+            if !siblingCaptures.isEmpty { return siblingCaptures }
+        }
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        var captures: Set<String> = []
+        for raw in data.split(separator: 0x0a, omittingEmptySubsequences: true) {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(raw))
+                    as? [String: Any],
+                  let capture = object["captureId"] as? String,
+                  !capture.isEmpty else { continue }
+            captures.insert(capture)
+        }
+        let parentPath = url.deletingLastPathComponent()
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        if captures.isEmpty, !parentPath.isEmpty {
+            let parentDigest = String(sha256(Data(parentPath.utf8)).prefix(16))
+            captures.insert("uncorrelated:\(parentDigest)")
+        }
+        return captures
+    }
+
+    private func pruneRetention(reserving requiredBytes: Int = 0) throws {
         let fileManager = FileManager.default
         let cutoff = now().addingTimeInterval(-Self.retentionAge)
-        var chunks = allAppChunkFiles()
-        for url in chunks where url != currentChunkURL {
+        var files = allDiagnosticRetentionFiles()
+        let activeCaptures = Set([activeCaptureId?.uuidString.lowercased()].compactMap { $0 })
+        let newestAppChunk = allAppChunkFiles().last
+        let protectedPaths = Set(
+            [currentChunkURL, preDetailedContextURL, newestAppChunk].compactMap {
+                $0?.resolvingSymlinksInPath().standardizedFileURL.path
+            }
+        )
+        func snapshot(_ files: [URL]) -> [URL: Set<String>] {
+            Dictionary(uniqueKeysWithValues: files.map { ($0, captureIDs(in: $0)) })
+        }
+        func isProtected(_ url: URL, in capturesByFile: [URL: Set<String>]) -> Bool {
+            protectedPaths.contains(
+                url.resolvingSymlinksInPath().standardizedFileURL.path
+            ) || !(capturesByFile[url] ?? []).isDisjoint(with: activeCaptures)
+        }
+        func protectedCaptures(
+            in files: [URL],
+            capturesByFile: [URL: Set<String>]
+        ) -> Set<String> {
+            files.reduce(into: activeCaptures) { captures, url in
+                if isProtected(url, in: capturesByFile) {
+                    captures.formUnion(capturesByFile[url] ?? [])
+                }
+            }
+        }
+
+        var capturesByFile = snapshot(files)
+        for url in files where !isProtected(url, in: capturesByFile) {
             let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? now()
             if date < cutoff {
                 try? fileManager.removeItem(at: url)
             }
         }
-        chunks = allAppChunkFiles()
-        while chunks.count > Self.retainedChunkLimit || retainedBytesOnQueue > Self.retainedBytesLimit {
-            guard let candidate = chunks.first(where: { $0 != currentChunkURL }) else { break }
-            try fileManager.removeItem(at: candidate)
-            chunks.removeFirst()
+
+        files = allDiagnosticRetentionFiles()
+        capturesByFile = snapshot(files)
+        let protectedCaptureIDs = protectedCaptures(
+            in: files,
+            capturesByFile: capturesByFile
+        )
+        var captureDates: [String: Date] = [:]
+        for url in files {
+            let date = (try? url.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate) ?? .distantPast
+            for capture in capturesByFile[url] ?? [] {
+                captureDates[capture] = max(captureDates[capture] ?? .distantPast, date)
+            }
+        }
+        let retainedCaptures = captureDates.keys.sorted {
+            (captureDates[$0] ?? .distantPast) < (captureDates[$1] ?? .distantPast)
+        }
+        let excess = max(0, retainedCaptures.count - Self.retainedCaptureLimit)
+        let expiredCaptures = Set(
+            retainedCaptures.lazy.filter { !protectedCaptureIDs.contains($0) }.prefix(excess)
+        )
+        if !expiredCaptures.isEmpty {
+            for url in files where !isProtected(url, in: capturesByFile) {
+                let captures = capturesByFile[url] ?? []
+                if !captures.isDisjoint(with: expiredCaptures) {
+                    try? fileManager.removeItem(at: url)
+                }
+            }
+        }
+
+        updateRetainedBytes()
+        files = allDiagnosticRetentionFiles()
+        while retainedBytesOnQueue + requiredBytes > Self.retainedBytesLimit {
+            capturesByFile = snapshot(files)
+            let protectedCaptureIDs = protectedCaptures(
+                in: files,
+                capturesByFile: capturesByFile
+            )
+            var dates: [String: Date] = [:]
+            for url in files {
+                let date = (try? url.resourceValues(
+                    forKeys: [.contentModificationDateKey]
+                ).contentModificationDate) ?? .distantPast
+                for capture in capturesByFile[url] ?? [] {
+                    dates[capture] = max(dates[capture] ?? .distantPast, date)
+                }
+            }
+            guard let oldestCapture = dates.keys
+                .filter({ !protectedCaptureIDs.contains($0) })
+                .min(by: { (dates[$0] ?? .distantPast) < (dates[$1] ?? .distantPast) }) else {
+                break
+            }
+            let candidates = files.filter {
+                !isProtected($0, in: capturesByFile) &&
+                    (capturesByFile[$0] ?? []).contains(oldestCapture)
+            }
+            guard !candidates.isEmpty else { break }
+            for candidate in candidates {
+                try fileManager.removeItem(at: candidate)
+            }
+            files = allDiagnosticRetentionFiles()
             updateRetainedBytes()
         }
         updateRetainedBytes()
     }
 
     private func oldestEventDate() -> Date? {
-        allAppChunkFiles().compactMap { url in
+        allDiagnosticRetentionFiles().compactMap { url in
             (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
         }.min()
     }
 
     private func healthOnQueue() -> RideDiagnosticsRecorderHealth {
-        RideDiagnosticsRecorderHealth(
+        let captureCount = Set(
+            allDiagnosticRetentionFiles().flatMap { captureIDs(in: $0) }
+        ).count
+        return RideDiagnosticsRecorderHealth(
             schema: Self.schema,
             processId: processId.uuidString.lowercased(),
             retainedBytes: retainedBytesOnQueue,
-            retainedChunkCount: allAppChunkFiles().count,
+            retainedChunkCount: allDiagnosticChunkFiles().count,
+            retainedCaptureCount: captureCount,
             oldestWallTime: oldestEventDate().map(isoFormatter.string),
             newestWallTime: newestEventDate().map(isoFormatter.string),
             droppedEventCount: totalDropped,
@@ -858,7 +1252,7 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
     }
 
     private func newestEventDate() -> Date? {
-        allAppChunkFiles().compactMap { url in
+        allDiagnosticRetentionFiles().compactMap { url in
             (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
         }.max()
     }
@@ -872,7 +1266,9 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
             event: "detailed_trace_ended",
             fields: ["reason": "time_limit"]
         )
+        rotateChunk()
         activeCaptureId = nil
+        preDetailedContextURL = nil
         detailedTraceExpiry = nil
         detailedTraceActive = false
         publishDetailedState()
@@ -945,6 +1341,25 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
             CharacterSet.alphanumerics.contains($0) || $0 == "_" || $0 == "-" || $0 == "."
         }
         return String(String.UnicodeScalarView(allowed).prefix(64))
+    }
+
+    private static func isValidDeviceDigest(_ value: String) -> Bool {
+        value.utf8.count == 16 && value.unicodeScalars.allSatisfy {
+            (48...57).contains($0.value) || (97...102).contains($0.value)
+        }
+    }
+
+    private static func loadOrCreateDeviceDigestKey(
+        userDefaults: UserDefaults
+    ) -> SymmetricKey {
+        if let stored = userDefaults.data(forKey: deviceDigestSaltDefaultsKey),
+           stored.count == 32 {
+            return SymmetricKey(data: stored)
+        }
+        let key = SymmetricKey(size: .bits256)
+        let encoded = key.withUnsafeBytes { Data($0) }
+        userDefaults.set(encoded, forKey: deviceDigestSaltDefaultsKey)
+        return key
     }
 
     private static func safeEnum(_ value: String) -> String {

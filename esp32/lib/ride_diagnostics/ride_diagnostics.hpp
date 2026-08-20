@@ -25,11 +25,32 @@ struct Stats {
 };
 
 constexpr std::size_t kMaximumEventBytes = 768;
-constexpr std::size_t kQueueCapacity = 32;
+constexpr std::size_t kNormalQueueCapacity = 24;
+constexpr std::size_t kCriticalQueueCapacity = 8;
+constexpr std::size_t kQueueCapacity =
+    kNormalQueueCapacity + kCriticalQueueCapacity;
 constexpr std::size_t kChunkBytes = 256 * 1024;
 constexpr std::size_t kRetentionBytes = 32 * 1024 * 1024;
+constexpr std::size_t kMinimumFreeSpaceBytes = 8 * 1024 * 1024;
 constexpr uint8_t kRetentionBoots = 20;
 constexpr uint8_t kRetentionDays = 14;
+
+namespace retention_policy {
+
+constexpr uint64_t kMinimumTrustworthyEpoch = 1'700'000'000ULL;
+
+inline bool expiredByWallClock(uint64_t nowEpoch, uint64_t modifiedEpoch,
+                               uint8_t retentionDays) {
+  if (nowEpoch < kMinimumTrustworthyEpoch ||
+      modifiedEpoch < kMinimumTrustworthyEpoch || modifiedEpoch > nowEpoch) {
+    return false;
+  }
+  const uint64_t retentionSeconds =
+      static_cast<uint64_t>(retentionDays) * 24ULL * 60ULL * 60ULL;
+  return modifiedEpoch < nowEpoch - retentionSeconds;
+}
+
+} // namespace retention_policy
 
 void begin(Storage &storage, uint32_t bootSequence, uint32_t firmwareFingerprint);
 // Start persistent SD writes after boot-time map recovery has released storage.
@@ -39,10 +60,12 @@ void process(uint32_t nowMs);
 
 bool record(Level level, const char *category, const char *event,
             const char *fieldsJson = "{}");
-bool markIssue(const char *code);
-bool bindCapture(const char *captureId);
+bool markIssue(const char *code, uint32_t markerSequence);
+bool bindCapture(const char *captureId, bool detailed = false);
 void clearCapture();
 const char *captureId();
+bool detailedCaptureEnabled();
+bool sealActiveChunk(uint32_t timeoutMs = 2000);
 Stats stats();
 uint32_t currentBootSequence();
 uint32_t currentActiveChunk();

@@ -48,6 +48,7 @@
 #include "../power_metrics/power_metrics.hpp"
 #include "../renderer_diagnostics/renderer_diagnostics.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
+#include "../ride_diagnostics/ride_diagnostics_control.hpp"
 #include "../route_overlay/route_overlay.hpp"
 #include "../speaker/speaker.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
@@ -2256,6 +2257,18 @@ static void processPendingTransferControl() {
           "BLE Device Transfer: diagnostics enter rejected, transfer is busy");
     } else if (transferStatus.enabled && transferStatus.mode == "diagnostics") {
       Serial.println("BLE Device Transfer: diagnostics enter already applied");
+    } else if (!storage.ensureSdMounted()) {
+      deviceTransferHttp.setLastError(
+          "diagnostics_storage_unavailable",
+          "device diagnostics require a mounted removable SD card");
+      Serial.println(
+          "BLE Device Transfer: diagnostics enter rejected, SD unavailable");
+    } else if (!ride_diagnostics::sealActiveChunk()) {
+      deviceTransferHttp.setLastError(
+          "diagnostics_storage_unavailable",
+          "device diagnostics could not seal a readable storage checkpoint");
+      Serial.println(
+          "BLE Device Transfer: diagnostics enter rejected, checkpoint failed");
     } else {
       const bool enabled = deviceTransferHttp.setEnabled(true, "diagnostics");
       Serial.printf(
@@ -2722,8 +2735,11 @@ static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
 static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
                                                 NimBLECharacteristic *) {
   device_transfer::LanCredentials lanCredentials;
+  device_transfer::LanSessionMode lanMode =
+      device_transfer::LanSessionMode::Debug;
   const device_transfer::LanCommandParseResult lanCommand =
-      device_transfer::parseRemoteDebugLanCommand(data, len, lanCredentials);
+      device_transfer::parseTransferLanCommand(data, len, lanMode,
+                                               lanCredentials);
   if (lanCommand == device_transfer::LanCommandParseResult::Invalid) {
     deviceTransferHttp.clearPreferredNetwork();
     deviceTransferHttp.setLastError(
@@ -2732,11 +2748,39 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
         "8-63 byte password");
     queueTransferControl(ble_transfer::Action::None,
                          ble_transfer::NotifyGeneric);
-    Serial.println(
-        "BLE Device Transfer: rejected invalid remote-debug LAN credentials");
+    Serial.println("BLE Device Transfer: rejected invalid LAN credentials");
     return;
   }
   if (lanCommand == device_transfer::LanCommandParseResult::Valid) {
+    if (lanMode == device_transfer::LanSessionMode::Diagnostics) {
+#if PERSISTENT_RIDE_DIAGNOSTICS
+      if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire)) {
+        deviceTransferHttp.setLastError(
+            "ride_diagnostics_unsupported",
+            "diagnostics capability was not negotiated");
+        queueTransferControl(ble_transfer::Action::None,
+                             ble_transfer::NotifyGeneric);
+      } else if (!deviceTransferHttp.setPreferredNetwork(lanCredentials)) {
+        deviceTransferHttp.setLastError(
+            "wifi_credentials",
+            "LAN credentials could not be applied to this diagnostics session");
+        queueTransferControl(ble_transfer::Action::None,
+                             ble_transfer::NotifyGeneric);
+      } else {
+        queueTransferControl(ble_transfer::Action::EnableDiagnostics,
+                             ble_transfer::NotifyGeneric);
+        Serial.println(
+            "BLE Device Transfer: LAN-first diagnostics enter queued");
+      }
+#else
+      deviceTransferHttp.setLastError(
+          "ride_diagnostics_unsupported",
+          "this firmware has no persistent ride diagnostics");
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+#endif
+      return;
+    }
 #if DEVICE_REMOTE_DEBUG
     if (!deviceDebugHttp.initialized()) {
       deviceTransferHttp.setLastError(
@@ -2836,9 +2880,13 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
   }
 
   if (command.rfind("capture|", 0) == 0) {
-    const std::string capture = command.substr(8);
+    ride_diagnostics::control::CaptureBinding binding;
     if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) ||
-        !ride_diagnostics::bindCapture(capture.c_str())) {
+        !ride_diagnostics::control::parseCaptureBinding(command, binding) ||
+        !ride_diagnostics::bindCapture(
+            binding.captureId.c_str(),
+            binding.mode ==
+                ride_diagnostics::control::CaptureMode::Detailed)) {
       deviceTransferHttp.setLastError("capture_rejected",
                                       "capture binding was malformed or unsupported");
     }
@@ -2848,9 +2896,10 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
   }
 
   if (command.rfind("mark|", 0) == 0) {
-    const std::string code = command.substr(5);
+    ride_diagnostics::control::IssueMarker marker;
     if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) ||
-        !ride_diagnostics::markIssue(code.c_str())) {
+        !ride_diagnostics::control::parseIssueMarker(command, marker) ||
+        !ride_diagnostics::markIssue(marker.code.c_str(), marker.sequence)) {
       deviceTransferHttp.setLastError("marker_rejected",
                                       "issue marker was malformed or unsupported");
     }
@@ -2886,6 +2935,31 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
     deviceTransferHttp.setLastError(
         "remote_debug_unsupported",
         "this firmware has no remote debug capability");
+    queueTransferControl(ble_transfer::Action::None,
+                         ble_transfer::NotifyGeneric);
+#endif
+    return;
+  }
+
+  if (command == "enter|diagnostics|h1|e") {
+#if PERSISTENT_RIDE_DIAGNOSTICS
+    if (bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) &&
+        deviceTransferHttp.forceHotspotFallbackAfterEndpointFailure()) {
+      queueTransferControl(ble_transfer::Action::EnableDiagnostics,
+                           ble_transfer::NotifyGeneric);
+      Serial.println(
+          "BLE Device Transfer: endpoint-fallback diagnostics enter queued");
+    } else {
+      deviceTransferHttp.setLastError(
+          "ride_diagnostics_unavailable",
+          "endpoint-fallback diagnostics session could not be prepared");
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    }
+#else
+    deviceTransferHttp.setLastError(
+        "ride_diagnostics_unsupported",
+        "this firmware has no persistent ride diagnostics");
     queueTransferControl(ble_transfer::Action::None,
                          ble_transfer::NotifyGeneric);
 #endif

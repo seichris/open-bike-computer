@@ -855,6 +855,7 @@ class BLEManager: NSObject, ObservableObject {
             }
         }
     }
+    private var nextDiagnosticsMarkerSequence: UInt32 = 1
     @Published var mapTransferModeEnabled: Bool = false
     @Published var mapTransferBaseURL: URL?
     @Published var mapTransferAccessPointSSID: String?
@@ -4614,11 +4615,13 @@ class BLEManager: NSObject, ObservableObject {
             deviceTransferHotspotFallbackReason = nil
         }
         var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
-        if mode == .debug, let remoteDebugLANCredentials {
-            packet.append(remoteDebugLANCredentials.commandPayload)
-        } else if mode == .debug, let remoteDebugHotspotFallbackReason {
+        if (mode == .debug || mode == .diagnostics),
+           let remoteDebugLANCredentials {
+            packet.append(remoteDebugLANCredentials.commandPayload(for: mode))
+        } else if (mode == .debug || mode == .diagnostics),
+                  let remoteDebugHotspotFallbackReason {
             packet.append(Data(
-                "enter|debug|h1|\(remoteDebugHotspotFallbackReason.commandCode)".utf8
+                "enter|\(mode.rawValue)|h1|\(remoteDebugHotspotFallbackReason.commandCode)".utf8
             ))
         } else {
             packet.append(Data("enter|\(mode.rawValue)".utf8))
@@ -4660,8 +4663,11 @@ class BLEManager: NSObject, ObservableObject {
               let captureID = captureID ?? diagnosticsRecorder?.currentCaptureID else {
             return false
         }
+        let mode = diagnosticsRecorder?.detailedTraceEnabled == true
+            ? "detailed"
+            : "standard"
         let packet = Data(
-            "\(DeviceBLEProtocol.deviceTransferControlPrefix)capture|\(captureID.uuidString.lowercased())".utf8
+            "\(DeviceBLEProtocol.deviceTransferControlPrefix)capture|1|\(mode)|\(captureID.uuidString.lowercased())".utf8
         )
         return sendTransferControlPacket(
             packet,
@@ -4673,14 +4679,17 @@ class BLEManager: NSObject, ObservableObject {
     @discardableResult
     func sendDiagnosticsIssueMarker(_ code: RideIssueCode) -> Bool {
         guard supportsRideDiagnostics else { return false }
+        let markerSequence = nextDiagnosticsMarkerSequence
         let packet = Data(
-            "\(DeviceBLEProtocol.deviceTransferControlPrefix)mark|\(code.rawValue)".utf8
+            "\(DeviceBLEProtocol.deviceTransferControlPrefix)mark|1|\(markerSequence)|\(code.rawValue)".utf8
         )
-        return sendTransferControlPacket(
+        let queued = sendTransferControlPacket(
             packet,
             label: "diagnostics issue marker",
-            coalescingKey: "transfer.diagnostics.marker"
+            coalescingKey: nil
         )
+        if queued { nextDiagnosticsMarkerSequence &+= 1 }
+        return queued
     }
 
     @discardableResult
@@ -5223,10 +5232,11 @@ class BLEManager: NSObject, ObservableObject {
 
     private func log(_ message: String) {
         print(message)
-        let messageDigest = SHA256.hash(data: Data(message.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
-        diagnosticsRecorder?.record(
+        let messageDigest = diagnosticsRecorder?.privacyDigest(
+            Data(message.utf8)
+        )
+        if let messageDigest {
+            diagnosticsRecorder?.record(
             level: .debug,
             category: .ble,
             event: "debug_message",
@@ -5235,7 +5245,8 @@ class BLEManager: NSObject, ObservableObject {
                 "messageDigest": messageDigest,
             ],
             captureId: diagnosticsRecorder?.currentCaptureID
-        )
+            )
+        }
 
         let timestamp = DateFormatter.bleDebugTimestamp.string(from: Date())
         let line = "\(timestamp) \(message)"
@@ -6545,7 +6556,7 @@ class BLEManager: NSObject, ObservableObject {
     private func sendTransferControlPacket(
         _ data: Data,
         label: String,
-        coalescingKey: String
+        coalescingKey: String?
     ) -> Bool {
         DevicePacketRouting.sendPreferredThenFallback(
             preferred: {

@@ -97,12 +97,19 @@ streams = sorted(root.rglob("*.jsonl"))
 if not streams:
     raise SystemExit("copied diagnostics root contains no JSONL streams")
 for stream in streams:
-    for index, line in enumerate(stream.read_bytes().splitlines(), 1):
+    payload = stream.read_bytes()
+    lines = payload.splitlines(keepends=True)
+    if payload and not payload.endswith(b"\n") and lines:
+        try:
+            json.loads(lines[-1])
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            lines = lines[:-1]
+    for index, line in enumerate(lines, 1):
         if not line:
             continue
         try:
             event = json.loads(line)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise SystemExit(f"invalid JSON at {stream}:{index}: {exc}")
         if event.get("schema") != 1 or event.get("source") not in {"ios", "firmware", "host"}:
             raise SystemExit(f"unsupported event at {stream}:{index}")

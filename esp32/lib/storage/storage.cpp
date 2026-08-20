@@ -7,6 +7,7 @@
  */
 
 #include "storage.hpp"
+#include "storage_mount_policy.hpp"
 #include "../power_management/power_management.hpp"
 #include "driver/gpio.h"
 #include "driver/sdspi_host.h"
@@ -79,11 +80,23 @@ bool Storage::ensureSdMounted(bool allowInternalFallback) {
   }
 #endif
   if (!ready) {
+    // The FFat fallback shares /sdcard with the removable card. Retrying the
+    // removable mount would have to unmount FFat and invalidate every map/file
+    // handle in the application. Automatic diagnostics recovery therefore
+    // retries only when no fallback is active. Existing explicit callers that
+    // allow the fallback retain the historical remount-and-restore behavior.
+    if (!storage_mount_policy::shouldAttemptAutomaticRemovableRetry(
+            isSdLoaded.load(), internalFallbackMounted.load()) &&
+        !allowInternalFallback) {
+      xSemaphoreGive(mountMutex);
+      return false;
+    }
     isSdLoaded = false;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
     defined(SPI_SHARED)
     const bool restoreInternalFallback =
-        allowInternalFallback || internalFallbackMounted;
+        storage_mount_policy::shouldRestoreFallbackAfterFailedRetry(
+            allowInternalFallback, internalFallbackMounted.load());
     FFat.end();
     SD.end();
     delay(25);
@@ -99,6 +112,32 @@ bool Storage::ensureSdMounted(bool allowInternalFallback) {
 }
 
 void Storage::markSdUnavailable() { isSdLoaded = false; }
+
+bool Storage::hasInternalFallbackMounted() const {
+  return internalFallbackMounted.load();
+}
+
+bool Storage::canRetryRemovableSd() const {
+  return storage_mount_policy::shouldAttemptAutomaticRemovableRetry(
+      isSdLoaded.load(), internalFallbackMounted.load());
+}
+
+uint64_t Storage::removableSdFreeBytes() const {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  if (!isSdLoaded.load())
+    return 0;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
+    defined(SPI_SHARED)
+  const uint64_t total = SD.totalBytes();
+  const uint64_t used = SD.usedBytes();
+  return total > used ? total - used : 0;
+#else
+  // Persistent diagnostics is enabled only on the Waveshare targets. Other
+  // legacy storage backends do not expose a portable free-space query here.
+  return UINT64_MAX;
+#endif
+}
 
 /**
  * @brief SD Card init with DMA using ESP-IDF
@@ -498,6 +537,12 @@ size_t Storage::write(FILE *file, const char *buffer, size_t size) {
   if (!file)
     return 0;
   return fwrite(buffer, 1, size, file);
+}
+
+int Storage::flush(FILE *file) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  return file == nullptr ? EOF : fflush(file);
 }
 
 /**

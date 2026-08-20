@@ -26,8 +26,11 @@ Each stream is UTF-8 JSON Lines. Every complete line is one object with
 
 `wallTime`, `uptimeMs`, `processId`, `captureId`, and `fields` are optional
 when the producer cannot provide them, but a producer must not invent a wall
-clock. `sequence` is monotonically increasing within one stream. Firmware
-additionally includes `bootSequence` and `firmwareFingerprint` in `fields`.
+clock. `sequence` is monotonically increasing across every chunk in one
+process/boot stream; a chunk boundary does not reset it. Firmware additionally
+includes a persistent, collision-free `bootSequence` and
+`firmwareFingerprint` in `fields`. `runtimeBootSequence` preserves the RTC
+boot-history sequence when it differs from the persistent storage stream.
 
 Allowed sources are `ios`, `firmware`, and `host`. Levels are `debug`, `info`,
 `warning`, and `error`. Categories are `lifecycle`, `boot`, `ble`,
@@ -38,8 +41,17 @@ The event name and fields are deliberately typed at each call site. Unknown
 fields are rejected by the host validator and by the iOS device-chunk
 validator. Fields are flat scalar values from the closed vocabulary maintained
 in `tools/ride_diagnostics.py` and `RideDiagnosticsFieldPolicy`; nested objects
-and arrays are not accepted. A truncated final line is reported and ignored; a
+and arrays are not accepted. iOS field values are bounded strings. Firmware
+counter/timing fields are numbers, state flags are booleans, and enum/identity
+fields are strings; all three validators enforce the same source-specific type
+contract. A truncated final line is reported and ignored; a
 truncated line in the middle of a stream is an error.
+
+Firmware that starts before its wall clock is valid omits `wallTime`. Its first
+later timestamped event is a `lifecycle.clock_anchor` carrying the same uptime
+and persistent boot sequence. The Mac summarizer uses that anchor to derive a
+`correlatedWallTime` for earlier records, reports `clockUncertaintyMs`, and
+never rewrites the raw JSONL bytes.
 
 ## Privacy boundary
 
@@ -57,6 +69,9 @@ health/sensor stream.
 An exported stored-ZIP contains `manifest.json`, `checksums.sha256`, `app/`,
 `device/`, and `summary/`. The Mac summarizer extracts every validated archive
 member byte-for-byte under `raw/` before writing derived files, so filtering or
-timeline sorting never rewrites the evidence. The manifest records source schema versions,
-capture/boot IDs, UTC/uptime anchors, chunk hashes, drop counts, and truncation
-warnings. It must not contain secrets or forbidden private values.
+timeline sorting never rewrites the evidence. The manifest inventories the
+JSONL source streams and records the active capture, retained bytes, and iPhone
+drop count. `checksums.sha256` binds every archive entry, imported device index
+snapshots retain firmware counters, and the validated Mac summary reports
+stream gaps, recoverable tails, and clock correlation. None of these files may
+contain secrets or forbidden private values.

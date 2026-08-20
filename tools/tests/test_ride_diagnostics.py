@@ -71,6 +71,35 @@ class RideDiagnosticsTests(unittest.TestCase):
         cpp_keys = set(re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', cpp_match.group(1)))
         self.assertEqual(cpp_keys, ride_diagnostics.ALLOWED_FIELD_KEYS)
 
+        swift_validator = (
+            REPO_ROOT
+            / "ios-app/BikeComputer/BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift"
+        ).read_text()
+        for cpp_name, swift_name, expected in (
+            ("kNumberKeys", "numberKeys", ride_diagnostics.FIRMWARE_NUMBER_FIELD_KEYS),
+            ("kBooleanKeys", "booleanKeys", ride_diagnostics.FIRMWARE_BOOLEAN_FIELD_KEYS),
+        ):
+            cpp_types = re.search(
+                rf"{cpp_name}\[\] = \{{(.*?)\n\s*\}};",
+                cpp_source,
+                flags=re.DOTALL,
+            )
+            swift_types = re.search(
+                rf"{swift_name}: Set<String> = \[(.*?)\n\s*\]",
+                swift_validator,
+                flags=re.DOTALL,
+            )
+            self.assertIsNotNone(cpp_types)
+            self.assertIsNotNone(swift_types)
+            self.assertEqual(
+                set(re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', cpp_types.group(1))),
+                expected,
+            )
+            self.assertEqual(
+                set(re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', swift_types.group(1))),
+                expected,
+            )
+
     def test_valid_stream_reports_sequence_gaps_and_tail(self):
         data = (json.dumps(event(2)) + "\n" + json.dumps(event(4)) + "\n" + "partial").encode()
         result = ride_diagnostics.validate_jsonl(data, "app/events.jsonl")
@@ -99,6 +128,66 @@ class RideDiagnosticsTests(unittest.TestCase):
         with self.assertRaises(ride_diagnostics.DiagnosticError):
             ride_diagnostics.validate_event(payload)
 
+    def test_rejects_unbounded_fields_and_invalid_utf8(self):
+        with self.assertRaises(ride_diagnostics.DiagnosticError):
+            ride_diagnostics.validate_event(
+                event(fields={
+                    key: "x"
+                    for key in sorted(ride_diagnostics.ALLOWED_FIELD_KEYS)[:33]
+                })
+            )
+        with self.assertRaises(ride_diagnostics.DiagnosticError):
+            ride_diagnostics.validate_event(
+                event(fields={"rssiBucket": "x" * 257})
+            )
+        result = ride_diagnostics.validate_jsonl(
+            (json.dumps(event()) + "\n").encode() + b"\xff",
+            "app/events.jsonl",
+        )
+        self.assertTrue(result.truncated_tail)
+        self.assertEqual(len(result.events), 1)
+
+    def test_rejects_ambiguous_archive_paths(self):
+        self.assertFalse(ride_diagnostics._safe_member("app//events.jsonl"))
+        self.assertFalse(ride_diagnostics._safe_member("app/./events.jsonl"))
+        self.assertFalse(ride_diagnostics._safe_member("app/../events.jsonl"))
+
+    def test_rejects_noncanonical_ids_and_boolean_counters(self):
+        malformed_id = event()
+        malformed_id["captureId"] = "123e4567"
+        with self.assertRaises(ride_diagnostics.DiagnosticError):
+            ride_diagnostics.validate_event(malformed_id)
+
+        boolean_sequence = event()
+        boolean_sequence["sequence"] = True
+        with self.assertRaises(ride_diagnostics.DiagnosticError):
+            ride_diagnostics.validate_event(boolean_sequence)
+
+        boolean_uptime = event()
+        boolean_uptime["uptimeMs"] = False
+        with self.assertRaises(ride_diagnostics.DiagnosticError):
+            ride_diagnostics.validate_event(boolean_uptime)
+
+        boolean_schema = event()
+        boolean_schema["schema"] = True
+        with self.assertRaises(ride_diagnostics.DiagnosticError):
+            ride_diagnostics.validate_event(boolean_schema)
+
+        numeric_wall_time = event()
+        numeric_wall_time["wallTime"] = 2026
+        with self.assertRaises(ride_diagnostics.DiagnosticError):
+            ride_diagnostics.validate_event(numeric_wall_time)
+
+        naive_wall_time = event()
+        naive_wall_time["wallTime"] = "2026-08-19T08:20:31"
+        with self.assertRaises(ride_diagnostics.DiagnosticError):
+            ride_diagnostics.validate_event(naive_wall_time)
+
+        collection_source = event()
+        collection_source["source"] = ["ios"]
+        with self.assertRaises(ride_diagnostics.DiagnosticError):
+            ride_diagnostics.validate_event(collection_source)
+
     def test_accepts_firmware_boot_and_storage_gap_fields(self):
         boot = ride_diagnostics.validate_event(firmware_event())
         self.assertEqual(boot["source"], "firmware")
@@ -120,6 +209,151 @@ class RideDiagnosticsTests(unittest.TestCase):
             )
         )
         self.assertEqual(gap["fields"]["storageErrorCount"], 2)
+
+    def test_rejects_source_specific_field_type_mismatches(self):
+        with self.assertRaises(ride_diagnostics.DiagnosticError):
+            ride_diagnostics.validate_event(
+                firmware_event(fields={"bootSequence": "7"})
+            )
+        with self.assertRaises(ride_diagnostics.DiagnosticError):
+            ride_diagnostics.validate_event(
+                event(fields={"sampleCount": 7})
+            )
+
+    def test_rejects_sequence_overlap_across_chunk_boundaries(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = (json.dumps(firmware_event(sequence=10)) + "\n").encode()
+            second = (json.dumps(firmware_event(sequence=10)) + "\n").encode()
+            manifest_data = json.dumps({
+                "schema": 1,
+                "sourceStreams": [
+                    "device/7/events-000001-a.jsonl",
+                    "device/7/events-000002-b.jsonl",
+                ],
+            }).encode()
+            members = {
+                "manifest.json": manifest_data,
+                "device/7/events-000001-a.jsonl": first,
+                "device/7/events-000002-b.jsonl": second,
+            }
+            checksums = "".join(
+                f"{hashlib.sha256(payload).hexdigest()}  {name}\n"
+                for name, payload in members.items()
+            ).encode()
+            bundle = root / "overlap.zip"
+            with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_STORED) as archive:
+                for name, payload in members.items():
+                    archive.writestr(name, payload)
+                archive.writestr("checksums.sha256", checksums)
+            with self.assertRaises(ride_diagnostics.DiagnosticError):
+                ride_diagnostics.validate_bundle(bundle)
+
+    def test_rejects_duplicate_chunk_numbers(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [
+                "device/7/events-000001-a.jsonl",
+                "device/7/events-000001-b.jsonl",
+            ]
+            members = {
+                paths[0]: (json.dumps(firmware_event(sequence=10)) + "\n").encode(),
+                paths[1]: (json.dumps(firmware_event(sequence=11)) + "\n").encode(),
+            }
+            manifest_data = json.dumps({
+                "schema": 1,
+                "sourceStreams": paths,
+            }).encode()
+            members["manifest.json"] = manifest_data
+            checksums = "".join(
+                f"{hashlib.sha256(payload).hexdigest()}  {name}\n"
+                for name, payload in members.items()
+            ).encode()
+            bundle = root / "duplicate-chunk.zip"
+            with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_STORED) as archive:
+                for name, payload in members.items():
+                    archive.writestr(name, payload)
+                archive.writestr("checksums.sha256", checksums)
+            with self.assertRaisesRegex(
+                ride_diagnostics.DiagnosticError, "duplicates chunk"
+            ):
+                ride_diagnostics.validate_bundle(bundle)
+
+    def test_counts_sequence_gaps_across_chunk_boundaries(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [
+                "device/7/events-000001-a.jsonl",
+                "device/7/events-000002-b.jsonl",
+            ]
+            members = {
+                paths[0]: (json.dumps(firmware_event(sequence=10)) + "\n").encode(),
+                paths[1]: (json.dumps(firmware_event(sequence=13)) + "\n").encode(),
+            }
+            members["manifest.json"] = json.dumps({
+                "schema": 1,
+                "sourceStreams": paths,
+            }).encode()
+            checksums = "".join(
+                f"{hashlib.sha256(payload).hexdigest()}  {name}\n"
+                for name, payload in members.items()
+            ).encode()
+            bundle = root / "chunk-gap.zip"
+            with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_STORED) as archive:
+                for name, payload in members.items():
+                    archive.writestr(name, payload)
+                archive.writestr("checksums.sha256", checksums)
+            _, streams = ride_diagnostics.validate_bundle(bundle)
+            self.assertEqual(streams[1].dropped_sequences, 2)
+
+    def test_rejects_manifest_stream_coverage_mismatch(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            stream_path = "app/events.jsonl"
+            stream = (json.dumps(event()) + "\n").encode()
+            manifest_data = json.dumps({
+                "schema": 1,
+                "sourceStreams": [],
+            }).encode()
+            members = {
+                "manifest.json": manifest_data,
+                stream_path: stream,
+            }
+            checksums = "".join(
+                f"{hashlib.sha256(payload).hexdigest()}  {name}\n"
+                for name, payload in members.items()
+            ).encode()
+            bundle = root / "stream-coverage.zip"
+            with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_STORED) as archive:
+                for name, payload in members.items():
+                    archive.writestr(name, payload)
+                archive.writestr("checksums.sha256", checksums)
+            with self.assertRaisesRegex(
+                ride_diagnostics.DiagnosticError, "manifest stream coverage mismatch"
+            ):
+                ride_diagnostics.validate_bundle(bundle)
+
+    def test_clock_anchor_correlates_pre_sync_firmware_event(self):
+        before = firmware_event(sequence=0)
+        before.pop("wallTime")
+        before["uptimeMs"] = 100
+        anchor = firmware_event(
+            sequence=1,
+            fields={
+                "bootSequence": 7,
+                "firmwareFingerprint": "A1B2C3D4",
+                "clockSynchronized": True,
+            },
+        )
+        anchor["category"] = "lifecycle"
+        anchor["event"] = "clock_anchor"
+        anchor["uptimeMs"] = 200
+        correlated = ride_diagnostics._correlate_events([before, anchor])
+        self.assertEqual(correlated[0]["clockUncertaintyMs"], 1000)
+        self.assertLess(
+            ride_diagnostics._event_timestamp(correlated[0]),
+            ride_diagnostics._event_timestamp(correlated[1]),
+        )
 
     def test_bundle_hashes_and_summary(self):
         with TemporaryDirectory() as directory:
@@ -177,7 +411,10 @@ class RideDiagnosticsTests(unittest.TestCase):
             root = Path(directory)
             bundle = root / "bundle.zip"
             with zipfile.ZipFile(bundle, "w") as archive:
-                manifest_data = b'{"schema":1}'
+                manifest_data = json.dumps({
+                    "schema": 1,
+                    "sourceStreams": ["app/events.jsonl"],
+                }).encode()
                 archive.writestr("manifest.json", manifest_data)
                 archive.writestr("app/events.jsonl", json.dumps(event()) + "\n")
                 manifest_checksum = hashlib.sha256(manifest_data).hexdigest()

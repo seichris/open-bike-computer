@@ -1308,8 +1308,10 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `DTRN` | iOS -> ESP32 | `enter\|debug\|lan1\|` plus bounded binary credentials | Enter browser-debug mode by trying a normal LAN first, with device-hotspot fallback. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug\|h1\|e` | Force the hotspot after authenticated LAN endpoint verification fails; `e` records `endpoint_unreachable`. |
 | `DTRN` | iOS -> ESP32 | `enter\|diagnostics` | Enter the authenticated, read-only device-log transfer mode when CAP2 bit `20` is negotiated. |
-| `DTRN` | iOS -> ESP32 | `capture\|<uuid>` | Bind the current random iPhone capture UUID; idempotent on reconnect. |
-| `DTRN` | iOS -> ESP32 | `mark\|<code>` | Persist one predefined issue marker on the device. |
+| `DTRN` | iOS -> ESP32 | `enter\|diagnostics\|lan1\|` plus bounded binary credentials | Enter diagnostics mode by trying the configured trusted LAN first, with protected-hotspot fallback. |
+| `DTRN` | iOS -> ESP32 | `enter\|diagnostics\|h1\|e` | Re-enter diagnostics on the protected hotspot after the iPhone confirms that the advertised LAN endpoint is unreachable. |
+| `DTRN` | iOS -> ESP32 | `capture\|1\|<standard-or-detailed>\|<uuid>` | Bind the current random iPhone capture UUID and capture level; idempotent on reconnect. Detailed mode is rejected by firmware without the read-only ride-automation shadow capability. |
+| `DTRN` | iOS -> ESP32 | `mark\|1\|<sequence>\|<code>` | Persist one predefined issue marker. Sequence is positive and strictly increasing for the bound capture; replayed or out-of-order markers are rejected. |
 | `DTRN` | iOS -> ESP32 | `capture_end` | End the active detailed capture binding. |
 | `DTRN` | iOS -> ESP32 | `exit` | Exit the active map, firmware, debug, or diagnostics transfer mode. |
 | `DSTS` | iOS -> ESP32 | empty | Request generic device-transfer status and the current HTTP credential. |
@@ -1370,7 +1372,7 @@ UI task. Failure starts `BikeComputer-Transfer` with a fresh per-session WPA2
 password and reports a hotspot fallback.
 `DSTS` reports `networkTransport` (`starting`, `connecting`, `lan`, or
 `hotspot`), `networkSsid`, `hotspotFallback`, `hotspotFallbackReason`, and (only
-for an active debug hotspot) `apPassphrase`; `baseUrl` remains empty until the
+for an active debug or diagnostics hotspot) `apPassphrase`; `baseUrl` remains empty until the
 selected listener is ready. Stable fallback reasons are `ssid_unavailable`,
 `authentication_failed`, `association_timeout`, and `endpoint_unreachable`.
 The normal LAN password is never returned. The app verifies a LAN result
@@ -1404,6 +1406,7 @@ the existing bearer token. The read-only API is:
 
 | Method | Path | Meaning |
 | --- | --- | --- |
+| `GET` | `/device-diagnostics/v1/status` | Constant-size authenticated liveness and storage status; does not enumerate or hash chunks. |
 | `GET` | `/device-diagnostics/v1/index` | Bounded list of closed firmware JSONL chunks, byte sizes, SHA-256 hashes, boot sequence, and recorder counters. |
 | `GET` | `/device-diagnostics/v1/chunks/{boot}/{chunk}` | Download one immutable closed chunk; path components are strict unsigned integers. |
 | `GET` | `/device-diagnostics/v1/active-tail` | Returns `404`; the initial contract does not expose an active mutable tail. |
@@ -1411,8 +1414,13 @@ the existing bearer token. The read-only API is:
 
 Every route requires the authenticated transfer token and an active
 `diagnostics` mode. The device never accepts an arbitrary filesystem path or a
-remote-delete request. iOS downloads one bounded chunk at a time, verifies its
-length, SHA-256, JSONL schema/source, and sequence ordering, then atomically
+remote-delete request. Before enabling the HTTP session, the firmware writer
+drains all earlier queue entries and seals its current chunk; short, normal
+rides are therefore included without exposing a mutable tail. Chunk GET resolves
+one strict canonical path and never re-hashes the complete index. iOS downloads
+one bounded chunk at a time, rejects oversized responses while streaming,
+verifies length, SHA-256, JSONL schema/source, per-field types, and sequence
+ordering within and across chunks, then atomically
 retains it under its local diagnostics root. Repeating a download skips an
 already-imported chunk with the same hash.
 

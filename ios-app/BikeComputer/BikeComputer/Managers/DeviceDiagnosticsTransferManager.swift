@@ -6,15 +6,23 @@
 import CryptoKit
 import Foundation
 
-struct DeviceDiagnosticsIndex: Decodable {
+struct DeviceDiagnosticsIndex: Codable {
     let schema: Int
     let source: String
     let bootSequence: UInt32
     let activeChunk: UInt32
+    let stats: DeviceDiagnosticsStats
     let chunks: [DeviceDiagnosticsChunk]
 }
 
-struct DeviceDiagnosticsChunk: Decodable, Identifiable {
+struct DeviceDiagnosticsStats: Codable {
+    let enqueued: UInt32
+    let written: UInt32
+    let dropped: UInt32
+    let storageErrors: UInt32
+}
+
+struct DeviceDiagnosticsChunk: Codable, Identifiable {
     let bootSequence: UInt32
     let chunk: UInt32
     let bytes: Int
@@ -24,6 +32,7 @@ struct DeviceDiagnosticsChunk: Decodable, Identifiable {
 }
 
 enum DeviceDiagnosticsTransferError: LocalizedError {
+    case deviceIdentityUnavailable
     case invalidIndex
     case requestFailed(Int)
     case oversizedChunk
@@ -32,6 +41,8 @@ enum DeviceDiagnosticsTransferError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .deviceIdentityUnavailable:
+            return "The connected bike computer identity is unavailable."
         case .invalidIndex:
             return "The device returned an invalid diagnostics index."
         case .requestFailed(let status):
@@ -49,13 +60,23 @@ enum DeviceDiagnosticsTransferError: LocalizedError {
 @MainActor
 final class DeviceDiagnosticsTransferManager {
     private let transferManager = DeviceTransferManager()
-    private let maximumChunkBytes = 12 * 1024 * 1024
+    private let maximumChunkBytes = 256 * 1024
+    private let maximumIndexBytes = 64 * 1024
+
+    private struct JSONLValidation {
+        let firstSequence: UInt64
+        let lastSequence: UInt64
+    }
 
     func downloadDeviceLogs(
         bleManager: BLEManager,
         recorder: RideDiagnosticsRecorder,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> Int {
+        guard let deviceID = bleManager.connectedDeviceID else {
+            throw DeviceDiagnosticsTransferError.deviceIdentityUnavailable
+        }
+        let deviceDigest = recorder.deviceDigest(for: deviceID)
         transferManager.diagnosticsRecorder = recorder
         recorder.record(
             category: .transfer,
@@ -66,83 +87,122 @@ final class DeviceDiagnosticsTransferManager {
             bleManager: bleManager,
             status: status
         )
-        var exited = false
-        defer {
-            if !exited {
-                Task { @MainActor in
-                    await self.transferManager.exitDiagnostics(bleManager: bleManager)
+        do {
+            status("reading device diagnostics index")
+            let indexData = try await request(
+                session: session,
+                path: "device-diagnostics/v1/index",
+                method: "GET",
+                maximumBytes: maximumIndexBytes
+            )
+            let index = try decodeIndex(indexData)
+            var imported = 0
+            var previousSequenceByBoot: [UInt32: UInt64] = [:]
+            let chunks = index.chunks.sorted {
+                ($0.bootSequence, $0.chunk) < ($1.bootSequence, $1.chunk)
+            }
+            for (offset, chunk) in chunks.enumerated() {
+                guard chunk.bytes > 0, chunk.bytes <= maximumChunkBytes,
+                      chunk.bootSequence > 0,
+                      chunk.bootSequence <= index.bootSequence,
+                      chunk.chunk > 0,
+                      chunk.sha256.count == 64,
+                      chunk.sha256.allSatisfy({ $0.isHexDigit }) else {
+                    throw DeviceDiagnosticsTransferError.invalidIndex
+                }
+                let cached = recorder.importedDeviceChunkData(
+                    deviceDigest: deviceDigest,
+                    bootSequence: chunk.bootSequence,
+                    chunk: chunk.chunk,
+                    sha256: chunk.sha256
+                )
+                let existing = cached.flatMap { data -> Data? in
+                    guard data.count == chunk.bytes,
+                          Self.sha256(data) == chunk.sha256.lowercased(),
+                          Self.validateJSONL(data) != nil else {
+                        return nil
+                    }
+                    return data
+                }
+                let data: Data
+                if let existing {
+                    data = existing
+                } else {
+                    status("downloading device chunk \(offset + 1) of \(chunks.count)")
+                    data = try await request(
+                        session: session,
+                        path: "device-diagnostics/v1/chunks/\(chunk.bootSequence)/\(chunk.chunk)",
+                        method: "GET",
+                        maximumBytes: maximumChunkBytes
+                    )
+                }
+                guard data.count == chunk.bytes, data.count <= maximumChunkBytes else {
+                    throw DeviceDiagnosticsTransferError.oversizedChunk
+                }
+                guard Self.sha256(data) == chunk.sha256.lowercased() else {
+                    throw DeviceDiagnosticsTransferError.hashMismatch
+                }
+                guard let validation = Self.validateJSONL(data) else {
+                    throw DeviceDiagnosticsTransferError.malformedChunk
+                }
+                if let previous = previousSequenceByBoot[chunk.bootSequence],
+                   validation.firstSequence <= previous {
+                    throw DeviceDiagnosticsTransferError.malformedChunk
+                }
+                previousSequenceByBoot[chunk.bootSequence] = validation.lastSequence
+                if existing == nil {
+                    _ = try recorder.importDeviceChunk(
+                        deviceDigest: deviceDigest,
+                        bootSequence: chunk.bootSequence,
+                        chunk: chunk.chunk,
+                        data: data,
+                        sha256: chunk.sha256,
+                        enforceRetention: false
+                    )
+                    imported += 1
                 }
             }
-        }
-
-        status("reading device diagnostics index")
-        let indexData = try await request(
-            session: session,
-            path: "device-diagnostics/v1/index",
-            method: "GET"
-        )
-        let index = try decodeIndex(indexData)
-        var imported = 0
-        let chunks = index.chunks.sorted {
-            ($0.bootSequence, $0.chunk) < ($1.bootSequence, $1.chunk)
-        }
-        for (offset, chunk) in chunks.enumerated() {
-            guard chunk.bytes >= 0, chunk.bytes <= maximumChunkBytes,
-                  chunk.bootSequence > 0,
-                  chunk.bootSequence <= index.bootSequence,
-                  chunk.chunk > 0,
-                  chunk.sha256.count == 64,
-                  chunk.sha256.allSatisfy({ $0.isHexDigit }) else {
-                throw DeviceDiagnosticsTransferError.invalidIndex
-            }
-            if recorder.hasImportedDeviceChunk(
-                bootSequence: chunk.bootSequence,
-                chunk: chunk.chunk,
-                sha256: chunk.sha256
-            ) {
-                continue
-            }
-            status("downloading device chunk \(offset + 1) of \(chunks.count)")
-            let data = try await request(
-                session: session,
-                path: "device-diagnostics/v1/chunks/\(chunk.bootSequence)/\(chunk.chunk)",
-                method: "GET"
+            try recorder.importDeviceRecorderHealth(
+                deviceDigest: deviceDigest,
+                bootSequence: index.bootSequence,
+                data: indexData
             )
-            guard data.count == chunk.bytes, data.count <= maximumChunkBytes else {
-                throw DeviceDiagnosticsTransferError.oversizedChunk
-            }
-            guard Self.sha256(data) == chunk.sha256.lowercased() else {
-                throw DeviceDiagnosticsTransferError.hashMismatch
-            }
-            guard Self.isValidJSONL(data) else {
-                throw DeviceDiagnosticsTransferError.malformedChunk
-            }
-            _ = try recorder.importDeviceChunk(
-                bootSequence: chunk.bootSequence,
-                chunk: chunk.chunk,
-                data: data,
-                sha256: chunk.sha256
-            )
-            imported += 1
-        }
 
-        status("closing device diagnostics session")
+            status("closing device diagnostics session")
+            await closeSession(session, bleManager: bleManager)
+            recorder.record(
+                category: .transfer,
+                event: "diagnostics_download_completed",
+                fields: [
+                    "mode": DeviceTransferSession.Mode.diagnostics.rawValue,
+                    "importedCount": String(imported),
+                ]
+            )
+            return imported
+        } catch {
+            try? recorder.enforceRetention()
+            await closeSession(session, bleManager: bleManager)
+            recorder.record(
+                level: .warning,
+                category: .transfer,
+                event: "diagnostics_download_failed",
+                fields: ["reason": "transfer_failed"]
+            )
+            throw error
+        }
+    }
+
+    private func closeSession(
+        _ session: DeviceTransferSession,
+        bleManager: BLEManager
+    ) async {
         _ = try? await request(
             session: session,
             path: "device-diagnostics/v1/session/exit",
-            method: "POST"
+            method: "POST",
+            maximumBytes: 4 * 1024
         )
         await transferManager.exitDiagnostics(bleManager: bleManager)
-        exited = true
-        recorder.record(
-            category: .transfer,
-            event: "diagnostics_download_completed",
-            fields: [
-                "mode": DeviceTransferSession.Mode.diagnostics.rawValue,
-                "importedCount": String(imported),
-            ]
-        )
-        return imported
     }
 
     private func decodeIndex(_ data: Data) throws -> DeviceDiagnosticsIndex {
@@ -150,8 +210,25 @@ final class DeviceDiagnosticsTransferManager {
               index.schema == 1,
               index.source == "firmware",
               index.bootSequence > 0,
-              index.chunks.count <= 128 else {
+              index.activeChunk > 0,
+              index.chunks.count <= 256 else {
             throw DeviceDiagnosticsTransferError.invalidIndex
+        }
+        var chunkKeys: Set<String> = []
+        for chunk in index.chunks {
+            let key = "\(chunk.bootSequence)-\(chunk.chunk)"
+            guard chunk.bytes > 0,
+                  chunk.bytes <= maximumChunkBytes,
+                  chunk.bootSequence > 0,
+                  chunk.bootSequence <= index.bootSequence,
+                  chunk.chunk > 0,
+                  chunk.sha256.count == 64,
+                  chunk.sha256.allSatisfy({ $0.isHexDigit }),
+                  (chunk.bootSequence < index.bootSequence ||
+                    chunk.chunk < index.activeChunk),
+                  chunkKeys.insert(key).inserted else {
+                throw DeviceDiagnosticsTransferError.invalidIndex
+            }
         }
         return index
     }
@@ -159,7 +236,8 @@ final class DeviceDiagnosticsTransferManager {
     private func request(
         session: DeviceTransferSession,
         path: String,
-        method: String
+        method: String,
+        maximumBytes: Int
     ) async throws -> Data {
         let url = session.baseURL.appendingPathComponent(path)
         var request = URLRequest(url: url)
@@ -184,12 +262,26 @@ final class DeviceDiagnosticsTransferManager {
         configuration.timeoutIntervalForResource = 30
         let urlSession = URLSession(configuration: configuration)
         defer { urlSession.invalidateAndCancel() }
-        let (data, response) = try await urlSession.data(for: request)
+        let (bytes, response) = try await urlSession.bytes(for: request)
         guard let status = (response as? HTTPURLResponse)?.statusCode,
               200..<300 ~= status else {
             throw DeviceDiagnosticsTransferError.requestFailed(
                 (response as? HTTPURLResponse)?.statusCode ?? -1
             )
+        }
+        let expectedLength = response.expectedContentLength
+        guard expectedLength < 0 || expectedLength <= Int64(maximumBytes) else {
+            throw DeviceDiagnosticsTransferError.oversizedChunk
+        }
+        var data = Data()
+        if expectedLength > 0 {
+            data.reserveCapacity(Int(expectedLength))
+        }
+        for try await byte in bytes {
+            guard data.count < maximumBytes else {
+                throw DeviceDiagnosticsTransferError.oversizedChunk
+            }
+            data.append(byte)
         }
         return data
     }
@@ -198,13 +290,19 @@ final class DeviceDiagnosticsTransferManager {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func isValidJSONL(_ data: Data) -> Bool {
-        guard data.count <= 12 * 1024 * 1024 else { return false }
+    private static func validateJSONL(_ data: Data) -> JSONLValidation? {
+        guard data.count <= 256 * 1024 else { return nil }
+        let fractionalTimeFormatter = ISO8601DateFormatter()
+        fractionalTimeFormatter.formatOptions = [
+            .withInternetDateTime, .withFractionalSeconds,
+        ]
+        let secondTimeFormatter = ISO8601DateFormatter()
+        secondTimeFormatter.formatOptions = [.withInternetDateTime]
         var lines = data.split(
             separator: 0x0a,
             omittingEmptySubsequences: true
         )
-        guard !lines.isEmpty else { return false }
+        guard !lines.isEmpty else { return nil }
         if data.last != 0x0a,
            let last = lines.last,
            (try? JSONSerialization.jsonObject(with: Data(last))) == nil {
@@ -213,8 +311,9 @@ final class DeviceDiagnosticsTransferManager {
             // hard failure below.
             lines.removeLast()
         }
-        guard !lines.isEmpty else { return false }
+        guard !lines.isEmpty else { return nil }
         var previousSequence: UInt64?
+        var firstSequence: UInt64?
         for rawLine in lines {
             guard rawLine.count <= 8 * 1024,
                   let object = try? JSONSerialization.jsonObject(
@@ -225,6 +324,7 @@ final class DeviceDiagnosticsTransferManager {
                     "event", "wallTime", "uptimeMs", "processId",
                     "captureId", "fields",
                   ])),
+                  !(object["schema"] is Bool),
                   object["schema"] as? Int == 1,
                   object["source"] as? String == "firmware",
                   ["debug", "info", "warning", "error"].contains(
@@ -239,20 +339,50 @@ final class DeviceDiagnosticsTransferManager {
                   !eventName.isEmpty,
                   eventName.count <= 64,
                   let sequenceValue = object["sequence"] as? Int,
+                  !(object["sequence"] is Bool),
                   sequenceValue >= 0 else {
-                return false
+                return nil
+            }
+            if let wallTime = object["wallTime"] {
+                guard let value = wallTime as? String,
+                      fractionalTimeFormatter.date(from: value) != nil ||
+                        secondTimeFormatter.date(from: value) != nil else {
+                    return nil
+                }
+            }
+            if let uptime = object["uptimeMs"] {
+                guard !(uptime is Bool),
+                      let value = uptime as? Int,
+                      value >= 0 else { return nil }
+            }
+            for key in ["processId", "captureId"] {
+                if let identifier = object[key] {
+                    guard let value = identifier as? String,
+                          isCanonicalUUID(value) else { return nil }
+                }
             }
             if let fieldsValue = object["fields"] {
                 guard let fields = fieldsValue as? [String: Any],
-                      isPrivacySafe(fields) else { return false }
+                      isPrivacySafe(fields) else { return nil }
             }
             let sequence = UInt64(sequenceValue)
             if let previousSequence, sequence <= previousSequence {
-                return false
+                return nil
             }
+            if firstSequence == nil { firstSequence = sequence }
             previousSequence = sequence
         }
-        return true
+        guard let firstSequence, let previousSequence else { return nil }
+        return JSONLValidation(
+            firstSequence: firstSequence,
+            lastSequence: previousSequence
+        )
+    }
+
+    private static func isCanonicalUUID(_ value: String) -> Bool {
+        guard value.utf8.count == 36,
+              let uuid = UUID(uuidString: value) else { return false }
+        return uuid.uuidString.lowercased() == value.lowercased()
     }
 
     private static func isPrivacySafe(_ value: Any) -> Bool {
@@ -271,6 +401,7 @@ final class DeviceDiagnosticsTransferManager {
                       !(child is [String: Any]),
                       !(child is [Any]),
                       !forbidden.contains(where: { normalized.contains($0) }),
+                      isFirmwareFieldTypeValid(key: key, value: child),
                       isPrivacySafe(child) else { return false }
             }
             return true
@@ -285,5 +416,32 @@ final class DeviceDiagnosticsTransferManager {
                 string.utf8.count <= 256
         }
         return value is NSNumber || value is NSNull
+    }
+
+    private static func isFirmwareFieldTypeValid(key: String, value: Any) -> Bool {
+        let numberKeys: Set<String> = [
+            "accuracy", "activeStage", "ageMs", "alertMode", "bootSequence",
+            "bytes", "chunk", "completedStage", "consecutiveEarlyFailures",
+            "decisionSequence", "droppedCount", "eventCount", "firmwareBuild",
+            "firstMissingUptimeMs", "importedCount", "lastGapMs",
+            "lastMissingUptimeMs", "maximumGapMs", "messageBytes",
+            "profileVersion", "resetReason", "rideGeneration",
+            "runtimeBootSequence", "sampleCount", "sequence", "sourceHealthMask",
+            "storageErrorCount",
+        ]
+        let booleanKeys: Set<String> = [
+            "accuracyAvailable", "active", "autoPauseEnabled", "authorized",
+            "available", "background", "clockSynchronized", "diagnosticHold",
+            "fallback", "fixValid", "navigating", "pendingControl", "ready",
+            "rideDetectionArmed", "routeLoaded", "safeMode", "sessionPresent",
+            "simulation", "speedAvailable", "viewingMap", "workoutActive",
+        ]
+        if numberKeys.contains(key) {
+            return value is NSNumber && !(value is Bool)
+        }
+        if booleanKeys.contains(key) {
+            return value is Bool
+        }
+        return value is String
     }
 }

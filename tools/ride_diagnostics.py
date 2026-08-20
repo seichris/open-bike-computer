@@ -10,8 +10,8 @@ import re
 import sys
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 
@@ -60,6 +60,7 @@ ALLOWED_FIELD_KEYS = {
     "bootSequence",
     "bytes",
     "chunk",
+    "clockSynchronized",
     "code",
     "connectionState",
     "completedStage",
@@ -93,6 +94,7 @@ ALLOWED_FIELD_KEYS = {
     "rideGeneration",
     "rideDetectionArmed",
     "routeLoaded",
+    "runtimeBootSequence",
     "rssiBucket",
     "ready",
     "sampleCount",
@@ -117,7 +119,27 @@ ALLOWED_FIELD_KEYS = {
     "viewingMap",
     "workoutActive",
 }
-UUID_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
+FIRMWARE_NUMBER_FIELD_KEYS = {
+    "accuracy", "activeStage", "ageMs", "alertMode", "bootSequence",
+    "bytes", "chunk", "completedStage", "consecutiveEarlyFailures",
+    "decisionSequence", "droppedCount", "eventCount", "firmwareBuild",
+    "firstMissingUptimeMs", "importedCount", "lastGapMs",
+    "lastMissingUptimeMs", "maximumGapMs", "messageBytes",
+    "profileVersion", "resetReason", "rideGeneration",
+    "runtimeBootSequence", "sampleCount", "sequence", "sourceHealthMask",
+    "storageErrorCount",
+}
+FIRMWARE_BOOLEAN_FIELD_KEYS = {
+    "accuracyAvailable", "active", "autoPauseEnabled", "authorized",
+    "available", "background", "clockSynchronized", "diagnosticHold",
+    "fallback", "fixValid", "navigating", "pendingControl", "ready",
+    "rideDetectionArmed", "routeLoaded", "safeMode", "sessionPresent",
+    "simulation", "speedAvailable", "viewingMap", "workoutActive",
+}
+UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 FORBIDDEN_KEY_PARTS = (
     "latitude",
     "longitude",
@@ -148,6 +170,8 @@ def _fail(message: str) -> None:
 
 def _check_privacy(value: Any, path: str = "fields") -> None:
     if isinstance(value, dict):
+        if path == "fields" and len(value) > 32:
+            _fail(f"too many values at {path}")
         for key, child in value.items():
             if path == "fields" and key not in ALLOWED_FIELD_KEYS:
                 _fail(f"unknown field {path}.{key}")
@@ -158,7 +182,8 @@ def _check_privacy(value: Any, path: str = "fields") -> None:
                 _fail(f"forbidden field {path}.{key}")
             _check_privacy(child, f"{path}.{key}")
     elif isinstance(value, list):
-        if len(value) > 32:
+        limit = 1024 if path == "manifest.sourceStreams" else 32
+        if len(value) > limit:
             _fail(f"unbounded array at {path}")
         for index, child in enumerate(value):
             _check_privacy(child, f"{path}[{index}]")
@@ -166,6 +191,8 @@ def _check_privacy(value: Any, path: str = "fields") -> None:
         lower = value.lower()
         if "x-bikecomputer-transfer-token" in lower or "bearer " in lower:
             _fail(f"credential-like value at {path}")
+        if path.startswith("fields.") and len(value.encode("utf-8")) > 256:
+            _fail(f"unbounded string at {path}")
 
 
 def validate_event(record: Any, source_path: str = "event") -> dict[str, Any]:
@@ -178,25 +205,46 @@ def validate_event(record: Any, source_path: str = "event") -> dict[str, Any]:
         _fail(f"{source_path} missing {sorted(missing)}")
     if unknown:
         _fail(f"{source_path} has unknown keys {sorted(unknown)}")
-    if record["schema"] != SCHEMA:
+    if (
+        isinstance(record["schema"], bool)
+        or not isinstance(record["schema"], int)
+        or record["schema"] != SCHEMA
+    ):
         _fail(f"{source_path} has unsupported schema")
-    if record["source"] not in ALLOWED_SOURCES:
+    if not isinstance(record["source"], str) or record["source"] not in ALLOWED_SOURCES:
         _fail(f"{source_path} has unsupported source")
-    if not isinstance(record["sequence"], int) or record["sequence"] < 0:
+    if (
+        isinstance(record["sequence"], bool)
+        or not isinstance(record["sequence"], int)
+        or record["sequence"] < 0
+    ):
         _fail(f"{source_path}.sequence is invalid")
-    if record["level"] not in ALLOWED_LEVELS:
+    if not isinstance(record["level"], str) or record["level"] not in ALLOWED_LEVELS:
         _fail(f"{source_path}.level is invalid")
-    if record["category"] not in ALLOWED_CATEGORIES:
+    if (
+        not isinstance(record["category"], str)
+        or record["category"] not in ALLOWED_CATEGORIES
+    ):
         _fail(f"{source_path}.category is invalid")
     if not isinstance(record["event"], str) or not record["event"] or len(record["event"]) > 64:
         _fail(f"{source_path}.event is invalid")
     if "wallTime" in record:
+        if not isinstance(record["wallTime"], str):
+            _fail(f"{source_path}.wallTime is invalid")
         try:
-            datetime.fromisoformat(str(record["wallTime"]).replace("Z", "+00:00"))
+            parsed_wall_time = datetime.fromisoformat(
+                record["wallTime"].replace("Z", "+00:00")
+            )
         except ValueError as error:
             _fail(f"{source_path}.wallTime is invalid: {error}")
+        if parsed_wall_time.tzinfo is None:
+            _fail(f"{source_path}.wallTime is missing a timezone")
     for key in ("uptimeMs",):
-        if key in record and (not isinstance(record[key], int) or record[key] < 0):
+        if key in record and (
+            isinstance(record[key], bool)
+            or not isinstance(record[key], int)
+            or record[key] < 0
+        ):
             _fail(f"{source_path}.{key} is invalid")
     for key in ("processId", "captureId"):
         if key in record and (not isinstance(record[key], str) or not UUID_RE.match(record[key])):
@@ -204,10 +252,25 @@ def validate_event(record: Any, source_path: str = "event") -> dict[str, Any]:
     if "fields" in record and not isinstance(record["fields"], dict):
         _fail(f"{source_path}.fields is not an object")
     _check_privacy(record.get("fields", {}))
+    fields = record.get("fields", {})
+    if record["source"] == "ios":
+        for key, value in fields.items():
+            if not isinstance(value, str):
+                _fail(f"{source_path}.fields.{key} must be a string for ios")
+    elif record["source"] == "firmware":
+        for key, value in fields.items():
+            if key in FIRMWARE_NUMBER_FIELD_KEYS:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    _fail(f"{source_path}.fields.{key} must be numeric")
+            elif key in FIRMWARE_BOOLEAN_FIELD_KEYS:
+                if not isinstance(value, bool):
+                    _fail(f"{source_path}.fields.{key} must be boolean")
+            elif not isinstance(value, str):
+                _fail(f"{source_path}.fields.{key} must be a string")
     return record
 
 
-@dataclass(frozen=True)
+@dataclass
 class StreamResult:
     path: str
     events: tuple[dict[str, Any], ...]
@@ -228,7 +291,7 @@ def validate_jsonl(data: bytes, source_path: str, expected_source: str | None = 
         # object. Only classify the tail as recoverable when it is not JSON.
         try:
             json.loads(lines[-1])
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             truncated_tail = True
             lines = lines[:-1]
     for index, raw in enumerate(lines, 1):
@@ -236,7 +299,7 @@ def validate_jsonl(data: bytes, source_path: str, expected_source: str | None = 
             _fail(f"{source_path}:{index} exceeds line size limit")
         try:
             record = json.loads(raw)
-        except json.JSONDecodeError as error:
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
             _fail(f"{source_path}:{index} is invalid JSON: {error}")
         event = validate_event(record, f"{source_path}:{index}")
         if expected_source and event["source"] != expected_source:
@@ -251,17 +314,30 @@ def validate_jsonl(data: bytes, source_path: str, expected_source: str | None = 
 
 
 def _safe_member(name: str) -> bool:
-    path = Path(name)
-    return bool(name) and not path.is_absolute() and ".." not in path.parts and "\\" not in name
+    path = PurePosixPath(name)
+    components = name.split("/")
+    return (
+        bool(name)
+        and not path.is_absolute()
+        and "\\" not in name
+        and all(component not in {"", ".", ".."} for component in components)
+    )
 
 
 def _read_manifest(archive: zipfile.ZipFile) -> dict[str, Any]:
     try:
         manifest = json.loads(archive.read("manifest.json"))
-    except (KeyError, json.JSONDecodeError) as error:
+    except (KeyError, json.JSONDecodeError, UnicodeDecodeError) as error:
         _fail(f"manifest.json is invalid: {error}")
     if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
         _fail("manifest schema is unsupported")
+    source_streams = manifest.get("sourceStreams")
+    if (
+        not isinstance(source_streams, list)
+        or any(not isinstance(path, str) or not _safe_member(path) for path in source_streams)
+        or len(source_streams) != len(set(source_streams))
+    ):
+        _fail("manifest sourceStreams is invalid")
     _check_privacy(manifest, path="manifest")
     return manifest
 
@@ -328,11 +404,93 @@ def validate_bundle(bundle: Path) -> tuple[dict[str, Any], tuple[StreamResult, .
             missing = sorted(expected_checksum_names - checksum_names)
             extra = sorted(checksum_names - expected_checksum_names)
             _fail(f"checksum coverage mismatch missing={missing} extra={extra}")
+        source_streams = manifest["sourceStreams"]
+        actual_streams = [stream.path for stream in streams]
+        if set(source_streams) != set(actual_streams):
+            missing = sorted(set(actual_streams) - set(source_streams))
+            extra = sorted(set(source_streams) - set(actual_streams))
+            _fail(f"manifest stream coverage mismatch missing={missing} extra={extra}")
+    _validate_stream_boundaries(streams)
     return manifest, tuple(streams)
 
 
+def _validate_stream_boundaries(streams: list[StreamResult]) -> None:
+    groups: dict[str, list[StreamResult]] = {}
+    for stream in streams:
+        if not stream.events:
+            continue
+        parent = str(PurePosixPath(stream.path).parent)
+        groups.setdefault(parent, []).append(stream)
+    chunk_pattern = re.compile(r"events-(\d+)")
+    for parent, members in groups.items():
+        members.sort(
+            key=lambda stream: (
+                int(match.group(1))
+                if (match := chunk_pattern.search(PurePosixPath(stream.path).name))
+                else 2**63 - 1,
+                stream.path,
+            )
+        )
+        previous: int | None = None
+        seen_chunks: set[int] = set()
+        for stream in members:
+            match = chunk_pattern.search(PurePosixPath(stream.path).name)
+            if match:
+                chunk = int(match.group(1))
+                if chunk in seen_chunks:
+                    _fail(f"{stream.path} duplicates chunk {chunk} in {parent}")
+                seen_chunks.add(chunk)
+            first = int(stream.events[0]["sequence"])
+            if previous is not None and first <= previous:
+                _fail(
+                    f"{stream.path} sequence overlaps the previous chunk in {parent}"
+                )
+            if previous is not None and first > previous + 1:
+                stream.dropped_sequences += first - previous - 1
+            previous = int(stream.events[-1]["sequence"])
+
+
+def _correlate_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    anchors: dict[str, list[tuple[int, datetime]]] = {}
+    for event in events:
+        if event.get("source") != "firmware" or event.get("event") != "clock_anchor":
+            continue
+        timestamp = _event_timestamp(event)
+        uptime = event.get("uptimeMs")
+        boot = str(event.get("fields", {}).get("bootSequence", ""))
+        if timestamp is not None and isinstance(uptime, int) and boot:
+            anchors.setdefault(boot, []).append((uptime, timestamp))
+    for values in anchors.values():
+        values.sort()
+
+    correlated: list[dict[str, Any]] = []
+    for raw in events:
+        event = dict(raw)
+        timestamp = _event_timestamp(raw)
+        uncertainty_ms = 0
+        if timestamp is None and raw.get("source") == "firmware":
+            boot = str(raw.get("fields", {}).get("bootSequence", ""))
+            uptime = raw.get("uptimeMs")
+            candidates = anchors.get(boot, [])
+            if isinstance(uptime, int) and candidates:
+                anchor_uptime, anchor_time = min(
+                    candidates, key=lambda item: abs(item[0] - uptime)
+                )
+                timestamp = anchor_time + timedelta(milliseconds=uptime - anchor_uptime)
+                # RTC synchronization and one-second capture cadence bound the
+                # inferred pre-anchor placement; raw evidence remains unchanged.
+                uncertainty_ms = 1_000
+        if timestamp is not None:
+            event["correlatedWallTime"] = (
+                timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            )
+            event["clockUncertaintyMs"] = uncertainty_ms
+        correlated.append(event)
+    return correlated
+
+
 def _event_key(event: dict[str, Any]) -> tuple[int, str, int]:
-    wall = event.get("wallTime")
+    wall = event.get("correlatedWallTime") or event.get("wallTime")
     if wall:
         try:
             timestamp = int(datetime.fromisoformat(str(wall).replace("Z", "+00:00")).timestamp() * 1000)
@@ -344,7 +502,7 @@ def _event_key(event: dict[str, Any]) -> tuple[int, str, int]:
 
 
 def _event_timestamp(event: dict[str, Any]) -> datetime | None:
-    wall = event.get("wallTime")
+    wall = event.get("correlatedWallTime") or event.get("wallTime")
     if not wall:
         return None
     try:
@@ -378,7 +536,9 @@ def summarize(
     manifest, streams = validate_bundle(bundle)
     output.mkdir(parents=True, exist_ok=True)
     _extract_raw_entries(bundle, output / "raw")
-    events = [event for stream in streams for event in stream.events]
+    events = _correlate_events(
+        [event for stream in streams for event in stream.events]
+    )
     if category:
         events = [event for event in events if event["category"] == category]
     if level:
@@ -424,6 +584,12 @@ def summarize(
     (output / "timeline.jsonl").write_text("".join(json.dumps(event, sort_keys=True) + "\n" for event in events))
     summary = {
         "eventCount": len(events),
+        "correlatedEventCount": sum(
+            1 for event in events if event.get("correlatedWallTime")
+        ),
+        "inferredClockEventCount": sum(
+            1 for event in events if event.get("clockUncertaintyMs", 0) > 0
+        ),
         "streams": [
             {
                 "path": stream.path,

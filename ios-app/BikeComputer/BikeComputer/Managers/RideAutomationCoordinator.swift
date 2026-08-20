@@ -163,11 +163,15 @@ final class RideAutomationCoordinator: ObservableObject {
     }
 
     private func handle(_ frame: RideAutomationFrame) {
-        diagnosticsRecorder?.record(
-            category: .rideAutomation,
-            event: "frame_received",
-            fields: diagnosticFields(for: frame)
-        )
+        if diagnosticsRecorder?.isDetailedTraceEnabled == true {
+            diagnosticsRecorder?.record(
+                level: .debug,
+                category: .rideAutomation,
+                event: "frame_received",
+                fields: diagnosticFields(for: frame),
+                captureId: nil
+            )
+        }
         guard let deviceID = bleManager.connectedDeviceID else { return }
         if frame.kind == .decision,
            let pending = pendingDecision,
@@ -615,13 +619,20 @@ final class RideAutomationCoordinator: ObservableObject {
                 : nil
         )
         let sent = bleManager.sendRideAutomationFrame(response)
-        diagnosticsRecorder?.record(
-            level: sent ? .debug : .warning,
-            category: .rideAutomation,
-            event: sent ? "frame_sent" : "frame_send_failed",
-            fields: diagnosticFields(for: response),
-            captureId: nil
-        )
+        if !sent || diagnosticsRecorder?.isDetailedTraceEnabled == true {
+            diagnosticsRecorder?.record(
+                level: sent ? .debug : .warning,
+                category: .rideAutomation,
+                event: sent ? "frame_sent" : "frame_send_failed",
+                fields: sent
+                    ? diagnosticFields(for: response)
+                    : [
+                        "kind": String(response.kind.rawValue),
+                        "result": String(response.result.rawValue),
+                    ],
+                captureId: nil
+            )
+        }
         return sent
     }
 

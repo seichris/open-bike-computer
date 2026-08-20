@@ -127,7 +127,7 @@ private:
   // Diagnostics must not treat this as removable-SD availability, but a
   // failed SD retry must restore it so the rest of the application keeps the
   // same fallback behavior as the non-diagnostics firmware.
-  bool internalFallbackMounted = false;
+  std::atomic<bool> internalFallbackMounted{false};
   sdmmc_card_t *card;
   SemaphoreHandle_t mountMutex = nullptr;
 
@@ -140,6 +140,9 @@ public:
   // turns into an unbounded internal log sink.
   bool ensureSdMounted(bool allowInternalFallback = true);
   void markSdUnavailable();
+  bool hasInternalFallbackMounted() const;
+  bool canRetryRemovableSd() const;
+  uint64_t removableSdFreeBytes() const;
   esp_err_t initSPIFFS();
   SDCardInfo getSDCardInfo();
   bool getSdLoaded() const;
@@ -154,6 +157,7 @@ public:
   size_t read(FILE *file, char *buffer, size_t size);
   size_t write(FILE *file, const uint8_t *buffer, size_t size);
   size_t write(FILE *file, const char *buffer, size_t size);
+  int flush(FILE *file);
   int seek(FILE *file, long offset, int whence);
   int print(FILE *file, const char *str);
   int println(FILE *file, const char *str);

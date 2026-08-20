@@ -66,7 +66,8 @@ struct RemoteDebugLANCredentials: Codable, Equatable {
     static let maximumSSIDBytes = 32
     static let minimumPasswordBytes = 8
     static let maximumPasswordBytes = 63
-    static let commandPrefix = "enter|debug|lan1|"
+    static let debugCommandPrefix = "enter|debug|lan1|"
+    static let diagnosticsCommandPrefix = "enter|diagnostics|lan1|"
 
     let ssid: String
     let password: String
@@ -87,16 +88,21 @@ struct RemoteDebugLANCredentials: Codable, Equatable {
         self.password = password
     }
 
-    var commandPayload: Data {
+    func commandPayload(for mode: DeviceTransferSession.Mode) -> Data {
         let ssidBytes = Data(ssid.utf8)
         let passwordBytes = Data(password.utf8)
-        var payload = Data(Self.commandPrefix.utf8)
+        let prefix = mode == .diagnostics
+            ? Self.diagnosticsCommandPrefix
+            : Self.debugCommandPrefix
+        var payload = Data(prefix.utf8)
         payload.append(UInt8(ssidBytes.count))
         payload.append(UInt8(passwordBytes.count))
         payload.append(ssidBytes)
         payload.append(passwordBytes)
         return payload
     }
+
+    var commandPayload: Data { commandPayload(for: .debug) }
 }
 
 struct RemoteDebugLANCredentialStore {
@@ -226,6 +232,13 @@ enum DeviceTransferHandshakePolicy {
         attempt > 0 && attempt % 4 == 0
     }
 
+    static func diagnosticsAttemptCount(lanFirst: Bool) -> Int {
+        // Diagnostics uses the same station-association worker as remote
+        // debug. Give LAN-first startup enough time to reach either the LAN
+        // listener or the protected-hotspot fallback.
+        lanFirst ? remoteDebugAttemptCount : attemptCount
+    }
+
     static func shouldRequestLegacyMapEnter(attempt: Int) -> Bool {
         // A generic DTRN-aware device responds to the enter command itself.
         // Give that application-level acknowledgement two seconds before
@@ -291,19 +304,31 @@ enum DeviceNetworkJoinPolicy {
         "\(message) [\(domain) \(code)]"
     }
 
+    static func makeHotspotConfiguration<Configuration>(
+        ssid: String,
+        passphrase: String?,
+        open: (String) -> Configuration,
+        secured: (String, String) -> Configuration
+    ) -> Configuration {
+        if let passphrase, !passphrase.isEmpty {
+            return secured(ssid, passphrase)
+        }
+        return open(ssid)
+    }
+
 #if os(iOS)
     static func hotspotConfiguration(
         ssid: String,
         passphrase: String?
     ) -> NEHotspotConfiguration {
-        if let passphrase, !passphrase.isEmpty {
-            return NEHotspotConfiguration(
-                ssid: ssid,
-                passphrase: passphrase,
-                isWEP: false
-            )
-        }
-        return NEHotspotConfiguration(ssid: ssid)
+        makeHotspotConfiguration(
+            ssid: ssid,
+            passphrase: passphrase,
+            open: { NEHotspotConfiguration(ssid: $0) },
+            secured: {
+                NEHotspotConfiguration(ssid: $0, passphrase: $1, isWEP: false)
+            }
+        )
     }
 #endif
 }
@@ -510,54 +535,66 @@ final class DeviceTransferManager {
         guard bleManager.supportsRideDiagnostics else {
             throw RemoteDeviceDebugError.unsupportedFirmware
         }
-        let initialRevision = bleManager.deviceTransferStatusRevision
         var enterWasQueued = false
-        guard bleManager.requestDeviceTransferMode(.diagnostics) else {
-            throw RemoteDeviceDebugError.transferCommandNotSent
-        }
-        enterWasQueued = true
+        let lanCredentials = RemoteDebugLANCredentialStore().load()
         do {
-            for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
-                if bleManager.deviceTransferStatusRevision != initialRevision,
-                   bleManager.deviceTransferMode == DeviceTransferSession.Mode.diagnostics.rawValue,
-                   let baseURL = bleManager.deviceTransferBaseURL,
-                   let token = bleManager.deviceTransferSessionToken,
-                   !token.isEmpty {
-                    let session = DeviceTransferSession(
-                        mode: .diagnostics,
-                        baseURL: baseURL,
-                        accessPointSSID: bleManager.deviceTransferAccessPointSSID,
-                        accessPointPassphrase: bleManager.deviceTransferAccessPointPassphrase,
-                        sessionToken: token,
-                        networkTransport: bleManager.deviceTransferNetworkTransport,
-                        networkSSID: bleManager.deviceTransferNetworkSSID,
-                        hotspotFallback: bleManager.deviceTransferUsedHotspotFallback,
-                        hotspotFallbackReason: bleManager.deviceTransferHotspotFallbackReason
-                    )
-                    try await joinDeviceNetworkIfNeeded(
-                        session: session,
-                        statusPath: "device-diagnostics/v1/index",
-                        sessionToken: session.sessionToken,
-                        status: status
-                    )
-                    record(
-                        mode: .diagnostics,
-                        event: "transfer_ready",
-                        fields: [
-                            "networkTransport": session.networkTransport ?? "unknown",
-                            "fallback": String(session.hotspotFallback),
-                        ]
-                    )
-                    return session
-                }
-                if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
-                    _ = bleManager.requestDeviceTransferStatus()
-                }
-                try await Task.sleep(
-                    nanoseconds: DeviceTransferHandshakePolicy.retryIntervalNanoseconds
-                )
+            let initialRevision = bleManager.deviceTransferStatusRevision
+            guard bleManager.requestDeviceTransferMode(
+                .diagnostics,
+                remoteDebugLANCredentials: lanCredentials
+            ) else {
+                throw RemoteDeviceDebugError.transferCommandNotSent
             }
-            throw RemoteDeviceDebugError.missingSession
+            enterWasQueued = true
+            let attemptCount = DeviceTransferHandshakePolicy
+                .diagnosticsAttemptCount(lanFirst: lanCredentials != nil)
+            var session = try await waitForDiagnosticsSession(
+                bleManager: bleManager,
+                afterRevision: initialRevision,
+                attemptCount: attemptCount
+            )
+            if session.networkTransport == "lan" {
+                status("checking local Wi-Fi")
+                let reachable = try await waitForTransferServer(
+                    baseURL: session.baseURL,
+                    statusPath: "device-diagnostics/v1/status",
+                    sessionToken: session.sessionToken,
+                    timeout: 4
+                )
+                if !reachable {
+                    status("switching to device hotspot")
+                    try await stopDiagnostics(bleManager: bleManager)
+                    enterWasQueued = false
+                    let fallbackRevision = bleManager.deviceTransferStatusRevision
+                    guard bleManager.requestDeviceTransferMode(
+                        .diagnostics,
+                        remoteDebugHotspotFallbackReason: .endpointUnreachable
+                    ) else {
+                        throw RemoteDeviceDebugError.transferCommandNotSent
+                    }
+                    enterWasQueued = true
+                    session = try await waitForDiagnosticsSession(
+                        bleManager: bleManager,
+                        afterRevision: fallbackRevision,
+                        attemptCount: DeviceTransferHandshakePolicy.attemptCount
+                    )
+                }
+            }
+            try await joinDeviceNetworkIfNeeded(
+                session: session,
+                statusPath: "device-diagnostics/v1/status",
+                sessionToken: session.sessionToken,
+                status: status
+            )
+            record(
+                mode: .diagnostics,
+                event: "transfer_ready",
+                fields: [
+                    "networkTransport": session.networkTransport ?? "unknown",
+                    "fallback": String(session.hotspotFallback),
+                ]
+            )
+            return session
         } catch {
             if enterWasQueued {
                 await exitDiagnostics(bleManager: bleManager)
@@ -566,9 +603,72 @@ final class DeviceTransferManager {
         }
     }
 
-    func exitDiagnostics(bleManager: BLEManager) async {
-        _ = bleManager.requestDeviceTransferExit()
+    private func waitForDiagnosticsSession(
+        bleManager: BLEManager,
+        afterRevision initialRevision: UInt64,
+        attemptCount: Int
+    ) async throws -> DeviceTransferSession {
+        for attempt in 0..<attemptCount {
+            if bleManager.deviceTransferStatusRevision != initialRevision,
+               bleManager.deviceTransferMode == DeviceTransferSession.Mode.diagnostics.rawValue,
+               let baseURL = bleManager.deviceTransferBaseURL,
+               let token = bleManager.deviceTransferSessionToken,
+               !token.isEmpty {
+                return DeviceTransferSession(
+                    mode: .diagnostics,
+                    baseURL: baseURL,
+                    accessPointSSID: bleManager.deviceTransferAccessPointSSID,
+                    accessPointPassphrase: bleManager.deviceTransferAccessPointPassphrase,
+                    sessionToken: token,
+                    networkTransport: bleManager.deviceTransferNetworkTransport,
+                    networkSSID: bleManager.deviceTransferNetworkSSID,
+                    hotspotFallback: bleManager.deviceTransferUsedHotspotFallback,
+                    hotspotFallbackReason: bleManager.deviceTransferHotspotFallbackReason
+                )
+            }
+            if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
+                _ = bleManager.requestDeviceTransferStatus()
+            }
+            try await Task.sleep(
+                nanoseconds: DeviceTransferHandshakePolicy.retryIntervalNanoseconds
+            )
+        }
+        if bleManager.deviceTransferStatusRevision != initialRevision,
+           let code = bleManager.deviceTransferLastErrorCode,
+           !code.isEmpty {
+            let message = bleManager.deviceTransferLastErrorMessage
+                .flatMap { $0.isEmpty ? nil : $0 } ?? code
+            throw RemoteDeviceDebugError.rejected(message)
+        }
+        throw RemoteDeviceDebugError.missingSession
+    }
+
+    private func stopDiagnostics(bleManager: BLEManager) async throws {
+        let initialRevision = bleManager.deviceTransferStatusRevision
+        guard bleManager.requestDeviceTransferExit() else {
+            throw RemoteDeviceDebugError.transferCommandNotSent
+        }
         _ = await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2)
+        for attempt in 0..<DeviceTransferHandshakePolicy.remoteDebugExitAttemptCount {
+            if bleManager.deviceTransferStatusRevision != initialRevision,
+               bleManager.deviceTransferMode.isEmpty,
+               bleManager.deviceTransferSessionToken?.isEmpty != false {
+                return
+            }
+            if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
+                _ = bleManager.requestDeviceTransferStatus()
+            }
+            try await Task.sleep(
+                nanoseconds: DeviceTransferHandshakePolicy.retryIntervalNanoseconds
+            )
+        }
+        throw RemoteDeviceDebugError.rejected(
+            "The device did not confirm that the diagnostics session ended."
+        )
+    }
+
+    func exitDiagnostics(bleManager: BLEManager) async {
+        try? await stopDiagnostics(bleManager: bleManager)
         removeJoinedAccessPointIfNeeded()
         record(mode: .diagnostics, event: "transfer_exited")
     }

@@ -14,6 +14,7 @@ constexpr const char *kAllowedFieldKeys[] = {
     "authorization",            "authorized",               "available",
     "background",               "bootSequence",             "bytes",
     "chunk",                    "code",                     "completedStage",
+    "clockSynchronized",
     "connectionState",          "consecutiveEarlyFailures", "decisionSequence",
     "diagnosticHold",           "domain",                   "droppedCount",
     "durationLimit",            "eventCount",                "expectedState",
@@ -27,6 +28,7 @@ constexpr const char *kAllowedFieldKeys[] = {
     "ready",                    "reason",                    "resetReason",
     "result",                   "rideDetectionArmed",         "rideGeneration",
     "routeLoaded",              "rssiBucket",                "safeMode",
+    "runtimeBootSequence",
     "sampleCount",              "scope",                      "sequence",
     "sessionPresent",           "sha256Prefix",               "simulation",
     "sourceHealthMask",         "speedAvailable",              "startMode",
@@ -47,6 +49,47 @@ inline bool allowedFieldKey(const char *key, std::size_t length) {
       return true;
   }
   return false;
+}
+
+enum class FieldValueKind : uint8_t { String, Number, Boolean, Null };
+
+inline bool fieldKeyIn(const char *key, const char *const *keys,
+                       std::size_t count) {
+  for (std::size_t index = 0; index < count; ++index) {
+    if (std::strcmp(key, keys[index]) == 0)
+      return true;
+  }
+  return false;
+}
+
+inline bool allowedFieldValueKind(const char *key, FieldValueKind kind) {
+  static constexpr const char *kNumberKeys[] = {
+      "accuracy",          "activeStage",       "ageMs",
+      "alertMode",        "bootSequence",      "bytes",
+      "chunk",            "completedStage",    "consecutiveEarlyFailures",
+      "decisionSequence", "droppedCount",      "eventCount",
+      "firmwareBuild",    "firstMissingUptimeMs", "importedCount",
+      "lastGapMs",        "lastMissingUptimeMs", "maximumGapMs",
+      "messageBytes",     "profileVersion",    "resetReason",
+      "rideGeneration",   "runtimeBootSequence", "sampleCount",
+      "sequence",         "sourceHealthMask",  "storageErrorCount",
+  };
+  static constexpr const char *kBooleanKeys[] = {
+      "accuracyAvailable", "active",           "autoPauseEnabled",
+      "authorized",       "available",        "background",
+      "clockSynchronized", "diagnosticHold",   "fallback",
+      "fixValid",         "navigating",       "pendingControl",
+      "ready",            "rideDetectionArmed", "routeLoaded",
+      "safeMode",         "sessionPresent",   "simulation",
+      "speedAvailable",   "viewingMap",       "workoutActive",
+  };
+  if (fieldKeyIn(key, kNumberKeys,
+                 sizeof(kNumberKeys) / sizeof(kNumberKeys[0])))
+    return kind == FieldValueKind::Number;
+  if (fieldKeyIn(key, kBooleanKeys,
+                 sizeof(kBooleanKeys) / sizeof(kBooleanKeys[0])))
+    return kind == FieldValueKind::Boolean;
+  return kind == FieldValueKind::String;
 }
 
 inline void skipJsonWhitespace(const char *&cursor, const char *end) {
@@ -187,21 +230,30 @@ inline bool validateFieldsJson(const char *fieldsJson,
     skipJsonWhitespace(cursor, end);
     if (cursor >= end)
       return false;
+    FieldValueKind valueKind = FieldValueKind::Null;
     if (*cursor == '"') {
       if (!consumeJsonString(cursor, end))
         return false;
+      valueKind = FieldValueKind::String;
     } else if (*cursor == 't') {
       if (!consumeJsonLiteral(cursor, end, "true"))
         return false;
+      valueKind = FieldValueKind::Boolean;
     } else if (*cursor == 'f') {
       if (!consumeJsonLiteral(cursor, end, "false"))
         return false;
+      valueKind = FieldValueKind::Boolean;
     } else if (*cursor == 'n') {
       if (!consumeJsonLiteral(cursor, end, "null"))
         return false;
+      valueKind = FieldValueKind::Null;
     } else if (!consumeJsonNumber(cursor, end)) {
       return false;
+    } else {
+      valueKind = FieldValueKind::Number;
     }
+    if (!allowedFieldValueKind(key, valueKind))
+      return false;
     skipJsonWhitespace(cursor, end);
     if (cursor >= end)
       return false;
@@ -215,9 +267,12 @@ inline bool validateFieldsJson(const char *fieldsJson,
 }
 
 constexpr uint32_t kFaultCapsuleMagic = 0x52444350; // "RDCP"
+constexpr uint16_t kFaultCapsuleSchema = 1;
 
 struct FaultCapsuleState {
   uint32_t magic;
+  uint16_t schema;
+  uint16_t size;
   uint32_t bootSequence;
   uint32_t firstMissingUptimeMs;
   uint32_t lastMissingUptimeMs;
@@ -229,11 +284,41 @@ struct FaultCapsuleState {
   uint16_t completedStage;
   char lastCriticalCategory[24];
   char lastCriticalEvent[48];
+  uint32_t checksum;
 };
 
+inline uint32_t faultCapsuleChecksum(const FaultCapsuleState &capsule) {
+  const auto *bytes = reinterpret_cast<const uint8_t *>(&capsule);
+  uint32_t checksum = 2166136261U;
+  for (std::size_t index = 0; index < offsetof(FaultCapsuleState, checksum);
+       ++index) {
+    checksum ^= bytes[index];
+    checksum *= 16777619U;
+  }
+  return checksum;
+}
+
+inline void sealFaultCapsule(FaultCapsuleState &capsule) {
+  capsule.magic = kFaultCapsuleMagic;
+  capsule.schema = kFaultCapsuleSchema;
+  capsule.size = sizeof(FaultCapsuleState);
+  capsule.checksum = faultCapsuleChecksum(capsule);
+}
+
+inline bool validFaultCapsuleEnvelope(const FaultCapsuleState &capsule) {
+  return capsule.magic == kFaultCapsuleMagic &&
+         capsule.schema == kFaultCapsuleSchema &&
+         capsule.size == sizeof(FaultCapsuleState) &&
+         capsule.bootSequence != 0 &&
+         std::memchr(capsule.lastCriticalCategory, '\0',
+                     sizeof(capsule.lastCriticalCategory)) != nullptr &&
+         std::memchr(capsule.lastCriticalEvent, '\0',
+                     sizeof(capsule.lastCriticalEvent)) != nullptr &&
+         capsule.checksum == faultCapsuleChecksum(capsule);
+}
+
 inline bool validFaultCapsule(const FaultCapsuleState &capsule) {
-  return capsule.magic == kFaultCapsuleMagic && capsule.bootSequence != 0 &&
-         capsule.eventCount != 0;
+  return validFaultCapsuleEnvelope(capsule) && capsule.eventCount != 0;
 }
 
 inline bool formatFaultCapsuleFields(const FaultCapsuleState &capsule,
@@ -242,12 +327,12 @@ inline bool formatFaultCapsuleFields(const FaultCapsuleState &capsule,
     return false;
   const int length = std::snprintf(
       out, capacity,
-      "{\"bootSequence\":%lu,\"firstMissingUptimeMs\":%lu,"
+      "{\"runtimeBootSequence\":%lu,\"firstMissingUptimeMs\":%lu,"
       "\"lastMissingUptimeMs\":%lu,\"eventCount\":%lu,"
       "\"droppedCount\":%lu,\"storageErrorCount\":%lu,"
       "\"resetReason\":%lu,\"activeStage\":%u,"
-      "\"completedStage\":%u,\"lastCriticalCategory\":\"%s\","
-      "\"lastCriticalEvent\":\"%s\"}",
+      "\"completedStage\":%u,\"lastCriticalCategory\":\"%.*s\","
+      "\"lastCriticalEvent\":\"%.*s\"}",
       static_cast<unsigned long>(capsule.bootSequence),
       static_cast<unsigned long>(capsule.firstMissingUptimeMs),
       static_cast<unsigned long>(capsule.lastMissingUptimeMs),
@@ -257,8 +342,10 @@ inline bool formatFaultCapsuleFields(const FaultCapsuleState &capsule,
       static_cast<unsigned long>(capsule.resetReason),
       static_cast<unsigned>(capsule.activeStage),
       static_cast<unsigned>(capsule.completedStage),
+      static_cast<int>(sizeof(capsule.lastCriticalCategory) - 1),
       capsule.lastCriticalCategory[0] == '\0' ? "unknown"
                                               : capsule.lastCriticalCategory,
+      static_cast<int>(sizeof(capsule.lastCriticalEvent) - 1),
       capsule.lastCriticalEvent[0] == '\0' ? "storage_unavailable"
                                            : capsule.lastCriticalEvent);
   return length > 0 && static_cast<std::size_t>(length) < capacity;

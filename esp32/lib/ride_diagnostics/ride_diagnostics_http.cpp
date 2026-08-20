@@ -13,6 +13,7 @@
 #include <cstring>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 extern Storage storage;
@@ -21,8 +22,8 @@ namespace ride_diagnostics {
 namespace {
 
 constexpr const char *kPrefix = "/device-diagnostics/v1/";
-constexpr std::size_t kMaximumChunks = 128;
-constexpr std::size_t kMaximumIndexBytes = 24 * 1024;
+constexpr std::size_t kMaximumChunks = 256;
+constexpr std::size_t kMaximumIndexBytes = 64 * 1024;
 
 struct Chunk {
   uint32_t boot = 0;
@@ -31,6 +32,11 @@ struct Chunk {
   std::string path;
   std::string sha256;
 };
+
+bool chunkOlder(const Chunk &left, const Chunk &right) {
+  return std::tie(left.boot, left.number) <
+         std::tie(right.boot, right.number);
+}
 
 bool parseUnsigned(const std::string &value, uint32_t &out) {
   if (value.empty() || value.size() > 10)
@@ -108,6 +114,7 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes) {
 
 std::vector<Chunk> listChunks() {
   std::vector<Chunk> chunks;
+  chunks.reserve(kMaximumChunks);
   DIR *boots = opendir("/sdcard/BICINO/DIAGNOSTICS/v1/boots");
   if (boots == nullptr)
     return chunks;
@@ -130,26 +137,42 @@ std::vector<Chunk> listChunks() {
       const std::string number = name.substr(7, name.size() - 7 - 6);
       uint32_t chunkNumber = 0;
       if (!parseUnsigned(number, chunkNumber) ||
-          !isClosedChunk(boot, chunkNumber) || chunks.size() >= kMaximumChunks)
+          !isClosedChunk(boot, chunkNumber))
         continue;
       char path[220] = {};
       snprintf(path, sizeof(path), "%s/%s", directory, name.c_str());
-      uint32_t bytes = 0;
-      std::string digest;
-      if (!sha256File(path, digest, bytes))
+      struct stat metadata = {};
+      if (::stat(path, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
+          metadata.st_size <= 0 ||
+          static_cast<uint64_t>(metadata.st_size) > kChunkBytes) {
         continue;
-      chunks.push_back({boot, chunkNumber, bytes, path, digest});
+      }
+      Chunk candidate = {boot, chunkNumber,
+                         static_cast<uint32_t>(metadata.st_size), path, {}};
+      if (chunks.size() < kMaximumChunks) {
+        chunks.push_back(std::move(candidate));
+      } else {
+        auto oldest = std::min_element(chunks.begin(), chunks.end(), chunkOlder);
+        if (oldest != chunks.end() && chunkOlder(*oldest, candidate))
+          *oldest = std::move(candidate);
+      }
     }
     closedir(dir);
-    if (chunks.size() >= kMaximumChunks)
-      break;
   }
   closedir(boots);
-  std::sort(chunks.begin(), chunks.end(),
-            [](const Chunk &left, const Chunk &right) {
-              return std::tie(left.boot, left.number) <
-                     std::tie(right.boot, right.number);
-            });
+  std::sort(chunks.begin(), chunks.end(), chunkOlder);
+  for (auto chunk = chunks.begin(); chunk != chunks.end();) {
+    uint32_t bytes = 0;
+    std::string digest;
+    if (!sha256File(chunk->path.c_str(), digest, bytes) || bytes == 0 ||
+        bytes > kChunkBytes) {
+      chunk = chunks.erase(chunk);
+      continue;
+    }
+    chunk->bytes = bytes;
+    chunk->sha256 = std::move(digest);
+    ++chunk;
+  }
   return chunks;
 }
 
@@ -183,6 +206,27 @@ bool sendFile(WiFiClient &client, const Chunk &chunk) {
   return true;
 }
 
+bool resolveClosedChunk(uint32_t boot, uint32_t number, Chunk &chunk) {
+  if (!isClosedChunk(boot, number))
+    return false;
+  char path[220] = {};
+  snprintf(path, sizeof(path),
+           "/sdcard/BICINO/DIAGNOSTICS/v1/boots/%lu/events-%06lu.jsonl",
+           static_cast<unsigned long>(boot),
+           static_cast<unsigned long>(number));
+  struct stat metadata = {};
+  if (::stat(path, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
+      metadata.st_size <= 0 ||
+      static_cast<uint64_t>(metadata.st_size) > kChunkBytes) {
+    return false;
+  }
+  chunk.boot = boot;
+  chunk.number = number;
+  chunk.bytes = static_cast<uint32_t>(metadata.st_size);
+  chunk.path = path;
+  return true;
+}
+
 } // namespace
 
 RideDiagnosticsHttp::RideDiagnosticsHttp(device_transfer::HttpTransferServer *server)
@@ -200,15 +244,27 @@ bool RideDiagnosticsHttp::handleRequest(
                                    "diagnostics session is not authorized");
     return true;
   }
+  if (request.path == std::string(kPrefix) + "status" &&
+      request.method == "GET") {
+    const Stats snapshot = stats();
+    const std::string body =
+        "{\"schema\":1,\"ready\":true,\"bootSequence\":" +
+        std::to_string(currentBootSequence()) +
+        ",\"activeChunk\":" + std::to_string(currentActiveChunk()) +
+        ",\"storageAvailable\":" +
+        (snapshot.storageAvailable ? "true" : "false") + "}";
+    return sendBody(client, body, "application/json");
+  }
   if (request.path == std::string(kPrefix) + "index" && request.method == "GET") {
     const std::vector<Chunk> chunks = listChunks();
+    const Stats snapshot = stats();
     std::string body = "{\"schema\":1,\"source\":\"firmware\",\"bootSequence\":" +
                        std::to_string(currentBootSequence()) +
                        ",\"activeChunk\":" + std::to_string(currentActiveChunk()) +
-                       ",\"stats\":{\"enqueued\":" + std::to_string(stats().enqueued) +
-                       ",\"written\":" + std::to_string(stats().written) +
-                       ",\"dropped\":" + std::to_string(stats().dropped) +
-                       ",\"storageErrors\":" + std::to_string(stats().storageErrors) +
+                       ",\"stats\":{\"enqueued\":" + std::to_string(snapshot.enqueued) +
+                       ",\"written\":" + std::to_string(snapshot.written) +
+                       ",\"dropped\":" + std::to_string(snapshot.dropped) +
+                       ",\"storageErrors\":" + std::to_string(snapshot.storageErrors) +
                        "},\"chunks\":[";
     for (std::size_t index = 0; index < chunks.size(); ++index) {
       if (index != 0)
@@ -240,15 +296,11 @@ bool RideDiagnosticsHttp::handleRequest(
         !isClosedChunk(boot, number))
       return device_transfer::sendHttpError(client, 404, "chunk_unavailable",
                                             "diagnostic chunk is unavailable");
-    const std::vector<Chunk> chunks = listChunks();
-    const auto found = std::find_if(chunks.begin(), chunks.end(),
-                                    [boot, number](const Chunk &chunk) {
-                                      return chunk.boot == boot && chunk.number == number;
-                                    });
-    if (found == chunks.end())
+    Chunk chunk;
+    if (!resolveClosedChunk(boot, number, chunk))
       return device_transfer::sendHttpError(client, 404, "chunk_unavailable",
                                             "diagnostic chunk is unavailable");
-    return sendFile(client, *found);
+    return sendFile(client, chunk);
   }
 
   if (request.path == std::string(kPrefix) + "active-tail" && request.method == "GET") {

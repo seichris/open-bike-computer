@@ -222,6 +222,9 @@ jobs:
       - name: Run Swift helper tests
         run: ./scripts/run-navigation-tests.sh
         working-directory: ios-app
+      - name: Run ride diagnostics recorder tests
+        run: ./scripts/run-ride-diagnostics-tests.sh
+        working-directory: ios-app
       - name: Run shared route and Watch BLE contract tests
         run: ./scripts/run-ride-shared-tests.sh
         working-directory: ios-app
@@ -321,10 +324,15 @@ jobs:
         working-directory: ${{ github.workspace }}
       - name: Ride diagnostics format host tests
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror \
-            tools/tests/test_ride_diagnostics_format.cpp \
-            -o /tmp/test_ride_diagnostics_format
-          /tmp/test_ride_diagnostics_format
+          for test in \
+            test_ride_diagnostics_format \
+            test_ride_diagnostics_queue_policy \
+            test_ride_diagnostics_control \
+            test_storage_mount_policy; do
+            g++ -std=c++17 -Wall -Wextra -Werror \
+              "tools/tests/${test}.cpp" -o "/tmp/${test}"
+            "/tmp/${test}"
+          done
       - name: Verify generated pre-connection assets
         run: |
           python -m pip install -r tools/preconnection-assets-requirements.txt

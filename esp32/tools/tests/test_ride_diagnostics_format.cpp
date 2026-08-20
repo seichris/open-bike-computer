@@ -7,11 +7,10 @@
 int main() {
   using ride_diagnostics::detail::FaultCapsuleState;
   using ride_diagnostics::detail::formatFaultCapsuleFields;
-  using ride_diagnostics::detail::kFaultCapsuleMagic;
+  using ride_diagnostics::detail::sealFaultCapsule;
   using ride_diagnostics::detail::validateFieldsJson;
 
   FaultCapsuleState capsule{};
-  capsule.magic = kFaultCapsuleMagic;
   capsule.bootSequence = 42;
   capsule.firstMissingUptimeMs = 100;
   capsule.lastMissingUptimeMs = 130;
@@ -23,12 +22,13 @@ int main() {
   capsule.completedStage = 9;
   std::strcpy(capsule.lastCriticalCategory, "storage");
   std::strcpy(capsule.lastCriticalEvent, "write_failed");
+  sealFaultCapsule(capsule);
 
   char output[512] = {};
   assert(formatFaultCapsuleFields(capsule, output, sizeof(output)));
   assert(std::strcmp(
              output,
-             "{\"bootSequence\":42,\"firstMissingUptimeMs\":100,"
+             "{\"runtimeBootSequence\":42,\"firstMissingUptimeMs\":100,"
              "\"lastMissingUptimeMs\":130,\"eventCount\":3,"
              "\"droppedCount\":2,\"storageErrorCount\":1,"
              "\"resetReason\":7,\"activeStage\":11,"
@@ -37,6 +37,7 @@ int main() {
 
   capsule.lastCriticalCategory[0] = '\0';
   capsule.lastCriticalEvent[0] = '\0';
+  sealFaultCapsule(capsule);
   assert(formatFaultCapsuleFields(capsule, output, sizeof(output)));
   assert(std::strstr(output, "\"lastCriticalCategory\":\"unknown\"") !=
          nullptr);
@@ -46,8 +47,13 @@ int main() {
 
   capsule.magic = 0;
   assert(!formatFaultCapsuleFields(capsule, output, sizeof(output)));
-  capsule.magic = kFaultCapsuleMagic;
+  sealFaultCapsule(capsule);
   assert(!formatFaultCapsuleFields(capsule, output, 16));
+
+  std::memset(capsule.lastCriticalEvent, 'x',
+              sizeof(capsule.lastCriticalEvent));
+  sealFaultCapsule(capsule);
+  assert(!formatFaultCapsuleFields(capsule, output, sizeof(output)));
 
   const char *validFields =
       "{\"bootSequence\":7,\"ready\":true,"
@@ -61,6 +67,11 @@ int main() {
   assert(!validateFieldsJson(nestedField, std::strlen(nestedField)));
   const char *malformedField = "{\"ready\":tru}";
   assert(!validateFieldsJson(malformedField, std::strlen(malformedField)));
+  const char *wrongBooleanType = "{\"ready\":\"true\"}";
+  assert(!validateFieldsJson(wrongBooleanType,
+                             std::strlen(wrongBooleanType)));
+  const char *wrongNumberType = "{\"bootSequence\":\"7\"}";
+  assert(!validateFieldsJson(wrongNumberType, std::strlen(wrongNumberType)));
 
   std::cout << "ride diagnostics format tests passed\n";
   return 0;

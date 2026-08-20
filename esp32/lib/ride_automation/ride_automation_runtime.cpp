@@ -13,6 +13,7 @@
 #include "qmi8658.hpp"
 #include "ride_automation_trace.hpp"
 #include "ride_automation_protocol.hpp"
+#include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "speaker.hpp"
 #include "workout_telemetry_runtime.hpp"
 
@@ -899,6 +900,34 @@ void processFirmwareShadow(uint32_t nowMs) {
   char output[1'536];
   if (ride_automation::formatTraceJsonLine(trace, output, sizeof(output)) >= 0)
     Serial.println(output);
+  if (ride_diagnostics::detailedCaptureEnabled()) {
+    char fields[320] = {};
+    snprintf(
+        fields, sizeof(fields),
+        "{\"state\":\"%s\",\"startMode\":\"%s\","
+        "\"autoPauseEnabled\":%s,\"profileVersion\":%u,"
+        "\"sourceHealthMask\":%u,\"transition\":\"%s\","
+        "\"decisionSequence\":%lu,\"fixValid\":%s,"
+        "\"speedAvailable\":%s}",
+        ride_automation::lifecycleName(trace.lifecycle),
+        ride_automation::startModeName(trace.settings.startMode),
+        trace.settings.autoPauseEnabled ? "true" : "false",
+        static_cast<unsigned>(trace.profileVersion),
+        static_cast<unsigned>(trace.decision.sourceHealthMask),
+        ride_automation::transitionName(trace.decision.transition),
+        static_cast<unsigned long>(trace.decision.sequence),
+        trace.observation.gpsFixValid.available &&
+                trace.observation.gpsFixValid.value
+            ? "true"
+            : "false",
+        (trace.observation.wheelSpeedMetersPerSecond.available ||
+         trace.observation.cadenceRpm.available ||
+         trace.observation.gpsSpeedMetersPerSecond.available)
+            ? "true"
+            : "false");
+    ride_diagnostics::record(ride_diagnostics::Level::Debug,
+                             "rideAutomation", "detailed_sample", fields);
+  }
 #if !defined(RIDE_AUTOMATION_INTERNAL_CONTROL)
   if (decision)
     runtime.policy().rejectPending(nowMs);

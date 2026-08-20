@@ -166,7 +166,12 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                         rideDiagnosticsRecorder?.currentCaptureID
                     )
                 } else {
-                    _ = bleManager?.endDiagnosticsCapture()
+                    // Detailed capture ends back into the always-on standard
+                    // capture. Rebind that UUID instead of clearing firmware
+                    // correlation until the next reconnect.
+                    _ = bleManager?.sendDiagnosticsCaptureBinding(
+                        rideDiagnosticsRecorder?.currentCaptureID
+                    )
                 }
             }
             .store(in: &cancellables)
@@ -267,6 +272,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             "app_backgrounded",
             state: "background"
         )
+        rideDiagnosticsRecorder.flush()
         coordinator.setViewingMap(false)
         setApplicationActive(false)
         print("App entered background - navigation continues")
@@ -288,6 +294,14 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             state: "foregrounding"
         )
         print("App entering foreground")
+    }
+
+    func applicationWillTerminate(_ application: UIApplication) {
+        rideDiagnosticsRecorder.recordApplicationLifecycle(
+            "app_terminating",
+            state: "terminating"
+        )
+        rideDiagnosticsRecorder.flush()
     }
 
     func application(

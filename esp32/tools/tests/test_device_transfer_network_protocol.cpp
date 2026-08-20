@@ -10,8 +10,9 @@ using device_transfer::LanCommandParseResult;
 using device_transfer::LanCredentials;
 
 static std::vector<uint8_t> command(const std::string &ssid,
-                                    const std::string &password) {
-  const std::string prefix = device_transfer::kRemoteDebugLanCommandPrefix;
+                                    const std::string &password,
+                                    const std::string &prefix =
+                                        device_transfer::kRemoteDebugLanCommandPrefix) {
   std::vector<uint8_t> payload(prefix.begin(), prefix.end());
   payload.push_back(static_cast<uint8_t>(ssid.size()));
   payload.push_back(static_cast<uint8_t>(password.size()));
@@ -34,6 +35,16 @@ int main() {
              open.data(), open.size(), credentials) ==
          LanCommandParseResult::Valid);
   assert(credentials.password.empty());
+
+  device_transfer::LanSessionMode mode =
+      device_transfer::LanSessionMode::Debug;
+  const auto diagnostics = command(
+      "Developer Lab", "diagnostic-password",
+      device_transfer::kDiagnosticsLanCommandPrefix);
+  assert(device_transfer::parseTransferLanCommand(
+             diagnostics.data(), diagnostics.size(), mode, credentials) ==
+         LanCommandParseResult::Valid);
+  assert(mode == device_transfer::LanSessionMode::Diagnostics);
 
   const std::string ordinary = "enter|debug";
   assert(device_transfer::parseRemoteDebugLanCommand(
