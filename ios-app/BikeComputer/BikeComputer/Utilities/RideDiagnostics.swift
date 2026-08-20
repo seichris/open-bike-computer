@@ -330,6 +330,9 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
     private var detailedTraceActive = false
     private var detailedTraceExpiry: Date?
     private var totalDropped = 0
+    // Queue-confined storage state. The @Published value is a main-thread UI
+    // snapshot and must never be mutated from the recorder queue.
+    private var retainedBytesOnQueue = 0
 
     init(
         rootURL: URL? = nil,
@@ -734,7 +737,7 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
             "appProcessId": processId.uuidString.lowercased(),
             "sourceStreams": entries.map(\.0).filter { $0.hasSuffix(".jsonl") },
             "captureId": (activeCaptureId ?? standardCaptureId).uuidString.lowercased(),
-            "retainedBytes": retainedBytes,
+            "retainedBytes": retainedBytesOnQueue,
             "droppedEventCount": totalDropped,
             "privacy": "coordinates_addresses_credentials_health_values_and_raw_sensors_excluded",
         ]
@@ -807,9 +810,10 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
     }
 
     private func updateRetainedBytes() {
-        retainedBytes = allAppChunkFiles().reduce(0) { total, url in
+        retainedBytesOnQueue = allAppChunkFiles().reduce(0) { total, url in
             total + ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         }
+        publishRetainedBytes(retainedBytesOnQueue)
     }
 
     private func pruneRetention() throws {
@@ -823,7 +827,7 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
             }
         }
         chunks = allAppChunkFiles()
-        while chunks.count > Self.retainedChunkLimit || retainedBytes > Self.retainedBytesLimit {
+        while chunks.count > Self.retainedChunkLimit || retainedBytesOnQueue > Self.retainedBytesLimit {
             guard let candidate = chunks.first(where: { $0 != currentChunkURL }) else { break }
             try fileManager.removeItem(at: candidate)
             chunks.removeFirst()
@@ -842,7 +846,7 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
         RideDiagnosticsRecorderHealth(
             schema: Self.schema,
             processId: processId.uuidString.lowercased(),
-            retainedBytes: retainedBytes,
+            retainedBytes: retainedBytesOnQueue,
             retainedChunkCount: allAppChunkFiles().count,
             oldestWallTime: oldestEventDate().map(isoFormatter.string),
             newestWallTime: newestEventDate().map(isoFormatter.string),
@@ -895,6 +899,12 @@ final class RideDiagnosticsRecorder: ObservableObject, RideDiagnosticsEventSink 
             self?.lastError = nil
         }
         _ = (category, event, fields)
+    }
+
+    private func publishRetainedBytes(_ bytes: Int) {
+        DispatchQueue.main.async { [weak self] in
+            self?.retainedBytes = bytes
+        }
     }
 
     private func publishDropCount() {
