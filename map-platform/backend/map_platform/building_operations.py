@@ -21,13 +21,17 @@ def building_plan_alerts(
     now: float | None = None,
     stale_heartbeat_seconds: float = DEFAULT_STALE_HEARTBEAT_SECONDS,
     memory_warning_fraction: float = DEFAULT_MEMORY_WARNING_FRACTION,
+    limit: int = 100,
+    offset: int = 0,
 ) -> dict[str, Any]:
-    """Return deterministic, secret-free diagnostics without mutating state.
+    """Return one bounded page of secret-free alerts without mutating state.
 
     The coordinator remains the source of truth for recovery.  This report
     only points an operator at stale leases, failed/split work, memory
     headroom violations, and incomplete receipts; it never retries or
-    cancels a task implicitly.
+    cancels a task implicitly. The cursor applies to each retained evidence
+    collection in ``BuildingTaskStore.diagnostic_page`` so no task, attempt,
+    receipt, or reservation query is unbounded.
     """
 
     if stale_heartbeat_seconds <= 0:
@@ -37,6 +41,7 @@ def building_plan_alerts(
     plan = store.get_plan(parent_job_id)
     if plan is None:
         raise ValueError(f"building plan not found: {parent_job_id}")
+    page = store.diagnostic_page(parent_job_id, limit=limit, offset=offset)
     current = time.time() if now is None else now
     alerts: list[dict[str, Any]] = []
 
@@ -65,8 +70,7 @@ def building_plan_alerts(
             detail={"state": plan.get("state"), "stage": plan.get("stage")},
         )
 
-    tasks = store.list_tasks(parent_job_id)
-    for task in tasks:
+    for task in page["tasks"]:
         if task.state == "leased":
             if task.lease_expires_at is not None and task.lease_expires_at <= current:
                 add(
@@ -116,7 +120,42 @@ def building_plan_alerts(
                 },
             )
 
-    for attempt in store.list_attempts(parent_job_id):
+    for reservation in page["parentPhaseReservations"]:
+        phase = str(reservation.get("phase") or "unknown")
+        subject = f"{parent_job_id}:{phase}"
+        expires_at = _number(reservation.get("expires_at"))
+        if expires_at is not None and expires_at <= current:
+            add(
+                "parent_phase_lease_expired",
+                "critical",
+                subject=subject,
+                detail={
+                    "parentJobId": parent_job_id,
+                    "phase": phase,
+                    "workerId": reservation.get("worker_id"),
+                    "leaseExpiresAt": expires_at,
+                    "now": current,
+                },
+            )
+        heartbeat_at = _number(reservation.get("heartbeat_at"))
+        if heartbeat_at is not None:
+            heartbeat_age = max(0.0, current - heartbeat_at)
+            if heartbeat_age > stale_heartbeat_seconds:
+                add(
+                    "parent_phase_stale_heartbeat",
+                    "warning",
+                    subject=subject,
+                    detail={
+                        "parentJobId": parent_job_id,
+                        "phase": phase,
+                        "workerId": reservation.get("worker_id"),
+                        "heartbeatAt": heartbeat_at,
+                        "heartbeatAgeSeconds": round(heartbeat_age, 3),
+                        "thresholdSeconds": stale_heartbeat_seconds,
+                    },
+                )
+
+    for attempt in page["attempts"]:
         typed_failure = attempt.get("typed_failure")
         actual_resource = _json_object(attempt.get("actual_resource_json"))
         root_failure = actual_resource.get("rootFailureCode")
@@ -170,7 +209,7 @@ def building_plan_alerts(
             )
 
     expected = _nonnegative_int(plan.get("expected_output_block_count"))
-    receipt_count = len(store.list_receipts(parent_job_id))
+    receipt_count = int(page["counts"]["receipts"])
     if expected is not None and receipt_count > expected:
         add(
             "receipt_overflow",
@@ -203,6 +242,10 @@ def building_plan_alerts(
         "parentJobId": parent_job_id,
         "generatedAt": current,
         "alertCount": len(alerts),
+        "page": {
+            key: page[key]
+            for key in ("limit", "offset", "counts", "hasMore")
+        },
         "alerts": alerts,
     }
 
@@ -238,3 +281,9 @@ def _nonnegative_int(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)

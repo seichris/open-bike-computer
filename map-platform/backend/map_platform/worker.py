@@ -21,7 +21,7 @@ from .pipeline import (
     MapBuildPipeline,
     safe_build_failure,
 )
-from .resource_report import worker_resource_report
+from .resource_report import worker_capability_snapshot, worker_resource_report
 from .reuse import SubsetReuseUnavailable
 
 
@@ -140,11 +140,24 @@ class MapWorker:
         self.store.requeue_retryable_failures(
             non_retryable_error_codes=_NON_RETRYABLE_BUILD_ERROR_CODES
         )
-        worker_capability = None
-        try:
-            worker_capability = worker_resource_report().get("capability")
-        except Exception:
+        executable_chunked = (
+            isinstance(self.pipeline, MapBuildPipeline)
+            and self.pipeline.building_scope_mode
+            in {"chunked_allowlist", "chunked"}
+        )
+        if executable_chunked:
+            # Chunked work is resource-admitted. A missing or malformed report
+            # must stop before the public job is claimed rather than silently
+            # selecting the old unbounded path.
+            worker_capability = worker_capability_snapshot()
+        else:
             worker_capability = None
+            try:
+                worker_capability = worker_resource_report().get("capability")
+            except Exception:
+                # Legacy/non-chunk execution retains its existing best-effort
+                # diagnostic behavior.
+                worker_capability = None
         preferred_job_id = None
         if (
             isinstance(self.pipeline, MapBuildPipeline)
@@ -160,6 +173,11 @@ class MapWorker:
         )
         if job is None:
             return WorkerResult(worker_id=self.worker_id, job=None, processed=False)
+        if executable_chunked:
+            # Reuse-key preparation can acquire a parent resource lease before
+            # build_chunked is entered. Preserve the exact validated snapshot
+            # for every phase of this public attempt.
+            job._worker_capability_snapshot = worker_capability
         # Start lease heartbeats before the read-only capability probe.  On a
         # cold host the cgroup/proc walk can exceed a short test or recovery
         # lease, and a worker must not become reclaimable before its heartbeat

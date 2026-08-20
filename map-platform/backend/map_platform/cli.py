@@ -477,7 +477,15 @@ def main() -> int:
     build_plan_tasks.add_argument("--offset", type=int, default=0)
     build_plan_workload = build_plan_subparsers.add_parser(
         "complete-workload-scan",
-        help="commit an exact source-index workload receipt and requeue the chunk",
+        help=(
+            "INTERNAL MUTATING: commit an exact source-index workload receipt "
+            "under a live fenced lease"
+        ),
+        description=(
+            "INTERNAL MUTATING command: commit an exact source-index workload "
+            "receipt under a live fenced lease. This is not an operator "
+            "inspection or retry command."
+        ),
     )
     build_plan_workload.add_argument("task_id")
     build_plan_workload.add_argument("--worker-id", required=True)
@@ -513,6 +521,8 @@ def main() -> int:
         help="show read-only operator alerts for a building plan",
     )
     build_plan_alerts_command.add_argument("job_id")
+    build_plan_alerts_command.add_argument("--limit", type=int, default=100)
+    build_plan_alerts_command.add_argument("--offset", type=int, default=0)
     subparsers.add_parser(
         "resource-report",
         help="print a read-only worker cgroup and memory capability report",
@@ -577,9 +587,18 @@ def main() -> int:
         if plan is None:
             raise SystemExit(f"building plan not found: {args.job_id}")
         if args.build_plan_command == "alerts":
+            try:
+                alert_report = building_plan_alerts(
+                    building_task_store,
+                    args.job_id,
+                    limit=args.limit,
+                    offset=args.offset,
+                )
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
             print(
                 json.dumps(
-                    building_plan_alerts(building_task_store, args.job_id),
+                    alert_report,
                     indent=2,
                     sort_keys=True,
                 )
@@ -629,6 +648,9 @@ def main() -> int:
                         ),
                         "resourceReservations": list(
                             diagnostic_page["resourceReservations"]
+                        ),
+                        "parentPhaseReservations": list(
+                            diagnostic_page["parentPhaseReservations"]
                         ),
                     },
                     indent=2,

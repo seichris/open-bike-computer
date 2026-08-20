@@ -87,6 +87,7 @@ from .building_tasks import (
     BuildingTaskSpec,
     BuildingTaskStoreError,
     BuildingTaskStore,
+    StaleLeaseError,
     deterministic_building_task_id,
 )
 from .building_resource_model import (
@@ -122,7 +123,7 @@ from .reuse import (
     reuse_keys,
     expanded_building_source_bounds,
 )
-from .source_cache import SourceCache, SourceCacheError
+from .source_cache import SourceCache, SourceCacheError, SourceCacheStorageError
 from .sources import SourceResolutionError
 
 
@@ -177,6 +178,8 @@ class _TaskLeaseHeartbeat:
         self._lease_seconds = lease_seconds
         self._interval_seconds = interval_seconds
         self._stop = threading.Event()
+        self._lost = threading.Event()
+        self._last_confirmed_monotonic = time.monotonic()
         self._thread = threading.Thread(
             target=self._run,
             name=f"building-task-heartbeat-{task_id[:12]}",
@@ -186,13 +189,22 @@ class _TaskLeaseHeartbeat:
     def start(self) -> None:
         self._thread.start()
 
+    @property
+    def lost(self) -> bool:
+        return self._lost.is_set()
+
     def stop(self) -> None:
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join(timeout=max(self._interval_seconds, 1.0) + 1.0)
 
     def _run(self) -> None:
-        while not self._stop.wait(self._interval_seconds):
+        retry_delay = self._interval_seconds
+        safety_margin = max(
+            0.01,
+            min(self._interval_seconds, self._lease_seconds / 4.0),
+        )
+        while not self._stop.wait(retry_delay):
             try:
                 self._store.heartbeat(
                     self._task_id,
@@ -200,11 +212,27 @@ class _TaskLeaseHeartbeat:
                     lease_token=self._lease_token,
                     lease_seconds=self._lease_seconds,
                 )
-            except Exception:
-                # The completion/failure operation remains fenced by the same
-                # lease token. A lost lease must never be revived by this
-                # best-effort reporter.
+            except StaleLeaseError:
+                self._lost.set()
                 return
+            except Exception:
+                remaining = (
+                    self._last_confirmed_monotonic
+                    + self._lease_seconds
+                    - time.monotonic()
+                )
+                if remaining <= safety_margin:
+                    # Stop the process tree before the durable reservation can
+                    # expire and become reusable by another worker.
+                    self._lost.set()
+                    return
+                retry_delay = max(
+                    0.01,
+                    min(self._interval_seconds, remaining / 2.0),
+                )
+                continue
+            self._last_confirmed_monotonic = time.monotonic()
+            retry_delay = self._interval_seconds
 
 
 class _ParentPhaseLeaseHeartbeat:
@@ -660,8 +688,26 @@ _CHUNK_SPLIT_FAILURE_CODES = frozenset(
     }
 )
 MAX_FINAL_ASSEMBLY_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_FINAL_ASSEMBLY_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_FINAL_ASSEMBLY_FMB_BYTES = 2 * 1024 * 1024
+_FINAL_ASSEMBLY_METADATA_PATHS = frozenset(
+    {
+        "manifest.json",
+        "ATTRIBUTION.txt",
+        "LICENSES/OpenStreetMap-ODbL.txt",
+    }
+)
 CHUNK_TASK_LEASE_SECONDS = 120.0
 PARENT_PHASE_LEASE_SECONDS = 120.0
+SOURCE_PREPARATION_MEMORY_RESERVATION_BYTES = 5 * 1024 * 1024 * 1024
+MAP_ASSEMBLY_MEMORY_RESERVATION_BYTES = 5 * 1024 * 1024 * 1024
+_PARENT_PHASE_MEMORY_RESERVATION_BYTES = {
+    "source_preparation": SOURCE_PREPARATION_MEMORY_RESERVATION_BYTES,
+    "map_assembly": MAP_ASSEMBLY_MEMORY_RESERVATION_BYTES,
+}
+_TRANSIENT_CHUNK_FAILURE_CODES = frozenset(
+    {"building_block_cache_unavailable"}
+)
 
 
 class BuildingChunkSplitRequired(BuildingScopeError):
@@ -688,13 +734,49 @@ class BuildingCacheRetryRequired(RuntimeError):
     """Canonical cache loss was durably converted back into pending work."""
 
 
+def _safe_final_archive_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    if value != value.replace("\\", "/") or value.startswith("/"):
+        return False
+    parts = value.split("/")
+    return not any(
+        part in {"", ".", ".."} or (index == 0 and ":" in part)
+        for index, part in enumerate(parts)
+    )
+
+
+def _zip_entry_sha256(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+) -> str:
+    digest = hashlib.sha256()
+    with archive.open(info, "r") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def validate_final_assembly_artifact(
     archive_path: Path,
     artifacts: Iterable[ArtifactRecord],
     *,
     max_archive_bytes: int = MAX_FINAL_ASSEMBLY_ARCHIVE_BYTES,
 ) -> dict[str, Any]:
-    """Validate the final ZIP receipt before the parent becomes ready."""
+    """Validate a bounded, identity-complete map ZIP before publication."""
+
+    if (
+        isinstance(max_archive_bytes, bool)
+        or not isinstance(max_archive_bytes, int)
+        or max_archive_bytes <= 0
+    ):
+        raise ValueError("final map archive size limit must be positive")
+
+    def invalid(message: str) -> None:
+        raise BuildingScopeError("building_artifact_validation_failed", message)
+
+    def too_large(message: str) -> None:
+        raise BuildingScopeError("building_artifact_too_large", message)
 
     try:
         archive_bytes = archive_path.stat().st_size
@@ -704,57 +786,156 @@ def validate_final_assembly_artifact(
             "final map archive is unavailable for validation",
         ) from exc
     if archive_bytes <= 0:
-        raise BuildingScopeError(
-            "building_artifact_validation_failed",
-            "final map archive is empty",
-        )
+        invalid("final map archive is empty")
     if archive_bytes > max_archive_bytes:
-        raise BuildingScopeError(
-            "building_artifact_too_large",
-            "final map archive exceeds the assembly size limit",
-        )
+        too_large("final map archive exceeds the assembly size limit")
     try:
         with zipfile.ZipFile(archive_path) as archive:
-            if archive.testzip() is not None:
-                raise BuildingScopeError(
-                    "building_artifact_validation_failed",
-                    "final map archive contains a corrupt entry",
-                )
             entries = archive.infolist()
-            manifest = next(
-                (
-                    info
-                    for info in entries
-                    if info.filename == "manifest.json" and not info.is_dir()
-                ),
-                None,
-            )
-            if manifest is None or manifest.file_size <= 0:
-                raise BuildingScopeError(
-                    "building_artifact_validation_failed",
-                    "final map archive manifest is missing or empty",
-                )
-            fmb_entries = [
-                info
-                for info in entries
-                if info.filename.endswith(".fmb") and not info.is_dir()
+            if not entries:
+                invalid("final map archive contains no files")
+            entries_by_path: dict[str, zipfile.ZipInfo] = {}
+            uncompressed_bytes = 0
+            for info in entries:
+                path = info.filename
+                if (
+                    not _safe_final_archive_path(path)
+                    or info.is_dir()
+                    or path in entries_by_path
+                ):
+                    invalid(
+                        "final map archive contains an unsafe or duplicate path"
+                    )
+                if (
+                    info.flag_bits & 0x1
+                    or info.compress_type != zipfile.ZIP_STORED
+                    or info.compress_size != info.file_size
+                ):
+                    invalid("final map archive entries must be unencrypted stored files")
+                mode = (info.external_attr >> 16) & 0o177777
+                if mode & 0o170000 not in {0, 0o100000}:
+                    invalid("final map archive contains a non-regular entry")
+                entries_by_path[path] = info
+                uncompressed_bytes += info.file_size
+                if uncompressed_bytes > max_archive_bytes:
+                    too_large(
+                        "final map archive expands beyond the assembly size limit"
+                    )
+
+            manifest_info = entries_by_path.get("manifest.json")
+            if manifest_info is None or manifest_info.file_size <= 0:
+                invalid("final map archive manifest is missing or empty")
+            if manifest_info.file_size > MAX_FINAL_ASSEMBLY_MANIFEST_BYTES:
+                invalid("final map archive manifest exceeds its size limit")
+            if archive.testzip() is not None:
+                invalid("final map archive contains a corrupt entry")
+            manifest_bytes = archive.read(manifest_info)
+            try:
+                manifest = json.loads(manifest_bytes)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                invalid("final map archive manifest is not valid JSON")
+            if (
+                not isinstance(manifest, dict)
+                or type(manifest.get("schemaVersion")) is not int
+                or manifest["schemaVersion"] != 1
+            ):
+                invalid("final map archive manifest schema is unsupported")
+            map_id = manifest.get("mapId")
+            if not isinstance(map_id, str) or not map_id:
+                invalid("final map archive manifest map identity is invalid")
+            manifest_files = manifest.get("files")
+            if not isinstance(manifest_files, list) or not manifest_files:
+                invalid("final map archive manifest has no file identities")
+
+            declared_files: dict[str, tuple[int, str]] = {}
+            for record in manifest_files:
+                if not isinstance(record, dict) or set(record) != {
+                    "path",
+                    "bytes",
+                    "sha256",
+                }:
+                    invalid("final map archive manifest file record is invalid")
+                path = record["path"]
+                byte_count = record["bytes"]
+                expected_sha256 = record["sha256"]
+                if (
+                    not isinstance(path, str)
+                    or type(byte_count) is not int
+                    or byte_count < 0
+                    or not isinstance(expected_sha256, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+                ):
+                    invalid("final map archive manifest file record is invalid")
+                try:
+                    validate_pack_path(path)
+                except (UnicodeError, ValueError):
+                    invalid("final map archive manifest contains an unsafe file path")
+                if path.split("/")[1] != map_id or path in declared_files:
+                    invalid(
+                        "final map archive manifest contains a duplicate or mismatched file path"
+                    )
+                declared_files[path] = (byte_count, expected_sha256)
+
+            fmb_paths = [
+                path for path in declared_files if path.endswith(".fmb")
             ]
-            if not fmb_entries:
-                raise BuildingScopeError(
-                    "building_artifact_validation_failed",
-                    "final map archive contains no FMB blocks",
+            if not fmb_paths:
+                invalid("final map archive contains no FMB blocks")
+            for path in fmb_paths:
+                byte_count = declared_files[path][0]
+                if byte_count <= 0:
+                    invalid("final map archive contains an empty FMB block")
+                if byte_count > MAX_FINAL_ASSEMBLY_FMB_BYTES:
+                    too_large("final map archive contains an oversized FMB block")
+
+            preview_path: str | None = None
+            preview_identity: tuple[int, str] | None = None
+            preview = manifest.get("preview")
+            if "preview" in manifest:
+                if not isinstance(preview, dict):
+                    invalid("final map archive preview identity is invalid")
+                preview_path = preview.get("path")
+                preview_bytes = preview.get("bytes")
+                preview_sha256 = preview.get("sha256")
+                if (
+                    not _safe_final_archive_path(preview_path)
+                    or preview_path in _FINAL_ASSEMBLY_METADATA_PATHS
+                    or preview_path in declared_files
+                    or type(preview_bytes) is not int
+                    or preview_bytes <= 0
+                    or not isinstance(preview_sha256, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", preview_sha256) is None
+                ):
+                    invalid("final map archive preview identity is invalid")
+                preview_identity = (preview_bytes, preview_sha256)
+
+            expected_paths = set(_FINAL_ASSEMBLY_METADATA_PATHS)
+            expected_paths.update(declared_files)
+            if preview_path is not None:
+                expected_paths.add(preview_path)
+            if set(entries_by_path) != expected_paths:
+                invalid(
+                    "final map archive entries do not match the manifest identities"
                 )
-            oversized_blocks = [
-                info.filename
-                for info in fmb_entries
-                if info.file_size > 2 * 1024 * 1024
-            ]
-            if oversized_blocks:
-                raise BuildingScopeError(
-                    "building_artifact_too_large",
-                    "final map archive contains an oversized FMB block",
-                )
-    except (OSError, zipfile.BadZipFile) as exc:
+
+            for path, (byte_count, expected_sha256) in declared_files.items():
+                info = entries_by_path[path]
+                if (
+                    info.file_size != byte_count
+                    or _zip_entry_sha256(archive, info) != expected_sha256
+                ):
+                    invalid("final map archive file identity does not match")
+            if preview_path is not None and preview_identity is not None:
+                preview_info = entries_by_path[preview_path]
+                if (
+                    preview_info.file_size != preview_identity[0]
+                    or _zip_entry_sha256(archive, preview_info)
+                    != preview_identity[1]
+                ):
+                    invalid("final map archive preview identity does not match")
+    except BuildingScopeError:
+        raise
+    except (EOFError, NotImplementedError, OSError, RuntimeError, zipfile.BadZipFile) as exc:
         raise BuildingScopeError(
             "building_artifact_validation_failed",
             "final map archive is not a valid ZIP",
@@ -1152,12 +1333,18 @@ class MapBuildPipeline:
         if self.building_task_store is None or not worker_id:
             yield cancellation_check
             return
+        estimated_peak_memory_bytes = _PARENT_PHASE_MEMORY_RESERVATION_BYTES.get(
+            phase
+        )
+        if estimated_peak_memory_bytes is None:
+            raise BuildingTaskStoreError("parent resource phase is invalid")
         reservation = self.building_task_store.acquire_parent_phase_reservation(
             parent_job_id=parent_job_id,
             phase=phase,
             worker_id=worker_id,
             worker_capability=worker_capability,
             lease_seconds=PARENT_PHASE_LEASE_SECONDS,
+            estimated_peak_memory_bytes=estimated_peak_memory_bytes,
         )
         if reservation is None:
             raise BuildingChunkSchedulingYield()
@@ -1212,14 +1399,17 @@ class MapBuildPipeline:
             )
 
     @staticmethod
-    def _reported_worker_capability() -> Mapping[str, Any] | None:
-        try:
-            from .resource_report import worker_resource_report
-
-            capability = worker_resource_report().get("capability")
-        except Exception:
+    def _job_worker_capability(job: MapJob) -> Mapping[str, Any] | None:
+        capability = getattr(job, "_worker_capability_snapshot", None)
+        if capability is None:
+            if job.worker_id is not None:
+                raise BuildingTaskStoreError(
+                    "claimed chunked job is missing its worker capability snapshot"
+                )
             return None
-        return capability if isinstance(capability, Mapping) else None
+        if not isinstance(capability, Mapping):
+            raise BuildingTaskStoreError("worker capability snapshot is invalid")
+        return capability
 
     def build(
         self,
@@ -2052,147 +2242,174 @@ class MapBuildPipeline:
             "globalPlanSha256": global_plan.sha256,
         }
         chunk_policy_version = BuildingChunkPolicy().policy_version
-        self.building_task_store.create_plan(
-            parent_job_id=job.job_id,
-            global_plan_sha256=global_plan.sha256,
-            input_identity=input_identity,
-            expected_output_block_count=len(global_plan.output_blocks),
-            policy_version=chunk_policy_version,
-            resource_model_version="building-resource-model-untrained-v1",
-            stage="source_preparation",
-            scheduling_weight=1,
-            admission_priority=0,
-            active_task_quota=1,
-        )
-        self.building_task_store.activate_observed_plan(
-            job.job_id,
-            stage="source_preparation",
-        )
-        plan_record = self.building_task_store.reopen_failed_plan(
-            job.job_id,
-            stage="source_preparation",
-        )
-        coordinator_already_ready = bool(
-            plan_record is not None and plan_record["state"] == "ready"
-        )
-        if not coordinator_already_ready:
-            self.building_task_store.advance_plan_stage(
-                job.job_id, stage="source_preparation"
+        try:
+            self.building_task_store.create_plan(
+                parent_job_id=job.job_id,
+                global_plan_sha256=global_plan.sha256,
+                input_identity=input_identity,
+                expected_output_block_count=len(global_plan.output_blocks),
+                policy_version=chunk_policy_version,
+                resource_model_version="building-resource-model-untrained-v1",
+                stage="source_preparation",
+                scheduling_weight=1,
+                admission_priority=0,
+                active_task_quota=1,
             )
-        parent_root = (
-            self.paths.work_root / job.job_id / "chunked-parent" / global_plan.sha256
-        )
-        parent_root.mkdir(parents=True, exist_ok=True)
-        global_plan_path = parent_root / "global-plan.json"
-        global_plan.write(global_plan_path)
+            self.building_task_store.activate_observed_plan(
+                job.job_id,
+                stage="source_preparation",
+            )
+            plan_record = self.building_task_store.reopen_failed_plan(
+                job.job_id,
+                stage="source_preparation",
+            )
+            coordinator_already_ready = bool(
+                plan_record is not None and plan_record["state"] == "ready"
+            )
+            if not coordinator_already_ready:
+                self.building_task_store.advance_plan_stage(
+                    job.job_id, stage="source_preparation"
+                )
+            parent_root = (
+                self.paths.work_root
+                / job.job_id
+                / "chunked-parent"
+                / global_plan.sha256
+            )
+            parent_root.mkdir(parents=True, exist_ok=True)
+            global_plan_path = parent_root / "global-plan.json"
+            global_plan.write(global_plan_path)
+        except (BuildingChunkSchedulingYield, BuildingCacheRetryRequired):
+            raise
+        except Exception:
+            self._mark_chunked_plan_failed(job.job_id)
+            raise
 
         calibration_execution: dict[str, Any] = {}
-        with self._parent_phase_reservation(
-            parent_job_id=job.job_id,
-            phase="source_preparation",
-            worker_id=worker_id,
-            worker_capability=worker_capability,
-            cancellation_check=cancellation_check,
-        ) as phase_cancellation_check:
-            calibration_manifest, calibration_generation = (
-                self._ensure_selected_calibration_generation(
-                    source_pbf,
-                    source_snapshot_sha256,
-                    global_plan,
-                    temporary_parent=parent_root,
-                    on_phase_progress=on_phase_progress,
-                    execution_sink=calibration_execution,
-                    cancellation_check=phase_cancellation_check,
+        try:
+            with self._parent_phase_reservation(
+                parent_job_id=job.job_id,
+                phase="source_preparation",
+                worker_id=worker_id,
+                worker_capability=worker_capability,
+                cancellation_check=cancellation_check,
+            ) as phase_cancellation_check:
+                calibration_manifest, calibration_generation = (
+                    self._ensure_selected_calibration_generation(
+                        source_pbf,
+                        source_snapshot_sha256,
+                        global_plan,
+                        temporary_parent=parent_root,
+                        on_phase_progress=on_phase_progress,
+                        execution_sink=calibration_execution,
+                        cancellation_check=phase_cancellation_check,
+                    )
                 )
-            )
-            source_index_manifest, source_index = self._prepare_chunked_source_index(
-                source_pbf,
-                source_snapshot_sha256,
-                global_plan,
-                parent_root,
-                on_phase_progress=on_phase_progress,
-                cancellation_check=phase_cancellation_check,
-            )
-        self._freeze_chunked_inputs(
-            job,
-            source_snapshot_sha256=source_snapshot_sha256,
-            global_plan=global_plan,
-            calibration_generation=calibration_generation,
-        )
-        building_identity = selected_building_identity(
-            source_snapshot_sha256=source_snapshot_sha256,
-            rules_path=(
-                self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
-            ),
-            scope_plan=global_plan,
-            calibration_generation=calibration_generation,
-        )
-        block_cache_identity = selected_building_block_cache_identity(
-            source_snapshot_sha256=source_snapshot_sha256,
-            rules_path=(
-                self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
-            ),
-            scope_plan=global_plan,
-            calibration_generation=dict(calibration_generation),
-        )
-        partition_path = parent_root / "partition-plan.json"
-        if partition_path.is_file():
-            try:
-                partition = BuildingPartitionPlan.read(
-                    partition_path,
-                    global_plan_sha256=global_plan.sha256,
-                    expected_blocks=global_plan.output_blocks,
+                source_index_manifest, source_index = (
+                    self._prepare_chunked_source_index(
+                        source_pbf,
+                        source_snapshot_sha256,
+                        global_plan,
+                        parent_root,
+                        on_phase_progress=on_phase_progress,
+                        cancellation_check=phase_cancellation_check,
+                    )
                 )
-            except BuildingChunkPlanningError as exc:
-                raise BuildingScopeError(exc.code, str(exc)) from exc
-        else:
-            cache_workloads: dict[MapBlock, BlockWorkload] = {}
-            for block in global_plan.output_blocks:
+        except (BuildingChunkSchedulingYield, BuildingCacheRetryRequired):
+            raise
+        except Exception:
+            self._mark_chunked_plan_failed(job.job_id)
+            raise
+        try:
+            self._freeze_chunked_inputs(
+                job,
+                source_snapshot_sha256=source_snapshot_sha256,
+                global_plan=global_plan,
+                calibration_generation=calibration_generation,
+            )
+            building_identity = selected_building_identity(
+                source_snapshot_sha256=source_snapshot_sha256,
+                rules_path=(
+                    self.paths.osm_extract_root
+                    / "conf"
+                    / "building_height_rules.yaml"
+                ),
+                scope_plan=global_plan,
+                calibration_generation=calibration_generation,
+            )
+            block_cache_identity = selected_building_block_cache_identity(
+                source_snapshot_sha256=source_snapshot_sha256,
+                rules_path=(
+                    self.paths.osm_extract_root
+                    / "conf"
+                    / "building_height_rules.yaml"
+                ),
+                scope_plan=global_plan,
+                calibration_generation=dict(calibration_generation),
+            )
+            partition_path = parent_root / "partition-plan.json"
+            if partition_path.is_file():
                 try:
-                    read_building_block_receipts(
-                        self.paths.building_cache_root,
-                        block_cache_identity,
-                        (block,),
+                    partition = BuildingPartitionPlan.read(
+                        partition_path,
+                        global_plan_sha256=global_plan.sha256,
+                        expected_blocks=global_plan.output_blocks,
                     )
-                except BuildingBlockReceiptError:
-                    cache_workloads[block] = BlockWorkload(block=block)
-                else:
-                    cache_workloads[block] = BlockWorkload(
-                        block=block,
-                        cache_hit=True,
-                    )
-            partition = partition_global_building_plan(
-                global_plan,
-                workloads=cache_workloads,
+                except BuildingChunkPlanningError as exc:
+                    raise BuildingScopeError(exc.code, str(exc)) from exc
+            else:
+                cache_workloads: dict[MapBlock, BlockWorkload] = {}
+                for block in global_plan.output_blocks:
+                    try:
+                        read_building_block_receipts(
+                            self.paths.building_cache_root,
+                            block_cache_identity,
+                            (block,),
+                        )
+                    except BuildingBlockReceiptError:
+                        cache_workloads[block] = BlockWorkload(block=block)
+                    else:
+                        cache_workloads[block] = BlockWorkload(
+                            block=block,
+                            cache_hit=True,
+                        )
+                partition = partition_global_building_plan(
+                    global_plan,
+                    workloads=cache_workloads,
+                )
+                partition.write(partition_path)
+            self.building_task_store.create_plan(
+                parent_job_id=job.job_id,
+                global_plan_sha256=global_plan.sha256,
+                input_identity=input_identity,
+                expected_output_block_count=len(global_plan.output_blocks),
+                policy_version=partition.policy.policy_version,
+                resource_model_version="building-resource-model-untrained-v1",
+                stage="chunk_planning",
+                scheduling_weight=1,
+                admission_priority=0,
+                active_task_quota=1,
             )
-            partition.write(partition_path)
-        self.building_task_store.create_plan(
-            parent_job_id=job.job_id,
-            global_plan_sha256=global_plan.sha256,
-            input_identity=input_identity,
-            expected_output_block_count=len(global_plan.output_blocks),
-            policy_version=partition.policy.policy_version,
-            resource_model_version="building-resource-model-untrained-v1",
-            stage="chunk_planning",
-            scheduling_weight=1,
-            admission_priority=0,
-            active_task_quota=1,
-        )
-        if not coordinator_already_ready:
-            self.building_task_store.advance_plan_stage(
-                job.job_id, stage="chunk_planning"
+            if not coordinator_already_ready:
+                self.building_task_store.advance_plan_stage(
+                    job.job_id, stage="chunk_planning"
+                )
+            self._persist_chunked_partition(
+                job,
+                partition=partition,
+                cache_identity_sha256=block_cache_identity[
+                    "cacheIdentitySha256"
+                ],
             )
-        self._persist_chunked_partition(
-            job,
-            partition=partition,
-            cache_identity_sha256=block_cache_identity[
-                "cacheIdentitySha256"
-            ],
-        )
-        if not coordinator_already_ready:
-            self.building_task_store.advance_plan_stage(
-                job.job_id, stage="building_chunks"
-            )
+            if not coordinator_already_ready:
+                self.building_task_store.advance_plan_stage(
+                    job.job_id, stage="building_chunks"
+                )
+        except (BuildingChunkSchedulingYield, BuildingCacheRetryRequired):
+            raise
+        except Exception:
+            self._mark_chunked_plan_failed(job.job_id)
+            raise
 
         resource_metrics: dict[str, Any] = {
             "mode": self.building_scope_mode,
@@ -2246,6 +2463,16 @@ class MapBuildPipeline:
                         if task.state == "pending"
                     )
                     if pending:
+                        availability = (
+                            self.building_task_store.pending_task_availability(
+                                job.job_id
+                            )
+                        )
+                        if (
+                            availability["eligible"] == 0
+                            and availability["deferred"] > 0
+                        ):
+                            raise BuildingChunkSchedulingYield()
                         if (
                             max_tasks_per_run is not None
                             and self.building_task_store.resource_capacity_occupied(
@@ -2287,10 +2514,13 @@ class MapBuildPipeline:
                 task_started_monotonic = time.monotonic()
 
                 def task_cancellation_check() -> bool:
-                    return self._chunk_task_cancellation_requested(
-                        cancellation_check=cancellation_check,
-                        started_monotonic=task_started_monotonic,
-                        hard_seconds=partition.policy.wall_time_hard_seconds,
+                    return (
+                        lease_heartbeat.lost
+                        or self._chunk_task_cancellation_requested(
+                            cancellation_check=cancellation_check,
+                            started_monotonic=task_started_monotonic,
+                            hard_seconds=partition.policy.wall_time_hard_seconds,
+                        )
                     )
 
                 scan_failure: BuildingScopeError | None = None
@@ -2391,6 +2621,8 @@ class MapBuildPipeline:
                     continue
                 except BuildingScopeError as exc:
                     lease_heartbeat.stop()
+                    if lease_heartbeat.lost:
+                        raise BuildingChunkSchedulingYield() from exc
                     if (
                         exc.code in _CHUNK_SPLIT_FAILURE_CODES
                         and len(task.blocks) > 1
@@ -2415,30 +2647,45 @@ class MapBuildPipeline:
                             **(failure_resource or {}),
                             "rootFailureCode": exc.code,
                         }
-                    self.building_task_store.fail(
+                    failed_task = self.building_task_store.fail(
                         task.task_id,
                         worker_id=worker_id,
                         lease_token=claimed.lease_token,
                         typed_failure=typed_failure,
-                        transient=False,
+                        transient=self._chunk_failure_is_transient(
+                            exc,
+                            typed_failure,
+                        ),
                         actual_resource=failure_resource,
                         peak_rss_bytes=self._last_task_failure_peak_rss(),
                     )
+                    if failed_task.state == "pending":
+                        yield_after_quantum()
+                        continue
                     raise
                 except Exception as exc:
                     lease_heartbeat.stop()
+                    if lease_heartbeat.lost:
+                        raise BuildingChunkSchedulingYield() from exc
                     typed_failure = getattr(exc, "code", None) or (
                         "building_chunk_execution_failed"
                     )
-                    self.building_task_store.fail(
+                    transient = self._chunk_failure_is_transient(
+                        exc,
+                        str(typed_failure),
+                    )
+                    failed_task = self.building_task_store.fail(
                         task.task_id,
                         worker_id=worker_id,
                         lease_token=claimed.lease_token,
                         typed_failure=str(typed_failure),
-                        transient=False,
+                        transient=transient,
                         actual_resource=self._last_task_failure_resource(),
                         peak_rss_bytes=self._last_task_failure_peak_rss(),
                     )
+                    if failed_task.state == "pending":
+                        yield_after_quantum()
+                        continue
                     raise
                 else:
                     lease_heartbeat.stop()
@@ -2517,20 +2764,27 @@ class MapBuildPipeline:
                 max_tasks_per_run=max_tasks_per_run,
             )
         except Exception:
-            try:
-                plan = self.building_task_store.get_plan(job.job_id)
-                if plan is not None and plan["state"] not in {
-                    "observed",
-                    "cancelled",
-                    "failed",
-                    "ready",
-                }:
-                    self.building_task_store.set_plan_stage(
-                        job.job_id, stage="failed", state="failed"
-                    )
-            except Exception:
-                pass
+            self._mark_chunked_plan_failed(job.job_id)
             raise
+
+    def _mark_chunked_plan_failed(self, parent_job_id: str) -> None:
+        if self.building_task_store is None:
+            return
+        try:
+            plan = self.building_task_store.get_plan(parent_job_id)
+            if plan is not None and plan["state"] not in {
+                "observed",
+                "cancelled",
+                "failed",
+                "ready",
+            }:
+                self.building_task_store.set_plan_stage(
+                    parent_job_id, stage="failed", state="failed"
+                )
+        except Exception:
+            # Preserve the original preparation/execution failure. The public
+            # job still fails and maintenance can surface a coordinator fault.
+            pass
 
     def _last_task_failure_resource(self) -> dict[str, Any] | None:
         """Return bounded child-command observations for a failed task.
@@ -2568,6 +2822,25 @@ class MapBuildPipeline:
             )
         return False
 
+    @staticmethod
+    def _chunk_failure_is_transient(exc: BaseException, typed_failure: str) -> bool:
+        if isinstance(exc, BuildingScopeError):
+            if typed_failure in _TRANSIENT_CHUNK_FAILURE_CODES:
+                return True
+            # A subprocess can report a deterministic typed guard, relation,
+            # oversize, or OOM failure. Its CalledProcessError cause does not
+            # make that explicit producer result transient.
+            if typed_failure != "building_chunk_execution_failed":
+                return False
+        current: BaseException | None = exc
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            if isinstance(current, (OSError, subprocess.CalledProcessError)):
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
     def _last_task_failure_peak_rss(self) -> int | None:
         return self._maximum_command_peak_rss(
             self._active_task_command_execution_metrics()
@@ -2600,24 +2873,6 @@ class MapBuildPipeline:
         *,
         source_pbf: Path,
     ) -> dict[str, Any]:
-        def configured_bytes(name: str, default: int) -> int:
-            raw = os.environ.get(name)
-            if raw is None or not raw.strip():
-                return default
-            try:
-                value = int(raw)
-            except ValueError as exc:
-                raise BuildingScopeError(
-                    "building_storage_admission",
-                    f"{name} must be a positive byte count",
-                ) from exc
-            if value <= 0:
-                raise BuildingScopeError(
-                    "building_storage_admission",
-                    f"{name} must be a positive byte count",
-                )
-            return value
-
         try:
             source_bytes = source_pbf.stat().st_size
             self.paths.building_cache_root.mkdir(parents=True, exist_ok=True)
@@ -2628,15 +2883,15 @@ class MapBuildPipeline:
                 ),
                 source_bytes=source_bytes,
                 free_bytes=free_bytes,
-                cache_max_bytes=configured_bytes(
+                cache_max_bytes=self._configured_building_storage_bytes(
                     "MAP_PLATFORM_BUILDING_BLOCK_CACHE_MAX_BYTES",
                     DEFAULT_BUILDING_BLOCK_CACHE_MAX_BYTES,
                 ),
-                attempt_max_bytes=configured_bytes(
+                attempt_max_bytes=self._configured_building_storage_bytes(
                     "MAP_PLATFORM_BUILDING_ATTEMPT_STORAGE_MAX_BYTES",
                     DEFAULT_BUILDING_ATTEMPT_STORAGE_MAX_BYTES,
                 ),
-                reserve_bytes=configured_bytes(
+                reserve_bytes=self._configured_building_storage_bytes(
                     "MAP_PLATFORM_BUILDING_STORAGE_RESERVE_BYTES",
                     DEFAULT_BUILDING_STORAGE_RESERVE_BYTES,
                 ),
@@ -2648,6 +2903,25 @@ class MapBuildPipeline:
                 "building_storage_admission",
                 str(exc),
             ) from exc
+
+    @staticmethod
+    def _configured_building_storage_bytes(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None or not raw.strip():
+            return default
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise BuildingScopeError(
+                "building_storage_admission",
+                f"{name} must be a positive byte count",
+            ) from exc
+        if value <= 0:
+            raise BuildingScopeError(
+                "building_storage_admission",
+                f"{name} must be a positive byte count",
+            )
+        return value
 
     def _freeze_chunked_inputs(
         self,
@@ -3123,18 +3397,6 @@ class MapBuildPipeline:
             },
             "globalPlanSha256": global_plan.sha256,
         }
-        self.building_task_store.create_plan(
-            parent_job_id=job.job_id,
-            global_plan_sha256=global_plan.sha256,
-            input_identity=input_identity,
-            expected_output_block_count=len(global_plan.output_blocks),
-            policy_version=partition.policy.policy_version,
-            resource_model_version="building-resource-model-untrained-v1",
-            stage="chunk_planning",
-            scheduling_weight=1,
-            admission_priority=0,
-            active_task_quota=1,
-        )
         task_specs: list[BuildingTaskSpec] = []
         for chunk in partition.chunks:
             kind = (
@@ -3180,8 +3442,18 @@ class MapBuildPipeline:
                     },
                 )
             )
-        self.building_task_store.add_tasks(task_specs)
-        self.building_task_store.mark_plan_observed(job.job_id)
+        self.building_task_store.publish_observed_plan(
+            parent_job_id=job.job_id,
+            global_plan_sha256=global_plan.sha256,
+            input_identity=input_identity,
+            expected_output_block_count=len(global_plan.output_blocks),
+            policy_version=partition.policy.policy_version,
+            resource_model_version="building-resource-model-untrained-v1",
+            tasks=task_specs,
+            scheduling_weight=1,
+            admission_priority=0,
+            active_task_quota=1,
+        )
 
     def publish_building_chunk_receipts(
         self,
@@ -4216,8 +4488,8 @@ class MapBuildPipeline:
             )
             cache_wait_started = time.monotonic()
             try:
-                resolved_source = self.source_cache.ensure(
-                    job.source_region,
+                resolved_source = self._ensure_source_cached(
+                    job,
                     cancellation_check=cancellation_check,
                 )
             finally:
@@ -4238,8 +4510,8 @@ class MapBuildPipeline:
                 )
             source_snapshot_sha256 = resolved_source.sha256
         if not re.fullmatch(r"[0-9a-f]{64}", source_snapshot_sha256 or ""):
-            resolved_source = resolved_source or self.source_cache.ensure(
-                job.source_region,
+            resolved_source = resolved_source or self._ensure_source_cached(
+                job,
                 cancellation_check=cancellation_check,
             )
             source_snapshot_sha256 = resolved_source.sha256
@@ -4291,19 +4563,27 @@ class MapBuildPipeline:
             calibration = load_building_calibration_window(
                 self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
             )
-            chunked = self.building_scope_mode in {"chunked_allowlist", "chunked"}
+            chunked = self.uses_chunked_preprocessing(job)
             scope_plan = (
                 self._plan_chunked_scope(job, calibration)
                 if chunked
                 else self._plan_selected_scope(job, calibration)
             )
+            if chunked:
+                # Reuse identity preparation can write the calibration cache
+                # before build_chunked is entered. Run the complete admission
+                # model here as soon as the global plan is available.
+                self._admit_chunked_storage(
+                    scope_plan,
+                    source_pbf=cached_source.path,
+                )
             calibration_generation_execution: dict[str, Any] = {}
             phase_context = (
                 self._parent_phase_reservation(
                     parent_job_id=job.job_id,
                     phase="source_preparation",
                     worker_id=job.worker_id,
-                    worker_capability=self._reported_worker_capability(),
+                    worker_capability=self._job_worker_capability(job),
                     cancellation_check=cancellation_check,
                 )
                 if chunked and job.worker_id
@@ -5354,7 +5634,11 @@ class MapBuildPipeline:
 
     def _cached_source_for_job(self, job: MapJob):
         leased = getattr(job, "_leased_cached_source", None)
-        cached = leased if leased is not None else self.source_cache.ensure(job.source_region)
+        cached = (
+            leased
+            if leased is not None
+            else self._ensure_source_cached(job)
+        )
         frozen = job.building_preprocessing_inputs
         if (
             frozen is not None
@@ -5365,6 +5649,27 @@ class MapBuildPipeline:
                 "frozen source snapshot changed before selected-area build",
             )
         return cached
+
+    def _ensure_source_cached(self, job: MapJob, *, cancellation_check=None):
+        minimum_free_bytes = (
+            self._configured_building_storage_bytes(
+                "MAP_PLATFORM_BUILDING_STORAGE_RESERVE_BYTES",
+                DEFAULT_BUILDING_STORAGE_RESERVE_BYTES,
+            )
+            if self.uses_chunked_preprocessing(job)
+            else None
+        )
+        try:
+            return self.source_cache.ensure(
+                job.source_region,
+                cancellation_check=cancellation_check,
+                minimum_free_bytes=minimum_free_bytes,
+            )
+        except SourceCacheStorageError as exc:
+            raise BuildingScopeError(
+                "building_storage_admission",
+                str(exc),
+            ) from exc
 
     def _run_command(
         self,
@@ -6918,6 +7223,16 @@ def run_job(
     monitoring_store: MapMonitoringStore | None = None,
     estimate_coordinator=None,
 ) -> MapJob:
+    queued_job = store.get(job_id)
+    if (
+        queued_job is not None
+        and isinstance(pipeline, MapBuildPipeline)
+        and pipeline.uses_chunked_preprocessing(queued_job)
+    ):
+        raise RuntimeError(
+            "chunked map jobs require the normal MapWorker worker loop; "
+            "the direct run_job development runner cannot schedule task quanta"
+        )
     try:
         from .resource_report import worker_resource_report
 

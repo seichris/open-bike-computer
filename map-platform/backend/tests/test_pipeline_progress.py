@@ -121,6 +121,64 @@ class PipelineProgressTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "building_chunk_wall_time_exceeded")
 
+    def test_chunk_retry_classification_is_narrow_and_deterministic(self):
+        self.assertTrue(
+            MapBuildPipeline._chunk_failure_is_transient(
+                OSError("temporary filesystem fault"),
+                "building_chunk_execution_failed",
+            )
+        )
+        self.assertTrue(
+            MapBuildPipeline._chunk_failure_is_transient(
+                subprocess.CalledProcessError(1, ["tool"]),
+                "building_chunk_execution_failed",
+            )
+        )
+        self.assertFalse(
+            MapBuildPipeline._chunk_failure_is_transient(
+                BuildingScopeError(
+                    "building_relation_incomplete",
+                    "deterministic closure failure",
+                ),
+                "building_relation_incomplete",
+            )
+        )
+        relation_process_failure = BuildingScopeError(
+            "building_relation_incomplete",
+            "deterministic producer relation failure",
+        )
+        relation_process_failure.__cause__ = subprocess.CalledProcessError(
+            2,
+            ["producer"],
+        )
+        self.assertFalse(
+            MapBuildPipeline._chunk_failure_is_transient(
+                relation_process_failure,
+                "building_relation_incomplete",
+            )
+        )
+        self.assertFalse(
+            MapBuildPipeline._chunk_failure_is_transient(
+                BuildingScopeError("building_worker_oom", "cgroup OOM"),
+                "building_worker_oom",
+            )
+        )
+        self.assertFalse(
+            MapBuildPipeline._chunk_failure_is_transient(
+                RuntimeError("deterministic Python bug"),
+                "building_chunk_execution_failed",
+            )
+        )
+        self.assertTrue(
+            MapBuildPipeline._chunk_failure_is_transient(
+                BuildingScopeError(
+                    "building_block_cache_unavailable",
+                    "temporary cache filesystem failure",
+                ),
+                "building_block_cache_unavailable",
+            )
+        )
+
     def test_relation_failure_preserves_bounded_source_detail(self):
         message, code = safe_build_failure(
             SimpleNamespace(

@@ -1,11 +1,13 @@
 # Shanghai 3D map orchestration runbook
 
 This runbook covers the internal `shadow`/`chunked_allowlist`/`chunked`
-coordinator. Its operator surfaces are intentionally read-only. Lease expiry,
-cache rebuild, and public/coordinator ready reconciliation use bounded,
-transactional recovery paths rather than manual database changes. Production
-remains on the monolithic executor until the rollout gates in the
-implementation plan are complete.
+coordinator. The documented inspect, task, alert, and resource-report surfaces
+are intentionally read-only. Lease expiry, cache rebuild, and
+public/coordinator ready reconciliation use bounded, transactional recovery
+paths rather than manual database changes. The CLI also contains the internal,
+mutating `complete-workload-scan` receipt handoff described below; it is not a
+routine operator recovery command. Production remains on the monolithic
+executor until the rollout gates in the implementation plan are complete.
 
 ## First response
 
@@ -18,19 +20,27 @@ implementation plan are complete.
    ```sh
    map-platform build-plan inspect JOB_ID --limit 100 --offset 0
    map-platform build-plan tasks JOB_ID --limit 100 --offset 0
-   map-platform build-plan alerts JOB_ID
+   map-platform build-plan alerts JOB_ID --limit 100 --offset 0
    map-platform resource-report
    ```
 
    The same information is available from the authenticated API endpoint
    `/v1/admin/building-plans/JOB_ID` and the read-only
    `/v1/admin/building-plans/JOB_ID/alerts` endpoint.
-   Inspect/task pages are limited to 100 rows and report total counts and
-   `hasMore`; advance `offset` until the retained result is complete. Raw
+   Inspect/task pages limit each task, attempt, receipt, and child/parent
+   reservation collection to 100 rows and report total counts plus `hasMore`;
+   advance `offset` until the retained result is complete. Alerts derive only
+   from the same bounded evidence page and return its cursor/counts. Raw
    workload-object arrays are deliberately omitted. Retain their identity and
    byte-count fields instead of trying to reconstruct them from diagnostics.
 3. Record the exact image digest and source/index/calibration identities before
    restarting anything. A changed identity is a new build, not a retry.
+
+`map-platform build-plan complete-workload-scan` is an internal, mutating
+receipt handoff. It requires the active worker ID, live lease token, and exact
+source-index receipt, and can split or requeue durable work. Do not use it as a
+manual retry. Invoke it only under an explicitly approved break-glass procedure
+that preserves the source, plan, worker, and lease identities.
 
 Child leases are refreshed every 30 seconds while a workload scan or building
 command is running. This lease cadence is separate from the 30-minute hard
@@ -55,7 +65,10 @@ expected chunk behavior.
 
 ## Typed alerts
 
-### `stale_lease` or `stale_heartbeat`
+### Child and parent-phase lease alerts
+
+`stale_lease`, `stale_heartbeat`, `parent_phase_lease_expired`, and
+`parent_phase_stale_heartbeat` identify lease-health problems.
 
 Confirm the worker container is alive and inspect its health/heartbeat and
 resource report. Every global scheduling or claim pass automatically recovers
@@ -66,6 +79,11 @@ and cache recovery also reject an expired token before a replacement claim, so
 do not publish with or manually requeue an old lease. If the worker is
 unhealthy, restart only the validation worker after checking that no active
 reservation is being held by a healthy replacement.
+
+The parent-phase variants identify `source_preparation` or `map_assembly` and
+the owning worker without exposing the lease token. They are read-only evidence:
+normal scheduling removes an expired parent-phase lease transactionally, so do
+not release or replace it manually.
 
 ### `task_split`
 
@@ -171,14 +189,15 @@ following from retained evidence:
 - every expected global block has one matching canonical cache receipt;
 - the receipt-set SHA-256 and preprocessing identity are present;
 - the published file is a positive-size, parseable ZIP whose CRC test passes,
-  whose `manifest.json` is nonempty, which contains at least one FMB, whose FMB
-  entries are each no larger than 2 MiB, and whose total size is no larger than
-  512 MiB;
+  whose paths are safe, unique, stored, and exactly match a schema-1
+  `manifest.json`; every declared map file and preview must match its manifest
+  byte count and SHA-256, at least one FMB must be nonempty, every FMB must be no
+  larger than 2 MiB, and the total ZIP must be no larger than 512 MiB;
 - exactly one ZIP receipt exists and its byte count and SHA-256 match the
   published file;
 - when stream signing is enabled, the separate signed-manifest validation
-  passed; and
-- no active lease, reservation, split child, or failed task remains.
+  passed;
+- no active lease, reservation, split child, or failed task remains; and
 - the bounded diagnostics show no active child or parent-phase reservation.
 
 Public job completion is durable before the coordinator marker moves from
@@ -212,7 +231,11 @@ not satisfy the retained monolithic-versus-chunked gate.
 
 ## Retained validation baseline
 
-The validation-only exact cold run on 2026-08-20 is job
+This is the authoritative retained validation baseline for this runbook, not a
+claim about the current live deployment or validation of later source commits.
+It used candidate image
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:eab9c1337acffa6206fa0f36f5728a40f47ba0109828099e80cd43e369744a55`
+(commit `d84c5c3a`). The validation-only exact cold run on 2026-08-20 is job
 `242ab1e1cd76478bbbd7`, map
 `shanghai-exact-cold-candidate-de7fbf0ea9`. It completed all 442 blocks and
 16 chunks under `memory.max=12,884,901,888`, with peak cgroup memory

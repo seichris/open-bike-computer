@@ -269,6 +269,20 @@ class MapJobRunAPITests(unittest.TestCase):
                 )
             ]
         )
+        reservation = task_store.acquire_parent_phase_reservation(
+            parent_job_id="job-admin-alerts",
+            phase="source_preparation",
+            worker_id="worker-admin-alerts",
+            worker_capability={
+                "memoryLimitBytes": 12_000_000_000,
+                "cpuCount": 1,
+                "resourcePool": "admin-alerts",
+                "maxConcurrentTasks": 1,
+            },
+            lease_seconds=1,
+            now=1.0,
+        )
+        self.assertIsNotNone(reservation)
 
         denied = self.client.get("/v1/admin/building-plans/job-admin-alerts/alerts")
         self.assertEqual(denied.status_code, 401)
@@ -277,8 +291,19 @@ class MapJobRunAPITests(unittest.TestCase):
             headers={"Authorization": "Bearer admin-secret"},
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["alertCount"], 0)
+        document = response.json()
+        self.assertEqual(document["page"]["limit"], 100)
+        self.assertIn(
+            "parent_phase_lease_expired",
+            {alert["code"] for alert in document["alerts"]},
+        )
         self.assertEqual(task_store.get_plan("job-admin-alerts")["state"], "planning")
+
+        rejected = self.client.get(
+            "/v1/admin/building-plans/job-admin-alerts/alerts?limit=101",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+        self.assertEqual(rejected.status_code, 400)
 
     def test_admin_building_plan_diagnostics_are_bounded_and_summarized(self):
         task_store = self.client.app.state.building_task_store
@@ -322,6 +347,18 @@ class MapJobRunAPITests(unittest.TestCase):
         )
         connection.commit()
         connection.close()
+        reservation = task_store.acquire_parent_phase_reservation(
+            parent_job_id="job-admin-page",
+            phase="source_preparation",
+            worker_id="worker-admin-page",
+            worker_capability={
+                "memoryLimitBytes": 12_000_000_000,
+                "cpuCount": 1,
+                "resourcePool": "admin-page",
+                "maxConcurrentTasks": 1,
+            },
+        )
+        self.assertIsNotNone(reservation)
 
         response = self.client.get(
             "/v1/admin/building-plans/job-admin-page?limit=1&offset=0",
@@ -335,6 +372,11 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertTrue(document["page"]["hasMore"])
         self.assertEqual(len(document["tasks"]), 1)
         self.assertEqual(len(document["attempts"]), 0)
+        self.assertEqual(len(document["parentPhaseReservations"]), 1)
+        self.assertEqual(
+            document["parentPhaseReservations"][0]["phase"],
+            "source_preparation",
+        )
         self.assertEqual(len(document["workloadReceipts"]), 1)
         self.assertGreater(
             document["workloadReceipts"][0]["workload_bytes"],

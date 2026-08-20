@@ -4,17 +4,45 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from map_platform.models import Bounds, SourceRegion
 from map_platform.source_cache import (
     SourceCache,
     SourceCacheError,
+    SourceCacheStorageError,
     default_backend_data_root,
 )
 
 
 class SourceCacheTests(unittest.TestCase):
+    def test_cold_download_checks_disk_reserve_before_opening_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            region = SourceRegion(
+                id="test-region",
+                provider="test",
+                name="Test",
+                url="https://example.invalid/test.osm.pbf",
+                bounds=Bounds(0, 0, 1, 1),
+                local_path="map-platform/backend/data/source-pbf/test.osm.pbf",
+            )
+            cache = SourceCache(
+                root / "repo",
+                root / "cache.json",
+                data_root=root / "data",
+            )
+            with patch(
+                "map_platform.source_cache.shutil.disk_usage",
+                return_value=SimpleNamespace(free=99),
+            ), patch(
+                "map_platform.source_cache.urllib.request.urlopen"
+            ) as download, self.assertRaises(SourceCacheStorageError):
+                cache.ensure(region, minimum_free_bytes=100)
+
+            download.assert_not_called()
+
     def test_default_data_root_reuses_pre_relocation_local_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -539,17 +539,27 @@ def create_app():
             "attempts": list(page["attempts"]),
             "resourceModel": building_task_store.resource_model_summary(parent_job_id),
             "resourceReservations": list(page["resourceReservations"]),
+            "parentPhaseReservations": list(page["parentPhaseReservations"]),
         }
 
     @app.get(
         "/v1/admin/building-plans/{parent_job_id}/alerts",
         dependencies=[Depends(require_admin_token)],
     )
-    def admin_building_plan_alerts(parent_job_id: str) -> dict[str, Any]:
+    def admin_building_plan_alerts(
+        parent_job_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
         if building_task_store.get_plan(parent_job_id) is None:
             raise HTTPException(status_code=404, detail="building plan not found")
         try:
-            return building_plan_alerts(building_task_store, parent_job_id)
+            return building_plan_alerts(
+                building_task_store,
+                parent_job_id,
+                limit=limit,
+                offset=offset,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

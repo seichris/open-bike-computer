@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -10,7 +13,9 @@ from map_platform.cli import (
     _perform_maintenance,
     _pipeline_producer_identity,
     _safe_error_summary,
+    main,
 )
+from map_platform.building_tasks import BuildingTaskStore
 from map_platform.jobs import ArtifactGarbageCollectionError
 from map_platform.map_stream_build_identity import MapStreamBuildIdentity
 from map_platform.worker import (
@@ -73,6 +78,127 @@ class PipelineProducerIdentityTests(unittest.TestCase):
                 "open-bike-map-platform:local",
                 required=True,
             )
+
+
+class BuildingPlanCLITests(unittest.TestCase):
+    def test_inspect_and_alerts_expose_bounded_parent_phase_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_root = Path(directory)
+            store = BuildingTaskStore(data_root / "building-tasks.sqlite3")
+            store.create_plan(
+                parent_job_id="job-cli-parent-phase",
+                global_plan_sha256="a" * 64,
+                input_identity={},
+                expected_output_block_count=1,
+                policy_version=1,
+                resource_model_version="v1",
+            )
+            reservation = store.acquire_parent_phase_reservation(
+                parent_job_id="job-cli-parent-phase",
+                phase="source_preparation",
+                worker_id="worker-cli",
+                worker_capability={
+                    "memoryLimitBytes": 12_000_000_000,
+                    "cpuCount": 1,
+                    "resourcePool": "cli",
+                    "maxConcurrentTasks": 1,
+                },
+                lease_seconds=1,
+                now=1.0,
+            )
+            self.assertIsNotNone(reservation)
+            repo_root = Path(__file__).resolve().parents[3]
+
+            inspect_output = io.StringIO()
+            with (
+                patch(
+                    "sys.argv",
+                    [
+                        "map-platform",
+                        "--repo-root",
+                        str(repo_root),
+                        "--data-root",
+                        str(data_root),
+                        "build-plan",
+                        "inspect",
+                        "job-cli-parent-phase",
+                        "--limit",
+                        "1",
+                    ],
+                ),
+                redirect_stdout(inspect_output),
+            ):
+                self.assertEqual(main(), 0)
+            inspect_document = json.loads(inspect_output.getvalue())
+            self.assertEqual(len(inspect_document["parentPhaseReservations"]), 1)
+
+            alerts_output = io.StringIO()
+            with (
+                patch(
+                    "sys.argv",
+                    [
+                        "map-platform",
+                        "--repo-root",
+                        str(repo_root),
+                        "--data-root",
+                        str(data_root),
+                        "build-plan",
+                        "alerts",
+                        "job-cli-parent-phase",
+                        "--limit",
+                        "1",
+                    ],
+                ),
+                redirect_stdout(alerts_output),
+            ):
+                self.assertEqual(main(), 0)
+            alerts_document = json.loads(alerts_output.getvalue())
+            self.assertEqual(alerts_document["page"]["limit"], 1)
+            self.assertIn(
+                "parent_phase_lease_expired",
+                {alert["code"] for alert in alerts_document["alerts"]},
+            )
+
+            with (
+                patch(
+                    "sys.argv",
+                    [
+                        "map-platform",
+                        "--repo-root",
+                        str(repo_root),
+                        "--data-root",
+                        str(data_root),
+                        "build-plan",
+                        "alerts",
+                        "job-cli-parent-phase",
+                        "--limit",
+                        "101",
+                    ],
+                ),
+                self.assertRaises(SystemExit) as context,
+            ):
+                main()
+            self.assertIn("limit/offset", str(context.exception))
+
+    def test_complete_workload_scan_help_marks_internal_mutation(self):
+        output = io.StringIO()
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "map-platform",
+                    "build-plan",
+                    "complete-workload-scan",
+                    "--help",
+                ],
+            ),
+            redirect_stdout(output),
+            self.assertRaises(SystemExit) as context,
+        ):
+            main()
+
+        self.assertEqual(context.exception.code, 0)
+        self.assertIn("INTERNAL MUTATING", output.getvalue())
 
 
 class MaintenanceTests(unittest.TestCase):

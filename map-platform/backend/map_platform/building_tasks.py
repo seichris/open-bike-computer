@@ -64,6 +64,10 @@ _DEFAULT_SPLIT_DEPTH_LIMIT = 16
 _DEFAULT_SCHEDULING_WEIGHT = 1
 _DEFAULT_ADMISSION_PRIORITY = 0
 _PARENT_RESOURCE_PHASES = frozenset({"source_preparation", "map_assembly"})
+_DEFAULT_PARENT_PHASE_MEMORY_RESERVATION_BYTES = 5 * 1024 * 1024 * 1024
+_MAX_TRANSIENT_TASK_ATTEMPTS = 3
+_TRANSIENT_RETRY_BASE_SECONDS = 5.0
+_TRANSIENT_RETRY_JITTER_FRACTION = 0.25
 
 
 class BuildingTaskStoreError(RuntimeError):
@@ -256,6 +260,223 @@ class BuildingTaskStore:
         finally:
             connection.close()
 
+    def publish_observed_plan(
+        self,
+        *,
+        parent_job_id: str,
+        global_plan_sha256: str,
+        input_identity: Mapping[str, Any],
+        expected_output_block_count: int,
+        policy_version: int,
+        resource_model_version: str,
+        tasks: Sequence[BuildingTaskSpec],
+        scheduling_weight: int = _DEFAULT_SCHEDULING_WEIGHT,
+        admission_priority: int = _DEFAULT_ADMISSION_PRIORITY,
+        active_task_quota: int | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Atomically replace one non-executed shadow plan observation.
+
+        Shadow task rows are useful audit evidence, but they must never be
+        visible to the scheduler as pending work. Plan creation, exact task
+        replacement, task cancellation, and terminal observation therefore
+        share one SQLite write transaction.
+        """
+
+        _require_sha(global_plan_sha256, "global_plan_sha256")
+        if not isinstance(parent_job_id, str) or not parent_job_id:
+            raise BuildingTaskStoreError("parent job ID is required")
+        if (
+            isinstance(expected_output_block_count, bool)
+            or not isinstance(expected_output_block_count, int)
+            or expected_output_block_count <= 0
+        ):
+            raise BuildingTaskStoreError(
+                "expected output block count is invalid"
+            )
+        _validate_scheduling_policy(
+            scheduling_weight=scheduling_weight,
+            admission_priority=admission_priority,
+            active_task_quota=active_task_quota,
+        )
+        task_specs = tuple(tasks)
+        task_ids: set[str] = set()
+        block_owners: dict[tuple[int, int], str] = {}
+        for spec in task_specs:
+            if spec.parent_job_id != parent_job_id:
+                raise BuildingTaskStoreError(
+                    "shadow task belongs to a different parent"
+                )
+            if not spec.task_id or spec.task_id in task_ids:
+                raise BuildingTaskStoreError(
+                    "shadow task identity is missing or duplicated"
+                )
+            task_ids.add(spec.task_id)
+            if not spec.blocks or len(set(spec.blocks)) != len(spec.blocks):
+                raise BuildingTaskStoreError(
+                    "shadow task block set is empty or duplicated"
+                )
+            for block in spec.blocks:
+                _validate_block(block)
+                if block in block_owners:
+                    raise BuildingTaskStoreError(
+                        "shadow tasks contain duplicate block ownership"
+                    )
+                block_owners[block] = spec.task_id
+        if len(block_owners) != expected_output_block_count:
+            raise BuildingTaskStoreError(
+                "shadow tasks do not cover the expected block count"
+            )
+
+        now = self._clock() if now is None else now
+        identity_json = _canonical_json(dict(input_identity)).decode("utf-8")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            plan = connection.execute(
+                "SELECT * FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            expected_identity = (
+                global_plan_sha256,
+                identity_json,
+                expected_output_block_count,
+                policy_version,
+                resource_model_version,
+                scheduling_weight,
+                admission_priority,
+                active_task_quota,
+            )
+            if plan is None:
+                connection.execute(
+                    """
+                    INSERT INTO map_build_plans(
+                        parent_job_id, global_plan_sha256, input_identity_json,
+                        stage, state, expected_output_block_count,
+                        policy_version, resource_model_version,
+                        cancellation_generation, scheduling_weight,
+                        admission_priority, active_task_quota,
+                        virtual_finish, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'observed', 'observed', ?, ?, ?, 0, ?, ?, ?, 0, ?, ?)
+                    """,
+                    (
+                        parent_job_id,
+                        global_plan_sha256,
+                        identity_json,
+                        expected_output_block_count,
+                        policy_version,
+                        resource_model_version,
+                        scheduling_weight,
+                        admission_priority,
+                        active_task_quota,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                actual_identity = (
+                    plan["global_plan_sha256"],
+                    plan["input_identity_json"],
+                    plan["expected_output_block_count"],
+                    plan["policy_version"],
+                    plan["resource_model_version"],
+                    plan["scheduling_weight"],
+                    plan["admission_priority"],
+                    plan["active_task_quota"],
+                )
+                if actual_identity != expected_identity:
+                    raise BuildingTaskStoreError("parent plan identity changed")
+                compatible_states = {"observed", "chunk_planning", "planning"}
+                if (
+                    plan["state"] not in compatible_states
+                    or plan["stage"] not in compatible_states
+                    or plan["cancellation_generation"] != 0
+                    or plan["last_claimed_at"] is not None
+                    or float(plan["virtual_finish"] or 0.0) != 0.0
+                ):
+                    raise BuildingTaskStoreError(
+                        "parent plan is not a compatible shadow observation"
+                    )
+                task_evidence = connection.execute(
+                    """
+                    SELECT 1
+                    FROM map_build_tasks tasks
+                    WHERE tasks.parent_job_id=? AND (
+                        tasks.state NOT IN ('pending', 'cancelled')
+                        OR tasks.transient_attempts != 0
+                        OR tasks.lease_owner IS NOT NULL
+                        OR tasks.lease_token IS NOT NULL
+                        OR tasks.lease_expires_at IS NOT NULL
+                        OR tasks.heartbeat_at IS NOT NULL
+                        OR tasks.next_eligible_at IS NOT NULL
+                        OR tasks.output_receipt_set_sha256 IS NOT NULL
+                        OR (tasks.typed_error IS NOT NULL AND tasks.typed_error!='building_shadow_observed')
+                        OR EXISTS(SELECT 1 FROM map_build_task_attempts attempts WHERE attempts.task_id=tasks.task_id)
+                        OR EXISTS(SELECT 1 FROM map_build_workload_receipts workloads WHERE workloads.task_id=tasks.task_id)
+                        OR EXISTS(SELECT 1 FROM map_build_block_receipts receipts WHERE receipts.task_id=tasks.task_id)
+                        OR EXISTS(SELECT 1 FROM map_build_resource_reservations reservations WHERE reservations.task_id=tasks.task_id)
+                    )
+                    LIMIT 1
+                    """,
+                    (parent_job_id,),
+                ).fetchone()
+                parent_reservation = connection.execute(
+                    "SELECT 1 FROM map_build_parent_phase_reservations WHERE parent_job_id=? LIMIT 1",
+                    (parent_job_id,),
+                ).fetchone()
+                if task_evidence is not None or parent_reservation is not None:
+                    raise BuildingTaskStoreError(
+                        "shadow plan contains execution evidence"
+                    )
+                existing_task_ids = [
+                    row["task_id"]
+                    for row in connection.execute(
+                        "SELECT task_id FROM map_build_tasks WHERE parent_job_id=?",
+                        (parent_job_id,),
+                    ).fetchall()
+                ]
+                if existing_task_ids:
+                    placeholders = ",".join("?" for _ in existing_task_ids)
+                    connection.execute(
+                        f"DELETE FROM map_build_task_blocks WHERE task_id IN ({placeholders})",
+                        existing_task_ids,
+                    )
+                    connection.execute(
+                        f"DELETE FROM map_build_tasks WHERE task_id IN ({placeholders})",
+                        existing_task_ids,
+                    )
+                connection.execute(
+                    """
+                    UPDATE map_build_plans
+                    SET stage='observed', state='observed', updated_at=?
+                    WHERE parent_job_id=?
+                    """,
+                    (now, parent_job_id),
+                )
+
+            for spec in task_specs:
+                self._insert_task(connection, spec)
+            connection.execute(
+                """
+                UPDATE map_build_tasks
+                SET state='cancelled', typed_error='building_shadow_observed',
+                    updated_at=?
+                WHERE parent_job_id=?
+                """,
+                (now, parent_job_id),
+            )
+            result = connection.execute(
+                "SELECT * FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            connection.commit()
+            return dict(result)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def add_tasks(self, tasks: Sequence[BuildingTaskSpec]) -> None:
         if not tasks:
             return
@@ -393,10 +614,11 @@ class BuildingTaskStore:
     ) -> dict[str, Any] | None:
         """Requeue a failed parent for a bounded job-level retry.
 
-        Job retries keep the same parent identity.  Reopening only a failed
-        plan preserves ready receipts, split history, and all attempt
-        observations while making failed child tasks eligible for a fresh
-        lease.  Cancelled and ready plans remain terminal by design.
+        Job retries keep the same parent identity. Reopening preserves ready
+        receipts, split history, and all attempt observations. Child retries
+        are handled before parent failure, so a failed child remains terminal
+        here; requeueing it would turn deterministic failures into retries.
+        Cancelled and ready plans remain terminal by design.
         """
 
         if stage not in _PLAN_STATES or stage in _TERMINAL_PLAN_STATES:
@@ -420,17 +642,6 @@ class BuildingTaskStore:
                     WHERE parent_job_id=?
                     """,
                     (stage, stage, now, parent_job_id),
-                )
-                connection.execute(
-                    """
-                    UPDATE map_build_tasks
-                    SET state='pending', typed_error=NULL,
-                        lease_owner=NULL, lease_token=NULL,
-                        lease_expires_at=NULL, heartbeat_at=NULL,
-                        next_eligible_at=?, updated_at=?
-                    WHERE parent_job_id=? AND state='failed'
-                    """,
-                    (now, now, parent_job_id),
                 )
                 connection.execute(
                     "DELETE FROM map_build_resource_reservations WHERE parent_job_id=?",
@@ -635,6 +846,7 @@ class BuildingTaskStore:
     ) -> ClaimedBuildingTask | None:
         if not worker_id or lease_seconds <= 0:
             raise BuildingTaskStoreError("worker and lease are required")
+        effective_capability = _normalize_resource_capability(worker_capability)
         now = self._clock() if now is None else now
         connection = self._connect()
         try:
@@ -673,19 +885,15 @@ class BuildingTaskStore:
             fair_parent_ids = {
                 candidate["parent_job_id"]
                 for candidate in rows
-                if _worker_can_admit(candidate, worker_capability)
+                if _worker_can_admit(candidate, effective_capability)
             }
-            active_parent_ids: set[str] = set()
-            if worker_capability is not None:
-                active_parent_ids = _active_reservation_parent_ids(
-                    connection,
-                    resource_pool=str(
-                        worker_capability.get("resourcePool", _DEFAULT_RESOURCE_POOL)
-                    ),
-                    now=now,
-                )
+            active_parent_ids = _active_reservation_parent_ids(
+                connection,
+                resource_pool=str(effective_capability["resourcePool"]),
+                now=now,
+            )
             for candidate in rows:
-                if not _worker_can_admit(candidate, worker_capability):
+                if not _worker_can_admit(candidate, effective_capability):
                     continue
                 active_task_quota = candidate["active_task_quota"]
                 if active_task_quota is not None:
@@ -695,7 +903,7 @@ class BuildingTaskStore:
                     ).fetchone()[0]
                     if int(active_for_parent) >= int(active_task_quota):
                         continue
-                request = _resource_request(candidate, worker_capability)
+                request = _resource_request(candidate, effective_capability)
                 if request is not None and request["maxConcurrentTasks"] > 1:
                     if (
                         len(fair_parent_ids) > 1
@@ -745,7 +953,7 @@ class BuildingTaskStore:
                     row["parent_job_id"],
                 ),
             )
-            admission = _resource_admission(row, worker_capability)
+            admission = _resource_admission(row, effective_capability)
             if resource_request is not None:
                 active = _resource_capacity_snapshot(
                     connection, resource_request["resourcePool"], now=now
@@ -779,7 +987,7 @@ class BuildingTaskStore:
                         resource_request["cpuWeight"],
                         resource_request["cpuCapacity"],
                         resource_request["maxConcurrentTasks"],
-                        _canonical_json(dict(worker_capability or {})).decode(
+                        _canonical_json(effective_capability).decode(
                             "utf-8"
                         ),
                         now,
@@ -801,7 +1009,7 @@ class BuildingTaskStore:
                     _canonical_json(
                         {
                             "workerId": worker_id,
-                            "capability": dict(worker_capability or {}),
+                            "capability": effective_capability,
                             "admission": admission,
                         }
                     ).decode("utf-8"),
@@ -832,7 +1040,7 @@ class BuildingTaskStore:
         worker_capability: Mapping[str, Any] | None,
         lease_seconds: float = 60.0,
         estimated_peak_memory_bytes: int = (
-            DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES
+            _DEFAULT_PARENT_PHASE_MEMORY_RESERVATION_BYTES
         ),
         now: float | None = None,
     ) -> ParentPhaseReservation | None:
@@ -1054,6 +1262,7 @@ class BuildingTaskStore:
     ) -> str | None:
         """Return the parent currently favored by the global task scheduler."""
 
+        effective_capability = _normalize_resource_capability(worker_capability)
         now = self._clock() if now is None else now
         connection = self._connect()
         try:
@@ -1084,7 +1293,7 @@ class BuildingTaskStore:
                 (
                     str(row["parent_job_id"])
                     for row in rows
-                    if _worker_can_admit(row, worker_capability)
+                    if _worker_can_admit(row, effective_capability)
                 ),
                 None,
             )
@@ -1093,6 +1302,34 @@ class BuildingTaskStore:
         except Exception:
             connection.rollback()
             raise
+        finally:
+            connection.close()
+
+    def pending_task_availability(
+        self,
+        parent_job_id: str,
+        *,
+        now: float | None = None,
+    ) -> dict[str, int]:
+        """Return eligible/deferred pending counts using the store clock."""
+
+        now = self._clock() if now is None else now
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN next_eligible_at IS NULL OR next_eligible_at <= ? THEN 1 ELSE 0 END), 0) AS eligible,
+                    COALESCE(SUM(CASE WHEN next_eligible_at > ? THEN 1 ELSE 0 END), 0) AS deferred
+                FROM map_build_tasks
+                WHERE parent_job_id=? AND state='pending'
+                """,
+                (now, now, parent_job_id),
+            ).fetchone()
+            return {
+                "eligible": int(row["eligible"] or 0),
+                "deferred": int(row["deferred"] or 0),
+            }
         finally:
             connection.close()
 
@@ -1567,6 +1804,7 @@ class BuildingTaskStore:
             peak_rss_bytes=peak_rss_bytes,
             now=now,
             require_receipts=False,
+            transient_retry=transient,
         )
 
     def split(
@@ -2673,6 +2911,7 @@ class BuildingTaskStore:
         peak_rss_bytes: int | None = None,
         now: float | None = None,
         require_receipts: bool,
+        transient_retry: bool = False,
     ) -> BuildingTaskRecord:
         now = self._clock() if now is None else now
         connection = self._connect()
@@ -2681,6 +2920,18 @@ class BuildingTaskStore:
             task = self._locked_task(
                 connection, task_id, worker_id, lease_token, now=now
             )
+            next_eligible_at = None
+            if transient_retry:
+                if task.transient_attempts >= _MAX_TRANSIENT_TASK_ATTEMPTS:
+                    state = "failed"
+                    outcome = "failed_retry_exhausted"
+                else:
+                    state = "pending"
+                    outcome = "failed_transient"
+                    next_eligible_at = now + _transient_retry_delay_seconds(
+                        task.task_id,
+                        task.transient_attempts,
+                    )
             if require_receipts:
                 expected = int(connection.execute(
                     "SELECT COUNT(*) FROM map_build_task_blocks WHERE task_id=?", (task_id,)
@@ -2700,8 +2951,8 @@ class BuildingTaskStore:
                 if expected != actual:
                     raise BuildingTaskStoreError("task cannot become ready without all block receipts")
             connection.execute(
-                "UPDATE map_build_tasks SET state=?, typed_error=?, lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, updated_at=? WHERE task_id=?",
-                (state, typed_failure, now, task_id),
+                "UPDATE map_build_tasks SET state=?, typed_error=?, next_eligible_at=?, lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, updated_at=? WHERE task_id=?",
+                (state, typed_failure, next_eligible_at, now, task_id),
             )
             receipt_set_sha256 = None
             if require_receipts:
@@ -2810,14 +3061,32 @@ class BuildingTaskStore:
                 "SELECT state FROM map_build_plans WHERE parent_job_id=?",
                 (row["parent_job_id"],),
             ).fetchone()
+            terminal_parent = (
+                plan is not None and plan["state"] in _TERMINAL_PLAN_STATES
+            )
+            exhausted = int(row["transient_attempts"]) >= _MAX_TRANSIENT_TASK_ATTEMPTS
             new_state = (
                 "cancelled"
-                if plan is not None and plan["state"] in _TERMINAL_PLAN_STATES
-                else "pending"
+                if terminal_parent
+                else "failed" if exhausted else "pending"
+            )
+            next_eligible_at = (
+                now
+                + _transient_retry_delay_seconds(
+                    str(row["task_id"]), int(row["transient_attempts"])
+                )
+                if new_state == "pending"
+                else None
             )
             connection.execute(
-                "UPDATE map_build_tasks SET state=?, lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, updated_at=? WHERE task_id=?",
-                (new_state, now, row["task_id"]),
+                "UPDATE map_build_tasks SET state=?, typed_error=?, next_eligible_at=?, lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, updated_at=? WHERE task_id=?",
+                (
+                    new_state,
+                    "building_task_lease_expired",
+                    next_eligible_at,
+                    now,
+                    row["task_id"],
+                ),
             )
             connection.execute(
                 "DELETE FROM map_build_resource_reservations WHERE task_id=?",
@@ -2827,7 +3096,11 @@ class BuildingTaskStore:
                 connection,
                 row["task_id"],
                 row["transient_attempts"],
-                outcome="lease_expired",
+                outcome=(
+                    "lease_expired_retry_exhausted"
+                    if exhausted and not terminal_parent
+                    else "lease_expired"
+                ),
                 typed_failure="building_task_lease_expired",
                 now=now,
             )
@@ -2965,6 +3238,13 @@ class BuildingTaskStore:
     def _initialize(self) -> None:
         connection = self._connect()
         try:
+            # A downgrade must reject a future schema before changing journal
+            # mode or creating compatibility tables/indexes. Recheck after the
+            # migration lock because another initializer may upgrade between
+            # this read and BEGIN IMMEDIATE.
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version > BUILDING_TASK_SCHEMA_VERSION:
+                raise BuildingTaskStoreError("unsupported building task schema")
             # SQLite does not consistently honor busy_timeout while changing
             # journal mode. API, worker, and maintenance may all open the same
             # freshly upgraded store, so retry only this idempotent lock race.
@@ -2976,8 +3256,11 @@ class BuildingTaskStore:
                     if "locked" not in str(exc).lower() or attempt == 99:
                         raise
                     time.sleep(0.01)
-            connection.executescript(
-                """
+            connection.execute("BEGIN IMMEDIATE")
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version > BUILDING_TASK_SCHEMA_VERSION:
+                raise BuildingTaskStoreError("unsupported building task schema")
+            base_schema = """
                 CREATE TABLE IF NOT EXISTS map_build_plans(
                     parent_job_id TEXT PRIMARY KEY,
                     global_plan_sha256 TEXT NOT NULL,
@@ -3103,14 +3386,9 @@ class BuildingTaskStore:
                 CREATE INDEX IF NOT EXISTS map_build_parent_phase_reservations_pool
                     ON map_build_parent_phase_reservations(resource_pool, expires_at);
                 """
-            )
-            # sqlite3.executescript() commits any open transaction. Acquire
-            # the migration write lock only after the idempotent base schema
-            # exists, then re-read the version and columns while serialized.
-            connection.execute("BEGIN IMMEDIATE")
-            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version > BUILDING_TASK_SCHEMA_VERSION:
-                raise BuildingTaskStoreError("unsupported building task schema")
+            for statement in base_schema.split(";"):
+                if statement.strip():
+                    connection.execute(statement)
             plan_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(map_build_plans)")
@@ -3218,22 +3496,23 @@ def _worker_can_admit(
     row: sqlite3.Row,
     worker_capability: Mapping[str, Any] | None,
 ) -> bool:
-    if worker_capability is None:
-        return True
-    if not isinstance(worker_capability, Mapping):
-        raise BuildingTaskStoreError("worker capability is invalid")
-    if not {
-        "memoryLimitBytes",
-        "configuredMemoryLimitBytes",
-        "cgroupMemoryLimitBytes",
-        "cgroupMemory",
-        "cpuCount",
-        "cpuCapacity",
-        "maxConcurrentTasks",
-        "resourcePool",
-    }.intersection(worker_capability):
-        return True
     return _resource_request(row, worker_capability) is not None
+
+
+def _normalize_resource_capability(
+    worker_capability: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return fail-closed legacy defaults for the chunk resource ledger."""
+
+    if worker_capability is None:
+        effective: dict[str, Any] = {}
+    elif isinstance(worker_capability, Mapping):
+        effective = dict(worker_capability)
+    else:
+        raise BuildingTaskStoreError("worker capability is invalid")
+    effective.setdefault("resourcePool", _DEFAULT_RESOURCE_POOL)
+    effective.setdefault("maxConcurrentTasks", _DEFAULT_MAX_CONCURRENT_TASKS)
+    return effective
 
 
 def _resource_request(
@@ -3242,52 +3521,33 @@ def _resource_request(
 ) -> dict[str, Any] | None:
     """Normalize a worker/task pair into a reservation request.
 
-    A capability without any resource fields keeps the legacy unbounded
-    admission behavior. Once a worker reports a resource pool, memory, CPU,
-    or concurrency limit, every claimed task consumes a reservation in that
-    pool. The default concurrency is intentionally one for this heavy-task
-    coordinator.
+    Every chunk task consumes a durable reservation. Missing legacy capability
+    metadata is represented by the default concurrency-one pool; it never
+    selects an unbounded compatibility path.
     """
 
-    if worker_capability is None:
-        return None
-    if not isinstance(worker_capability, Mapping):
-        raise BuildingTaskStoreError("worker capability is invalid")
-    resource_fields = {
-        "memoryLimitBytes",
-        "configuredMemoryLimitBytes",
-        "cgroupMemoryLimitBytes",
-        "cgroupMemory",
-        "cpuCount",
-        "cpuCapacity",
-        "maxConcurrentTasks",
-        "resourcePool",
-    }
-    if not resource_fields.intersection(worker_capability):
-        return None
-    limit = _capability_memory_limit(worker_capability)
+    effective_capability = _normalize_resource_capability(worker_capability)
+    limit = _capability_memory_limit(effective_capability)
     predicted = _predicted_memory(row)
     if limit is not None and predicted > _memory_admission_limit(limit):
         return None
-    pool = worker_capability.get("resourcePool", _DEFAULT_RESOURCE_POOL)
+    pool = effective_capability["resourcePool"]
     if not isinstance(pool, str) or not pool or len(pool) > 128:
         raise BuildingTaskStoreError("worker resource pool is invalid")
-    max_concurrent = worker_capability.get(
-        "maxConcurrentTasks", _DEFAULT_MAX_CONCURRENT_TASKS
-    )
+    max_concurrent = effective_capability["maxConcurrentTasks"]
     if (
         isinstance(max_concurrent, bool)
         or not isinstance(max_concurrent, int)
         or max_concurrent <= 0
     ):
         raise BuildingTaskStoreError("worker concurrency capability is invalid")
-    cpu_weight = worker_capability.get("cpuWeight", 1.0)
+    cpu_weight = effective_capability.get("cpuWeight", 1.0)
     if isinstance(cpu_weight, bool) or not isinstance(cpu_weight, (int, float)):
         raise BuildingTaskStoreError("worker CPU reservation is invalid")
     if cpu_weight <= 0:
         raise BuildingTaskStoreError("worker CPU reservation is invalid")
-    cpu_capacity = worker_capability.get(
-        "cpuCapacity", worker_capability.get("cpuCount")
+    cpu_capacity = effective_capability.get(
+        "cpuCapacity", effective_capability.get("cpuCount")
     )
     if cpu_capacity is not None:
         if isinstance(cpu_capacity, bool) or not isinstance(cpu_capacity, (int, float)):
@@ -3315,16 +3575,10 @@ def _parent_phase_resource_request(
         or estimated_peak_memory_bytes < 0
     ):
         raise BuildingTaskStoreError("parent phase memory estimate is invalid")
-    if worker_capability is None:
-        effective_capability: dict[str, Any] = {}
-    elif isinstance(worker_capability, Mapping):
-        effective_capability = dict(worker_capability)
-    else:
-        raise BuildingTaskStoreError("worker capability is invalid")
+    effective_capability = _normalize_resource_capability(worker_capability)
     # New parent-phase coordination is always durable. If an older caller has
     # no resource report, it still enters the default concurrency-one pool;
     # reported memory/CPU limits retain the child admission semantics below.
-    effective_capability.setdefault("resourcePool", _DEFAULT_RESOURCE_POOL)
     effective_capability["maxConcurrentTasks"] = 1
     request = _resource_request(
         {
@@ -3533,6 +3787,23 @@ def _resource_admission(
 
 def _memory_admission_limit(limit: int) -> int:
     return (limit * _MEMORY_ADMISSION_PERCENT) // 100
+
+
+def _transient_retry_delay_seconds(task_id: str, attempt_number: int) -> float:
+    if (
+        not isinstance(task_id, str)
+        or not task_id
+        or isinstance(attempt_number, bool)
+        or not isinstance(attempt_number, int)
+        or attempt_number <= 0
+    ):
+        raise BuildingTaskStoreError("task retry identity is invalid")
+    exponential = _TRANSIENT_RETRY_BASE_SECONDS * (2 ** (attempt_number - 1))
+    digest = hashlib.sha256(f"{task_id}:{attempt_number}".encode("utf-8")).digest()
+    jitter_unit = int.from_bytes(digest[:8], "big") / float((1 << 64) - 1)
+    return exponential * (
+        1.0 + (_TRANSIENT_RETRY_JITTER_FRACTION * jitter_unit)
+    )
 
 
 def _capability_memory_limit(capability: Mapping[str, Any]) -> int | None:

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+import warnings
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,7 @@ from map_platform.models import Bounds, MapJob, SourceRegion
 from map_platform.pipeline import (
     BuildingCacheRetryRequired,
     BuildingChunkSplitRequired,
+    BuildingChunkSchedulingYield,
     MapBuildPipeline,
     PipelinePaths,
     _coalesce_projected_rectangles,
@@ -90,7 +92,131 @@ class RecordingRunner:
         return ""
 
 
+_FINAL_TEST_MAP_ID = "map"
+_FINAL_TEST_FMB_PATH = "VECTMAP/map/+0000+0000/0_0.fmb"
+_FINAL_TEST_PREVIEW_PATH = "preview.png"
+
+
+def _valid_final_archive_fixture():
+    fmb = one_building_fmb4()
+    preview = b"bounded-preview"
+    manifest = {
+        "schemaVersion": 1,
+        "mapId": _FINAL_TEST_MAP_ID,
+        "preview": {
+            "path": _FINAL_TEST_PREVIEW_PATH,
+            "bytes": len(preview),
+            "sha256": hashlib.sha256(preview).hexdigest(),
+        },
+        "files": [
+            {
+                "path": _FINAL_TEST_FMB_PATH,
+                "bytes": len(fmb),
+                "sha256": hashlib.sha256(fmb).hexdigest(),
+            }
+        ],
+    }
+    entries = {
+        "ATTRIBUTION.txt": b"OpenStreetMap contributors\n",
+        "LICENSES/OpenStreetMap-ODbL.txt": b"ODbL\n",
+        _FINAL_TEST_PREVIEW_PATH: preview,
+        _FINAL_TEST_FMB_PATH: fmb,
+    }
+    return manifest, entries
+
+
+def _write_final_archive(
+    path: Path,
+    *,
+    manifest,
+    entries,
+    duplicate_entries=(),
+    compression_overrides=None,
+):
+    compression_overrides = compression_overrides or {}
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        if manifest is not None:
+            manifest_bytes = (
+                manifest
+                if isinstance(manifest, bytes)
+                else json.dumps(manifest, sort_keys=True).encode("utf-8")
+            )
+            archive.writestr("manifest.json", manifest_bytes)
+        for relative, payload in entries.items():
+            archive.writestr(
+                relative,
+                payload,
+                compress_type=compression_overrides.get(
+                    relative,
+                    zipfile.ZIP_STORED,
+                ),
+            )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            for relative, payload in duplicate_entries:
+                archive.writestr(relative, payload)
+
+
+def _zip_record(path: Path) -> ArtifactRecord:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return ArtifactRecord(
+        format=ZIP_STORED_FORMAT,
+        media_type=ZIP_MEDIA_TYPE,
+        filename=path.name,
+        object_key=zip_object_key(_FINAL_TEST_MAP_ID, digest),
+        bytes=path.stat().st_size,
+        sha256=digest,
+    )
+
+
 class MapBuildingContractTests(unittest.TestCase):
+    def test_cold_source_storage_preflight_is_limited_to_chunked_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(
+                self._request()
+            )
+            cached = SimpleNamespace(path=root / "source.pbf", sha256="a" * 64)
+
+            for mode, expected_reserve in (
+                ("selected", False),
+                ("chunked", True),
+            ):
+                with self.subTest(mode=mode):
+                    pipeline = MapBuildPipeline(
+                        PipelinePaths(root, root / "work", root / "packs"),
+                        building_scope_mode=mode,
+                    )
+                    with patch.object(
+                        pipeline.source_cache,
+                        "ensure",
+                        return_value=cached,
+                    ) as ensure:
+                        self.assertIs(pipeline._ensure_source_cached(job), cached)
+                    minimum_free_bytes = ensure.call_args.kwargs[
+                        "minimum_free_bytes"
+                    ]
+                    if expected_reserve:
+                        self.assertGreater(minimum_free_bytes, 0)
+                    else:
+                        self.assertIsNone(minimum_free_bytes)
+
+            target_two = deepcopy(job)
+            target_two.request["target"]["rendererFormatVersion"] = 2
+            allowlist_pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"),
+                building_scope_mode="chunked_allowlist",
+            )
+            with patch.object(
+                allowlist_pipeline.source_cache,
+                "ensure",
+                return_value=cached,
+            ) as ensure:
+                allowlist_pipeline._ensure_source_cached(target_two)
+            self.assertIsNone(
+                ensure.call_args.kwargs["minimum_free_bytes"]
+            )
+
     def test_chunked_storage_admission_runs_before_preparation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -119,6 +245,195 @@ class MapBuildingContractTests(unittest.TestCase):
                 )
 
             self.assertEqual(raised.exception.code, "building_storage_admission")
+
+    def test_chunked_reuse_admission_precedes_calibration_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(self._request())
+            source_pbf = root / "source.pbf"
+            source_pbf.write_bytes(b"source")
+            source_sha = hashlib.sha256(b"source").hexdigest()
+            pipeline = MapBuildPipeline(
+                PipelinePaths(
+                    Path(__file__).resolve().parents[3],
+                    root / "work",
+                    root / "packs",
+                ),
+                building_scope_mode="chunked",
+                producer_build_sha256="a" * 64,
+                producer_image_digest=f"sha256:{'b' * 64}",
+            )
+            admission_error = BuildingScopeError(
+                "building_storage_admission",
+                "low free space",
+            )
+
+            with patch.object(
+                pipeline.source_cache,
+                "ensure",
+                return_value=SimpleNamespace(path=source_pbf, sha256=source_sha),
+            ), patch.object(
+                pipeline,
+                "_admit_chunked_storage",
+                side_effect=admission_error,
+            ) as admission, patch.object(
+                pipeline,
+                "_ensure_selected_calibration_generation",
+            ) as calibration, self.assertRaises(BuildingScopeError) as raised:
+                pipeline.reuse_keys(job)
+
+            self.assertEqual(raised.exception.code, "building_storage_admission")
+            admission.assert_called_once()
+            calibration.assert_not_called()
+
+    def test_reuse_preparation_obeys_per_job_chunk_predicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(
+                self._request()
+            )
+            source_pbf = root / "source.pbf"
+            source_pbf.write_bytes(b"source")
+            cached = SimpleNamespace(path=source_pbf, sha256="3" * 64)
+            pipeline = MapBuildPipeline(
+                PipelinePaths(
+                    Path(__file__).resolve().parents[3],
+                    root / "work",
+                    root / "packs",
+                ),
+                building_scope_mode="chunked_allowlist",
+                producer_build_sha256="a" * 64,
+                producer_image_digest=f"sha256:{'b' * 64}",
+            )
+
+            with patch.object(
+                pipeline,
+                "uses_chunked_preprocessing",
+                return_value=False,
+            ), patch.object(
+                pipeline,
+                "_plan_chunked_scope",
+            ) as chunk_plan, patch.object(
+                pipeline,
+                "_admit_chunked_storage",
+            ) as admission, patch.object(
+                pipeline,
+                "_parent_phase_reservation",
+            ) as reservation, patch.object(
+                pipeline,
+                "_ensure_selected_calibration_generation",
+                side_effect=lambda _path, sha, scope, **_kwargs: self._calibration_generation(
+                    sha,
+                    scope,
+                ),
+            ):
+                keys = pipeline._reuse_keys_for_cached_source(job, cached)
+
+            self.assertIsNotNone(keys)
+            chunk_plan.assert_not_called()
+            admission.assert_not_called()
+            reservation.assert_not_called()
+            self.assertIsNotNone(job.building_preprocessing_inputs)
+
+    def test_source_preparation_failure_terminalizes_active_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(self._request())
+            source_pbf = root / "source.pbf"
+            source_pbf.write_bytes(b"source")
+            source_sha = hashlib.sha256(b"source").hexdigest()
+            task_store = BuildingTaskStore(root / "building-tasks.sqlite3")
+            pipeline = MapBuildPipeline(
+                PipelinePaths(
+                    Path(__file__).resolve().parents[3],
+                    root / "work",
+                    root / "packs",
+                ),
+                building_scope_mode="chunked",
+                building_task_store=task_store,
+            )
+
+            with patch.object(
+                pipeline.source_cache,
+                "ensure",
+                return_value=SimpleNamespace(path=source_pbf, sha256=source_sha),
+            ), patch.object(
+                pipeline,
+                "_admit_chunked_storage",
+                return_value={"admitted": True},
+            ), patch.object(
+                pipeline,
+                "_ensure_selected_calibration_generation",
+                side_effect=BuildingScopeError(
+                    "building_calibration_unavailable",
+                    "calibration failed",
+                ),
+            ), self.assertRaises(BuildingScopeError):
+                pipeline.build_chunked(
+                    job,
+                    worker_id="worker-test",
+                    worker_capability={
+                        "resourcePool": "test",
+                        "memoryLimitBytes": 8 * 1024**3,
+                        "maxConcurrentTasks": 1,
+                    },
+                )
+
+            self.assertEqual(task_store.get_plan(job.job_id)["state"], "failed")
+            self.assertEqual(
+                task_store.list_parent_phase_reservations(job.job_id),
+                (),
+            )
+
+    def test_source_preparation_capacity_yield_keeps_plan_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(self._request())
+            source_pbf = root / "source.pbf"
+            source_pbf.write_bytes(b"source")
+            source_sha = hashlib.sha256(b"source").hexdigest()
+            task_store = BuildingTaskStore(root / "building-tasks.sqlite3")
+            capability = {
+                "resourcePool": "test",
+                "memoryLimitBytes": 8 * 1024**3,
+                "maxConcurrentTasks": 1,
+            }
+            blocker = task_store.acquire_parent_phase_reservation(
+                parent_job_id="other-parent",
+                phase="source_preparation",
+                worker_id="other-worker",
+                worker_capability=capability,
+            )
+            assert blocker is not None
+            pipeline = MapBuildPipeline(
+                PipelinePaths(
+                    Path(__file__).resolve().parents[3],
+                    root / "work",
+                    root / "packs",
+                ),
+                building_scope_mode="chunked",
+                building_task_store=task_store,
+            )
+
+            with patch.object(
+                pipeline.source_cache,
+                "ensure",
+                return_value=SimpleNamespace(path=source_pbf, sha256=source_sha),
+            ), patch.object(
+                pipeline,
+                "_admit_chunked_storage",
+                return_value={"admitted": True},
+            ), self.assertRaises(BuildingChunkSchedulingYield):
+                pipeline.build_chunked(
+                    job,
+                    worker_id="worker-test",
+                    worker_capability=capability,
+                )
+
+            self.assertEqual(
+                task_store.get_plan(job.job_id)["state"],
+                "source_preparation",
+            )
 
     def setUp(self):
         self.source = SourceRegion(
@@ -469,6 +784,9 @@ class MapBuildingContractTests(unittest.TestCase):
                 pipeline.source_cache,
                 "ensure",
                 return_value=SimpleNamespace(path=source_pbf, sha256=source_sha),
+            ), patch(
+                "map_platform.pipeline.shutil.disk_usage",
+                return_value=SimpleNamespace(free=100 * 1024**3),
             ), patch.object(
                 pipeline,
                 "_ensure_selected_calibration_generation",
@@ -647,23 +965,18 @@ class MapBuildingContractTests(unittest.TestCase):
     def test_final_assembly_artifact_validates_size_and_zip_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "map.zip"
-            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as output:
-                output.writestr("manifest.json", b"{}")
-                output.writestr("VECTMAP/map/0_0.fmb", b"FMB4")
-            archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
-            record = ArtifactRecord(
-                format=ZIP_STORED_FORMAT,
-                media_type=ZIP_MEDIA_TYPE,
-                filename="map.zip",
-                object_key=zip_object_key("map", archive_sha256),
-                bytes=archive.stat().st_size,
-                sha256=archive_sha256,
+            manifest, entries = _valid_final_archive_fixture()
+            _write_final_archive(
+                archive,
+                manifest=manifest,
+                entries=entries,
             )
+            record = _zip_record(archive)
 
             summary = validate_final_assembly_artifact(archive, [record])
 
             self.assertEqual(summary["archiveBytes"], archive.stat().st_size)
-            self.assertEqual(summary["archiveSha256"], archive_sha256)
+            self.assertEqual(summary["archiveSha256"], record.sha256)
             self.assertTrue(summary["zipReceiptValidated"])
             with self.assertRaises(BuildingScopeError) as too_large:
                 validate_final_assembly_artifact(
@@ -688,46 +1001,171 @@ class MapBuildingContractTests(unittest.TestCase):
                 "building_artifact_validation_failed",
             )
 
-    def test_final_assembly_artifact_rejects_non_map_archives(self):
+    def test_final_assembly_artifact_rejects_malformed_archive_structure(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            cases = {
-                "not-a-zip": None,
-                "missing-manifest": {"VECTMAP/map/0_0.fmb": b"FMB4"},
-                "empty-manifest": {
-                    "manifest.json": b"",
-                    "VECTMAP/map/0_0.fmb": b"FMB4",
-                },
-                "missing-fmb": {"manifest.json": b"{}"},
-            }
-            for name, entries in cases.items():
+            base_manifest, base_entries = _valid_final_archive_fixture()
+            cases = []
+
+            cases.append(("missing-manifest", None, deepcopy(base_entries), (), {}))
+            cases.append(("empty-manifest", b"", deepcopy(base_entries), (), {}))
+            cases.append(("malformed-json", b"{", deepcopy(base_entries), (), {}))
+            cases.append(("non-object-manifest", b"[]", deepcopy(base_entries), (), {}))
+            unsupported = deepcopy(base_manifest)
+            unsupported["schemaVersion"] = 2
+            cases.append(("unsupported-schema", unsupported, deepcopy(base_entries), (), {}))
+            null_preview = deepcopy(base_manifest)
+            null_preview["preview"] = None
+            entries_without_preview = deepcopy(base_entries)
+            entries_without_preview.pop(_FINAL_TEST_PREVIEW_PATH)
+            cases.append(
+                (
+                    "null-preview",
+                    null_preview,
+                    entries_without_preview,
+                    (),
+                    {},
+                )
+            )
+            no_fmb = deepcopy(base_manifest)
+            no_fmb["files"] = []
+            entries_without_fmb = deepcopy(base_entries)
+            entries_without_fmb.pop(_FINAL_TEST_FMB_PATH)
+            cases.append(("missing-fmb", no_fmb, entries_without_fmb, (), {}))
+            unsafe_entries = deepcopy(base_entries)
+            unsafe_entries["../escape"] = b"unsafe"
+            cases.append(("unsafe-path", deepcopy(base_manifest), unsafe_entries, (), {}))
+            cases.append(
+                (
+                    "duplicate-path",
+                    deepcopy(base_manifest),
+                    deepcopy(base_entries),
+                    ((_FINAL_TEST_FMB_PATH, base_entries[_FINAL_TEST_FMB_PATH]),),
+                    {},
+                )
+            )
+            cases.append(
+                (
+                    "duplicate-manifest",
+                    deepcopy(base_manifest),
+                    deepcopy(base_entries),
+                    (("manifest.json", json.dumps(base_manifest).encode("utf-8")),),
+                    {},
+                )
+            )
+            cases.append(
+                (
+                    "compressed-entry",
+                    deepcopy(base_manifest),
+                    deepcopy(base_entries),
+                    (),
+                    {_FINAL_TEST_FMB_PATH: zipfile.ZIP_DEFLATED},
+                )
+            )
+
+            for name, manifest, entries, duplicates, compression in cases:
                 with self.subTest(name=name):
                     archive = root / f"{name}.zip"
-                    if entries is None:
-                        archive.write_bytes(b"assembled-map")
-                    else:
-                        with zipfile.ZipFile(
-                            archive, "w", compression=zipfile.ZIP_STORED
-                        ) as output:
-                            for filename, content in entries.items():
-                                output.writestr(filename, content)
-                    archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
-                    record = ArtifactRecord(
-                        format=ZIP_STORED_FORMAT,
-                        media_type=ZIP_MEDIA_TYPE,
-                        filename=archive.name,
-                        object_key=zip_object_key("map", archive_sha256),
-                        bytes=archive.stat().st_size,
-                        sha256=archive_sha256,
+                    _write_final_archive(
+                        archive,
+                        manifest=manifest,
+                        entries=entries,
+                        duplicate_entries=duplicates,
+                        compression_overrides=compression,
                     )
 
                     with self.assertRaises(BuildingScopeError) as invalid:
-                        validate_final_assembly_artifact(archive, [record])
+                        validate_final_assembly_artifact(
+                            archive,
+                            [_zip_record(archive)],
+                        )
 
                     self.assertEqual(
                         invalid.exception.code,
                         "building_artifact_validation_failed",
                     )
+
+            not_zip = root / "not-a-zip.zip"
+            not_zip.write_bytes(b"assembled-map")
+            with self.assertRaises(BuildingScopeError) as invalid:
+                validate_final_assembly_artifact(not_zip, [_zip_record(not_zip)])
+            self.assertEqual(
+                invalid.exception.code,
+                "building_artifact_validation_failed",
+            )
+
+    def test_final_assembly_artifact_rejects_incomplete_file_identities(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_manifest, base_entries = _valid_final_archive_fixture()
+            cases = []
+
+            zero_manifest = deepcopy(base_manifest)
+            zero_manifest["files"][0]["bytes"] = 0
+            zero_manifest["files"][0]["sha256"] = hashlib.sha256(b"").hexdigest()
+            zero_entries = deepcopy(base_entries)
+            zero_entries[_FINAL_TEST_FMB_PATH] = b""
+            cases.append(("zero-fmb", zero_manifest, zero_entries))
+
+            missing_entries = deepcopy(base_entries)
+            missing_entries.pop(_FINAL_TEST_FMB_PATH)
+            cases.append(("missing-declared-file", deepcopy(base_manifest), missing_entries))
+
+            extra_entries = deepcopy(base_entries)
+            extra_entries["VECTMAP/map/+0000+0000/0_1.fmb"] = one_building_fmb4()
+            cases.append(("extra-undeclared-file", deepcopy(base_manifest), extra_entries))
+
+            wrong_bytes = deepcopy(base_manifest)
+            wrong_bytes["files"][0]["bytes"] += 1
+            cases.append(("wrong-file-bytes", wrong_bytes, deepcopy(base_entries)))
+
+            wrong_hash = deepcopy(base_manifest)
+            wrong_hash["files"][0]["sha256"] = "f" * 64
+            cases.append(("wrong-file-hash", wrong_hash, deepcopy(base_entries)))
+
+            wrong_preview = deepcopy(base_manifest)
+            wrong_preview["preview"]["sha256"] = "e" * 64
+            cases.append(("wrong-preview-hash", wrong_preview, deepcopy(base_entries)))
+
+            for name, manifest, entries in cases:
+                with self.subTest(name=name):
+                    archive = root / f"{name}.zip"
+                    _write_final_archive(
+                        archive,
+                        manifest=manifest,
+                        entries=entries,
+                    )
+                    with self.assertRaises(BuildingScopeError) as invalid:
+                        validate_final_assembly_artifact(
+                            archive,
+                            [_zip_record(archive)],
+                        )
+                    self.assertEqual(
+                        invalid.exception.code,
+                        "building_artifact_validation_failed",
+                    )
+
+    def test_final_assembly_artifact_rejects_crc_corruption(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "crc-corrupt.zip"
+            manifest, entries = _valid_final_archive_fixture()
+            _write_final_archive(
+                archive,
+                manifest=manifest,
+                entries=entries,
+            )
+            archive_bytes = bytearray(archive.read_bytes())
+            preview_offset = archive_bytes.index(entries[_FINAL_TEST_PREVIEW_PATH])
+            archive_bytes[preview_offset] ^= 0x01
+            archive.write_bytes(archive_bytes)
+
+            with self.assertRaises(BuildingScopeError) as invalid:
+                validate_final_assembly_artifact(archive, [_zip_record(archive)])
+
+            self.assertEqual(
+                invalid.exception.code,
+                "building_artifact_validation_failed",
+            )
 
     def test_multi_block_guard_failure_becomes_split_signal(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1310,6 +1748,9 @@ class MapBuildingContractTests(unittest.TestCase):
                 pipeline.source_cache,
                 "ensure",
                 return_value=SimpleNamespace(path=source_pbf, sha256=source_sha),
+            ), patch(
+                "map_platform.pipeline.shutil.disk_usage",
+                return_value=SimpleNamespace(free=100 * 1024**3),
             ), patch.object(
                 pipeline,
                 "_ensure_selected_calibration_generation",

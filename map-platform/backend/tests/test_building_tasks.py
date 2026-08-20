@@ -255,6 +255,56 @@ class BuildingTaskStoreTests(unittest.TestCase):
         refreshed = self.store.list_tasks("job-1")[0]
         self.assertGreater(refreshed.heartbeat_at or 0, initial or 0)
 
+    def test_task_lease_heartbeat_retries_transient_fault_before_safety_boundary(self):
+        succeeded = threading.Event()
+
+        class FlakyStore:
+            def __init__(self):
+                self.calls = 0
+
+            def heartbeat(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise OSError("temporary sqlite fault")
+                succeeded.set()
+
+        store = FlakyStore()
+        heartbeat = _TaskLeaseHeartbeat(
+            store,
+            task_id="task-flaky",
+            worker_id="worker-a",
+            lease_token="token",
+            lease_seconds=0.5,
+            interval_seconds=0.01,
+        )
+        heartbeat.start()
+        self.assertTrue(succeeded.wait(timeout=1))
+        heartbeat.stop()
+
+        self.assertGreaterEqual(store.calls, 2)
+        self.assertFalse(heartbeat.lost)
+
+    def test_task_lease_heartbeat_marks_lost_before_failed_lease_is_reusable(self):
+        class FailingStore:
+            def heartbeat(self, *_args, **_kwargs):
+                raise OSError("persistent sqlite fault")
+
+        heartbeat = _TaskLeaseHeartbeat(
+            FailingStore(),
+            task_id="task-lost",
+            worker_id="worker-a",
+            lease_token="token",
+            lease_seconds=0.08,
+            interval_seconds=0.01,
+        )
+        heartbeat.start()
+        deadline = time.monotonic() + 1
+        while not heartbeat.lost and time.monotonic() < deadline:
+            time.sleep(0.005)
+        heartbeat.stop()
+
+        self.assertTrue(heartbeat.lost)
+
     def test_parent_stage_and_progress_are_monotonic_and_receipt_based(self):
         self.store.add_tasks([self.spec(blocks=((1, 2),))])
         stage = self.store.set_plan_stage("job-1", stage="building_chunks")
@@ -285,7 +335,7 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.assertEqual(progress["totalChunks"], 1)
         self.assertFalse(progress["indeterminate"])
 
-    def test_failed_parent_reopens_for_job_retry_without_discarding_history(self):
+    def test_failed_parent_reopens_without_retrying_deterministic_child(self):
         self.store.add_tasks([self.spec(blocks=((1, 2),))])
         claimed = self.store.claim_next(worker_id="worker-a")
         self.assertIsNotNone(claimed)
@@ -302,8 +352,45 @@ class BuildingTaskStoreTests(unittest.TestCase):
         reopened = self.store.reopen_failed_plan("job-1")
 
         self.assertEqual(reopened["state"], "chunk_planning")
-        self.assertEqual(self.store.get_task("task-1").state, "pending")
+        self.assertEqual(self.store.get_task("task-1").state, "failed")
+        self.assertIsNone(self.store.claim_next(worker_id="worker-b"))
         self.assertEqual(len(self.store.list_attempts("job-1")), 1)
+
+    def test_transient_task_failure_backs_off_and_exhausts_after_three_attempts(self):
+        self.store.add_tasks([self.spec(blocks=((1, 2),))])
+        delays = []
+        for attempt_number in range(1, 4):
+            claimed = self.store.claim_next(worker_id=f"worker-{attempt_number}")
+            self.assertIsNotNone(claimed)
+            assert claimed is not None
+            self.assertEqual(claimed.attempt_number, attempt_number)
+            failed = self.store.fail(
+                claimed.task.task_id,
+                worker_id=f"worker-{attempt_number}",
+                lease_token=claimed.lease_token,
+                typed_failure="building_chunk_execution_failed",
+                transient=True,
+            )
+            if attempt_number < 3:
+                self.assertEqual(failed.state, "pending")
+                assert failed.next_eligible_at is not None
+                delays.append(failed.next_eligible_at - self.clock.value)
+                self.assertEqual(
+                    self.store.pending_task_availability("job-1"),
+                    {"eligible": 0, "deferred": 1},
+                )
+                self.assertIsNone(self.store.claim_next(worker_id="too-early"))
+                self.clock.value = failed.next_eligible_at
+            else:
+                self.assertEqual(failed.state, "failed")
+                self.assertIsNone(failed.next_eligible_at)
+
+        self.assertGreater(delays[1], delays[0])
+        self.assertIsNone(self.store.claim_next(worker_id="attempt-four"))
+        self.assertEqual(
+            [row["outcome"] for row in self.store.list_attempts("job-1")],
+            ["failed_transient", "failed_transient", "failed_retry_exhausted"],
+        )
 
     def test_terminal_retention_prunes_failed_history_but_not_cache_policy(self):
         self.store.add_tasks([self.spec(blocks=((1, 2),))])
@@ -398,6 +485,74 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.assertIsNotNone(
             self.store.claim_next(worker_id="worker-b", worker_capability=capability)
         )
+
+    def test_missing_capability_still_reserves_default_pool_in_both_directions(self):
+        self.store.create_plan(
+            parent_job_id="job-2",
+            global_plan_sha256="b" * 64,
+            input_identity={},
+            expected_output_block_count=1,
+            policy_version=1,
+            resource_model_version="v1",
+        )
+        self.store.add_tasks(
+            [
+                BuildingTaskSpec(
+                    task_id="job-2-task",
+                    parent_job_id="job-2",
+                    kind="building_chunk",
+                    blocks=((2, 2),),
+                    chunk_plan_sha256=SHA,
+                )
+            ]
+        )
+        parent = self.store.acquire_parent_phase_reservation(
+            parent_job_id="job-1",
+            phase="source_preparation",
+            worker_id="parent-worker",
+            worker_capability=None,
+        )
+        assert parent is not None
+        self.assertIsNone(self.store.claim_next(worker_id="child-worker"))
+        self.store.release_parent_phase_reservation(
+            parent_job_id="job-1",
+            phase="source_preparation",
+            worker_id="parent-worker",
+            lease_token=parent.lease_token,
+        )
+
+        child = self.store.claim_next(worker_id="child-worker")
+        assert child is not None
+        self.assertEqual(len(self.store.list_resource_reservations("job-2")), 1)
+        self.assertIsNone(
+            self.store.acquire_parent_phase_reservation(
+                parent_job_id="job-1",
+                phase="map_assembly",
+                worker_id="parent-worker",
+                worker_capability=None,
+            )
+        )
+
+    def test_parent_phase_uses_five_gibibyte_conservative_floor(self):
+        with self.assertRaisesRegex(
+            BuildingTaskStoreError,
+            "cannot admit the parent resource phase",
+        ):
+            self.store.acquire_parent_phase_reservation(
+                parent_job_id="job-1",
+                phase="source_preparation",
+                worker_id="small-parent",
+                worker_capability={"memoryLimitBytes": 5 * 1024**3},
+            )
+        reservation = self.store.acquire_parent_phase_reservation(
+            parent_job_id="job-1",
+            phase="source_preparation",
+            worker_id="large-parent",
+            worker_capability={"memoryLimitBytes": 8 * 1024**3},
+        )
+        assert reservation is not None
+        row = self.store.list_parent_phase_reservations("job-1")[0]
+        self.assertEqual(row["memory_reservation_bytes"], 5 * 1024**3)
 
     def test_resource_reservation_recovery_and_memory_sum_are_fenced(self):
         self.store.add_tasks(
@@ -772,6 +927,28 @@ class BuildingTaskStoreTests(unittest.TestCase):
         self.assertIn("last_claimed_at", columns)
         self.assertEqual(version, 6)
 
+    def test_future_schema_is_rejected_before_any_schema_mutation(self):
+        path = Path(self.temp.name) / "future-tasks.sqlite3"
+        connection = sqlite3.connect(path)
+        connection.execute("PRAGMA user_version=7")
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(
+            BuildingTaskStoreError,
+            "unsupported building task schema",
+        ):
+            BuildingTaskStore(path)
+
+        connection = sqlite3.connect(path)
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        tables = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+        connection.close()
+        self.assertEqual(version, 7)
+        self.assertEqual(tables, [])
+
     def test_concurrent_legacy_initializers_serialize_migrations(self):
         path = Path(self.temp.name) / "concurrent-legacy-tasks.sqlite3"
         connection = sqlite3.connect(path)
@@ -1059,6 +1236,148 @@ class BuildingTaskStoreTests(unittest.TestCase):
         assert active is not None
         self.assertEqual(active["state"], "chunk_planning")
         self.assertEqual(self.store.list_tasks("job-1"), ())
+
+    def test_observed_plan_publication_rolls_back_before_tasks_are_claimable(self):
+        path = Path(self.temp.name) / "atomic-shadow.sqlite3"
+        store = BuildingTaskStore(path, clock=self.clock)
+        specs = [
+            BuildingTaskSpec(
+                task_id="shadow-a",
+                parent_job_id="shadow-parent",
+                kind="building_chunk",
+                blocks=((1, 1),),
+                chunk_plan_sha256=SHA,
+            ),
+            BuildingTaskSpec(
+                task_id="shadow-b",
+                parent_job_id="shadow-parent",
+                kind="building_chunk",
+                blocks=((1, 2),),
+                chunk_plan_sha256=SHA,
+            ),
+        ]
+        original_insert = store._insert_task
+        inserted = 0
+
+        def fail_after_first_insert(connection, spec):
+            nonlocal inserted
+            original_insert(connection, spec)
+            inserted += 1
+            if inserted == 1:
+                raise RuntimeError("injected shadow publication failure")
+
+        store._insert_task = fail_after_first_insert
+        with self.assertRaisesRegex(RuntimeError, "injected shadow"):
+            store.publish_observed_plan(
+                parent_job_id="shadow-parent",
+                global_plan_sha256=SHA,
+                input_identity={"source": "shadow"},
+                expected_output_block_count=2,
+                policy_version=1,
+                resource_model_version="v1",
+                tasks=specs,
+            )
+        store._insert_task = original_insert
+
+        self.assertIsNone(store.get_plan("shadow-parent"))
+        self.assertEqual(store.list_tasks("shadow-parent"), ())
+        self.assertIsNone(store.claim_next(worker_id="unexpected-worker"))
+
+    def test_observed_plan_retry_atomically_replaces_changed_partition(self):
+        first_partition = [
+            BuildingTaskSpec(
+                task_id="shadow-old",
+                parent_job_id="job-1",
+                kind="building_chunk",
+                blocks=((1, 2), (1, 3), (1, 4)),
+                chunk_plan_sha256=SHA,
+            )
+        ]
+        second_partition = [
+            BuildingTaskSpec(
+                task_id="shadow-new-a",
+                parent_job_id="job-1",
+                kind="building_chunk",
+                blocks=((1, 2),),
+                chunk_plan_sha256=CONTENT,
+            ),
+            BuildingTaskSpec(
+                task_id="shadow-new-b",
+                parent_job_id="job-1",
+                kind="building_chunk",
+                blocks=((1, 3), (1, 4)),
+                chunk_plan_sha256=CONTENT,
+            ),
+        ]
+        plan_args = {
+            "parent_job_id": "job-1",
+            "global_plan_sha256": SHA,
+            "input_identity": {"source": "source-sha"},
+            "expected_output_block_count": 3,
+            "policy_version": 1,
+            "resource_model_version": "v1",
+        }
+        self.store.publish_observed_plan(tasks=first_partition, **plan_args)
+
+        observed = self.store.publish_observed_plan(
+            tasks=second_partition,
+            **plan_args,
+        )
+
+        self.assertEqual(observed["state"], "observed")
+        self.assertIsNone(self.store.get_task("shadow-old"))
+        replacement = self.store.list_tasks("job-1")
+        self.assertEqual(
+            {task.task_id for task in replacement},
+            {"shadow-new-a", "shadow-new-b"},
+        )
+        self.assertTrue(all(task.state == "cancelled" for task in replacement))
+        self.assertIsNone(self.store.claim_next(worker_id="shadow-worker"))
+
+    def test_observed_plan_retry_rejects_execution_evidence(self):
+        specs = [
+            BuildingTaskSpec(
+                task_id="shadow-old",
+                parent_job_id="job-1",
+                kind="building_chunk",
+                blocks=((1, 2), (1, 3), (1, 4)),
+                chunk_plan_sha256=SHA,
+            )
+        ]
+        plan_args = {
+            "parent_job_id": "job-1",
+            "global_plan_sha256": SHA,
+            "input_identity": {"source": "source-sha"},
+            "expected_output_block_count": 3,
+            "policy_version": 1,
+            "resource_model_version": "v1",
+        }
+        self.store.publish_observed_plan(tasks=specs, **plan_args)
+        self.store.activate_observed_plan("job-1")
+        self.store.add_tasks(
+            [
+                BuildingTaskSpec(
+                    task_id="executed-task",
+                    parent_job_id="job-1",
+                    kind="building_chunk",
+                    blocks=((1, 2), (1, 3), (1, 4)),
+                    chunk_plan_sha256=SHA,
+                )
+            ]
+        )
+        claimed = self.store.claim_next(worker_id="selected-worker")
+        assert claimed is not None
+
+        with self.assertRaisesRegex(
+            BuildingTaskStoreError,
+            "compatible shadow observation|execution evidence",
+        ):
+            self.store.publish_observed_plan(tasks=specs, **plan_args)
+
+        retained = self.store.get_task("executed-task")
+        assert retained is not None
+        self.assertEqual(retained.state, "leased")
+        self.assertEqual(retained.lease_token, claimed.lease_token)
 
     def test_deterministic_task_id_is_order_independent(self):
         first = deterministic_building_task_id(
@@ -1359,6 +1678,9 @@ class BuildingTaskStoreTests(unittest.TestCase):
                 worker_id="worker-a",
                 lease_token=claimed.lease_token,
             )
+        deferred = self.store.get_task(claimed.task.task_id)
+        assert deferred is not None and deferred.next_eligible_at is not None
+        self.clock.value = deferred.next_eligible_at
         retry = self.store.claim_next(worker_id="worker-b")
         self.assertIsNotNone(retry)
         assert retry is not None
@@ -1370,6 +1692,12 @@ class BuildingTaskStoreTests(unittest.TestCase):
         assert expired is not None
         self.clock.value = 106
 
+        self.assertIsNone(
+            self.store.claim_next(worker_id="worker-b", lease_seconds=5)
+        )
+        deferred = self.store.get_task(expired.task.task_id)
+        assert deferred is not None and deferred.next_eligible_at is not None
+        self.clock.value = deferred.next_eligible_at
         reclaimed = self.store.claim_next(worker_id="worker-b", lease_seconds=5)
 
         assert reclaimed is not None

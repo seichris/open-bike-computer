@@ -34,6 +34,14 @@ from map_platform.worker import (
 )
 
 
+TEST_CHUNK_CAPABILITY = {
+    "resourcePool": "test-chunk-worker",
+    "memoryLimitBytes": 8 * 1024**3,
+    "cpuCount": 8,
+    "maxConcurrentTasks": 1,
+}
+
+
 class FakePipeline:
     def __init__(self, failures=0):
         self.failures = failures
@@ -345,11 +353,15 @@ class WorkerTests(unittest.TestCase):
                 PipelinePaths(root, root / "work", root / "packs")
             )
 
-            results = MapWorker(
-                store,
-                pipeline,
-                worker_id="worker-fair",
-            ).run_until_empty()
+            with patch(
+                "map_platform.worker.worker_capability_snapshot",
+                return_value=TEST_CHUNK_CAPABILITY,
+            ):
+                results = MapWorker(
+                    store,
+                    pipeline,
+                    worker_id="worker-fair",
+                ).run_until_empty()
 
             self.assertEqual(len(results), 4)
             self.assertEqual(
@@ -361,6 +373,52 @@ class WorkerTests(unittest.TestCase):
                 self.assertEqual(completed.status, JobStatus.READY)
                 self.assertEqual(completed.attempts, 1)
                 self.assertFalse(completed.scheduler_yielded)
+
+    def test_chunked_worker_capability_failure_does_not_claim_public_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            pipeline = QuantumChunkedPipeline(
+                PipelinePaths(root, root / "work", root / "packs")
+            )
+
+            with patch(
+                "map_platform.worker.worker_capability_snapshot",
+                side_effect=RuntimeError("resource report unavailable"),
+            ), self.assertRaisesRegex(RuntimeError, "resource report unavailable"):
+                MapWorker(store, pipeline, worker_id="worker-fail-closed").run_next()
+
+            persisted = store.get(job.job_id)
+            self.assertEqual(persisted.status, JobStatus.QUEUED)
+            self.assertEqual(persisted.attempts, 0)
+            self.assertIsNone(persisted.worker_id)
+
+            with self.assertRaises(KeyError):
+                run_job(store, pipeline, "missing-job-id")
+
+    def test_direct_runner_rejects_chunked_job_before_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            pipeline = QuantumChunkedPipeline(
+                PipelinePaths(root, root / "work", root / "packs")
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "normal MapWorker worker loop"):
+                run_job(store, pipeline, job.job_id)
+
+            persisted = store.get(job.job_id)
+            self.assertEqual(persisted.status, JobStatus.QUEUED)
+            self.assertEqual(persisted.attempts, 0)
+            self.assertIsNone(persisted.worker_id)
 
     def test_retry_reconciles_artifact_publication_after_public_complete_fault(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -395,7 +453,12 @@ class WorkerTests(unittest.TestCase):
                     raise RuntimeError("injected public completion fault")
                 return original_complete(*args, **kwargs)
 
-            with patch.object(store, "complete_job", side_effect=fail_once):
+            with patch.object(
+                store, "complete_job", side_effect=fail_once
+            ), patch(
+                "map_platform.worker.worker_capability_snapshot",
+                return_value=TEST_CHUNK_CAPABILITY,
+            ):
                 first = worker.run_next()
                 self.assertEqual(first.job.status, JobStatus.QUEUED)
                 self.assertEqual(

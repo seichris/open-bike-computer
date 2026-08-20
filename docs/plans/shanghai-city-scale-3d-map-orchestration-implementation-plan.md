@@ -19,7 +19,9 @@ report exists, and Phase 1 global planning has a deterministic shadow path.
 Shadow plans are retained as terminal `observed` records: their proposed child
 tasks are cancelled with `building_shadow_observed`, cannot be claimed, and are
 exposed as `buildingPlanObservation` rather than authoritative public progress.
-They remain available under the bounded terminal-evidence retention policy.
+Plan creation, task insertion/cancellation, and terminal observation share one
+SQLite transaction, so a crash cannot expose executable shadow work. They
+remain available under the bounded terminal-evidence retention policy.
 
 Phase 2's SQLite WAL parent/task/attempt/receipt store, lease fencing, crash
 recovery, authenticated diagnostics, and operator inspection commands are now
@@ -30,15 +32,24 @@ reservations. The worker executes one child-task quantum before yielding the
 public parent, so the global weighted virtual-finish scheduler can choose among
 parents instead of draining one city job. The effective worker memory cap is
 the strict minimum of configured and observed cgroup limits; admission uses 85%
-of that cap and keeps heavy concurrency at one by default.
+of that cap and keeps heavy concurrency at one by default. Executable chunked
+workers require one identity-validated capability snapshot before claiming a
+public job; cgroup-v1's kernel unlimited sentinel is not treated as a real cap.
 Durable, token-fenced parent-phase reservations place source preparation and
 whole-map assembly in the same resource pool as child scans/builds. They
 heartbeat, recover after expiry, appear in bounded diagnostics, and yield the
-public parent without consuming another retry when the pool is occupied.
+public parent without consuming another retry when the pool is occupied. Both
+phases reserve a reviewed 5 GiB floor, above the retained 4,128,673,792-byte
+cold source-extraction peak, instead of the unknown-workload 512 MiB default.
 
 Exact workload scans now recompute conservative memory and wall estimates,
 split multi-block work that exceeds the 70% memory or ten-minute wall target,
-and enforce a separate 30-minute runtime deadline. Cache readers, writers, and
+and enforce a separate 30-minute runtime deadline. A child heartbeat retries a
+transient store fault only while its lease remains safely fenced; confirmed or
+imminent lease loss cancels the complete process group before capacity can be
+reused. Transient process/filesystem failures receive at most three persisted
+per-task attempts with deterministic exponential backoff and jitter, while
+typed deterministic failures remain terminal. Cache readers, writers, and
 eviction share a stable namespace lease outside the removable directory;
 maintenance also protects identities referenced by nonterminal plans. A cache
 miss or mismatch transactionally removes stale receipts, returns affected work
@@ -49,17 +60,28 @@ and a reserve before preparation begins.
 The retained resource model uses the p95 of paired actual/predicted ratios for
 one worker capability identity, refuses to train on a positive actual with a
 zero prediction, and remains review-only until explicitly adopted. Final
-assembly now requires a real, CRC-valid ZIP with a nonempty manifest, at least
-one FMB, per-FMB and whole-archive size limits, exactly one matching ZIP
-receipt, and matching byte count/SHA-256. Operator diagnostics are paged at
-most 100 rows and omit raw workload-object arrays. Command evidence retains
-bounded process-tree peak RSS plus cgroup `memory.events` deltas; only a positive
-OOM counter delta is classified as `building_worker_oom`. Public `ready` is
-persisted before the coordinator advances from `artifact_publication` to
-`ready`, with maintenance reconciliation as the durable backstop. Production
-still uses the existing monolithic executor and hard ceilings until the
-90-minute, retained monolithic-versus-chunked equivalence, signing, deployment,
-and physical acceptance gates are complete.
+assembly now requires a real, CRC-valid ZIP with safe unique stored paths, a
+schema-1 manifest, a complete path/size/SHA-256 identity for every declared map
+file and preview, no undeclared entries, at least one nonempty FMB, per-FMB and
+whole-archive size limits, exactly one matching ZIP receipt, and matching byte
+count/SHA-256. Operator diagnostics page each task,
+attempt, receipt, and reservation collection at no more than 100 evidence rows
+and omit raw workload-object arrays. Alert computation consumes the same
+bounded evidence page and reports its cursor/counts. Command evidence retains
+bounded process-tree peak RSS plus cgroup `memory.events` deltas; only a
+positive OOM counter delta is classified as `building_worker_oom`. Public
+`ready` is persisted before the coordinator advances from
+`artifact_publication` to `ready`, with maintenance reconciliation as the
+durable backstop. Production still uses the existing monolithic executor and
+hard ceilings until the 90-minute, retained monolithic-versus-chunked
+equivalence, signing, deployment, and physical acceptance gates are complete.
+
+The authoritative retained validation baseline in this document is the final
+2026-08-20 exact-cold run `242ab1e1cd76478bbbd7` on candidate image
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:eab9c1337acffa6206fa0f36f5728a40f47ba0109828099e80cd43e369744a55`
+(commit `d84c5c3a`). Earlier image/digest paragraphs below are dated historical
+checkpoints, not statements of the current live deployment or validation of
+later source commits.
 
 The first exact full-bbox validation attempt exposed and fixed one remaining
 warm-path bug: the standalone relation-audit consumer still called the
@@ -93,18 +115,18 @@ the last command wall/RSS observation on failed task attempts, so the app and
 operator surface report `building_relation_incomplete` rather than hiding it
 behind `map_build_failed`.
 
-The follow-up diagnostic image for commit `d4333e80` is now deployed only to
-validation as
+At that historical checkpoint, the follow-up diagnostic image for commit
+`d4333e80` was deployed only to validation as
 `ghcr.io/seichris/open-bike-computer-map-platform@sha256:7bf08c97a1fc0fceca26355dac5a2069e77c9d3c28554c3c59e20b0fefd0857d`.
 It preserves fail-closed behavior for ambiguous or untagged relations, while
 naming the malformed source relation and part members in the typed failure. A
 fresh 16.923716841 km²
 validation smoke (`ea7d419dca064ce5af7a`) reached `ready` with 6/6 receipts,
 a 131,878-byte ZIP (`3f280a5736ec9ef92390ca758fb477c642a1ece56d5421c395d079d7f8d1eb4f`),
-and zero active reservations. Production remains pinned to the existing
+and zero active reservations. Production was then still pinned to the existing
 `a6980506…` digest.
 
-The current validation image
+At that historical validation checkpoint, image
 `ghcr.io/seichris/open-bike-computer-map-platform@sha256:7f7637692c8f53e98dbcfeb033de511edca6effce54636ab9e1c70e433e9cb8f`
 was then exercised with two same-size Shanghai requests. Central job
 `3d7fefb317ba47e88616` reached `ready` in 532.597238 seconds of processing
@@ -117,7 +139,7 @@ job `4acd2e89c8714555bb1d` reached `ready` in 283.967580 seconds of processing
 8,873,163-byte ZIP. Its artifact SHA-256 is
 `a97c1c73fa6ecda528f2f458a105e616ed9e3c58e97ab2a982c7183c459b4888`; ZIP
 testing passed, with 63 FMB entries and a largest FMB of 476,207 bytes. These
-two runs are current-image assembly and cache-integrity evidence, not new cold
+two runs are evidence for that image's assembly and cache integrity, not new cold
 heavy-task samples: the durable attempts explicitly record `cacheHit=true` and
 zero RSS for every child.
 
@@ -136,12 +158,12 @@ bbox then completed against the Shanghai snapshot as validation job
 testing passed, with 56 FMB entries and a largest FMB of 623,771 bytes. The
 whole-map source-extraction command recorded a 3,993,960,448-byte peak RSS and
 14.926442 seconds of wall time. Its child attempts were all cache hits (56
-receipts, zero child RSS), so this proves current-image canary publication and
-artifact integrity while the cold per-block resource sample remains a
-separate gate.
+receipts, zero child RSS), so this proved canary publication and artifact
+integrity for that image while the cold per-block resource sample was still a
+separate gate at that checkpoint.
 
 Follow-up image `ghcr.io/seichris/open-bike-computer-map-platform@sha256:54bec06298af2bbb67f1f19e60149f92965efb9bc060936387cc8ba2515af45f`
-contains the cancellation-attempt fix. Live validation job
+contained the cancellation-attempt fix. At that checkpoint, validation job
 `3f7059ff3fc742358378` reached a leased workload-scan child before API
 cancellation; the child was fenced, its follow-on attempt was retained as
 `outcome=cancelled` with typed failure `building_task_cancelled` and a
@@ -153,13 +175,13 @@ The reconciliation follow-up image
 `ghcr.io/seichris/open-bike-computer-map-platform@sha256:2c54309c5ee3aca70874a0b8c0ea0aaf8cf6bacc19c189c1c28e1f63f9ee617f`
 was deployed to validation and its maintenance pass repaired four historical
 cancelled parents left by the pre-fix image. The retained coordinator database
-now reports zero unfinished attempts, zero leased tasks, and zero active
-reservations; production remains pinned to
+then reported zero unfinished attempts, zero leased tasks, and zero active
+reservations; production was still pinned to
 `ghcr.io/seichris/open-bike-computer-map-platform@sha256:a698050644a4d7c0e1290a9e8882a52d6907d5492d6e1794d93e174b06812a74`.
 
 The validation worker then retained eight successful cold target-3 chunk
-observations across the current Shanghai source identity (cache-only children
-remain excluded). The historical pre-review p95 model was `trained` for capability
+observations across the then-current Shanghai source identity (cache-only
+children remain excluded). The historical pre-review p95 model was `trained` for capability
 `de3f8eac8c3a71ee74967fe227d92397dc0d5581bd7ef79894fa28d45c51ea4a`, with
 8 observations, a 2,902,016,000-byte p95 measured peak, a 580,100,704-byte
 p95 prediction, and a conservative 5.5029x effective multiplier after the
@@ -498,12 +520,14 @@ and block-cache misses. No single scalar replaces the raw counters.
 Worker capability records the configured limit and the actual cgroup limit
 separately and uses their minimum as the effective `memoryLimitBytes`. The
 scheduler re-derives that minimum rather than trusting a looser summary, refuses
-a task above 85%, and reserves memory before leasing. Source preparation and
-final assembly use token-fenced parent-phase reservations in the same durable
+a task above 85%, and reserves memory before leasing. A missing or malformed
+capability, including cgroup-v1's unlimited sentinel without a configured cap,
+fails before executable chunked work is claimed. Source preparation and final
+assembly use token-fenced 5 GiB parent-phase reservations in the same durable
 pool, so they cannot overlap a child or another parent phase while heavy
 concurrency is one. Validation now has an explicit 12 GiB cgroup cap; setting
-and validating the production cap remains a promotion gate. It must never
-start two roughly 4 GiB tasks merely because two CPU slots are idle.
+and validating the production cap remains a promotion gate. It must never start
+two roughly 4 GiB tasks merely because two CPU slots are idle.
 
 Start production chunk concurrency at one. Raise it only when retained
 benchmarks prove the sum of reservations, API/maintenance overhead, filesystem
@@ -855,13 +879,16 @@ Persist and surface:
 Add operator commands such as:
 
 ```text
-map-platform build-plan inspect <job-id>
-map-platform build-plan tasks <job-id>
-map-platform build-plan retry <job-id> --failed-transient
+map-platform build-plan inspect <job-id> --limit 100 --offset 0
+map-platform build-plan tasks <job-id> --limit 100 --offset 0
+map-platform build-plan alerts <job-id> --limit 100 --offset 0
 ```
 
-The retry command must not override hard guards. Policy overrides remain code
-and deployment changes through review.
+Those inspection and alert commands are read-only. The separate
+`complete-workload-scan` subcommand is an internal, mutating receipt handoff
+that requires a live fenced worker lease; it is not an operator retry command
+and must be used only under an explicit break-glass procedure. Policy overrides
+remain code and deployment changes through review.
 
 Alert on:
 
@@ -908,8 +935,9 @@ below one global block.
   policy version, and task transition.
 - Never expose local source/cache paths, Coolify metadata, secrets, or raw OSM
   object sets through public errors.
-- Keep ordinary authenticated diagnostics bounded to 100 rows and omit raw
-  workload key arrays; use pagination for the rest.
+- Keep each ordinary authenticated evidence collection bounded to 100 rows and
+  omit raw workload key arrays; compute alerts from the same bounded page and
+  use pagination for the rest.
 - Fence publication by lease token and parent cancellation generation.
 - Treat source/index/cache/task artifacts as untrusted after disk reads and
   verify schema, identity, path containment, length, and content hash.
@@ -943,7 +971,7 @@ production heavy-task concurrency is enabled yet. The validation Coolify
 canary on `d3ae60c2` measured a 12-CPU worker with no cgroup memory cap, a
 4,186,312,704-byte cgroup peak, and a 3,990,401,024-byte source-extraction
 resident peak while host available memory stayed above 41 GiB. The retained
-current-image cold cohort now reaches the eight-observation review floor, but
+cold cohort for that image reached the eight-observation review floor, but
 its systematic underprediction means no automatic admission change is allowed.
 
 ### Phase 1 — Global planning and workload queries
@@ -967,7 +995,7 @@ canonical global-to-chunk scope projection, and shadow diagnostics are
 implemented. The validation canary accepted a 631,792,599 m² request as one
 global plan with 56 output blocks under the 600,000 relation ceiling; the
 source index recorded 903,545 nodes, 156,448 ways, and 892 relations. The
-current image has ready central, west, and 631.792599 km² assembly runs with
+image at that checkpoint had ready central, west, and 631.792599 km² assembly runs with
 durable receipt and artifact evidence. A later capped exact full-bbox cold run
 also reached server `ready` with the retained evidence below, but missed the
 90-minute objective and did not perform the retained monolithic comparison,
@@ -1063,7 +1091,7 @@ benchmarks, and production allowlist rollout remain pending.
 The exact-bbox run also verified that relation-audit and closure workers now
 reuse the sealed source-index manifest; a replacement run reached ordinary
 `osmium extract` chunk execution instead of repeating the full source-index
-validation. On the current image, the first bounded chunk completed all 24
+validation. On that historical image, the first bounded chunk completed all 24
 block encodings with 24 durable receipts, no split/retry, 1,819,049,984 bytes
 peak RSS, and a 2,190,176,256-byte worker cgroup peak. The full timing and
 artifact evidence remain pending. The third chunk's invalid source relation is
@@ -1089,23 +1117,25 @@ one receipt prevents publication.
 every global block receipt, rereads and matches the canonical cache manifests,
 extracts whole-map roads/labels, and passes a fail-closed cache-only flag to the
 extractor. A cache miss cannot silently re-enter monolithic building
-normalization. Assembly now rejects non-ZIP bytes, CRC failure, a missing/empty
-manifest, no FMB entries, an FMB above 2 MiB, a ZIP above 512 MiB,
-duplicate/missing ZIP receipts, or a ZIP receipt whose byte count/SHA-256
-differs. The parent worker invokes this assembly after every block receipt is
-ready, records final ZIP validation and receipt-set metrics, and cannot fall
-back to monolithic building normalization. Public job `ready` is committed
-before coordinator `ready`, with maintenance reconciliation if that second
-additive write is interrupted.
+normalization. Assembly now rejects non-ZIP bytes, CRC failure,
+unsafe/duplicate/compressed or undeclared paths, a malformed or unsupported
+manifest, incomplete or mismatched file/preview identities, no nonempty FMB
+entries, an FMB above 2 MiB, a ZIP above 512 MiB, duplicate/missing ZIP
+receipts, or a ZIP receipt whose byte count/SHA-256 differs. The parent worker
+invokes this assembly after every block receipt is ready, records final ZIP
+validation and receipt-set metrics, and cannot fall back to monolithic building
+normalization. Public job `ready` is committed before coordinator `ready`, with
+maintenance reconciliation if that second additive write is interrupted.
 The validation canary produced one 14,948,371-byte ZIP with 56 FMB entries;
 ZIP testing passed and the largest FMB was 623,771 bytes. The recorded artifact
 SHA-256 is `8ea288c0066c210ccb1802029d84b8bd351a2d50c790596e067871517842be17`.
-On the current image, 631.792599 km² job `ea72880448e64bb1b932` repeated the
+On that historical image, 631.792599 km² job `ea72880448e64bb1b932` repeated the
 same cache-only assembly contract with a 14,953,308-byte ZIP and artifact
 SHA-256 `12eec0279cb9c122ead5a97db2efb259233419bd34a190d63d7c2c63528cd09a`;
 its 56/56 receipt set, 56 FMB entries, 623,771-byte largest FMB, and
 3,993,960,448-byte source-extraction peak were retained. Child attempts were
-explicitly cache hits, so a cold per-block resource sample is still pending.
+explicitly cache hits, so a cold per-block resource sample was still pending
+at that checkpoint; later cold results are authoritative below.
 The final assembly summary now records a canonical partition-invariant
 artifact identity derived from source/index, calibration, cache, and ordered
 block receipts; task IDs, chunk boundaries, lease order, timings, and
@@ -1176,12 +1206,12 @@ same one-job workflow.
    navigation on supported physical Bicino targets before broad production
    enablement.
 
-**Current status:** the exact implementation image was published by the
-repository's immutable GHCR workflow and deployed only to the validation
-Coolify app with `chunked_allowlist` and concurrency one. The current
-validation digest is
+**Historical validation checkpoint:** the exact implementation image was
+published by the repository's immutable GHCR workflow and deployed only to the
+validation Coolify app with `chunked_allowlist` and concurrency one. The validation
+digest at that checkpoint was
 `ghcr.io/seichris/open-bike-computer-map-platform@sha256:a6eed22cc5a6c37d18eb37939bbfa0983c3433763d35be5ddff220910d125535`;
-all three validation containers report healthy. Retained central job
+all three validation containers reported healthy. Retained central job
 `3d7fefb317ba47e88616` and west job `4acd2e89c8714555bb1d` reached `ready` with
 artifact and receipt validation. The full rectangle was deliberately
 cancelled after source-resolution selected the China snapshot; the app-sized
@@ -1194,13 +1224,13 @@ receipts, a 132,325-byte ZIP (`4ce50f649ae1709ed556eb973efdfe0b9f4ccc5068d173677
 and a 703,766,528-byte source-extraction peak; its final ZIP validation passed
 on the exact deployed image
 `a6eed22cc5a6c37d18eb37939bbfa0983c3433763d35be5ddff220910d125535`.
-production remains pinned to its existing digest. At that point physical
+Production was still pinned to its existing digest. At that point physical
 validation, cold central/632 km²/full-bbox coverage, and production promotion
-were still required. The current validation deployment has since moved to the immutable
+were still required. A later validation deployment then moved to the immutable
 `ghcr.io/seichris/open-bike-computer-map-platform@sha256:9fafdf8e1e7bed5ba90b970fddb1bd25e2faf30318c93693f05ef75c0584b866`
 image from commit `0dd2d2ab` after the closure-algorithm-v2 estimate profile
-was refreshed; all three validation containers are healthy and production
-remains on `a6980506…`.
+was refreshed; all three validation containers reported healthy and production
+was still on `a6980506…`.
 
 After that retained evidence, the diagnostic follow-up image for commit
 `d4333e80` was deployed only to validation at
@@ -1211,7 +1241,7 @@ the unchanged `a6980506…` digest. This image adds relation identity to
 fail-closed `building_relation_incomplete` diagnostics; it does not relax the
 relation policy.
 
-The next runtime image for commit `6a8722b7` is deployed only to validation at
+The next runtime image for commit `6a8722b7` was then deployed only to validation at
 `ghcr.io/seichris/open-bike-computer-map-platform@sha256:291b609549a2efb4380470d9fd5d3befc617abb232a61326988360dac14169b9`.
 Relation probe `6dbab7a1e2754d4eb608` (26.537229464 km² around the preserved
 Guangfulin relation) failed closed after three attempts with the public error
@@ -1229,8 +1259,8 @@ misses, 1,837,615-byte ZIP, 20 FMB entries) and job
 cache misses, 419,087-byte ZIP, 16 FMB entries). The latter artifact SHA-256 is
 `475361a14ebd9ee60324e287f9d02bdaf7bc6eb62546522de5d02550c2011877` and ZIP
 testing passed. Two sparse-cell probes failed closed before publication with
-generic chunk-execution errors despite nonzero workload receipts. The latest
-image now preserves the typed preflight result end-to-end: sparse rerun
+generic chunk-execution errors despite nonzero workload receipts. The follow-up
+image preserved the typed preflight result end-to-end: sparse rerun
 `a514a62ce5ea4e4991c2` failed as `building_calibration_unavailable` with the
 stable calibration key and source snapshot identity, rather than generic
 `map_build_failed`; the historical rows remain retained as diagnostics and are
@@ -1239,8 +1269,8 @@ At that point the full-bbox, physical acceptance, and production-promotion
 gates remained open; later retained server runs below close only the functional
 full-bbox portion.
 
-The current image's relation-heavy validation probe
-`a932f748a388475ca0e1` (26.537229464 km² around Guangfulin) now reaches
+A subsequent image's relation-heavy validation probe
+`a932f748a388475ca0e1` (26.537229464 km² around Guangfulin) reached
 `ready` with 4/4 receipts, an 894,886-byte ZIP, and artifact SHA-256
 `9f88a32fa8ef4274cd0e0ca330d55fe77f397afa90721bf146b71029607ec2e1`.
 This confirms the reviewed narrow fallback: a malformed `type=building`
@@ -1267,42 +1297,43 @@ prove unlisted cells empty while lazy manifests remain fail-closed, and adds a
 regression test. A new validation image and rerun are required before this
 benchmark can be marked passed.
 
-The calibration fix is now in validation image
+At that historical checkpoint, the calibration fix was in validation image
 `ghcr.io/seichris/open-bike-computer-map-platform@sha256:e7c4e22a4dd0accee91c5efa3398bf73635208af7c63a5cbe923d12776d137cd`
-(commit `62ac9d2a`). Replacement job `25e477cf532f4ecb8ec5` has passed the
+(commit `62ac9d2a`). Replacement job `25e477cf532f4ecb8ec5` had passed the
 previously failing region: its first 40-block chunk completed with the
 complete-snapshot edge lookup, a 50,201-object workload receipt, 3,369,889,792
 bytes child peak RSS, and no typed failure. The validation worker cgroup peak
 for that chunk is 6,116,237,312 bytes with `high=0`, `oom=0`, and
-`oom_kill=0`. The replacement parent currently has 40/442 receipts and one
-next workload scan leased; the remaining full-artifact and timing gates are
-still open. Production remains pinned to `a6980506…`.
+`oom_kill=0`. At that snapshot, the replacement parent had 40/442 receipts and
+one next workload scan leased; the remaining full-artifact and timing gates
+were still open. Production was still pinned to `a6980506…`.
 
-The live replacement run retained an additional exact resource observation:
+The replacement run retained an additional exact resource observation:
 its second 45-block workload scan contained 429,955 closure objects and took
-2,894.870334 seconds, with 106,532,864 bytes child RSS. The subsequent bounded
-chunk is now leased. The validation worker cgroup peaked at 6,922,547,200
+2,894.870334 seconds, with 106,532,864 bytes child RSS. At that snapshot, the
+subsequent bounded chunk was leased. The validation worker cgroup peaked at 6,922,547,200
 bytes, with `memory.current` sampled around 4.44 GB and `low=0`, `high=0`,
 `max=0`, `oom=0`, and `oom_kill=0`; the host reported about 43.4 GB available.
-This confirms the remaining bottleneck is repeated source-index closure work,
-not relation-ceiling or RAM exhaustion.
+At that checkpoint, this showed that the remaining bottleneck was repeated
+source-index closure work, not relation-ceiling or RAM exhaustion.
 
 Commits `56ad9c39` and `6d327408` close that implementation gap: chunk builds
 now reconstruct and verify the canonical closure directly from a durable exact
 workload receipt instead of re-running the same multi-minute query, and source
 index closure/member lookups are batched in bounded SQLite parameter pages.
-The combined backend and targeted source-index regressions pass (449 backend
+The combined backend and targeted source-index regressions passed (449 backend
 tests, one skipped; 35 relation/index/scanner tests). The immutable candidate
-for `6d327408` is built as
-`ghcr.io/seichris/open-bike-computer-map-platform@sha256:a2ac30289d98cc184aaae27f063dfb5aea4a14f0de93b998a9a301c1826a3abd` but is
-not deployed over the running benchmark. Production remains pinned to
+for `6d327408` had been built as
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:a2ac30289d98cc184aaae27f063dfb5aea4a14f0de93b998a9a301c1826a3abd`
+and had not been deployed over that running benchmark. Production was still
+pinned to
 `a6980506…`.
 
-The receipt-reuse and batched-lookup implementation is now deployed only to
+The receipt-reuse and batched-lookup implementation was then deployed only to
 the isolated validation stack as
 `ghcr.io/seichris/open-bike-computer-map-platform@sha256:ac8094ba412f1ca462b1307899090b2b0e3545d9ff32eb870f40dbdd693a2e41` (commit
-`d20d0c3f`). Public health is HTTP 200 and all three validation containers are
-healthy; production is still pinned to `a6980506…`. Exact-bbox validation job
+`d20d0c3f`). Public health returned HTTP 200 and all three validation containers
+were healthy; production was still pinned to `a6980506…`. Exact-bbox validation job
 `d8afbc95c4fd4589ae5f` was created with 442 output blocks and 150 durable
 tasks: 142 cache-hit block tasks and eight heavy workload/chunk tasks.
 
@@ -1356,7 +1387,7 @@ mutate policy. The worker had no cgroup memory limit, so this cohort must be
 regenerated/reviewed under the strict effective cap before production
 allowlisting or concurrency increases.
 
-### Validation image follow-up on 2026-08-20
+### Authoritative retained validation baseline — 2026-08-20
 
 The validation Coolify app was then rebuilt from the HarfBuzz face/font-cache
 candidate
@@ -1371,8 +1402,8 @@ completed in 287.476420 seconds (285.925852 processing seconds), with 0.890863
 seconds spent shaping labels and 29.853659 seconds in block encoding. The
 worker cgroup ended at 290,099,200 bytes current and 4,116,819,968 bytes peak;
 all `memory.events` counters, including `oom` and `oom_kill`, were zero. This
-confirms the optimization is deployed and safe on the validation worker, but
-does not change the open exact-bbox performance gate.
+retained run showed the optimization performing safely on that validation
+worker, but does not change the open exact-bbox performance gate.
 
 The same candidate then completed a fresh exact-bbox validation request
 `41263048594843ea885e` (`shanghai-exact-candidate-de7fbf0ea9`) with 442/442
@@ -1393,9 +1424,10 @@ unlimited (`memory.max=max`), peaked at 4,636,704,768 bytes, and recorded zero
 After the run, validation was recreated with the checked-in explicit memory
 policy: `memory.max=12,884,901,888` bytes (12 GiB), configured worker limit
 `12,884,901,888`, heavy-task concurrency `1`, and relation-object ceiling
-`600,000`. The replacement worker is healthy and the public development
-health endpoint remains HTTP 200. This cap is validation-only; production is
-still pinned to its existing immutable image and has not been promoted.
+`600,000`. At that checkpoint, the replacement worker was healthy and the
+public development health endpoint returned HTTP 200. This cap was
+validation-only; production was still pinned to its existing immutable image
+and had not been promoted.
 
 The exact cold-cache validation job then completed on that capped validation
 worker. Job `242ab1e1cd76478bbbd7`
