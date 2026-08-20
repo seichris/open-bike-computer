@@ -1197,6 +1197,27 @@ is 8,704,212,992 bytes, with `low=0`, `high=0`, `max=0`, `oom=0`, and
 full-bbox artifact, final ZIP receipts, and the remaining performance and
 physical gates are still pending.
 
+The exact-bbox validation job then completed successfully on the same immutable
+candidate. Job `d8afbc95c4fd4589ae5f` reached `ready` with 442/442 completed
+blocks, 150 ready durable tasks (142 cache-hit tasks and eight heavy tasks),
+442 canonical receipts, and receipt-set SHA-256
+`648dcefa710fdbc5ccc85dd42ad72a2d0a5f752b56c608cf026abe9686f8ae90`.
+The final ZIP is 25,863,764 bytes with SHA-256
+`23a35dd502dc6a97bcc12b16f901f6e7ba1cc94d4e38db2c9cca02903f0748ee`;
+independent download and ZIP validation found 420 FMB entries, a maximum FMB
+size of 507,326 bytes, and a valid final-artifact receipt. The final
+partition-invariant artifact identity is
+`04d22a29beed417b94bf7ccc617997631e76f49d51f797afbf79d05d214c07a4`.
+The worker cgroup ended at 472,309,760 bytes current and 8,704,212,992 bytes
+peak, with `low=0`, `high=0`, `max=0`, `oom=0`, `oom_kill=0`, and
+`oom_group_kill=0`; the host retained 42.35 GiB available. No signed stream
+artifact was issued because validation `mapStreamRollout` is disabled, so the
+signed-manifest and physical-install gates remain open. The measured server
+time was 8,101.010277 seconds (135.0 minutes), which is a deliberate miss of
+the current 90-minute concurrency-one objective and must not be silently
+relaxed. The exact server benchmark is therefore retained as successful
+functional/resource evidence but remains unchecked for the performance gate.
+
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
 

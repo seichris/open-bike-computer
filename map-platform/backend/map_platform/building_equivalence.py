@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 import re
 from typing import Any, Mapping
+import zipfile
 
 from .building_scope import canonical_json
 
@@ -14,6 +16,70 @@ class BuildingEquivalenceError(ValueError):
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def build_equivalence_record_from_zip(
+    archive_path: str | Path,
+    *,
+    artifact_format: str = "zip-stored-v1",
+) -> dict[str, Any]:
+    """Materialize a byte-level build record from a published ZIP artifact.
+
+    The record is intentionally limited to canonical FMB paths and the ZIP
+    payload itself.  ZIP metadata, task IDs, and producer timings are not
+    treated as building inputs; the archive digest still makes final artifact
+    bytes part of the equivalence check.
+    """
+
+    if not isinstance(artifact_format, str) or not artifact_format:
+        raise BuildingEquivalenceError("artifact format must be a non-empty string")
+    path = Path(archive_path)
+    try:
+        archive_bytes = path.read_bytes()
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()
+            names: set[str] = set()
+            fmb_hashes: dict[str, str] = {}
+            for info in infos:
+                name = info.filename.replace("\\", "/")
+                parts = name.split("/")
+                if (
+                    not name
+                    or name.startswith("/")
+                    or any(part in {"", ".", ".."} for part in parts)
+                    or name in names
+                ):
+                    raise BuildingEquivalenceError(
+                        "ZIP contains an unsafe or duplicate entry path"
+                    )
+                names.add(name)
+                if info.is_dir() or not name.endswith(".fmb"):
+                    continue
+                payload = archive.read(info)
+                if not payload:
+                    raise BuildingEquivalenceError(
+                        f"ZIP contains an empty FMB entry: {name}"
+                    )
+                fmb_hashes[name] = hashlib.sha256(payload).hexdigest()
+    except BuildingEquivalenceError:
+        raise
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        raise BuildingEquivalenceError(
+            f"unable to read ZIP artifact: {path}"
+        ) from exc
+
+    if not fmb_hashes:
+        raise BuildingEquivalenceError("ZIP contains no FMB entries")
+    return {
+        "fmbSha256ByPath": dict(sorted(fmb_hashes.items())),
+        "artifacts": [
+            {
+                "format": artifact_format,
+                "bytes": len(archive_bytes),
+                "sha256": hashlib.sha256(archive_bytes).hexdigest(),
+            }
+        ],
+    }
 
 
 def _hashes(value: Any, label: str) -> dict[str, str]:
@@ -127,4 +193,3 @@ def validate_partition_equivalence(
             for format_name, payload in reference_artifacts.items()
         },
     }
-
