@@ -1222,6 +1222,12 @@ The new `compare_building_equivalence.py --reference-zip ... --candidate-zip
 FMB hashes and self-compared it successfully; a separate monolithic-versus-
 partitioned retained artifact comparison is still required before the
 partition-invariant byte gate can be checked.
+The retained resource-model report also matters for rollout: all eight heavy
+tasks were underpredicted, with p95 predicted peak 761,323,296 bytes versus
+5,446,459,392 bytes actual and a calibrated conservative multiplier of 7.1539.
+The worker had no cgroup memory limit, so these reservations did not create a
+false safety claim; this model must be retrained/reviewed before production
+allowlisting or concurrency increases.
 
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
