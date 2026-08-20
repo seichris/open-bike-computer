@@ -155,69 +155,78 @@ class SourceCache:
             # Calls without a configured reserve participate as well; otherwise
             # a legacy download could race a resource-admitted chunked build.
             storage_lock_path = self.data_root / ".source-cache-storage.lock"
-            with self._lock(
-                storage_lock_path,
-                cancellation_check=cancellation_check,
-                exclusive=True,
-            ):
-                self._require_download_capacity(
-                    target.parent,
-                    minimum_free_bytes=minimum_free_bytes,
-                )
-
-                try:
-                    with urllib.request.urlopen(
-                        region.url, timeout=60
-                    ) as response, tmp_path.open("wb") as output:
-                        headers = getattr(response, "headers", None)
-                        content_length = (
-                            headers.get("Content-Length")
-                            if headers is not None
-                            else None
-                        )
-                        if content_length is not None:
-                            try:
-                                incoming_bytes = int(content_length)
-                            except ValueError as exc:
-                                raise SourceCacheStorageError(
-                                    "source response Content-Length is invalid"
-                                ) from exc
-                            if incoming_bytes < 0:
-                                raise SourceCacheStorageError(
-                                    "source response Content-Length is invalid"
-                                )
-                            self._require_download_capacity(
-                                target.parent,
-                                minimum_free_bytes=minimum_free_bytes,
-                                incoming_bytes=incoming_bytes,
-                            )
-                        while True:
-                            _raise_if_cancelled(cancellation_check)
-                            chunk = response.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            self._require_download_capacity(
-                                target.parent,
-                                minimum_free_bytes=minimum_free_bytes,
-                                incoming_bytes=len(chunk),
-                            )
-                            output.write(chunk)
-                        _raise_if_cancelled(cancellation_check)
-                except Exception as exc:
-                    tmp_path.unlink(missing_ok=True)
-                    if isinstance(exc, SourceCacheError):
-                        raise
-                    raise SourceCacheError(
-                        f"failed to download source PBF for {region.id}: {exc}"
-                    ) from exc
-
-                cached = self._cached_source(
-                    region,
-                    tmp_path,
+            published = False
+            try:
+                with self._lock(
+                    storage_lock_path,
                     cancellation_check=cancellation_check,
-                )
-                self._verify_expected_checksum(region, cached.sha256)
-                tmp_path.replace(target)
+                    exclusive=True,
+                ):
+                    self._require_download_capacity(
+                        target.parent,
+                        minimum_free_bytes=minimum_free_bytes,
+                    )
+
+                    try:
+                        with urllib.request.urlopen(
+                            region.url, timeout=60
+                        ) as response, tmp_path.open("wb") as output:
+                            headers = getattr(response, "headers", None)
+                            content_length = (
+                                headers.get("Content-Length")
+                                if headers is not None
+                                else None
+                            )
+                            if content_length is not None:
+                                try:
+                                    incoming_bytes = int(content_length)
+                                except ValueError as exc:
+                                    raise SourceCacheStorageError(
+                                        "source response Content-Length is invalid"
+                                    ) from exc
+                                if incoming_bytes < 0:
+                                    raise SourceCacheStorageError(
+                                        "source response Content-Length is invalid"
+                                    )
+                                self._require_download_capacity(
+                                    target.parent,
+                                    minimum_free_bytes=minimum_free_bytes,
+                                    incoming_bytes=incoming_bytes,
+                                )
+                            while True:
+                                _raise_if_cancelled(cancellation_check)
+                                chunk = response.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                self._require_download_capacity(
+                                    target.parent,
+                                    minimum_free_bytes=minimum_free_bytes,
+                                    incoming_bytes=len(chunk),
+                                )
+                                output.write(chunk)
+                            _raise_if_cancelled(cancellation_check)
+                    except Exception as exc:
+                        if isinstance(exc, SourceCacheError):
+                            raise
+                        raise SourceCacheError(
+                            f"failed to download source PBF for {region.id}: {exc}"
+                        ) from exc
+
+                    cached = self._cached_source(
+                        region,
+                        tmp_path,
+                        cancellation_check=cancellation_check,
+                    )
+                    self._verify_expected_checksum(region, cached.sha256)
+                    tmp_path.replace(target)
+                    published = True
+            finally:
+                # Hashing, checksum validation, cancellation, and an atomic
+                # replace failure are all still an unsuccessful publication.
+                # Never leave a complete temporary PBF behind, and never touch
+                # a stable target until the replace itself succeeds.
+                if not published:
+                    tmp_path.unlink(missing_ok=True)
             cached = self._cached_source(
                 region,
                 target,

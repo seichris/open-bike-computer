@@ -10,6 +10,7 @@ from unittest.mock import patch
 from map_platform.models import Bounds, SourceRegion
 from map_platform.source_cache import (
     SourceCache,
+    SourceCacheCancelled,
     SourceCacheError,
     SourceCacheStorageError,
     default_backend_data_root,
@@ -303,6 +304,86 @@ class SourceCacheTests(unittest.TestCase):
 
             with self.assertRaises(SourceCacheError):
                 cache.ensure(region)
+
+            target = root / "data" / "source-pbf" / "test.osm.pbf"
+            self.assertFalse(target.exists())
+            self.assertFalse(target.with_suffix(target.suffix + ".tmp").exists())
+
+    def test_fresh_checksum_failure_preserves_stable_target_and_removes_tmp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote.osm.pbf"
+            remote.write_bytes(b"replacement")
+            target = root / "data" / "source-pbf" / "test.osm.pbf"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"stable")
+            region = SourceRegion(
+                id="test-region",
+                provider="test",
+                name="Test",
+                url=remote.as_uri(),
+                bounds=Bounds(0, 0, 1, 1),
+                local_path="map-platform/backend/data/source-pbf/test.osm.pbf",
+                checksum="0" * 64,
+            )
+            cache = SourceCache(root / "repo", root / "cache.json", data_root=root / "data")
+
+            with self.assertRaisesRegex(SourceCacheError, "checksum mismatch"):
+                cache.ensure(region, force=True)
+
+            self.assertEqual(target.read_bytes(), b"stable")
+            self.assertFalse(target.with_suffix(target.suffix + ".tmp").exists())
+
+    def test_fresh_hash_cancellation_preserves_stable_target_and_removes_tmp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote.osm.pbf"
+            remote.write_bytes(b"replacement")
+            target = root / "data" / "source-pbf" / "test.osm.pbf"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"stable")
+            region = SourceRegion(
+                id="test-region",
+                provider="test",
+                name="Test",
+                url=remote.as_uri(),
+                bounds=Bounds(0, 0, 1, 1),
+                local_path="map-platform/backend/data/source-pbf/test.osm.pbf",
+            )
+            cache = SourceCache(root / "repo", root / "cache.json", data_root=root / "data")
+
+            with patch(
+                "map_platform.source_cache._hash_file",
+                side_effect=SourceCacheCancelled("operation was cancelled"),
+            ), self.assertRaisesRegex(SourceCacheError, "operation was cancelled"):
+                cache.ensure(region, force=True)
+
+            self.assertEqual(target.read_bytes(), b"stable")
+            self.assertFalse(target.with_suffix(target.suffix + ".tmp").exists())
+
+    def test_fresh_replace_failure_preserves_stable_target_and_removes_tmp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote.osm.pbf"
+            remote.write_bytes(b"replacement")
+            target = root / "data" / "source-pbf" / "test.osm.pbf"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"stable")
+            region = SourceRegion(
+                id="test-region",
+                provider="test",
+                name="Test",
+                url=remote.as_uri(),
+                bounds=Bounds(0, 0, 1, 1),
+                local_path="map-platform/backend/data/source-pbf/test.osm.pbf",
+            )
+            cache = SourceCache(root / "repo", root / "cache.json", data_root=root / "data")
+
+            with patch.object(Path, "replace", side_effect=OSError("replace failed")), self.assertRaisesRegex(OSError, "replace failed"):
+                cache.ensure(region, force=True)
+
+            self.assertEqual(target.read_bytes(), b"stable")
+            self.assertFalse(target.with_suffix(target.suffix + ".tmp").exists())
 
     def test_redownloads_existing_file_when_checksum_mismatches(self):
         with tempfile.TemporaryDirectory() as tmp:
