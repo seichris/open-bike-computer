@@ -1228,6 +1228,10 @@ tasks were underpredicted, with p95 predicted peak 761,323,296 bytes versus
 The worker had no cgroup memory limit, so these reservations did not create a
 false safety claim; this model must be retrained/reviewed before production
 allowlisting or concurrency increases.
+The review-only trainer produces calibrated model
+`building-resource-model-calibrated-v1` with effective multiplier `7.8693`
+(1.10 safety margin); it was generated without mutating admission policy and
+is not yet enabled in validation or production.
 
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
