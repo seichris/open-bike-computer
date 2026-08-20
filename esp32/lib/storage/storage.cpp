@@ -82,13 +82,15 @@ bool Storage::ensureSdMounted(bool allowInternalFallback) {
     isSdLoaded = false;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
     defined(SPI_SHARED)
+    const bool restoreInternalFallback =
+        allowInternalFallback || internalFallbackMounted;
     FFat.end();
     SD.end();
     delay(25);
 #endif
     ready = initSD() == ESP_OK;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-    if (!ready && allowInternalFallback)
+    if (!ready && restoreInternalFallback)
       initSPIFFS();
 #endif
   }
@@ -176,6 +178,7 @@ esp_err_t Storage::initSD() {
 #endif
 
   isSdLoaded = true;
+  internalFallbackMounted = false;
   return ESP_OK;
 
 #elif defined(SPI_SHARED)
@@ -191,6 +194,7 @@ esp_err_t Storage::initSD() {
   } else {
     ESP_LOGI(TAG, "SD Card Mounted");
     isSdLoaded = true;
+    internalFallbackMounted = false;
     return ESP_OK;
   }
 
@@ -264,6 +268,7 @@ esp_err_t Storage::initSD() {
     ESP_LOGI(TAG, "SD card initialized successfully");
     sdmmc_card_print_info(stdout, card);
     isSdLoaded = true;
+    internalFallbackMounted = false;
     return ESP_OK;
   }
 #endif
@@ -289,12 +294,14 @@ esp_err_t Storage::initSPIFFS() {
   // even when using FFat
   if (!FFat.begin(true, "/sdcard", 20, "ffat")) {
     ESP_LOGE(TAG, "FFat Mount Failed");
+    internalFallbackMounted = false;
     return ESP_FAIL;
   }
 
   size_t total = FFat.totalBytes();
   size_t used = FFat.usedBytes();
   ESP_LOGI(TAG, "FFat Mounted at /sdcard. Total: %d, Used: %d", total, used);
+  internalFallbackMounted = true;
 
 #ifdef WAVESHARE_SD_LIST_ROOT
   // Debug: List files (flat, no recursion to avoid file handle exhaustion)

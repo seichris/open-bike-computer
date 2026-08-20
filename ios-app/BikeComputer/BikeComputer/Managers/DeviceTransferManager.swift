@@ -290,6 +290,22 @@ enum DeviceNetworkJoinPolicy {
     ) -> String {
         "\(message) [\(domain) \(code)]"
     }
+
+#if os(iOS)
+    static func hotspotConfiguration(
+        ssid: String,
+        passphrase: String?
+    ) -> NEHotspotConfiguration {
+        if let passphrase, !passphrase.isEmpty {
+            return NEHotspotConfiguration(
+                ssid: ssid,
+                passphrase: passphrase,
+                isWEP: false
+            )
+        }
+        return NEHotspotConfiguration(ssid: ssid)
+    }
+#endif
 }
 
 @MainActor
@@ -727,7 +743,10 @@ final class DeviceTransferManager {
         )
 
         for attempt in 0..<DeviceNetworkJoinPolicy.applyAttemptCount {
-            let configuration = NEHotspotConfiguration(ssid: ssid)
+            let configuration = DeviceNetworkJoinPolicy.hotspotConfiguration(
+                ssid: ssid,
+                passphrase: session.accessPointPassphrase
+            )
             // A join-once network is disconnected by iOS when the screen sleeps
             // or the app remains backgrounded for 15 seconds. Keep this
             // accessory AP configured for the background URLSession upload and

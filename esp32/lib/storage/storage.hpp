@@ -123,6 +123,11 @@ private:
 class Storage {
 private:
   std::atomic<bool> isSdLoaded;
+  // True when /sdcard is currently backed by the main-branch FFat fallback.
+  // Diagnostics must not treat this as removable-SD availability, but a
+  // failed SD retry must restore it so the rest of the application keeps the
+  // same fallback behavior as the non-diagnostics firmware.
+  bool internalFallbackMounted = false;
   sdmmc_card_t *card;
   SemaphoreHandle_t mountMutex = nullptr;
 

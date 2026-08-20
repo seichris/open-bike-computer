@@ -3,6 +3,7 @@ import CoreLocation
 import CoreBluetooth
 import CryptoKit
 import MapKit
+import NetworkExtension
 
 func assert(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() {
@@ -12819,6 +12820,26 @@ struct NavigationProtocolTests {
             message: "System denied configuration"
         ), "System denied configuration [NEHotspotConfigurationErrorDomain 17]",
                     "join failures retain their actionable domain and code")
+        let securedConfiguration = DeviceNetworkJoinPolicy.hotspotConfiguration(
+            ssid: "BikeComputer-Transfer",
+            passphrase: "0123456789abcdef"
+        )
+        assertEqual(
+            securedConfiguration.SSID,
+            "BikeComputer-Transfer",
+            "diagnostics hotspot configuration keeps the device SSID"
+        )
+        assert(!securedConfiguration.joinOnce,
+               "diagnostics hotspot configuration remains persistent during transfer")
+        let openConfiguration = DeviceNetworkJoinPolicy.hotspotConfiguration(
+            ssid: "BikeComputer-Transfer",
+            passphrase: nil
+        )
+        assertEqual(
+            openConfiguration.SSID,
+            "BikeComputer-Transfer",
+            "open transfer configuration keeps the device SSID"
+        )
     }
 
     static func testDeviceCapabilitiesProtocol() {
