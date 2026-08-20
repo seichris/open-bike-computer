@@ -23,6 +23,13 @@ enum WatchWorkoutFinishRequestError: Equatable {
     case segmentConfirmationPending
 }
 
+enum WatchWorkoutCleanupState: Equatable {
+    case none
+    case delivering
+    case retrying
+    case retryRequired
+}
+
 enum WatchWorkoutSegmentError: Equatable {
     case unavailable
     case healthKitWriteFailed
@@ -299,6 +306,8 @@ typealias WatchSegmentEventOperation = @MainActor (
 
 @MainActor
 final class WatchWorkoutManager: NSObject, ObservableObject {
+    private static let maxTerminalCleanupRetryAttempts = 3
+
     private enum RideDetectionMirrorKey {
         static let payload = "rideDetection.watchMirror.v1"
         static let generation = "rideDetection.watchMirrorGeneration.v1"
@@ -363,6 +372,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     @Published private(set) var finishRequestError: WatchWorkoutFinishRequestError? = nil
     @Published private(set) var isTerminalArchivePending = false
     @Published private(set) var isTerminalPublicationPending = false
+    @Published private(set) var isTerminalMirrorDeliveryPending = false
+    @Published private(set) var isStartFailureMirrorDeliveryPending = false
+    @Published private(set) var isTerminalCleanupRetrying = false
     @Published private(set) var maximumHeartRateBPM: Int
     @Published private(set) var rideDetectionSettings: RideDetectionSettings
     @Published private(set) var rideDetectionSettingsGeneration: UInt32
@@ -425,6 +437,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     )?
     private let mirrorRetryDelay: TimeInterval
     private let mirrorShutdownDeliveryTimeout: TimeInterval
+    private let terminalCleanupRetryDelay: TimeInterval
     private var cancellables: Set<AnyCancellable> = []
 
     private var session: HKWorkoutSession?
@@ -493,8 +506,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var manualTransitionOverrideTimeoutTask: Task<Void, Never>?
     private var lastProcessedManualTransitionRequestAt = Date.distantPast
     private var remoteSegmentControlContext: RemoteSegmentControlContext?
-    private var isTerminalMirrorDeliveryPending = false
-    private var isStartFailureMirrorDeliveryPending = false
+    private var terminalCleanupRetryTask: Task<Void, Never>?
+    private var terminalCleanupRetryAttemptCount = 0
     private var shutdownMirrorFailureRetryCount = 0
     private var pendingWorkoutConfiguration: HKWorkoutConfiguration?
     private var hasPendingComplicationStartRequest = false
@@ -565,6 +578,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             mirrorShutdownEndSession: nil,
             mirrorRetryDelay: 5,
             mirrorShutdownDeliveryTimeout: 10,
+            terminalCleanupRetryDelay: 1,
             initializeOnLaunch: !isAppStoreScreenshotPreview
         )
 #if DEBUG
@@ -628,6 +642,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             (@MainActor (HKWorkoutSession) -> Void)? = nil,
         mirrorRetryDelay: TimeInterval = 5,
         mirrorShutdownDeliveryTimeout: TimeInterval = 10,
+        terminalCleanupRetryDelay: TimeInterval = 1,
         initializeOnLaunch: Bool = true,
         heartRateZoneDefaults: UserDefaults = .standard
     ) {
@@ -684,6 +699,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         self.injectedMirrorShutdownEndSession = mirrorShutdownEndSession
         self.mirrorRetryDelay = mirrorRetryDelay
         self.mirrorShutdownDeliveryTimeout = mirrorShutdownDeliveryTimeout
+        self.terminalCleanupRetryDelay = terminalCleanupRetryDelay.isFinite
+            ? min(max(0, terminalCleanupRetryDelay), 60)
+            : 1
         self.locationAuthorizationState = routeRecorder.authorizationState
         super.init()
 
@@ -739,6 +757,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         finalizationTask?.cancel()
         mirrorRetryTask?.cancel()
         mirrorShutdownWatchdogTask?.cancel()
+        terminalCleanupRetryTask?.cancel()
         complicationStartTask?.cancel()
         authorizationRefreshTask?.cancel()
         segmentOperationTask?.cancel()
@@ -760,6 +779,53 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         return recoveryStore.recoveredIdentity?.sessionToken
             ?? identity?.sessionToken
     }
+
+    var isTerminalCleanupDeliveryInFlight: Bool {
+        isTerminalMirrorDeliveryPending
+            || isStartFailureMirrorDeliveryPending
+            || (session != nil
+                && (isTerminalPublicationPending || isTerminalArchivePending))
+    }
+
+    private var hasDetachedRecoveryCleanup: Bool {
+        guard session == nil else { return false }
+        return recoveryStore.recoveredIdentity?.finishRequest?.disposition
+                == .discard
+            || recoveryStore.recoveredIdentity?.finishRequest?.phase
+                == .workoutSaved
+            || reconciledSavedWorkout != nil
+    }
+
+    private var hasDurableTerminalCleanupRetry: Bool {
+        guard session == nil,
+              !isTerminalCleanupDeliveryInFlight else {
+            return false
+        }
+        return isTerminalPublicationPending
+            || isTerminalArchivePending
+    }
+
+    var isTerminalCleanupRetryRequired: Bool {
+        guard !isTerminalCleanupDeliveryInFlight,
+              !isTerminalCleanupRetrying else {
+            return false
+        }
+        return hasDurableTerminalCleanupRetry || hasDetachedRecoveryCleanup
+    }
+
+    var terminalCleanupState: WatchWorkoutCleanupState {
+        if isTerminalCleanupDeliveryInFlight {
+            return .delivering
+        }
+        if isTerminalCleanupRetrying {
+            return .retrying
+        }
+        if isTerminalCleanupRetryRequired {
+            return .retryRequired
+        }
+        return .none
+    }
+
     var isAwaitingDetachedSessionCleanup: Bool {
         if isTerminalPublicationPending
             || isTerminalMirrorDeliveryPending
@@ -1304,8 +1370,29 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         clearMetrics()
     }
 
+    func retryPendingTerminalCleanupIfPossible() {
+        guard hasDurableTerminalCleanupRetry else { return }
+        if terminalCleanupRetryTask == nil,
+           terminalCleanupRetryAttemptCount
+                >= Self.maxTerminalCleanupRetryAttempts {
+            terminalCleanupRetryAttemptCount = 0
+        }
+        scheduleTerminalCleanupRetryIfNeeded()
+    }
+
     func retryDetachedSessionCleanup() {
-        guard isAwaitingDetachedSessionCleanup else { return }
+        guard hasDurableTerminalCleanupRetry || hasDetachedRecoveryCleanup else {
+            return
+        }
+        cancelTerminalCleanupRetry(resetAttemptCount: true)
+        guard hasDurableTerminalCleanupRetry else {
+            handleActiveWorkoutRecovery()
+            return
+        }
+        runTerminalCleanupRetryAttempt()
+    }
+
+    private func performTerminalCleanupRetry() {
         if isTerminalPublicationPending {
             retryTerminalPublicationAndArchive()
             return
@@ -1329,6 +1416,62 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             return
         }
         handleActiveWorkoutRecovery()
+    }
+
+    private func scheduleTerminalCleanupRetryIfNeeded() {
+        guard hasDurableTerminalCleanupRetry,
+              !isTerminalCleanupRetrying,
+              terminalCleanupRetryTask == nil,
+              terminalCleanupRetryAttemptCount
+                < Self.maxTerminalCleanupRetryAttempts else {
+            return
+        }
+        let nextAttempt = terminalCleanupRetryAttemptCount + 1
+        let delay = min(
+            terminalCleanupRetryDelay
+                * pow(2, Double(max(0, nextAttempt - 1))),
+            30
+        )
+        isTerminalCleanupRetrying = true
+        terminalCleanupRetryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(
+                    nanoseconds: UInt64(max(0, delay) * 1_000_000_000)
+                )
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.terminalCleanupRetryTask = nil
+            self.runTerminalCleanupRetryAttempt()
+        }
+    }
+
+    private func runTerminalCleanupRetryAttempt() {
+        terminalCleanupRetryTask = nil
+        guard hasDurableTerminalCleanupRetry else {
+            isTerminalCleanupRetrying = false
+            terminalCleanupRetryAttemptCount = 0
+            return
+        }
+        terminalCleanupRetryAttemptCount += 1
+        isTerminalCleanupRetrying = true
+        performTerminalCleanupRetry()
+        isTerminalCleanupRetrying = false
+        if hasDurableTerminalCleanupRetry {
+            scheduleTerminalCleanupRetryIfNeeded()
+        } else {
+            terminalCleanupRetryAttemptCount = 0
+        }
+    }
+
+    private func cancelTerminalCleanupRetry(resetAttemptCount: Bool) {
+        terminalCleanupRetryTask?.cancel()
+        terminalCleanupRetryTask = nil
+        isTerminalCleanupRetrying = false
+        if resetAttemptCount {
+            terminalCleanupRetryAttemptCount = 0
+        }
     }
 
     private func startRecoveryLoopIfNeeded() {
@@ -3482,9 +3625,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         remoteSegmentControlContext = nil
         segmentAccumulator = WorkoutSegmentAccumulator()
         handleAttachedSessionRelease()
+        scheduleTerminalCleanupRetryIfNeeded()
     }
 
     private func clearActiveObjects() {
+        cancelTerminalCleanupRetry(resetAttemptCount: true)
         resetMirrorTransport()
         session = nil
         builder = nil

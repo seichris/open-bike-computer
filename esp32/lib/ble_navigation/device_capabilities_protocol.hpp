@@ -27,6 +27,8 @@ constexpr uint32_t RIDE_AUTOMATION_V2_FEATURE = 1UL << 15;
 constexpr uint32_t REMOTE_DEVICE_DEBUG_FEATURE = 1UL << 16;
 constexpr uint32_t GPS_POSITION_QUALITY_V1_FEATURE = 1UL << 17;
 constexpr uint32_t RENDERER_DIAGNOSTICS_FEATURE = 1UL << 18;
+// Connected-display inactivity control (setting ID 36).
+constexpr uint32_t AUTOMATIC_DISPLAY_OFF_FEATURE = 1UL << 19;
 constexpr uint8_t POWER_BUTTON_CONFIG_TLV = 1;
 constexpr size_t POWER_BUTTON_CONFIG_BYTES = 3;
 constexpr size_t CAP2_BASE_BYTES = 9;

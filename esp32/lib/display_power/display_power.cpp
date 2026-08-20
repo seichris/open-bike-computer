@@ -1,4 +1,5 @@
 #include "display_power.hpp"
+#include "display_power_preferences.hpp"
 
 #include "../panel/WAVESHARE_AMOLED_175.hpp"
 #include "../power_management/power_management.hpp"
@@ -11,7 +12,6 @@
 
 namespace {
 
-constexpr char kPreferencesNamespace[] = "deviceSettings";
 constexpr char kBrightnessKey[] = "brightnessPct";
 
 } // namespace
@@ -39,12 +39,17 @@ bool DisplayPowerManager::begin() {
   Preferences preferences;
   bool hasSavedValue = false;
   uint8_t savedValue = display_power::kDefaultBrightnessPercent;
-  if (preferences.begin(kPreferencesNamespace, false)) {
+  bool hasSavedAutomaticDisplayOff = false;
+  bool automaticDisplayOff =
+      display_power::kDefaultAutomaticDisplayOffEnabled;
+  if (display_power::beginDeviceSettingsPreferences(preferences)) {
     hasSavedValue = preferences.isKey(kBrightnessKey);
     if (hasSavedValue) {
       savedValue = preferences.getUChar(
           kBrightnessKey, display_power::kDefaultBrightnessPercent);
     }
+    automaticDisplayOff = display_power::loadAutomaticDisplayOff(
+        preferences, hasSavedAutomaticDisplayOff);
     preferences.end();
   } else {
     Serial.println("DisplayPower: failed to open device settings NVS");
@@ -53,6 +58,8 @@ bool DisplayPowerManager::begin() {
   policy_.restoreSavedBrightness(hasSavedValue, savedValue);
   savedBrightnessPersisted_ =
       hasSavedValue && display_power::isBrightnessPercentInRange(savedValue);
+  automaticDisplayOffEnabled_ = automaticDisplayOff;
+  automaticDisplayOffPersisted_ = hasSavedAutomaticDisplayOff;
   initialized_ = true;
   return true;
 }
@@ -74,7 +81,8 @@ bool DisplayPowerManager::requestUserBrightness(int32_t requestedPercent) {
   }
 
   Preferences preferences;
-  const bool opened = preferences.begin(kPreferencesNamespace, false);
+  const bool opened =
+      display_power::beginDeviceSettingsPreferences(preferences);
   const bool persisted =
       opened && preferences.putUChar(kBrightnessKey, normalized) == 1;
   if (opened) {
@@ -88,6 +96,42 @@ bool DisplayPowerManager::requestUserBrightness(int32_t requestedPercent) {
 
   if (!persisted) {
     Serial.println("DisplayPower: failed to persist brightness");
+  } else {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Display);
+  }
+  return persisted;
+}
+
+bool DisplayPowerManager::requestAutomaticDisplayOff(bool enabled) {
+  if (!initialized_ && !begin()) {
+    return false;
+  }
+  if (!lock()) {
+    return false;
+  }
+
+  if (automaticDisplayOffPersisted_ &&
+      automaticDisplayOffEnabled_ == enabled) {
+    unlock();
+    return true;
+  }
+
+  Preferences preferences;
+  const bool opened =
+      display_power::beginDeviceSettingsPreferences(preferences);
+  const bool persisted =
+      opened && display_power::persistAutomaticDisplayOff(preferences, enabled);
+  if (opened) {
+    preferences.end();
+  }
+  if (persisted) {
+    automaticDisplayOffEnabled_ = enabled;
+    automaticDisplayOffPersisted_ = true;
+  }
+  unlock();
+
+  if (!persisted) {
+    Serial.println("DisplayPower: failed to persist automatic display-off setting");
   } else {
     ui_scheduler::notify(ui_scheduler::WakeReason::Display);
   }
@@ -132,6 +176,15 @@ uint8_t DisplayPowerManager::effectiveBrightnessPercent() const {
     return display_power::kDefaultBrightnessPercent;
   }
   const uint8_t value = policy_.effectiveBrightnessPercent();
+  unlock();
+  return value;
+}
+
+bool DisplayPowerManager::automaticDisplayOffEnabled() const {
+  if (!lock()) {
+    return display_power::kDefaultAutomaticDisplayOffEnabled;
+  }
+  const bool value = automaticDisplayOffEnabled_;
   unlock();
   return value;
 }

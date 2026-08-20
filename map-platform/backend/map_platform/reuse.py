@@ -155,7 +155,7 @@ def reuse_keys(
     if preview_sha256 is None:
         preview_sha256 = hashlib.sha256(
             render_boundary_preview(
-                job.source_region.preview_geometry or job.geometry.geometry,
+                job.geometry.geometry,
                 job.geometry.bounds,
             )
         ).hexdigest()

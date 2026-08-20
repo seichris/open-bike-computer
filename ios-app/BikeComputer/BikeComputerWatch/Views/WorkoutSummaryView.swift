@@ -2,7 +2,7 @@ import SwiftUI
 
 struct WorkoutSummaryView: View {
     let summary: WatchWorkoutSummary
-    let isAwaitingSessionCleanup: Bool
+    let cleanupState: WatchWorkoutCleanupState
     let onRetryCleanup: () -> Void
     let onDone: () -> Void
 
@@ -48,14 +48,27 @@ struct WorkoutSummaryView: View {
                         .multilineTextAlignment(.center)
                 }
 
-                if isAwaitingSessionCleanup {
+                switch cleanupState {
+                case .delivering:
+                    ProgressView()
+                    Text("Finishing workout cleanup before another ride can start.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                case .retrying:
+                    ProgressView()
+                    Text("Retrying workout recovery before another ride can start.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                case .retryRequired:
                     Text("Finishing workout recovery before another ride can start.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                     Button("Retry Recovery", action: onRetryCleanup)
                         .tint(.orange)
-                } else {
+                case .none:
                     Button("Done", action: onDone)
                         .tint(.blue)
                 }

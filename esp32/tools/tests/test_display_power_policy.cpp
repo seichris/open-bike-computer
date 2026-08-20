@@ -1,15 +1,102 @@
 #include "../../lib/display_power/display_power_policy.hpp"
+#include "../../lib/display_power/display_power_preferences.hpp"
 #include "../../lib/ble_navigation/map_setting_packet.hpp"
 #include "../../lib/ble_navigation/map_setting_redraw_policy.hpp"
 
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <initializer_list>
+
+struct FakePreferences {
+  bool hasValue = false;
+  bool value = false;
+  bool opened = false;
+  bool readOnly = true;
+  const char *lastKey = nullptr;
+
+  bool begin(const char *name, bool nextReadOnly) {
+    assert(std::strcmp(name,
+                       display_power::kDeviceSettingsPreferencesNamespace) ==
+           0);
+    opened = true;
+    readOnly = nextReadOnly;
+    return true;
+  }
+
+  bool isKey(const char *key) {
+    lastKey = key;
+    assert(std::strcmp(key,
+                       display_power::kAutomaticDisplayOffPreferencesKey) ==
+           0);
+    return hasValue;
+  }
+  bool getBool(const char *key, bool fallback) {
+    lastKey = key;
+    assert(std::strcmp(key,
+                       display_power::kAutomaticDisplayOffPreferencesKey) ==
+           0);
+    return hasValue ? value : fallback;
+  }
+  size_t putBool(const char *key, bool nextValue) {
+    lastKey = key;
+    assert(std::strcmp(key,
+                       display_power::kAutomaticDisplayOffPreferencesKey) ==
+           0);
+    hasValue = true;
+    value = nextValue;
+    return 1;
+  }
+};
+
+struct FakeDisplayPowerManager {
+  int requestCount = 0;
+  bool enabled = true;
+
+  bool requestAutomaticDisplayOff(bool nextEnabled) {
+    ++requestCount;
+    enabled = nextEnabled;
+    return true;
+  }
+};
 
 int main() {
   using display_power::PanelUpdate;
   using display_power::Policy;
   using display_power::State;
+
+  static_assert(display_power::kAutomaticDisplayOffSettingID == 36);
+  static_assert(display_power::kDefaultAutomaticDisplayOffEnabled);
+  static_assert(sizeof(display_power::kAutomaticDisplayOffPreferencesKey) - 1 <=
+                15);
+  static_assert(sizeof(display_power::kDeviceSettingsPreferencesNamespace) - 1 <=
+                15);
+  static_assert(display_power::isBooleanSettingValue(0));
+  static_assert(display_power::isBooleanSettingValue(1));
+  static_assert(!display_power::isBooleanSettingValue(-1));
+  static_assert(!display_power::isBooleanSettingValue(2));
+
+  FakePreferences preferences;
+  assert(display_power::beginDeviceSettingsPreferences(preferences));
+  assert(preferences.opened);
+  assert(!preferences.readOnly);
+  bool hasSavedAutomaticDisplayOff = false;
+  assert(display_power::loadAutomaticDisplayOff(
+             preferences, hasSavedAutomaticDisplayOff) ==
+         display_power::kDefaultAutomaticDisplayOffEnabled);
+  assert(!hasSavedAutomaticDisplayOff);
+  assert(display_power::persistAutomaticDisplayOff(preferences, false));
+  assert(!display_power::loadAutomaticDisplayOff(
+      preferences, hasSavedAutomaticDisplayOff));
+  assert(hasSavedAutomaticDisplayOff);
+
+  FakeDisplayPowerManager manager;
+  assert(!display_power::applyAutomaticDisplayOffSetting(manager, 2));
+  assert(manager.requestCount == 0);
+  assert(display_power::applyAutomaticDisplayOffSetting(manager, 0));
+  assert(manager.requestCount == 1);
+  assert(!manager.enabled);
 
   static_assert(!display_power::isBrightnessPercentInRange(4));
   static_assert(display_power::isBrightnessPercentInRange(5));
