@@ -1217,6 +1217,11 @@ time was 8,101.010277 seconds (135.0 minutes), which is a deliberate miss of
 the current 90-minute concurrency-one objective and must not be silently
 relaxed. The exact server benchmark is therefore retained as successful
 functional/resource evidence but remains unchecked for the performance gate.
+The new `compare_building_equivalence.py --reference-zip ... --candidate-zip
+...` path independently materialized the downloaded artifact as 420 canonical
+FMB hashes and self-compared it successfully; a separate monolithic-versus-
+partitioned retained artifact comparison is still required before the
+partition-invariant byte gate can be checked.
 
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
@@ -1369,8 +1374,9 @@ artifact.
 - [x] Convert split signals into bounded workload-scan child enqueue transitions.
 - [x] Implement cache-only final assembly and whole-artifact validation.
 - [ ] Preserve partition-invariant block and artifact identity (canonical
-      receipt-set and artifact-input identities are implemented; byte-level
-      reference equivalence remains).
+      receipt-set and artifact-input identities plus ZIP-to-record comparison
+      are implemented; byte-level monolithic-versus-partitioned reference
+      evidence remains).
 - [x] Add public aggregate progress and authenticated operator diagnostics.
 - [x] Add conservative failed/cancelled task-evidence retention without
       deleting reusable canonical cache blocks.
