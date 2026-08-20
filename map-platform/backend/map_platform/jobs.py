@@ -13,7 +13,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .artifacts import ArtifactRecord
 from .generation_profiles import GenerationProfilePolicy
@@ -473,6 +473,7 @@ class JobStore:
         job = self.get(job_id)
         previous_status = job.status
         job.status = status
+        job.scheduler_yielded = False
         job.updated_at = utc_now_iso()
         job.error = error
         job.error_code = error_code
@@ -1309,11 +1310,57 @@ class JobStore:
                 raise JobClaimError(f"job is {job.status.value}, not queued")
             return self._claim_unlocked(job, worker_id)
 
-    def claim_next(self, worker_id: str, *, interrupted_job_stale_seconds: float | None = None) -> MapJob | None:
+    def claim_next(
+        self,
+        worker_id: str,
+        *,
+        interrupted_job_stale_seconds: float | None = None,
+        preferred_job_id: str | None = None,
+    ) -> MapJob | None:
         with self._queue_lock():
-            for job in self.list():
-                if job.status != JobStatus.QUEUED:
-                    continue
+            jobs = self.list()
+            # Admit never-started public work first so it can materialize a
+            # durable child plan. Resumable chunked parents are then selected
+            # by the coordinator's global weighted scheduler when possible;
+            # the timestamp fallback is a durable round robin.
+            never_started = sorted(
+                (
+                    job
+                    for job in jobs
+                    if job.status == JobStatus.QUEUED
+                    and not job.scheduler_yielded
+                    and job.attempts == 0
+                ),
+                key=lambda job: (job.created_at, job.job_id),
+            )
+            resumable = [
+                job
+                for job in jobs
+                if job.scheduler_yielded and job.worker_id is None
+            ]
+            if preferred_job_id is not None:
+                resumable.sort(
+                    key=lambda job: (
+                        job.job_id != preferred_job_id,
+                        job.updated_at,
+                        job.job_id,
+                    )
+                )
+            else:
+                resumable.sort(key=lambda job: (job.updated_at, job.job_id))
+            queued_retries = sorted(
+                (
+                    job
+                    for job in jobs
+                    if job.status == JobStatus.QUEUED
+                    and not job.scheduler_yielded
+                    and job.attempts > 0
+                ),
+                key=lambda job: (job.updated_at, job.job_id),
+            )
+            for job in (*never_started, *resumable, *queued_retries):
+                if job.scheduler_yielded:
+                    return self._resume_yielded_unlocked(job, worker_id)
                 claimed = self._claim_unlocked(job, worker_id)
                 if claimed.status == JobStatus.VALIDATING:
                     return claimed
@@ -1344,6 +1391,36 @@ class JobStore:
                     return claimed
             return None
 
+    def yield_chunked_job(self, job_id: str, *, worker_id: str) -> MapJob:
+        """Release one active public parent without consuming a retry."""
+
+        with self._queue_lock():
+            job = self.get(job_id)
+            if job.worker_id != worker_id:
+                raise RuntimeError("job is owned by another worker")
+            if job.status in {
+                JobStatus.QUEUED,
+                JobStatus.READY,
+                JobStatus.FAILED,
+                JobStatus.CANCELLED,
+                JobStatus.EXPIRED,
+            }:
+                raise RuntimeError("job is not yieldable")
+            job.scheduler_yielded = True
+            job.worker_id = None
+            job.updated_at = utc_now_iso()
+            self.save(job)
+            return job
+
+    def _resume_yielded_unlocked(self, job: MapJob, worker_id: str) -> MapJob:
+        if not job.scheduler_yielded or job.worker_id is not None:
+            raise JobClaimError("job is not available for scheduler resume")
+        job.scheduler_yielded = False
+        job.worker_id = worker_id
+        job.updated_at = utc_now_iso()
+        self.save(job)
+        return job
+
     def _claim_unlocked(self, job: MapJob, worker_id: str) -> MapJob:
         if job.attempts >= job.max_attempts:
             return self._update_status_unlocked(
@@ -1354,6 +1431,7 @@ class JobStore:
                 finished=True,
             )
         job.status = JobStatus.VALIDATING
+        job.scheduler_yielded = False
         job.updated_at = utc_now_iso()
         job.started_at = job.started_at or job.updated_at
         job.worker_id = worker_id
@@ -1377,11 +1455,20 @@ class JobStore:
         self.save(job)
         return job
 
-    def requeue_retryable_failures(self) -> int:
+    def requeue_retryable_failures(
+        self,
+        *,
+        non_retryable_error_codes: Iterable[str] = (),
+    ) -> int:
+        non_retryable = frozenset(str(value) for value in non_retryable_error_codes)
         count = 0
         with self._queue_lock():
             for job in self.list():
-                if job.status == JobStatus.FAILED and job.attempts < job.max_attempts:
+                if (
+                    job.status == JobStatus.FAILED
+                    and job.attempts < job.max_attempts
+                    and job.error_code not in non_retryable
+                ):
                     job.status = JobStatus.QUEUED
                     job.updated_at = utc_now_iso()
                     job.finished_at = None

@@ -36,8 +36,13 @@ BUILDING_SELECTION_SEMANTICS = "complete_blocks_no_selection_edge_clipping"
 BUILDING_RELATION_CLOSURE_MODE = "source_snapshot_index"
 BUILDING_SCOPE_SCHEMA_VERSION = 1
 GLOBAL_BUILDING_SCOPE_SCHEMA_VERSION = 1
-GLOBAL_BUILDING_PLAN_POLICY_VERSION = 1
+GLOBAL_BUILDING_PLAN_POLICY_VERSION = 2
 GLOBAL_BUILDING_MAX_OUTPUT_BLOCKS = 1_024
+GLOBAL_BUILDING_MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+GLOBAL_BUILDING_ARCHIVE_HEADROOM_BASIS_POINTS = 9_000
+GLOBAL_BUILDING_ESTIMATED_FMB_BYTES_PER_BLOCK = 512 * 1024
+GLOBAL_BUILDING_MAX_FMB_BYTES = 2 * 1024 * 1024
+GLOBAL_BUILDING_ARCHIVE_FIXED_BYTES = 1024 * 1024
 
 
 class BuildingScopeError(RuntimeError):
@@ -217,6 +222,10 @@ class GlobalBuildingPlan:
             **metrics,
             "geometryBufferMeters": document["chunkPolicy"]["geometryBufferMeters"],
             "maxOutputBlocks": document["globalPolicy"]["maxOutputBlocks"],
+            "estimatedArchiveBytes": metrics["estimatedArchiveBytes"],
+            "archiveAdmissionLimitBytes": document["globalPolicy"][
+                "archiveAdmissionLimitBytes"
+            ],
             "sourceBoundsE7": document["sourceScope"]["boundsE7"],
         }
 
@@ -227,6 +236,15 @@ class GlobalBuildingPlanPolicy:
 
     policy_version: int = GLOBAL_BUILDING_PLAN_POLICY_VERSION
     max_output_blocks: int = GLOBAL_BUILDING_MAX_OUTPUT_BLOCKS
+    max_archive_bytes: int = GLOBAL_BUILDING_MAX_ARCHIVE_BYTES
+    archive_headroom_basis_points: int = (
+        GLOBAL_BUILDING_ARCHIVE_HEADROOM_BASIS_POINTS
+    )
+    estimated_fmb_bytes_per_block: int = (
+        GLOBAL_BUILDING_ESTIMATED_FMB_BYTES_PER_BLOCK
+    )
+    max_fmb_bytes: int = GLOBAL_BUILDING_MAX_FMB_BYTES
+    archive_fixed_bytes: int = GLOBAL_BUILDING_ARCHIVE_FIXED_BYTES
 
     def validate(self) -> None:
         if (
@@ -236,6 +254,18 @@ class GlobalBuildingPlanPolicy:
             or isinstance(self.max_output_blocks, bool)
             or not isinstance(self.max_output_blocks, int)
             or self.max_output_blocks <= 0
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                for value in (
+                    self.max_archive_bytes,
+                    self.archive_headroom_basis_points,
+                    self.estimated_fmb_bytes_per_block,
+                    self.max_fmb_bytes,
+                    self.archive_fixed_bytes,
+                )
+            )
+            or self.archive_headroom_basis_points > 10_000
+            or self.estimated_fmb_bytes_per_block > self.max_fmb_bytes
         ):
             raise BuildingScopeError(
                 "building_scope_policy_invalid",
@@ -243,9 +273,19 @@ class GlobalBuildingPlanPolicy:
             )
 
     def to_document(self) -> dict[str, int]:
+        self.validate()
+        archive_limit = (
+            self.max_archive_bytes * self.archive_headroom_basis_points
+        ) // 10_000
         return {
             "policyVersion": self.policy_version,
             "maxOutputBlocks": self.max_output_blocks,
+            "maxArchiveBytes": self.max_archive_bytes,
+            "archiveHeadroomBasisPoints": self.archive_headroom_basis_points,
+            "archiveAdmissionLimitBytes": archive_limit,
+            "estimatedFmbBytesPerBlock": self.estimated_fmb_bytes_per_block,
+            "maxFmbBytes": self.max_fmb_bytes,
+            "archiveFixedBytes": self.archive_fixed_bytes,
         }
 
 
@@ -476,6 +516,19 @@ def plan_global_building_scope(
             "building_scope_policy_invalid",
             "selection does not intersect an output block",
         )
+    estimated_archive_bytes = (
+        global_policy.archive_fixed_bytes
+        + len(blocks) * global_policy.estimated_fmb_bytes_per_block
+    )
+    archive_admission_limit = (
+        global_policy.max_archive_bytes
+        * global_policy.archive_headroom_basis_points
+    ) // 10_000
+    if estimated_archive_bytes > archive_admission_limit:
+        raise BuildingScopeError(
+            "building_artifact_admission",
+            "predicted global map artifact exceeds the admission headroom",
+        )
 
     output = (
         min(block.x for block in blocks) * MAP_BLOCK_SIZE_METERS,
@@ -601,6 +654,10 @@ def plan_global_building_scope(
             "outputBlockCount": len(blocks),
             "calibrationCellCount": len(target_cells),
             "calibrationSampleCellCount": len(sample_cells),
+            "estimatedFmbBytesPerBlock": (
+                global_policy.estimated_fmb_bytes_per_block
+            ),
+            "estimatedArchiveBytes": estimated_archive_bytes,
         },
     }
     encoded = canonical_json(document)

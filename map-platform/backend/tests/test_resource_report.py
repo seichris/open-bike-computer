@@ -53,6 +53,35 @@ class ResourceReportTests(unittest.TestCase):
         self.assertIsNone(report["configuredMemoryLimitBytes"])
         self.assertIsNone(report["cgroupMemory"]["version"])
 
+    def test_effective_memory_limit_uses_smaller_configured_or_cgroup_cap(self):
+        cases = (
+            (8_192, 4_096, 4_096),
+            (4_096, 8_192, 4_096),
+        )
+        for configured, cgroup_limit, expected in cases:
+            with self.subTest(
+                configured=configured,
+                cgroup_limit=cgroup_limit,
+            ), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "memory.max").write_text(str(cgroup_limit))
+                with patch.dict(
+                    os.environ,
+                    {"MAP_PLATFORM_WORKER_MEMORY_LIMIT_BYTES": str(configured)},
+                    clear=False,
+                ):
+                    report = worker_resource_report(
+                        cgroup_root=root,
+                        proc_root=root / "missing-proc",
+                    )
+
+            capability = report["capability"]
+            self.assertEqual(capability["memoryLimitBytes"], expected)
+            self.assertEqual(
+                capability["configuredMemoryLimitBytes"], configured
+            )
+            self.assertEqual(capability["cgroupMemoryLimitBytes"], cgroup_limit)
+
 
 if __name__ == "__main__":
     unittest.main()

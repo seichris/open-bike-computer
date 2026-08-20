@@ -110,6 +110,60 @@ class BuildingBlockCacheMaintenanceTests(unittest.TestCase):
             self.assertEqual(result["removedNamespaces"], 0)
             self.assertEqual(result["skippedLeasedNamespaces"], 1)
 
+    def test_active_plan_identity_is_excluded_from_age_and_size_eviction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            protected = self._namespace(
+                root,
+                "1" * 64,
+                "3" * 64,
+                age_seconds=20 * 86_400,
+                size=200,
+            )
+            removable = self._namespace(
+                root,
+                "4" * 64,
+                "5" * 64,
+                age_seconds=19 * 86_400,
+                size=200,
+            )
+
+            result = prune_building_block_cache(
+                root,
+                older_than_days=14,
+                max_bytes=1,
+                max_items=10,
+                protected_cache_identity_sha256s=("3" * 64,),
+                now=2_000_000_000,
+            )
+
+            self.assertTrue(protected.exists())
+            self.assertFalse(removable.exists())
+            self.assertEqual(result["removedNamespaces"], 1)
+
+    def test_legacy_active_cache_hit_can_protect_the_complete_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            namespace = self._namespace(
+                root,
+                "1" * 64,
+                "3" * 64,
+                age_seconds=20 * 86_400,
+                size=200,
+            )
+
+            result = prune_building_block_cache(
+                root,
+                older_than_days=14,
+                max_bytes=1,
+                max_items=10,
+                protect_all=True,
+                now=2_000_000_000,
+            )
+
+            self.assertTrue(namespace.exists())
+            self.assertEqual(result["removedNamespaces"], 0)
+
     def test_missing_cache_is_a_quiet_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(

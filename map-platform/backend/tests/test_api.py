@@ -78,6 +78,23 @@ class BuildingProgressProjectionTests(unittest.TestCase):
 
         self.assertEqual(result, {"progress": None})
 
+    def test_shadow_observation_is_not_projected_as_executable_progress(self):
+        result = {"progress": {"phase": "block_encoding", "completed": 2}}
+        observation = {
+            "phase": "observed",
+            "state": "observed",
+            "completed": 0,
+            "total": 442,
+        }
+
+        api_module._project_building_progress(result, observation)
+
+        self.assertEqual(
+            result["progress"], {"phase": "block_encoding", "completed": 2}
+        )
+        self.assertNotIn("buildingProgress", result)
+        self.assertEqual(result["buildingPlanObservation"], observation)
+
 
 class MapJobRunAPITests(unittest.TestCase):
     def setUp(self):
@@ -262,6 +279,77 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["alertCount"], 0)
         self.assertEqual(task_store.get_plan("job-admin-alerts")["state"], "planning")
+
+    def test_admin_building_plan_diagnostics_are_bounded_and_summarized(self):
+        task_store = self.client.app.state.building_task_store
+        task_store.create_plan(
+            parent_job_id="job-admin-page",
+            global_plan_sha256="b" * 64,
+            input_identity={},
+            expected_output_block_count=2,
+            policy_version=1,
+            resource_model_version="v1",
+        )
+        task_store.add_tasks(
+            [
+                BuildingTaskSpec(
+                    task_id=f"task-admin-page-{index}",
+                    parent_job_id="job-admin-page",
+                    kind="building_chunk",
+                    blocks=((index, 1),),
+                    chunk_plan_sha256="b" * 64,
+                )
+                for index in range(2)
+            ]
+        )
+        oversized_workload = json.dumps({"objectKeys": "x" * 2_000_000})
+        connection = sqlite3.connect(task_store.path)
+        connection.execute(
+            """
+            INSERT INTO map_build_workload_receipts(
+                task_id, parent_job_id, closure_plan_sha256,
+                source_index_identity_json, workload_json, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "task-admin-page-0",
+                "job-admin-page",
+                "c" * 64,
+                "{}",
+                oversized_workload,
+                1.0,
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        response = self.client.get(
+            "/v1/admin/building-plans/job-admin-page?limit=1&offset=0",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        document = response.json()
+        self.assertEqual(document["page"]["limit"], 1)
+        self.assertEqual(document["page"]["counts"]["tasks"], 2)
+        self.assertTrue(document["page"]["hasMore"])
+        self.assertEqual(len(document["tasks"]), 1)
+        self.assertEqual(len(document["attempts"]), 0)
+        self.assertEqual(len(document["workloadReceipts"]), 1)
+        self.assertGreater(
+            document["workloadReceipts"][0]["workload_bytes"],
+            2_000_000,
+        )
+        self.assertTrue(
+            all("workload_json" not in row for row in document["workloadReceipts"])
+        )
+        self.assertLess(len(response.content), 50_000)
+
+        rejected = self.client.get(
+            "/v1/admin/building-plans/job-admin-page?limit=101",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+        self.assertEqual(rejected.status_code, 400)
 
     def test_preparation_estimate_rollout_modes_control_public_field(self):
         observations = {}

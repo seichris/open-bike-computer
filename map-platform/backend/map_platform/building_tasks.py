@@ -13,13 +13,15 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .building_resource_model import (
+    CONSERVATIVE_WALL_MODEL_VERSION,
     CONSERVATIVE_MEMORY_MODEL_VERSION,
     DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES,
     conservative_peak_memory_bytes,
+    conservative_wall_seconds,
     summarize_resource_observations,
 )
 
-BUILDING_TASK_SCHEMA_VERSION = 5
+BUILDING_TASK_SCHEMA_VERSION = 6
 DEFAULT_BUILDING_TASK_RETENTION_DAYS = 30
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _TASK_STATES = {"pending", "leased", "ready", "split", "failed", "cancelled"}
@@ -33,6 +35,7 @@ _PLAN_STATES = {
     "assembly",
     "artifact_validation",
     "artifact_publication",
+    "observed",
     "ready",
     "failed",
     "cancelled",
@@ -47,11 +50,12 @@ _PLAN_STAGE_ORDER = {
     "assembly": 4,
     "artifact_validation": 5,
     "artifact_publication": 6,
+    "observed": 7,
     "ready": 7,
     "failed": 7,
     "cancelled": 7,
 }
-_TERMINAL_PLAN_STATES = {"ready", "failed", "cancelled"}
+_TERMINAL_PLAN_STATES = {"observed", "ready", "failed", "cancelled"}
 _MEMORY_ADMISSION_FRACTION = 0.85
 _MEMORY_ADMISSION_PERCENT = 85
 _DEFAULT_RESOURCE_POOL = "default"
@@ -59,6 +63,7 @@ _DEFAULT_MAX_CONCURRENT_TASKS = 1
 _DEFAULT_SPLIT_DEPTH_LIMIT = 16
 _DEFAULT_SCHEDULING_WEIGHT = 1
 _DEFAULT_ADMISSION_PRIORITY = 0
+_PARENT_RESOURCE_PHASES = frozenset({"source_preparation", "map_assembly"})
 
 
 class BuildingTaskStoreError(RuntimeError):
@@ -107,6 +112,16 @@ class BuildingTaskSpec:
     closure_plan_sha256: str | None = None
     split_depth: int = 0
     predicted_resource: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class ParentPhaseReservation:
+    parent_job_id: str
+    phase: str
+    worker_id: str
+    lease_token: str
+    resource_pool: str
+    expires_at: float
 
 
 def deterministic_building_task_id(
@@ -314,6 +329,61 @@ class BuildingTaskStore:
         finally:
             connection.close()
 
+    def advance_plan_stage(
+        self,
+        parent_job_id: str,
+        *,
+        stage: str,
+        state: str | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Advance a resumable plan, treating an already-later stage as done.
+
+        Job and coordinator state are persisted in separate stores. A worker
+        can therefore restart after the coordinator advanced but before the
+        public job record did. Retry callers use this method for idempotent
+        forward progress; terminal states remain fenced.
+        """
+
+        if stage not in _PLAN_STATES:
+            raise BuildingTaskStoreError("plan stage is invalid")
+        next_state = stage if state is None else state
+        if next_state not in _PLAN_STATES:
+            raise BuildingTaskStoreError("plan state is invalid")
+        now = self._clock() if now is None else now
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            if row is None:
+                raise BuildingTaskStoreError("parent plan not found")
+            if row["state"] in _TERMINAL_PLAN_STATES:
+                if row["state"] == next_state and row["stage"] == stage:
+                    connection.commit()
+                    return dict(row)
+                raise BuildingTaskStoreError("parent plan is terminal")
+            if _PLAN_STAGE_ORDER[stage] <= _PLAN_STAGE_ORDER[row["stage"]]:
+                connection.commit()
+                return dict(row)
+            connection.execute(
+                "UPDATE map_build_plans SET stage=?, state=?, updated_at=? WHERE parent_job_id=?",
+                (stage, next_state, now, parent_job_id),
+            )
+            result = connection.execute(
+                "SELECT * FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            connection.commit()
+            return dict(result)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def reopen_failed_plan(
         self,
         parent_job_id: str,
@@ -366,12 +436,188 @@ class BuildingTaskStore:
                     "DELETE FROM map_build_resource_reservations WHERE parent_job_id=?",
                     (parent_job_id,),
                 )
+                connection.execute(
+                    "DELETE FROM map_build_parent_phase_reservations WHERE parent_job_id=?",
+                    (parent_job_id,),
+                )
             result = connection.execute(
                 "SELECT * FROM map_build_plans WHERE parent_job_id=?",
                 (parent_job_id,),
             ).fetchone()
             connection.commit()
             return dict(result) if result is not None else None
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def mark_plan_observed(
+        self,
+        parent_job_id: str,
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Terminalize a shadow-only plan without making its tasks claimable."""
+
+        now = self._clock() if now is None else now
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            plan = connection.execute(
+                "SELECT * FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            if plan is None:
+                raise BuildingTaskStoreError("parent plan not found")
+            if plan["state"] == "observed":
+                connection.commit()
+                return dict(plan)
+            if plan["state"] in _TERMINAL_PLAN_STATES:
+                raise BuildingTaskStoreError("parent plan is terminal")
+            non_pending = connection.execute(
+                "SELECT 1 FROM map_build_tasks WHERE parent_job_id=? AND state!='pending' LIMIT 1",
+                (parent_job_id,),
+            ).fetchone()
+            if non_pending is not None:
+                raise BuildingTaskStoreError(
+                    "shadow plan contains executable task history"
+                )
+            connection.execute(
+                "UPDATE map_build_tasks SET state='cancelled', typed_error='building_shadow_observed', updated_at=? WHERE parent_job_id=?",
+                (now, parent_job_id),
+            )
+            connection.execute(
+                "UPDATE map_build_plans SET stage='observed', state='observed', updated_at=? WHERE parent_job_id=?",
+                (now, parent_job_id),
+            )
+            result = connection.execute(
+                "SELECT * FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            connection.commit()
+            return dict(result)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def activate_observed_plan(
+        self,
+        parent_job_id: str,
+        *,
+        stage: str = "chunk_planning",
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Replace disposable shadow tasks before executing the same parent."""
+
+        if stage not in _PLAN_STATES or stage in _TERMINAL_PLAN_STATES:
+            raise BuildingTaskStoreError("plan stage is invalid")
+        now = self._clock() if now is None else now
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            plan = connection.execute(
+                "SELECT * FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            if plan is None:
+                connection.commit()
+                return None
+            if plan["state"] != "observed":
+                connection.commit()
+                return dict(plan)
+            evidence = connection.execute(
+                """
+                SELECT 1
+                FROM map_build_tasks tasks
+                WHERE tasks.parent_job_id=? AND (
+                    EXISTS(SELECT 1 FROM map_build_task_attempts attempts WHERE attempts.task_id=tasks.task_id)
+                    OR EXISTS(SELECT 1 FROM map_build_workload_receipts workloads WHERE workloads.task_id=tasks.task_id)
+                    OR EXISTS(SELECT 1 FROM map_build_block_receipts receipts WHERE receipts.task_id=tasks.task_id)
+                    OR EXISTS(SELECT 1 FROM map_build_resource_reservations reservations WHERE reservations.task_id=tasks.task_id)
+                )
+                LIMIT 1
+                """,
+                (parent_job_id,),
+            ).fetchone()
+            if evidence is not None:
+                raise BuildingTaskStoreError(
+                    "observed plan unexpectedly contains execution evidence"
+                )
+            task_ids = [
+                row["task_id"]
+                for row in connection.execute(
+                    "SELECT task_id FROM map_build_tasks WHERE parent_job_id=?",
+                    (parent_job_id,),
+                ).fetchall()
+            ]
+            if task_ids:
+                placeholders = ",".join("?" for _ in task_ids)
+                connection.execute(
+                    f"DELETE FROM map_build_task_blocks WHERE task_id IN ({placeholders})",
+                    task_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM map_build_tasks WHERE task_id IN ({placeholders})",
+                    task_ids,
+                )
+            connection.execute(
+                "UPDATE map_build_plans SET stage=?, state=?, updated_at=? WHERE parent_job_id=?",
+                (stage, stage, now, parent_job_id),
+            )
+            result = connection.execute(
+                "SELECT * FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            connection.commit()
+            return dict(result)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def reconcile_ready_plans(
+        self,
+        parent_job_ids: Iterable[str],
+        *,
+        now: float | None = None,
+    ) -> int:
+        """Finalize coordinator publication after the public jobs are ready."""
+
+        parent_ids = tuple(dict.fromkeys(str(value) for value in parent_job_ids))
+        if not parent_ids:
+            return 0
+        now = self._clock() if now is None else now
+        placeholders = ",".join("?" for _ in parent_ids)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                f"""
+                SELECT parent_job_id
+                FROM map_build_plans
+                WHERE parent_job_id IN ({placeholders})
+                  AND state='artifact_publication'
+                """,
+                parent_ids,
+            ).fetchall()
+            ready_ids = tuple(str(row["parent_job_id"]) for row in rows)
+            if ready_ids:
+                ready_placeholders = ",".join("?" for _ in ready_ids)
+                connection.execute(
+                    f"""
+                    UPDATE map_build_plans
+                    SET stage='ready', state='ready', updated_at=?
+                    WHERE parent_job_id IN ({ready_placeholders})
+                      AND state='artifact_publication'
+                    """,
+                    (now, *ready_ids),
+                )
+            connection.commit()
+            return len(ready_ids)
         except Exception:
             connection.rollback()
             raise
@@ -393,10 +639,11 @@ class BuildingTaskStore:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._recover_expired_locked(connection, now=now)
             where = [
                 "task.state = 'pending'",
                 "(task.next_eligible_at IS NULL OR task.next_eligible_at <= ?)",
-                "plan.state NOT IN ('cancelled', 'failed', 'ready')",
+                "plan.state NOT IN ('observed', 'cancelled', 'failed', 'ready')",
             ]
             params: list[Any] = [now]
             if parent_job_id is not None:
@@ -576,6 +823,279 @@ class BuildingTaskStore:
         finally:
             connection.close()
 
+    def acquire_parent_phase_reservation(
+        self,
+        *,
+        parent_job_id: str,
+        phase: str,
+        worker_id: str,
+        worker_capability: Mapping[str, Any] | None,
+        lease_seconds: float = 60.0,
+        estimated_peak_memory_bytes: int = (
+            DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES
+        ),
+        now: float | None = None,
+    ) -> ParentPhaseReservation | None:
+        """Atomically reserve the shared heavy-work pool for a parent phase.
+
+        Parent source preparation can run before its chunk plan exists, so
+        these leases intentionally live outside the task/plan foreign-key
+        graph. They still participate in the exact same pool capacity snapshot
+        as child leases. Parent phases are always concurrency-one: an active
+        parent lease therefore excludes both other parent phases and children,
+        even if a differently configured worker reports a larger concurrency.
+        """
+
+        if not isinstance(parent_job_id, str) or not parent_job_id:
+            raise BuildingTaskStoreError("parent job ID is required")
+        if phase not in _PARENT_RESOURCE_PHASES:
+            raise BuildingTaskStoreError("parent resource phase is invalid")
+        if not isinstance(worker_id, str) or not worker_id or lease_seconds <= 0:
+            raise BuildingTaskStoreError("worker and lease are required")
+        request, effective_capability = _parent_phase_resource_request(
+            worker_capability,
+            estimated_peak_memory_bytes=estimated_peak_memory_bytes,
+        )
+        now = self._clock() if now is None else now
+        expires = now + lease_seconds
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._recover_expired_locked(connection, now=now)
+            plan = connection.execute(
+                "SELECT state FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            if plan is not None and plan["state"] in {
+                "observed",
+                "cancelled",
+                "failed",
+            }:
+                raise BuildingTaskStoreError("parent plan is terminal")
+            if not _resource_capacity_available(connection, request, now=now):
+                connection.commit()
+                return None
+            lease_token = uuid.uuid4().hex
+            connection.execute(
+                """
+                INSERT INTO map_build_parent_phase_reservations(
+                    parent_job_id, phase, lease_token, worker_id,
+                    resource_pool, memory_reservation_bytes,
+                    memory_limit_bytes, cpu_weight, cpu_capacity,
+                    max_concurrent_tasks, capability_json,
+                    reserved_at, heartbeat_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    parent_job_id,
+                    phase,
+                    lease_token,
+                    worker_id,
+                    request["resourcePool"],
+                    request["memoryReservationBytes"],
+                    request["memoryLimitBytes"],
+                    request["cpuWeight"],
+                    request["cpuCapacity"],
+                    request["maxConcurrentTasks"],
+                    _canonical_json(effective_capability).decode("utf-8"),
+                    now,
+                    now,
+                    expires,
+                ),
+            )
+            connection.commit()
+            return ParentPhaseReservation(
+                parent_job_id=parent_job_id,
+                phase=phase,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                resource_pool=request["resourcePool"],
+                expires_at=expires,
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def heartbeat_parent_phase_reservation(
+        self,
+        *,
+        parent_job_id: str,
+        phase: str,
+        worker_id: str,
+        lease_token: str,
+        lease_seconds: float = 60.0,
+        now: float | None = None,
+    ) -> ParentPhaseReservation:
+        if phase not in _PARENT_RESOURCE_PHASES or lease_seconds <= 0:
+            raise BuildingTaskStoreError("parent resource lease is invalid")
+        now = self._clock() if now is None else now
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = _locked_parent_phase_reservation(
+                connection,
+                parent_job_id=parent_job_id,
+                phase=phase,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                now=now,
+            )
+            plan = connection.execute(
+                "SELECT state FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            if plan is not None and plan["state"] in {
+                "observed",
+                "cancelled",
+                "failed",
+            }:
+                raise StaleLeaseError("parent plan is no longer active")
+            expires = now + lease_seconds
+            connection.execute(
+                """
+                UPDATE map_build_parent_phase_reservations
+                SET heartbeat_at=?, expires_at=?
+                WHERE parent_job_id=? AND phase=? AND lease_token=?
+                """,
+                (now, expires, parent_job_id, phase, lease_token),
+            )
+            connection.commit()
+            return ParentPhaseReservation(
+                parent_job_id=parent_job_id,
+                phase=phase,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                resource_pool=str(row["resource_pool"]),
+                expires_at=expires,
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def release_parent_phase_reservation(
+        self,
+        *,
+        parent_job_id: str,
+        phase: str,
+        worker_id: str,
+        lease_token: str,
+        now: float | None = None,
+    ) -> None:
+        now = self._clock() if now is None else now
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            _locked_parent_phase_reservation(
+                connection,
+                parent_job_id=parent_job_id,
+                phase=phase,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                now=now,
+            )
+            connection.execute(
+                """
+                DELETE FROM map_build_parent_phase_reservations
+                WHERE parent_job_id=? AND phase=? AND lease_token=?
+                """,
+                (parent_job_id, phase, lease_token),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def resource_capacity_occupied(
+        self,
+        *,
+        worker_capability: Mapping[str, Any] | None,
+        now: float | None = None,
+    ) -> bool:
+        """Return whether a live lease temporarily occupies this worker pool."""
+
+        request, _ = _parent_phase_resource_request(
+            worker_capability,
+            estimated_peak_memory_bytes=(
+                DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES
+            ),
+        )
+        now = self._clock() if now is None else now
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._recover_expired_locked(connection, now=now)
+            occupied = (
+                _resource_capacity_snapshot(
+                    connection,
+                    request["resourcePool"],
+                    now=now,
+                )["count"]
+                > 0
+            )
+            connection.commit()
+            return occupied
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def next_pending_parent(
+        self,
+        *,
+        worker_capability: Mapping[str, Any] | None = None,
+        now: float | None = None,
+    ) -> str | None:
+        """Return the parent currently favored by the global task scheduler."""
+
+        now = self._clock() if now is None else now
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._recover_expired_locked(connection, now=now)
+            rows = connection.execute(
+                """
+                SELECT task.*, plan.scheduling_weight,
+                       plan.admission_priority, plan.active_task_quota,
+                       plan.virtual_finish
+                FROM map_build_tasks task
+                JOIN map_build_plans plan
+                  ON plan.parent_job_id = task.parent_job_id
+                WHERE task.state='pending'
+                  AND (task.next_eligible_at IS NULL OR task.next_eligible_at <= ?)
+                  AND plan.state NOT IN ('observed', 'cancelled', 'failed', 'ready')
+                ORDER BY plan.admission_priority DESC,
+                         plan.virtual_finish,
+                         CASE WHEN plan.last_claimed_at IS NULL THEN 0 ELSE 1 END,
+                         plan.last_claimed_at,
+                         plan.parent_job_id,
+                         task.created_at,
+                         task.task_id
+                """,
+                (now,),
+            ).fetchall()
+            parent_job_id = next(
+                (
+                    str(row["parent_job_id"])
+                    for row in rows
+                    if _worker_can_admit(row, worker_capability)
+                ),
+                None,
+            )
+            connection.commit()
+            return parent_job_id
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def heartbeat(
         self,
         task_id: str,
@@ -589,7 +1109,9 @@ class BuildingTaskStore:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            row = self._locked_task(connection, task_id, worker_id, lease_token)
+            row = self._locked_task(
+                connection, task_id, worker_id, lease_token, now=now
+            )
             expires = now + lease_seconds
             connection.execute(
                 "UPDATE map_build_tasks SET lease_expires_at=?, heartbeat_at=?, updated_at=? WHERE task_id=?",
@@ -631,12 +1153,14 @@ class BuildingTaskStore:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            task = self._locked_task(connection, task_id, worker_id, lease_token)
+            task = self._locked_task(
+                connection, task_id, worker_id, lease_token, now=now
+            )
             plan = connection.execute(
                 "SELECT state, cancellation_generation FROM map_build_plans WHERE parent_job_id=?",
                 (task.parent_job_id,),
             ).fetchone()
-            if plan is None or plan["state"] in {"cancelled", "failed", "ready"}:
+            if plan is None or plan["state"] in _TERMINAL_PLAN_STATES:
                 raise StaleLeaseError("parent plan is no longer active")
             assigned = connection.execute(
                 "SELECT 1 FROM map_build_task_blocks WHERE parent_job_id=? AND block_x=? AND block_y=? AND task_id=?",
@@ -689,6 +1213,8 @@ class BuildingTaskStore:
         actual_resource: Mapping[str, Any] | None = None,
         phase_timings: Mapping[str, Any] | None = None,
         peak_rss_bytes: int | None = None,
+        worker_capability: Mapping[str, Any] | None = None,
+        split_depth_limit: int = _DEFAULT_SPLIT_DEPTH_LIMIT,
         now: float | None = None,
     ) -> BuildingTaskRecord:
         """Persist an exact source-index workload and release the scan task.
@@ -705,7 +1231,9 @@ class BuildingTaskStore:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            task = self._locked_task(connection, task_id, worker_id, lease_token)
+            task = self._locked_task(
+                connection, task_id, worker_id, lease_token, now=now
+            )
             if task.kind != "building_workload_scan":
                 raise BuildingTaskStoreError(
                     "task is not an exact workload scan"
@@ -781,6 +1309,170 @@ class BuildingTaskStore:
                 receipt
             )
             predicted["memoryEstimateSource"] = CONSERVATIVE_MEMORY_MODEL_VERSION
+            predicted["estimatedWallSeconds"] = conservative_wall_seconds(receipt)
+            predicted["wallEstimateSource"] = CONSERVATIVE_WALL_MODEL_VERSION
+            memory_limit = _capability_memory_limit(worker_capability or {})
+            from .building_orchestration import (
+                BuildingChunkPolicy,
+                deterministic_runtime_bisection,
+            )
+
+            policy = BuildingChunkPolicy(split_depth_limit=split_depth_limit)
+            memory_target_exceeded = (
+                memory_limit is not None
+                and predicted["estimatedPeakMemoryBytes"]
+                > (memory_limit * 70) // 100
+            )
+            memory_hard_exceeded = (
+                memory_limit is not None
+                and predicted["estimatedPeakMemoryBytes"]
+                > _memory_admission_limit(memory_limit)
+            )
+            wall_target_exceeded = (
+                predicted["estimatedWallSeconds"]
+                > policy.wall_time_target_seconds
+            )
+            wall_hard_exceeded = (
+                predicted["estimatedWallSeconds"]
+                > policy.wall_time_hard_seconds
+            )
+            target_violations = [
+                name
+                for name, exceeded in (
+                    ("estimated_peak_memory", memory_target_exceeded),
+                    ("wall_time", wall_target_exceeded),
+                )
+                if exceeded
+            ]
+            hard_violations = [
+                name
+                for name, exceeded in (
+                    ("estimated_peak_memory", memory_hard_exceeded),
+                    ("wall_time", wall_hard_exceeded),
+                )
+                if exceeded
+            ]
+            predicted["targetViolations"] = target_violations
+            predicted["hardViolations"] = hard_violations
+            can_split = (
+                bool(target_violations)
+                and len(task.blocks) >= 2
+                and task.split_depth < split_depth_limit
+            )
+            if can_split:
+                from .reuse import MapBlock
+
+                left, right = deterministic_runtime_bisection(
+                    tuple(MapBlock(x, y) for x, y in task.blocks)
+                )
+                child_specs = tuple(
+                    BuildingTaskSpec(
+                        task_id=deterministic_building_task_id(
+                            parent_job_id=task.parent_job_id,
+                            kind="building_workload_scan",
+                            blocks=tuple((block.x, block.y) for block in blocks),
+                            chunk_plan_sha256=task.chunk_plan_sha256,
+                            split_depth=task.split_depth + 1,
+                        ),
+                        parent_job_id=task.parent_job_id,
+                        kind="building_workload_scan",
+                        blocks=tuple((block.x, block.y) for block in blocks),
+                        chunk_plan_sha256=task.chunk_plan_sha256,
+                        split_depth=task.split_depth + 1,
+                        predicted_resource={
+                            "estimatedPeakMemoryBytes": (
+                                DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES
+                            ),
+                            "memoryEstimateSource": (
+                                CONSERVATIVE_MEMORY_MODEL_VERSION
+                            ),
+                            "wallEstimateSource": CONSERVATIVE_WALL_MODEL_VERSION,
+                            "requiresExactWorkloadScan": True,
+                        },
+                    )
+                    for blocks in (left, right)
+                )
+                connection.execute(
+                    "DELETE FROM map_build_task_blocks WHERE task_id=?",
+                    (task_id,),
+                )
+                connection.execute(
+                    """
+                    UPDATE map_build_tasks
+                    SET state='split', typed_error='building_resource_admission',
+                        lease_owner=NULL, lease_token=NULL,
+                        lease_expires_at=NULL, heartbeat_at=NULL,
+                        predicted_resource_json=?, updated_at=?
+                    WHERE task_id=?
+                    """,
+                    (
+                        _canonical_json(predicted).decode("utf-8"),
+                        now,
+                        task_id,
+                    ),
+                )
+                connection.execute(
+                    "DELETE FROM map_build_resource_reservations WHERE task_id=? AND lease_token=?",
+                    (task_id, lease_token),
+                )
+                self._finish_attempt(
+                    connection,
+                    task_id,
+                    task.transient_attempts,
+                    outcome="split",
+                    typed_failure="building_resource_admission",
+                    actual_resource=actual_resource,
+                    phase_timings=phase_timings,
+                    peak_rss_bytes=peak_rss_bytes,
+                    now=now,
+                )
+                for child in child_specs:
+                    self._insert_task(connection, child)
+                connection.commit()
+                return self._row_to_task(
+                    connection.execute(
+                        "SELECT * FROM map_build_tasks WHERE task_id=?",
+                        (task_id,),
+                    ).fetchone()
+                )
+            if hard_violations:
+                connection.execute(
+                    """
+                    UPDATE map_build_tasks
+                    SET state='failed', typed_error='building_pathological_block',
+                        lease_owner=NULL, lease_token=NULL,
+                        lease_expires_at=NULL, heartbeat_at=NULL,
+                        predicted_resource_json=?, updated_at=?
+                    WHERE task_id=?
+                    """,
+                    (
+                        _canonical_json(predicted).decode("utf-8"),
+                        now,
+                        task_id,
+                    ),
+                )
+                connection.execute(
+                    "DELETE FROM map_build_resource_reservations WHERE task_id=? AND lease_token=?",
+                    (task_id, lease_token),
+                )
+                self._finish_attempt(
+                    connection,
+                    task_id,
+                    task.transient_attempts,
+                    outcome="failed",
+                    typed_failure="building_pathological_block",
+                    actual_resource=actual_resource,
+                    phase_timings=phase_timings,
+                    peak_rss_bytes=peak_rss_bytes,
+                    now=now,
+                )
+                connection.commit()
+                return self._row_to_task(
+                    connection.execute(
+                        "SELECT * FROM map_build_tasks WHERE task_id=?",
+                        (task_id,),
+                    ).fetchone()
+                )
             connection.execute(
                 """
                 UPDATE map_build_tasks
@@ -893,7 +1585,9 @@ class BuildingTaskStore:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            task = self._locked_task(connection, task_id, worker_id, lease_token)
+            task = self._locked_task(
+                connection, task_id, worker_id, lease_token, now=now
+            )
             parent_blocks = {
                 (int(row["block_x"]), int(row["block_y"]))
                 for row in connection.execute(
@@ -906,9 +1600,9 @@ class BuildingTaskStore:
                 for child in children
                 for block in child.blocks
             }
-            if not child_blocks or not child_blocks.issubset(parent_blocks):
+            if not child_blocks or child_blocks != parent_blocks:
                 raise BuildingTaskStoreError(
-                    "split children must be a subset of the parent block set"
+                    "split children must exactly cover the parent block set"
                 )
             if len(child_blocks) != sum(len(set(child.blocks)) for child in children):
                 raise BuildingTaskStoreError("split children overlap")
@@ -1035,7 +1729,7 @@ class BuildingTaskStore:
         try:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
-                "UPDATE map_build_plans SET state='cancelled', stage='cancelled', cancellation_generation=cancellation_generation+1, updated_at=? WHERE parent_job_id=? AND state NOT IN ('cancelled', 'ready')",
+                "UPDATE map_build_plans SET state='cancelled', stage='cancelled', cancellation_generation=cancellation_generation+1, updated_at=? WHERE parent_job_id=? AND state NOT IN ('observed', 'cancelled', 'ready')",
                 (now, parent_job_id),
             )
             connection.execute(
@@ -1056,6 +1750,10 @@ class BuildingTaskStore:
             )
             connection.execute(
                 "DELETE FROM map_build_resource_reservations WHERE parent_job_id=?",
+                (parent_job_id,),
+            )
+            connection.execute(
+                "DELETE FROM map_build_parent_phase_reservations WHERE parent_job_id=?",
                 (parent_job_id,),
             )
             connection.commit()
@@ -1091,7 +1789,7 @@ class BuildingTaskStore:
             active = connection.execute(
                 f"SELECT parent_job_id FROM map_build_plans "
                 f"WHERE parent_job_id IN ({placeholders}) "
-                "AND state NOT IN ('cancelled', 'ready')",
+                "AND state NOT IN ('observed', 'cancelled', 'ready')",
                 parent_ids,
             ).fetchall()
             active_ids = tuple(row[0] for row in active)
@@ -1133,6 +1831,11 @@ class BuildingTaskStore:
                 f"WHERE parent_job_id IN ({cancelled_placeholders})",
                 parent_ids,
             )
+            connection.execute(
+                f"DELETE FROM map_build_parent_phase_reservations "
+                f"WHERE parent_job_id IN ({cancelled_placeholders})",
+                parent_ids,
+            )
             connection.commit()
             return len(active_ids)
         except Exception:
@@ -1146,34 +1849,9 @@ class BuildingTaskStore:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
-                "SELECT task_id, parent_job_id, transient_attempts FROM map_build_tasks WHERE state='leased' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?",
-                (now,),
-            ).fetchall()
-            for row in rows:
-                plan = connection.execute(
-                    "SELECT state FROM map_build_plans WHERE parent_job_id=?",
-                    (row["parent_job_id"],),
-                ).fetchone()
-                new_state = "cancelled" if plan is not None and plan["state"] == "cancelled" else "pending"
-                connection.execute(
-                    "UPDATE map_build_tasks SET state=?, lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, updated_at=? WHERE task_id=?",
-                    (new_state, now, row["task_id"]),
-                )
-                connection.execute(
-                    "DELETE FROM map_build_resource_reservations WHERE task_id=?",
-                    (row["task_id"],),
-                )
-                self._finish_attempt(
-                    connection,
-                    row["task_id"],
-                    row["transient_attempts"],
-                    outcome="lease_expired",
-                    typed_failure="building_task_lease_expired",
-                    now=now,
-                )
+            recovered = self._recover_expired_locked(connection, now=now)
             connection.commit()
-            return len(rows)
+            return recovered
         except Exception:
             connection.rollback()
             raise
@@ -1210,6 +1888,243 @@ class BuildingTaskStore:
                 "SELECT * FROM map_build_block_receipts WHERE parent_job_id=? ORDER BY block_x, block_y",
                 (parent_job_id,),
             ).fetchall())
+        finally:
+            connection.close()
+
+    def cache_retention_protection(self) -> dict[str, Any]:
+        """Snapshot cache identities still required by nonterminal plans.
+
+        Cache-hit tasks created before the identity field was persisted cannot
+        be tied to one namespace. Such legacy active tasks fail closed by
+        protecting the complete cache until they become terminal or are
+        recovered through normal execution.
+        """
+
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN")
+            protected: set[str] = set()
+            protect_all = False
+            receipt_rows = connection.execute(
+                """
+                SELECT receipts.cache_identity_sha256
+                FROM map_build_block_receipts AS receipts
+                JOIN map_build_plans AS plans
+                  ON plans.parent_job_id = receipts.parent_job_id
+                WHERE plans.state NOT IN ('observed', 'ready', 'failed', 'cancelled')
+                """
+            ).fetchall()
+            for row in receipt_rows:
+                identity = row["cache_identity_sha256"]
+                if not isinstance(identity, str) or not _SHA256.fullmatch(identity):
+                    protect_all = True
+                else:
+                    protected.add(identity)
+            task_rows = connection.execute(
+                """
+                SELECT tasks.predicted_resource_json
+                FROM map_build_tasks AS tasks
+                JOIN map_build_plans AS plans
+                  ON plans.parent_job_id = tasks.parent_job_id
+                WHERE plans.state NOT IN ('observed', 'ready', 'failed', 'cancelled')
+                """
+            ).fetchall()
+            for row in task_rows:
+                payload = row["predicted_resource_json"]
+                if payload is None:
+                    continue
+                try:
+                    predicted = json.loads(payload)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    protect_all = True
+                    continue
+                if not isinstance(predicted, dict):
+                    protect_all = True
+                    continue
+                if predicted.get("cacheHit") is not True:
+                    continue
+                identity = predicted.get("cacheIdentitySha256")
+                if not isinstance(identity, str) or not _SHA256.fullmatch(identity):
+                    protect_all = True
+                else:
+                    protected.add(identity)
+            connection.commit()
+            return {
+                "protectedCacheIdentitySha256s": tuple(sorted(protected)),
+                "protectAll": protect_all,
+            }
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def invalidate_cache_for_retry(
+        self,
+        parent_job_id: str,
+        *,
+        blocks: Iterable[tuple[int, int]],
+        cache_identity_sha256: str,
+        typed_failure: str,
+        task_id: str | None = None,
+        worker_id: str | None = None,
+        lease_token: str | None = None,
+        now: float | None = None,
+    ) -> tuple[BuildingTaskRecord, ...]:
+        """Atomically discard stale cache receipts and requeue their tasks."""
+
+        if not isinstance(parent_job_id, str) or not parent_job_id:
+            raise BuildingTaskStoreError("parent job ID is required")
+        _require_sha(cache_identity_sha256, "cache_identity_sha256")
+        if not isinstance(typed_failure, str) or not typed_failure:
+            raise BuildingTaskStoreError("typed failure is required")
+        requested_blocks = tuple(sorted(set(blocks)))
+        if not requested_blocks:
+            raise BuildingTaskStoreError("cache invalidation requires blocks")
+        for block in requested_blocks:
+            _validate_block(block)
+        if task_id is not None and (not worker_id or not lease_token):
+            raise BuildingTaskStoreError(
+                "leased cache invalidation requires worker and lease"
+            )
+        now = self._clock() if now is None else now
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            plan = connection.execute(
+                "SELECT state FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone()
+            if plan is None:
+                raise BuildingTaskStoreError("parent plan not found")
+            if plan["state"] in _TERMINAL_PLAN_STATES:
+                raise BuildingTaskStoreError("parent plan is terminal")
+            current_task = None
+            if task_id is not None:
+                current_task = self._locked_task(
+                    connection,
+                    task_id,
+                    str(worker_id),
+                    str(lease_token),
+                    now=now,
+                )
+                if current_task.parent_job_id != parent_job_id:
+                    raise BuildingTaskStoreError("cache task parent mismatch")
+
+            requested = set(requested_blocks)
+            ownership_rows = connection.execute(
+                """
+                SELECT task_id, block_x, block_y
+                FROM map_build_task_blocks
+                WHERE parent_job_id=?
+                """,
+                (parent_job_id,),
+            ).fetchall()
+            affected_task_ids = {
+                str(row["task_id"])
+                for row in ownership_rows
+                if (int(row["block_x"]), int(row["block_y"])) in requested
+            }
+            if not affected_task_ids:
+                raise BuildingTaskStoreError(
+                    "cache invalidation blocks are not assigned"
+                )
+            if task_id is not None and task_id not in affected_task_ids:
+                raise BuildingTaskStoreError(
+                    "cache invalidation task does not own requested blocks"
+                )
+            placeholders = ",".join("?" for _ in affected_task_ids)
+            rows = connection.execute(
+                f"SELECT * FROM map_build_tasks WHERE task_id IN ({placeholders}) ORDER BY task_id",
+                tuple(sorted(affected_task_ids)),
+            ).fetchall()
+            for row in rows:
+                if row["state"] == "leased" and row["task_id"] != task_id:
+                    raise StaleLeaseError(
+                        "another worker owns an affected cache task"
+                    )
+                if row["kind"] not in {
+                    "building_chunk",
+                    "building_workload_scan",
+                }:
+                    raise BuildingTaskStoreError(
+                        "cache invalidation found an unsupported task"
+                    )
+
+            connection.execute(
+                f"DELETE FROM map_build_block_receipts WHERE task_id IN ({placeholders})",
+                tuple(sorted(affected_task_ids)),
+            )
+            for row in rows:
+                try:
+                    predicted = json.loads(row["predicted_resource_json"] or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    predicted = {}
+                if not isinstance(predicted, dict):
+                    predicted = {}
+                predicted.pop("cacheHit", None)
+                predicted.pop("cacheIdentitySha256", None)
+                estimate = predicted.get("estimatedPeakMemoryBytes")
+                if (
+                    isinstance(estimate, bool)
+                    or not isinstance(estimate, int)
+                    or estimate <= 0
+                ):
+                    predicted["estimatedPeakMemoryBytes"] = (
+                        DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES
+                    )
+                    predicted["memoryEstimateSource"] = (
+                        CONSERVATIVE_MEMORY_MODEL_VERSION
+                    )
+                predicted["cacheInvalidatedReason"] = typed_failure
+                connection.execute(
+                    """
+                    UPDATE map_build_tasks
+                    SET state='pending', typed_error=?, next_eligible_at=?,
+                        output_receipt_set_sha256=NULL,
+                        predicted_resource_json=?, lease_owner=NULL,
+                        lease_token=NULL, lease_expires_at=NULL,
+                        heartbeat_at=NULL, updated_at=?
+                    WHERE task_id=?
+                    """,
+                    (
+                        typed_failure,
+                        now,
+                        _canonical_json(predicted).decode("utf-8"),
+                        now,
+                        row["task_id"],
+                    ),
+                )
+            connection.execute(
+                f"DELETE FROM map_build_resource_reservations WHERE task_id IN ({placeholders})",
+                tuple(sorted(affected_task_ids)),
+            )
+            if current_task is not None:
+                self._finish_attempt(
+                    connection,
+                    current_task.task_id,
+                    current_task.transient_attempts,
+                    outcome="cache_invalidated",
+                    typed_failure=typed_failure,
+                    now=now,
+                )
+            connection.execute(
+                """
+                UPDATE map_build_plans
+                SET stage='building_chunks', state='building_chunks', updated_at=?
+                WHERE parent_job_id=?
+                """,
+                (now, parent_job_id),
+            )
+            updated_rows = connection.execute(
+                f"SELECT * FROM map_build_tasks WHERE task_id IN ({placeholders}) ORDER BY task_id",
+                tuple(sorted(affected_task_ids)),
+            ).fetchall()
+            connection.commit()
+            return tuple(self._row_to_task(row) for row in updated_rows)
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -1318,11 +2233,12 @@ class BuildingTaskStore:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._recover_expired_locked(connection, now=current_time)
             candidates = connection.execute(
                 """
                 SELECT parent_job_id
                 FROM map_build_plans
-                WHERE state IN ('failed', 'cancelled') AND updated_at < ?
+                WHERE state IN ('observed', 'failed', 'cancelled') AND updated_at < ?
                 ORDER BY updated_at, parent_job_id
                 LIMIT ?
                 """,
@@ -1336,15 +2252,21 @@ class BuildingTaskStore:
                 parent_job_id = candidate["parent_job_id"]
                 active = connection.execute(
                     """
-                    SELECT 1
-                    FROM map_build_tasks AS tasks
-                    LEFT JOIN map_build_resource_reservations AS reservations
-                      ON reservations.task_id = tasks.task_id
-                    WHERE tasks.parent_job_id=?
-                      AND (tasks.state='leased' OR reservations.task_id IS NOT NULL)
+                    SELECT 1 FROM (
+                        SELECT tasks.parent_job_id
+                        FROM map_build_tasks AS tasks
+                        LEFT JOIN map_build_resource_reservations AS reservations
+                          ON reservations.task_id = tasks.task_id
+                        WHERE tasks.parent_job_id=?
+                          AND (tasks.state='leased' OR reservations.task_id IS NOT NULL)
+                        UNION ALL
+                        SELECT parent_job_id
+                        FROM map_build_parent_phase_reservations
+                        WHERE parent_job_id=?
+                    )
                     LIMIT 1
                     """,
-                    (parent_job_id,),
+                    (parent_job_id, parent_job_id),
                 ).fetchone()
                 if active is not None:
                     skipped_active += 1
@@ -1386,6 +2308,10 @@ class BuildingTaskStore:
                         f"DELETE FROM map_build_tasks WHERE task_id IN ({placeholders})",
                         task_ids,
                     )
+                connection.execute(
+                    "DELETE FROM map_build_parent_phase_reservations WHERE parent_job_id=?",
+                    (parent_job_id,),
+                )
                 connection.execute(
                     "DELETE FROM map_build_plans WHERE parent_job_id=?",
                     (parent_job_id,),
@@ -1529,6 +2455,155 @@ class BuildingTaskStore:
         finally:
             connection.close()
 
+    def list_parent_phase_reservations(
+        self, parent_job_id: str | None = None
+    ) -> tuple[dict[str, Any], ...]:
+        connection = self._connect()
+        try:
+            if parent_job_id is None:
+                rows = connection.execute(
+                    "SELECT * FROM map_build_parent_phase_reservations "
+                    "ORDER BY reserved_at, parent_job_id, phase"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM map_build_parent_phase_reservations "
+                    "WHERE parent_job_id=? "
+                    "ORDER BY reserved_at, parent_job_id, phase",
+                    (parent_job_id,),
+                ).fetchall()
+            return tuple(dict(row) for row in rows)
+        finally:
+            connection.close()
+
+    def diagnostic_page(
+        self,
+        parent_job_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Return bounded operator diagnostics without large workload JSON.
+
+        Exact workload documents can contain hundreds of thousands of object
+        keys. They remain durable in SQLite for execution/audit, while this
+        ordinary API/CLI surface returns only identity and byte-count metadata.
+        """
+
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 100
+            or isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or offset < 0
+        ):
+            raise ValueError("diagnostic page limit/offset is invalid")
+        connection = self._connect()
+        try:
+            if connection.execute(
+                "SELECT 1 FROM map_build_plans WHERE parent_job_id=?",
+                (parent_job_id,),
+            ).fetchone() is None:
+                raise BuildingTaskStoreError("parent plan not found")
+
+            def count(table: str, where: str = "parent_job_id=?") -> int:
+                return int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE {where}",
+                        (parent_job_id,),
+                    ).fetchone()[0]
+                )
+
+            tasks = tuple(
+                self._row_to_task(row)
+                for row in connection.execute(
+                    "SELECT * FROM map_build_tasks WHERE parent_job_id=? ORDER BY created_at, task_id LIMIT ? OFFSET ?",
+                    (parent_job_id, limit, offset),
+                ).fetchall()
+            )
+            workload_receipts = tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT task_id, parent_job_id, closure_plan_sha256,
+                           source_index_identity_json,
+                           length(CAST(workload_json AS BLOB)) AS workload_bytes,
+                           recorded_at
+                    FROM map_build_workload_receipts
+                    WHERE parent_job_id=?
+                    ORDER BY recorded_at, task_id
+                    LIMIT ? OFFSET ?
+                    """,
+                    (parent_job_id, limit, offset),
+                ).fetchall()
+            )
+            receipts = tuple(
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM map_build_block_receipts WHERE parent_job_id=? ORDER BY block_x, block_y LIMIT ? OFFSET ?",
+                    (parent_job_id, limit, offset),
+                ).fetchall()
+            )
+            attempts = tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT attempts.*, tasks.parent_job_id, tasks.kind
+                    FROM map_build_task_attempts attempts
+                    JOIN map_build_tasks tasks ON tasks.task_id=attempts.task_id
+                    WHERE tasks.parent_job_id=?
+                    ORDER BY attempts.started_at, attempts.task_id,
+                             attempts.attempt_number
+                    LIMIT ? OFFSET ?
+                    """,
+                    (parent_job_id, limit, offset),
+                ).fetchall()
+            )
+            reservations = tuple(
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM map_build_resource_reservations WHERE parent_job_id=? ORDER BY reserved_at, task_id LIMIT ? OFFSET ?",
+                    (parent_job_id, limit, offset),
+                ).fetchall()
+            )
+            parent_phase_reservations = tuple(
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM map_build_parent_phase_reservations "
+                    "WHERE parent_job_id=? "
+                    "ORDER BY reserved_at, phase LIMIT ? OFFSET ?",
+                    (parent_job_id, limit, offset),
+                ).fetchall()
+            )
+            counts = {
+                "tasks": count("map_build_tasks"),
+                "workloadReceipts": count("map_build_workload_receipts"),
+                "receipts": count("map_build_block_receipts"),
+                "attempts": count(
+                    "map_build_task_attempts",
+                    "task_id IN (SELECT task_id FROM map_build_tasks WHERE parent_job_id=?)",
+                ),
+                "resourceReservations": count("map_build_resource_reservations"),
+                "parentPhaseReservations": count(
+                    "map_build_parent_phase_reservations"
+                ),
+            }
+            return {
+                "limit": limit,
+                "offset": offset,
+                "counts": counts,
+                "tasks": tasks,
+                "workloadReceipts": workload_receipts,
+                "receipts": receipts,
+                "attempts": attempts,
+                "resourceReservations": reservations,
+                "parentPhaseReservations": parent_phase_reservations,
+                "hasMore": any(offset + limit < value for value in counts.values()),
+            }
+        finally:
+            connection.close()
+
     def get_plan(self, parent_job_id: str) -> dict[str, Any] | None:
         connection = self._connect()
         try:
@@ -1603,7 +2678,9 @@ class BuildingTaskStore:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            task = self._locked_task(connection, task_id, worker_id, lease_token)
+            task = self._locked_task(
+                connection, task_id, worker_id, lease_token, now=now
+            )
             if require_receipts:
                 expected = int(connection.execute(
                     "SELECT COUNT(*) FROM map_build_task_blocks WHERE task_id=?", (task_id,)
@@ -1692,19 +2769,69 @@ class BuildingTaskStore:
         task_id: str,
         worker_id: str,
         lease_token: str,
+        *,
+        now: float | None = None,
     ) -> BuildingTaskRecord:
         row = connection.execute(
             "SELECT * FROM map_build_tasks WHERE task_id=?", (task_id,)
         ).fetchone()
         if row is None or row["state"] != "leased" or row["lease_owner"] != worker_id or row["lease_token"] != lease_token:
             raise StaleLeaseError("task lease is no longer valid")
+        checked_at = self._clock() if now is None else now
+        if (
+            row["lease_expires_at"] is None
+            or float(row["lease_expires_at"]) <= checked_at
+        ):
+            raise StaleLeaseError("task lease has expired")
         plan = connection.execute(
             "SELECT state FROM map_build_plans WHERE parent_job_id=?",
             (row["parent_job_id"],),
         ).fetchone()
-        if plan is None or plan["state"] in {"cancelled", "failed", "ready"}:
+        if plan is None or plan["state"] in _TERMINAL_PLAN_STATES:
             raise StaleLeaseError("parent plan is no longer active")
         return self._row_to_task(row)
+
+    def _recover_expired_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        now: float,
+    ) -> int:
+        expired_parent_phases = connection.execute(
+            "DELETE FROM map_build_parent_phase_reservations WHERE expires_at <= ?",
+            (now,),
+        ).rowcount
+        rows = connection.execute(
+            "SELECT task_id, parent_job_id, transient_attempts FROM map_build_tasks WHERE state='leased' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?",
+            (now,),
+        ).fetchall()
+        for row in rows:
+            plan = connection.execute(
+                "SELECT state FROM map_build_plans WHERE parent_job_id=?",
+                (row["parent_job_id"],),
+            ).fetchone()
+            new_state = (
+                "cancelled"
+                if plan is not None and plan["state"] in _TERMINAL_PLAN_STATES
+                else "pending"
+            )
+            connection.execute(
+                "UPDATE map_build_tasks SET state=?, lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL, updated_at=? WHERE task_id=?",
+                (new_state, now, row["task_id"]),
+            )
+            connection.execute(
+                "DELETE FROM map_build_resource_reservations WHERE task_id=?",
+                (row["task_id"],),
+            )
+            self._finish_attempt(
+                connection,
+                row["task_id"],
+                row["transient_attempts"],
+                outcome="lease_expired",
+                typed_failure="building_task_lease_expired",
+                now=now,
+            )
+        return len(rows) + max(0, int(expired_parent_phases))
 
     def _finish_attempt(
         self,
@@ -1838,11 +2965,17 @@ class BuildingTaskStore:
     def _initialize(self) -> None:
         connection = self._connect()
         try:
-            connection.execute("PRAGMA journal_mode=WAL")
-            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version > BUILDING_TASK_SCHEMA_VERSION:
-                raise BuildingTaskStoreError("unsupported building task schema")
-            connection.execute("BEGIN IMMEDIATE")
+            # SQLite does not consistently honor busy_timeout while changing
+            # journal mode. API, worker, and maintenance may all open the same
+            # freshly upgraded store, so retry only this idempotent lock race.
+            for attempt in range(100):
+                try:
+                    connection.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or attempt == 99:
+                        raise
+                    time.sleep(0.01)
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS map_build_plans(
@@ -1940,6 +3073,23 @@ class BuildingTaskStore:
                     reserved_at REAL NOT NULL,
                     expires_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS map_build_parent_phase_reservations(
+                    parent_job_id TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    lease_token TEXT NOT NULL,
+                    worker_id TEXT NOT NULL,
+                    resource_pool TEXT NOT NULL,
+                    memory_reservation_bytes INTEGER NOT NULL,
+                    memory_limit_bytes INTEGER,
+                    cpu_weight REAL NOT NULL,
+                    cpu_capacity REAL,
+                    max_concurrent_tasks INTEGER NOT NULL,
+                    capability_json TEXT NOT NULL,
+                    reserved_at REAL NOT NULL,
+                    heartbeat_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    PRIMARY KEY(parent_job_id, phase)
+                );
                 CREATE INDEX IF NOT EXISTS map_build_tasks_pending
                     ON map_build_tasks(state, next_eligible_at, created_at);
                 CREATE INDEX IF NOT EXISTS map_build_tasks_parent
@@ -1950,8 +3100,17 @@ class BuildingTaskStore:
                     ON map_build_workload_receipts(parent_job_id, recorded_at);
                 CREATE INDEX IF NOT EXISTS map_build_resource_reservations_pool
                     ON map_build_resource_reservations(resource_pool, expires_at);
+                CREATE INDEX IF NOT EXISTS map_build_parent_phase_reservations_pool
+                    ON map_build_parent_phase_reservations(resource_pool, expires_at);
                 """
             )
+            # sqlite3.executescript() commits any open transaction. Acquire
+            # the migration write lock only after the idempotent base schema
+            # exists, then re-read the version and columns while serialized.
+            connection.execute("BEGIN IMMEDIATE")
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version > BUILDING_TASK_SCHEMA_VERSION:
+                raise BuildingTaskStoreError("unsupported building task schema")
             plan_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(map_build_plans)")
@@ -2145,6 +3304,70 @@ def _resource_request(
     }
 
 
+def _parent_phase_resource_request(
+    worker_capability: Mapping[str, Any] | None,
+    *,
+    estimated_peak_memory_bytes: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if (
+        isinstance(estimated_peak_memory_bytes, bool)
+        or not isinstance(estimated_peak_memory_bytes, int)
+        or estimated_peak_memory_bytes < 0
+    ):
+        raise BuildingTaskStoreError("parent phase memory estimate is invalid")
+    if worker_capability is None:
+        effective_capability: dict[str, Any] = {}
+    elif isinstance(worker_capability, Mapping):
+        effective_capability = dict(worker_capability)
+    else:
+        raise BuildingTaskStoreError("worker capability is invalid")
+    # New parent-phase coordination is always durable. If an older caller has
+    # no resource report, it still enters the default concurrency-one pool;
+    # reported memory/CPU limits retain the child admission semantics below.
+    effective_capability.setdefault("resourcePool", _DEFAULT_RESOURCE_POOL)
+    effective_capability["maxConcurrentTasks"] = 1
+    request = _resource_request(
+        {
+            "predicted_resource_json": _canonical_json(
+                {"estimatedPeakMemoryBytes": estimated_peak_memory_bytes}
+            ).decode("utf-8")
+        },
+        effective_capability,
+    )
+    if request is None:
+        raise BuildingTaskStoreError(
+            "worker capacity cannot admit the parent resource phase"
+        )
+    return request, effective_capability
+
+
+def _locked_parent_phase_reservation(
+    connection: sqlite3.Connection,
+    *,
+    parent_job_id: str,
+    phase: str,
+    worker_id: str,
+    lease_token: str,
+    now: float,
+) -> sqlite3.Row:
+    row = connection.execute(
+        """
+        SELECT * FROM map_build_parent_phase_reservations
+        WHERE parent_job_id=? AND phase=?
+        """,
+        (parent_job_id, phase),
+    ).fetchone()
+    if (
+        row is None
+        or row["worker_id"] != worker_id
+        or row["lease_token"] != lease_token
+    ):
+        raise StaleLeaseError("parent resource lease is no longer valid")
+    if float(row["expires_at"]) <= now:
+        raise StaleLeaseError("parent resource lease has expired")
+    return row
+
+
 def _predicted_memory(row: sqlite3.Row) -> int:
     predicted = row["predicted_resource_json"]
     if not predicted:
@@ -2178,16 +3401,43 @@ def _resource_capacity_snapshot(
         f"""
         SELECT COUNT(*) AS count,
                COALESCE(SUM(memory_reservation_bytes), 0) AS memory_bytes,
-               COALESCE(SUM(cpu_weight), 0) AS cpu_weight
-        FROM map_build_resource_reservations
-        WHERE {where}
+               COALESCE(SUM(cpu_weight), 0) AS cpu_weight,
+               MIN(memory_limit_bytes) AS memory_limit_bytes,
+               MIN(cpu_capacity) AS cpu_capacity,
+               MIN(max_concurrent_tasks) AS max_concurrent_tasks
+        FROM (
+            SELECT memory_reservation_bytes, memory_limit_bytes, cpu_weight,
+                   cpu_capacity, max_concurrent_tasks
+            FROM map_build_resource_reservations
+            WHERE {where}
+            UNION ALL
+            SELECT memory_reservation_bytes, memory_limit_bytes, cpu_weight,
+                   cpu_capacity, max_concurrent_tasks
+            FROM map_build_parent_phase_reservations
+            WHERE {where}
+        )
         """,
-        params,
+        (*params, *params),
     ).fetchone()
     return {
         "count": int(row["count"] or 0),
         "memoryBytes": int(row["memory_bytes"] or 0),
         "cpuWeight": float(row["cpu_weight"] or 0),
+        "memoryLimitBytes": (
+            int(row["memory_limit_bytes"])
+            if row["memory_limit_bytes"] is not None
+            else None
+        ),
+        "cpuCapacity": (
+            float(row["cpu_capacity"])
+            if row["cpu_capacity"] is not None
+            else None
+        ),
+        "maxConcurrentTasks": (
+            int(row["max_concurrent_tasks"])
+            if row["max_concurrent_tasks"] is not None
+            else None
+        ),
     }
 
 
@@ -2200,10 +3450,17 @@ def _active_reservation_parent_ids(
     rows = connection.execute(
         """
         SELECT DISTINCT parent_job_id
-        FROM map_build_resource_reservations
-        WHERE resource_pool=? AND expires_at > ?
+        FROM (
+            SELECT parent_job_id
+            FROM map_build_resource_reservations
+            WHERE resource_pool=? AND expires_at > ?
+            UNION ALL
+            SELECT parent_job_id
+            FROM map_build_parent_phase_reservations
+            WHERE resource_pool=? AND expires_at > ?
+        )
         """,
-        (resource_pool, now),
+        (resource_pool, now, resource_pool, now),
     ).fetchall()
     return {str(row["parent_job_id"]) for row in rows}
 
@@ -2217,16 +3474,33 @@ def _resource_capacity_available(
     active = _resource_capacity_snapshot(
         connection, request["resourcePool"], now=now
     )
-    if active["count"] >= request["maxConcurrentTasks"]:
+    active_concurrency = active["maxConcurrentTasks"]
+    effective_concurrency = request["maxConcurrentTasks"]
+    if active_concurrency is not None:
+        effective_concurrency = min(effective_concurrency, active_concurrency)
+    if active["count"] >= effective_concurrency:
         return False
-    limit = request["memoryLimitBytes"]
+    limits = tuple(
+        value
+        for value in (
+            request["memoryLimitBytes"],
+            active["memoryLimitBytes"],
+        )
+        if value is not None
+    )
+    limit = min(limits) if limits else None
     if limit is not None:
         if (
             active["memoryBytes"] + request["memoryReservationBytes"]
             > _memory_admission_limit(limit)
         ):
             return False
-    capacity = request["cpuCapacity"]
+    capacities = tuple(
+        value
+        for value in (request["cpuCapacity"], active["cpuCapacity"])
+        if value is not None
+    )
+    capacity = min(capacities) if capacities else None
     if capacity is not None and active["cpuWeight"] + request["cpuWeight"] > capacity:
         return False
     return True
@@ -2262,6 +3536,7 @@ def _memory_admission_limit(limit: int) -> int:
 
 
 def _capability_memory_limit(capability: Mapping[str, Any]) -> int | None:
+    values: list[int] = []
     for field in (
         "memoryLimitBytes",
         "configuredMemoryLimitBytes",
@@ -2272,7 +3547,7 @@ def _capability_memory_limit(capability: Mapping[str, Any]) -> int | None:
             continue
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise BuildingTaskStoreError("worker memory capability is invalid")
-        return value
+        values.append(value)
     nested = capability.get("cgroupMemory")
     if isinstance(nested, Mapping):
         for field in ("limitBytes", "configuredLimitBytes"):
@@ -2281,8 +3556,8 @@ def _capability_memory_limit(capability: Mapping[str, Any]) -> int | None:
                 continue
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise BuildingTaskStoreError("worker memory capability is invalid")
-            return value
-    return None
+            values.append(value)
+    return min(values) if values else None
 
 
 def _json_or_none(value: Mapping[str, Any] | None) -> str | None:

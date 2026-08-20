@@ -61,7 +61,12 @@ def _worker_capability(
 
     cpu_count = os.cpu_count() or 1
     cgroup_limit = cgroup.get("limitBytes")
-    memory_limit = configured_memory_limit_bytes or cgroup_limit
+    positive_limits = [
+        value
+        for value in (configured_memory_limit_bytes, cgroup_limit)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    ]
+    memory_limit = min(positive_limits) if positive_limits else None
     body = {
         "schemaVersion": WORKER_CAPABILITY_SCHEMA_VERSION,
         "workerClass": os.environ.get("MAP_PLATFORM_WORKER_CLASS", "default"),

@@ -118,9 +118,16 @@ def building_plan_alerts(
 
     for attempt in store.list_attempts(parent_job_id):
         typed_failure = attempt.get("typed_failure")
+        actual_resource = _json_object(attempt.get("actual_resource_json"))
+        root_failure = actual_resource.get("rootFailureCode")
         if isinstance(typed_failure, str):
             lowered = typed_failure.lower()
-            if "oom" in lowered or "out of memory" in lowered or "memory" in lowered:
+            if (
+                "oom" in lowered
+                or "out of memory" in lowered
+                or "memory" in lowered
+                or root_failure == "building_worker_oom"
+            ):
                 add(
                     "worker_oom",
                     "critical",
@@ -214,15 +221,17 @@ def _memory_limit(capability_document: Mapping[str, Any]) -> int | None:
     capability = capability_document.get("capability", capability_document)
     if not isinstance(capability, Mapping):
         return None
-    for key in (
-        "memoryLimitBytes",
-        "cgroupMemoryLimitBytes",
-        "configuredMemoryLimitBytes",
-    ):
-        value = _nonnegative_int(capability.get(key))
-        if value is not None and value > 0:
-            return value
-    return None
+    limits = [
+        value
+        for key in (
+            "memoryLimitBytes",
+            "cgroupMemoryLimitBytes",
+            "configuredMemoryLimitBytes",
+        )
+        if (value := _nonnegative_int(capability.get(key))) is not None
+        and value > 0
+    ]
+    return min(limits) if limits else None
 
 
 def _nonnegative_int(value: Any) -> int | None:

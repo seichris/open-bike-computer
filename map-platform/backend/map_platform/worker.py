@@ -13,9 +13,14 @@ from .jobs import (
     JobRecordEnumerationError,
     JobStore,
 )
+from .building_tasks import BuildingTaskStoreError
 from .models import JobStatus, MapJob
 from .monitoring import MapMonitoringStore, build_map_job_monitoring_event
-from .pipeline import MapBuildPipeline, safe_build_failure
+from .pipeline import (
+    BuildingChunkSchedulingYield,
+    MapBuildPipeline,
+    safe_build_failure,
+)
 from .resource_report import worker_resource_report
 from .reuse import SubsetReuseUnavailable
 
@@ -24,8 +29,18 @@ _NON_RETRYABLE_BUILD_ERROR_CODES = frozenset(
     {
         "building_scope_exceeded",
         "building_object_limit_exceeded",
+        "building_artifact_too_large",
+        "building_artifact_admission",
+        "building_artifact_validation_failed",
+        "building_calibration_unavailable",
+        "building_chunk_wall_time_exceeded",
+        "building_pathological_block",
+        "building_relation_incomplete",
         "building_source_snapshot_changed",
         "building_scope_policy_invalid",
+        "building_storage_admission",
+        "building_worker_oom",
+        "building_workload_receipt_mismatch",
     }
 )
 
@@ -122,10 +137,26 @@ class MapWorker:
         self.estimate_coordinator = estimate_coordinator
 
     def run_next(self) -> WorkerResult:
-        self.store.requeue_retryable_failures()
+        self.store.requeue_retryable_failures(
+            non_retryable_error_codes=_NON_RETRYABLE_BUILD_ERROR_CODES
+        )
+        worker_capability = None
+        try:
+            worker_capability = worker_resource_report().get("capability")
+        except Exception:
+            worker_capability = None
+        preferred_job_id = None
+        if (
+            isinstance(self.pipeline, MapBuildPipeline)
+            and self.pipeline.building_task_store is not None
+        ):
+            preferred_job_id = self.pipeline.building_task_store.next_pending_parent(
+                worker_capability=worker_capability
+            )
         job = self.store.claim_next(
             self.worker_id,
             interrupted_job_stale_seconds=self.interrupted_job_stale_seconds,
+            preferred_job_id=preferred_job_id,
         )
         if job is None:
             return WorkerResult(worker_id=self.worker_id, job=None, processed=False)
@@ -133,7 +164,6 @@ class MapWorker:
         # cold host the cgroup/proc walk can exceed a short test or recovery
         # lease, and a worker must not become reclaimable before its heartbeat
         # loop is running.
-        worker_capability = None
         attempt_started_at = job.updated_at
         attempt_started_monotonic = time.monotonic()
         if self.estimate_coordinator is not None:
@@ -214,13 +244,6 @@ class MapWorker:
                 interval_seconds=self.heartbeat_interval_seconds,
                 on_heartbeat=self.on_heartbeat,
             ):
-                try:
-                    worker_capability = worker_resource_report().get("capability")
-                except Exception:
-                    # Resource reporting is advisory; the coordinator still
-                    # runs with legacy admission if the host exposes no
-                    # readable cgroup data.
-                    worker_capability = None
                 build_kwargs = {
                     "on_status": update,
                     "on_progress": update_progress,
@@ -370,6 +393,7 @@ class MapWorker:
                                     job,
                                     worker_id=self.worker_id,
                                     worker_capability=worker_capability,
+                                    max_tasks_per_run=1,
                                     **build_kwargs,
                                 )
                             else:
@@ -380,6 +404,7 @@ class MapWorker:
                             job,
                             worker_id=self.worker_id,
                             worker_capability=worker_capability,
+                            max_tasks_per_run=1,
                             **build_kwargs,
                         )
                     else:
@@ -430,6 +455,18 @@ class MapWorker:
                 reuse_strategy=reuse_strategy,
                 reuse_source_job_id=reuse_source_job_id,
             )
+            if (
+                isinstance(self.pipeline, MapBuildPipeline)
+                and self.pipeline.building_task_store is not None
+            ):
+                try:
+                    self.pipeline.building_task_store.reconcile_ready_plans(
+                        (job.job_id,)
+                    )
+                except BuildingTaskStoreError:
+                    # The public job is already durable and downloadable.
+                    # Maintenance retries this additive coordinator marker.
+                    pass
             monitoring_event = self._monitoring_event(
                 finished,
                 attempt_started_at,
@@ -444,6 +481,25 @@ class MapWorker:
                 job=finished,
                 processed=True,
                 monitoring_event=monitoring_event,
+            )
+        except BuildingChunkSchedulingYield:
+            if (
+                job.building_preprocessing_inputs is not None
+                and job.building_preprocessing_runtime is not None
+            ):
+                self.store.freeze_building_preprocessing_inputs_unless_cancelled(
+                    job.job_id,
+                    worker_id=self.worker_id,
+                    building_preprocessing_inputs=job.building_preprocessing_inputs,
+                    building_preprocessing_runtime=job.building_preprocessing_runtime,
+                )
+            yielded = self.store.yield_chunked_job(
+                job.job_id, worker_id=self.worker_id
+            )
+            return WorkerResult(
+                worker_id=self.worker_id,
+                job=yielded,
+                processed=True,
             )
         except Exception as exc:
             if isinstance(self.pipeline, MapBuildPipeline):

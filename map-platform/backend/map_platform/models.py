@@ -186,6 +186,7 @@ class MapJob:
     attempts: int = 0
     max_attempts: int = 3
     worker_id: str | None = None
+    scheduler_yielded: bool = False
     started_at: str | None = None
     finished_at: str | None = None
     progress_completed: int | None = None
@@ -268,6 +269,7 @@ class MapJob:
             ]
             result["pendingArtifactKeys"] = self.pending_artifact_keys
             result["artifactGcKeys"] = self.artifact_gc_keys
+            result["schedulerYielded"] = self.scheduler_yielded
         return result
 
     @classmethod
@@ -339,6 +341,7 @@ class MapJob:
             attempts=int(data.get("attempts", 0)),
             max_attempts=int(data.get("maxAttempts", 3)),
             worker_id=data.get("workerId"),
+            scheduler_yielded=bool(data.get("schedulerYielded", False)),
             started_at=data.get("startedAt"),
             finished_at=data.get("finishedAt"),
             progress_completed=_progress_value(data.get("progress"), "completedBlocks"),

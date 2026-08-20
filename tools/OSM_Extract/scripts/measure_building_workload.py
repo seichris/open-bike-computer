@@ -45,9 +45,9 @@ def main() -> None:
     parser.add_argument("--calibration-halo-cells", required=True, type=int)
     parser.add_argument("--result-json", required=True, type=Path)
     args = parser.parse_args()
-    # The source-index builder validates and seals this immutable manifest
-    # before publication. Reusing it per chunk must not rehash and audit the
-    # multi-gigabyte SQLite database.
+    # The source-index builder binds the database hash to a stable-file
+    # verification receipt. Warm readers validate that receipt and file
+    # identity without rehashing the multi-gigabyte SQLite database per chunk.
     index = BuildingSourceIndex.from_manifest(
         args.source_index_manifest,
         validate_database=False,

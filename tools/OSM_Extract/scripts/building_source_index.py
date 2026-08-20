@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import tempfile
 from typing import Any, Iterable
 import uuid
@@ -25,6 +26,8 @@ SOURCE_INDEX_SCHEMA_VERSION = 1
 SOURCE_INDEX_ALGORITHM_VERSION = 2
 SOURCE_INDEX_CREATION_TOOL = "open-bike-building-source-index"
 SOURCE_INDEX_MAX_RELATION_DEPTH = 256
+SOURCE_INDEX_VERIFICATION_SCHEMA_VERSION = 1
+SOURCE_INDEX_VERIFICATION_TOOL = "open-bike-building-source-index-verification"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _OBJECT_KEY = re.compile(r"[nwr][0-9]+")
 _EARTH_RADIUS_METERS = 6_378_137
@@ -91,6 +94,8 @@ class BuildingSourceIndex:
         )
         self.database_path = self.index_root / "index.sqlite"
         self.manifest_path = self.index_root / "manifest.json"
+        self.verification_path = self.index_root / "verification.json"
+        self._verified_database_identity: dict[str, int] | None = None
 
     @classmethod
     def from_manifest(
@@ -105,7 +110,7 @@ class BuildingSourceIndex:
             value = dict(raw)
             digest = value.pop("manifestSha256")
             source_sha256 = value["sourceSnapshotSha256"]
-        except (OSError, TypeError, ValueError, KeyError) as exc:
+        except (AttributeError, OSError, TypeError, ValueError, KeyError) as exc:
             raise BuildingSourceIndexError(
                 "building_relation_incomplete", "source index manifest is unavailable"
             ) from exc
@@ -113,6 +118,7 @@ class BuildingSourceIndex:
         index.index_root = path.parent
         index.database_path = path.parent / "index.sqlite"
         index.manifest_path = path
+        index.verification_path = path.parent / "verification.json"
         if value.get("indexKey") != index.index_key:
             raise BuildingSourceIndexError(
                 "building_relation_incomplete", "source index manifest key is invalid"
@@ -120,6 +126,8 @@ class BuildingSourceIndex:
         index._validate_manifest_document(value, digest)
         if validate_database:
             index.validate()
+        else:
+            index.validate_verified_database()
         return index
 
     def _validate_manifest_document(self, manifest, digest: str) -> None:
@@ -154,21 +162,66 @@ class BuildingSourceIndex:
                 "building_relation_incomplete", "source index manifest is invalid"
             )
 
-    def validate(self) -> dict[str, Any]:
+    def _read_validated_manifest(self) -> dict[str, Any]:
         try:
             manifest = json.loads(self.manifest_path.read_bytes())
             digest = manifest.pop("manifestSha256")
-        except (OSError, ValueError, KeyError) as exc:
+        except (AttributeError, OSError, TypeError, ValueError, KeyError) as exc:
             raise BuildingSourceIndexError("building_relation_incomplete", "source index manifest is unavailable") from exc
+        self._validate_manifest_document(manifest, digest)
+        return {**manifest, "manifestSha256": digest}
+
+    def _database_file_identity(self) -> dict[str, int]:
+        try:
+            value = os.stat(self.database_path, follow_symlinks=False)
+        except OSError as exc:
+            raise BuildingSourceIndexError("building_relation_incomplete", "source index database is unavailable") from exc
+        if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database file identity is invalid"
+            )
+        return {
+            "device": value.st_dev,
+            "inode": value.st_ino,
+            "mode": value.st_mode,
+            "ownerUserId": value.st_uid,
+            "ownerGroupId": value.st_gid,
+            "size": value.st_size,
+            "modifiedTimeNs": value.st_mtime_ns,
+            "changedTimeNs": value.st_ctime_ns,
+        }
+
+    def _validate_database_sha256(self, manifest: dict[str, Any]) -> dict[str, int]:
+        identity_before = self._database_file_identity()
         try:
             database_sha256 = file_sha256(self.database_path)
         except OSError as exc:
-            raise BuildingSourceIndexError("building_relation_incomplete", "source index database is unavailable") from exc
-        self._validate_manifest_document(manifest, digest)
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database is unavailable"
+            ) from exc
+        identity_after = self._database_file_identity()
+        if identity_after != identity_before:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database changed during validation"
+            )
         if manifest.get("databaseSha256") != database_sha256:
             raise BuildingSourceIndexError("building_relation_incomplete", "source index identity is invalid")
+        return identity_after
+
+    def validate_database_identity(self) -> dict[str, Any]:
+        """Bind the exact published database bytes without a semantic rescan."""
+
+        manifest = self._read_validated_manifest()
+        self._verified_database_identity = self._validate_database_sha256(manifest)
+        return manifest
+
+    def validate(self) -> dict[str, Any]:
+        manifest = self._read_validated_manifest()
+        verified_identity = self._validate_database_sha256(manifest)
         try:
-            connection = sqlite3.connect(f"file:{self.database_path}?mode=ro", uri=True)
+            connection = sqlite3.connect(
+                f"file:{self.database_path}?mode=ro&immutable=1", uri=True
+            )
             metadata = dict(connection.execute("SELECT key, value FROM metadata"))
             counts = verify_source_index_database(
                 connection, repair_relation_bounds=False
@@ -180,6 +233,10 @@ class BuildingSourceIndex:
         finally:
             if "connection" in locals():
                 connection.close()
+        if self._database_file_identity() != verified_identity:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database changed during validation"
+            )
         if any(manifest.get(key) != value for key, value in counts.items()):
             raise BuildingSourceIndexError("building_relation_incomplete", "source index has incomplete relation members")
         expected_metadata = {
@@ -190,23 +247,115 @@ class BuildingSourceIndex:
         }
         if metadata != expected_metadata:
             raise BuildingSourceIndexError("building_relation_incomplete", "source index metadata is invalid")
-        return {**manifest, "manifestSha256": digest}
+        self._verified_database_identity = verified_identity
+        return manifest
+
+    def _write_verification_receipt_locked(self, manifest: dict[str, Any]) -> None:
+        identity = self._verified_database_identity
+        if identity is None or self._database_file_identity() != identity:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database is not verified"
+            )
+        receipt = {
+            "schemaVersion": SOURCE_INDEX_VERIFICATION_SCHEMA_VERSION,
+            "creationTool": SOURCE_INDEX_VERIFICATION_TOOL,
+            "indexKey": self.index_key,
+            "manifestSha256": manifest["manifestSha256"],
+            "databaseSha256": manifest["databaseSha256"],
+            "databaseFileIdentity": identity,
+        }
+        receipt["verificationSha256"] = hashlib.sha256(
+            canonical_json(receipt)
+        ).hexdigest()
+        atomic_write_json(self.verification_path, receipt)
+
+    def validate_verified_database(self) -> dict[str, Any]:
+        """Validate a prior full-byte verification receipt without rehashing SQLite."""
+
+        manifest = self._read_validated_manifest()
+        try:
+            receipt = json.loads(self.verification_path.read_bytes())
+            digest = receipt.pop("verificationSha256")
+        except (AttributeError, OSError, TypeError, ValueError, KeyError) as exc:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index verification is unavailable"
+            ) from exc
+        expected_keys = {
+            "schemaVersion",
+            "creationTool",
+            "indexKey",
+            "manifestSha256",
+            "databaseSha256",
+            "databaseFileIdentity",
+        }
+        file_identity = receipt.get("databaseFileIdentity")
+        identity_keys = {
+            "device",
+            "inode",
+            "mode",
+            "ownerUserId",
+            "ownerGroupId",
+            "size",
+            "modifiedTimeNs",
+            "changedTimeNs",
+        }
+        if (
+            set(receipt) != expected_keys
+            or not _SHA256.fullmatch(str(digest or ""))
+            or hashlib.sha256(canonical_json(receipt)).hexdigest() != digest
+            or receipt.get("schemaVersion") != SOURCE_INDEX_VERIFICATION_SCHEMA_VERSION
+            or receipt.get("creationTool") != SOURCE_INDEX_VERIFICATION_TOOL
+            or receipt.get("indexKey") != self.index_key
+            or receipt.get("manifestSha256") != manifest["manifestSha256"]
+            or receipt.get("databaseSha256") != manifest["databaseSha256"]
+            or not isinstance(file_identity, dict)
+            or set(file_identity) != identity_keys
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in file_identity.values()
+            )
+        ):
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index verification is invalid"
+            )
+        current_identity = self._database_file_identity()
+        if current_identity != file_identity:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database changed after verification"
+            )
+        self._verified_database_identity = current_identity
+        return manifest
+
+    def verify_database_unchanged(self) -> None:
+        if (
+            self._verified_database_identity is None
+            or self._database_file_identity() != self._verified_database_identity
+        ):
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database changed after verification"
+            )
+
+    def connect_verified_database(self) -> sqlite3.Connection:
+        self.verify_database_unchanged()
+        try:
+            connection = sqlite3.connect(
+                f"file:{self.database_path}?mode=ro&immutable=1", uri=True
+            )
+        except sqlite3.Error as exc:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database is invalid"
+            ) from exc
+        try:
+            self.verify_database_unchanged()
+        except BuildingSourceIndexError:
+            connection.close()
+            raise
+        return connection
 
     def validate_manifest_only(self) -> dict[str, Any]:
-        """Validate the immutable manifest without rescanning its database."""
-        try:
-            manifest = json.loads(self.manifest_path.read_bytes())
-            digest = manifest.pop("manifestSha256")
-        except (OSError, TypeError, ValueError, KeyError) as exc:
-            raise BuildingSourceIndexError(
-                "building_relation_incomplete", "source index manifest is unavailable"
-            ) from exc
-        self._validate_manifest_document(manifest, digest)
-        if not self.database_path.is_file():
-            raise BuildingSourceIndexError(
-                "building_relation_incomplete", "source index database is unavailable"
-            )
-        return {**manifest, "manifestSha256": digest}
+        """Compatibility alias for the verified warm-reader boundary."""
+
+        return self.validate_verified_database()
 
     def build(
         self,
@@ -262,7 +411,7 @@ class BuildingSourceIndex:
                 raise BuildingSourceIndexError(
                     "building_scope_policy_invalid", "building closure bounds are invalid"
                 )
-        connection = sqlite3.connect(f"file:{self.database_path}?mode=ro", uri=True)
+        connection = self.connect_verified_database()
         try:
             spatial_clause = " OR ".join(
                 """(
@@ -447,6 +596,7 @@ class BuildingSourceIndex:
             ) from exc
         finally:
             connection.close()
+            self.verify_database_unchanged()
 
     def workload_for_bounds(
         self,
@@ -473,7 +623,7 @@ class BuildingSourceIndex:
         relation_keys = tuple(closure["requiredRelationKeys"])
         way_keys = tuple(closure["requiredWayKeys"])
         node_keys = tuple(closure["requiredNodeKeys"])
-        connection = sqlite3.connect(f"file:{self.database_path}?mode=ro", uri=True)
+        connection = self.connect_verified_database()
         try:
             connection.execute(
                 "CREATE TEMP TABLE workload_relation_keys(object_key TEXT PRIMARY KEY)"
@@ -558,6 +708,7 @@ class BuildingSourceIndex:
             ) from exc
         finally:
             connection.close()
+            self.verify_database_unchanged()
 
     def build_with_scanner(self, scanner, *, lock_timeout_seconds: float | None = None):
         """Run the expensive source scan once, while holding the artifact lock."""
@@ -631,12 +782,18 @@ class BuildingSourceIndex:
         if all(path.is_file() for path in artifacts):
             try:
                 if validate_database:
-                    return self.validate()
-                return self.validate_manifest_only()
+                    manifest = self.validate()
+                else:
+                    try:
+                        manifest = self.validate_verified_database()
+                    except BuildingSourceIndexError:
+                        manifest = self.validate_database_identity()
+                self._write_verification_receipt_locked(manifest)
+                return manifest
             except BuildingSourceIndexError:
                 pass
         quarantine_id = uuid.uuid4().hex
-        for path in artifacts:
+        for path in (*artifacts, self.verification_path):
             if path.exists():
                 os.replace(path, path.with_name(f"{path.name}.corrupt-{quarantine_id}"))
         return None
@@ -792,7 +949,9 @@ class BuildingSourceIndex:
         }
         manifest["manifestSha256"] = hashlib.sha256(canonical_json(manifest)).hexdigest()
         atomic_write_json(self.manifest_path, manifest)
-        return self.validate()
+        validated = self.validate()
+        self._write_verification_receipt_locked(validated)
+        return validated
 
 
 def _normalize_node(value):

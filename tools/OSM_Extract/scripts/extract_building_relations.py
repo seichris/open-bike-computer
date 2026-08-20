@@ -194,12 +194,12 @@ def load_scope_policy(path: Path) -> dict:
 
 
 def load_source_index_manifest(path: str | Path) -> BuildingSourceIndex:
-    """Open a sealed source index without rescanning its database.
+    """Open a verified source index without rescanning its database.
 
-    The source-index builder validates and seals the database before
-    publishing this manifest. Chunk workers verify the manifest identity and
-    reuse it; calling ``validate()`` here would hash and audit the
-    multi-gigabyte SQLite database once per chunk.
+    The source-index builder binds the database hash to a stable-file receipt.
+    Chunk workers verify that receipt and current file identity; calling
+    ``validate()`` here would hash and audit the multi-gigabyte SQLite database
+    once per chunk.
     """
 
     return BuildingSourceIndex.from_manifest(path, validate_database=False)
@@ -241,7 +241,7 @@ def audit_closure(
     relation_retry_count: int,
     expected: dict | None = None,
 ) -> dict[str, int | str]:
-    connection = sqlite3.connect(f"file:{index.database_path}?mode=ro", uri=True)
+    connection = index.connect_verified_database()
     try:
         expected = expected or index.closure_for_bounds(
                 scope_policy["outputBoundsE7"],
@@ -337,6 +337,7 @@ def audit_closure(
         }
     finally:
         connection.close()
+        index.verify_database_unchanged()
 
 
 def _closure_rows(

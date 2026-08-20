@@ -3,12 +3,26 @@ import unittest
 from map_platform.building_resource_model import (
     CALIBRATED_RESOURCE_MODEL_VERSION,
     apply_calibrated_memory_prediction,
+    conservative_wall_seconds,
     summarize_resource_observations,
     train_resource_model,
 )
 
 
 class BuildingResourceModelTests(unittest.TestCase):
+    def test_conservative_wall_estimate_uses_exact_paired_counters(self):
+        self.assertEqual(
+            conservative_wall_seconds(
+                {
+                    "totalObjectCount": 450_000,
+                    "storedRelationMemberCount": 50_000,
+                    "wayNodeReferenceCount": 100_000,
+                    "vertexCount": 50_000,
+                }
+            ),
+            634,
+        )
+
     def test_summary_is_grouped_by_stable_capability_and_conservative(self):
         observations = [
             {
@@ -47,7 +61,88 @@ class BuildingResourceModelTests(unittest.TestCase):
         self.assertEqual(group["p95ActualPeakMemoryBytes"], 150)
         self.assertEqual(group["p95PredictedPeakMemoryBytes"], 200)
         self.assertEqual(group["underpredictionCount"], 1)
-        self.assertEqual(group["conservativeMemoryMultiplier"], 1.0)
+        self.assertEqual(group["conservativeMemoryMultiplier"], 1.25)
+
+    def test_multiplier_preserves_paired_prediction_error(self):
+        capability = {
+            "schemaVersion": 1,
+            "workerClass": "large",
+            "resourcePool": "coolify",
+            "identitySha256": "a" * 64,
+        }
+        observations = [
+            {
+                "resourceModelVersion": "model-v1",
+                "workerCapability": capability,
+                "predictedPeakMemoryBytes": 100,
+                "actualPeakMemoryBytes": 200,
+            }
+            for _ in range(4)
+        ] + [
+            {
+                "resourceModelVersion": "model-v1",
+                "workerCapability": capability,
+                "predictedPeakMemoryBytes": 200,
+                "actualPeakMemoryBytes": 100,
+            }
+            for _ in range(4)
+        ]
+
+        summary = summarize_resource_observations(
+            observations,
+            minimum_observations=8,
+        )
+
+        group = summary["groups"][0]
+        self.assertEqual(group["p95ActualPeakMemoryBytes"], 200)
+        self.assertEqual(group["p95PredictedPeakMemoryBytes"], 200)
+        self.assertEqual(group["underpredictionCount"], 4)
+        self.assertEqual(group["conservativeMemoryMultiplier"], 2.0)
+        self.assertEqual(group["status"], "calibrated")
+
+    def test_positive_actual_with_zero_prediction_cannot_train(self):
+        capability = {
+            "schemaVersion": 1,
+            "workerClass": "large",
+            "resourcePool": "coolify",
+            "identitySha256": "a" * 64,
+        }
+        observations = [
+            {
+                "resourceModelVersion": "model-v1",
+                "workerCapability": capability,
+                "predictedPeakMemoryBytes": 100,
+                "actualPeakMemoryBytes": 100,
+            }
+            for _ in range(7)
+        ]
+        observations.append(
+            {
+                "resourceModelVersion": "model-v1",
+                "workerCapability": capability,
+                "predictedPeakMemoryBytes": 0,
+                "actualPeakMemoryBytes": 1,
+            }
+        )
+
+        model = train_resource_model(
+            observations,
+            minimum_observations=8,
+        )
+
+        group = model["groups"][0]
+        self.assertEqual(group["status"], "insufficient_observations")
+        self.assertIsNone(group["rawMemoryMultiplier"])
+        self.assertIsNone(group["effectiveMemoryMultiplier"])
+        self.assertEqual(
+            apply_calibrated_memory_prediction(
+                1_000,
+                worker_capability=capability,
+                calibrated_model=model,
+                resource_model_version="model-v1",
+            ),
+            1_000,
+        )
 
     def test_invalid_observations_are_excluded(self):
         summary = summarize_resource_observations(

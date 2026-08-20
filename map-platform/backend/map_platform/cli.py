@@ -241,6 +241,28 @@ def _perform_maintenance(
         "buildingBlockCache": {},
     }
     failures: dict[str, object] = {}
+
+    def prune_building_cache() -> dict[str, int]:
+        kwargs: dict[str, object] = {
+            "older_than_days": building_cache_retention_days,
+            "max_bytes": building_cache_max_bytes,
+            "max_items": max_gc_items,
+        }
+        if building_task_store is not None:
+            protection = building_task_store.cache_retention_protection()
+            kwargs.update(
+                {
+                    "protected_cache_identity_sha256s": protection[
+                        "protectedCacheIdentitySha256s"
+                    ],
+                    "protect_all": protection["protectAll"],
+                }
+            )
+        return prune_building_block_cache(
+            data_root / "building-cache",
+            **kwargs,
+        )
+
     tasks = (
         (
             "expired",
@@ -261,15 +283,24 @@ def _perform_maintenance(
         ),
         (
             "buildingBlockCache",
-            lambda: prune_building_block_cache(
-                data_root / "building-cache",
-                older_than_days=building_cache_retention_days,
-                max_bytes=building_cache_max_bytes,
-                max_items=max_gc_items,
-            ),
+            prune_building_cache,
         ),
     )
     if building_task_store is not None:
+        ready_parent_ids = tuple(
+            job.job_id
+            for job in store.list()
+            if getattr(job.status, "value", job.status) == "ready"
+        )
+        result["buildingTaskReady"] = {}
+        tasks += (
+            (
+                "buildingTaskReady",
+                lambda: building_task_store.reconcile_ready_plans(
+                    ready_parent_ids
+                ),
+            ),
+        )
         cancelled_parent_ids = tuple(
             job.job_id
             for job in store.list()
@@ -435,11 +466,15 @@ def main() -> int:
         help="show the parent plan, tasks, and block receipts",
     )
     build_plan_inspect.add_argument("job_id")
+    build_plan_inspect.add_argument("--limit", type=int, default=100)
+    build_plan_inspect.add_argument("--offset", type=int, default=0)
     build_plan_tasks = build_plan_subparsers.add_parser(
         "tasks",
         help="show durable child task state",
     )
     build_plan_tasks.add_argument("job_id")
+    build_plan_tasks.add_argument("--limit", type=int, default=100)
+    build_plan_tasks.add_argument("--offset", type=int, default=0)
     build_plan_workload = build_plan_subparsers.add_parser(
         "complete-workload-scan",
         help="commit an exact source-index workload receipt and requeue the chunk",
@@ -550,13 +585,26 @@ def main() -> int:
                 )
             )
             return 0
-        tasks = [asdict(task) for task in building_task_store.list_tasks(args.job_id)]
+        try:
+            diagnostic_page = building_task_store.diagnostic_page(
+                args.job_id,
+                limit=args.limit,
+                offset=args.offset,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        tasks = [asdict(task) for task in diagnostic_page["tasks"]]
+        page = {
+            key: diagnostic_page[key]
+            for key in ("limit", "offset", "counts", "hasMore")
+        }
         if args.build_plan_command == "tasks":
             print(
                 json.dumps(
                     {
                         "plan": plan,
                         "progress": building_task_store.progress(args.job_id),
+                        "page": page,
                         "tasks": tasks,
                     },
                     indent=2,
@@ -569,21 +617,18 @@ def main() -> int:
                     {
                         "plan": plan,
                         "progress": building_task_store.progress(args.job_id),
+                        "page": page,
                         "tasks": tasks,
                         "workloadReceipts": list(
-                            building_task_store.list_workload_receipts(args.job_id)
+                            diagnostic_page["workloadReceipts"]
                         ),
-                        "receipts": list(
-                            building_task_store.list_receipts(args.job_id)
-                        ),
-                        "attempts": list(
-                            building_task_store.list_attempts(args.job_id)
-                        ),
+                        "receipts": list(diagnostic_page["receipts"]),
+                        "attempts": list(diagnostic_page["attempts"]),
                         "resourceModel": building_task_store.resource_model_summary(
                             args.job_id
                         ),
                         "resourceReservations": list(
-                            building_task_store.list_resource_reservations(args.job_id)
+                            diagnostic_page["resourceReservations"]
                         ),
                     },
                     indent=2,

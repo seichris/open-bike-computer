@@ -61,7 +61,8 @@ class SelectedAreaFixtureTests(unittest.TestCase):
             self.assertEqual(metadata["buildingBytes"], golden["bytes"])
             self.assertEqual(hashlib.sha256(section).hexdigest(), golden["sha256"])
 
-    def test_partition_layouts_produce_byte_identical_canonical_blocks(self):
+    def test_block_encoding_is_invariant_to_group_iteration_layout(self):
+        """Pin encoder ordering only; preprocessing equivalence is a separate gate."""
         fixture = json.loads(
             (Path(__file__).parent / "fixtures" / "selected_area_buildings.json").read_text()
         )

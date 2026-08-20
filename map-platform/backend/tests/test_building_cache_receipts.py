@@ -1,9 +1,13 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
 
+from map_platform.building_cache_maintenance import prune_building_block_cache
 from map_platform.building_cache_receipts import (
     BuildingBlockReceiptError,
     read_building_block_receipt,
@@ -56,14 +60,38 @@ class BuildingCacheReceiptTests(unittest.TestCase):
             (namespace / "blocks" / "12_34.json").write_bytes(
                 canonical_json(manifest)
             )
+            marker = namespace / ".last-access"
+            marker.touch()
+            old_access = time.time() - 20 * 86_400
+            os.utime(marker, (old_access, old_access))
+            pruning_attempts = []
+            original_read_bytes = Path.read_bytes
 
-            receipt = read_building_block_receipt(
-                root, identity, MapBlock(12, 34)
-            )
+            def read_while_pruning(path):
+                if path == namespace / "blocks" / "12_34.json":
+                    pruning_attempts.append(
+                        prune_building_block_cache(
+                            root,
+                            older_than_days=14,
+                            max_bytes=10_000,
+                            max_items=10,
+                            now=time.time(),
+                        )
+                    )
+                return original_read_bytes(path)
+
+            with patch.object(Path, "read_bytes", read_while_pruning):
+                receipt = read_building_block_receipt(
+                    root, identity, MapBlock(12, 34)
+                )
 
             self.assertEqual(receipt.content_sha256, section_sha)
             self.assertEqual(receipt.content_bytes, len(section))
             self.assertEqual(receipt.stats, stats)
+            self.assertEqual(pruning_attempts[0]["removedNamespaces"], 0)
+            self.assertEqual(pruning_attempts[0]["skippedLeasedNamespaces"], 1)
+            self.assertTrue(namespace.is_dir())
+            self.assertGreater(marker.stat().st_mtime, old_access)
 
     def test_corrupt_section_is_not_publishable(self):
         with tempfile.TemporaryDirectory() as temporary:

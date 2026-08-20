@@ -187,6 +187,14 @@ class BuildingScopeTests(unittest.TestCase):
             1_024,
         )
         self.assertEqual(
+            plan.document["globalPolicy"]["policyVersion"],
+            2,
+        )
+        self.assertLess(
+            plan.document["metrics"]["estimatedArchiveBytes"],
+            plan.document["globalPolicy"]["archiveAdmissionLimitBytes"],
+        )
+        self.assertEqual(
             plan.document["chunkPolicy"]["maxSourceAreaM2"],
             BUILDING_MAX_SOURCE_AREA_M2,
         )
@@ -211,6 +219,31 @@ class BuildingScopeTests(unittest.TestCase):
                 global_policy=GlobalBuildingPlanPolicy(max_output_blocks=1),
             )
         self.assertEqual(raised.exception.code, "building_scope_exceeded")
+
+    def test_global_plan_rejects_predicted_archive_before_execution(self):
+        with self.assertRaises(BuildingScopeError) as raised:
+            self.global_plan(
+                make_job(
+                    {
+                        "mode": "custom_bbox",
+                        "bbox": [121.45, 31.20, 121.50, 31.24],
+                    }
+                ),
+                global_policy=GlobalBuildingPlanPolicy(
+                    max_archive_bytes=2 * 1024 * 1024,
+                    archive_headroom_basis_points=9_000,
+                    estimated_fmb_bytes_per_block=1024 * 1024,
+                    archive_fixed_bytes=1024 * 1024,
+                ),
+            )
+        self.assertEqual(raised.exception.code, "building_artifact_admission")
+
+    def test_global_plan_policy_rejects_per_block_prediction_above_format_limit(self):
+        with self.assertRaises(BuildingScopeError) as raised:
+            GlobalBuildingPlanPolicy(
+                estimated_fmb_bytes_per_block=2 * 1024 * 1024 + 1
+            ).validate()
+        self.assertEqual(raised.exception.code, "building_scope_policy_invalid")
 
     def test_chunk_scope_is_canonical_subset_with_local_buffer_and_calibration(self):
         global_plan = self.global_plan(

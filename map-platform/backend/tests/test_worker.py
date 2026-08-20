@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from map_platform.artifacts import ArtifactRecord, FileSystemArtifactStore, sha256_file
 from map_platform.building_scope import BuildingScopeError
+from map_platform.building_tasks import BuildingTaskStore
 from map_platform.jobs import (
     ArtifactGarbageCollectionError,
     JobClaimError,
@@ -211,6 +212,74 @@ class FailingAttemptPipeline(MapBuildPipeline):
         raise RuntimeError("conversion failed")
 
 
+class QuantumChunkedPipeline(MapBuildPipeline):
+    def __init__(self, paths):
+        super().__init__(paths, building_scope_mode="chunked")
+        self.calls = []
+        self.call_counts = {}
+
+    def uses_selected_preprocessing(self, job):
+        del job
+        return False
+
+    def uses_chunked_preprocessing(self, job):
+        del job
+        return True
+
+    def reuse_keys(self, job, *, on_phase_progress=None, cancellation_check=None):
+        del job, on_phase_progress, cancellation_check
+        return None
+
+    def build_chunked(self, job, *, max_tasks_per_run=None, **kwargs):
+        del kwargs
+        self.calls.append(job.job_id)
+        self.call_counts[job.job_id] = self.call_counts.get(job.job_id, 0) + 1
+        if max_tasks_per_run != 1:
+            raise AssertionError("worker did not enforce one-task scheduling quantum")
+        if self.call_counts[job.job_id] == 1:
+            from map_platform.pipeline import BuildingChunkSchedulingYield
+
+            raise BuildingChunkSchedulingYield()
+        pack_path = self.paths.work_root / f"{job.job_id}.zip"
+        pack_path.parent.mkdir(parents=True, exist_ok=True)
+        pack_path.write_bytes(b"chunked-map")
+        return MapBuildResult(f"map-{job.job_id}", pack_path, [])
+
+
+class CompletionBoundaryPipeline(MapBuildPipeline):
+    def __init__(self, paths, task_store):
+        super().__init__(
+            paths,
+            building_scope_mode="chunked",
+            building_task_store=task_store,
+        )
+
+    def uses_selected_preprocessing(self, job):
+        del job
+        return False
+
+    def uses_chunked_preprocessing(self, job):
+        del job
+        return True
+
+    def reuse_keys(self, job, *, on_phase_progress=None, cancellation_check=None):
+        del job, on_phase_progress, cancellation_check
+        return None
+
+    def build_chunked(self, job, **kwargs):
+        del kwargs
+        # A retry begins at chunk planning even though the prior attempt
+        # already published and validated its artifact.
+        self.building_task_store.advance_plan_stage(
+            job.job_id,
+            stage="chunk_planning",
+        )
+        pack_path = self.paths.work_root / f"{job.job_id}.zip"
+        pack_path.parent.mkdir(parents=True, exist_ok=True)
+        pack_path.write_bytes(b"completion-boundary")
+        return MapBuildResult("map-completion-boundary", pack_path, [])
+
+
 class SourceCacheFailingPipeline(MapBuildPipeline):
     def __init__(self, paths):
         super().__init__(paths, building_scope_mode="selected")
@@ -257,6 +326,87 @@ class WorkerTests(unittest.TestCase):
             timings = response["phaseTimings"]
             self.assertTrue(any(timing["status"] == "ready" for timing in timings))
             self.assertTrue(all("durationSeconds" in timing for timing in timings))
+
+    def test_chunked_public_jobs_yield_without_consuming_retries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            jobs = [
+                service.create_job(
+                    {
+                        "mode": "custom_bbox",
+                        "bbox": [103.75, 1.24, 103.93, 1.37],
+                    }
+                )
+                for _ in range(2)
+            ]
+            pipeline = QuantumChunkedPipeline(
+                PipelinePaths(root, root / "work", root / "packs")
+            )
+
+            results = MapWorker(
+                store,
+                pipeline,
+                worker_id="worker-fair",
+            ).run_until_empty()
+
+            self.assertEqual(len(results), 4)
+            self.assertEqual(
+                pipeline.calls,
+                [jobs[0].job_id, jobs[1].job_id, jobs[0].job_id, jobs[1].job_id],
+            )
+            for job in jobs:
+                completed = store.get(job.job_id)
+                self.assertEqual(completed.status, JobStatus.READY)
+                self.assertEqual(completed.attempts, 1)
+                self.assertFalse(completed.scheduler_yielded)
+
+    def test_retry_reconciles_artifact_publication_after_public_complete_fault(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root / "jobs")
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+            )
+            task_store = BuildingTaskStore(root / "building-tasks.sqlite3")
+            task_store.create_plan(
+                parent_job_id=job.job_id,
+                global_plan_sha256="a" * 64,
+                input_identity={},
+                expected_output_block_count=1,
+                policy_version=1,
+                resource_model_version="v1",
+                stage="artifact_publication",
+            )
+            pipeline = CompletionBoundaryPipeline(
+                PipelinePaths(root, root / "work", root / "packs"),
+                task_store,
+            )
+            worker = MapWorker(store, pipeline, worker_id="worker-boundary")
+            original_complete = store.complete_job
+            calls = 0
+
+            def fail_once(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError("injected public completion fault")
+                return original_complete(*args, **kwargs)
+
+            with patch.object(store, "complete_job", side_effect=fail_once):
+                first = worker.run_next()
+                self.assertEqual(first.job.status, JobStatus.QUEUED)
+                self.assertEqual(
+                    task_store.get_plan(job.job_id)["state"],
+                    "artifact_publication",
+                )
+                second = worker.run_next()
+
+            self.assertEqual(second.job.status, JobStatus.READY)
+            self.assertEqual(task_store.get_plan(job.job_id)["state"], "ready")
+            self.assertEqual(store.get(job.job_id).attempts, 2)
 
     def test_selected_preprocessing_keeps_compatible_status_and_nested_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -470,11 +620,13 @@ class WorkerTests(unittest.TestCase):
                 }
             )
 
-            result = MapWorker(
+            worker = MapWorker(
                 store,
                 DeterministicFailurePipeline(),
                 worker_id="worker-test",
-            ).run_next()
+            )
+            result = worker.run_next()
+            next_result = worker.run_next()
             loaded = store.get(job.job_id)
 
             self.assertTrue(result.processed)
@@ -484,6 +636,8 @@ class WorkerTests(unittest.TestCase):
                 loaded.error_code, "building_object_limit_exceeded"
             )
             self.assertIsNotNone(loaded.finished_at)
+            self.assertFalse(next_result.processed)
+            self.assertEqual(store.get(job.job_id).attempts, 1)
 
     def test_retryable_failure_is_never_observable_as_terminal(self):
         with tempfile.TemporaryDirectory() as tmp:

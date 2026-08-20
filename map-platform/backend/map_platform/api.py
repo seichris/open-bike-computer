@@ -97,6 +97,11 @@ def _project_building_progress(
     if not isinstance(building_progress, Mapping):
         return
     projected = dict(building_progress)
+    if projected.get("state") == "observed":
+        # Shadow planning is diagnostic evidence, not executable progress for
+        # the authoritative legacy parent job.
+        result["buildingPlanObservation"] = projected
+        return
     existing = result.get("progress")
     merged = dict(existing) if isinstance(existing, dict) else {}
     for key, value in projected.items():
@@ -505,26 +510,35 @@ def create_app():
         "/v1/admin/building-plans/{parent_job_id}",
         dependencies=[Depends(require_admin_token)],
     )
-    def admin_building_plan(parent_job_id: str) -> dict[str, Any]:
+    def admin_building_plan(
+        parent_job_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
         plan = building_task_store.get_plan(parent_job_id)
         if plan is None:
             raise HTTPException(status_code=404, detail="building plan not found")
+        try:
+            page = building_task_store.diagnostic_page(
+                parent_job_id,
+                limit=limit,
+                offset=offset,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {
             "plan": plan,
             "progress": building_task_store.progress(parent_job_id),
-            "tasks": [
-                asdict(task)
-                for task in building_task_store.list_tasks(parent_job_id)
-            ],
-            "workloadReceipts": list(
-                building_task_store.list_workload_receipts(parent_job_id)
-            ),
-            "receipts": list(building_task_store.list_receipts(parent_job_id)),
-            "attempts": list(building_task_store.list_attempts(parent_job_id)),
+            "page": {
+                key: page[key]
+                for key in ("limit", "offset", "counts", "hasMore")
+            },
+            "tasks": [asdict(task) for task in page["tasks"]],
+            "workloadReceipts": list(page["workloadReceipts"]),
+            "receipts": list(page["receipts"]),
+            "attempts": list(page["attempts"]),
             "resourceModel": building_task_store.resource_model_summary(parent_job_id),
-            "resourceReservations": list(
-                building_task_store.list_resource_reservations(parent_job_id)
-            ),
+            "resourceReservations": list(page["resourceReservations"]),
         }
 
     @app.get(

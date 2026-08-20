@@ -1,21 +1,38 @@
-"""Byte-level equivalence checks for monolithic and chunked map runs."""
+"""Canonical building-payload equivalence for monolithic and chunked runs.
+
+The canonical comparison is the exact, sorted mapping from each safe relative
+``.fmb`` path in a ZIP to the SHA-256 of that entry's uncompressed bytes.  The
+path set and every FMB byte must therefore match.  ZIP container bytes and
+non-FMB entries, including orchestration metadata in ``manifest.json``, are not
+canonical building payload; their raw artifact sizes and digests are retained
+as evidence but are not required to match.
+"""
 
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import re
 from typing import Any, Mapping
 import zipfile
 
-from .building_scope import canonical_json
-
 
 class BuildingEquivalenceError(ValueError):
-    """Raised when two retained build records are not byte-equivalent."""
+    """Raised when two retained build records are not canonically equivalent."""
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
 
 
 def build_equivalence_record_from_zip(
@@ -23,12 +40,13 @@ def build_equivalence_record_from_zip(
     *,
     artifact_format: str = "zip-stored-v1",
 ) -> dict[str, Any]:
-    """Materialize a byte-level build record from a published ZIP artifact.
+    """Materialize canonical FMB hashes plus raw evidence from a published ZIP.
 
-    The record is intentionally limited to canonical FMB paths and the ZIP
-    payload itself.  ZIP metadata, task IDs, and producer timings are not
-    treated as building inputs; the archive digest still makes final artifact
-    bytes part of the equivalence check.
+    Canonical payload is defined solely by safe relative FMB paths and the
+    uncompressed bytes at those paths.  ZIP metadata and non-FMB entries are
+    outside that projection, so manifest-only orchestration differences do not
+    change equivalence.  The complete ZIP digest remains in ``artifacts`` for
+    review evidence.
     """
 
     if not isinstance(artifact_format, str) or not artifact_format:
@@ -41,10 +59,12 @@ def build_equivalence_record_from_zip(
             names: set[str] = set()
             fmb_hashes: dict[str, str] = {}
             for info in infos:
-                name = info.filename.replace("\\", "/")
+                raw_name = info.filename
+                name = raw_name.replace("\\", "/")
                 parts = name.split("/")
                 if (
                     not name
+                    or raw_name != name
                     or name.startswith("/")
                     or any(part in {"", ".", ".."} for part in parts)
                     or name in names
@@ -87,13 +107,20 @@ def _hashes(value: Any, label: str) -> dict[str, str]:
         raise BuildingEquivalenceError(f"{label} must be a non-empty object")
     result: dict[str, str] = {}
     for path, digest in value.items():
+        parts = path.split("/") if isinstance(path, str) else []
         if (
             not isinstance(path, str)
             or not path
+            or "\\" in path
+            or path.startswith("/")
+            or not path.endswith(".fmb")
+            or any(part in {"", ".", ".."} for part in parts)
             or not isinstance(digest, str)
             or _SHA256.fullmatch(digest) is None
         ):
-            raise BuildingEquivalenceError(f"{label} contains an invalid hash")
+            raise BuildingEquivalenceError(
+                f"{label} contains an invalid FMB path or hash"
+            )
         result[path] = digest
     return dict(sorted(result.items()))
 
@@ -135,10 +162,12 @@ def validate_partition_equivalence(
 ) -> dict[str, Any]:
     """Compare retained run records without trusting task or worker identity.
 
-    ``fmbSha256ByPath`` is the canonical block-byte comparison.  Artifact
-    payload bytes are compared by format when both records include them.  The
-    comparison intentionally ignores task IDs, chunk boundaries, timing,
-    cache-hit state, signatures, and producer metadata.
+    ``fmbSha256ByPath`` is the complete canonical comparison: the FMB path set
+    and the SHA-256 of every FMB's uncompressed bytes must match exactly.  Raw
+    artifact digests are validated and returned as evidence, but they are not
+    an equivalence input because legitimate ZIP manifests can differ by task
+    layout, chunk boundaries, timing, cache-hit state, signatures, and producer
+    metadata.
     """
 
     if not isinstance(reference, Mapping) or not isinstance(candidate, Mapping):
@@ -172,24 +201,30 @@ def validate_partition_equivalence(
 
     reference_artifacts = _artifact_payloads(reference)
     candidate_artifacts = _artifact_payloads(candidate)
-    if reference_artifacts != candidate_artifacts:
-        raise BuildingEquivalenceError(
-            "partitioned artifact payload bytes differ from the reference"
-        )
 
     block_digest = hashlib.sha256(
-        canonical_json(reference_blocks)
+        _canonical_json(reference_blocks)
     ).hexdigest()
-    return {
-        "schemaVersion": 1,
-        "status": "pass",
-        "blockCount": len(reference_blocks),
-        "fmbSha256ByPathDigest": block_digest,
-        "artifacts": {
+
+    def artifact_evidence(
+        payloads: Mapping[str, tuple[int, str]],
+    ) -> dict[str, dict[str, int | str]]:
+        return {
             format_name: {
                 "bytes": payload[0],
                 "sha256": payload[1],
             }
-            for format_name, payload in reference_artifacts.items()
+            for format_name, payload in payloads.items()
+        }
+
+    return {
+        "schemaVersion": 2,
+        "status": "pass",
+        "blockCount": len(reference_blocks),
+        "fmbSha256ByPathDigest": block_digest,
+        "rawArtifactEvidence": {
+            "payloadsEqual": reference_artifacts == candidate_artifacts,
+            "reference": artifact_evidence(reference_artifacts),
+            "candidate": artifact_evidence(candidate_artifacts),
         },
     }

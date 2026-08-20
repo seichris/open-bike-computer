@@ -15,6 +15,7 @@ DEFAULT_MINIMUM_OBSERVATIONS = 8
 RESOURCE_MODEL_VERSION = "building-resource-model-untrained-v1"
 CALIBRATED_RESOURCE_MODEL_VERSION = "building-resource-model-calibrated-v1"
 CONSERVATIVE_MEMORY_MODEL_VERSION = "conservative-counter-floor-v1"
+CONSERVATIVE_WALL_MODEL_VERSION = "conservative-counter-throughput-v1"
 DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES = 512 * 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -48,6 +49,35 @@ def conservative_peak_memory_bytes(workload: Mapping[str, Any]) -> int:
     estimate += counter("candidateOutlineCount") * 2_048
     estimate += counter("candidatePartCount") * 2_048
     return estimate
+
+
+def conservative_wall_seconds(workload: Mapping[str, Any]) -> int:
+    """Estimate one cold chunk's wall time from exact workload counters.
+
+    The floor is intentionally simple and reviewable: 30 seconds of fixed
+    setup, one second per 750 unique closure objects, and one second per
+    50,000 reference/vertex records. It is used only to split exact scan
+    results toward the ten-minute planning target; the runtime thirty-minute
+    deadline remains authoritative and a retained calibrated model can replace
+    this version only through an explicit policy update.
+    """
+
+    if not isinstance(workload, Mapping):
+        raise ValueError("workload counters must be a mapping")
+
+    def counter(name: str) -> int:
+        value = workload.get(name, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"workload counter {name} is invalid")
+        return value
+
+    return (
+        30
+        + math.ceil(counter("totalObjectCount") / 750)
+        + math.ceil(counter("storedRelationMemberCount") / 50_000)
+        + math.ceil(counter("wayNodeReferenceCount") / 50_000)
+        + math.ceil(counter("vertexCount") / 50_000)
+    )
 
 
 def summarize_resource_observations(
@@ -105,8 +135,22 @@ def summarize_resource_observations(
         p95_actual = _percentile95(actual_values)
         p95_predicted = _percentile95(predicted_values)
         multiplier = None
-        if p95_predicted > 0:
-            multiplier = round(max(1.0, p95_actual / p95_predicted), 4)
+        has_positive_actual_with_zero_prediction = any(
+            value["actualPeakMemoryBytes"] > 0
+            and value["predictedPeakMemoryBytes"] == 0
+            for value in values
+        )
+        if not has_positive_actual_with_zero_prediction:
+            paired_ratios = sorted(
+                (
+                    value["actualPeakMemoryBytes"]
+                    / value["predictedPeakMemoryBytes"]
+                    if value["predictedPeakMemoryBytes"] > 0
+                    else 1.0
+                )
+                for value in values
+            )
+            multiplier = round(max(1.0, _percentile95(paired_ratios)), 4)
         capability = values[0]["workerCapability"]
         summaries.append(
             {
@@ -118,6 +162,7 @@ def summarize_resource_observations(
                 "status": (
                     "calibrated"
                     if len(values) >= minimum_observations
+                    and multiplier is not None
                     else "insufficient_observations"
                 ),
                 "minimumObservations": minimum_observations,
@@ -254,7 +299,7 @@ def apply_calibrated_memory_prediction(
     return conservative_prediction_bytes
 
 
-def _percentile95(values: list[int]) -> int:
+def _percentile95(values: list[int | float]) -> int | float:
     if not values:
         raise ValueError("percentile requires at least one value")
     return values[max(0, math.ceil(len(values) * 0.95) - 1)]

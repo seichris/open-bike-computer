@@ -90,11 +90,9 @@ def main() -> None:
     scope, scope_sha256 = _load_scope(args.scope_plan)
     policy = scope["policy"]
     calibration = scope["calibration"]
-    # The source-index builder validates the immutable database before it
-    # publishes this manifest. Re-validating every multi-gigabyte database for
-    # each chunk would turn a warm plan into repeated full snapshots. Closure
-    # workers verify the signed manifest identity here and leave the expensive
-    # database audit to the builder/maintenance path.
+    # The source-index builder binds the exact database bytes to a stable-file
+    # verification receipt. Closure workers validate that receipt and file
+    # identity here without repeating the multi-gigabyte hash/audit per chunk.
     index = BuildingSourceIndex.from_manifest(
         args.source_index_manifest,
         validate_database=False,

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Compare retained monolithic and partitioned target-3 build records."""
+"""Compare canonical FMB payloads from monolithic and partitioned runs.
+
+The exact relative FMB path set and uncompressed FMB bytes are the equivalence
+gate.  Raw ZIP digests remain in the report as evidence and may legitimately
+differ when manifests contain different orchestration metadata.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +23,12 @@ from map_platform.building_equivalence import (  # noqa: E402
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compare the exact FMB path/content projection of two target-3 "
+            "artifacts; raw ZIP digests are reported as non-gating evidence."
+        )
+    )
     reference = parser.add_mutually_exclusive_group(required=True)
     reference.add_argument("--reference", type=Path)
     reference.add_argument("--reference-zip", type=Path)

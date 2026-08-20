@@ -7,11 +7,13 @@ import sys
 import tempfile
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from map_platform.jobs import JobStore, MapJobService
+from map_platform.building_cache_maintenance import prune_building_block_cache
 from map_platform.artifacts import (
     ArtifactRecord,
     ZIP_MEDIA_TYPE,
@@ -34,6 +36,7 @@ from map_platform.map_buildings import (
 )
 from map_platform.models import Bounds, MapJob, SourceRegion
 from map_platform.pipeline import (
+    BuildingCacheRetryRequired,
     BuildingChunkSplitRequired,
     MapBuildPipeline,
     PipelinePaths,
@@ -41,7 +44,7 @@ from map_platform.pipeline import (
     validate_final_assembly_artifact,
 )
 from map_platform.building_scope import plan_building_scope, plan_global_building_scope
-from map_platform.building_tasks import BuildingTaskStore
+from map_platform.building_tasks import BuildingTaskSpec, BuildingTaskStore
 from map_platform.building_scope import BuildingScopeError, BuildingScopePolicy
 from map_platform.building_identity import (
     canonical_json as canonical_building_json,
@@ -49,7 +52,7 @@ from map_platform.building_identity import (
     selected_building_identity,
     selected_calibration_identity,
 )
-from map_platform.reuse import aligned_projected_extent
+from map_platform.reuse import MapBlock, aligned_projected_extent
 from map_platform import reuse as reuse_module
 from map_platform.sources import SourceIndex
 from tests.map_label_fixtures import one_building_fmb4, one_label_fma1
@@ -88,6 +91,35 @@ class RecordingRunner:
 
 
 class MapBuildingContractTests(unittest.TestCase):
+    def test_chunked_storage_admission_runs_before_preparation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(
+                self._request()
+            )
+            pipeline = MapBuildPipeline(
+                PipelinePaths(
+                    Path(__file__).resolve().parents[3],
+                    root / "work",
+                    root / "packs",
+                ),
+                building_scope_mode="chunked",
+            )
+            global_plan = pipeline._plan_chunked_scope(job)
+            source_pbf = root / "source.pbf"
+            source_pbf.write_bytes(b"source")
+
+            with patch.dict(
+                "os.environ",
+                {"MAP_PLATFORM_BUILDING_BLOCK_CACHE_MAX_BYTES": "1"},
+            ), self.assertRaises(BuildingScopeError) as raised:
+                pipeline._admit_chunked_storage(
+                    global_plan,
+                    source_pbf=source_pbf,
+                )
+
+            self.assertEqual(raised.exception.code, "building_storage_admission")
+
     def setUp(self):
         self.source = SourceRegion(
             id="sg",
@@ -138,6 +170,58 @@ class MapBuildingContractTests(unittest.TestCase):
             label_target2_enabled=True,
             building_target3_enabled=True,
         )
+
+    def _write_cache_block(
+        self,
+        cache_root: Path,
+        cache_identity,
+        block: MapBlock,
+        *,
+        content: bytes = b"canonical-building-section",
+    ):
+        identity_sha = cache_identity["cacheIdentitySha256"]
+        namespace = (
+            cache_root
+            / "building-block-v1"
+            / cache_identity["sourceSnapshotSha256"]
+            / cache_identity["rulesSha256"]
+            / identity_sha
+        )
+        section_sha = hashlib.sha256(content).hexdigest()
+        manifest_body = {
+            "schemaVersion": 1,
+            "cacheIdentitySha256": identity_sha,
+            "block": {
+                "x": block.x,
+                "y": block.y,
+                "boundsMeters": [
+                    block.x * 4096,
+                    block.y * 4096,
+                    (block.x + 1) * 4096,
+                    (block.y + 1) * 4096,
+                ],
+            },
+            "section": {
+                "path": f"sections/{section_sha}.bin",
+                "bytes": len(content),
+                "sha256": section_sha,
+            },
+            "stats": {"recordCount": 0, "sectionBytes": len(content)},
+        }
+        manifest = {
+            **manifest_body,
+            "manifestSha256": hashlib.sha256(
+                canonical_building_json(manifest_body)
+            ).hexdigest(),
+        }
+        (namespace / "blocks").mkdir(parents=True)
+        (namespace / "sections").mkdir()
+        (namespace / "sections" / f"{section_sha}.bin").write_bytes(content)
+        (namespace / "blocks" / f"{block.x}_{block.y}.json").write_bytes(
+            canonical_building_json(manifest)
+        )
+        (namespace / ".last-access").touch()
+        return namespace, section_sha
 
     def test_target_three_generation_is_disabled_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -274,10 +358,298 @@ class MapBuildingContractTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, "building_chunks_incomplete")
 
+    def test_eviction_before_cache_hit_requeues_and_builds_the_chunk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = deepcopy(self._request())
+            request["bbox"] = [103.8, 1.3, 103.801, 1.301]
+            job = self._service(JobStore(root / "jobs")).create_job(request)
+            source_pbf = root / "source.pbf"
+            source_pbf.write_bytes(b"source")
+            source_sha = hashlib.sha256(b"source").hexdigest()
+            task_store = BuildingTaskStore(root / "building-tasks.sqlite3")
+            pipeline = MapBuildPipeline(
+                PipelinePaths(
+                    Path(__file__).resolve().parents[3],
+                    root / "work",
+                    root / "packs",
+                ),
+                building_task_store=task_store,
+                building_scope_mode="chunked",
+            )
+            calibration = load_building_calibration_window(
+                pipeline.paths.osm_extract_root
+                / "conf"
+                / "building_height_rules.yaml"
+            )
+            global_plan = pipeline._plan_chunked_scope(job, calibration)
+            self.assertEqual(len(global_plan.output_blocks), 1)
+            calibration_identity = selected_calibration_identity(
+                source_snapshot_sha256=source_sha,
+                rules_path=(
+                    pipeline.paths.osm_extract_root
+                    / "conf"
+                    / "building_height_rules.yaml"
+                ),
+                scope_plan=global_plan,
+            )
+            calibration_generation = {
+                "calibrationKey": calibration_identity["calibrationKey"],
+                "manifestSha256": "a" * 64,
+                "entrySetSha256": "b" * 64,
+                "cellCount": 1,
+            }
+            cache_identity = selected_building_block_cache_identity(
+                source_snapshot_sha256=source_sha,
+                rules_path=(
+                    pipeline.paths.osm_extract_root
+                    / "conf"
+                    / "building_height_rules.yaml"
+                ),
+                scope_plan=global_plan,
+                calibration_generation=calibration_generation,
+            )
+            namespace, _section_sha = self._write_cache_block(
+                pipeline.paths.building_cache_root,
+                cache_identity,
+                global_plan.output_blocks[0],
+            )
+            source_index = {
+                "indexKey": "c" * 64,
+                "sourceSnapshotSha256": source_sha,
+                "databaseSha256": "d" * 64,
+                "schemaVersion": 1,
+                "algorithmVersion": 2,
+                "nodeCount": 0,
+                "wayCount": 0,
+                "relationCount": 0,
+                "relationMemberCount": 0,
+            }
+            original_persist = pipeline._persist_chunked_partition
+            eviction_results = []
+
+            def persist_then_evict(job_arg, **kwargs):
+                stale_protection = task_store.cache_retention_protection()
+                original_persist(job_arg, **kwargs)
+                eviction_results.append(
+                    prune_building_block_cache(
+                        pipeline.paths.building_cache_root,
+                        older_than_days=14,
+                        max_bytes=1,
+                        max_items=10,
+                        protected_cache_identity_sha256s=stale_protection[
+                            "protectedCacheIdentitySha256s"
+                        ],
+                        protect_all=stale_protection["protectAll"],
+                    )
+                )
+
+            def build_requeued_chunk(job_arg, **kwargs):
+                self.assertIs(job_arg, job)
+                for block in kwargs["scope_plan"].output_blocks:
+                    task_store.publish_receipt(
+                        kwargs["task_id"],
+                        worker_id=kwargs["worker_id"],
+                        lease_token=kwargs["lease_token"],
+                        block=(block.x, block.y),
+                        cache_identity_sha256=cache_identity[
+                            "cacheIdentitySha256"
+                        ],
+                        content_sha256="0" * 64,
+                        producer_identity={},
+                        validation={"rebuilt": True},
+                    )
+                task_store.mark_ready(
+                    kwargs["task_id"],
+                    worker_id=kwargs["worker_id"],
+                    lease_token=kwargs["lease_token"],
+                )
+
+            with patch.object(
+                pipeline.source_cache,
+                "ensure",
+                return_value=SimpleNamespace(path=source_pbf, sha256=source_sha),
+            ), patch.object(
+                pipeline,
+                "_ensure_selected_calibration_generation",
+                return_value=(root / "calibration.json", calibration_generation),
+            ), patch.object(
+                pipeline,
+                "_prepare_chunked_source_index",
+                return_value=(root / "source-index.json", source_index),
+            ), patch.object(
+                pipeline,
+                "_persist_chunked_partition",
+                side_effect=persist_then_evict,
+            ), patch.object(
+                pipeline,
+                "build_building_chunk",
+                side_effect=build_requeued_chunk,
+            ) as rebuilt, patch.object(
+                pipeline,
+                "assemble_building_chunks",
+                return_value=SimpleNamespace(
+                    artifact_metrics={
+                        "buildingPreprocessing": {"mode": "chunked"}
+                    }
+                ),
+            ):
+                result = pipeline.build_chunked(job, worker_id="worker-test")
+
+            self.assertIsNotNone(result)
+            self.assertEqual(eviction_results[0]["removedNamespaces"], 1)
+            self.assertFalse(namespace.exists())
+            rebuilt.assert_called_once()
+            self.assertEqual(
+                [attempt["outcome"] for attempt in task_store.list_attempts(job.job_id)],
+                ["cache_invalidated", "ready"],
+            )
+            self.assertEqual(task_store.list_tasks(job.job_id)[0].state, "ready")
+            self.assertNotEqual(task_store.get_plan(job.job_id)["state"], "failed")
+
+    def test_eviction_after_ready_before_assembly_requeues_for_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = deepcopy(self._request())
+            request["bbox"] = [103.8, 1.3, 103.801, 1.301]
+            job = self._service(JobStore(root / "jobs")).create_job(request)
+            source_pbf = root / "source.pbf"
+            source_pbf.write_bytes(b"source")
+            source_sha = hashlib.sha256(b"source").hexdigest()
+            task_store = BuildingTaskStore(root / "building-tasks.sqlite3")
+            pipeline = MapBuildPipeline(
+                PipelinePaths(
+                    Path(__file__).resolve().parents[3],
+                    root / "work",
+                    root / "packs",
+                ),
+                building_task_store=task_store,
+                building_scope_mode="chunked",
+            )
+            calibration = load_building_calibration_window(
+                pipeline.paths.osm_extract_root
+                / "conf"
+                / "building_height_rules.yaml"
+            )
+            global_plan = pipeline._plan_chunked_scope(job, calibration)
+            block = global_plan.output_blocks[0]
+            calibration_identity = selected_calibration_identity(
+                source_snapshot_sha256=source_sha,
+                rules_path=(
+                    pipeline.paths.osm_extract_root
+                    / "conf"
+                    / "building_height_rules.yaml"
+                ),
+                scope_plan=global_plan,
+            )
+            calibration_generation = {
+                "calibrationKey": calibration_identity["calibrationKey"],
+                "manifestSha256": "a" * 64,
+                "entrySetSha256": "b" * 64,
+                "cellCount": 1,
+            }
+            cache_identity = selected_building_block_cache_identity(
+                source_snapshot_sha256=source_sha,
+                rules_path=(
+                    pipeline.paths.osm_extract_root
+                    / "conf"
+                    / "building_height_rules.yaml"
+                ),
+                scope_plan=global_plan,
+                calibration_generation=calibration_generation,
+            )
+            namespace, section_sha = self._write_cache_block(
+                pipeline.paths.building_cache_root,
+                cache_identity,
+                block,
+            )
+            task_store.create_plan(
+                parent_job_id=job.job_id,
+                global_plan_sha256=global_plan.sha256,
+                input_identity={},
+                expected_output_block_count=1,
+                policy_version=1,
+                resource_model_version="v1",
+                stage="building_chunks",
+            )
+            task_store.add_tasks(
+                [
+                    BuildingTaskSpec(
+                        task_id="ready-cache-task",
+                        parent_job_id=job.job_id,
+                        kind="building_chunk",
+                        blocks=((block.x, block.y),),
+                        chunk_plan_sha256="f" * 64,
+                    )
+                ]
+            )
+            stale_protection = task_store.cache_retention_protection()
+            claimed = task_store.claim_next(worker_id="worker-test")
+            assert claimed is not None
+            task_store.publish_receipt(
+                claimed.task.task_id,
+                worker_id="worker-test",
+                lease_token=claimed.lease_token,
+                block=(block.x, block.y),
+                cache_identity_sha256=cache_identity[
+                    "cacheIdentitySha256"
+                ],
+                content_sha256=section_sha,
+                producer_identity={},
+                validation={},
+            )
+            task_store.mark_ready(
+                claimed.task.task_id,
+                worker_id="worker-test",
+                lease_token=claimed.lease_token,
+            )
+            eviction = prune_building_block_cache(
+                pipeline.paths.building_cache_root,
+                older_than_days=14,
+                max_bytes=1,
+                max_items=10,
+                protected_cache_identity_sha256s=stale_protection[
+                    "protectedCacheIdentitySha256s"
+                ],
+                protect_all=stale_protection["protectAll"],
+            )
+            self.assertEqual(eviction["removedNamespaces"], 1)
+            self.assertFalse(namespace.exists())
+
+            with patch(
+                "map_platform.pipeline.selected_calibration_identity",
+                return_value={"calibrationKey": "test-calibration"},
+            ), patch(
+                "map_platform.pipeline.calibration_generation_from_manifest",
+                return_value=calibration_generation,
+            ), patch(
+                "map_platform.pipeline.selected_building_block_cache_identity",
+                return_value=cache_identity,
+            ):
+                with self.assertRaises(BuildingCacheRetryRequired):
+                    pipeline.assemble_building_chunks(
+                        job,
+                        global_plan=global_plan,
+                        source_pbf=source_pbf,
+                        source_snapshot_sha256=source_sha,
+                        calibration_manifest=root / "calibration.json",
+                        calibration_generation=calibration_generation,
+                    )
+
+            requeued = task_store.get_task("ready-cache-task")
+            self.assertEqual(requeued.state, "pending")
+            self.assertEqual(task_store.list_receipts(job.job_id), ())
+            self.assertEqual(
+                task_store.get_plan(job.job_id)["state"], "building_chunks"
+            )
+            self.assertIsNotNone(task_store.claim_next(worker_id="retry-worker"))
+
     def test_final_assembly_artifact_validates_size_and_zip_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "map.zip"
-            archive.write_bytes(b"assembled-map")
+            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as output:
+                output.writestr("manifest.json", b"{}")
+                output.writestr("VECTMAP/map/0_0.fmb", b"FMB4")
             archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
             record = ArtifactRecord(
                 format=ZIP_STORED_FORMAT,
@@ -315,6 +687,47 @@ class MapBuildingContractTests(unittest.TestCase):
                 invalid.exception.code,
                 "building_artifact_validation_failed",
             )
+
+    def test_final_assembly_artifact_rejects_non_map_archives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cases = {
+                "not-a-zip": None,
+                "missing-manifest": {"VECTMAP/map/0_0.fmb": b"FMB4"},
+                "empty-manifest": {
+                    "manifest.json": b"",
+                    "VECTMAP/map/0_0.fmb": b"FMB4",
+                },
+                "missing-fmb": {"manifest.json": b"{}"},
+            }
+            for name, entries in cases.items():
+                with self.subTest(name=name):
+                    archive = root / f"{name}.zip"
+                    if entries is None:
+                        archive.write_bytes(b"assembled-map")
+                    else:
+                        with zipfile.ZipFile(
+                            archive, "w", compression=zipfile.ZIP_STORED
+                        ) as output:
+                            for filename, content in entries.items():
+                                output.writestr(filename, content)
+                    archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+                    record = ArtifactRecord(
+                        format=ZIP_STORED_FORMAT,
+                        media_type=ZIP_MEDIA_TYPE,
+                        filename=archive.name,
+                        object_key=zip_object_key("map", archive_sha256),
+                        bytes=archive.stat().st_size,
+                        sha256=archive_sha256,
+                    )
+
+                    with self.assertRaises(BuildingScopeError) as invalid:
+                        validate_final_assembly_artifact(archive, [record])
+
+                    self.assertEqual(
+                        invalid.exception.code,
+                        "building_artifact_validation_failed",
+                    )
 
     def test_multi_block_guard_failure_becomes_split_signal(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -793,6 +1206,18 @@ class MapBuildingContractTests(unittest.TestCase):
             )
 
             def fake_calibration(_source, sha, scope, **_kwargs):
+                self.assertEqual(
+                    task_store.get_plan(job.job_id)["state"],
+                    "source_preparation",
+                )
+                parent_reservations = (
+                    task_store.list_parent_phase_reservations(job.job_id)
+                )
+                self.assertEqual(len(parent_reservations), 1)
+                self.assertEqual(
+                    parent_reservations[0]["phase"],
+                    "source_preparation",
+                )
                 identity = selected_calibration_identity(
                     source_snapshot_sha256=sha,
                     rules_path=(

@@ -1,7 +1,8 @@
-import unittest
 import hashlib
+import json
 from pathlib import Path
 import tempfile
+import unittest
 import zipfile
 
 from map_platform.building_equivalence import (
@@ -33,6 +34,21 @@ def record(block_hash="1"):
     }
 
 
+def write_zip(
+    path: Path,
+    *,
+    manifest: dict,
+    blocks: dict[str, bytes],
+) -> None:
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr(
+            "manifest.json",
+            json.dumps(manifest, sort_keys=True).encode("utf-8"),
+        )
+        for block_path, payload in sorted(blocks.items()):
+            archive.writestr(block_path, payload)
+
+
 class BuildingEquivalenceTests(unittest.TestCase):
     def test_published_zip_materializes_a_byte_level_equivalence_record(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -57,6 +73,73 @@ class BuildingEquivalenceTests(unittest.TestCase):
             self.assertEqual(
                 validate_partition_equivalence(record_from_zip, expected)["status"],
                 "pass",
+            )
+
+    def test_manifest_orchestration_metadata_does_not_change_fmb_equivalence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reference_zip = root / "monolithic.zip"
+            candidate_zip = root / "chunked.zip"
+            blocks = {
+                "VECTMAP/map/0/0.fmb": b"FMB4-same-zero",
+                "VECTMAP/map/0/1.fmb": b"FMB4-same-one",
+            }
+            common_manifest = {
+                "schemaVersion": 1,
+                "mapId": "map",
+                "files": [
+                    {
+                        "path": block_path,
+                        "bytes": len(blocks[block_path]),
+                        "sha256": hashlib.sha256(blocks[block_path]).hexdigest(),
+                    }
+                    for block_path in sorted(blocks)
+                ],
+            }
+            write_zip(
+                reference_zip,
+                manifest={
+                    **common_manifest,
+                    "buildingPreprocessing": {
+                        "mode": "selected",
+                        "taskIds": ["monolithic-parent"],
+                        "wallMilliseconds": 10,
+                    },
+                },
+                blocks=blocks,
+            )
+            write_zip(
+                candidate_zip,
+                manifest={
+                    **common_manifest,
+                    "buildingPreprocessing": {
+                        "mode": "chunked",
+                        "taskIds": ["chunk-2", "chunk-1"],
+                        "chunkBoundaries": [[0, 0], [0, 1]],
+                        "wallMilliseconds": 20,
+                    },
+                },
+                blocks=blocks,
+            )
+
+            reference = build_equivalence_record_from_zip(reference_zip)
+            candidate = build_equivalence_record_from_zip(candidate_zip)
+            report = validate_partition_equivalence(reference, candidate)
+
+            self.assertEqual(report["status"], "pass")
+            self.assertEqual(report["schemaVersion"], 2)
+            self.assertFalse(report["rawArtifactEvidence"]["payloadsEqual"])
+            self.assertEqual(
+                report["rawArtifactEvidence"]["reference"]["zip-stored-v1"][
+                    "sha256"
+                ],
+                reference["artifacts"][0]["sha256"],
+            )
+            self.assertEqual(
+                report["rawArtifactEvidence"]["candidate"]["zip-stored-v1"][
+                    "sha256"
+                ],
+                candidate["artifacts"][0]["sha256"],
             )
 
     def test_zip_without_fmb_entries_fails_closed(self):
@@ -86,12 +169,32 @@ class BuildingEquivalenceTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildingEquivalenceError, "changed blocks"):
             validate_partition_equivalence(record(), candidate)
 
-    def test_changed_artifact_payload_fails_closed(self):
+    def test_changed_block_path_fails_closed(self):
+        candidate = record()
+        candidate["fmbSha256ByPath"]["VECTMAP/map/0/2.fmb"] = (
+            candidate["fmbSha256ByPath"].pop("VECTMAP/map/0/1.fmb")
+        )
+
+        with self.assertRaisesRegex(
+            BuildingEquivalenceError,
+            "missing blocks: .*0/1.fmb; extra blocks: .*0/2.fmb",
+        ):
+            validate_partition_equivalence(record(), candidate)
+
+    def test_changed_raw_artifact_payload_is_evidence_not_an_equivalence_input(self):
         candidate = record()
         candidate["artifacts"][0]["sha256"] = "8" * 64
 
-        with self.assertRaisesRegex(BuildingEquivalenceError, "artifact payload"):
-            validate_partition_equivalence(record(), candidate)
+        report = validate_partition_equivalence(record(), candidate)
+
+        self.assertEqual(report["status"], "pass")
+        self.assertFalse(report["rawArtifactEvidence"]["payloadsEqual"])
+        self.assertEqual(
+            report["rawArtifactEvidence"]["candidate"]["zip-stored-v1"][
+                "sha256"
+            ],
+            "8" * 64,
+        )
 
 
 if __name__ == "__main__":
