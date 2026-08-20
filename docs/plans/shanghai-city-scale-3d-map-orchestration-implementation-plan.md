@@ -1251,6 +1251,29 @@ all `memory.events` counters, including `oom` and `oom_kill`, were zero. This
 confirms the optimization is deployed and safe on the validation worker, but
 does not change the open exact-bbox performance gate.
 
+The same candidate then completed a fresh exact-bbox validation request
+`41263048594843ea885e` (`shanghai-exact-candidate-de7fbf0ea9`) with 442/442
+blocks and no retries or typed failures. All 442 durable building-block cache
+lookups were hits, so this is a warm-cache assembly benchmark rather than the
+cold-generation gate. It reached `ready` in 2,432.435772 seconds (40.54
+minutes; 2,428.728230 processing seconds). Source extraction took 93.482642
+seconds and peaked at 4,126,343,168 child bytes; cache-only block encoding took
+1,731.356357 seconds. Label candidate generation took 64.326106 seconds,
+shaping took 6.212453 seconds across 195,700 shape calls (181,731 shape-cache
+hits), and the final ZIP was 25,887,782 bytes with SHA-256
+`d831ffd5e8fb6875f686b55efe2db0915f3995aa3d024ac6b0d11ea332169dd8`. The
+downloaded ZIP had 420 FMB entries, maximum FMB size 507,316 bytes, and passed
+the ZIP self-equivalence comparator. The worker cgroup for this run was still
+unlimited (`memory.max=max`), peaked at 4,636,704,768 bytes, and recorded zero
+`low`, `high`, `max`, `oom`, `oom_kill`, or `oom_group_kill` events.
+
+After the run, validation was recreated with the checked-in explicit memory
+policy: `memory.max=12,884,901,888` bytes (12 GiB), configured worker limit
+`12,884,901,888`, heavy-task concurrency `1`, and relation-object ceiling
+`600,000`. The replacement worker is healthy and the public development
+health endpoint remains HTTP 200. This cap is validation-only; production is
+still pinned to its existing immutable image and has not been promoted.
+
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
 
