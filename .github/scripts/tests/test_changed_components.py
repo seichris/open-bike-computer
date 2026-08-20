@@ -204,6 +204,14 @@ class ChangedComponentsTests(unittest.TestCase):
                     changed_components.classify_paths([path]),
                 )
 
+    def test_ride_diagnostics_tool_selects_its_host_test_job(self) -> None:
+        selected = changed_components.classify_paths([
+            "tools/ride_diagnostics.py"
+        ])
+        self.assertFalse(selected["firmware_build"])
+        self.assertTrue(selected["firmware_host"])
+        self.assertFalse(selected["ios"])
+
     def test_ci_router_change_runs_every_component(self) -> None:
         selected = changed_components.classify_paths(
             [".github/scripts/changed_components.py"]

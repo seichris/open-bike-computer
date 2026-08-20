@@ -16,6 +16,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift \
   ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift \
   ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \

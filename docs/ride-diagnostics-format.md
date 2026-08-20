@@ -48,9 +48,10 @@ contract. A truncated final line is reported and ignored; a
 truncated line in the middle of a stream is an error.
 
 Firmware that starts before its wall clock is valid omits `wallTime`. Its first
-later timestamped event is a `lifecycle.clock_anchor` carrying the same uptime
-and persistent boot sequence. The Mac summarizer uses that anchor to derive a
-`correlatedWallTime` for earlier records, reports `clockUncertaintyMs`, and
+later timestamped event and every subsequent RTC correction emit a
+`lifecycle.clock_anchor` carrying the same uptime and persistent boot sequence.
+The Mac summarizer uses the nearest anchor, including across unsigned 32-bit
+uptime wrap, to derive a `correlatedWallTime`, reports `clockUncertaintyMs`, and
 never rewrites the raw JSONL bytes.
 
 ## Privacy boundary

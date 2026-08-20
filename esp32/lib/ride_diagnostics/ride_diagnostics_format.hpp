@@ -22,6 +22,7 @@ constexpr const char *kAllowedFieldKeys[] = {
     "firmwareTarget",           "firstMissingUptimeMs",       "fixValid",
     "importedCount",            "kind",                      "lastCriticalCategory",
     "lastCriticalEvent",        "lastGapMs",                  "lastMissingUptimeMs",
+    "lastFailureStage",         "lastFailureCompletedStage",  "lastFailureResetReason",
     "maximumGapMs",              "messageBytes",               "messageDigest",
     "mode",                     "navigating",                "networkTransport",
     "origin",                   "pendingControl",            "profileVersion",
@@ -70,6 +71,7 @@ inline bool allowedFieldValueKind(const char *key, FieldValueKind kind) {
       "decisionSequence", "droppedCount",      "eventCount",
       "firmwareBuild",    "firstMissingUptimeMs", "importedCount",
       "lastGapMs",        "lastMissingUptimeMs", "maximumGapMs",
+      "lastFailureStage", "lastFailureCompletedStage", "lastFailureResetReason",
       "messageBytes",     "profileVersion",    "resetReason",
       "rideGeneration",   "runtimeBootSequence", "sampleCount",
       "sequence",         "sourceHealthMask",  "storageErrorCount",
@@ -319,6 +321,13 @@ inline bool validFaultCapsuleEnvelope(const FaultCapsuleState &capsule) {
 
 inline bool validFaultCapsule(const FaultCapsuleState &capsule) {
   return validFaultCapsuleEnvelope(capsule) && capsule.eventCount != 0;
+}
+
+inline bool faultCapsuleIdentityMatches(const FaultCapsuleState &capsule,
+                                        uint32_t bootSequence,
+                                        uint32_t checksum) {
+  return validFaultCapsuleEnvelope(capsule) &&
+         capsule.bootSequence == bootSequence && capsule.checksum == checksum;
 }
 
 inline bool formatFaultCapsuleFields(const FaultCapsuleState &capsule,

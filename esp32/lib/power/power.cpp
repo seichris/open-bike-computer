@@ -7,6 +7,7 @@
  */
 
 #include "power.hpp"
+#include "../ride_diagnostics/ride_diagnostics.hpp"
 #ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
 #endif
@@ -128,6 +129,16 @@ void Power::deviceSuspend() {
  *
  */
 void Power::deviceShutdown() {
+  bool diagnosticsSealed = ride_diagnostics::prepareForShutdown();
+  if (!diagnosticsSealed) {
+    // A transient producer/seal race should not silently discard the final
+    // controlled-shutdown boundary. Retry once; a persistent storage failure
+    // is retained in the recorder's RTC fault capsule for the next boot.
+    delay(25);
+    diagnosticsSealed = ride_diagnostics::prepareForShutdown(3000);
+  }
+  Serial.printf("RIDE_DIAGNOSTICS: shutdown checkpoint sealed=%d\n",
+                diagnosticsSealed);
   powerOffPeripherals();
   powerDeepSleep();
 }

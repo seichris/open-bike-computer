@@ -119,6 +119,13 @@ firmware_update::FirmwareUpdateHttpServer firmwareUpdateHttp;
 device_debug::DeviceDebugHttp deviceDebugHttp;
 ride_diagnostics::RideDiagnosticsHttp rideDiagnosticsHttp;
 
+static bool diagnosticsStorageRecoveryAllowed() {
+  const device_transfer::HttpTransferStatus status =
+      deviceTransferHttp.status();
+  return status.mode != "map" && status.mode != "diagnostics" &&
+         !mapTransferHttp.activationSnapshot().running;
+}
+
 static lv_obj_t *mapActivationProgressPanel = nullptr;
 static lv_obj_t *mapActivationProgressLabel = nullptr;
 static lv_obj_t *mapActivationProgressBar = nullptr;
@@ -489,6 +496,10 @@ bool startRemoteDeviceDebugSession() {
 
 bool stopActiveDeviceTransfer() {
   const device_transfer::HttpTransferStatus status = deviceTransferHttp.status();
+  if (status.mode == "diagnostics") {
+    ride_diagnostics::endTransferSnapshotLease();
+    return deviceTransferHttp.setEnabled(false);
+  }
   if (status.mode == "map")
     return mapTransferHttp.setEnabled(false);
   if (status.mode == "firmware")
@@ -885,6 +896,16 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
                 static_cast<unsigned long>(display_inactivity::elapsedMs(
                     nowMs,
                     displayInactivityPolicy.lastMeaningfulActivityMs())));
+  char diagnosticFields[192] = {};
+  snprintf(
+      diagnosticFields, sizeof(diagnosticFields),
+      "{\"mode\":\"%s\",\"navigating\":%s,\"workoutActive\":%s}",
+      displayInactivityModeName(update.current), context.navigating ? "true"
+                                                                     : "false",
+      context.workoutActive ? "true" : "false");
+  (void)ride_diagnostics::record(
+      ride_diagnostics::Level::Info, "power", "display_mode_changed",
+      diagnosticFields);
   return update;
 }
 #endif
@@ -1504,12 +1525,17 @@ void setup() {
       diagnosticBootFields, sizeof(diagnosticBootFields),
       "{\"runtimeBootSequence\":%lu,"
       "\"resetReason\":%lu,\"activeStage\":%u,\"completedStage\":%u,"
+      "\"lastFailureStage\":%u,\"lastFailureCompletedStage\":%u,"
+      "\"lastFailureResetReason\":%lu,"
       "\"consecutiveEarlyFailures\":%u,\"ready\":%s,\"safeMode\":%s,"
       "\"diagnosticHold\":%s}",
       static_cast<unsigned long>(diagnosticBoot.bootSequence),
       static_cast<unsigned long>(diagnosticBoot.resetReason),
       static_cast<unsigned>(diagnosticBoot.activeStage),
       static_cast<unsigned>(diagnosticBoot.completedStage),
+      static_cast<unsigned>(diagnosticBoot.lastFailureStage),
+      static_cast<unsigned>(diagnosticBoot.lastFailureCompletedStage),
+      static_cast<unsigned long>(diagnosticBoot.lastFailureResetReason),
       static_cast<unsigned>(diagnosticBoot.consecutiveEarlyFailures),
       diagnosticBoot.ready ? "true" : "false",
       diagnosticBoot.safeMode ? "true" : "false",
@@ -1574,6 +1600,8 @@ void setup() {
   }
   // Map recovery owns the SD card during this phase. Start the diagnostics
   // writer only after recovery has released it; boot events remain queued.
+  ride_diagnostics::setStorageRecoveryAllowedProbe(
+      diagnosticsStorageRecoveryAllowed);
   ride_diagnostics::startWriter();
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   boot_diagnostics::completeStage(boot_diagnostics::Stage::MapRecovery);

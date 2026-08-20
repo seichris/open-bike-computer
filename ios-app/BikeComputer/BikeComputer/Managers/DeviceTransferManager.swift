@@ -597,7 +597,15 @@ final class DeviceTransferManager {
             return session
         } catch {
             if enterWasQueued {
-                await exitDiagnostics(bleManager: bleManager)
+                // An unstructured task does not inherit cancellation from the
+                // failed entry attempt. Await its bounded exit handshake so a
+                // cancel during status/LAN/hotspot setup cannot strand the
+                // device in diagnostics mode or leave the joined AP behind.
+                let cleanup = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    try? await self.exitDiagnostics(bleManager: bleManager)
+                }
+                await cleanup.value
             }
             throw error
         }
@@ -667,9 +675,9 @@ final class DeviceTransferManager {
         )
     }
 
-    func exitDiagnostics(bleManager: BLEManager) async {
-        try? await stopDiagnostics(bleManager: bleManager)
-        removeJoinedAccessPointIfNeeded()
+    func exitDiagnostics(bleManager: BLEManager) async throws {
+        defer { removeJoinedAccessPointIfNeeded() }
+        try await stopDiagnostics(bleManager: bleManager)
         record(mode: .diagnostics, event: "transfer_exited")
     }
 

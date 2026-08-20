@@ -71,7 +71,16 @@ std::string jsonEscape(const std::string &value) {
   return escaped;
 }
 
-bool sha256File(const char *path, std::string &out, uint32_t &bytes) {
+bool requestStillAuthorized(
+    device_transfer::HttpTransferServer *server,
+    const device_transfer::HttpRequest &request) {
+  return server != nullptr && server->isRequestAuthorized(request) &&
+         server->status().mode == "diagnostics";
+}
+
+bool sha256File(const char *path, std::string &out, uint32_t &bytes,
+                device_transfer::HttpTransferServer *server,
+                const device_transfer::HttpRequest &request) {
   FILE *file = storage.open(path, "rb");
   if (file == nullptr)
     return false;
@@ -86,9 +95,16 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes) {
   bytes = 0;
   bool ok = true;
   while (true) {
-    const size_t count = storage.read(file, buffer, sizeof(buffer));
-    if (count == 0)
+    if (!requestStillAuthorized(server, request)) {
+      ok = false;
       break;
+    }
+    const size_t count = storage.read(file, buffer, sizeof(buffer));
+    if (count == 0) {
+      if (storage.hasError(file))
+        ok = false;
+      break;
+    }
     if (mbedtls_sha256_update(&context, buffer, count) != 0) {
       ok = false;
       break;
@@ -99,7 +115,8 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes) {
   if (ok)
     ok = mbedtls_sha256_finish(&context, digest) == 0;
   mbedtls_sha256_free(&context);
-  storage.close(file);
+  if (storage.close(file) != 0)
+    ok = false;
   if (!ok)
     return false;
   static constexpr char hex[] = "0123456789abcdef";
@@ -112,24 +129,38 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes) {
   return true;
 }
 
-std::vector<Chunk> listChunks() {
+std::vector<Chunk> listChunks(
+    device_transfer::HttpTransferServer *server,
+    const device_transfer::HttpRequest &request) {
   std::vector<Chunk> chunks;
   chunks.reserve(kMaximumChunks);
-  DIR *boots = opendir("/sdcard/BICINO/DIAGNOSTICS/v1/boots");
+  char bootsRoot[192] = {};
+  snprintf(bootsRoot, sizeof(bootsRoot),
+           "%s/BICINO/DIAGNOSTICS/v1/boots",
+           storage.diagnosticsRootPath());
+  DIR *boots = opendir(bootsRoot);
   if (boots == nullptr)
     return chunks;
   while (struct dirent *bootEntry = readdir(boots)) {
+    if (!requestStillAuthorized(server, request)) {
+      closedir(boots);
+      return {};
+    }
     uint32_t boot = 0;
     if (!parseUnsigned(bootEntry->d_name, boot))
       continue;
     char directory[192] = {};
-    snprintf(directory, sizeof(directory),
-             "/sdcard/BICINO/DIAGNOSTICS/v1/boots/%s",
+    snprintf(directory, sizeof(directory), "%s/%s", bootsRoot,
              bootEntry->d_name);
     DIR *dir = opendir(directory);
     if (dir == nullptr)
       continue;
     while (struct dirent *entry = readdir(dir)) {
+      if (!requestStillAuthorized(server, request)) {
+        closedir(dir);
+        closedir(boots);
+        return {};
+      }
       const std::string name(entry->d_name);
       if (name.size() < 14 || name.rfind("events-", 0) != 0 ||
           name.substr(name.size() - 6) != ".jsonl")
@@ -164,8 +195,9 @@ std::vector<Chunk> listChunks() {
   for (auto chunk = chunks.begin(); chunk != chunks.end();) {
     uint32_t bytes = 0;
     std::string digest;
-    if (!sha256File(chunk->path.c_str(), digest, bytes) || bytes == 0 ||
-        bytes > kChunkBytes) {
+    if (!sha256File(chunk->path.c_str(), digest, bytes, server, request) ||
+        bytes == 0 ||
+        bytes != chunk->bytes || bytes > kChunkBytes) {
       chunk = chunks.erase(chunk);
       continue;
     }
@@ -177,13 +209,39 @@ std::vector<Chunk> listChunks() {
 }
 
 bool sendBody(WiFiClient &client, const std::string &body,
-              const char *contentType) {
-  return device_transfer::sendHttpHead(client, 200, body.size(), contentType) &&
-         device_transfer::writeHttpBytes(
-             client, reinterpret_cast<const uint8_t *>(body.data()), body.size());
+              const char *contentType,
+              device_transfer::HttpTransferServer *server,
+              const device_transfer::HttpRequest &request) {
+  if (!requestStillAuthorized(server, request) ||
+      !device_transfer::sendHttpHead(client, 200, body.size(), contentType)) {
+    return false;
+  }
+  std::size_t offset = 0;
+  while (offset < body.size()) {
+    if (!requestStillAuthorized(server, request)) {
+      client.stop();
+      return false;
+    }
+    const std::size_t count =
+        std::min<std::size_t>(4096, body.size() - offset);
+    if (!device_transfer::writeHttpBytes(
+            client,
+            reinterpret_cast<const uint8_t *>(body.data() + offset),
+            count)) {
+      return false;
+    }
+    offset += count;
+  }
+  return true;
 }
 
-bool sendFile(WiFiClient &client, const Chunk &chunk) {
+bool sendFile(WiFiClient &client, const Chunk &chunk,
+              device_transfer::HttpTransferServer *server,
+              const device_transfer::HttpRequest &request) {
+  if (!requestStillAuthorized(server, request)) {
+    client.stop();
+    return false;
+  }
   FILE *file = storage.open(chunk.path.c_str(), "rb");
   if (file == nullptr)
     return device_transfer::sendHttpError(client, 404, "chunk_missing",
@@ -193,17 +251,27 @@ bool sendFile(WiFiClient &client, const Chunk &chunk) {
     return false;
   }
   uint8_t buffer[4096];
-  while (true) {
-    const size_t count = storage.read(file, buffer, sizeof(buffer));
-    if (count == 0)
-      break;
+  uint32_t sent = 0;
+  while (sent < chunk.bytes) {
+    if (!requestStillAuthorized(server, request)) {
+      storage.close(file);
+      client.stop();
+      return false;
+    }
+    const size_t remaining = chunk.bytes - sent;
+    const size_t count =
+        storage.read(file, buffer, std::min(remaining, sizeof(buffer)));
+    if (count == 0 || storage.hasError(file)) {
+      storage.close(file);
+      return false;
+    }
     if (!device_transfer::writeHttpBytes(client, buffer, count)) {
       storage.close(file);
       return false;
     }
+    sent += static_cast<uint32_t>(count);
   }
-  storage.close(file);
-  return true;
+  return sent == chunk.bytes && storage.close(file) == 0;
 }
 
 bool resolveClosedChunk(uint32_t boot, uint32_t number, Chunk &chunk) {
@@ -211,7 +279,8 @@ bool resolveClosedChunk(uint32_t boot, uint32_t number, Chunk &chunk) {
     return false;
   char path[220] = {};
   snprintf(path, sizeof(path),
-           "/sdcard/BICINO/DIAGNOSTICS/v1/boots/%lu/events-%06lu.jsonl",
+           "%s/BICINO/DIAGNOSTICS/v1/boots/%lu/events-%06lu.jsonl",
+           storage.diagnosticsRootPath(),
            static_cast<unsigned long>(boot),
            static_cast<unsigned long>(number));
   struct stat metadata = {};
@@ -233,6 +302,8 @@ RideDiagnosticsHttp::RideDiagnosticsHttp(device_transfer::HttpTransferServer *se
     : server_(server) {}
 
 void RideDiagnosticsHttp::configure(device_transfer::HttpTransferServer *server) {
+  exitAfterResponse_ = false;
+  endTransferSnapshotLease();
   server_ = server;
 }
 
@@ -244,6 +315,14 @@ bool RideDiagnosticsHttp::handleRequest(
                                    "diagnostics session is not authorized");
     return true;
   }
+  const std::string exitPath = std::string(kPrefix) + "session/exit";
+  if (request.path != exitPath) {
+    // A prior peer may have failed to close its exit response cleanly. Any
+    // authenticated non-exit request belongs to the live session and cancels
+    // that stale deferred shutdown.
+    exitAfterResponse_ = false;
+    refreshTransferSnapshotLease();
+  }
   if (request.path == std::string(kPrefix) + "status" &&
       request.method == "GET") {
     const Stats snapshot = stats();
@@ -253,10 +332,16 @@ bool RideDiagnosticsHttp::handleRequest(
         ",\"activeChunk\":" + std::to_string(currentActiveChunk()) +
         ",\"storageAvailable\":" +
         (snapshot.storageAvailable ? "true" : "false") + "}";
-    return sendBody(client, body, "application/json");
+    return sendBody(client, body, "application/json", server_, request);
   }
   if (request.path == std::string(kPrefix) + "index" && request.method == "GET") {
-    const std::vector<Chunk> chunks = listChunks();
+    beginTransferSnapshotLease();
+    const std::vector<Chunk> chunks = listChunks(server_, request);
+    if (!requestStillAuthorized(server_, request)) {
+      endTransferSnapshotLease();
+      client.stop();
+      return false;
+    }
     const Stats snapshot = stats();
     std::string body = "{\"schema\":1,\"source\":\"firmware\",\"bootSequence\":" +
                        std::to_string(currentBootSequence()) +
@@ -267,6 +352,11 @@ bool RideDiagnosticsHttp::handleRequest(
                        ",\"storageErrors\":" + std::to_string(snapshot.storageErrors) +
                        "},\"chunks\":[";
     for (std::size_t index = 0; index < chunks.size(); ++index) {
+      if (!requestStillAuthorized(server_, request)) {
+        endTransferSnapshotLease();
+        client.stop();
+        return false;
+      }
       if (index != 0)
         body += ',';
       const Chunk &chunk = chunks[index];
@@ -274,12 +364,14 @@ bool RideDiagnosticsHttp::handleRequest(
               ",\"chunk\":" + std::to_string(chunk.number) +
               ",\"bytes\":" + std::to_string(chunk.bytes) +
               ",\"sha256\":\"" + chunk.sha256 + "\"}";
-      if (body.size() > kMaximumIndexBytes)
+      if (body.size() > kMaximumIndexBytes) {
+        endTransferSnapshotLease();
         return device_transfer::sendHttpError(client, 413, "index_too_large",
                                               "diagnostic index exceeds the response limit");
+      }
     }
     body += "]}";
-    return sendBody(client, body, "application/json");
+    return sendBody(client, body, "application/json", server_, request);
   }
 
   const std::string chunkPrefix = std::string(kPrefix) + "chunks/";
@@ -300,7 +392,7 @@ bool RideDiagnosticsHttp::handleRequest(
     if (!resolveClosedChunk(boot, number, chunk))
       return device_transfer::sendHttpError(client, 404, "chunk_unavailable",
                                             "diagnostic chunk is unavailable");
-    return sendFile(client, chunk);
+    return sendFile(client, chunk, server_, request);
   }
 
   if (request.path == std::string(kPrefix) + "active-tail" && request.method == "GET") {
@@ -308,12 +400,14 @@ bool RideDiagnosticsHttp::handleRequest(
                                           "active diagnostic tail is not exposed");
   }
 
-  if (request.path == std::string(kPrefix) + "session/exit" && request.method == "POST") {
+  if (request.path == exitPath && request.method == "POST") {
     if (request.hasContentLength && request.contentLength != 0)
       return device_transfer::sendHttpError(client, 400, "body_not_allowed",
                                             "session exit does not accept a body");
     exitAfterResponse_ = true;
-    return sendBody(client, "{\"ok\":true}", "application/json");
+    endTransferSnapshotLease();
+    return sendBody(client, "{\"ok\":true}", "application/json", server_,
+                    request);
   }
 
   return device_transfer::sendHttpError(client, 404, "not_found",

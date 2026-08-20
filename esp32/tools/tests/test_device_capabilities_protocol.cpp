@@ -48,7 +48,7 @@ int main() {
                 (1UL << 18));
   static_assert(
       device_capabilities_protocol::AUTOMATIC_DISPLAY_OFF_CLIENT_VERSION ==
-      17);
+      16);
   static_assert(
       device_capabilities_protocol::AUTOMATIC_DISPLAY_OFF_FEATURE ==
       (1UL << 19));
@@ -56,6 +56,11 @@ int main() {
       device_capabilities_protocol::RIDE_DIAGNOSTICS_CLIENT_VERSION == 18);
   static_assert(device_capabilities_protocol::RIDE_DIAGNOSTICS_FEATURE ==
                 (1UL << 20));
+  static_assert(device_capabilities_protocol::
+                    DETAILED_RIDE_DIAGNOSTICS_CLIENT_VERSION == 19);
+  static_assert(
+      device_capabilities_protocol::DETAILED_RIDE_DIAGNOSTICS_FEATURE ==
+      (1UL << 21));
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
@@ -130,6 +135,16 @@ int main() {
   assert(rideDiagnosticsSize == sizeof(expectedRideDiagnostics));
   for (size_t index = 0; index < rideDiagnosticsSize; ++index)
     assert(output[index] == expectedRideDiagnostics[index]);
+  const size_t detailedRideDiagnosticsSize =
+      device_capabilities_protocol::encodeCap2(
+          device_capabilities_protocol::DETAILED_RIDE_DIAGNOSTICS_FEATURE,
+          nullptr, false, output, sizeof(output));
+  const uint8_t expectedDetailedRideDiagnostics[] = {
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x20, 0x00};
+  assert(detailedRideDiagnosticsSize ==
+         sizeof(expectedDetailedRideDiagnostics));
+  for (size_t index = 0; index < detailedRideDiagnosticsSize; ++index)
+    assert(output[index] == expectedDetailedRideDiagnostics[index]);
   std::cout << "device capabilities protocol tests passed\n";
   return 0;
 }

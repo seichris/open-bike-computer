@@ -714,6 +714,7 @@ struct NavigationProtocolTests {
         await testDeviceTransferManagerCompensatesCancelledDebugEntry()
         await testDeviceTransferManagerConfirmsDebugExit()
         await testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus()
+        await testDeviceDiagnosticsTransferPolicy()
         await testOfflineMapInstallationCredentialClient()
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
@@ -10553,11 +10554,16 @@ struct NavigationProtocolTests {
             NavigationWrite(
                 data: Data([8]),
                 label: "calculating-status",
-                onDrop: { supersededStatusWasDropped = true }
+                onDrop: { supersededStatusWasDropped = true },
+                coalescingKey: "destination-status"
             )
         ]), "first priority status is admitted despite a full catalog lane")
         assert(catalogAndStatusQueue.enqueuePrioritizedAtomically([
-            NavigationWrite(data: Data([9]), label: "terminal-status")
+            NavigationWrite(
+                data: Data([9]),
+                label: "terminal-status",
+                coalescingKey: "destination-status"
+            )
         ]), "new terminal status replaces an older queued status")
         assert(supersededStatusWasDropped,
                "priority replacement reports the superseded status")
@@ -10886,6 +10892,15 @@ struct NavigationProtocolTests {
         ), prioritized: true), "transfer status has a dedicated sixth priority slot")
         assertEqual(priorityCapacityQueue.count, 6,
                     "workout, navigation, and transfer priority traffic coexist")
+        assert(!priorityCapacityQueue.enqueuePrioritizedAtomically([
+            NavigationWrite(
+                data: Data([28]),
+                label: "issue-marker",
+                writeClass: .transfer
+            )
+        ]), "an unkeyed issue marker cannot evict active priority controls")
+        assertEqual(priorityCapacityQueue.count, 6,
+                    "a rejected marker preserves every active priority control")
         assert(priorityCapacityQueue.enqueuePrioritizedAtomically([
             NavigationWrite(
                 data: Data([26]),
@@ -11217,8 +11232,9 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rendererDiagnosticsCapabilityMask, 1 << 18, "CAP2 bit 18 advertises renderer diagnostics")
         assertEqual(DeviceBLEProtocol.automaticDisplayOffCapabilityMask, 1 << 19, "CAP2 bit 19 advertises automatic display-off")
         assertEqual(DeviceBLEProtocol.rideDiagnosticsCapabilityMask, 1 << 20, "CAP2 bit 20 advertises persistent ride diagnostics")
+        assertEqual(DeviceBLEProtocol.detailedRideDiagnosticsCapabilityMask, 1 << 21, "CAP2 bit 21 advertises detailed ride diagnostics")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 18, "capability version negotiates ride diagnostics after automatic display-off in version 17")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 19, "capability version negotiates detailed ride diagnostics")
         assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
         assertEqual(DeviceBLEProtocol.rendererMetricsResponsePrefix, "RDMT", "renderer metrics responses use RDMT")
         assertEqual(DeviceBLEProtocol.rendererMetricsChunkPrefix, "RDMC", "renderer metrics chunks use RDMC")
@@ -15734,6 +15750,271 @@ struct NavigationProtocolTests {
         ), "LAN credentials that exceed the negotiated fallback endpoint are rejected")
         assert(shortEndpointPackets.isEmpty,
                "oversized LAN credential commands are never queued")
+
+        let diagnosticsManager = BLEManager()
+        diagnosticsManager.isConnected = true
+        diagnosticsManager.isNavigationReady = true
+        let diagnosticsCapabilities =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 0x30, 0])
+        assert(diagnosticsManager.handleDeviceCapabilitiesNotification(
+            diagnosticsCapabilities
+        ), "diagnostics capture fixture negotiates CAP2 bit 20")
+        var diagnosticsPackets: [Data] = []
+        diagnosticsManager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 80,
+                canSend: { true },
+                write: { diagnosticsPackets.append($0) }
+            )
+        )
+        let captureID = UUID(
+            uuidString: "01234567-89ab-cdef-0123-456789abcdef"
+        )!
+        assert(diagnosticsManager.sendDiagnosticsCaptureBinding(
+            captureID,
+            detailed: true
+        ), "the emitted detailed mode should queue explicitly")
+        assert(diagnosticsManager.sendDiagnosticsCaptureBinding(
+            captureID,
+            detailed: false
+        ), "the emitted standard mode should queue explicitly")
+        assertEqual(
+            String(data: diagnosticsPackets[0], encoding: .utf8),
+            "DTRNcapture|1|detailed|01234567-89ab-cdef-0123-456789abcdef",
+            "the @Published willSet callback cannot invert detailed mode"
+        )
+        assertEqual(
+            String(data: diagnosticsPackets[1], encoding: .utf8),
+            "DTRNcapture|1|standard|01234567-89ab-cdef-0123-456789abcdef",
+            "ending detailed capture explicitly rebinds standard mode"
+        )
+
+        let standardOnlyManager = BLEManager()
+        standardOnlyManager.isConnected = true
+        standardOnlyManager.isNavigationReady = true
+        let standardOnlyCapabilities =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 0x10, 0])
+        _ = standardOnlyManager.handleDeviceCapabilitiesNotification(
+            standardOnlyCapabilities
+        )
+        var standardOnlyPackets: [Data] = []
+        standardOnlyManager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 80,
+                canSend: { true },
+                write: { standardOnlyPackets.append($0) }
+            )
+        )
+        assert(standardOnlyManager.sendDiagnosticsCaptureBinding(
+            captureID,
+            detailed: true
+        ), "standard-only firmware still receives capture correlation")
+        assertEqual(
+            String(data: standardOnlyPackets[0], encoding: .utf8),
+            "DTRNcapture|1|standard|01234567-89ab-cdef-0123-456789abcdef",
+            "production diagnostics downgrade unsupported detailed binding"
+        )
+        _ = standardOnlyManager.handleDeviceCapabilitiesNotification(
+            diagnosticsCapabilities
+        )
+        assertEqual(
+            String(data: standardOnlyPackets.last ?? Data(), encoding: .utf8),
+            "DTRNcapture|1|detailed|01234567-89ab-cdef-0123-456789abcdef",
+            "a later detailed-capable reconnect restores the requested mode"
+        )
+
+        let disconnectedManager = BLEManager()
+        let endedCaptureID = UUID(
+            uuidString: "fedcba98-7654-3210-fedc-ba9876543210"
+        )!
+        assert(!disconnectedManager.sendDiagnosticsCaptureBinding(
+            endedCaptureID,
+            detailed: false
+        ), "a disconnected binding is retained even though it cannot queue")
+        var reconnectedPackets: [Data] = []
+        disconnectedManager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 80,
+                canSend: { true },
+                write: { reconnectedPackets.append($0) }
+            )
+        )
+        disconnectedManager.isConnected = true
+        disconnectedManager.isNavigationReady = true
+        _ = disconnectedManager.handleDeviceCapabilitiesNotification(
+            diagnosticsCapabilities
+        )
+        let reconnectedCapturePacket = reconnectedPackets.first {
+            String(data: $0, encoding: .utf8)?.hasPrefix("DTRNcapture|") == true
+        }
+        assertEqual(
+            String(data: reconnectedCapturePacket ?? Data(), encoding: .utf8),
+            "DTRNcapture|1|standard|fedcba98-7654-3210-fedc-ba9876543210",
+            "reconnect sends the capture that rotated while capabilities were unavailable"
+        )
+    }
+
+    @MainActor
+    static func testDeviceDiagnosticsTransferPolicy() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let manager = DeviceDiagnosticsTransferManager(
+            sessionConfiguration: { configuration }
+        )
+        let session = DeviceTransferSession(
+            mode: .diagnostics,
+            baseURL: URL(string: "https://diagnostics.test")!,
+            accessPointSSID: nil,
+            sessionToken: "test-token"
+        )
+        defer { OfflineMapTestURLProtocol.reset() }
+
+        OfflineMapTestURLProtocol.configure { _ in (200, Data([1, 2, 3])) }
+        do {
+            let data = try await manager.requestForTesting(
+                session: session,
+                path: "device-diagnostics/v1/index",
+                maximumBytes: 4
+            )
+            assertEqual(data, Data([1, 2, 3]),
+                        "diagnostics requests stream a bounded response")
+        } catch {
+            assert(false, "bounded diagnostics response succeeds: \(error)")
+        }
+
+        OfflineMapTestURLProtocol.configure { _ in
+            (200, Data([1, 2, 3, 4, 5]))
+        }
+        do {
+            _ = try await manager.requestForTesting(
+                session: session,
+                path: "device-diagnostics/v1/chunks/1/1",
+                maximumBytes: 4
+            )
+            assert(false, "oversized diagnostics stream is rejected")
+        } catch DeviceDiagnosticsTransferError.oversizedChunk {
+            // Expected.
+        } catch {
+            assert(false, "oversized diagnostics stream has the right error")
+        }
+
+        let validIndex = Data("""
+        {"schema":1,"source":"firmware","bootSequence":1,"activeChunk":2,"stats":{"enqueued":2,"written":1,"dropped":0,"storageErrors":0},"chunks":[{"bootSequence":1,"chunk":1,"bytes":3,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
+        """.utf8)
+        assert(
+            DeviceDiagnosticsTransferManager.indexShapeIsValidForTesting(
+                validIndex
+            ),
+            "known diagnostics index shape is accepted"
+        )
+        let unsafeIndex = Data("""
+        {"schema":1,"source":"firmware","bootSequence":1,"activeChunk":2,"stats":{"enqueued":2,"written":1,"dropped":0,"storageErrors":0},"chunks":[],"password":"secret123"}
+        """.utf8)
+        assert(
+            !DeviceDiagnosticsTransferManager.indexShapeIsValidForTesting(
+                unsafeIndex
+            ),
+            "unknown credential-shaped index fields are rejected"
+        )
+
+        let validStream = Data("""
+        {"schema":1,"source":"firmware","sequence":7,"level":"info","category":"boot","event":"ready","fields":{"bootSequence":1,"firmwareFingerprint":"A1B2C3D4"}}
+        {"schema":1,"source":"firmware","sequence":8,"level":"info","category":"storage","event":"mounted","fields":{"bootSequence":1,"firmwareFingerprint":"A1B2C3D4","available":true}}
+        """.utf8)
+        let validation =
+            DeviceDiagnosticsTransferManager.validateJSONLForTesting(
+                validStream
+            )
+        assertEqual(validation?.first, 7,
+                    "diagnostics validator retains first sequence")
+        assertEqual(validation?.last, 8,
+                    "diagnostics validator retains last sequence")
+        let validHash = SHA256.hash(data: validStream).map {
+            String(format: "%02x", $0)
+        }.joined()
+        assert(
+            DeviceDiagnosticsTransferManager.cachedChunkIsReusableForTesting(
+                validStream,
+                expectedBytes: validStream.count,
+                expectedSHA256: validHash
+            ),
+            "a complete cached chunk can resume without another HTTP fetch"
+        )
+        assert(
+            !DeviceDiagnosticsTransferManager.cachedChunkIsReusableForTesting(
+                Data(validStream.dropLast()),
+                expectedBytes: validStream.count,
+                expectedSHA256: validHash
+            ),
+            "a truncated cache entry cannot bypass resume validation"
+        )
+        let laterStream = Data("""
+        {"schema":1,"source":"firmware","sequence":9,"level":"info","category":"boot","event":"later","fields":{"bootSequence":1,"firmwareFingerprint":"A1B2C3D4"}}
+        """.utf8)
+        let otherBootStream = Data("""
+        {"schema":1,"source":"firmware","sequence":1,"level":"info","category":"boot","event":"other","fields":{"bootSequence":2,"firmwareFingerprint":"A1B2C3D4"}}
+        """.utf8)
+        assert(
+            DeviceDiagnosticsTransferManager.streamsAreOrderedForTesting([
+                (1, validStream), (1, laterStream), (2, otherBootStream),
+            ]),
+            "sequence tracking is monotonic per boot and independent across boots"
+        )
+        assert(
+            !DeviceDiagnosticsTransferManager.streamsAreOrderedForTesting([
+                (1, laterStream), (1, validStream),
+            ]),
+            "cached or downloaded chunks cannot move a boot sequence backward"
+        )
+        let replacedFirmwareStream = Data("""
+        {"schema":1,"source":"firmware","sequence":10,"level":"info","category":"boot","event":"replaced","fields":{"bootSequence":1,"firmwareFingerprint":"B1C2D3E4"}}
+        """.utf8)
+        assert(
+            !DeviceDiagnosticsTransferManager.streamsAreOrderedForTesting([
+                (1, validStream), (1, replacedFirmwareStream),
+            ]),
+            "chunks from one boot cannot silently change firmware identity"
+        )
+        let truncatedFirstStream = validStream + Data("{\"schema\":".utf8)
+        assert(
+            !DeviceDiagnosticsTransferManager.streamsAreOrderedForTesting([
+                (1, truncatedFirstStream), (1, laterStream),
+            ]),
+            "a recoverable tail is valid only on the final chunk of a boot"
+        )
+        let blankMiddleLine = Data("""
+        {"schema":1,"source":"firmware","sequence":7,"level":"info","category":"boot","event":"ready","fields":{"bootSequence":1,"firmwareFingerprint":"A1B2C3D4"}}
+
+        {"schema":1,"source":"firmware","sequence":8,"level":"info","category":"boot","event":"later","fields":{"bootSequence":1,"firmwareFingerprint":"A1B2C3D4"}}
+        """.utf8)
+        assert(
+            DeviceDiagnosticsTransferManager.validateJSONLForTesting(
+                blankMiddleLine
+            ) == nil,
+            "blank middle records cannot pass iOS and later fail Mac validation"
+        )
+        let booleanNumberStream = Data("""
+        {"schema":1,"source":"firmware","sequence":9,"level":"info","category":"boot","event":"invalid","fields":{"bootSequence":true,"firmwareFingerprint":"A1B2C3D4"}}
+
+        """.utf8)
+        assert(
+            DeviceDiagnosticsTransferManager.validateJSONLForTesting(
+                booleanNumberStream
+            ) == nil,
+            "JSON booleans cannot impersonate firmware number fields"
+        )
+        let numericBooleanStream = Data("""
+        {"schema":1,"source":"firmware","sequence":10,"level":"info","category":"storage","event":"invalid","fields":{"bootSequence":1,"firmwareFingerprint":"A1B2C3D4","available":1}}
+
+        """.utf8)
+        assert(
+            DeviceDiagnosticsTransferManager.validateJSONLForTesting(
+                numericBooleanStream
+            ) == nil,
+            "JSON numbers cannot impersonate firmware boolean fields"
+        )
     }
 
     static func testDeviceTransferManagerWaitsForFreshDebugToken() async {

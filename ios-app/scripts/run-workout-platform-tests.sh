@@ -84,6 +84,7 @@ xcodebuild \
   -destination "id=${SIMULATOR_UDID}" \
   -derivedDataPath "${DERIVED_DATA}" \
   CODE_SIGNING_ALLOWED=NO \
+  ${ONLY_TESTING:+-only-testing:"${ONLY_TESTING}"} \
   test
 
 echo "${SCHEME} passed"

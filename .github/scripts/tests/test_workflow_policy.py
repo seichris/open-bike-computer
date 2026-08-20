@@ -307,6 +307,20 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('"/device-debug/v1/metrics/window"', general_ci)
         self.assertIn('route.encode("utf-8") + b"\\0"', general_ci)
 
+    def test_pull_request_ordinary_builds_verify_persistent_diagnostics_routes(self) -> None:
+        general_ci = workflow_source("ci.yml")
+
+        self.assertIn(
+            "Verify ordinary artifacts include persistent diagnostics capability",
+            general_ci,
+        )
+        self.assertIn('"/device-diagnostics/v1/"', general_ci)
+        self.assertIn('"storage_gap"', general_ci)
+        self.assertIn(
+            "if: ${{ !contains(matrix.target, '_REMOTE_DEBUG') }}",
+            general_ci,
+        )
+
     def test_feature_branch_pushes_do_not_duplicate_pull_request_ci(self) -> None:
         general_ci = workflow_source("ci.yml")
 

@@ -996,26 +996,32 @@ and renderer target 3, bit `13` to the explicit invalid GPS-heading sentinel,
 bit `14` to scoped Watch control, bit `15` to the complete RAUT v2
 characteristic/fallback, persistence, and UI/control path, and bit `16` to the
 session-scoped real-device browser-debug service. Bit `17` negotiates the
-GPS-position quality-v1 tail used by ride detection. Bit `19` reports
+GPS-position quality-v1 tail used by ride detection. Bit `18` reports bounded
+renderer diagnostics. Bit `19` reports
 connected-display automatic inactivity control (setting ID `36`), and bit `20`
 negotiates persistent, privacy-bounded ride diagnostics and the authenticated
-device-log transfer mode. Client version `11` requests bit `13`, version `12` requests
+device-log transfer mode. Bit `21` reports support for the optional detailed
+one-Hz ride-automation trace. Client version `11` requests bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
-without the newer features. Client version `16` requests bit `18`, the
-authenticated renderer-diagnostics and benchmark-fixture contract below.
-Client version `17` requests bit `19`, and version `18` requests bit `20`.
+without the newer features. Client version `16` requests bits `18` and `19`,
+including the authenticated renderer-diagnostics contract and the already
+released automatic-display setting. Version `18` requests bit `20`, and
+version `19` requests bit `21`.
 Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
 Firmware sets bit `18` only when `FIRMWARE_DIAGNOSTICS=1`; production builds
 therefore expose neither the snapshot nor experimental profile control. GFX
-firmware advertises bit `19` for client version `17` and newer; iOS enables the
+firmware advertises bit `19` for client version `16` and newer; iOS enables the
 toggle and sends ID `36` only after this bit is received, so legacy firmware
 with the generic settings characteristic never receives an unsupported setting.
 The bounded persistent recorder may advertise bit `20` in ordinary and
 production profiles; it never enables USB serial diagnostics or the
 remote-debug service.
+Firmware advertises bit `21` only when the read-only ride-automation shadow
+producer is compiled. Production firmware keeps it clear, and iOS downgrades
+an otherwise detailed capture binding to standard correlation when it is absent.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). Types are unique;
@@ -1053,6 +1059,9 @@ Automatic display off, CAP2 schema 1, only feature bit 19:
 
 Persistent ride diagnostics, CAP2 schema 1, only feature bit 20:
 43 41 50 32 01 00 00 10 00
+
+Detailed ride diagnostics, CAP2 schema 1, only feature bit 21:
+43 41 50 32 01 00 00 20 00
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -1310,9 +1319,15 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `DTRN` | iOS -> ESP32 | `enter\|diagnostics` | Enter the authenticated, read-only device-log transfer mode when CAP2 bit `20` is negotiated. |
 | `DTRN` | iOS -> ESP32 | `enter\|diagnostics\|lan1\|` plus bounded binary credentials | Enter diagnostics mode by trying the configured trusted LAN first, with protected-hotspot fallback. |
 | `DTRN` | iOS -> ESP32 | `enter\|diagnostics\|h1\|e` | Re-enter diagnostics on the protected hotspot after the iPhone confirms that the advertised LAN endpoint is unreachable. |
-| `DTRN` | iOS -> ESP32 | `capture\|1\|<standard-or-detailed>\|<uuid>` | Bind the current random iPhone capture UUID and capture level; idempotent on reconnect. Detailed mode is rejected by firmware without the read-only ride-automation shadow capability. |
+| `DTRN` | iOS -> ESP32 | `capture\|1\|<standard-or-detailed>\|<uuid>` | Bind the current random iPhone capture UUID and capture level; idempotent on reconnect. Detailed mode is sent only with CAP2 bit `21` and is rejected by firmware without the read-only ride-automation shadow producer. |
 | `DTRN` | iOS -> ESP32 | `mark\|1\|<sequence>\|<code>` | Persist one predefined issue marker. Sequence is positive and strictly increasing for the bound capture; replayed or out-of-order markers are rejected. |
 | `DTRN` | iOS -> ESP32 | `capture_end` | End the active detailed capture binding. |
+
+The device preserves a detailed binding through short BLE gaps. If the last
+confirmed workout lifecycle was active and workout telemetry remains stale for
+five minutes, firmware ends detailed sampling conservatively because it can no
+longer observe the phone-side ride-end transition. The independent four-hour
+deadline remains the final fail-safe.
 | `DTRN` | iOS -> ESP32 | `exit` | Exit the active map, firmware, debug, or diagnostics transfer mode. |
 | `DSTS` | iOS -> ESP32 | empty | Request generic device-transfer status and the current HTTP credential. |
 
@@ -1423,6 +1438,9 @@ verifies length, SHA-256, JSONL schema/source, per-field types, and sequence
 ordering within and across chunks, then atomically
 retains it under its local diagnostics root. Repeating a download skips an
 already-imported chunk with the same hash.
+Creating the index starts a bounded transfer snapshot lease. Retention pruning
+cannot delete indexed closed chunks while that authenticated session is active;
+each non-exit request refreshes the lease and session exit releases it.
 
 The browser API and binary RGB565 frame contract are documented in
 [Remote device debugging](remote-device-debugging.md). BLE exit, browser exit,

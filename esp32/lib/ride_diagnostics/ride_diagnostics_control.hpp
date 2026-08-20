@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 namespace ride_diagnostics::control {
@@ -16,6 +17,29 @@ struct IssueMarker {
   uint32_t sequence = 0;
   std::string code;
 };
+
+inline bool bindingRequiresChunkBoundary(
+    const char *currentCaptureId, CaptureMode currentMode,
+    const char *nextCaptureId, CaptureMode nextMode) {
+  if (currentCaptureId == nullptr || nextCaptureId == nullptr)
+    return true;
+  return std::strcmp(currentCaptureId, nextCaptureId) != 0 ||
+         currentMode != nextMode;
+}
+
+inline bool markerSequenceCanAdvance(uint32_t previous, uint32_t next) {
+  return next != 0 && next > previous;
+}
+
+inline uint32_t markerSequenceAfterBinding(
+    const char *currentCaptureId, const char *nextCaptureId,
+    uint32_t previousMarkerSequence) {
+  if (currentCaptureId == nullptr || nextCaptureId == nullptr ||
+      std::strcmp(currentCaptureId, nextCaptureId) != 0) {
+    return 0;
+  }
+  return previousMarkerSequence;
+}
 
 inline bool parsePositiveUint32(const std::string &value, uint32_t &out) {
   if (value.empty() || value.size() > 10)

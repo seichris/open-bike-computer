@@ -312,7 +312,8 @@ enum DeviceBLEProtocol {
     static let rendererDiagnosticsCapabilityMask: UInt32 = 1 << 18
     static let automaticDisplayOffCapabilityMask: UInt32 = 1 << 19
     static let rideDiagnosticsCapabilityMask: UInt32 = 1 << 20
-    static let deviceCapabilitiesVersion: UInt8 = 18
+    static let detailedRideDiagnosticsCapabilityMask: UInt32 = 1 << 21
+    static let deviceCapabilitiesVersion: UInt8 = 19
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryOriginFrameLength = 28
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
@@ -820,6 +821,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsGPSPositionQualityV1: Bool = false
     @Published private(set) var supportsRendererDiagnostics: Bool = false
     @Published private(set) var supportsRideDiagnostics: Bool = false
+    @Published private(set) var supportsDetailedRideDiagnostics: Bool = false
     @Published private(set) var rendererDiagnosticsSnapshotJSON: String?
     @Published private(set) var rendererDiagnosticsStatus = "unavailable"
     @Published private(set) var rendererDiagnosticsRevision: UInt64 = 0
@@ -1136,6 +1138,9 @@ class BLEManager: NSObject, ObservableObject {
     private var nextDestinationCatalogTransferID: UInt8 = 1
     private var destinationStatusSequence: UInt64 = 0
     private var powerButtonHonkRetryWorkItem: DispatchWorkItem?
+    private var desiredDiagnosticsCaptureBinding: RideDiagnosticsCaptureBinding?
+    private var diagnosticsCaptureBindingRetryWorkItem: DispatchWorkItem?
+    private var diagnosticsCaptureBindingRetryPending = false
     private var powerButtonHonkRetryScheduler: (TimeInterval, DispatchWorkItem) -> Void = { delay, workItem in
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
@@ -4236,6 +4241,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsGPSPositionQualityV1 = false
         supportsRendererDiagnostics = false
         supportsRideDiagnostics = false
+        supportsDetailedRideDiagnostics = false
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
         rendererDiagnosticsStatus = "unsupported"
@@ -4658,22 +4664,50 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    func sendDiagnosticsCaptureBinding(_ captureID: UUID? = nil) -> Bool {
-        guard supportsRideDiagnostics,
-              let captureID = captureID ?? diagnosticsRecorder?.currentCaptureID else {
+    func sendDiagnosticsCaptureBinding(
+        _ captureID: UUID? = nil,
+        detailed explicitDetailedMode: Bool? = nil
+    ) -> Bool {
+        guard let captureID = captureID ?? diagnosticsRecorder?.currentCaptureID else {
             return false
         }
-        let mode = diagnosticsRecorder?.detailedTraceEnabled == true
+        let requestedDetailed = explicitDetailedMode ??
+            (diagnosticsRecorder?.isDetailedTraceEnabled == true)
+        // Capture state can rotate while BLE is disconnected and capability
+        // flags are cleared. Persist the recorder's requested state before any
+        // connection/capability guard so reconnect never revives a stale ride
+        // ID or stale detailed consent.
+        desiredDiagnosticsCaptureBinding = RideDiagnosticsCaptureBinding(
+            captureID: captureID,
+            detailed: requestedDetailed
+        )
+        guard supportsRideDiagnostics else { return false }
+        // Production firmware supports standard correlation but deliberately
+        // omits the detailed one-Hz producer. Downgrade the binding instead of
+        // sending a mode that the connected profile must reject.
+        let detailed = requestedDetailed && supportsDetailedRideDiagnostics
+        let mode = detailed
             ? "detailed"
             : "standard"
         let packet = Data(
             "\(DeviceBLEProtocol.deviceTransferControlPrefix)capture|1|\(mode)|\(captureID.uuidString.lowercased())".utf8
         )
-        return sendTransferControlPacket(
+        let queued = sendTransferControlPacket(
             packet,
             label: "diagnostics capture binding",
-            coalescingKey: "transfer.diagnostics.capture"
+            coalescingKey: "transfer.diagnostics.capture",
+            onWriteFailure: { [weak self] in
+                self?.scheduleDiagnosticsCaptureBindingRetry()
+            }
         )
+        if queued {
+            diagnosticsCaptureBindingRetryPending = false
+            diagnosticsCaptureBindingRetryWorkItem?.cancel()
+            diagnosticsCaptureBindingRetryWorkItem = nil
+        } else {
+            scheduleDiagnosticsCaptureBindingRetry()
+        }
+        return queued
     }
 
     @discardableResult
@@ -4707,7 +4741,39 @@ class BLEManager: NSObject, ObservableObject {
 
     private func sendDiagnosticsCaptureBindingIfNeeded() {
         guard isConnected, isNavigationReady, supportsRideDiagnostics else { return }
-        _ = sendDiagnosticsCaptureBinding()
+        if let desiredDiagnosticsCaptureBinding {
+            _ = sendDiagnosticsCaptureBinding(
+                desiredDiagnosticsCaptureBinding.captureID,
+                detailed: desiredDiagnosticsCaptureBinding.detailed
+            )
+        } else {
+            _ = sendDiagnosticsCaptureBinding()
+        }
+    }
+
+    private func scheduleDiagnosticsCaptureBindingRetry() {
+        diagnosticsCaptureBindingRetryPending = true
+        diagnosticsCaptureBindingRetryWorkItem?.cancel()
+        diagnosticsCaptureBindingRetryWorkItem = nil
+        guard isConnected, isNavigationReady, supportsRideDiagnostics else {
+            return
+        }
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.diagnosticsCaptureBindingRetryPending,
+                  let desired = self.desiredDiagnosticsCaptureBinding else {
+                return
+            }
+            _ = self.sendDiagnosticsCaptureBinding(
+                desired.captureID,
+                detailed: desired.detailed
+            )
+        }
+        diagnosticsCaptureBindingRetryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 0.25,
+            execute: workItem
+        )
     }
 
     @discardableResult
@@ -5204,6 +5270,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsGPSPositionQualityV1 = false
         supportsRendererDiagnostics = false
         supportsRideDiagnostics = false
+        supportsDetailedRideDiagnostics = false
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
         rendererDiagnosticsStatus = "unavailable"
@@ -5232,21 +5299,6 @@ class BLEManager: NSObject, ObservableObject {
 
     private func log(_ message: String) {
         print(message)
-        let messageDigest = diagnosticsRecorder?.privacyDigest(
-            Data(message.utf8)
-        )
-        if let messageDigest {
-            diagnosticsRecorder?.record(
-            level: .debug,
-            category: .ble,
-            event: "debug_message",
-            fields: [
-                "messageBytes": String(message.utf8.count),
-                "messageDigest": messageDigest,
-            ],
-            captureId: diagnosticsRecorder?.currentCaptureID
-            )
-        }
 
         let timestamp = DateFormatter.bleDebugTimestamp.string(from: Date())
         let line = "\(timestamp) \(message)"
@@ -6228,6 +6280,12 @@ class BLEManager: NSObject, ObservableObject {
         authInfoFallbackTimer?.invalidate()
         authInfoFallbackTimer = nil
         log("BLE auth failed: \(message)")
+        diagnosticsRecorder?.record(
+            level: .warning,
+            category: .ble,
+            event: "authentication_failed",
+            fields: ["reason": "authentication_failed"]
+        )
         suppressNextReconnect = pendingPairingSession != nil
         centralManager.cancelPeripheralConnection(peripheral)
     }
@@ -6382,6 +6440,11 @@ class BLEManager: NSObject, ObservableObject {
         autoReconnect = true
         reconcileScanning(reason: "authentication completed")
         log("BLE peripheral authenticated")
+        diagnosticsRecorder?.record(
+            category: .ble,
+            event: "authenticated",
+            fields: ["authorized": "true"]
+        )
         enqueueAuthMessage("GET_NAME")
         requestDeviceCapabilities()
         sendInitialDeviceSettingsAfterAuthentication()
@@ -6517,7 +6580,8 @@ class BLEManager: NSObject, ObservableObject {
         atomically: Bool = false,
         payloadProvider: (() -> Data)? = nil,
         onWrite: (() -> Void)? = nil,
-        onDrop: (() -> Void)? = nil
+        onDrop: (() -> Void)? = nil,
+        onWriteFailure: (() -> Void)? = nil
     ) -> Bool {
         guard let endpoint = navigationWriteEndpoint,
               isConnected,
@@ -6543,7 +6607,8 @@ class BLEManager: NSObject, ObservableObject {
                 { _ in endpoint.write(provider()) }
             },
             onWrite: onWrite,
-            onDrop: onDrop
+            onDrop: onDrop,
+            onWriteFailure: onWriteFailure
         ) else {
             log("Fallback \(label) not queued: write queue unavailable")
             return false
@@ -6556,7 +6621,8 @@ class BLEManager: NSObject, ObservableObject {
     private func sendTransferControlPacket(
         _ data: Data,
         label: String,
-        coalescingKey: String?
+        coalescingKey: String?,
+        onWriteFailure: (() -> Void)? = nil
     ) -> Bool {
         DevicePacketRouting.sendPreferredThenFallback(
             preferred: {
@@ -6565,7 +6631,8 @@ class BLEManager: NSObject, ObservableObject {
                     label: label,
                     writeClass: .transfer,
                     coalescingKey: coalescingKey,
-                    prioritized: true
+                    prioritized: true,
+                    onWriteFailure: onWriteFailure
                 )
             },
             fallback: {
@@ -6574,7 +6641,8 @@ class BLEManager: NSObject, ObservableObject {
                     label: label,
                     writeClass: .transfer,
                     coalescingKey: coalescingKey,
-                    prioritized: true
+                    prioritized: true,
+                    onWriteFailure: onWriteFailure
                 )
             }
         )
@@ -6587,7 +6655,8 @@ class BLEManager: NSObject, ObservableObject {
         writeClass: NavigationWriteClass = .settingsControl,
         coalescingKey: String? = nil,
         prioritized: Bool = false,
-        onDrop: (() -> Void)? = nil
+        onDrop: (() -> Void)? = nil,
+        onWriteFailure: (() -> Void)? = nil
     ) -> Bool {
         guard isConnected,
               isNavigationReady,
@@ -6630,7 +6699,8 @@ class BLEManager: NSObject, ObservableObject {
                     : peripheral.canSendWriteWithoutResponse
             },
             transportExpectsWriteResponse: expectsWriteResponse,
-            onDrop: onDrop
+            onDrop: onDrop,
+            onWriteFailure: onWriteFailure
         ) else { return false }
         log("Queued native \(label): \(data.count) bytes")
         return true
@@ -6639,6 +6709,9 @@ class BLEManager: NSObject, ObservableObject {
     func waitForNavigationWritesToDrain(timeoutSeconds: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while navigationWriteQueue.count > 0 {
+            if Task.isCancelled {
+                return false
+            }
             if let endpoint = navigationWriteEndpoint {
                 flushPendingNavigationWrites(endpoint: endpoint)
             }
@@ -7196,6 +7269,11 @@ extension BLEManager: CBCentralManagerDelegate {
                 )
         )
         log("Connected to: \(peripheral.name ?? "Unknown")")
+        diagnosticsRecorder?.record(
+            category: .ble,
+            event: "transport_connected",
+            fields: ["connectionState": "connected"]
+        )
         
         connectionTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
@@ -7228,6 +7306,15 @@ extension BLEManager: CBCentralManagerDelegate {
         if let error = error {
             log("Disconnect error: \(error.localizedDescription)")
         }
+        diagnosticsRecorder?.record(
+            level: error == nil ? .info : .warning,
+            category: .ble,
+            event: "transport_disconnected",
+            fields: [
+                "connectionState": "disconnected",
+                "reason": error == nil ? "remote" : "transport_error",
+            ]
+        )
         
         isConnected = false
         isConnecting = false
@@ -7353,6 +7440,12 @@ extension BLEManager: CBCentralManagerDelegate {
         }
         locallyForgottenPeripheralIdentifiers.remove(peripheral.identifier)
         log("Failed to connect to: \(peripheral.name ?? "Unknown")")
+        diagnosticsRecorder?.record(
+            level: .warning,
+            category: .ble,
+            event: "connection_failed",
+            fields: ["reason": "transport_error"]
+        )
         clearConnectionState()
         
         if let error = error {
@@ -7717,6 +7810,7 @@ extension BLEManager: CBPeripheralDelegate {
         supportsGPSPositionQualityV1 = false
         supportsRendererDiagnostics = false
         supportsRideDiagnostics = false
+        supportsDetailedRideDiagnostics = false
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
         rendererDiagnosticsStatus = "invalid capabilities"
@@ -7848,6 +7942,8 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.automaticDisplayOffCapabilityMask != 0
         let hasRideDiagnostics =
             flags & DeviceBLEProtocol.rideDiagnosticsCapabilityMask != 0
+        let hasDetailedRideDiagnostics = hasRideDiagnostics &&
+            flags & DeviceBLEProtocol.detailedRideDiagnosticsCapabilityMask != 0
         if has3DBuildings && shouldApply3DBuildingVisibilityDefault {
             shouldApply3DBuildingVisibilityDefault = false
             UserDefaults.standard.set(
@@ -7936,6 +8032,7 @@ extension BLEManager: CBPeripheralDelegate {
         supportsGPSPositionQualityV1 = hasGPSPositionQualityV1
         supportsRendererDiagnostics = hasRendererDiagnostics
         supportsRideDiagnostics = hasRideDiagnostics
+        supportsDetailedRideDiagnostics = hasDetailedRideDiagnostics
         if hasRideDiagnostics {
             sendDiagnosticsCaptureBindingIfNeeded()
         }

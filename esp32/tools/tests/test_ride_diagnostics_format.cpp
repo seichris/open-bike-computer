@@ -7,6 +7,7 @@
 int main() {
   using ride_diagnostics::detail::FaultCapsuleState;
   using ride_diagnostics::detail::formatFaultCapsuleFields;
+  using ride_diagnostics::detail::faultCapsuleIdentityMatches;
   using ride_diagnostics::detail::sealFaultCapsule;
   using ride_diagnostics::detail::validateFieldsJson;
 
@@ -23,6 +24,9 @@ int main() {
   std::strcpy(capsule.lastCriticalCategory, "storage");
   std::strcpy(capsule.lastCriticalEvent, "write_failed");
   sealFaultCapsule(capsule);
+  assert(faultCapsuleIdentityMatches(capsule, 42, capsule.checksum));
+  assert(!faultCapsuleIdentityMatches(capsule, 8, capsule.checksum));
+  assert(!faultCapsuleIdentityMatches(capsule, 42, capsule.checksum + 1));
 
   char output[512] = {};
   assert(formatFaultCapsuleFields(capsule, output, sizeof(output)));

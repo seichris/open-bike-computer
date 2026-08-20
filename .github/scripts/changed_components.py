@@ -55,6 +55,7 @@ FIRMWARE_MANIFEST_PATHS = {
     "tools/firmware_manifest.py",
     "tools/tests/test_firmware_manifest.py",
 }
+RIDE_DIAGNOSTICS_TOOL_PATHS = {"tools/ride_diagnostics.py"}
 FIRMWARE_RELEASE_TOOL_PATHS = {
     "tools/factory_release_manifest.py",
     "tools/firmware-signing-requirements.txt",
@@ -102,6 +103,7 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
             or path in FIRMWARE_WORKFLOW_PATHS
             or path in FIRMWARE_CONTRACT_PATHS
             or path in FIRMWARE_RELEASE_TOOL_PATHS
+            or path in RIDE_DIAGNOSTICS_TOOL_PATHS
         ):
             selected["firmware_host"] = True
 

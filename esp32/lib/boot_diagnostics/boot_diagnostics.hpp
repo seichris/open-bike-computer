@@ -18,6 +18,9 @@ struct Snapshot {
   uint32_t resetReason;
   Stage activeStage;
   Stage completedStage;
+  Stage lastFailureStage;
+  Stage lastFailureCompletedStage;
+  uint32_t lastFailureResetReason;
   uint8_t consecutiveEarlyFailures;
   bool ready;
   bool safeMode;

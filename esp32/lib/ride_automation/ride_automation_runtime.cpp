@@ -774,10 +774,30 @@ void processFirmwareShadow(uint32_t nowMs) {
   const ride_automation::Settings settings = configuredSettings;
   const workout_telemetry::Snapshot workout =
       workout_telemetry_runtime::snapshot(nowMs);
+  const ride_automation::ConfirmedLifecycle previousLifecycle =
+      retainedLifecycle;
   const ride_automation::ConfirmedLifecycle lifecycle =
       confirmedLifecycle(workout, retainedLifecycle);
-  if (!workout.stale && workout.state.coreReceived)
+  if (!workout.stale && workout.state.coreReceived) {
+    // A detailed capture is consented for one ride. End it from the device's
+    // own confirmed workout lifecycle as well as from the BLE command so a
+    // phone disconnect/background transition cannot extend detailed sampling
+    // until the four-hour safety deadline.
+    if (ride_automation_runtime::shouldEndDetailedCapture(
+            previousLifecycle, lifecycle)) {
+      const ride_diagnostics::DetailedCaptureLease lease =
+          ride_diagnostics::detailedCaptureLease();
+      (void)ride_diagnostics::clearCaptureIfMatches(lease);
+    }
     retainedLifecycle = lifecycle;
+  } else if (ride_automation_runtime::
+                 shouldEndDetailedCaptureAfterTelemetryLoss(
+                     retainedLifecycle, workout.stale, nowMs,
+                     workout.state.lastCoreReceivedAtMs)) {
+    const ride_diagnostics::DetailedCaptureLease lease =
+        ride_diagnostics::detailedCaptureLease();
+    (void)ride_diagnostics::clearCaptureIfMatches(lease);
+  }
   // Every newly observed running session receives a conservative startup
   // grace. Manual provenance may arrive one telemetry frame later, while an
   // automatic start safely tolerates the same brief pause suppression.

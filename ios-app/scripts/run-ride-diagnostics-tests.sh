@@ -8,6 +8,7 @@ OUT="${TMPDIR:-/tmp}/open-bike-ride-diagnostics-tests"
 
 cd "${REPO_DIR}"
 xcrun swiftc \
+  -D HOST_TESTING \
   -parse-as-library \
   -o "${OUT}" \
   ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \

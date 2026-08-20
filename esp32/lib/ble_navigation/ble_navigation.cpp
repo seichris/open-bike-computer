@@ -166,6 +166,8 @@ static StaticSemaphore_t deviceOwnershipMutexStorage;
 static SemaphoreHandle_t deviceOwnershipMutex = nullptr;
 static StaticSemaphore_t notificationTransportMutexStorage;
 static SemaphoreHandle_t notificationTransportMutex = nullptr;
+static StaticSemaphore_t diagnosticsSessionMutexStorage;
+static SemaphoreHandle_t diagnosticsSessionMutex = nullptr;
 static bool ownershipAdvertisingDirty = false;
 static bool ownershipDisconnectPending = false;
 static bool ownershipRestartRequested = false;
@@ -182,6 +184,9 @@ static uint32_t ownershipUiPairingGeneration = 0;
 static ownership_button_policy::ComparisonRenderGate
     ownershipComparisonRenderGate;
 static ble_transfer::PendingRequest pendingTransferControl;
+static std::atomic<bool> diagnosticsSessionStartInProgress{false};
+static std::atomic<uint32_t> diagnosticsSessionStartGeneration{0};
+static std::atomic<uint32_t> diagnosticsSessionActiveGeneration{0};
 static portMUX_TYPE destinationPickerMux = portMUX_INITIALIZER_UNLOCKED;
 static DestinationCatalogSnapshot destinationCatalog;
 static DestinationPickerStatusSnapshot destinationPickerStatus;
@@ -910,6 +915,22 @@ static void parseNavigationData(const std::string &data) {
   currentNavData.instruction[sizeof(currentNavData.instruction) - 1] = '\0';
 
   navDataUpdated = true;
+  static std::string lastDiagnosticInstruction;
+  static uint32_t lastDiagnosticNavigationRecordMs = 0;
+  const uint32_t nowMs = millis();
+  if (instruction != lastDiagnosticInstruction ||
+      static_cast<uint32_t>(nowMs - lastDiagnosticNavigationRecordMs) >=
+          30'000U) {
+    lastDiagnosticInstruction = instruction;
+    lastDiagnosticNavigationRecordMs = nowMs;
+    char diagnosticFields[128] = {};
+    snprintf(diagnosticFields, sizeof(diagnosticFields),
+             "{\"messageBytes\":%u,\"routeLoaded\":true}",
+             static_cast<unsigned>(instruction.size()));
+    (void)ride_diagnostics::record(
+        ride_diagnostics::Level::Info, "navigation", "maneuver_updated",
+        diagnosticFields);
+  }
 
 #if FIRMWARE_DIAGNOSTICS
   Serial.printf("BLE Nav: Icon=%d, Dist=%dm, Instr=%s\n", currentNavData.iconID,
@@ -2146,6 +2167,97 @@ static bool handleRendererDiagnosticsCommand(const std::string &value,
 #endif
 }
 
+static void cancelDiagnosticsSessionStart() {
+  if (diagnosticsSessionMutex != nullptr &&
+      xSemaphoreTake(diagnosticsSessionMutex, portMAX_DELAY) == pdTRUE) {
+    diagnosticsSessionStartGeneration.fetch_add(1, std::memory_order_acq_rel);
+    xSemaphoreGive(diagnosticsSessionMutex);
+    return;
+  }
+  diagnosticsSessionStartGeneration.fetch_add(1, std::memory_order_acq_rel);
+}
+
+static void diagnosticsSessionStartTask(void *context) {
+  const uint32_t generation = static_cast<uint32_t>(
+      reinterpret_cast<uintptr_t>(context));
+  bool ready = storage.ensureDiagnosticsSdMounted();
+  if (ready)
+    ready = ride_diagnostics::sealActiveChunk();
+
+  bool stillCurrent = false;
+  if (diagnosticsSessionMutex != nullptr &&
+      xSemaphoreTake(diagnosticsSessionMutex, portMAX_DELAY) == pdTRUE) {
+    stillCurrent =
+        diagnosticsSessionStartGeneration.load(std::memory_order_acquire) ==
+            generation &&
+        bleNavServer.isConnected() &&
+        bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire);
+    if (ready && stillCurrent && !deviceTransferHttp.status().enabled) {
+      const bool enabled = deviceTransferHttp.setEnabled(true, "diagnostics");
+      if (!enabled) {
+        deviceTransferHttp.setLastError(
+            "diagnostics_start_failed",
+            "diagnostics storage was ready but the transfer server did not start");
+      }
+      (void)ride_diagnostics::record(
+          enabled ? ride_diagnostics::Level::Info
+                  : ride_diagnostics::Level::Warning,
+          "transfer", "diagnostics_transfer_entered",
+          enabled ? "{\"active\":true,\"mode\":\"diagnostics\"}"
+                  : "{\"active\":false,\"mode\":\"diagnostics\"}");
+      Serial.printf(
+          "BLE Device Transfer: diagnostics async enter applied, enabled=%d\n",
+          enabled);
+    } else if (stillCurrent) {
+      deviceTransferHttp.setLastError(
+          "diagnostics_storage_unavailable",
+          ready ? "another transfer mode became active"
+                : "device diagnostics could not mount removable storage and "
+                  "seal a readable checkpoint");
+      Serial.println(
+          "BLE Device Transfer: diagnostics async enter failed");
+      (void)ride_diagnostics::record(
+          ride_diagnostics::Level::Warning, "transfer",
+          "diagnostics_transfer_entered",
+          "{\"active\":false,\"mode\":\"diagnostics\"}");
+    }
+    xSemaphoreGive(diagnosticsSessionMutex);
+  }
+  if (diagnosticsSessionActiveGeneration.load(std::memory_order_acquire) ==
+      generation) {
+    diagnosticsSessionStartInProgress.store(false,
+                                            std::memory_order_release);
+  }
+  vTaskDelete(nullptr);
+}
+
+static bool startDiagnosticsSessionAsync() {
+  if (diagnosticsSessionStartInProgress.exchange(
+          true, std::memory_order_acq_rel)) {
+    return diagnosticsSessionActiveGeneration.load(
+               std::memory_order_acquire) ==
+           diagnosticsSessionStartGeneration.load(
+               std::memory_order_acquire);
+  }
+  const uint32_t generation =
+      diagnosticsSessionStartGeneration.fetch_add(
+          1, std::memory_order_acq_rel) +
+      1;
+  diagnosticsSessionActiveGeneration.store(generation,
+                                           std::memory_order_release);
+  if (xTaskCreatePinnedToCore(
+          diagnosticsSessionStartTask, "diagnostics_start", 6144,
+          reinterpret_cast<void *>(static_cast<uintptr_t>(generation)), 1,
+          nullptr, 0) != pdPASS) {
+    diagnosticsSessionStartInProgress.store(false,
+                                            std::memory_order_release);
+    diagnosticsSessionActiveGeneration.store(0,
+                                              std::memory_order_release);
+    return false;
+  }
+  return true;
+}
+
 static void processPendingTransferControl() {
   const ble_transfer::Request request = pendingTransferControl.take();
   if (request.empty()) {
@@ -2153,6 +2265,7 @@ static void processPendingTransferControl() {
   }
 
   if (request.disconnectCleanup) {
+    cancelDiagnosticsSessionStart();
     // Pending LAN credentials were synchronously cleared by the BLE
     // disconnect callback before a new session could authenticate. Revoke
     // modes whose lifetime must not outlive that old session. Firmware upload
@@ -2168,6 +2281,19 @@ static void processPendingTransferControl() {
     Serial.printf("BLE Device Transfer: disconnect cleanup applied, "
                   "mode=%s disabled=%d\n",
                   mode.c_str(), disabled);
+  }
+
+  const bool enablingOtherMode =
+      request.action == ble_transfer::Action::EnableMap ||
+      request.action == ble_transfer::Action::EnableFirmware ||
+      request.action == ble_transfer::Action::EnableDebug;
+  if (enablingOtherMode && diagnosticsSessionStartInProgress.load(
+                               std::memory_order_acquire)) {
+    deviceTransferHttp.setLastError(
+        "transfer_busy", "device diagnostics are still preparing storage");
+    Serial.println(
+        "BLE Device Transfer: enter rejected, diagnostics are preparing");
+    return;
   }
 
   switch (request.action) {
@@ -2191,20 +2317,40 @@ static void processPendingTransferControl() {
           "transfer_stopping", "previous transfer work is still stopping");
       Serial.println(
           "BLE Map Transfer: enter rejected, transfer worker is stopping");
-    } else if (!storage.ensureSdMounted()) {
-      mapTransferHttp.setLastError("sd_unavailable",
-                                   "SD card is not mounted");
-      Serial.println(
-          "BLE Map Transfer: enter rejected, SD card is not mounted");
-    } else if (!mapTransferHttp.refreshStreamStorageCapability(true)) {
-      storage.markSdUnavailable();
-      mapTransferHttp.setLastError(
-          "sd_unwritable", "SD card map storage is not writable");
-      Serial.println(
-          "BLE Map Transfer: enter rejected, SD card is not writable");
     } else {
-      const bool enabled = mapTransferHttp.setEnabled(true);
-      Serial.printf("BLE Map Transfer: enter applied, enabled=%d\n", enabled);
+      const bool transitionReady =
+          ride_diagnostics::beginStorageTransition();
+      if (!transitionReady) {
+        mapTransferHttp.setLastError(
+            "sd_unavailable",
+            "diagnostic storage could not checkpoint before remounting SD");
+        Serial.println(
+            "BLE Map Transfer: enter rejected, diagnostics checkpoint failed");
+      } else {
+        const bool mounted = storage.ensureSdMounted();
+        if (!mounted) {
+          mapTransferHttp.setLastError("sd_unavailable",
+                                       "SD card is not mounted");
+          Serial.println(
+              "BLE Map Transfer: enter rejected, SD card is not mounted");
+        } else if (!mapTransferHttp.refreshStreamStorageCapability(true)) {
+          storage.markSdUnavailable();
+          mapTransferHttp.setLastError(
+              "sd_unwritable", "SD card map storage is not writable");
+          Serial.println(
+              "BLE Map Transfer: enter rejected, SD card is not writable");
+        } else {
+          const bool enabled = mapTransferHttp.setEnabled(true);
+          Serial.printf("BLE Map Transfer: enter applied, enabled=%d\n",
+                        enabled);
+          (void)ride_diagnostics::record(
+              enabled ? ride_diagnostics::Level::Info
+                      : ride_diagnostics::Level::Warning,
+              "map", "transfer_entered",
+              enabled ? "{\"active\":true}" : "{\"active\":false}");
+        }
+        ride_diagnostics::endStorageTransition();
+      }
     }
     break;
   }
@@ -2222,6 +2368,12 @@ static void processPendingTransferControl() {
       Serial.printf(
           "BLE Device Transfer: firmware enter applied, enabled=%d\n",
           enabled);
+      (void)ride_diagnostics::record(
+          enabled ? ride_diagnostics::Level::Info
+                  : ride_diagnostics::Level::Warning,
+          "transfer", "firmware_transfer_entered",
+          enabled ? "{\"active\":true,\"mode\":\"firmware\"}"
+                  : "{\"active\":false,\"mode\":\"firmware\"}");
     }
     break;
   }
@@ -2239,6 +2391,12 @@ static void processPendingTransferControl() {
       const bool enabled = startRemoteDeviceDebugSession();
       Serial.printf("BLE Device Transfer: debug enter applied, enabled=%d\n",
                     enabled);
+      (void)ride_diagnostics::record(
+          enabled ? ride_diagnostics::Level::Info
+                  : ride_diagnostics::Level::Warning,
+          "transfer", "debug_transfer_entered",
+          enabled ? "{\"active\":true,\"mode\":\"debug\"}"
+                  : "{\"active\":false,\"mode\":\"debug\"}");
     }
     break;
   }
@@ -2257,23 +2415,15 @@ static void processPendingTransferControl() {
           "BLE Device Transfer: diagnostics enter rejected, transfer is busy");
     } else if (transferStatus.enabled && transferStatus.mode == "diagnostics") {
       Serial.println("BLE Device Transfer: diagnostics enter already applied");
-    } else if (!storage.ensureSdMounted()) {
+    } else if (!startDiagnosticsSessionAsync()) {
       deviceTransferHttp.setLastError(
           "diagnostics_storage_unavailable",
-          "device diagnostics require a mounted removable SD card");
+          "device diagnostics could not start the storage checkpoint task");
       Serial.println(
-          "BLE Device Transfer: diagnostics enter rejected, SD unavailable");
-    } else if (!ride_diagnostics::sealActiveChunk()) {
-      deviceTransferHttp.setLastError(
-          "diagnostics_storage_unavailable",
-          "device diagnostics could not seal a readable storage checkpoint");
-      Serial.println(
-          "BLE Device Transfer: diagnostics enter rejected, checkpoint failed");
+          "BLE Device Transfer: diagnostics enter rejected, task unavailable");
     } else {
-      const bool enabled = deviceTransferHttp.setEnabled(true, "diagnostics");
-      Serial.printf(
-          "BLE Device Transfer: diagnostics enter applied, enabled=%d\n",
-          enabled);
+      Serial.println(
+          "BLE Device Transfer: diagnostics enter preparing asynchronously");
     }
     break;
   }
@@ -2283,12 +2433,23 @@ static void processPendingTransferControl() {
       disabled = mapTransferHttp.setEnabled(false);
     }
     Serial.printf("BLE Map Transfer: exit applied, disabled=%d\n", disabled);
+    (void)ride_diagnostics::record(
+        disabled ? ride_diagnostics::Level::Info
+                 : ride_diagnostics::Level::Warning,
+        "map", "transfer_exited",
+        disabled ? "{\"active\":false}" : "{\"active\":true}");
     break;
   }
   case ble_transfer::Action::DisableAll: {
+    cancelDiagnosticsSessionStart();
     const bool disabled = stopActiveDeviceTransfer();
     Serial.printf("BLE Device Transfer: exit applied, disabled=%d\n",
                   disabled);
+    (void)ride_diagnostics::record(
+        disabled ? ride_diagnostics::Level::Info
+                 : ride_diagnostics::Level::Warning,
+        "transfer", "transfer_exited",
+        disabled ? "{\"active\":false}" : "{\"active\":true}");
     break;
   }
   case ble_transfer::Action::DisableOnBleDisconnect: {
@@ -2424,6 +2585,13 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
                              RIDE_DIAGNOSTICS_CLIENT_VERSION) {
       featureFlags |= device_capabilities_protocol::RIDE_DIAGNOSTICS_FEATURE;
     }
+#if defined(RIDE_AUTOMATION_SHADOW)
+    if (clientVersion >= device_capabilities_protocol::
+                             DETAILED_RIDE_DIAGNOSTICS_CLIENT_VERSION) {
+      featureFlags |=
+          device_capabilities_protocol::DETAILED_RIDE_DIAGNOSTICS_FEATURE;
+    }
+#endif
 #endif
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
@@ -3075,6 +3243,7 @@ static void handleGpsPayload(
           static_cast<time_t>(packet.unixTime), "BLE GPS timestamp");
       if (rtcTimestampSynced) {
         lastBleRtcSyncMs = now;
+        (void)ride_diagnostics::recordClockAnchor();
       }
     }
   }
@@ -3161,6 +3330,26 @@ static void handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
   }
   const workout_telemetry::ApplyResult result =
       workout_telemetry_runtime::ingestFrame(data, len, millis(), true);
+  static int lastDiagnosticWorkoutResult = -1;
+  static uint32_t lastDiagnosticWorkoutRecordMs = 0;
+  const uint32_t nowMs = millis();
+  const int resultValue = static_cast<int>(result);
+  if (resultValue != lastDiagnosticWorkoutResult ||
+      static_cast<uint32_t>(nowMs - lastDiagnosticWorkoutRecordMs) >=
+          30'000U) {
+    lastDiagnosticWorkoutResult = resultValue;
+    lastDiagnosticWorkoutRecordMs = nowMs;
+    char diagnosticFields[128] = {};
+    snprintf(diagnosticFields, sizeof(diagnosticFields),
+             "{\"result\":\"%s\"}",
+             workout_telemetry::applyResultName(result));
+    (void)ride_diagnostics::record(
+        result == workout_telemetry::ApplyResult::Applied ||
+                result == workout_telemetry::ApplyResult::Cleared
+            ? ride_diagnostics::Level::Info
+            : ride_diagnostics::Level::Warning,
+        "workout", "telemetry_boundary", diagnosticFields);
+  }
   switch (result) {
   case workout_telemetry::ApplyResult::Applied:
   case workout_telemetry::ApplyResult::Cleared:
@@ -3805,7 +3994,6 @@ public:
     bleDebugStats.authenticated = false;
     ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
                              "disconnected", "{}");
-    ride_diagnostics::clearCapture();
     ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     bleDebugStats.disconnectCount++;
     bleDebugStats.lastDisconnectMs = millis();
@@ -4290,6 +4478,11 @@ void BLENavigationServer::init(const char *deviceName) {
   if (notificationTransportMutex == nullptr) {
     notificationTransportMutex =
         xSemaphoreCreateMutexStatic(&notificationTransportMutexStorage);
+  }
+
+  if (diagnosticsSessionMutex == nullptr) {
+    diagnosticsSessionMutex =
+        xSemaphoreCreateMutexStatic(&diagnosticsSessionMutexStorage);
   }
 
   deviceOwnershipReady = deviceOwnershipMutex != nullptr &&

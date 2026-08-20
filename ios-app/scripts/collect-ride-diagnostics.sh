@@ -45,6 +45,10 @@ esac
 if [[ -z "${DESTINATION}" ]]; then
   DESTINATION="$(mktemp -d "${TMPDIR:-/tmp}/bicino-ride-diagnostics.XXXXXX")"
 else
+  if [[ -e "${DESTINATION}" && ( ! -d "${DESTINATION}" || -n "$(find "${DESTINATION}" -mindepth 1 -maxdepth 1 -print -quit)" ) ]]; then
+    echo "destination must be a new or empty directory: ${DESTINATION}" >&2
+    exit 64
+  fi
   mkdir -p "${DESTINATION}"
 fi
 
@@ -61,7 +65,8 @@ xcrun devicectl device copy from \
   --remove-existing-content false \
   --json-output "${JSON_OUTPUT}"
 
-python3 - "${JSON_OUTPUT}" "${DESTINATION}" "${SOURCE}" <<'PY'
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+python3 - "${JSON_OUTPUT}" "${DESTINATION}" "${SOURCE}" "${REPO_ROOT}/tools" <<'PY'
 import json
 import pathlib
 import sys
@@ -69,6 +74,8 @@ import sys
 result_path = pathlib.Path(sys.argv[1])
 destination = pathlib.Path(sys.argv[2])
 source = pathlib.Path(sys.argv[3])
+sys.path.insert(0, sys.argv[4])
+import ride_diagnostics
 payload = json.loads(result_path.read_text())
 
 def failed_copy(value):
@@ -93,27 +100,65 @@ if failed_copy(payload):
 root = destination / source
 if not root.is_dir():
     raise SystemExit(f"diagnostics root was not copied: {root}")
-streams = sorted(root.rglob("*.jsonl"))
-if not streams:
+
+legacy_device_root = root / "imported-device"
+canonical_device_root = root / "device"
+if legacy_device_root.exists():
+    if canonical_device_root.exists():
+        raise SystemExit(
+            "copied diagnostics contain both imported-device/ and device/ trees"
+        )
+    legacy_device_root.replace(canonical_device_root)
+
+validated_streams = []
+sidecar_count = 0
+for path in sorted(root.rglob("*")):
+    if not path.is_file():
+        continue
+    relative = path.relative_to(root).as_posix()
+    if not ride_diagnostics._safe_member(relative) or not (
+        ride_diagnostics._supported_bundle_member(relative)
+    ):
+        raise SystemExit(
+            f"unsupported or noncanonical diagnostics member: {relative}"
+        )
+    if relative in {"manifest.json", "checksums.sha256"}:
+        raise SystemExit(
+            f"archive-only member is not valid in copied diagnostics: {relative}"
+        )
+    raw = path.read_bytes()
+    if len(raw) > ride_diagnostics.MAX_ENTRY_BYTES:
+        raise SystemExit(f"{relative} exceeds entry size limit")
+    try:
+        if relative.endswith(".jsonl"):
+            expected_source = (
+                "firmware" if relative.startswith("device/") else "ios"
+            )
+            validated_streams.append(ride_diagnostics.validate_jsonl(
+                raw,
+                relative,
+                expected_source,
+            ))
+        else:
+            value = json.loads(raw)
+            ride_diagnostics._check_privacy(value, path=relative)
+            ride_diagnostics._validate_json_sidecar(relative, value)
+            sidecar_count += 1
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise SystemExit(f"{relative} is invalid JSON: {exc}")
+    except ride_diagnostics.DiagnosticError as exc:
+        raise SystemExit(str(exc))
+if not validated_streams:
     raise SystemExit("copied diagnostics root contains no JSONL streams")
-for stream in streams:
-    payload = stream.read_bytes()
-    lines = payload.splitlines(keepends=True)
-    if payload and not payload.endswith(b"\n") and lines:
-        try:
-            json.loads(lines[-1])
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            lines = lines[:-1]
-    for index, line in enumerate(lines, 1):
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise SystemExit(f"invalid JSON at {stream}:{index}: {exc}")
-        if event.get("schema") != 1 or event.get("source") not in {"ios", "firmware", "host"}:
-            raise SystemExit(f"unsupported event at {stream}:{index}")
-print(f"copied and validated {len(streams)} JSONL stream(s) under {root}")
+try:
+    ride_diagnostics._validate_stream_boundaries(validated_streams)
+except ride_diagnostics.DiagnosticError as exc:
+    raise SystemExit(str(exc))
+event_count = sum(len(stream.events) for stream in validated_streams)
+print(
+    f"copied and validated {len(validated_streams)} JSONL stream(s), "
+    f"{sidecar_count} JSON sidecar(s), {event_count} event(s) under {root}"
+)
 PY
 
 echo "Ride diagnostics collected at ${DESTINATION}"

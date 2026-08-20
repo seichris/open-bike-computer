@@ -50,6 +50,32 @@ static_assert(!ShadowRuntime::kCanControlRide,
 
 namespace ride_automation_runtime {
 
+inline bool shouldEndDetailedCapture(
+    ride_automation::ConfirmedLifecycle previous,
+    ride_automation::ConfirmedLifecycle current) {
+  return previous != ride_automation::ConfirmedLifecycle::Finished &&
+         current == ride_automation::ConfirmedLifecycle::Finished;
+}
+
+// A short BLE gap must not end an opted-in ride trace, but once the device has
+// received no live workout state for five minutes it can no longer observe a
+// remote ride-end transition. Stop the privacy-sensitive detailed stream
+// conservatively instead of replaying stale state until the four-hour cap.
+constexpr uint32_t kDetailedCaptureTelemetryLossGraceMs = 5U * 60U * 1000U;
+
+inline bool shouldEndDetailedCaptureAfterTelemetryLoss(
+    ride_automation::ConfirmedLifecycle retained,
+    bool workoutTelemetryStale, uint32_t nowMs,
+    uint32_t lastCoreReceivedAtMs) {
+  const bool rideWasActive =
+      retained == ride_automation::ConfirmedLifecycle::Running ||
+      retained == ride_automation::ConfirmedLifecycle::AutomaticallyPaused ||
+      retained == ride_automation::ConfirmedLifecycle::ManuallyPaused;
+  return rideWasActive && workoutTelemetryStale &&
+         static_cast<uint32_t>(nowMs - lastCoreReceivedAtMs) >=
+             kDetailedCaptureTelemetryLossGraceMs;
+}
+
 enum class UiPhase : uint8_t {
   Hidden = 0,
   StartCandidate,

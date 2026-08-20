@@ -158,30 +158,39 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         workoutMirrorManager.store.diagnosticsRecorder = rideDiagnosticsRecorder
         rideAutomationCoordinator.diagnosticsRecorder = rideDiagnosticsRecorder
         coordinator.firmwareUpdateManager.diagnosticsRecorder = rideDiagnosticsRecorder
-        rideDiagnosticsRecorder.$detailedTraceEnabled
+        rideDiagnosticsRecorder.$captureBinding
             .removeDuplicates()
-            .sink { [weak bleManager, weak rideDiagnosticsRecorder] enabled in
-                if enabled {
-                    _ = bleManager?.sendDiagnosticsCaptureBinding(
-                        rideDiagnosticsRecorder?.currentCaptureID
-                    )
-                } else {
-                    // Detailed capture ends back into the always-on standard
-                    // capture. Rebind that UUID instead of clearing firmware
-                    // correlation until the next reconnect.
-                    _ = bleManager?.sendDiagnosticsCaptureBinding(
-                        rideDiagnosticsRecorder?.currentCaptureID
-                    )
-                }
+            .sink { [weak bleManager] binding in
+                _ = bleManager?.sendDiagnosticsCaptureBinding(
+                    binding.captureID,
+                    detailed: binding.detailed
+                )
             }
             .store(in: &cancellables)
-        coordinator.$isNavigating
-            .scan((previous: false, current: false)) { state, navigating in
-                (previous: state.current, current: navigating)
+        Publishers.CombineLatest(
+            coordinator.$isNavigating.removeDuplicates(),
+            workoutMirrorManager.store.$presentation
+                .map(\.isWorkoutActive)
+                .removeDuplicates()
+        )
+            .map { navigating, workoutActive in
+                RideDiagnosticsRideLifecyclePolicy.isRideActive(
+                    navigating: navigating,
+                    workoutActive: workoutActive
+                )
             }
-            .filter { $0.previous && !$0.current }
+            .removeDuplicates()
+            .scan((previous: false, current: false)) { state, active in
+                (previous: state.current, current: active)
+            }
+            .filter {
+                RideDiagnosticsRideLifecyclePolicy.didEndRide(
+                    previous: $0.previous,
+                    current: $0.current
+                )
+            }
             .sink { [weak rideDiagnosticsRecorder] _ in
-                rideDiagnosticsRecorder?.endDetailedTrace(reason: "ride_ended")
+                rideDiagnosticsRecorder?.endRideCapture()
             }
             .store(in: &cancellables)
         bleManager.bindWatchConnectivityCoordinator(
