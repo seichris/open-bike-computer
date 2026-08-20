@@ -62,6 +62,17 @@ class FontAssetTests(unittest.TestCase):
         self.assertEqual(builder.shape_calls, 2)
         self.assertEqual(builder.shape_cache_hits, 1)
 
+    def test_uncached_labels_reuse_scaled_harfbuzz_fonts(self):
+        builder = self.builder()
+
+        builder.shape("Main Street", "en")
+        builder.shape("Queen's Road", "en")
+
+        self.assertEqual(len(builder._hb_faces), len(FONT_SIZES))
+        self.assertEqual(len(builder._hb_fonts), len(FONT_SIZES))
+        self.assertEqual(builder.shape_cache_hits, 0)
+        self.assertEqual(builder.shaping_failures, 0)
+
     def test_fma1_output_is_deterministic_and_self_describing(self):
         def generate(path):
             builder = self.builder()

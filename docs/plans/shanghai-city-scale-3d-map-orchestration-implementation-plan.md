@@ -1233,6 +1233,24 @@ The review-only trainer produces calibrated model
 (1.10 safety margin); it was generated without mutating admission policy and
 is not yet enabled in validation or production.
 
+### Validation image follow-up on 2026-08-20
+
+The validation Coolify app was then rebuilt from the HarfBuzz face/font-cache
+candidate
+`ghcr.io/seichris/open-bike-computer-map-platform@sha256:eab9c1337acffa6206fa0f36f5728a40f47ba0109828099e80cd43e369744a55`
+(commit `d84c5c3a`). Production remained pinned to the prior immutable digest.
+Public health returned HTTP 200 after the replacement containers became
+healthy. A 67.817171 km² target-3 smoke request (`33aee7ce7320425cab50`) then
+reached `ready` with 16/16 blocks, one durable chunk, no retries, no typed
+failure, and a 3,887,108-byte ZIP. All 16 block-cache lookups were hits, so
+the job measured cache-warm assembly rather than a cold full-bbox build. It
+completed in 287.476420 seconds (285.925852 processing seconds), with 0.890863
+seconds spent shaping labels and 29.853659 seconds in block encoding. The
+worker cgroup ended at 290,099,200 bytes current and 4,116,819,968 bytes peak;
+all `memory.events` counters, including `oom` and `oom_kill`, were zero. This
+confirms the optimization is deployed and safe on the validation worker, but
+does not change the open exact-bbox performance gate.
+
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
 
