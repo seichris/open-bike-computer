@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "status": "pass",
+  "benchmarkKind": "full-scope-442-block-monolithic-vs-chunked-rebaseline",
+  "runDate": "2026-08-20",
+  "mapId": "shanghai-selected-area-3d-benchmark-5901e3ef06",
+  "sourceIdentity": {
+    "url": "https://download.geofabrik.de/asia/china/shanghai-260819.osm.pbf",
+    "publishedAt": "2026-08-19T23:00:01Z",
+    "bytes": 25665956,
+    "sha256": "c34e4f36f03a598480fe2f4671ca2e43939931234899cc5b17e50f7c1bbbc561"
+  },
+  "workerIdentity": {
+    "gitHead": "843c283b2f908bcb4c03baf857c9a9fc124ff93a",
+    "workspaceContentSha256": "592c79f84cb0b94f9542dfb942d78bd537d4234e8242cac6511e8e868b534be6",
+    "platform": "Linux-7.0.14-orbstack-00380-ga7e0a2dc9535-aarch64-with-glibc2.35",
+    "python": "3.10.12",
+    "osmium": "osmium version 1.14.0",
+    "gdal": "GDAL 3.4.1, released 2021/12/27",
+    "workerFingerprintSha256": "19880fce1ab0e58254dbe55ebbe1748e7b507a7c381c631bcca38505885cdce6"
+  },
+  "image": {
+    "localTag": "open-bike-map-platform-ci:latest",
+    "digest": "sha256:23079b453e476ad7bd2194350b9c248f386a19b6e1f29f688269c5ef8c4d47ee",
+    "producerBuildSha256": "592c79f84cb0b94f9542dfb942d78bd537d4234e8242cac6511e8e868b534be6"
+  },
+  "scope": {
+    "requestedOutputBlockCount": 442,
+    "nonEmptyFmbCount": 420,
+    "outputAreaM2": 7415529472,
+    "sourceAreaM2": 7505969152,
+    "sourceToOutputAreaBasisPoints": 10122,
+    "sourceBoundsE7": [1210900257, 307801019, 1220512949, 313199283]
+  },
+  "runs": {
+    "monolithicReference": {
+      "mode": "selected",
+      "scopePlanSha256": "228689f58fcc5d465b4606f33c031ddf72853c5bc8fa129a08bcb1aa83e7e426",
+      "policyNote": "Process-local validation-only relaxed scope policy was used to materialize the full reference; no checked-in production policy was changed.",
+      "timings": {
+        "wallMilliseconds": 1146284,
+        "firstPreprocessingProgressMilliseconds": 5,
+        "firstBlockProgressMilliseconds": 778210
+      },
+      "sourceQueryBytes": 20340999,
+      "sourceQueryObjects": {"nodes": 2091607, "ways": 354693, "relations": 20217},
+      "zip": {"bytes": 26315315, "sha256": "015b3ddd5dd04f5cbb6c574dfddbeb022c1aba9cb065bac780e7b3b666d67f77"},
+      "stream": {
+        "bytes": 26207474,
+        "sha256": "765a8a3570a9029a98d4ff35c14e05db7932a1678f21c43a5bd77e35fd2f8b9c",
+        "manifestReceipt": "fbd488f03c1484e1b2cab5937fb8de7a5c27b65f8cc1637eabb45b8b74ece3c6",
+        "signedManifestReceipt": "78854d247e4eba192e53241c22e0cb0c73378d3b368c4f13d37287a204b076ba"
+      }
+    },
+    "chunkedCandidate": {
+      "mode": "chunked",
+      "globalPlanSha256": "0d7bea5e78622fd554c844204ec082263e0231c85e93de85ccf6b7fcc1ea7df5",
+      "partitionPlanSha256": "36896d2a3fc533230b2711fa39bd2a1e5b9f65068cd2f4b23b3642a17029e0c5",
+      "receiptCount": 442,
+      "receiptSetSha256": "9b1f03d4caac48bed0a9733077e2696930add66f5cf10f93196be0c8b94869f2",
+      "chunkCount": 16,
+      "readyChunkCount": 17,
+      "timings": {
+        "wallMilliseconds": 820481,
+        "firstPreprocessingProgressMilliseconds": 41,
+        "firstBlockProgressMilliseconds": 55517
+      },
+      "sourceQueryBytes": 20341018,
+      "sourceQueryObjects": {"nodes": 2091607, "ways": 354693, "relations": 20217},
+      "zip": {"bytes": 26316404, "sha256": "cd0e0164cd1da43d3c3b6a7902556edcdd06df47b612755344456846357c7860"},
+      "stream": {
+        "bytes": 26208433,
+        "sha256": "f2a54ff9bd24e567714d423333a92471708272810cf153fbdbab1971c7c437c0",
+        "manifestReceipt": "94c9ecbd24881615c08ccc703520e537efbc7f6d3abe30bbde306cf2325e83c1",
+        "signedManifestReceipt": "7a42ec7a1e49bf6afd9d34ac788bf423961325a5571b65a8bc1bbdb42e7cd278"
+      }
+    }
+  },
+  "equivalence": {
+    "status": "pass",
+    "blockCount": 420,
+    "fmbSha256ByPathDigest": "4274e1efc653ced9ce6817052dca55dce475217be45a2b5cd3bcd717ee197c9d",
+    "zipPayloadsEqual": false,
+    "method": "Exact sorted safe .fmb relative paths and SHA-256 of uncompressed bytes; ZIP/container metadata is provenance only."
+  },
+  "artifactValidation": {
+    "zipEntries": 425,
+    "fmbEntries": 420,
+    "maximumFmbBytes": 519790,
+    "crcCheck": "pass",
+    "benchmarkSignature": {
+      "status": "pass",
+      "keyId": "selected-area-benchmark",
+      "publicKeySha256": "b33e4d1c20df27891225e731ac50234b2a202ec4442427bfbae62ca6a6f393b4"
+    }
+  },
+  "performance": {
+    "objective": "full-scope cold generation <= 90 minutes at concurrency one",
+    "monolithicWallSeconds": 1146.284,
+    "chunkedWallSeconds": 820.481,
+    "currentSourceImageRebaseline": "pass",
+    "retainedExactColdSeconds": 10959.762708,
+    "retainedExactColdGate": "miss",
+    "note": "The current Shanghai 260819 source/image rebaseline is separate evidence and does not rewrite the immutable retained exact-cold candidate or its historical performance miss."
+  },
+  "releaseGates": {
+    "productionSigning": "open",
+    "deploymentProduction": "open",
+    "physicalDevice": "open",
+    "productionTouched": false,
+    "hardwareTouched": false
+  }
+}

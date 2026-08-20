@@ -307,3 +307,47 @@ seconds, selected warm reached first block progress in 7.992 seconds versus
 mode. This is a six-block selected-area rebaseline only; it does not replace
 the retained 442-block exact-cold evidence or close the 90-minute,
 monolithic-vs-chunked, signing, deployment/production, or physical gates.
+
+### Current full-scope monolithic/chunked rebaseline
+
+The current full-scope software evidence is retained at
+`docs/benchmarks/geofabrik-osm-3d-full-shanghai-2026-08-20.json`. It uses the
+immutable `shanghai-260819.osm.pbf` snapshot and the pinned CI image digest
+recorded in that fixture. The exact request produces 442 global blocks, 442
+chunk receipts, and 420 non-empty FMB entries. The monolithic validation
+reference completed in 1,146.284 seconds (19.10 minutes); the durable
+chunked candidate completed in 820.481 seconds (13.67 minutes). Both passed
+ZIP CRC/structural validation with 425 entries, 420 FMBs, and a 519,790-byte
+maximum FMB.
+
+The reference required a process-local validation-only relaxed scope policy to
+materialize the full comparison; this did not alter the checked-in production
+area/object guards. The chunked run used the production-shaped scope policy,
+recorded global-plan SHA-256
+`0d7bea5e78622fd554c844204ec082263e0231c85e93de85ccf6b7fcc1ea7df5`,
+partition-plan SHA-256
+`36896d2a3fc533230b2711fa39bd2a1e5b9f65068cd2f4b23b3642a17029e0c5`, and
+442-receipt-set SHA-256
+`9b1f03d4caac48bed0a9733077e2696930add66f5cf10f93196be0c8b94869f2`.
+
+Run the canonical gate from `map-platform/backend`:
+
+```sh
+python tools/compare_building_equivalence.py \
+  --reference-zip MONOLITHIC.zip \
+  --candidate-zip CHUNKED.zip \
+  --output equivalence-report.json
+```
+
+The retained report returned `status=pass`, `blockCount=420`, and FMB
+path/hash digest
+`4274e1efc653ced9ce6817052dca55dce475217be45a2b5cd3bcd717ee197c9d`.
+The ZIP payloads differ only in orchestration/container metadata, which the
+comparator deliberately excludes. The `.bmap` envelopes independently
+verified with the deterministic benchmark key
+`selected-area-benchmark`; that is benchmark evidence, not production signing
+acceptance. The current source/image run is under 90 minutes in both modes,
+but the immutable retained exact-cold candidate remains a separate
+182.6627-minute performance miss. Keep production deployment, production
+signing, and physical-device gates open; no production or hardware action was
+taken for this rebaseline.

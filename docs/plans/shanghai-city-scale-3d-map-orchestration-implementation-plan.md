@@ -1526,6 +1526,42 @@ gate and does not justify relaxing it. Validation stream rollout remained
 disabled, production was untouched, and signed-manifest plus physical-device
 acceptance remain open.
 
+### Current full-scope monolithic/chunked rebaseline — 2026-08-20
+
+The current-image full-scope rebaseline is retained in
+`docs/benchmarks/geofabrik-osm-3d-full-shanghai-2026-08-20.json`. It uses the
+same immutable `shanghai-260819.osm.pbf` snapshot and CI image digest for both
+runs, with source-query object counts of 2,091,607 nodes, 354,693 ways, and
+20,217 relations. The request produces 442 global output blocks; 420 contain
+non-empty FMB payloads. Scope identity is output area 7,415,529,472 m²,
+source area 7,505,969,152 m², source-to-output ratio 10,122 basis points, and
+source bounds `[1210900257,307801019,1220512949,313199283]`.
+
+The monolithic reference completed in 1,146.284 seconds (19.10 minutes), with
+first preprocessing progress at 5 ms and first-block progress at 778.210 s.
+Because the checked-in production scope policy intentionally rejects this
+full reference area, the reference run used a process-local validation-only
+relaxed policy; no production configuration or admission guard changed. The
+durable chunked candidate completed in 820.481 seconds (13.67 minutes), with
+442 receipts, 16 planned chunks and 17 ready chunks after the deterministic
+workload-scan split. Both ZIPs passed CRC/structural validation with 425
+entries, 420 FMBs, and a 519,790-byte maximum FMB.
+
+`compare_building_equivalence.py` returned `status=pass` for all 420 canonical
+FMB paths and uncompressed-byte SHA-256 values, with path digest
+`4274e1efc653ced9ce6817052dca55dce475217be45a2b5cd3bcd717ee197c9d`. The raw
+ZIP payloads are intentionally different because orchestration metadata and
+manifests differ; that is not an equivalence input. Both stream envelopes also
+verified with the deterministic benchmark key `selected-area-benchmark`, not
+the production signing key.
+
+This current source/image rebaseline is under the 90-minute objective for both
+execution modes, but it does not rewrite the immutable retained exact-cold
+candidate (`242ab1e1cd76478bbbd7`, 182.6627 minutes), whose historical
+performance gate remains a miss. Production deployment, production signing,
+and physical-device acceptance remain open and no production or hardware was
+touched.
+
 **Exit gate:** the complete acceptance matrix passes on the exact promoted
 image and production worker class.
 
@@ -1706,9 +1742,10 @@ artifact.
       and strict effective configured/cgroup memory admission.
 - [x] Add storage admission, bounded diagnostics, process-tree/cgroup OOM
       evidence, and public/coordinator ready reconciliation.
-- [ ] Preserve partition-invariant building payload (canonical receipt-set and
-      artifact-input identities plus FMB-only comparison are implemented; the
-      retained monolithic-versus-partitioned comparison remains).
+- [x] Preserve partition-invariant building payload (canonical receipt-set and
+      artifact-input identities plus the current 442-block monolithic-versus-
+      partitioned FMB comparison pass are retained; production signing and
+      device acceptance remain separate gates).
 - [x] Add public aggregate progress and authenticated operator diagnostics.
 - [x] Add conservative failed/cancelled task-evidence retention without
       deleting reusable canonical cache blocks.
