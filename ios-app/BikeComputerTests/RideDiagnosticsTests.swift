@@ -36,13 +36,18 @@ final class RideDiagnosticsTests: XCTestCase {
             .appendingPathComponent("ride-diagnostics-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let recorder = RideDiagnosticsRecorder(rootURL: root)
+
+        let published = expectation(description: "detailed trace state published")
+        let cancellable = recorder.$detailedTraceEnabled
+            .dropFirst()
+            .filter { $0 }
+            .sink { _ in published.fulfill() }
         recorder.beginDetailedTrace()
-        let deadline = Date().addingTimeInterval(1)
-        while !recorder.detailedTraceEnabled && Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
-        }
+        wait(for: [published], timeout: 2)
+        XCTAssertTrue(recorder.isDetailedTraceEnabled)
         XCTAssertTrue(recorder.detailedTraceEnabled)
         XCTAssertNotNil(recorder.detailedTraceExpiresAt)
+        withExtendedLifetime(cancellable) {}
     }
 
     func testRecorderPublishesRetentionBytesOnMainThread() {
