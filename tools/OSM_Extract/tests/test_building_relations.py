@@ -155,6 +155,40 @@ class BuildingRelationIngressTests(unittest.TestCase):
         self.assertEqual(handler.standalone_part_keys, {"w30"})
         self.assertFalse(handler.parts_without_outline)
 
+    def test_unoutlined_building_relation_with_explicit_parts_is_retained_standalone(self):
+        handler = BuildingRelationHandler(
+            expected_closure={
+                "requiredRelationKeys": ["r108"],
+                "requiredWayKeys": ["w31", "w32"],
+            }
+        )
+
+        class Tags(list):
+            def get(self, key):
+                return next((tag.v for tag in self if tag.k == key), None)
+
+        for way_id in (31, 32):
+            handler.way(
+                SimpleNamespace(
+                    id=way_id,
+                    nodes=[],
+                    tags=Tags([SimpleNamespace(k="building:part", v="yes")]),
+                )
+            )
+        handler.relation(
+            self.relation(
+                108,
+                [
+                    {"type": "w", "ref": 31, "role": "part"},
+                    {"type": "w", "ref": 32, "role": "part"},
+                ],
+            )
+        )
+        handler.finalize()
+
+        self.assertEqual(handler.standalone_part_keys, {"w31", "w32"})
+        self.assertFalse(handler.parts_without_outline)
+
     def test_cli_indexes_real_osm_building_relations_deterministically(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "building-relations.json"
