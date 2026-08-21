@@ -34,11 +34,10 @@
     "production": {
       "globalProfiles": [
         "legacy-vector-v1",
-        "street-labels-v1"
-      ],
-      "canaryProfiles": [
+        "street-labels-v1",
         "buildings-3d-v1"
-      ]
+      ],
+      "canaryProfiles": []
     }
   }
 }
