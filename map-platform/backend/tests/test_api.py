@@ -484,9 +484,8 @@ class MapJobRunAPITests(unittest.TestCase):
         enabled = self.client.post("/v1/map-jobs", json=payload)
         self.assertEqual(enabled.status_code, 200)
 
-    def test_target_three_returns_typed_fallback_and_honors_allowlist(self):
-        allowed = self.client.post("/v1/installations").json()
-        blocked = self.client.post("/v1/installations").json()
+    def test_target_three_is_globally_available_after_production_promotion(self):
+        credential = self.client.post("/v1/installations").json()
         payload = {
             "mode": "custom_bbox",
             "bbox": [103.75, 1.24, 103.93, 1.37],
@@ -500,70 +499,18 @@ class MapJobRunAPITests(unittest.TestCase):
                 "preferredLanguages": ["en"],
                 "internationalFallback": "en",
             },
-            "clientInstallationId": blocked["clientInstallationId"],
-            "clientRequestId": "request-target3-blocked",
+            "clientInstallationId": credential["clientInstallationId"],
+            "clientRequestId": "request-target3-global",
         }
-        disabled_response = self.client.post(
+        response = self.client.post(
             "/v1/map-jobs",
-            headers={"X-Installation-Token": blocked["clientInstallationToken"]},
+            headers={"X-Installation-Token": credential["clientInstallationToken"]},
             json=payload,
         )
-        self.assertEqual(disabled_response.status_code, 400)
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            disabled_response.json()["detail"],
-            {
-                "code": "unsupported_renderer_target",
-                "message": "renderer format 3 generation is not available for this installation",
-                "requestedRendererFormatVersion": 3,
-                "supportedRendererFormatVersions": [2, 1],
-            },
-        )
-
-        with patch.dict(
-            os.environ,
-            {
-                "MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST": allowed[
-                    "clientInstallationId"
-                ],
-            },
-            clear=False,
-        ):
-            client = TestClient(create_app())
-            try:
-                blocked_response = client.post(
-                    "/v1/map-jobs",
-                    headers={"X-Installation-Token": blocked["clientInstallationToken"]},
-                    json=payload,
-                )
-                allowed_payload = {
-                    **payload,
-                    "clientInstallationId": allowed["clientInstallationId"],
-                    "clientRequestId": "request-target3-allowed",
-                }
-                allowed_response = client.post(
-                    "/v1/map-jobs",
-                    headers={"X-Installation-Token": allowed["clientInstallationToken"]},
-                    json=allowed_payload,
-                )
-            finally:
-                client.close()
-
-        self.assertEqual(blocked_response.status_code, 400)
-        self.assertEqual(
-            blocked_response.json()["detail"],
-            {
-                "code": "unsupported_renderer_target",
-                "message": "renderer format 3 generation is not available for this installation",
-                "requestedRendererFormatVersion": 3,
-                "supportedRendererFormatVersions": [2, 1],
-            },
-        )
-        self.assertEqual(allowed_response.status_code, 200)
-        allowed_job = self.client.app.state.job_store.get(
-            allowed_response.json()["jobId"]
-        )
-        self.assertEqual(
-            allowed_job.request["target"]["rendererFormatVersion"],
+            self.client.app.state.job_store.get(response.json()["jobId"])
+            .request["target"]["rendererFormatVersion"],
             3,
         )
 
@@ -593,7 +540,7 @@ class MapJobRunAPITests(unittest.TestCase):
                 profile["rendererFormatVersion"]
                 for profile in payload["generationProfiles"]
             ],
-            [2, 1],
+            [3, 2, 1],
         )
 
         with patch.dict(
