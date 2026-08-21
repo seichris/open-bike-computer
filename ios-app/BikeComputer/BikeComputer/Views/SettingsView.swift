@@ -673,6 +673,28 @@ private struct DownloadingMapsSettingsSection: View {
                 StatusValueRow(status: "Checking device activation", isBusy: false)
             }
 
+            if let overallGenerationProgress {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Overall Generation")
+                        Spacer()
+                        if let percentage = overallGenerationProgress.percentage {
+                            Text("\(percentage)%")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    if let fraction = overallGenerationProgress.fraction {
+                        ProgressView(value: fraction)
+                    } else {
+                        ProgressView()
+                    }
+                    Text(overallGenerationProgress.detail)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+            }
+
             if let generationProgress {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
@@ -749,6 +771,11 @@ private struct DownloadingMapsSettingsSection: View {
     private var generationProgress: OfflineMapJobProgress? {
         guard manager.currentJob?.status == "converting_features" else { return nil }
         return manager.currentJob?.progress
+    }
+
+    private var overallGenerationProgress: OfflineMapBuildingProgress? {
+        guard manager.currentJob?.status == "converting_features" else { return nil }
+        return manager.currentJob?.buildingProgress
     }
 }
 
