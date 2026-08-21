@@ -25,6 +25,18 @@ class DeploymentChannelComposeTests(unittest.TestCase):
         self.assertIn("MAP_PLATFORM_BUILDING_TARGET3_ENABLED", api_environment)
         self.assertIn("MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST", api_environment)
 
+    def test_production_worker_has_an_explicit_chunk_memory_ceiling(self):
+        compose = (DEPLOY_DIR / "compose.yaml").read_text(encoding="utf-8")
+        worker_environment = compose.split("  map-platform-worker:", 1)[1].split(
+            "  map-platform-maintenance:", 1
+        )[0]
+
+        self.assertIn(
+            "mem_limit: ${MAP_PLATFORM_WORKER_MEMORY_LIMIT:-12g}",
+            worker_environment,
+        )
+        self.assertIn("MAP_PLATFORM_WORKER_MEMORY_LIMIT_BYTES", worker_environment)
+
 
 class PreparationEstimateComposeTests(unittest.TestCase):
     _SERVICES = (
