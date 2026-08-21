@@ -29,8 +29,14 @@ class BLENotificationDispatchTests(unittest.TestCase):
         enqueue = function_body(
             BLE_SOURCE, "static bool enqueueDeferredNotification"
         )
-        self.assertIn("ble_npl_eventq_put", enqueue)
+        self.assertIn("ui_scheduler::notify", enqueue)
+        self.assertNotIn("ble_npl_eventq_put", enqueue)
         self.assertIn("deferredNotificationEventPending", enqueue)
+
+        schedule = function_body(
+            BLE_SOURCE, "static void scheduleDeferredNotificationEvent() {"
+        )
+        self.assertIn("ble_npl_eventq_put", schedule)
 
         send = function_body(BLE_SOURCE, "static bool sendWireNotification")
         self.assertIn("server->getPeerMTU", send)
@@ -48,6 +54,7 @@ class BLENotificationDispatchTests(unittest.TestCase):
     def test_arduino_loop_does_not_drain_deferred_transport(self):
         process = function_body(BLE_SOURCE, "void BLENavigationServer::process()")
         self.assertNotIn("processDeferredNotifications()", process)
+        self.assertIn("scheduleDeferredNotificationEvent()", process)
         event_handler = function_body(
             BLE_SOURCE,
             "static void deferredNotificationEventHandler(struct ble_npl_event *event) {",

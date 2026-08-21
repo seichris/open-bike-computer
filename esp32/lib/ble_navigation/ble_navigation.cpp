@@ -231,6 +231,7 @@ static uint32_t destinationStatusUpdatedMs = 0;
 static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
                                           const uint8_t *data, size_t length);
 static void processDeferredNotifications();
+static void scheduleDeferredNotificationEvent();
 static void deferredNotificationEventHandler(struct ble_npl_event *event);
 
 static void clearRendererWindowRequest() {
@@ -1126,17 +1127,28 @@ static bool enqueueDeferredNotification(NimBLECharacteristic *characteristic,
   }
   portEXIT_CRITICAL(&deferredNotificationMux);
   if (queued) {
-    bool expected = false;
-    if (deferredNotificationEventPending.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel,
-            std::memory_order_acquire)) {
-      ble_npl_eventq_put(nimble_port_get_dflt_eventq(),
-                         &deferredNotificationEvent);
-    }
+    deferredNotificationEventPending.store(true, std::memory_order_release);
+    // Do not touch NimBLE's event queue from an ATT callback. The callback
+    // still runs while NimBLE owns its host lock; enqueueing there can yield
+    // or re-enter the queue before the ATT response has been released. The
+    // Arduino owner task schedules the event after this callback returns.
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
   } else {
     deferredNotificationDrops.fetch_add(1, std::memory_order_relaxed);
   }
   return queued;
+}
+
+static void scheduleDeferredNotificationEvent() {
+  if (!deferredNotificationEventReady.load(std::memory_order_acquire) ||
+      !deferredNotificationEventPending.load(std::memory_order_acquire)) {
+    return;
+  }
+  // This is the only producer-side call into NimBLE's default event queue.
+  // It runs on the Arduino/LVGL owner task, after any NimBLE callback that
+  // published the deferred frame has returned.
+  ble_npl_eventq_put(nimble_port_get_dflt_eventq(),
+                     &deferredNotificationEvent);
 }
 
 static bool sendWireNotification(NimBLECharacteristic *characteristic,
@@ -1209,11 +1221,12 @@ static void processDeferredNotifications() {
 static void deferredNotificationEventHandler(struct ble_npl_event *event) {
   (void)event;
   // Clear our scheduling gate after NimBLE removes the event from its queue.
-  // Producers can then schedule a follow-up event while this drain is still
-  // running; the drain loop will consume those frames before returning.
+  // Producers can then request a follow-up event while this drain is running;
+  // the owner task will schedule it after the handler returns.
   deferredNotificationEventPending.store(false, std::memory_order_release);
-  // This callback is run by NimBLE's pinned host task. All calls below may
-  // therefore enter the host mutex, unlike the previous Arduino-loop drain.
+  // This callback runs on NimBLE's pinned host task. All transport calls below
+  // therefore enter the host mutex only after the incoming ATT callback has
+  // returned.
   processDeferredNotifications();
 }
 
@@ -4763,6 +4776,7 @@ void BLENavigationServer::init(const char *deviceName) {
 }
 
 void BLENavigationServer::process() {
+  scheduleDeferredNotificationEvent();
   if (deviceOwnershipReady) {
     bool pairingExpired = false;
     if (deviceOwnershipMutex != nullptr &&
