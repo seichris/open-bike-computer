@@ -14610,8 +14610,8 @@ struct NavigationProtocolTests {
                 hasActiveBLESession: true,
                 isConnecting: true
             ),
-            .disabledWhileConnecting,
-            "a connection attempt disables add-another discovery"
+            .cancelConnection,
+            "a connection attempt exposes cancellation for add-another discovery"
         )
         assert(NearbyBicinoPresentationPolicy.shouldPresent(
             isApplicationActive: true,

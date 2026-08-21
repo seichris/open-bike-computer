@@ -2684,6 +2684,43 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    /// Stop a stale or failed transport attempt so Settings can immediately
+    /// hand the radio to explicit nearby discovery. A board reboot during the
+    /// connection handshake can otherwise leave Core Bluetooth reporting
+    /// `isConnecting` until its delayed disconnect callback arrives, which
+    /// used to make the only add-device action permanently inert.
+    func cancelConnectionAttemptForDiscovery() {
+        guard isConnecting else { return }
+
+        if pendingPairingSession != nil || pendingPairingMaterial != nil ||
+            pairingPrompt != nil || isPairingMode {
+            cancelPairing()
+        }
+
+        let peripheral = connectedPeripheral
+        autoReconnect = false
+        suppressNextReconnect = false
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
+        pendingConnectionAfterDisconnect = nil
+        pendingScannedConnectionIdentifier = nil
+        pendingScannedConnectionTimeoutTimer?.invalidate()
+        pendingScannedConnectionTimeoutTimer = nil
+        explicitDiscoveryRequested = false
+        isExplicitDiscoveryPausedForCandidate = false
+        isPairingMode = false
+        pairingDiscoveryOrigin = nil
+        ownershipLifecycle.interrupt()
+        clearUnknownDiscoveryState()
+        if let peripheral {
+            centralManager.cancelPeripheralConnection(peripheral)
+        }
+        clearConnectionState()
+        pairingStatusMessage = nil
+        pairingError = nil
+        reconcileScanning(reason: "connection attempt cancelled for explicit discovery")
+    }
+
     func pair(with candidate: DiscoveredBikeComputerDevice, name: String) {
         guard BLEDeviceOperationPolicy.canStartPairing(
             operationDeviceID: deviceOperationDeviceID

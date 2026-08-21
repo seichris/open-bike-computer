@@ -382,7 +382,7 @@ enum BLEOpportunisticCandidatePolicy {
 enum BLEExplicitDiscoveryStartAction: Equatable {
     case start
     case confirmDisconnect
-    case disabledWhileConnecting
+    case cancelConnection
 }
 
 enum BLEExplicitDiscoveryStartPolicy {
@@ -390,7 +390,7 @@ enum BLEExplicitDiscoveryStartPolicy {
         hasActiveBLESession: Bool,
         isConnecting: Bool
     ) -> BLEExplicitDiscoveryStartAction {
-        if isConnecting { return .disabledWhileConnecting }
+        if isConnecting { return .cancelConnection }
         return hasActiveBLESession ? .confirmDisconnect : .start
     }
 }

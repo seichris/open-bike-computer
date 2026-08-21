@@ -67,6 +67,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <host/ble_hs_id.h>
+#include <nimble/porting/nimble/include/nimble/nimble_port.h>
 #include <mbedtls/md.h>
 #include <WiFi.h>
 
@@ -146,6 +147,10 @@ static std::atomic<uint8_t> radioRequestedConnectionProfile{
     static_cast<uint8_t>(ble_radio_policy::ConnectionProfile::Unset)};
 #endif
 static std::atomic<uint16_t> radioConnectionHandle{BLE_HS_CONN_HANDLE_NONE};
+// Producers may run on the Arduino/LVGL task, while NimBLE owns the live
+// connection state on its host task. Keep the last host-reported MTU in an
+// atomic snapshot so chunking never calls getPeerMTU() outside that task.
+static std::atomic<uint16_t> activePeerMtu{23};
 static std::atomic<uint32_t> lastConnectionParameterSampleMs{0};
 struct RadioDebugSnapshot {
   bool connectionParametersValid = false;
@@ -170,8 +175,9 @@ static StaticSemaphore_t notificationTransportMutexStorage;
 static SemaphoreHandle_t notificationTransportMutex = nullptr;
 // NimBLE characteristic callbacks run on the pinned host task. Keep those
 // callbacks bounded: authenticated notifications are protected there, then
-// handed to the LVGL-owner loop for the actual NimBLE notify call. This avoids
-// issuing transport work while the host is processing an incoming ATT write.
+// handed to NimBLE's own event queue for the actual notify call after the
+// incoming ATT event has released the host mutex. The Arduino/LVGL loop never
+// calls NimBLE transport APIs directly.
 constexpr uint8_t kDeferredNotificationCapacity = 8;
 constexpr size_t kDeferredNotificationBytes = 256;
 struct DeferredNotification {
@@ -186,6 +192,9 @@ static uint8_t deferredNotificationHead = 0;
 static uint8_t deferredNotificationTail = 0;
 static uint8_t deferredNotificationCount = 0;
 static portMUX_TYPE deferredNotificationMux = portMUX_INITIALIZER_UNLOCKED;
+static struct ble_npl_event deferredNotificationEvent;
+static std::atomic<bool> deferredNotificationEventReady{false};
+static std::atomic<bool> deferredNotificationEventPending{false};
 static std::atomic<TaskHandle_t> nimbleCallbackTask{nullptr};
 static std::atomic<uint32_t> deferredNotificationDrops{0};
 static StaticSemaphore_t diagnosticsSessionMutexStorage;
@@ -221,6 +230,8 @@ static uint32_t destinationStatusUpdatedMs = 0;
 
 static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
                                           const uint8_t *data, size_t length);
+static void processDeferredNotifications();
+static void deferredNotificationEventHandler(struct ble_npl_event *event);
 
 static void clearRendererWindowRequest() {
   portENTER_CRITICAL(&rendererWindowRequestMux);
@@ -1095,6 +1106,10 @@ static bool enqueueDeferredNotification(NimBLECharacteristic *characteristic,
       connectionHandle == BLE_HS_CONN_HANDLE_NONE) {
     return false;
   }
+  if (!deferredNotificationEventReady.load(std::memory_order_acquire)) {
+    deferredNotificationDrops.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
   bool queued = false;
   portENTER_CRITICAL(&deferredNotificationMux);
   if (deferredNotificationCount < kDeferredNotificationCapacity) {
@@ -1111,7 +1126,13 @@ static bool enqueueDeferredNotification(NimBLECharacteristic *characteristic,
   }
   portEXIT_CRITICAL(&deferredNotificationMux);
   if (queued) {
-    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+    bool expected = false;
+    if (deferredNotificationEventPending.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      ble_npl_eventq_put(nimble_port_get_dflt_eventq(),
+                         &deferredNotificationEvent);
+    }
   } else {
     deferredNotificationDrops.fetch_add(1, std::memory_order_relaxed);
   }
@@ -1185,6 +1206,17 @@ static void processDeferredNotifications() {
   }
 }
 
+static void deferredNotificationEventHandler(struct ble_npl_event *event) {
+  (void)event;
+  // Clear our scheduling gate after NimBLE removes the event from its queue.
+  // Producers can then schedule a follow-up event while this drain is still
+  // running; the drain loop will consume those frames before returning.
+  deferredNotificationEventPending.store(false, std::memory_order_release);
+  // This callback is run by NimBLE's pinned host task. All calls below may
+  // therefore enter the host mutex, unlike the previous Arduino-loop drain.
+  processDeferredNotifications();
+}
+
 static void notifyAuthResponse(const std::string &response) {
   constexpr size_t kMaximumOwnershipNotificationBytes = 182;
   if (authCharacteristic == nullptr || response.empty() ||
@@ -1197,14 +1229,8 @@ static void notifyAuthResponse(const std::string &response) {
   }
   const uint16_t connectionHandle = activeConnHandle;
   const uint8_t *data = reinterpret_cast<const uint8_t *>(response.data());
-  if (isNimbleCallbackContext()) {
-    (void)enqueueDeferredNotification(authCharacteristic, connectionHandle,
-                                       data, response.size());
-    return;
-  }
-  processDeferredNotifications();
-  (void)sendWireNotification(authCharacteristic, connectionHandle, data,
-                             response.size(), "ownership");
+  (void)enqueueDeferredNotification(authCharacteristic, connectionHandle, data,
+                                     response.size());
 }
 
 static void notifyAuthResponse(const char *response) {
@@ -1230,19 +1256,14 @@ static bool notifyAuthenticatedPayload(
     NimBLECharacteristic *characteristic,
     device_ownership::AuthenticatedChannel channel, const uint8_t *data,
     size_t length, const char *label) {
+  (void)label;
   if (characteristic == nullptr || data == nullptr ||
-      characteristic->getSubscribedCount() == 0 ||
       !bleSessionAuthenticated || !deviceOwnershipReady ||
       deviceOwnershipMutex == nullptr || notificationTransportMutex == nullptr ||
       xSemaphoreTake(deviceOwnershipMutex,
                      isNimbleCallbackContext() ? 0 : pdMS_TO_TICKS(100)) !=
           pdTRUE) {
     return false;
-  }
-  if (!isNimbleCallbackContext()) {
-    // A callback queues while holding the same ownership lock. Drain those
-    // earlier frames before assigning a later sequence on the UI task.
-    processDeferredNotifications();
   }
   std::string frame;
   const std::string payload(reinterpret_cast<const char *>(data), length);
@@ -1255,19 +1276,11 @@ static bool notifyAuthenticatedPayload(
   const uint16_t connectionHandle = activeConnHandle;
   const uint8_t *frameData =
       reinterpret_cast<const uint8_t *>(frame.data());
-  if (isNimbleCallbackContext()) {
-    // Queue before releasing the ownership lock so a UI-side sender cannot
-    // publish a later sequence before this callback's frame is visible.
-    const bool queued = enqueueDeferredNotification(
-        characteristic, connectionHandle, frameData, frame.size());
-    xSemaphoreGive(deviceOwnershipMutex);
-    return queued;
-  }
-  // Keep sequence assignment and wire publication ordered with other UI-side
-  // senders. NimBLE callbacks never enter this path because their task handle
-  // is tracked independently below.
-  const bool sent = sendWireNotification(characteristic, connectionHandle,
-                                         frameData, frame.size(), label);
+  // Queue before releasing the ownership lock so a callback or UI-side sender
+  // cannot publish a later sequence before this frame is visible to the host
+  // task. The event queue also serializes every outbound NimBLE call.
+  const bool sent = enqueueDeferredNotification(
+      characteristic, connectionHandle, frameData, frame.size());
   xSemaphoreGive(deviceOwnershipMutex);
   return sent;
 }
@@ -2004,12 +2017,7 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
   static map_transfer_status_protocol::ChunkSession chunkSession;
   const std::string body = mapTransferStatusJson();
   const std::string legacy = "MSTS" + body;
-  uint16_t peerMtu = 23;
-  NimBLEService *service = pChar->getService();
-  NimBLEServer *server = service == nullptr ? nullptr : service->getServer();
-  if (server != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
-    peerMtu = server->getPeerMTU(activeConnHandle);
-  }
+  const uint16_t peerMtu = activePeerMtu.load(std::memory_order_acquire);
   if (peerMtu >= 25 && legacy.size() <= peerMtu - 25 &&
       notifyAuthenticatedNavigation(
           pChar, reinterpret_cast<const uint8_t *>(legacy.data()),
@@ -2114,12 +2122,7 @@ static void notifyRendererDiagnosticsStatus(NimBLECharacteristic *pChar) {
         "BLE Renderer Diagnostics: snapshot serialization unavailable");
     return;
   }
-  uint16_t peerMtu = 23;
-  NimBLEService *service = pChar->getService();
-  NimBLEServer *server = service == nullptr ? nullptr : service->getServer();
-  if (server != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
-    peerMtu = server->getPeerMTU(activeConnHandle);
-  }
+  const uint16_t peerMtu = activePeerMtu.load(std::memory_order_acquire);
   if (peerMtu >= 25 &&
       body.size() + renderer_diagnostics_ble_protocol::PREFIX_BYTES <=
           peerMtu - 25) {
@@ -4002,6 +4005,7 @@ public:
       return;
     }
     radioConnectionHandle.store(desc->conn_handle, std::memory_order_release);
+    activePeerMtu.store(23, std::memory_order_release);
 #if BLE_RADIO_CHARACTERIZATION
     radioRequestedConnectionProfile.store(
         static_cast<uint8_t>(ble_radio_policy::ConnectionProfile::Unset),
@@ -4013,6 +4017,12 @@ public:
 #endif
     recordConnectionParameters(*desc, millis());
     acceptConnection();
+  }
+
+  void onMTUChange(uint16_t mtu, ble_gap_conn_desc *desc) override {
+    if (desc != nullptr && desc->conn_handle == activeConnHandle && mtu >= 23) {
+      activePeerMtu.store(mtu, std::memory_order_release);
+    }
   }
 
   void acceptConnection() {
@@ -4072,6 +4082,7 @@ public:
     }
     radioConnectionHandle.store(BLE_HS_CONN_HANDLE_NONE,
                                 std::memory_order_release);
+    activePeerMtu.store(23, std::memory_order_release);
     portENTER_CRITICAL(&radioDebugMux);
     radioDebugSnapshot.connectionParametersValid = false;
     portEXIT_CRITICAL(&radioDebugMux);
@@ -4656,6 +4667,12 @@ void BLENavigationServer::init(const char *deviceName) {
   }
 
   initBleIdentityAndSecurity(effectiveDeviceName.c_str());
+  if (!deferredNotificationEventReady.load(std::memory_order_acquire)) {
+    ble_npl_event_init(&deferredNotificationEvent,
+                       deferredNotificationEventHandler, nullptr);
+    deferredNotificationEventPending.store(false, std::memory_order_release);
+    deferredNotificationEventReady.store(true, std::memory_order_release);
+  }
   NimBLEDevice::setPower(configuredTxPowerLevel());
   NimBLEDevice::setMTU(512); // Increase MTU for route geometry
 
@@ -4746,7 +4763,6 @@ void BLENavigationServer::init(const char *deviceName) {
 }
 
 void BLENavigationServer::process() {
-  processDeferredNotifications();
   if (deviceOwnershipReady) {
     bool pairingExpired = false;
     if (deviceOwnershipMutex != nullptr &&
