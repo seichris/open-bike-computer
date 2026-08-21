@@ -136,6 +136,13 @@ image-build shape. The service stores mutable state in the `map-platform-data`
 volume. The host needs enough CPU, RAM, and temporary disk for the largest
 allowed PBF cut-out.
 
+The local compose shape defaults `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE` to
+`shadow` and passes the estimator settings to API, worker, and maintenance so
+local development records calibration revisions without exposing them to
+clients. The digest-pinned Coolify compose keeps the default `off`; set the
+variable explicitly on the isolated development Coolify application before
+starting shadow validation, and leave the production application `off`.
+
 Configure the existing Coolify resource with repository base directory `/`,
 Docker Compose location `/map-platform/deploy/compose.yaml`, and watch path
 `map-platform/deploy/compose.yaml`. Keep runtime secrets in Coolify, but do not
@@ -295,7 +302,8 @@ Useful production environment variables:
   in-window timing samples loaded for an aggregate summary, default `50000`,
   maximum `1000000`. Responses report the matching count, sampled count, limit,
   and whether the summary was truncated.
-- `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE`: `off` (default), `shadow`, or
+- `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE`: `off` (default for the pinned
+  Coolify compose; local development defaults to `shadow`), `shadow`, or
   `public`. `off` omits generation and the public field; `shadow` stores
   revisions for accuracy review but omits the public field; `public` returns
   the latest validated revision on the existing installation-scoped job API.
