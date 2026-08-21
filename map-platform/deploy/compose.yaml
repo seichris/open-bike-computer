@@ -86,6 +86,10 @@ services:
 
   map-platform-worker:
     image: *map-platform-worker-image
+    # Chunk admission requires a real cgroup memory ceiling. Keep the
+    # production default aligned with the reviewed 12 GiB validation cap;
+    # operators may lower it only with a corresponding resource review.
+    mem_limit: ${MAP_PLATFORM_WORKER_MEMORY_LIMIT:-12g}
     command: ["map-platform", "worker-loop", "--idle-sleep-seconds", "10"]
     environment:
       MAP_PLATFORM_REPO_ROOT: /app
