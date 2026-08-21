@@ -141,20 +141,49 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         qualified_relations = {
             relation_key
             for relation_key, parts in self.incomplete_relation_parts.items()
-            if len(parts) == 1
-            and parts[0].startswith("w")
-            and self.way_tags.get(parts[0], {}).get("building")
-            not in (None, "", "no")
+            if parts
+            and all(
+                part.startswith("w")
+                and (
+                    self.way_tags.get(part, {}).get("building")
+                    not in (None, "", "no")
+                    or self.way_tags.get(part, {}).get("building:part")
+                    not in (None, "", "no")
+                )
+                for part in parts
+            )
         }
+        relation_part_counts: dict[str, int] = {}
+        for parts in self.incomplete_relation_parts.values():
+            for part in parts:
+                relation_part_counts[part] = relation_part_counts.get(part, 0) + 1
         unsafe_parts = {
             part
             for relation_key, parts in self.incomplete_relation_parts.items()
             if relation_key not in qualified_relations
             for part in parts
         }
+        unsafe_parts.update(
+            part
+            for part, count in relation_part_counts.items()
+            if count != 1 or part in self.part_parents
+        )
+        safe_relations = {
+            relation_key
+            for relation_key in qualified_relations
+            if all(
+                part not in unsafe_parts
+                for part in self.incomplete_relation_parts[relation_key]
+            )
+        }
+        # A relation without an outline is safe to normalize only when every
+        # direct way is an explicit building/part feature and none of its
+        # members participates in another relation association. This keeps
+        # malformed or ambiguous nesting fail-closed while accepting common
+        # OSM building relations whose parts collectively are the footprint.
         self.standalone_part_keys = {
             part
-            for relation_key in qualified_relations
+            for relation_key in safe_relations
             for part in self.incomplete_relation_parts[relation_key]
             if part not in unsafe_parts
         }
