@@ -769,6 +769,7 @@ Current setting IDs:
 | `33` | Map + Navigation street-label size | Same values as ID `29` |
 | `34` | Map + Navigation street-label orientation | Same values as ID `30` |
 | `35` | Map + Navigation 3D buildings | `0` flat footprints, `1` LoD1 walls and roofs in the bird's-eye Map + Navigation view; defaults to enabled and is persisted as `nav3DBuild` |
+| `36` | Automatic display off | `0` disabled, `1` enabled; defaults to enabled and is persisted as `autoDisplayOff`. When enabled, the connected display dims after 15 seconds and turns off after 45 seconds without meaningful activity, except for navigation, workout, transfer, or attention holds. |
 
 In a dense scene, firmware reserves its bounded extrusion workspace from the
 nearest eligible buildings outward, preserves global back-to-front drawing,
@@ -1005,6 +1006,10 @@ ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
 Firmware sets bit `18` only when `FIRMWARE_DIAGNOSTICS=1`; production builds
 therefore expose neither the snapshot nor experimental profile control.
+Bit `19` reports connected-display automatic-inactivity support (setting ID
+`36`). GFX firmware advertises it in `CAP2`; iOS enables the toggle and sends
+ID `36` only after this bit is received, so legacy firmware with the generic
+settings characteristic never receives an unsupported setting.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). Types are unique;
@@ -1132,6 +1137,11 @@ Firmware without that bit is never offered renderer target 3 and never receives
 the new setting. The setting has no effect unless Buildings is visible, Map +
 Navigation is using bird's-eye projection, and an FMB v4 block supplies
 building records.
+
+ID `36` is sent only after a valid `CAP2` response advertises bit `19`.
+Firmware without that bit is never offered the Automatic Display Off toggle;
+the setting remains app-local until a compatible connected display is
+negotiated.
 
 ## Destination Picker
 

@@ -46,6 +46,9 @@ int main() {
                 16);
   static_assert(device_capabilities_protocol::RENDERER_DIAGNOSTICS_FEATURE ==
                 (1UL << 18));
+  static_assert(
+      device_capabilities_protocol::AUTOMATIC_DISPLAY_OFF_FEATURE ==
+      (1UL << 19));
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
@@ -103,6 +106,15 @@ int main() {
   assert(rendererDiagnosticsSize == sizeof(expectedRendererDiagnostics));
   for (size_t index = 0; index < rendererDiagnosticsSize; ++index)
     assert(output[index] == expectedRendererDiagnostics[index]);
+  const size_t automaticDisplayOffSize =
+      device_capabilities_protocol::encodeCap2(
+          device_capabilities_protocol::AUTOMATIC_DISPLAY_OFF_FEATURE, nullptr,
+          false, output, sizeof(output));
+  const uint8_t expectedAutomaticDisplayOff[] = {
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x08, 0x00};
+  assert(automaticDisplayOffSize == sizeof(expectedAutomaticDisplayOff));
+  for (size_t index = 0; index < automaticDisplayOffSize; ++index)
+    assert(output[index] == expectedAutomaticDisplayOff[index]);
   std::cout << "device capabilities protocol tests passed\n";
   return 0;
 }

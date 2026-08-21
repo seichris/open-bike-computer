@@ -40,7 +40,8 @@ struct NavigationData {
  * 23-24 carry the connected phone's transient battery percentage and charging
  * state. IDs 25-26 control the Map + Navigation bird's-eye projection and
  * perspective. IDs 27-34 configure street labels for Map and Map + Navigation,
- * and ID 35 controls OSM 3D buildings in bird's-eye navigation.
+ * and ID 35 controls OSM 3D buildings in bird's-eye navigation. ID 36
+ * controls automatic connected-display inactivity.
  * Legacy ID 4 is ignored because display rotation is selected by the hardware
  * target.
  */

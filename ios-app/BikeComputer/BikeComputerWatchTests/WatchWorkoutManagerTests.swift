@@ -1,3 +1,4 @@
+import Combine
 import CoreLocation
 import HealthKit
 import WatchConnectivity
@@ -2351,9 +2352,24 @@ final class WatchWorkoutManagerTests: XCTestCase {
             await Task.yield()
             XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
             XCTAssertTrue(runtime.manager.mirrorSendIsInFlightForTesting)
+            var observedMirrorDeliveryStates: [Bool] = []
+            var mirrorDeliveryObservation: AnyCancellable?
+            if !startFailure {
+                mirrorDeliveryObservation = runtime.manager
+                    .$isTerminalMirrorDeliveryPending
+                    .sink { observedMirrorDeliveryStates.append($0) }
+            }
             runtime.manager.markMirrorShutdownDeliveryPendingForTesting(
                 startFailure: startFailure
             )
+            if !startFailure {
+                XCTAssertEqual(
+                    runtime.manager.terminalCleanupState,
+                    .delivering
+                )
+                runtime.manager.retryDetachedSessionCleanup()
+                XCTAssertTrue(runtime.manager.isTerminalMirrorDeliveryPending)
+            }
             XCTAssertEqual(probe.sentData.count, 2)
             let shutdownEnvelope = try WorkoutContractCodec.decode(
                 XCTUnwrap(probe.sentData.last)
@@ -2377,6 +2393,12 @@ final class WatchWorkoutManagerTests: XCTestCase {
             XCTAssertEqual(probe.endSessionCallCount, 1)
             XCTAssertFalse(runtime.manager.hasAttachedSessionForTesting)
             XCTAssertFalse(runtime.manager.isAwaitingDetachedSessionCleanup)
+            if !startFailure {
+                XCTAssertTrue(observedMirrorDeliveryStates.contains(true))
+                XCTAssertTrue(observedMirrorDeliveryStates.contains(false))
+                XCTAssertEqual(runtime.manager.terminalCleanupState, .none)
+            }
+            _ = mirrorDeliveryObservation
         }
     }
 
@@ -6973,6 +6995,178 @@ final class WatchWorkoutManagerTests: XCTestCase {
                 disposition
             )
         }
+    }
+
+    func testTerminalArchiveFailureAutomaticallyRetriesAfterRuntimeRelease()
+        async throws
+    {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let identity = try recoveryStore.begin(startDate: Date())
+        let endedAt = identity.startDate.addingTimeInterval(30)
+        try recoveryStore.markFinishing(
+            disposition: .discard,
+            requestedAt: endedAt
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            terminalCleanupRetryDelay: 0.01,
+            initializeOnLaunch: false
+        )
+        XCTAssertTrue(
+            manager.restoreDetachedFinalizationLifecycle(
+                from: try XCTUnwrap(recoveryStore.recoveredIdentity)
+            )
+        )
+
+        persistence.failOnSaveCall = persistence.saveCallCount + 2
+        manager.completeConfirmedDiscard(
+            summary: WatchWorkoutSummary(
+                outcome: .discarded,
+                endedAt: endedAt,
+                duration: 30,
+                distanceMeters: nil,
+                activeEnergyKilocalories: nil,
+                averageHeartRate: nil,
+                routeStatus: .unavailable
+            ),
+            discardedAt: endedAt
+        )
+        XCTAssertTrue(manager.isTerminalArchivePending)
+        XCTAssertEqual(manager.terminalCleanupState, .retrying)
+
+        persistence.failOnSaveCall = nil
+        try await waitUntil {
+            !manager.isTerminalArchivePending
+                && recoveryStore.recoveredIdentity == nil
+        }
+        XCTAssertEqual(
+            recoveryStore.terminalTombstone(
+                externalUUID: identity.sessionID.uuidString
+            )?.disposition,
+            .discard
+        )
+        XCTAssertEqual(manager.terminalCleanupState, .none)
+    }
+
+    func testTerminalPublicationFailureAutomaticallyRetriesBeforeArchive()
+        async throws
+    {
+        for disposition in [WorkoutFinishDisposition.save, .discard] {
+            let persistence = ToggleRecoveryPersistence()
+            let recoveryStore = WatchWorkoutRecoveryStore(
+                persistence: persistence
+            )
+            let identity = try recoveryStore.begin(startDate: Date())
+            let endedAt = identity.startDate.addingTimeInterval(30)
+            try recoveryStore.markFinishing(
+                disposition: disposition,
+                requestedAt: endedAt
+            )
+            if disposition == .save {
+                try recoveryStore.markCollectionEnded()
+                try recoveryStore.markFinishAttempted()
+                try recoveryStore.markWorkoutSaved()
+            }
+            let manager = WatchWorkoutManager(
+                healthStore: HKHealthStore(),
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: recoveryStore,
+                terminalCleanupRetryDelay: 0.01,
+                initializeOnLaunch: false
+            )
+            XCTAssertTrue(
+                manager.restoreDetachedFinalizationLifecycle(
+                    from: try XCTUnwrap(recoveryStore.recoveredIdentity)
+                )
+            )
+
+            persistence.failOnSaveCall = persistence.saveCallCount + 1
+            let summary = WatchWorkoutSummary(
+                outcome: disposition == .save ? .saved : .discarded,
+                endedAt: endedAt,
+                duration: 30,
+                distanceMeters: nil,
+                activeEnergyKilocalories: nil,
+                averageHeartRate: nil,
+                routeStatus: .unavailable
+            )
+            if disposition == .save {
+                manager.completeConfirmedSave(summary: summary, savedAt: endedAt)
+            } else {
+                manager.completeConfirmedDiscard(
+                    summary: summary,
+                    discardedAt: endedAt
+                )
+            }
+            XCTAssertTrue(manager.isTerminalPublicationPending)
+            XCTAssertEqual(manager.terminalCleanupState, .retrying)
+
+            persistence.failOnSaveCall = nil
+            try await waitUntil {
+                !manager.isTerminalPublicationPending
+                    && recoveryStore.recoveredIdentity == nil
+            }
+            XCTAssertEqual(
+                recoveryStore.terminalTombstone(
+                    externalUUID: identity.sessionID.uuidString
+                )?.disposition,
+                disposition
+            )
+            XCTAssertEqual(manager.terminalCleanupState, .none)
+        }
+    }
+
+    func testTerminalCleanupRetryStopsAtBoundAndLeavesManualRecovery()
+        async throws
+    {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let identity = try recoveryStore.begin(startDate: Date())
+        let endedAt = identity.startDate.addingTimeInterval(30)
+        try recoveryStore.markFinishing(
+            disposition: .discard,
+            requestedAt: endedAt
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            terminalCleanupRetryDelay: 0.001,
+            initializeOnLaunch: false
+        )
+        XCTAssertTrue(
+            manager.restoreDetachedFinalizationLifecycle(
+                from: try XCTUnwrap(recoveryStore.recoveredIdentity)
+            )
+        )
+
+        persistence.failsSave = true
+        manager.completeConfirmedDiscard(
+            summary: WatchWorkoutSummary(
+                outcome: .discarded,
+                endedAt: endedAt,
+                duration: 30,
+                distanceMeters: nil,
+                activeEnergyKilocalories: nil,
+                averageHeartRate: nil,
+                routeStatus: .unavailable
+            ),
+            discardedAt: endedAt
+        )
+        try await waitUntil {
+            manager.terminalCleanupState == .retryRequired
+        }
+        XCTAssertTrue(manager.isTerminalPublicationPending)
+        XCTAssertTrue(manager.isTerminalCleanupRetryRequired)
+
+        persistence.failsSave = false
+        manager.retryDetachedSessionCleanup()
+        XCTAssertFalse(manager.isTerminalPublicationPending)
+        XCTAssertNil(recoveryStore.recoveredIdentity)
+        XCTAssertEqual(manager.terminalCleanupState, .none)
     }
 
     func testTerminalEnvelopeFailureBlocksArchiveUntilPublicationRetry() throws {
