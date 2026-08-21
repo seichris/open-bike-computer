@@ -63,7 +63,9 @@
 #include <cctype>
 #include <cstring>
 #include <esp_system.h>
+#include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 #include <host/ble_hs_id.h>
 #include <mbedtls/md.h>
 #include <WiFi.h>
@@ -166,6 +168,26 @@ static StaticSemaphore_t deviceOwnershipMutexStorage;
 static SemaphoreHandle_t deviceOwnershipMutex = nullptr;
 static StaticSemaphore_t notificationTransportMutexStorage;
 static SemaphoreHandle_t notificationTransportMutex = nullptr;
+// NimBLE characteristic callbacks run on the pinned host task. Keep those
+// callbacks bounded: authenticated notifications are protected there, then
+// handed to the LVGL-owner loop for the actual NimBLE notify call. This avoids
+// issuing transport work while the host is processing an incoming ATT write.
+constexpr uint8_t kDeferredNotificationCapacity = 8;
+constexpr size_t kDeferredNotificationBytes = 256;
+struct DeferredNotification {
+  NimBLECharacteristic *characteristic = nullptr;
+  uint16_t connectionHandle = BLE_HS_CONN_HANDLE_NONE;
+  uint16_t length = 0;
+  uint8_t payload[kDeferredNotificationBytes] = {};
+};
+static DeferredNotification deferredNotifications[
+    kDeferredNotificationCapacity];
+static uint8_t deferredNotificationHead = 0;
+static uint8_t deferredNotificationTail = 0;
+static uint8_t deferredNotificationCount = 0;
+static portMUX_TYPE deferredNotificationMux = portMUX_INITIALIZER_UNLOCKED;
+static std::atomic<TaskHandle_t> nimbleCallbackTask{nullptr};
+static std::atomic<uint32_t> deferredNotificationDrops{0};
 static StaticSemaphore_t diagnosticsSessionMutexStorage;
 static SemaphoreHandle_t diagnosticsSessionMutex = nullptr;
 static bool ownershipAdvertisingDirty = false;
@@ -1065,36 +1087,124 @@ static bool constantTimeEquals(const char *a, const char *b) {
   return diff == 0;
 }
 
-static void notifyAuthResponse(const std::string &response) {
-  if (authCharacteristic == nullptr || response.empty() ||
+static bool enqueueDeferredNotification(NimBLECharacteristic *characteristic,
+                                         uint16_t connectionHandle,
+                                         const uint8_t *data, size_t length) {
+  if (characteristic == nullptr || data == nullptr || length == 0 ||
+      length > kDeferredNotificationBytes ||
+      connectionHandle == BLE_HS_CONN_HANDLE_NONE) {
+    return false;
+  }
+  bool queued = false;
+  portENTER_CRITICAL(&deferredNotificationMux);
+  if (deferredNotificationCount < kDeferredNotificationCapacity) {
+    DeferredNotification &slot =
+        deferredNotifications[deferredNotificationTail];
+    slot.characteristic = characteristic;
+    slot.connectionHandle = connectionHandle;
+    slot.length = static_cast<uint16_t>(length);
+    memcpy(slot.payload, data, length);
+    deferredNotificationTail = static_cast<uint8_t>(
+        (deferredNotificationTail + 1) % kDeferredNotificationCapacity);
+    deferredNotificationCount++;
+    queued = true;
+  }
+  portEXIT_CRITICAL(&deferredNotificationMux);
+  if (queued) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+  } else {
+    deferredNotificationDrops.fetch_add(1, std::memory_order_relaxed);
+  }
+  return queued;
+}
+
+static bool sendWireNotification(NimBLECharacteristic *characteristic,
+                                 uint16_t connectionHandle,
+                                 const uint8_t *data, size_t length,
+                                 const char *label) {
+  if (characteristic == nullptr || data == nullptr || length == 0 ||
       notificationTransportMutex == nullptr ||
       xSemaphoreTake(notificationTransportMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-    return;
+    return false;
   }
-  constexpr size_t kMaximumOwnershipNotificationBytes = 182;
-  if (response.size() > kMaximumOwnershipNotificationBytes) {
-    Serial.printf("BLE: Ownership response too large: %u bytes\n",
-                  static_cast<unsigned>(response.size()));
+  if (connectionHandle == BLE_HS_CONN_HANDLE_NONE ||
+      activeConnHandle != connectionHandle ||
+      characteristic->getSubscribedCount() == 0) {
     xSemaphoreGive(notificationTransportMutex);
-    return;
+    return false;
   }
   uint16_t peerMtu = 23;
-  NimBLEService *service = authCharacteristic->getService();
+  NimBLEService *service = characteristic->getService();
   NimBLEServer *server = service == nullptr ? nullptr : service->getServer();
-  if (server != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
-    peerMtu = server->getPeerMTU(activeConnHandle);
+  if (server != nullptr) {
+    peerMtu = server->getPeerMTU(connectionHandle);
   }
-  if (response.size() > static_cast<size_t>(peerMtu - 3)) {
-    Serial.printf(
-        "BLE: Ownership response needs ATT MTU %u; peer negotiated %u\n",
-        static_cast<unsigned>(response.size() + 3), peerMtu);
+  if (peerMtu < 3 || length > static_cast<size_t>(peerMtu - 3)) {
+    Serial.printf("BLE: %s notification needs ATT MTU %u; peer negotiated %u\n",
+                  label == nullptr ? "wire" : label,
+                  static_cast<unsigned>(length + 3), peerMtu);
     xSemaphoreGive(notificationTransportMutex);
+    return false;
+  }
+  characteristic->setValue(data, length);
+  characteristic->notify();
+  xSemaphoreGive(notificationTransportMutex);
+  return true;
+}
+
+static bool isNimbleCallbackContext() {
+  return nimbleCallbackTask.load(std::memory_order_acquire) ==
+         xTaskGetCurrentTaskHandle();
+}
+
+static void processDeferredNotifications() {
+  const uint32_t dropped =
+      deferredNotificationDrops.exchange(0, std::memory_order_acq_rel);
+  if (dropped != 0) {
+    Serial.printf("BLE: Deferred notification queue dropped=%lu\n",
+                  static_cast<unsigned long>(dropped));
+  }
+  while (true) {
+    DeferredNotification pending;
+    bool available = false;
+    portENTER_CRITICAL(&deferredNotificationMux);
+    if (deferredNotificationCount > 0) {
+      pending = deferredNotifications[deferredNotificationHead];
+      deferredNotificationHead = static_cast<uint8_t>(
+          (deferredNotificationHead + 1) % kDeferredNotificationCapacity);
+      deferredNotificationCount--;
+      available = true;
+    }
+    portEXIT_CRITICAL(&deferredNotificationMux);
+    if (!available) {
+      return;
+    }
+    (void)sendWireNotification(pending.characteristic,
+                               pending.connectionHandle, pending.payload,
+                               pending.length, "deferred");
+  }
+}
+
+static void notifyAuthResponse(const std::string &response) {
+  constexpr size_t kMaximumOwnershipNotificationBytes = 182;
+  if (authCharacteristic == nullptr || response.empty() ||
+      response.size() > kMaximumOwnershipNotificationBytes) {
+    if (response.size() > kMaximumOwnershipNotificationBytes) {
+      Serial.printf("BLE: Ownership response too large: %u bytes\n",
+                    static_cast<unsigned>(response.size()));
+    }
     return;
   }
-  authCharacteristic->setValue(
-      reinterpret_cast<const uint8_t *>(response.data()), response.size());
-  authCharacteristic->notify();
-  xSemaphoreGive(notificationTransportMutex);
+  const uint16_t connectionHandle = activeConnHandle;
+  const uint8_t *data = reinterpret_cast<const uint8_t *>(response.data());
+  if (isNimbleCallbackContext()) {
+    (void)enqueueDeferredNotification(authCharacteristic, connectionHandle,
+                                       data, response.size());
+    return;
+  }
+  processDeferredNotifications();
+  (void)sendWireNotification(authCharacteristic, connectionHandle, data,
+                             response.size(), "ownership");
 }
 
 static void notifyAuthResponse(const char *response) {
@@ -1124,8 +1234,15 @@ static bool notifyAuthenticatedPayload(
       characteristic->getSubscribedCount() == 0 ||
       !bleSessionAuthenticated || !deviceOwnershipReady ||
       deviceOwnershipMutex == nullptr || notificationTransportMutex == nullptr ||
-      xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+      xSemaphoreTake(deviceOwnershipMutex,
+                     isNimbleCallbackContext() ? 0 : pdMS_TO_TICKS(100)) !=
+          pdTRUE) {
     return false;
+  }
+  if (!isNimbleCallbackContext()) {
+    // A callback queues while holding the same ownership lock. Drain those
+    // earlier frames before assigning a later sequence on the UI task.
+    processDeferredNotifications();
   }
   std::string frame;
   const std::string payload(reinterpret_cast<const char *>(data), length);
@@ -1135,29 +1252,24 @@ static bool notifyAuthenticatedPayload(
     xSemaphoreGive(deviceOwnershipMutex);
     return false;
   }
-  if (xSemaphoreTake(notificationTransportMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+  const uint16_t connectionHandle = activeConnHandle;
+  const uint8_t *frameData =
+      reinterpret_cast<const uint8_t *>(frame.data());
+  if (isNimbleCallbackContext()) {
+    // Queue before releasing the ownership lock so a UI-side sender cannot
+    // publish a later sequence before this callback's frame is visible.
+    const bool queued = enqueueDeferredNotification(
+        characteristic, connectionHandle, frameData, frame.size());
     xSemaphoreGive(deviceOwnershipMutex);
-    return false;
+    return queued;
   }
-  NimBLEService *service = characteristic->getService();
-  NimBLEServer *server = service == nullptr ? nullptr : service->getServer();
-  if (server == nullptr ||
-      frame.size() > static_cast<size_t>(server->getPeerMTU(activeConnHandle) - 3)) {
-    Serial.printf("BLE: Protected %s notification too large: %u bytes\n",
-                  label, static_cast<unsigned>(frame.size()));
-    xSemaphoreGive(notificationTransportMutex);
-    xSemaphoreGive(deviceOwnershipMutex);
-    return false;
-  }
-  // Keep sequence assignment, characteristic value publication, and notify in
-  // one critical section. Calls arrive from both NimBLE and application tasks;
-  // splitting these operations can publish R2 sequence N+1 before N.
-  characteristic->setValue(
-      reinterpret_cast<const uint8_t *>(frame.data()), frame.size());
-  characteristic->notify();
-  xSemaphoreGive(notificationTransportMutex);
+  // Keep sequence assignment and wire publication ordered with other UI-side
+  // senders. NimBLE callbacks never enter this path because their task handle
+  // is tracked independently below.
+  const bool sent = sendWireNotification(characteristic, connectionHandle,
+                                         frameData, frame.size(), label);
   xSemaphoreGive(deviceOwnershipMutex);
-  return true;
+  return sent;
 }
 
 static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
@@ -3832,6 +3944,19 @@ static void processPendingMapInputs() {
 // NimBLE Callbacks
 // ============================================================================
 
+class ScopedNimbleCallback {
+public:
+  TaskHandle_t previousTask = nullptr;
+
+  ScopedNimbleCallback() {
+    previousTask = nimbleCallbackTask.exchange(
+        xTaskGetCurrentTaskHandle(), std::memory_order_acq_rel);
+  }
+  ~ScopedNimbleCallback() {
+    nimbleCallbackTask.store(previousTask, std::memory_order_release);
+  }
+};
+
 static bool resetOwnershipConnectionState() {
   if (!deviceOwnershipReady) {
     return true;
@@ -4032,6 +4157,7 @@ public:
 class MyNavCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    ScopedNimbleCallback callbackScope;
     const std::string frame = pChar->getValue();
     if (frame.empty()) {
       return;
@@ -4192,6 +4318,7 @@ public:
 class MyRouteCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    ScopedNimbleCallback callbackScope;
     const std::string frame = pChar->getValue();
     std::string value;
     if (!unwrapOwnerAuthenticatedPayload(
@@ -4212,6 +4339,7 @@ public:
 class MyGPSCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    ScopedNimbleCallback callbackScope;
     const std::string frame = pChar->getValue();
     std::string value;
     if (!unwrapOwnerAuthenticatedPayload(
@@ -4233,6 +4361,7 @@ class MyWorkoutTelemetryCharacteristicCallbacks
     : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    ScopedNimbleCallback callbackScope;
     const std::string frame = pChar->getValue();
     workout_telemetry_transport::dispatchAuthenticatedNativeFrame(
         frame,
@@ -4251,6 +4380,7 @@ class MyRideAutomationCharacteristicCallbacks
     : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    ScopedNimbleCallback callbackScope;
     const std::string frame = pChar->getValue();
     std::string payload;
     if (!unwrapOwnerAuthenticatedPayload(
@@ -4274,6 +4404,7 @@ public:
 class MySettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    ScopedNimbleCallback callbackScope;
     const std::string frame = pChar->getValue();
     std::string value;
     if (!unwrapOwnerAuthenticatedPayload(
@@ -4378,6 +4509,7 @@ public:
 class MyAuthCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    ScopedNimbleCallback callbackScope;
     std::string value = pChar->getValue();
     if (!value.empty()) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Auth);
@@ -4614,6 +4746,7 @@ void BLENavigationServer::init(const char *deviceName) {
 }
 
 void BLENavigationServer::process() {
+  processDeferredNotifications();
   if (deviceOwnershipReady) {
     bool pairingExpired = false;
     if (deviceOwnershipMutex != nullptr &&
