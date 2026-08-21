@@ -29,6 +29,20 @@ class RideDiagnosticsStorageContractTests(unittest.TestCase):
         self.assertIn("beginStorageTransition", RECORDER)
         self.assertIn("prepareForShutdown", RECORDER)
 
+    def test_writer_isolated_from_cpu0_watchdog_and_uses_dedicated_sd_bus(self):
+        self.assertIn(
+            'xTaskCreatePinnedToCore(writerTask, "ride_diag_writer", 6144, nullptr, 0,',
+            RECORDER,
+        )
+        self.assertIn("&writerTaskHandle, 1);", RECORDER)
+        open_body = STORAGE.split("FILE *Storage::open", 1)[1].split(
+            "int Storage::close", 1
+        )[0]
+        self.assertIn(
+            "waveshareSdBus().begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS)", open_body
+        )
+        self.assertNotIn("SPI.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS)", open_body)
+
 
 if __name__ == "__main__":
     unittest.main()

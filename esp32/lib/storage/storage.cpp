@@ -599,8 +599,10 @@ FILE *Storage::open(const char *path, const char *mode) {
       power_management::LockDomain::Storage);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   // Reconfigure SPI bus before SD access - QSPI display operations may have
-  // altered SPI state. This ensures the SD card SPI is properly configured.
-  SPI.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
+  // altered SPI state. The card is mounted on the dedicated HSPI instance;
+  // reinitializing the global FSPI object here does not configure the card
+  // bus and can disturb an unrelated peripheral.
+  waveshareSdBus().begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
 #endif
   return fopen(path, mode);
 }

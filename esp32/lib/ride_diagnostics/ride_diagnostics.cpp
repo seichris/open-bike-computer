@@ -956,8 +956,12 @@ void startWriterTask() {
 #if PERSISTENT_RIDE_DIAGNOSTICS
   if (normalQueue != nullptr && criticalQueue != nullptr &&
       writerTaskHandle == nullptr) {
-    xTaskCreatePinnedToCore(writerTask, "ride_diag_writer", 6144, nullptr, 1,
-                            &writerTaskHandle, 0);
+    // Arduino's SPI FatFs backend can busy-wait for up to its card-response
+    // timeout inside fopen()/fflush(). Keep that lowest-priority I/O task off
+    // CPU0, whose idle task is covered by the production task watchdog, and
+    // let the UI/setup task preempt it on CPU1 while a card is recovering.
+    xTaskCreatePinnedToCore(writerTask, "ride_diag_writer", 6144, nullptr, 0,
+                            &writerTaskHandle, 1);
   }
 #endif
 }
