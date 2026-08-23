@@ -195,6 +195,10 @@ static portMUX_TYPE deferredNotificationMux = portMUX_INITIALIZER_UNLOCKED;
 static struct ble_npl_event deferredNotificationEvent;
 static std::atomic<bool> deferredNotificationEventReady{false};
 static std::atomic<bool> deferredNotificationEventPending{false};
+// Keep at most one copy of the deferred event queued or executing. NimBLE's
+// event object's internal queued bit is not an application-level ownership
+// gate and can race the owner task with the pinned host task.
+static std::atomic<bool> deferredNotificationEventScheduled{false};
 static std::atomic<TaskHandle_t> nimbleCallbackTask{nullptr};
 static std::atomic<uint32_t> deferredNotificationDrops{0};
 static StaticSemaphore_t diagnosticsSessionMutexStorage;
@@ -1144,6 +1148,12 @@ static void scheduleDeferredNotificationEvent() {
       !deferredNotificationEventPending.load(std::memory_order_acquire)) {
     return;
   }
+  bool expected = false;
+  if (!deferredNotificationEventScheduled.compare_exchange_strong(
+          expected, true, std::memory_order_acq_rel,
+          std::memory_order_acquire)) {
+    return;
+  }
   // This is the only producer-side call into NimBLE's default event queue.
   // It runs on the Arduino/LVGL owner task, after any NimBLE callback that
   // published the deferred frame has returned.
@@ -1220,14 +1230,16 @@ static void processDeferredNotifications() {
 
 static void deferredNotificationEventHandler(struct ble_npl_event *event) {
   (void)event;
-  // Clear our scheduling gate after NimBLE removes the event from its queue.
-  // Producers can then request a follow-up event while this drain is running;
-  // the owner task will schedule it after the handler returns.
+  // Clear the pending hint before draining, but keep the scheduling gate held
+  // until the handler is done. A producer that races the drain therefore
+  // leaves a pending hint for the owner task without queueing a second copy
+  // of this event while it is executing.
   deferredNotificationEventPending.store(false, std::memory_order_release);
   // This callback runs on NimBLE's pinned host task. All transport calls below
   // therefore enter the host mutex only after the incoming ATT callback has
   // returned.
   processDeferredNotifications();
+  deferredNotificationEventScheduled.store(false, std::memory_order_release);
 }
 
 static void notifyAuthResponse(const std::string &response) {
@@ -4684,6 +4696,8 @@ void BLENavigationServer::init(const char *deviceName) {
     ble_npl_event_init(&deferredNotificationEvent,
                        deferredNotificationEventHandler, nullptr);
     deferredNotificationEventPending.store(false, std::memory_order_release);
+    deferredNotificationEventScheduled.store(false,
+                                             std::memory_order_release);
     deferredNotificationEventReady.store(true, std::memory_order_release);
   }
   NimBLEDevice::setPower(configuredTxPowerLevel());

@@ -37,6 +37,8 @@ class BLENotificationDispatchTests(unittest.TestCase):
             BLE_SOURCE, "static void scheduleDeferredNotificationEvent() {"
         )
         self.assertIn("ble_npl_eventq_put", schedule)
+        self.assertIn("deferredNotificationEventScheduled", schedule)
+        self.assertIn("compare_exchange_strong", schedule)
 
         send = function_body(BLE_SOURCE, "static bool sendWireNotification")
         self.assertIn("server->getPeerMTU", send)
@@ -60,6 +62,22 @@ class BLENotificationDispatchTests(unittest.TestCase):
             "static void deferredNotificationEventHandler(struct ble_npl_event *event) {",
         )
         self.assertIn("processDeferredNotifications()", event_handler)
+        self.assertIn(
+            "deferredNotificationEventScheduled.store(false",
+            event_handler,
+        )
+        self.assertLess(
+            event_handler.index("deferredNotificationEventPending.store(false"),
+            event_handler.index("processDeferredNotifications()"),
+        )
+        self.assertLess(
+            event_handler.index("processDeferredNotifications()"),
+            event_handler.index("deferredNotificationEventScheduled.store(false"),
+        )
+        init = function_body(
+            BLE_SOURCE, "void BLENavigationServer::init(const char *deviceName)"
+        )
+        self.assertIn("deferredNotificationEventScheduled.store(false", init)
 
 
 if __name__ == "__main__":
