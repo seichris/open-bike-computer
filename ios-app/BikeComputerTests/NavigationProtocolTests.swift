@@ -755,6 +755,7 @@ struct NavigationProtocolTests {
         testMapUploadProgressReconciliation()
         testOfflineMapDownloadingSectionPresentation()
         testOfflineMapActivityCounterOverlappingOperations()
+        testSavedMapDeviceTransferPolicy()
         testOfflineMapJobPersistence()
         testOfflineMapInstallationIdentity()
         testOfflineMapJobRecoverySelection()
@@ -6439,6 +6440,54 @@ struct NavigationProtocolTests {
         assert(!counter.isBusy, "busy state clears after the final operation finishes")
     }
 
+    static func testSavedMapDeviceTransferPolicy() {
+        assert(
+            SavedMapDeviceTransferPolicy.canStart(
+                isDeviceTransferBusy: false,
+                hasActiveBackgroundUpload: false,
+                isPausedUpload: false,
+                isNavigationReady: true
+            ),
+            "server map processing does not block an independent saved-map transfer"
+        )
+        assert(
+            !SavedMapDeviceTransferPolicy.canStart(
+                isDeviceTransferBusy: true,
+                hasActiveBackgroundUpload: false,
+                isPausedUpload: false,
+                isNavigationReady: true
+            ),
+            "a foreground device transfer blocks a second transfer"
+        )
+        assert(
+            !SavedMapDeviceTransferPolicy.canStart(
+                isDeviceTransferBusy: false,
+                hasActiveBackgroundUpload: true,
+                isPausedUpload: false,
+                isNavigationReady: true
+            ),
+            "a background upload blocks a different saved map"
+        )
+        assert(
+            SavedMapDeviceTransferPolicy.canStart(
+                isDeviceTransferBusy: false,
+                hasActiveBackgroundUpload: true,
+                isPausedUpload: true,
+                isNavigationReady: true
+            ),
+            "a paused upload remains resumable through background arbitration"
+        )
+        assert(
+            !SavedMapDeviceTransferPolicy.canStart(
+                isDeviceTransferBusy: false,
+                hasActiveBackgroundUpload: false,
+                isPausedUpload: false,
+                isNavigationReady: false
+            ),
+            "BLE navigation readiness remains required"
+        )
+    }
+
     @MainActor
     static func testPendingOfflineMapJobBlocksEveryCreationIngress() {
         let suite = "offline-map-pending-ingress-\(UUID().uuidString)"
@@ -8402,8 +8451,11 @@ struct NavigationProtocolTests {
             "deleting a saved map requires explicit confirmation"
         )
         assert(
-            source.contains("manager.hasActiveBackgroundUpload"),
-            "a restored upload disables conflicting saved-map upload and delete actions"
+            source.contains("SavedMapDeviceTransferPolicy.canStart(") &&
+                source.contains("isDeviceTransferBusy: manager.isDeviceTransferBusy") &&
+                source.contains("manager.hasActiveBackgroundUpload") &&
+                source.contains("if manager.isMapJobProcessing, manager.hasPendingMapJob"),
+            "map controls separate server work from conflicting device transfers"
         )
         assert(
             source.contains("SavedMapThumbnail(") &&
