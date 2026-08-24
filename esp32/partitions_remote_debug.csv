@@ -1,0 +1,10 @@
+# Remote-debug images include the renderer/input service and need more than an
+# ordinary 3 MiB OTA slot. They are development-only, USB-flashed images, so a
+# single 6 MiB app slot preserves the ordinary profile's FFat start at
+# 0x610000. Switching profiles therefore cannot relocate or format fallback
+# map/diagnostic data.
+# Name,   Type, SubType, Offset, Size, Flags
+nvs,      data, nvs,     ,      0x5000,
+otadata,  data, ota,     ,      0x2000,
+app0,     app,  ota_0,   ,      0x600000,
+ffat,     data, fat,     ,      0x900000,

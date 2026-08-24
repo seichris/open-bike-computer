@@ -123,6 +123,18 @@ private:
 class Storage {
 private:
   std::atomic<bool> isSdLoaded;
+  // True when /sdcard is currently backed by the main-branch FFat fallback.
+  // Diagnostics must not treat this as removable-SD availability, but a
+  // failed SD retry must restore it so the rest of the application keeps the
+  // same fallback behavior as the non-diagnostics firmware.
+  std::atomic<bool> internalFallbackMounted{false};
+  // When FFat owns /sdcard, diagnostics may mount a newly inserted removable
+  // card at a separate VFS root. This preserves every live fallback/map handle
+  // while allowing the recorder to recover without a reboot.
+  std::atomic<bool> diagnosticsSdMountedAtAlternateRoot{false};
+  // Recorder health is separate from the physical mount. A write fault must
+  // not unmount SD beneath map/font readers or an in-flight diagnostics GET.
+  std::atomic<bool> diagnosticsSdHealthy{true};
   sdmmc_card_t *card;
   SemaphoreHandle_t mountMutex = nullptr;
 
@@ -130,8 +142,20 @@ public:
   Storage();
 
   esp_err_t initSD();
-  bool ensureSdMounted();
+  // Remount the removable card when requested. Existing callers retain the
+  // FFat fallback by default; diagnostics can opt out so an absent card never
+  // turns into an unbounded internal log sink.
+  bool ensureSdMounted(bool allowInternalFallback = true);
   void markSdUnavailable();
+  bool hasInternalFallbackMounted() const;
+  bool canRetryRemovableSd() const;
+  uint64_t removableSdFreeBytes() const;
+  bool ensureDiagnosticsSdMounted();
+  void markDiagnosticsSdUnavailable();
+  bool getDiagnosticsSdLoaded() const;
+  bool canRetryDiagnosticsSd() const;
+  uint64_t diagnosticsSdFreeBytes() const;
+  const char *diagnosticsRootPath() const;
   esp_err_t initSPIFFS();
   SDCardInfo getSDCardInfo();
   bool getSdLoaded() const;
@@ -144,8 +168,10 @@ public:
   size_t size(const char *path);
   size_t read(FILE *file, uint8_t *buffer, size_t size);
   size_t read(FILE *file, char *buffer, size_t size);
+  bool hasError(FILE *file);
   size_t write(FILE *file, const uint8_t *buffer, size_t size);
   size_t write(FILE *file, const char *buffer, size_t size);
+  int flush(FILE *file);
   int seek(FILE *file, long offset, int whence);
   int print(FILE *file, const char *str);
   int println(FILE *file, const char *str);

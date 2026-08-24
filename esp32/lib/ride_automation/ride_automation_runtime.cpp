@@ -13,6 +13,7 @@
 #include "qmi8658.hpp"
 #include "ride_automation_trace.hpp"
 #include "ride_automation_protocol.hpp"
+#include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "speaker.hpp"
 #include "workout_telemetry_runtime.hpp"
 
@@ -773,10 +774,30 @@ void processFirmwareShadow(uint32_t nowMs) {
   const ride_automation::Settings settings = configuredSettings;
   const workout_telemetry::Snapshot workout =
       workout_telemetry_runtime::snapshot(nowMs);
+  const ride_automation::ConfirmedLifecycle previousLifecycle =
+      retainedLifecycle;
   const ride_automation::ConfirmedLifecycle lifecycle =
       confirmedLifecycle(workout, retainedLifecycle);
-  if (!workout.stale && workout.state.coreReceived)
+  if (!workout.stale && workout.state.coreReceived) {
+    // A detailed capture is consented for one ride. End it from the device's
+    // own confirmed workout lifecycle as well as from the BLE command so a
+    // phone disconnect/background transition cannot extend detailed sampling
+    // until the four-hour safety deadline.
+    if (ride_automation_runtime::shouldEndDetailedCapture(
+            previousLifecycle, lifecycle)) {
+      const ride_diagnostics::DetailedCaptureLease lease =
+          ride_diagnostics::detailedCaptureLease();
+      (void)ride_diagnostics::clearCaptureIfMatches(lease);
+    }
     retainedLifecycle = lifecycle;
+  } else if (ride_automation_runtime::
+                 shouldEndDetailedCaptureAfterTelemetryLoss(
+                     retainedLifecycle, workout.stale, nowMs,
+                     workout.state.lastCoreReceivedAtMs)) {
+    const ride_diagnostics::DetailedCaptureLease lease =
+        ride_diagnostics::detailedCaptureLease();
+    (void)ride_diagnostics::clearCaptureIfMatches(lease);
+  }
   // Every newly observed running session receives a conservative startup
   // grace. Manual provenance may arrive one telemetry frame later, while an
   // automatic start safely tolerates the same brief pause suppression.
@@ -899,6 +920,34 @@ void processFirmwareShadow(uint32_t nowMs) {
   char output[1'536];
   if (ride_automation::formatTraceJsonLine(trace, output, sizeof(output)) >= 0)
     Serial.println(output);
+  if (ride_diagnostics::detailedCaptureEnabled()) {
+    char fields[320] = {};
+    snprintf(
+        fields, sizeof(fields),
+        "{\"state\":\"%s\",\"startMode\":\"%s\","
+        "\"autoPauseEnabled\":%s,\"profileVersion\":%u,"
+        "\"sourceHealthMask\":%u,\"transition\":\"%s\","
+        "\"decisionSequence\":%lu,\"fixValid\":%s,"
+        "\"speedAvailable\":%s}",
+        ride_automation::lifecycleName(trace.lifecycle),
+        ride_automation::startModeName(trace.settings.startMode),
+        trace.settings.autoPauseEnabled ? "true" : "false",
+        static_cast<unsigned>(trace.profileVersion),
+        static_cast<unsigned>(trace.decision.sourceHealthMask),
+        ride_automation::transitionName(trace.decision.transition),
+        static_cast<unsigned long>(trace.decision.sequence),
+        trace.observation.gpsFixValid.available &&
+                trace.observation.gpsFixValid.value
+            ? "true"
+            : "false",
+        (trace.observation.wheelSpeedMetersPerSecond.available ||
+         trace.observation.cadenceRpm.available ||
+         trace.observation.gpsSpeedMetersPerSecond.available)
+            ? "true"
+            : "false");
+    ride_diagnostics::record(ride_diagnostics::Level::Debug,
+                             "rideAutomation", "detailed_sample", fields);
+  }
 #if !defined(RIDE_AUTOMATION_INTERNAL_CONTROL)
   if (decision)
     runtime.policy().rejectPending(nowMs);

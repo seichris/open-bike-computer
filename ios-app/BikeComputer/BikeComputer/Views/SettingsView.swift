@@ -25,6 +25,8 @@ struct SettingsView: View {
         CyclingSensorDetectionCoordinator
     @ObservedObject private var rideDetectionSettingsStore:
         RideDetectionSettingsStore
+    @ObservedObject private var rideDiagnosticsRecorder:
+        RideDiagnosticsRecorder
     @FocusState private var focusedSavedMapFilename: String?
     let locationAuthorizationStatus: CLAuthorizationStatus
     let locationAccuracyAuthorization: CLAccuracyAuthorization
@@ -46,6 +48,7 @@ struct SettingsView: View {
         cyclingSensorDetectionCoordinator:
             CyclingSensorDetectionCoordinator? = nil,
         rideDetectionSettingsStore: RideDetectionSettingsStore? = nil,
+        rideDiagnosticsRecorder: RideDiagnosticsRecorder? = nil,
         onRequestLocationAuthorization: @escaping () -> Void = {},
         onStartTestNavigation: @escaping (String) -> Void
     ) {
@@ -72,6 +75,9 @@ struct SettingsView: View {
         _rideDetectionSettingsStore = ObservedObject(
             wrappedValue:
                 rideDetectionSettingsStore ?? RideDetectionSettingsStore()
+        )
+        _rideDiagnosticsRecorder = ObservedObject(
+            wrappedValue: rideDiagnosticsRecorder ?? RideDiagnosticsRecorder()
         )
         self.onStartTestNavigation = onStartTestNavigation
     }
@@ -170,6 +176,14 @@ struct SettingsView: View {
                         )
                     } label: {
                         Label("Developer Settings", systemImage: "wrench.and.screwdriver")
+                    }
+
+                    NavigationLink {
+                        RideDiagnosticsSettingsView(
+                            recorder: rideDiagnosticsRecorder
+                        )
+                    } label: {
+                        Label("Diagnostics", systemImage: "stethoscope")
                     }
                 }
 
@@ -2050,6 +2064,88 @@ private struct TestNavigationSettingsSection: View {
     }
 }
 
+@MainActor
+private struct DiagnosticsTransferNetworkSettingsSection: View {
+    @State private var ssid = ""
+    @State private var password = ""
+    @State private var loaded = false
+    @State private var statusMessage: String?
+    private let credentialStore = RemoteDebugLANCredentialStore()
+
+    var body: some View {
+        Section {
+            TextField("Wi-Fi name (SSID)", text: $ssid)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            SecureField("Wi-Fi password", text: $password)
+                .textContentType(.password)
+            if let validationMessage {
+                Text(validationMessage)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            Button(action: save) {
+                Label("Save Trusted Wi-Fi", systemImage: "key.fill")
+            }
+            .disabled(credentials == nil)
+            Button(role: .destructive, action: forget) {
+                Label("Forget Trusted Wi-Fi", systemImage: "trash")
+            }
+            .disabled(ssid.isEmpty && password.isEmpty)
+            if let statusMessage {
+                Text(statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Diagnostics Transfer Network")
+        } footer: {
+            Text("Authenticated device-log transfers try this trusted 2.4 GHz Wi-Fi first. Credentials stay in this iPhone's device-only Keychain and are sent to Bicino over authenticated BLE for the current session only. A per-session WPA2 device hotspot remains the fallback.")
+        }
+        .onAppear(perform: loadIfNeeded)
+    }
+
+    private var credentials: RemoteDebugLANCredentials? {
+        RemoteDebugLANCredentials(ssid: ssid, password: password)
+    }
+
+    private var validationMessage: String? {
+        if ssid.isEmpty {
+            return password.isEmpty ? nil : "Enter the Wi-Fi name."
+        }
+        guard credentials == nil else { return nil }
+        return "SSID must be at most 32 bytes; password must be empty for an open network or 8-63 bytes."
+    }
+
+    private func loadIfNeeded() {
+        guard !loaded else { return }
+        loaded = true
+        guard let saved = credentialStore.load() else { return }
+        ssid = saved.ssid
+        password = saved.password
+    }
+
+    private func save() {
+        guard let credentials else {
+            statusMessage = validationMessage ?? "Enter valid Wi-Fi credentials."
+            return
+        }
+        statusMessage = credentialStore.save(credentials)
+            ? "Trusted Wi-Fi saved."
+            : "Trusted Wi-Fi could not be saved to Keychain."
+    }
+
+    private func forget() {
+        guard credentialStore.remove() else {
+            statusMessage = "Trusted Wi-Fi could not be removed from Keychain."
+            return
+        }
+        ssid = ""
+        password = ""
+        statusMessage = "Trusted Wi-Fi forgotten."
+    }
+}
+
 #if DEBUG
 @MainActor
 private struct RemoteDeviceDebugSettingsSection: View {
@@ -2627,6 +2723,7 @@ private struct DeveloperSettingsView: View {
 
             OfflineMapDeviceTransferSettingsSection(manager: offlineMapManager)
             FirmwareUpdateSettingsSection(manager: firmwareUpdateManager)
+            DiagnosticsTransferNetworkSettingsSection()
 #if DEBUG
             RemoteDeviceDebugSettingsSection()
             RendererBenchmarkReplaySettingsSection(

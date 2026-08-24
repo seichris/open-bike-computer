@@ -305,12 +305,12 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     if (enabled) {
       if (!wasEnabled || previousMode != mode_ || previousSessionToken.empty()) {
         sessionToken_ = generateSessionToken();
-        apPassphrase_ = mode_ == "debug"
+        apPassphrase_ = (mode_ == "debug" || mode_ == "diagnostics")
                             ? generateSessionToken().substr(0, 16)
                             : "";
       }
       if (!wasEnabled) {
-        if (requestedMode != "debug")
+        if (requestedMode != "debug" && requestedMode != "diagnostics")
           preferredNetwork_ = {};
         startedAp_ = false;
         startedStation_ = false;
@@ -462,7 +462,7 @@ bool HttpTransferServer::startNetwork() {
       vTaskDelay(pdMS_TO_TICKS(50));
     }
     WiFi.mode(WIFI_AP);
-    const bool apStarted = mode == "debug"
+    const bool apStarted = mode == "debug" || mode == "diagnostics"
                                ? WiFi.softAP(apSsid.c_str(),
                                              apPassphrase.c_str())
                                : WiFi.softAP(apSsid.c_str());
@@ -670,7 +670,9 @@ HttpTransferStatus HttpTransferServer::status() const {
           mode,
           baseUrl,
           startedAp ? apSsid : "",
-          startedAp && mode == "debug" ? apPassphrase : "",
+          startedAp && (mode == "debug" || mode == "diagnostics")
+              ? apPassphrase
+              : "",
           networkTransport,
           networkSsid,
           hotspotFallback,

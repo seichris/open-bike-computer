@@ -339,6 +339,8 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     @Published var currentAddress: String = "Current Location"
     @Published var authorizationStatus: CLAuthorizationStatus
     @Published var accuracyAuthorization: CLAccuracyAuthorization
+
+    weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
     
     private let locationManager: LocationManagerClient
     private let applicationIsActive: () -> Bool
@@ -356,6 +358,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     private var isRefreshingDeviceDestinationLocation = false
     private var hasRequestedAlwaysAuthorizationForDeviceDestinations = false
     private var hasRequestedAlwaysAuthorizationForRideActivity = false
+    private var lastDiagnosticsLocationRecordAt = Date.distantPast
 #if DEBUG
     private let developerLocationOverride = DeveloperLocationOverride.coordinate(
         arguments: ProcessInfo.processInfo.arguments
@@ -529,11 +532,33 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             print("🌍 Starting location updates (navigating: \(isNavigating), map: \(isViewingMap), workout: \(isWorkoutActive), ride detection: \(isRideDetectionArmed), device destination request: \(isRefreshingDeviceDestinationLocation))")
             locationManager.startUpdatingLocation()
             isLocationUpdating = true
+            diagnosticsRecorder?.record(
+                category: .gps,
+                event: "tracking_started",
+                fields: [
+                    "navigating": String(isNavigating),
+                    "viewingMap": String(isViewingMap),
+                    "workoutActive": String(isWorkoutActive),
+                    "rideDetectionArmed": String(isRideDetectionArmed),
+                    "background": String(!isApplicationActive),
+                ]
+            )
         } else if (!shouldTrack || !isLocationAuthorized || !canStartUpdates) &&
                     isLocationUpdating {
             print("🌍 Stopping location updates (not needed)")
             locationManager.stopUpdatingLocation()
             isLocationUpdating = false
+            diagnosticsRecorder?.record(
+                category: .gps,
+                event: "tracking_stopped",
+                fields: [
+                    "navigating": String(isNavigating),
+                    "viewingMap": String(isViewingMap),
+                    "workoutActive": String(isWorkoutActive),
+                    "rideDetectionArmed": String(isRideDetectionArmed),
+                    "authorized": String(isLocationAuthorized),
+                ]
+            )
         }
     }
     
@@ -562,6 +587,36 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
 #endif
         
         currentLocation = location
+
+        let now = Date()
+        if now.timeIntervalSince(lastDiagnosticsLocationRecordAt) >= 30 {
+            lastDiagnosticsLocationRecordAt = now
+            let age = max(0, now.timeIntervalSince(location.timestamp))
+            let accuracy = location.horizontalAccuracy
+            let accuracyBucket: String
+            if !accuracy.isFinite || accuracy < 0 {
+                accuracyBucket = "unavailable"
+            } else if accuracy <= 5 {
+                accuracyBucket = "excellent"
+            } else if accuracy <= 12.5 {
+                accuracyBucket = "good"
+            } else if accuracy <= 50 {
+                accuracyBucket = "coarse"
+            } else {
+                accuracyBucket = "poor"
+            }
+            diagnosticsRecorder?.record(
+                category: .gps,
+                event: "quality_checkpoint",
+                fields: [
+                    "sampleCount": String(locations.count),
+                    "ageMs": String(Int(min(age * 1000, 86_400_000))),
+                    "accuracyBucket": accuracyBucket,
+                    "speedAvailable": String(location.speed.isFinite && location.speed >= 0),
+                    "authorization": locationAuthorizationLabel,
+                ]
+            )
+        }
 
         // Ride detection consumes raw location only. Reverse geocoding every
         // minute during an otherwise headless all-day detector session adds
@@ -631,13 +686,40 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         print("Location error: \(error.localizedDescription)")
+        let nsError = error as NSError
+        diagnosticsRecorder?.record(
+            level: .warning,
+            category: .gps,
+            event: "error",
+            fields: [
+                "domain": String(nsError.domain.prefix(64)),
+                "code": String(nsError.code),
+            ],
+            captureId: nil
+        )
     }
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         authorizationStatus = manager.authorizationStatus
         accuracyAuthorization = self.locationManager.accuracyAuthorization
+        diagnosticsRecorder?.record(
+            category: .gps,
+            event: "authorization_changed",
+            fields: [
+                "authorization": locationAuthorizationLabel,
+                "accuracy": String(accuracyAuthorization.rawValue),
+            ]
+        )
         prepareDeviceDestinationRequestsIfNeeded()
         updateLocationTracking()
+    }
+
+    private var locationAuthorizationLabel: String {
+        switch locationManager.authorizationLevel {
+        case .denied: return "denied"
+        case .whenInUse: return "when_in_use"
+        case .always: return "always"
+        }
     }
 
 }

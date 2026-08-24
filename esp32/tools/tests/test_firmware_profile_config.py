@@ -25,6 +25,7 @@ def inherited_option(section: str, option: str) -> str:
 
 
 prebuild_source = (project_dir / "prebuild.py").read_text()
+main_source = (project_dir / "src/main.cpp").read_text()
 assert "-DBUILD_PROFILE=" in prebuild_source
 assert "OPEN_BIKE_EXPECTED_GIT_SHA" in prebuild_source
 assert "SOURCE_DATE_EPOCH" in prebuild_source
@@ -35,12 +36,17 @@ assert 'env.subst("$PROJECT_LIBDEPS_DIR")' in prebuild_source
 assert '".pio/libdeps/" + flavor' not in prebuild_source
 assert "def record_link_start(target, source, env):" in prebuild_source
 assert "def record_link_finish(target, source, env):" in prebuild_source
+assert main_source.index("recoverInterruptedActivation()") < main_source.index(
+    "ride_diagnostics::startWriter()"
+)
 
 waveshare_sdkconfig = config.get("waveshare_amoled_common", "custom_sdkconfig")
 assert "CONFIG_PM_ENABLE=y" in waveshare_sdkconfig
 assert "CONFIG_PM_DFS_INIT_AUTO=n" in waveshare_sdkconfig
 assert "CONFIG_PM_PROFILING=n" in waveshare_sdkconfig
 assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n" in waveshare_sdkconfig
+assert "CONFIG_ARDUINO_LOOP_STACK_SIZE=16384" in waveshare_sdkconfig
+assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in waveshare_sdkconfig
 waveshare_unflags = config.get("waveshare_amoled_common", "build_unflags")
 assert "-Wl,--wrap=log_printf" in waveshare_unflags
 waveshare_flags = config.get("waveshare_amoled_common", "build_flags")
@@ -154,6 +160,8 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y" in sdkconfig
     assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n" not in sdkconfig
     assert "CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y" in sdkconfig
+    assert "CONFIG_ARDUINO_LOOP_STACK_SIZE=16384" in sdkconfig
+    assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in sdkconfig
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
     assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" in flags

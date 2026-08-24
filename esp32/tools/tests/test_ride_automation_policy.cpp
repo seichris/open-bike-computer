@@ -55,6 +55,29 @@ Decision runSeconds(RideAutomationPolicy &policy, uint32_t startMs,
 } // namespace
 
 int main() {
+  using ride_automation_runtime::shouldEndDetailedCapture;
+  assert(shouldEndDetailedCapture(ConfirmedLifecycle::Running,
+                                  ConfirmedLifecycle::Finished));
+  assert(shouldEndDetailedCapture(ConfirmedLifecycle::ManuallyPaused,
+                                  ConfirmedLifecycle::Finished));
+  assert(!shouldEndDetailedCapture(ConfirmedLifecycle::Finished,
+                                   ConfirmedLifecycle::Finished));
+  assert(!shouldEndDetailedCapture(ConfirmedLifecycle::Running,
+                                   ConfirmedLifecycle::ManuallyPaused));
+  using ride_automation_runtime::shouldEndDetailedCaptureAfterTelemetryLoss;
+  constexpr uint32_t staleGrace =
+      ride_automation_runtime::kDetailedCaptureTelemetryLossGraceMs;
+  assert(!shouldEndDetailedCaptureAfterTelemetryLoss(
+      ConfirmedLifecycle::Running, true, staleGrace - 1, 0));
+  assert(shouldEndDetailedCaptureAfterTelemetryLoss(
+      ConfirmedLifecycle::Running, true, staleGrace, 0));
+  assert(!shouldEndDetailedCaptureAfterTelemetryLoss(
+      ConfirmedLifecycle::Running, false, staleGrace, 0));
+  assert(!shouldEndDetailedCaptureAfterTelemetryLoss(
+      ConfirmedLifecycle::Finished, true, staleGrace, 0));
+  assert(shouldEndDetailedCaptureAfterTelemetryLoss(
+      ConfirmedLifecycle::ManuallyPaused, true, 100,
+      std::numeric_limits<uint32_t>::max() - staleGrace + 100));
   using ride_automation_runtime::UiPhase;
   assert(!ride_automation_runtime::shouldShowAutomationPanel(
       UiPhase::SensorDegraded));

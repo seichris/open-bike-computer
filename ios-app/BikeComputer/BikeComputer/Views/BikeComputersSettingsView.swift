@@ -77,15 +77,18 @@ struct BikeComputersSettingsView: View {
                         handleConnectNewBikeComputer()
                     } label: {
                         Label(
-                            bleManager.knownDevices.isEmpty
+                            bleManager.isConnecting
+                                ? "Cancel connection"
+                                : bleManager.knownDevices.isEmpty
                                 ? "Search Nearby"
                                 : "Connect a new Bike Computer",
-                            systemImage: "plus.circle"
+                            systemImage: bleManager.isConnecting
+                                ? "xmark.circle"
+                                : "plus.circle"
                         )
                     }
                     .disabled(
-                        bleManager.deviceOperationDeviceID != nil ||
-                        bleManager.isConnecting
+                        bleManager.deviceOperationDeviceID != nil
                     )
                 }
             }
@@ -300,8 +303,8 @@ struct BikeComputersSettingsView: View {
             beginDiscovery()
         case .confirmDisconnect:
             showingDisconnectForDiscoveryConfirmation = true
-        case .disabledWhileConnecting:
-            break
+        case .cancelConnection:
+            bleManager.cancelConnectionAttemptForDiscovery()
         }
     }
 

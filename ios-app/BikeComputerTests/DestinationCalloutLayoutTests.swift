@@ -112,7 +112,7 @@ struct DestinationCalloutLayoutTests {
     @MainActor
     private static func testDestinationSelectionTrackingIntegration() async {
         let coordinate = CLLocationCoordinate2D(latitude: 1.35210, longitude: 103.81980)
-        let mapView = RecordingMapView()
+        let mapView = RecordingMapView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         let coordinator = MapViewContainer.Coordinator(addressResolver: { _ in nil })
         coordinator.mapView = mapView
         coordinator.isUserLocationAuthorized = true
@@ -430,7 +430,7 @@ struct DestinationCalloutLayoutTests {
     @MainActor
     private static func testFallbackAddress() async {
         let coordinate = CLLocationCoordinate2D(latitude: 1.35210, longitude: 103.81980)
-        let mapView = RecordingMapView()
+        let mapView = RecordingMapView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         let coordinator = MapViewContainer.Coordinator(addressResolver: { _ in nil })
         mapView.annotationViewProvider = { annotation in
             coordinator.mapView(mapView, viewFor: annotation)
@@ -452,7 +452,7 @@ struct DestinationCalloutLayoutTests {
     private static func testStaleResolutionCancellation() async {
         let firstCoordinate = CLLocationCoordinate2D(latitude: 31.10000, longitude: 121.40000)
         let secondCoordinate = CLLocationCoordinate2D(latitude: 31.20000, longitude: 121.50000)
-        let mapView = RecordingMapView()
+        let mapView = RecordingMapView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         var firstResolverStarted = false
         var firstResolverFinished = false
         var firstResolverObservedCancellation = false

@@ -51,12 +51,14 @@ struct ContentView: View {
     // MARK: - State
     
     @StateObject private var coordinator: BikeComputerCoordinator
-    @StateObject private var offlineMapManager = OfflineMapManager()
+    @StateObject private var offlineMapManager: OfflineMapManager
     @StateObject private var watchAvailability: WorkoutWatchAvailabilityMonitor
     @ObservedObject private var routeLibrary: PhoneRouteLibrary
     @ObservedObject private var workoutStore: WorkoutMetricsStore
     @ObservedObject private var liveActivityDiagnostics:
         WorkoutLiveActivityDiagnosticStore
+    @ObservedObject private var rideDiagnosticsRecorder:
+        RideDiagnosticsRecorder
     @ObservedObject private var cyclingSensorStore:
         CyclingSensorStore
     @ObservedObject private var cyclingSensorDetectionCoordinator:
@@ -107,11 +109,14 @@ struct ContentView: View {
         routeLibrary: PhoneRouteLibrary? = nil,
         liveActivityDiagnostics:
             WorkoutLiveActivityDiagnosticStore? = nil,
+        rideDiagnosticsRecorder: RideDiagnosticsRecorder? = nil,
         onApplicationActiveChange:
             @escaping (Bool) -> Void = { _ in }
     ) {
         let liveActivityDiagnostics = liveActivityDiagnostics
             ?? WorkoutLiveActivityDiagnosticStore()
+        let rideDiagnosticsRecorder = rideDiagnosticsRecorder
+            ?? RideDiagnosticsRecorder()
         let cyclingSensorStore =
             cyclingSensorStore ?? CyclingSensorStore()
         let cyclingSensorDetectionCoordinator =
@@ -171,8 +176,16 @@ struct ContentView: View {
         _liveActivityDiagnostics = ObservedObject(
             wrappedValue: liveActivityDiagnostics
         )
+        _rideDiagnosticsRecorder = ObservedObject(
+            wrappedValue: rideDiagnosticsRecorder
+        )
         _coordinator = StateObject(
             wrappedValue: coordinator
+        )
+        _offlineMapManager = StateObject(
+            wrappedValue: OfflineMapManager(
+                diagnosticsRecorder: rideDiagnosticsRecorder
+            )
         )
     }
     
@@ -541,6 +554,7 @@ struct ContentView: View {
                     cyclingSensorDetectionCoordinator,
                 rideDetectionSettingsStore:
                     rideDetectionSettingsStore,
+                rideDiagnosticsRecorder: rideDiagnosticsRecorder,
                 onRequestLocationAuthorization: {
                     coordinator.requestLocationAuthorization()
                 },

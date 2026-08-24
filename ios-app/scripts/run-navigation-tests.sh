@@ -16,6 +16,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift \
   ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift \
   ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
@@ -32,6 +33,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkProtocol.swift \
@@ -67,6 +69,7 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
   ios-app/BikeComputer/BikeComputer/Models/CyclingSensorProfile.swift \
   ios-app/BikeComputer/BikeComputer/Managers/CyclingSensorStore.swift \
@@ -123,6 +126,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkProtocol.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationRuntimeLogic.swift \

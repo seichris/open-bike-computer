@@ -251,12 +251,8 @@ struct NavigationWriteQueue {
         }
 
         if pendingPriorityWrites.count + writes.count > priorityMaxCount {
-            let supersededWrites = pendingPriorityWrites
-            for supersededWrite in supersededWrites {
-                recordDropped(write: supersededWrite)
-                supersededWrite.onDrop?()
-            }
-            pendingPriorityWrites.removeAll()
+            recordRejectedFrames(writes.count)
+            return false
         }
         beginEnqueueIfEmpty()
         let enqueuedAt = now()

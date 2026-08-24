@@ -156,7 +156,10 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         transfer = (ROOT / "lib/device_transfer/device_transfer_http.cpp").read_text(
             encoding="utf-8"
         )
-        self.assertIn('apPassphrase_ = mode_ == "debug"', transfer)
+        self.assertIn(
+            'apPassphrase_ = (mode_ == "debug" || mode_ == "diagnostics")',
+            transfer,
+        )
         self.assertIn("WiFi.softAP(apSsid.c_str(),", transfer)
         info = HTTP[
             HTTP.index("bool DeviceDebugHttp::handleInfo") :

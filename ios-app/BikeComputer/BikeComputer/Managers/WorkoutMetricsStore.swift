@@ -37,6 +37,8 @@ final class WorkoutMetricsStore: ObservableObject {
     @Published private(set) var shouldMaintainWorkoutServices: Bool
     @Published private(set) var currentHeartRateZoneElapsedTime: TimeInterval?
 
+    weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
+
     private var reducer: WorkoutMirrorStateReducer
     private var iPhoneTelemetry: WorkoutIPhoneTelemetryV1 = .empty
     private var fallbackSessionID: UUID?
@@ -332,6 +334,30 @@ final class WorkoutMetricsStore: ObservableObject {
                 nextShouldMaintainWorkoutServices
         }
         guard next != presentation else { return }
+        let stateChanged = presentation.sessionState != next.sessionState
+            || presentation.connectionState != next.connectionState
+            || presentation.pendingControl != next.pendingControl
+            || presentation.errorCode != next.errorCode
+            || (presentation.sessionID != nil) != (next.sessionID != nil)
+        if stateChanged {
+            var fields: [String: String] = [
+                "state": next.sessionState.rawValue,
+                "connectionState": next.connectionState.rawValue,
+                "active": String(next.isWorkoutActive),
+                "sessionPresent": String(next.sessionID != nil),
+                "pendingControl": next.pendingControl?.rawValue ?? "none",
+            ]
+            if let errorCode = next.errorCode {
+                fields["code"] = errorCode.rawValue
+            }
+            diagnosticsRecorder?.record(
+                level: next.errorCode == nil ? .info : .warning,
+                category: .workout,
+                event: "state_changed",
+                fields: fields,
+                captureId: nil
+            )
+        }
         presentation = next
     }
 

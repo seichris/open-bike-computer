@@ -189,6 +189,28 @@ jobs:
             echo "Non-debug firmware contains remote-debug routes"
             exit 1
           fi
+      - name: Verify ordinary artifacts include persistent diagnostics capability
+        if: ${{ !contains(matrix.target, '_REMOTE_DEBUG') }}
+        run: |
+          python3 - "${{ matrix.target }}" <<'PY'
+          from pathlib import Path
+          import sys
+
+          artifact = Path(".pio/build") / sys.argv[1] / "firmware.elf"
+          firmware = artifact.read_bytes()
+          required = (
+              "/device-diagnostics/v1/",
+              "storage_gap",
+          )
+          missing = [
+              marker for marker in required
+              if marker.encode("utf-8") + b"\0" not in firmware
+          ]
+          if missing:
+              raise SystemExit(
+                  "Missing persistent diagnostics markers: " + ", ".join(missing)
+              )
+          PY
       - name: Verify remote-debug artifacts include renderer metrics routes
         if: contains(matrix.target, '_REMOTE_DEBUG')
         run: |
@@ -221,6 +243,12 @@ jobs:
         working-directory: ios-app
       - name: Run Swift helper tests
         run: ./scripts/run-navigation-tests.sh
+        working-directory: ios-app
+      - name: Run ride diagnostics recorder tests
+        run: ./scripts/run-ride-diagnostics-tests.sh
+        working-directory: ios-app
+      - name: Run ride diagnostics XCTest target
+        run: bash ./scripts/run-ride-diagnostics-xctest.sh
         working-directory: ios-app
       - name: Run shared route and Watch BLE contract tests
         run: ./scripts/run-ride-shared-tests.sh
@@ -319,6 +347,18 @@ jobs:
       - name: Firmware manifest tests
         run: python3 -m unittest discover -s tools/tests
         working-directory: ${{ github.workspace }}
+      - name: Ride diagnostics format host tests
+        run: |
+          for test in \
+            test_ride_diagnostics_format \
+            test_ride_diagnostics_queue_policy \
+            test_ride_diagnostics_control \
+            test_ride_diagnostics_http_policy \
+            test_storage_mount_policy; do
+            g++ -std=c++17 -Wall -Wextra -Werror \
+              "tools/tests/${test}.cpp" -o "/tmp/${test}"
+            "/tmp/${test}"
+          done
       - name: Verify generated pre-connection assets
         run: |
           python -m pip install -r tools/preconnection-assets-requirements.txt
