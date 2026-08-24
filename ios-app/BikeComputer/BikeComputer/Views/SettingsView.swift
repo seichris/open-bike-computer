@@ -682,9 +682,26 @@ private struct DownloadingMapsSettingsSection: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Map activation \(activationProgress.label)")
             } else if !manager.statusMessage.isEmpty {
-                StatusValueRow(status: manager.statusMessage, isBusy: manager.isBusy)
+                StatusValueRow(
+                    status: manager.statusMessage,
+                    isBusy: manager.isBusy && manager.downloadByteProgress == nil
+                )
             } else if manager.hasPendingDeviceActivation {
                 StatusValueRow(status: "Checking device activation", isBusy: false)
+            }
+
+            if let downloadProgress = manager.downloadByteProgress {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Download Progress")
+                        Spacer()
+                        Text("\(downloadProgress.percentage)%")
+                            .foregroundColor(.secondary)
+                    }
+                    ProgressView(value: downloadProgress.fraction)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Map download \(downloadProgress.percentage) percent")
             }
 
             if let overallGenerationProgress {

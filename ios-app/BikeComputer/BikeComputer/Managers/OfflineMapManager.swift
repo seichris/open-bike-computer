@@ -4990,6 +4990,15 @@ final class OfflineMapManager: ObservableObject {
 struct OfflineMapByteProgress: Equatable {
     let completedBytes: Int64
     let totalBytes: Int64
+
+    var fraction: Double {
+        guard totalBytes > 0 else { return 0 }
+        return min(max(Double(completedBytes) / Double(totalBytes), 0), 1)
+    }
+
+    var percentage: Int {
+        Int((fraction * 100).rounded())
+    }
 }
 
 nonisolated struct OfflineMapDownloadConstraints: Equatable {

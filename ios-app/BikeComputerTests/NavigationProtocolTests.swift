@@ -750,6 +750,7 @@ struct NavigationProtocolTests {
         testOfflineMapJobProgressDecoding()
         testOfflineMapJobProgressAbsentFallback()
         testOfflineMapProgressPresentation()
+        testOfflineMapByteProgressPresentation()
         testOfflineMapOnboardingPolicy()
         testMapActivationProgressPresentation()
         testMapUploadProgressReconciliation()
@@ -6250,6 +6251,29 @@ struct NavigationProtocolTests {
             cacheWaitJob?.progress?.detail,
             "Waiting for the verified map source",
             "source cache waits have a distinct progress explanation"
+        )
+    }
+
+    static func testOfflineMapByteProgressPresentation() {
+        assertEqual(
+            OfflineMapByteProgress(completedBytes: 25, totalBytes: 100).fraction,
+            0.25,
+            "map download fraction uses completed and total bytes"
+        )
+        assertEqual(
+            OfflineMapByteProgress(completedBytes: 256, totalBytes: 1_024).percentage,
+            25,
+            "map download percentage is suitable for the settings UI"
+        )
+        assertEqual(
+            OfflineMapByteProgress(completedBytes: 125, totalBytes: 100).percentage,
+            100,
+            "map download percentage clamps oversized progress"
+        )
+        assertEqual(
+            OfflineMapByteProgress(completedBytes: 10, totalBytes: 0).percentage,
+            0,
+            "map download percentage handles a missing byte total safely"
         )
     }
 
