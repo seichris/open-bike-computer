@@ -63,6 +63,13 @@ promotion. The policy-aware API ignores them. Remove them only after `/healthz`
 reports both `deploymentChannel` and `generationProfilePolicySha256` from the
 promoted control plane.
 
+Keep `MAP_PLATFORM_WORKER_MEMORY_LIMIT` at the reviewed `12g` default (or a
+separately reviewed lower value). The production Compose lock applies it as a
+real worker cgroup limit; the chunk coordinator refuses to claim target-3 work
+when that limit is absent or malformed. Keep
+`MAP_PLATFORM_WORKER_MAX_CONCURRENT_TASKS=1` until retained resource evidence
+supports a higher value.
+
 The initial worker lock points at the image already running successfully in
 production. Its control-plane lock contains the same backend revision currently
 deployed from `main`, so changing the Compose location does not introduce a new
@@ -87,6 +94,11 @@ hostname `maps-dev.8o.vc`. Give it independent installation/download/admin
 secrets, an independent S3 prefix (for example `map-artifacts-dev`), independent
 quotas and monitoring retention, and its own Compose-managed data volume. Do not
 copy production installation credentials or the target-3 canary allowlist.
+For estimator calibration, set `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE=shadow`
+on this development application and keep the production application at `off`.
+Shadow mode records bounded estimate revisions without returning them in public
+job responses; promote to `public` only after the documented sample and accuracy
+gates pass.
 Until `/healthz` exposes the generation-policy digest, set both legacy
 compatibility flags to `1` on this new application so the pinned pre-policy API
 can generate formats 2 and 3. They become inert after the control-plane image

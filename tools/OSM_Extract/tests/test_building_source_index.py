@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -127,6 +128,59 @@ class BuildingSourceIndexTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, "building_object_limit_exceeded")
 
+    def test_workload_scan_returns_exact_counts_and_stable_closure_identity(self):
+        nodes, ways, relations = records()
+        with tempfile.TemporaryDirectory() as root:
+            index = BuildingSourceIndex(root, "1" * 64)
+            index.build(nodes=nodes, ways=ways, relations=relations)
+            workload = index.workload_for_bounds(
+                [(0, 0, 500, 500)],
+                maximum_objects=100,
+                calibration_cell_size_meters=8192,
+                calibration_halo_cells=1,
+            )
+            repeat = index.workload_for_bounds(
+                [(0, 0, 500, 500)],
+                maximum_objects=100,
+                calibration_cell_size_meters=8192,
+                calibration_halo_cells=1,
+            )
+        self.assertEqual(workload["relationCount"], 1)
+        self.assertEqual(workload["wayCount"], 1)
+        self.assertEqual(workload["nodeCount"], 4)
+        self.assertEqual(workload["totalObjectCount"], 6)
+        self.assertEqual(workload["storedRelationMemberCount"], 1)
+        self.assertEqual(workload["wayNodeReferenceCount"], 5)
+        self.assertEqual(workload["vertexCount"], 5)
+        self.assertEqual(workload["candidateOutlineCount"], 1)
+        self.assertEqual(workload["candidatePartCount"], 0)
+        self.assertEqual(workload["closurePlanSha256"], repeat["closurePlanSha256"])
+
+    def test_closure_batches_more_than_one_sqlite_parameter_page(self):
+        nodes, base_ways, _ = records()
+        ways = [
+            {
+                "objectKey": f"w{index:04d}",
+                "tags": {"building": "yes"},
+                "nodes": list(base_ways[0]["nodes"]),
+            }
+            for index in range(401)
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            index = BuildingSourceIndex(root, "3" * 64)
+            index.build(nodes=nodes, ways=ways, relations=[])
+            closure = index.closure_for_bounds(
+                [(0, 0, 500, 500)],
+                maximum_objects=1_000,
+                calibration_cell_size_meters=8192,
+                calibration_halo_cells=1,
+            )
+
+        self.assertEqual(closure["requiredRelationKeys"], [])
+        self.assertEqual(len(closure["requiredWayKeys"]), 401)
+        self.assertEqual(len(closure["requiredNodeKeys"]), 4)
+        self.assertEqual(closure["candidateKeys"], closure["requiredWayKeys"])
+
     def test_output_candidate_extent_adds_its_runtime_calibration_anchor(self):
         nodes = [
             {"objectKey": "n1", "lonE7": 0, "latE7": 0},
@@ -202,6 +256,137 @@ class BuildingSourceIndexTests(unittest.TestCase):
                 output.write(b"tamper")
             with self.assertRaises(BuildingSourceIndexError):
                 index.validate()
+
+    def test_warm_valid_sqlite_mutation_is_rejected_and_rebuilt(self):
+        nodes, ways, relations = records()
+        calls = []
+
+        def scanner(path):
+            calls.append(path)
+            write_spool(path, nodes, ways, relations)
+
+        with tempfile.TemporaryDirectory() as root:
+            index = BuildingSourceIndex(root, "1" * 64)
+            original = index.build_with_scanner(scanner)
+            warm_reader = BuildingSourceIndex.from_manifest(
+                index.manifest_path,
+                validate_database=False,
+            )
+            self.assertEqual(
+                warm_reader.workload_for_bounds(
+                    [(0, 0, 500, 500)],
+                    maximum_objects=100,
+                    calibration_cell_size_meters=8192,
+                    calibration_halo_cells=1,
+                )["wayCount"],
+                1,
+            )
+
+            original_stat = index.database_path.stat()
+            connection = sqlite3.connect(index.database_path)
+            connection.execute("DELETE FROM relation_members")
+            connection.execute("DELETE FROM relations")
+            connection.execute("DELETE FROM ways")
+            connection.commit()
+            self.assertEqual(
+                connection.execute("PRAGMA quick_check").fetchone()[0], "ok"
+            )
+            connection.close()
+            os.utime(
+                index.database_path,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+            mutated_stat = index.database_path.stat()
+            self.assertEqual(mutated_stat.st_size, original_stat.st_size)
+            self.assertEqual(mutated_stat.st_mtime_ns, original_stat.st_mtime_ns)
+
+            with self.assertRaisesRegex(
+                BuildingSourceIndexError, "changed after verification"
+            ):
+                warm_reader.closure_for_bounds(
+                    [(0, 0, 500, 500)],
+                    maximum_objects=100,
+                    calibration_cell_size_meters=8192,
+                    calibration_halo_cells=1,
+                )
+            with self.assertRaisesRegex(
+                BuildingSourceIndexError, "changed after verification"
+            ):
+                BuildingSourceIndex.from_manifest(
+                    index.manifest_path,
+                    validate_database=False,
+                )
+
+            rebuilt = index.build_with_scanner(scanner)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(rebuilt["databaseSha256"], original["databaseSha256"])
+            self.assertEqual(
+                len(list(index.index_root.glob("index.sqlite.corrupt-*"))), 1
+            )
+            self.assertEqual(
+                len(list(index.index_root.glob("verification.json.corrupt-*"))), 1
+            )
+            self.assertEqual(
+                BuildingSourceIndex.from_manifest(
+                    index.manifest_path,
+                    validate_database=False,
+                ).validate_verified_database()["databaseSha256"],
+                original["databaseSha256"],
+            )
+
+    def test_verified_warm_reader_does_not_rehash_unchanged_database(self):
+        nodes, ways, relations = records()
+        with tempfile.TemporaryDirectory() as root:
+            index = BuildingSourceIndex(root, "1" * 64)
+            manifest = index.build(nodes=nodes, ways=ways, relations=relations)
+
+            with patch(
+                "building_source_index.file_sha256",
+                side_effect=AssertionError("warm reader rehashed source index"),
+            ):
+                reader = BuildingSourceIndex.from_manifest(
+                    index.manifest_path,
+                    validate_database=False,
+                )
+                self.assertEqual(
+                    reader.validate_verified_database()["databaseSha256"],
+                    manifest["databaseSha256"],
+                )
+                self.assertEqual(
+                    reader.closure_for_bounds(
+                        [(0, 0, 500, 500)],
+                        maximum_objects=100,
+                        calibration_cell_size_meters=8192,
+                        calibration_halo_cells=1,
+                    )["requiredWayKeys"],
+                    ["w10"],
+                )
+
+    def test_corrupt_verification_receipt_fails_closed_and_is_refreshed(self):
+        nodes, ways, relations = records()
+        scanner_calls = []
+        with tempfile.TemporaryDirectory() as root:
+            index = BuildingSourceIndex(root, "1" * 64)
+            index.build(nodes=nodes, ways=ways, relations=relations)
+            index.verification_path.write_text("null\n", encoding="ascii")
+
+            with self.assertRaisesRegex(
+                BuildingSourceIndexError, "verification is unavailable"
+            ):
+                BuildingSourceIndex.from_manifest(
+                    index.manifest_path,
+                    validate_database=False,
+                )
+
+            index.build_with_scanner(lambda _path: scanner_calls.append(1))
+            self.assertEqual(scanner_calls, [])
+            self.assertEqual(
+                BuildingSourceIndex.from_manifest(
+                    index.manifest_path,
+                    validate_database=False,
+                ).validate_verified_database()["indexKey"],
+                index.index_key,
+            )
 
     def test_way_and_relation_bounds_are_recomputed_during_validation(self):
         nodes, ways, relations = records()

@@ -87,16 +87,19 @@ def building_preprocessing_scope_mode() -> str:
 
     ``shadow`` preserves the legacy artifact while recording the proposed
     selected-area plan. ``selected`` enables the bounded source/index/cache
-    path. ``legacy`` disables even shadow planning for emergency rollback.
+    path. ``chunked_allowlist`` and ``chunked`` enable the durable chunk
+    coordinator (the former is intended for an explicit installation
+    allowlist). ``legacy`` disables even shadow planning for emergency
+    rollback.
     """
     value = os.environ.get(
         "MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE",
         "shadow",
     ).strip().lower()
-    if value not in {"legacy", "shadow", "selected"}:
+    if value not in {"legacy", "shadow", "selected", "chunked_allowlist", "chunked"}:
         raise ValueError(
             "MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE must be "
-            "legacy, shadow, or selected"
+            "legacy, shadow, or selected (chunked_allowlist or chunked are also supported)"
         )
     return value
 

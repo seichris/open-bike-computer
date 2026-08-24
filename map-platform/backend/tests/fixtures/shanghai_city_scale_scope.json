@@ -1,0 +1,25 @@
+{
+  "request": {
+    "mode": "custom_bbox",
+    "bbox": [
+      121.11,
+      30.8,
+      122.02,
+      31.29
+    ]
+  },
+  "expected": {
+    "requestedApproximateAreaM2": 4734175248,
+    "outputAreaM2": 7415529472,
+    "sourceAreaM2": 7505969152,
+    "sourceToOutputAreaBasisPoints": 10122,
+    "outputBlockCount": 442,
+    "outputBlockGrid": {
+      "xCount": 26,
+      "yCount": 17
+    },
+    "calibrationCellCount": 140,
+    "calibrationSampleCellCount": 192,
+    "minimumAreaOnlyChunkCount": 7
+  }
+}

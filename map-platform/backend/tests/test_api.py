@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 import map_platform.api as api_module
 from map_platform.api import create_app
 from map_platform.downloads import DownloadSigner
+from map_platform.building_tasks import BuildingTaskSpec
 from map_platform.models import JobStatus, MapJob
 
 
@@ -36,6 +37,63 @@ class BackendDependencyHintTests(unittest.TestCase):
         self.assertTrue(
             (documented_working_directory / editable_target / "pyproject.toml").is_file()
         )
+
+
+class BuildingProgressProjectionTests(unittest.TestCase):
+    def test_projection_adds_coordinator_fields_without_rewriting_legacy_counters(self):
+        result = {
+            "progress": {
+                "phase": "block_encoding",
+                "completedBlocks": 4,
+                "totalBlocks": 9,
+            }
+        }
+        coordinator_progress = {
+            "phase": "building_chunks",
+            "unit": "blocks",
+            "completed": 7,
+            "total": 12,
+            "completedBlocks": 7,
+            "totalBlocks": 12,
+            "activeChunks": 1,
+            "readyChunks": 2,
+            "totalChunks": 5,
+            "indeterminate": False,
+            "state": "building_chunks",
+        }
+
+        api_module._project_building_progress(result, coordinator_progress)
+
+        self.assertEqual(result["progress"]["phase"], "block_encoding")
+        self.assertEqual(result["progress"]["completedBlocks"], 4)
+        self.assertEqual(result["progress"]["totalBlocks"], 9)
+        self.assertEqual(result["progress"]["activeChunks"], 1)
+        self.assertEqual(result["progress"]["readyChunks"], 2)
+        self.assertEqual(result["buildingProgress"], coordinator_progress)
+
+    def test_projection_is_noop_without_a_durable_plan(self):
+        result = {"progress": None}
+
+        api_module._project_building_progress(result, None)
+
+        self.assertEqual(result, {"progress": None})
+
+    def test_shadow_observation_is_not_projected_as_executable_progress(self):
+        result = {"progress": {"phase": "block_encoding", "completed": 2}}
+        observation = {
+            "phase": "observed",
+            "state": "observed",
+            "completed": 0,
+            "total": 442,
+        }
+
+        api_module._project_building_progress(result, observation)
+
+        self.assertEqual(
+            result["progress"], {"phase": "block_encoding", "completed": 2}
+        )
+        self.assertNotIn("buildingProgress", result)
+        self.assertEqual(result["buildingPlanObservation"], observation)
 
 
 class MapJobRunAPITests(unittest.TestCase):
@@ -190,6 +248,188 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return response.json()["jobId"]
 
+    def test_admin_building_plan_alerts_is_authenticated_and_read_only(self):
+        task_store = self.client.app.state.building_task_store
+        task_store.create_plan(
+            parent_job_id="job-admin-alerts",
+            global_plan_sha256="b" * 64,
+            input_identity={},
+            expected_output_block_count=1,
+            policy_version=1,
+            resource_model_version="v1",
+        )
+        task_store.add_tasks(
+            [
+                BuildingTaskSpec(
+                    task_id="task-admin-alerts",
+                    parent_job_id="job-admin-alerts",
+                    kind="building_chunk",
+                    blocks=((1, 1),),
+                    chunk_plan_sha256="b" * 64,
+                )
+            ]
+        )
+        reservation = task_store.acquire_parent_phase_reservation(
+            parent_job_id="job-admin-alerts",
+            phase="source_preparation",
+            worker_id="worker-admin-alerts",
+            worker_capability={
+                "memoryLimitBytes": 12_000_000_000,
+                "cpuCount": 1,
+                "resourcePool": "admin-alerts",
+                "maxConcurrentTasks": 1,
+            },
+            lease_seconds=1,
+            now=1.0,
+        )
+        self.assertIsNotNone(reservation)
+
+        denied = self.client.get("/v1/admin/building-plans/job-admin-alerts/alerts")
+        self.assertEqual(denied.status_code, 401)
+        response = self.client.get(
+            "/v1/admin/building-plans/job-admin-alerts/alerts",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+        self.assertEqual(response.status_code, 200)
+        document = response.json()
+        self.assertEqual(document["page"]["limit"], 100)
+        self.assertIn(
+            "parent_phase_lease_expired",
+            {alert["code"] for alert in document["alerts"]},
+        )
+        self.assertEqual(task_store.get_plan("job-admin-alerts")["state"], "planning")
+
+        rejected = self.client.get(
+            "/v1/admin/building-plans/job-admin-alerts/alerts?limit=101",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+        self.assertEqual(rejected.status_code, 400)
+
+    def test_admin_building_plan_diagnostics_are_bounded_and_summarized(self):
+        task_store = self.client.app.state.building_task_store
+        task_store.create_plan(
+            parent_job_id="job-admin-page",
+            global_plan_sha256="b" * 64,
+            input_identity={},
+            expected_output_block_count=2,
+            policy_version=1,
+            resource_model_version="v1",
+        )
+        task_store.add_tasks(
+            [
+                BuildingTaskSpec(
+                    task_id=f"task-admin-page-{index}",
+                    parent_job_id="job-admin-page",
+                    kind="building_chunk",
+                    blocks=((index, 1),),
+                    chunk_plan_sha256="b" * 64,
+                )
+                for index in range(2)
+            ]
+        )
+        oversized_workload = json.dumps({"objectKeys": "x" * 2_000_000})
+        connection = sqlite3.connect(task_store.path)
+        connection.execute(
+            """
+            INSERT INTO map_build_workload_receipts(
+                task_id, parent_job_id, closure_plan_sha256,
+                source_index_identity_json, workload_json, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "task-admin-page-0",
+                "job-admin-page",
+                "c" * 64,
+                "{}",
+                oversized_workload,
+                1.0,
+            ),
+        )
+        connection.commit()
+        connection.close()
+        capability = {
+            "memoryLimitBytes": 12_000_000_000,
+            "cpuCount": 1,
+            "resourcePool": "admin-page",
+            "maxConcurrentTasks": 1,
+        }
+        reservation = task_store.acquire_parent_phase_reservation(
+            parent_job_id="job-admin-page",
+            phase="source_preparation",
+            worker_id="worker-admin-page",
+            worker_capability=capability,
+        )
+        self.assertIsNotNone(reservation)
+
+        response = self.client.get(
+            "/v1/admin/building-plans/job-admin-page?limit=1&offset=0",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        document = response.json()
+        self.assertEqual(document["page"]["limit"], 1)
+        self.assertEqual(document["page"]["counts"]["tasks"], 2)
+        self.assertTrue(document["page"]["hasMore"])
+        self.assertEqual(len(document["tasks"]), 1)
+        self.assertEqual(len(document["attempts"]), 0)
+        self.assertEqual(len(document["parentPhaseReservations"]), 1)
+        self.assertEqual(
+            document["parentPhaseReservations"][0]["phase"],
+            "source_preparation",
+        )
+        self.assertNotIn(
+            "lease_token", document["parentPhaseReservations"][0]
+        )
+        self.assertNotIn(reservation.lease_token, response.text)
+        self.assertEqual(len(document["workloadReceipts"]), 1)
+        self.assertGreater(
+            document["workloadReceipts"][0]["workload_bytes"],
+            2_000_000,
+        )
+        self.assertTrue(
+            all("workload_json" not in row for row in document["workloadReceipts"])
+        )
+        self.assertLess(len(response.content), 50_000)
+
+        task_store.release_parent_phase_reservation(
+            parent_job_id="job-admin-page",
+            phase="source_preparation",
+            worker_id="worker-admin-page",
+            lease_token=reservation.lease_token,
+        )
+        claimed = task_store.claim_next(
+            worker_id="worker-admin-child",
+            parent_job_id="job-admin-page",
+            worker_capability=capability,
+        )
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+
+        active_response = self.client.get(
+            "/v1/admin/building-plans/job-admin-page?limit=1&offset=0",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+
+        self.assertEqual(active_response.status_code, 200)
+        active_document = active_response.json()
+        self.assertNotIn("lease_token", active_document["tasks"][0])
+        self.assertEqual(len(active_document["resourceReservations"]), 1)
+        self.assertNotIn(
+            "lease_token", active_document["resourceReservations"][0]
+        )
+        self.assertNotIn(claimed.lease_token, active_response.text)
+        self.assertEqual(
+            task_store.get_task(claimed.task.task_id).lease_token,
+            claimed.lease_token,
+        )
+
+        rejected = self.client.get(
+            "/v1/admin/building-plans/job-admin-page?limit=101",
+            headers={"Authorization": "Bearer admin-secret"},
+        )
+        self.assertEqual(rejected.status_code, 400)
+
     def test_preparation_estimate_rollout_modes_control_public_field(self):
         observations = {}
         for mode in ("off", "shadow", "public"):
@@ -244,9 +484,8 @@ class MapJobRunAPITests(unittest.TestCase):
         enabled = self.client.post("/v1/map-jobs", json=payload)
         self.assertEqual(enabled.status_code, 200)
 
-    def test_target_three_returns_typed_fallback_and_honors_allowlist(self):
-        allowed = self.client.post("/v1/installations").json()
-        blocked = self.client.post("/v1/installations").json()
+    def test_target_three_is_globally_available_after_production_promotion(self):
+        credential = self.client.post("/v1/installations").json()
         payload = {
             "mode": "custom_bbox",
             "bbox": [103.75, 1.24, 103.93, 1.37],
@@ -260,70 +499,18 @@ class MapJobRunAPITests(unittest.TestCase):
                 "preferredLanguages": ["en"],
                 "internationalFallback": "en",
             },
-            "clientInstallationId": blocked["clientInstallationId"],
-            "clientRequestId": "request-target3-blocked",
+            "clientInstallationId": credential["clientInstallationId"],
+            "clientRequestId": "request-target3-global",
         }
-        disabled_response = self.client.post(
+        response = self.client.post(
             "/v1/map-jobs",
-            headers={"X-Installation-Token": blocked["clientInstallationToken"]},
+            headers={"X-Installation-Token": credential["clientInstallationToken"]},
             json=payload,
         )
-        self.assertEqual(disabled_response.status_code, 400)
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            disabled_response.json()["detail"],
-            {
-                "code": "unsupported_renderer_target",
-                "message": "renderer format 3 generation is not available for this installation",
-                "requestedRendererFormatVersion": 3,
-                "supportedRendererFormatVersions": [2, 1],
-            },
-        )
-
-        with patch.dict(
-            os.environ,
-            {
-                "MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST": allowed[
-                    "clientInstallationId"
-                ],
-            },
-            clear=False,
-        ):
-            client = TestClient(create_app())
-            try:
-                blocked_response = client.post(
-                    "/v1/map-jobs",
-                    headers={"X-Installation-Token": blocked["clientInstallationToken"]},
-                    json=payload,
-                )
-                allowed_payload = {
-                    **payload,
-                    "clientInstallationId": allowed["clientInstallationId"],
-                    "clientRequestId": "request-target3-allowed",
-                }
-                allowed_response = client.post(
-                    "/v1/map-jobs",
-                    headers={"X-Installation-Token": allowed["clientInstallationToken"]},
-                    json=allowed_payload,
-                )
-            finally:
-                client.close()
-
-        self.assertEqual(blocked_response.status_code, 400)
-        self.assertEqual(
-            blocked_response.json()["detail"],
-            {
-                "code": "unsupported_renderer_target",
-                "message": "renderer format 3 generation is not available for this installation",
-                "requestedRendererFormatVersion": 3,
-                "supportedRendererFormatVersions": [2, 1],
-            },
-        )
-        self.assertEqual(allowed_response.status_code, 200)
-        allowed_job = self.client.app.state.job_store.get(
-            allowed_response.json()["jobId"]
-        )
-        self.assertEqual(
-            allowed_job.request["target"]["rendererFormatVersion"],
+            self.client.app.state.job_store.get(response.json()["jobId"])
+            .request["target"]["rendererFormatVersion"],
             3,
         )
 
@@ -353,7 +540,7 @@ class MapJobRunAPITests(unittest.TestCase):
                 profile["rendererFormatVersion"]
                 for profile in payload["generationProfiles"]
             ],
-            [2, 1],
+            [3, 2, 1],
         )
 
         with patch.dict(

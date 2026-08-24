@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
@@ -19,7 +20,7 @@ from copy import deepcopy
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, Mapping
 
 from .artifacts import (
     BIKE_MAP_STREAM_FORMAT,
@@ -58,11 +59,48 @@ from .map_buildings import (
 )
 from .building_scope import (
     BuildingScopeError,
+    GlobalBuildingPlan,
     ScopePlan,
     legacy_building_scope_diagnostics,
+    plan_building_chunk_scope,
+    plan_global_building_scope,
     plan_building_scope,
     x_to_lon,
     y_to_lat,
+)
+from .building_orchestration import (
+    BlockWorkload,
+    BuildingChunkPolicy,
+    BuildingChunkPlanningError,
+    BuildingPartitionPlan,
+    partition_global_building_plan,
+)
+from .building_cache_receipts import (
+    BuildingBlockReceiptError,
+    read_building_block_receipts,
+)
+from .building_artifact_identity import (
+    partition_invariant_artifact_identity,
+    validate_partition_invariant_artifact_identity,
+)
+from .building_tasks import (
+    BuildingTaskSpec,
+    BuildingTaskStoreError,
+    BuildingTaskStore,
+    MAX_TRANSIENT_TASK_ATTEMPTS,
+    StaleLeaseError,
+    deterministic_building_task_id,
+)
+from .building_resource_model import (
+    CONSERVATIVE_MEMORY_MODEL_VERSION,
+    DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES,
+)
+from .building_storage_admission import (
+    DEFAULT_BUILDING_ATTEMPT_STORAGE_MAX_BYTES,
+    DEFAULT_BUILDING_BLOCK_CACHE_MAX_BYTES,
+    DEFAULT_BUILDING_STORAGE_RESERVE_BYTES,
+    BuildingStorageAdmissionError,
+    building_storage_admission,
 )
 from .building_identity import (
     calibration_generation_from_manifest,
@@ -77,6 +115,7 @@ from .monitoring import MapMonitoringStore
 from .preview import render_boundary_preview
 from .reuse import (
     MapReuseKeys,
+    MapBlock,
     SubsetReuseUnavailable,
     aligned_processing_bounds,
     block_from_pack_path,
@@ -85,7 +124,7 @@ from .reuse import (
     reuse_keys,
     expanded_building_source_bounds,
 )
-from .source_cache import SourceCache, SourceCacheError
+from .source_cache import SourceCache, SourceCacheError, SourceCacheStorageError
 from .sources import SourceResolutionError
 
 
@@ -120,26 +159,353 @@ class MapBuildResult:
         yield self.legacy_archive_path
 
 
+class _TaskLeaseHeartbeat:
+    """Refresh one durable child lease while its command runs."""
+
+    def __init__(
+        self,
+        store: BuildingTaskStore,
+        *,
+        task_id: str,
+        worker_id: str,
+        lease_token: str,
+        lease_seconds: float,
+        interval_seconds: float = 30.0,
+    ) -> None:
+        self._store = store
+        self._task_id = task_id
+        self._worker_id = worker_id
+        self._lease_token = lease_token
+        self._lease_seconds = lease_seconds
+        self._interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._lost = threading.Event()
+        self._last_confirmed_monotonic = time.monotonic()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"building-task-heartbeat-{task_id[:12]}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    @property
+    def lost(self) -> bool:
+        return self._lost.is_set()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=max(self._interval_seconds, 1.0) + 1.0)
+
+    def _run(self) -> None:
+        retry_delay = self._interval_seconds
+        safety_margin = max(
+            0.01,
+            min(self._interval_seconds, self._lease_seconds / 4.0),
+        )
+        while not self._stop.wait(retry_delay):
+            try:
+                self._store.heartbeat(
+                    self._task_id,
+                    worker_id=self._worker_id,
+                    lease_token=self._lease_token,
+                    lease_seconds=self._lease_seconds,
+                )
+            except StaleLeaseError:
+                self._lost.set()
+                return
+            except Exception:
+                remaining = (
+                    self._last_confirmed_monotonic
+                    + self._lease_seconds
+                    - time.monotonic()
+                )
+                if remaining <= safety_margin:
+                    # Stop the process tree before the durable reservation can
+                    # expire and become reusable by another worker.
+                    self._lost.set()
+                    return
+                retry_delay = max(
+                    0.01,
+                    min(self._interval_seconds, remaining / 2.0),
+                )
+                continue
+            self._last_confirmed_monotonic = time.monotonic()
+            retry_delay = self._interval_seconds
+
+
+class _ParentPhaseLeaseHeartbeat:
+    """Refresh a fenced parent-phase reservation during heavy subprocesses."""
+
+    def __init__(
+        self,
+        store: BuildingTaskStore,
+        *,
+        parent_job_id: str,
+        phase: str,
+        worker_id: str,
+        lease_token: str,
+        lease_seconds: float,
+        interval_seconds: float = 30.0,
+    ) -> None:
+        self._store = store
+        self._parent_job_id = parent_job_id
+        self._phase = phase
+        self._worker_id = worker_id
+        self._lease_token = lease_token
+        self._lease_seconds = lease_seconds
+        self._interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._lost = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"building-parent-heartbeat-{phase}-{parent_job_id[:8]}",
+            daemon=True,
+        )
+
+    @property
+    def lost(self) -> bool:
+        return self._lost.is_set()
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=max(self._interval_seconds, 1.0) + 1.0)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval_seconds):
+            try:
+                self._store.heartbeat_parent_phase_reservation(
+                    parent_job_id=self._parent_job_id,
+                    phase=self._phase,
+                    worker_id=self._worker_id,
+                    lease_token=self._lease_token,
+                    lease_seconds=self._lease_seconds,
+                )
+            except Exception:
+                # The caller's cancellation predicate observes this event and
+                # stops the subprocess. A later final heartbeat/release is
+                # still fenced by the original token.
+                self._lost.set()
+                return
+
+
 class CommandRunner:
-    def __init__(self) -> None:
-        self.last_execution_metrics: dict[str, int | float] = {}
+    _OOM_EVENT_KEYS = frozenset({"oom", "oom_kill", "oom_group_kill"})
+
+    def __init__(
+        self,
+        *,
+        proc_root: str | Path = "/proc",
+        cgroup_root: str | Path = "/sys/fs/cgroup",
+        memory_events_path: str | Path | None = None,
+        metrics_history_limit: int = 128,
+    ) -> None:
+        if (
+            isinstance(metrics_history_limit, bool)
+            or not isinstance(metrics_history_limit, int)
+            or metrics_history_limit <= 0
+        ):
+            raise ValueError("command metrics history limit must be positive")
+        self._proc_root = Path(proc_root)
+        self._memory_events_path = (
+            Path(memory_events_path)
+            if memory_events_path is not None
+            else self._resolve_memory_events_path(
+                self._proc_root, Path(cgroup_root)
+            )
+        )
+        self._metrics_history_limit = metrics_history_limit
+        self._metrics_lock = threading.Lock()
+        self.last_execution_metrics: dict[str, Any] = {}
+        self.execution_metrics_history: list[dict[str, Any]] = []
+        self.execution_metrics_sequence = 0
 
     @staticmethod
-    def _resident_bytes(process_id: int) -> int | None:
+    def _resolve_memory_events_path(proc_root: Path, cgroup_root: Path) -> Path:
         try:
-            status = Path(f"/proc/{process_id}/status").read_text(
-                encoding="utf-8"
+            lines = (proc_root / "self" / "cgroup").read_text(
+                encoding="ascii"
+            ).splitlines()
+        except (OSError, UnicodeError):
+            lines = []
+        for line in lines:
+            try:
+                hierarchy, controllers, relative = line.split(":", 2)
+            except ValueError:
+                continue
+            if hierarchy != "0" or controllers:
+                continue
+            candidate = (
+                cgroup_root
+                / relative.strip().lstrip("/")
+                / "memory.events"
             )
-        except OSError:
+            if candidate.is_file():
+                return candidate
+        return cgroup_root / "memory.events"
+
+    def _resident_bytes(self, process_id: int) -> int | None:
+        try:
+            status = (self._proc_root / str(process_id) / "status").read_text(
+                encoding="ascii"
+            )
+        except (OSError, UnicodeError):
             return None
-        resident_kib = []
+        resident_bytes = None
+        high_water_bytes = None
         for line in status.splitlines():
             field, separator, value = line.partition(":")
-            if separator and field in {"VmHWM", "VmRSS"}:
-                parts = value.split()
-                if parts and parts[0].isdigit():
-                    resident_kib.append(int(parts[0]))
-        return max(resident_kib) * 1024 if resident_kib else None
+            if not separator or field not in {"VmHWM", "VmRSS"}:
+                continue
+            parts = value.split()
+            if not parts or not parts[0].isdigit():
+                continue
+            parsed = int(parts[0]) * 1024
+            if field == "VmRSS":
+                resident_bytes = parsed
+            else:
+                high_water_bytes = parsed
+        return resident_bytes if resident_bytes is not None else high_water_bytes
+
+    def _process_group_resident_bytes(self, process_group_id: int) -> int | None:
+        """Return current RSS for the launched process group and descendants."""
+
+        try:
+            process_paths = tuple(self._proc_root.iterdir())
+        except OSError:
+            return None
+        processes: dict[int, tuple[int, int]] = {}
+        for process_path in process_paths:
+            if not process_path.name.isdigit():
+                continue
+            try:
+                process_id = int(process_path.name)
+                raw = (process_path / "stat").read_text(encoding="ascii")
+                fields = raw[raw.rfind(")") + 2 :].split()
+                parent_id = int(fields[1])
+                group_id = int(fields[2])
+            except (IndexError, OSError, UnicodeError, ValueError):
+                continue
+            processes[process_id] = (parent_id, group_id)
+        included = {
+            process_id
+            for process_id, (_parent_id, group_id) in processes.items()
+            if group_id == process_group_id
+        }
+        included.add(process_group_id)
+        while True:
+            descendants = {
+                process_id
+                for process_id, (parent_id, _group_id) in processes.items()
+                if parent_id in included
+            }
+            expanded = included | descendants
+            if expanded == included:
+                break
+            included = expanded
+        total = 0
+        measured = False
+        for process_id in included:
+            resident = self._resident_bytes(process_id)
+            if resident is None:
+                continue
+            total += resident
+            measured = True
+        return total if measured else None
+
+    def _read_memory_events(self) -> dict[str, int] | None:
+        try:
+            lines = self._memory_events_path.read_text(
+                encoding="ascii"
+            ).splitlines()
+        except (OSError, UnicodeError):
+            return None
+        events: dict[str, int] = {}
+        for line in lines:
+            parts = line.split()
+            if len(parts) != 2:
+                return None
+            try:
+                value = int(parts[1])
+            except ValueError:
+                return None
+            if value < 0:
+                return None
+            events[parts[0]] = value
+        return events or None
+
+    @staticmethod
+    def _memory_event_delta(
+        before: dict[str, int] | None,
+        after: dict[str, int] | None,
+    ) -> dict[str, int] | None:
+        if before is None or after is None:
+            return None
+        delta = {
+            key: after[key] - before[key]
+            for key in sorted(before.keys() & after.keys())
+            if after[key] >= before[key]
+        }
+        return delta or None
+
+    @classmethod
+    def _oom_event_incremented(cls, delta: Mapping[str, Any] | None) -> bool:
+        return bool(
+            isinstance(delta, Mapping)
+            and any(
+                isinstance(delta.get(key), int)
+                and not isinstance(delta.get(key), bool)
+                and delta[key] > 0
+                for key in cls._OOM_EVENT_KEYS
+            )
+        )
+
+    def _clear_last_execution_metrics(self) -> None:
+        with self._metrics_lock:
+            self.last_execution_metrics = {}
+
+    def _record_execution_metrics(
+        self,
+        metrics: Mapping[str, Any],
+        args: Iterable[str],
+    ) -> dict[str, Any]:
+        executable = next(iter(args), "")
+        executable = Path(executable).name[:128] if executable else "unknown"
+        with self._metrics_lock:
+            self.execution_metrics_sequence += 1
+            record = {
+                "sequence": self.execution_metrics_sequence,
+                "executable": executable,
+                **deepcopy(dict(metrics)),
+            }
+            self.last_execution_metrics = deepcopy(record)
+            self.execution_metrics_history.append(record)
+            if len(self.execution_metrics_history) > self._metrics_history_limit:
+                del self.execution_metrics_history[
+                    : len(self.execution_metrics_history)
+                    - self._metrics_history_limit
+                ]
+            return deepcopy(record)
+
+    def execution_metrics_cursor(self) -> int:
+        with self._metrics_lock:
+            return self.execution_metrics_sequence
+
+    def execution_metrics_since(self, cursor: int) -> tuple[dict[str, Any], ...]:
+        if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
+            return ()
+        with self._metrics_lock:
+            return tuple(
+                deepcopy(record)
+                for record in self.execution_metrics_history
+                if record["sequence"] > cursor
+            )
 
     def run(
         self,
@@ -148,23 +514,11 @@ class CommandRunner:
         cwd: Path | None = None,
         cancellation_check=None,
     ) -> str:
-        if cancellation_check is not None:
-            return self.run_streaming(
-                args,
-                cwd=cwd,
-                cancellation_check=cancellation_check,
-            )
-        self.last_execution_metrics = {}
-        started = time.perf_counter()
-        try:
-            result = subprocess.run(
-                args, cwd=cwd, check=True, text=True, capture_output=True
-            )
-        finally:
-            self.last_execution_metrics = {
-                "wallSeconds": round(time.perf_counter() - started, 6)
-            }
-        return (result.stdout or result.stderr).strip()
+        return self.run_streaming(
+            args,
+            cwd=cwd,
+            cancellation_check=cancellation_check,
+        )
 
     def run_streaming(
         self,
@@ -174,8 +528,9 @@ class CommandRunner:
         on_output=None,
         cancellation_check=None,
     ) -> str:
-        self.last_execution_metrics = {}
+        self._clear_last_execution_metrics()
         started = time.perf_counter()
+        memory_events_before = self._read_memory_events()
         process = subprocess.Popen(
             args,
             cwd=cwd,
@@ -187,12 +542,13 @@ class CommandRunner:
         output: list[str] = []
         pending = ""
         stdout_open = True
-        peak_resident_bytes = self._resident_bytes(process.pid)
+        peak_resident_bytes = self._process_group_resident_bytes(process.pid)
+        memory_events_delta = None
         try:
             assert process.stdout is not None
             descriptor = process.stdout.fileno()
             while True:
-                resident_bytes = self._resident_bytes(process.pid)
+                resident_bytes = self._process_group_resident_bytes(process.pid)
                 if resident_bytes is not None:
                     peak_resident_bytes = max(
                         peak_resident_bytes or 0, resident_bytes
@@ -245,13 +601,24 @@ class CommandRunner:
         finally:
             if process.stdout is not None:
                 process.stdout.close()
-            metrics: dict[str, int | float] = {
+            memory_events_delta = self._memory_event_delta(
+                memory_events_before,
+                self._read_memory_events(),
+            )
+            metrics: dict[str, Any] = {
                 "wallSeconds": round(time.perf_counter() - started, 6)
             }
             if peak_resident_bytes is not None:
                 metrics["peakResidentBytes"] = peak_resident_bytes
-            self.last_execution_metrics = metrics
+            if memory_events_delta is not None:
+                metrics["memoryEventsDelta"] = memory_events_delta
+            self._record_execution_metrics(metrics, args)
         combined_output = "".join(output)
+        if self._oom_event_incremented(memory_events_delta):
+            raise BuildingScopeError(
+                "building_worker_oom",
+                "worker cgroup reported an out-of-memory event during subprocess execution",
+            )
         if return_code != 0:
             raise subprocess.CalledProcessError(return_code, args, output=combined_output)
         return combined_output.strip()
@@ -271,8 +638,20 @@ _BUILDING_FAILURE_CODES = {
     "building_relation_incomplete",
     "building_calibration_unavailable",
     "building_block_cache_unavailable",
+    "building_chunks_incomplete",
     "building_source_snapshot_changed",
     "building_scope_policy_invalid",
+    "building_workload_receipt_mismatch",
+    "building_resource_admission",
+    "building_chunk_execution_failed",
+    "building_chunk_retry_exhausted",
+    "building_chunk_wall_time_exceeded",
+    "building_pathological_block",
+    "building_storage_admission",
+    "building_worker_oom",
+    "building_artifact_too_large",
+    "building_artifact_admission",
+    "building_artifact_validation_failed",
 }
 _BUILDING_FAILURE_MESSAGES = {
     "building_scope_exceeded": "selected building scope exceeds policy",
@@ -282,9 +661,327 @@ _BUILDING_FAILURE_MESSAGES = {
     "building_relation_incomplete": "selected building relation closure is incomplete",
     "building_calibration_unavailable": "selected building calibration is unavailable",
     "building_block_cache_unavailable": "selected building block cache is unavailable",
+    "building_chunks_incomplete": "selected building chunks are incomplete",
     "building_source_snapshot_changed": "selected building source snapshot changed",
     "building_scope_policy_invalid": "selected building scope policy is invalid",
+    "building_workload_receipt_mismatch": (
+        "selected building workload receipt does not match the source closure"
+    ),
+    "building_resource_admission": (
+        "selected building worker capacity cannot admit the next chunk"
+    ),
+    "building_chunk_execution_failed": "selected building chunk execution failed",
+    "building_chunk_retry_exhausted": (
+        "selected building chunk exhausted its internal retry budget"
+    ),
+    "building_chunk_wall_time_exceeded": "selected building chunk exceeded the hard wall-time policy",
+    "building_pathological_block": "one selected building block exceeds a hard worker policy",
+    "building_storage_admission": "selected building attempt exceeds storage capacity",
+    "building_worker_oom": "selected building worker exhausted its memory cgroup",
+    "building_artifact_too_large": "selected building artifact exceeds the format limit",
+    "building_artifact_admission": (
+        "selected building artifact exceeds pre-execution admission"
+    ),
+    "building_artifact_validation_failed": "selected building artifact failed final validation",
 }
+_CHUNK_SPLIT_FAILURE_CODES = frozenset(
+    {
+        "building_object_limit_exceeded",
+        "building_scope_exceeded",
+        "building_chunk_wall_time_exceeded",
+        "building_worker_oom",
+    }
+)
+MAX_FINAL_ASSEMBLY_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_FINAL_ASSEMBLY_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_FINAL_ASSEMBLY_FMB_BYTES = 2 * 1024 * 1024
+_FINAL_ASSEMBLY_METADATA_PATHS = frozenset(
+    {
+        "manifest.json",
+        "ATTRIBUTION.txt",
+        "LICENSES/OpenStreetMap-ODbL.txt",
+    }
+)
+CHUNK_TASK_LEASE_SECONDS = 120.0
+PARENT_PHASE_LEASE_SECONDS = 120.0
+SOURCE_PREPARATION_MEMORY_RESERVATION_BYTES = 5 * 1024 * 1024 * 1024
+MAP_ASSEMBLY_MEMORY_RESERVATION_BYTES = 5 * 1024 * 1024 * 1024
+_PARENT_PHASE_MEMORY_RESERVATION_BYTES = {
+    "source_preparation": SOURCE_PREPARATION_MEMORY_RESERVATION_BYTES,
+    "map_assembly": MAP_ASSEMBLY_MEMORY_RESERVATION_BYTES,
+}
+_TRANSIENT_CHUNK_FAILURE_CODES = frozenset(
+    {"building_block_cache_unavailable"}
+)
+
+
+class BuildingChunkSplitRequired(BuildingScopeError):
+    """Typed coordinator signal for a deterministic multi-block split."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        task_id: str,
+        blocks: tuple[tuple[int, int], ...],
+    ):
+        super().__init__(code, message)
+        self.task_id = task_id
+        self.blocks = blocks
+
+
+class BuildingChunkSchedulingYield(RuntimeError):
+    """One task quantum completed and another public parent may now run."""
+
+
+class BuildingChunkRetryExhausted(BuildingScopeError):
+    """Terminal child failure with a bounded, durable causal identity."""
+
+    def __init__(self, *, task_id: str, root_failure_code: str):
+        super().__init__(
+            "building_chunk_retry_exhausted",
+            "building chunk exhausted its internal retry budget",
+        )
+        self.task_id = task_id
+        self.root_failure_code = root_failure_code
+
+
+class BuildingCacheRetryRequired(RuntimeError):
+    """Canonical cache loss was durably converted back into pending work."""
+
+
+def _safe_final_archive_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    if value != value.replace("\\", "/") or value.startswith("/"):
+        return False
+    parts = value.split("/")
+    return not any(
+        part in {"", ".", ".."} or (index == 0 and ":" in part)
+        for index, part in enumerate(parts)
+    )
+
+
+def _zip_entry_sha256(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+) -> str:
+    digest = hashlib.sha256()
+    with archive.open(info, "r") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_final_assembly_artifact(
+    archive_path: Path,
+    artifacts: Iterable[ArtifactRecord],
+    *,
+    max_archive_bytes: int = MAX_FINAL_ASSEMBLY_ARCHIVE_BYTES,
+) -> dict[str, Any]:
+    """Validate a bounded, identity-complete map ZIP before publication."""
+
+    if (
+        isinstance(max_archive_bytes, bool)
+        or not isinstance(max_archive_bytes, int)
+        or max_archive_bytes <= 0
+    ):
+        raise ValueError("final map archive size limit must be positive")
+
+    def invalid(message: str) -> None:
+        raise BuildingScopeError("building_artifact_validation_failed", message)
+
+    def too_large(message: str) -> None:
+        raise BuildingScopeError("building_artifact_too_large", message)
+
+    try:
+        archive_bytes = archive_path.stat().st_size
+    except OSError as exc:
+        raise BuildingScopeError(
+            "building_artifact_validation_failed",
+            "final map archive is unavailable for validation",
+        ) from exc
+    if archive_bytes <= 0:
+        invalid("final map archive is empty")
+    if archive_bytes > max_archive_bytes:
+        too_large("final map archive exceeds the assembly size limit")
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            entries = archive.infolist()
+            if not entries:
+                invalid("final map archive contains no files")
+            entries_by_path: dict[str, zipfile.ZipInfo] = {}
+            uncompressed_bytes = 0
+            for info in entries:
+                path = info.filename
+                if (
+                    not _safe_final_archive_path(path)
+                    or info.is_dir()
+                    or path in entries_by_path
+                ):
+                    invalid(
+                        "final map archive contains an unsafe or duplicate path"
+                    )
+                if (
+                    info.flag_bits & 0x1
+                    or info.compress_type != zipfile.ZIP_STORED
+                    or info.compress_size != info.file_size
+                ):
+                    invalid("final map archive entries must be unencrypted stored files")
+                mode = (info.external_attr >> 16) & 0o177777
+                if mode & 0o170000 not in {0, 0o100000}:
+                    invalid("final map archive contains a non-regular entry")
+                entries_by_path[path] = info
+                uncompressed_bytes += info.file_size
+                if uncompressed_bytes > max_archive_bytes:
+                    too_large(
+                        "final map archive expands beyond the assembly size limit"
+                    )
+
+            manifest_info = entries_by_path.get("manifest.json")
+            if manifest_info is None or manifest_info.file_size <= 0:
+                invalid("final map archive manifest is missing or empty")
+            if manifest_info.file_size > MAX_FINAL_ASSEMBLY_MANIFEST_BYTES:
+                invalid("final map archive manifest exceeds its size limit")
+            if archive.testzip() is not None:
+                invalid("final map archive contains a corrupt entry")
+            manifest_bytes = archive.read(manifest_info)
+            try:
+                manifest = json.loads(manifest_bytes)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                invalid("final map archive manifest is not valid JSON")
+            if (
+                not isinstance(manifest, dict)
+                or type(manifest.get("schemaVersion")) is not int
+                or manifest["schemaVersion"] != 1
+            ):
+                invalid("final map archive manifest schema is unsupported")
+            map_id = manifest.get("mapId")
+            if not isinstance(map_id, str) or not map_id:
+                invalid("final map archive manifest map identity is invalid")
+            manifest_files = manifest.get("files")
+            if not isinstance(manifest_files, list) or not manifest_files:
+                invalid("final map archive manifest has no file identities")
+
+            declared_files: dict[str, tuple[int, str]] = {}
+            for record in manifest_files:
+                if not isinstance(record, dict) or set(record) != {
+                    "path",
+                    "bytes",
+                    "sha256",
+                }:
+                    invalid("final map archive manifest file record is invalid")
+                path = record["path"]
+                byte_count = record["bytes"]
+                expected_sha256 = record["sha256"]
+                if (
+                    not isinstance(path, str)
+                    or type(byte_count) is not int
+                    or byte_count < 0
+                    or not isinstance(expected_sha256, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+                ):
+                    invalid("final map archive manifest file record is invalid")
+                try:
+                    validate_pack_path(path)
+                except (UnicodeError, ValueError):
+                    invalid("final map archive manifest contains an unsafe file path")
+                if path.split("/")[1] != map_id or path in declared_files:
+                    invalid(
+                        "final map archive manifest contains a duplicate or mismatched file path"
+                    )
+                declared_files[path] = (byte_count, expected_sha256)
+
+            fmb_paths = [
+                path for path in declared_files if path.endswith(".fmb")
+            ]
+            if not fmb_paths:
+                invalid("final map archive contains no FMB blocks")
+            for path in fmb_paths:
+                byte_count = declared_files[path][0]
+                if byte_count <= 0:
+                    invalid("final map archive contains an empty FMB block")
+                if byte_count > MAX_FINAL_ASSEMBLY_FMB_BYTES:
+                    too_large("final map archive contains an oversized FMB block")
+
+            preview_path: str | None = None
+            preview_identity: tuple[int, str] | None = None
+            preview = manifest.get("preview")
+            if "preview" in manifest:
+                if not isinstance(preview, dict):
+                    invalid("final map archive preview identity is invalid")
+                preview_path = preview.get("path")
+                preview_bytes = preview.get("bytes")
+                preview_sha256 = preview.get("sha256")
+                if (
+                    not _safe_final_archive_path(preview_path)
+                    or preview_path in _FINAL_ASSEMBLY_METADATA_PATHS
+                    or preview_path in declared_files
+                    or type(preview_bytes) is not int
+                    or preview_bytes <= 0
+                    or not isinstance(preview_sha256, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", preview_sha256) is None
+                ):
+                    invalid("final map archive preview identity is invalid")
+                preview_identity = (preview_bytes, preview_sha256)
+
+            expected_paths = set(_FINAL_ASSEMBLY_METADATA_PATHS)
+            expected_paths.update(declared_files)
+            if preview_path is not None:
+                expected_paths.add(preview_path)
+            if set(entries_by_path) != expected_paths:
+                invalid(
+                    "final map archive entries do not match the manifest identities"
+                )
+
+            for path, (byte_count, expected_sha256) in declared_files.items():
+                info = entries_by_path[path]
+                if (
+                    info.file_size != byte_count
+                    or _zip_entry_sha256(archive, info) != expected_sha256
+                ):
+                    invalid("final map archive file identity does not match")
+            if preview_path is not None and preview_identity is not None:
+                preview_info = entries_by_path[preview_path]
+                if (
+                    preview_info.file_size != preview_identity[0]
+                    or _zip_entry_sha256(archive, preview_info)
+                    != preview_identity[1]
+                ):
+                    invalid("final map archive preview identity does not match")
+    except BuildingScopeError:
+        raise
+    except (EOFError, NotImplementedError, OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise BuildingScopeError(
+            "building_artifact_validation_failed",
+            "final map archive is not a valid ZIP",
+        ) from exc
+    archive_sha256 = sha256_file(archive_path)
+    zip_records = [
+        artifact
+        for artifact in artifacts
+        if artifact.format == ZIP_STORED_FORMAT
+    ]
+    if len(zip_records) != 1:
+        raise BuildingScopeError(
+            "building_artifact_validation_failed",
+            "final map artifact set must contain exactly one ZIP receipt",
+        )
+    if zip_records:
+        record = zip_records[0]
+        if record.bytes != archive_bytes or record.sha256 != archive_sha256:
+            raise BuildingScopeError(
+                "building_artifact_validation_failed",
+                "final map archive receipt does not match the published file",
+            )
+    return {
+        "schemaVersion": 1,
+        "archiveBytes": archive_bytes,
+        "archiveSha256": archive_sha256,
+        "maxArchiveBytes": max_archive_bytes,
+        "zipReceiptValidated": bool(zip_records),
+    }
 
 
 def _coalesce_projected_rectangles(
@@ -512,7 +1209,25 @@ def safe_build_failure(job: MapJob, exc: Exception) -> tuple[str, str]:
             identifiers.append(f"calibrationKey={calibration_key}")
         if isinstance(source_sha256, str):
             identifiers.append(f"sourceSnapshotSha256={source_sha256}")
-    return f"{_BUILDING_FAILURE_MESSAGES[code]}; {'; '.join(identifiers)}", code
+    message = _BUILDING_FAILURE_MESSAGES[code]
+    if isinstance(exc, BuildingChunkRetryExhausted):
+        identifiers.extend(
+            (
+                f"taskId={exc.task_id}",
+                f"rootFailureCode={exc.root_failure_code}",
+            )
+        )
+    # Preserve the bounded, typed source diagnostic for relation failures.
+    # This is intentionally limited to the relation code: other exception
+    # strings may contain paths, command output, or untrusted data that should
+    # not become part of the public job error. The extractor caps relation
+    # member detail to eight IDs, and this final bound keeps the API response
+    # stable even if a future producer changes that limit.
+    if code == "building_relation_incomplete":
+        detail = re.sub(r"\s+", " ", str(exc)).strip()
+        if detail and detail != message:
+            message += f"; detail={detail[:512]}"
+    return f"{message}; {'; '.join(identifiers)}", code
 
 
 def _parse_structured_stats(line: str, prefix: str) -> dict[str, Any] | None:
@@ -583,6 +1298,7 @@ class MapBuildPipeline:
         source_preview_geometry_resolver: Callable[[SourceRegion], dict[str, Any] | None] | None = None,
         building_scope_mode: str = "shadow",
         building_block_workers: int = 4,
+        building_task_store: BuildingTaskStore | None = None,
     ):
         self.paths = paths
         self.runner = runner or CommandRunner()
@@ -592,8 +1308,19 @@ class MapBuildPipeline:
         self.producer_build_sha256 = producer_build_sha256
         self.producer_image_digest = producer_image_digest
         self.source_preview_geometry_resolver = source_preview_geometry_resolver
-        if building_scope_mode not in {"legacy", "shadow", "selected"}:
-            raise ValueError("building scope mode must be legacy, shadow, or selected")
+        self.building_task_store = building_task_store
+        self._active_task_command_metrics_cursor: int | None = None
+        if building_scope_mode not in {
+            "legacy",
+            "shadow",
+            "selected",
+            "chunked_allowlist",
+            "chunked",
+        }:
+            raise ValueError(
+                "building scope mode must be legacy, shadow, or selected "
+                "(chunked_allowlist or chunked are also supported)"
+            )
         self.building_scope_mode = building_scope_mode
         if (
             isinstance(building_block_workers, bool)
@@ -614,6 +1341,99 @@ class MapBuildPipeline:
             self.producer_image_digest or "",
         ):
             raise ValueError("map stream generation requires an immutable worker image digest")
+
+    @contextmanager
+    def _parent_phase_reservation(
+        self,
+        *,
+        parent_job_id: str,
+        phase: str,
+        worker_id: str | None,
+        worker_capability: Mapping[str, Any] | None,
+        cancellation_check=None,
+    ):
+        """Hold one durable concurrency-one resource lease for a heavy phase."""
+
+        if self.building_task_store is None or not worker_id:
+            yield cancellation_check
+            return
+        estimated_peak_memory_bytes = _PARENT_PHASE_MEMORY_RESERVATION_BYTES.get(
+            phase
+        )
+        if estimated_peak_memory_bytes is None:
+            raise BuildingTaskStoreError("parent resource phase is invalid")
+        reservation = self.building_task_store.acquire_parent_phase_reservation(
+            parent_job_id=parent_job_id,
+            phase=phase,
+            worker_id=worker_id,
+            worker_capability=worker_capability,
+            lease_seconds=PARENT_PHASE_LEASE_SECONDS,
+            estimated_peak_memory_bytes=estimated_peak_memory_bytes,
+        )
+        if reservation is None:
+            raise BuildingChunkSchedulingYield()
+        heartbeat = _ParentPhaseLeaseHeartbeat(
+            self.building_task_store,
+            parent_job_id=parent_job_id,
+            phase=phase,
+            worker_id=worker_id,
+            lease_token=reservation.lease_token,
+            lease_seconds=PARENT_PHASE_LEASE_SECONDS,
+        )
+        heartbeat.start()
+
+        def phase_cancellation_requested() -> bool:
+            return heartbeat.lost or bool(
+                cancellation_check is not None and cancellation_check()
+            )
+
+        try:
+            yield phase_cancellation_requested
+        except BaseException:
+            heartbeat.stop()
+            try:
+                self.building_task_store.release_parent_phase_reservation(
+                    parent_job_id=parent_job_id,
+                    phase=phase,
+                    worker_id=worker_id,
+                    lease_token=reservation.lease_token,
+                )
+            except Exception:
+                # Preserve the phase failure. A stale/unavailable lease remains
+                # fenced by its token and expires durably before reuse.
+                pass
+            raise
+        else:
+            heartbeat.stop()
+            # A final heartbeat is the completion fence. If another worker
+            # recovered this lease after expiry, its token cannot be released
+            # or treated as successful by this worker.
+            self.building_task_store.heartbeat_parent_phase_reservation(
+                parent_job_id=parent_job_id,
+                phase=phase,
+                worker_id=worker_id,
+                lease_token=reservation.lease_token,
+                lease_seconds=PARENT_PHASE_LEASE_SECONDS,
+            )
+            self.building_task_store.release_parent_phase_reservation(
+                parent_job_id=parent_job_id,
+                phase=phase,
+                worker_id=worker_id,
+                lease_token=reservation.lease_token,
+            )
+
+    @staticmethod
+    def _job_worker_capability(job: MapJob) -> Mapping[str, Any] | None:
+        capability = getattr(job, "_worker_capability_snapshot", None)
+        if capability is None:
+            if job.worker_id is not None:
+                raise BuildingTaskStoreError(
+                    "claimed chunked job is missing its worker capability snapshot"
+                )
+            return None
+        if not isinstance(capability, Mapping):
+            raise BuildingTaskStoreError("worker capability snapshot is invalid")
+        return capability
 
     def build(
         self,
@@ -693,6 +1513,12 @@ class MapBuildPipeline:
                         "errorCode": exc.code,
                         "legacyScope": legacy_scope,
                     }
+                    if exc.code == "building_scope_exceeded":
+                        self._record_shadow_global_plan(
+                            job,
+                            calibration=calibration,
+                            scope_diagnostics=scope_diagnostics,
+                        )
             selected_scope = self.building_scope_mode == "selected"
             if selected_scope:
                 if scope_plan is None:
@@ -714,6 +1540,7 @@ class MapBuildPipeline:
                         "calibrationCellCount",
                         "calibrationSampleCellCount",
                         "geometryBufferMeters",
+                        "maxRelationObjectsPerJob",
                         "sourceBoundsE7",
                     )
                 }
@@ -763,6 +1590,7 @@ class MapBuildPipeline:
                 source_pbf,
                 source_snapshot_sha256,
                 scope_plan,
+                temporary_parent=job_dir,
                 **(
                     {"on_phase_progress": on_phase_progress}
                     if on_phase_progress is not None
@@ -844,6 +1672,7 @@ class MapBuildPipeline:
                         source_pbf,
                         source_snapshot_sha256,
                         scope_plan,
+                        temporary_parent=job_dir,
                         execution_sink=shadow_execution,
                         on_phase_progress=on_phase_progress,
                         cancellation_check=cancellation_check,
@@ -854,6 +1683,7 @@ class MapBuildPipeline:
                         source_snapshot_sha256,
                         scope_plan,
                         shadow_calibration_generation,
+                        temporary_parent=job_dir,
                         on_phase_progress=on_phase_progress,
                         cancellation_check=cancellation_check,
                     )
@@ -884,6 +1714,15 @@ class MapBuildPipeline:
                             exc, "code", "building_shadow_measurement_unavailable"
                         )
                     }
+                    if getattr(exc, "code", None) in {
+                        "building_object_limit_exceeded",
+                        "building_scope_exceeded",
+                    }:
+                        self._record_shadow_global_plan(
+                            job,
+                            calibration=calibration,
+                            scope_diagnostics=scope_diagnostics,
+                        )
                 finally:
                     scope_diagnostics["shadowMeasurementExecution"] = {
                         "durationSeconds": round(
@@ -1046,6 +1885,13 @@ class MapBuildPipeline:
                         "relation_retry_count": len(relation_retries),
                     }
                 )
+                if selected_scope and job.building_preprocessing_mode in {
+                    "chunked_allowlist",
+                    "chunked",
+                }:
+                    conversion_kwargs["building_closure_plan_path"] = (
+                        job_dir / "building-closure-plan.json"
+                    )
             if cancellation_check is not None:
                 conversion_kwargs["cancellation_check"] = cancellation_check
             try:
@@ -1358,6 +2204,1063 @@ class MapBuildPipeline:
             build_metrics=label_metrics,
         )
 
+    def build_chunked(
+        self,
+        job: MapJob,
+        *,
+        worker_id: str,
+        worker_capability: Mapping[str, Any] | None = None,
+        on_status=None,
+        on_progress=None,
+        on_phase_progress=None,
+        on_artifact_pending=None,
+        artifact_publication_lease=None,
+        cancellation_check=None,
+        max_tasks_per_run: int | None = None,
+    ) -> MapBuildResult:
+        """Run one parent map through the durable chunk coordinator.
+
+        The parent remains the only public job and artifact.  Source-index and
+        calibration preparation happen once, then the coordinator leases
+        workload scans and bounded building chunks until every global block has
+        a receipt.  Final packaging is deliberately delegated to the
+        cache-only assembly path, which fails closed when a receipt is absent.
+        """
+
+        if not self.uses_chunked_preprocessing(job):
+            raise BuildingScopeError(
+                "building_scope_policy_invalid",
+                "chunked execution is not enabled for this pipeline",
+            )
+        if self.building_task_store is None:
+            raise BuildingTaskStoreError(
+                "chunked execution requires the building task store"
+            )
+        if not worker_id:
+            raise BuildingTaskStoreError("chunked execution requires a worker ID")
+        if max_tasks_per_run is not None and (
+            isinstance(max_tasks_per_run, bool)
+            or not isinstance(max_tasks_per_run, int)
+            or max_tasks_per_run <= 0
+        ):
+            raise BuildingTaskStoreError("chunk task quantum is invalid")
+
+        calibration = load_building_calibration_window(
+            self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
+        )
+        global_plan = self._plan_chunked_scope(job, calibration)
+        source = self._cached_source_for_job(job)
+        source_pbf = source.path
+        source_snapshot_sha256 = sha256_file(source_pbf)
+        storage_admission = self._admit_chunked_storage(
+            global_plan,
+            source_pbf=source_pbf,
+        )
+        input_identity = {
+            "request": job.request,
+            "geometry": job.geometry.to_dict(),
+            "sourceRegion": {
+                "id": job.source_region.id,
+                "checksum": job.source_region.checksum,
+            },
+            "globalPlanSha256": global_plan.sha256,
+        }
+        chunk_policy_version = BuildingChunkPolicy().policy_version
+        try:
+            self.building_task_store.create_plan(
+                parent_job_id=job.job_id,
+                global_plan_sha256=global_plan.sha256,
+                input_identity=input_identity,
+                expected_output_block_count=len(global_plan.output_blocks),
+                policy_version=chunk_policy_version,
+                resource_model_version="building-resource-model-untrained-v1",
+                stage="source_preparation",
+                scheduling_weight=1,
+                admission_priority=0,
+                active_task_quota=1,
+            )
+            self.building_task_store.activate_observed_plan(
+                job.job_id,
+                stage="source_preparation",
+            )
+            plan_record = self.building_task_store.reopen_failed_plan(
+                job.job_id,
+                stage="source_preparation",
+            )
+            coordinator_already_ready = bool(
+                plan_record is not None and plan_record["state"] == "ready"
+            )
+            if not coordinator_already_ready:
+                self.building_task_store.advance_plan_stage(
+                    job.job_id, stage="source_preparation"
+                )
+            parent_root = (
+                self.paths.work_root
+                / job.job_id
+                / "chunked-parent"
+                / global_plan.sha256
+            )
+            parent_root.mkdir(parents=True, exist_ok=True)
+            global_plan_path = parent_root / "global-plan.json"
+            global_plan.write(global_plan_path)
+        except (BuildingChunkSchedulingYield, BuildingCacheRetryRequired):
+            raise
+        except Exception:
+            self._mark_chunked_plan_failed(job.job_id)
+            raise
+
+        calibration_execution: dict[str, Any] = {}
+        try:
+            with self._parent_phase_reservation(
+                parent_job_id=job.job_id,
+                phase="source_preparation",
+                worker_id=worker_id,
+                worker_capability=worker_capability,
+                cancellation_check=cancellation_check,
+            ) as phase_cancellation_check:
+                calibration_manifest, calibration_generation = (
+                    self._ensure_selected_calibration_generation(
+                        source_pbf,
+                        source_snapshot_sha256,
+                        global_plan,
+                        temporary_parent=parent_root,
+                        on_phase_progress=on_phase_progress,
+                        execution_sink=calibration_execution,
+                        cancellation_check=phase_cancellation_check,
+                    )
+                )
+                source_index_manifest, source_index = (
+                    self._prepare_chunked_source_index(
+                        source_pbf,
+                        source_snapshot_sha256,
+                        global_plan,
+                        parent_root,
+                        on_phase_progress=on_phase_progress,
+                        cancellation_check=phase_cancellation_check,
+                    )
+                )
+        except (BuildingChunkSchedulingYield, BuildingCacheRetryRequired):
+            raise
+        except Exception:
+            self._mark_chunked_plan_failed(job.job_id)
+            raise
+        try:
+            self._freeze_chunked_inputs(
+                job,
+                source_snapshot_sha256=source_snapshot_sha256,
+                global_plan=global_plan,
+                calibration_generation=calibration_generation,
+            )
+            building_identity = selected_building_identity(
+                source_snapshot_sha256=source_snapshot_sha256,
+                rules_path=(
+                    self.paths.osm_extract_root
+                    / "conf"
+                    / "building_height_rules.yaml"
+                ),
+                scope_plan=global_plan,
+                calibration_generation=calibration_generation,
+            )
+            block_cache_identity = selected_building_block_cache_identity(
+                source_snapshot_sha256=source_snapshot_sha256,
+                rules_path=(
+                    self.paths.osm_extract_root
+                    / "conf"
+                    / "building_height_rules.yaml"
+                ),
+                scope_plan=global_plan,
+                calibration_generation=dict(calibration_generation),
+            )
+            partition_path = parent_root / "partition-plan.json"
+            if partition_path.is_file():
+                try:
+                    partition = BuildingPartitionPlan.read(
+                        partition_path,
+                        global_plan_sha256=global_plan.sha256,
+                        expected_blocks=global_plan.output_blocks,
+                    )
+                except BuildingChunkPlanningError as exc:
+                    raise BuildingScopeError(exc.code, str(exc)) from exc
+            else:
+                cache_workloads: dict[MapBlock, BlockWorkload] = {}
+                for block in global_plan.output_blocks:
+                    try:
+                        read_building_block_receipts(
+                            self.paths.building_cache_root,
+                            block_cache_identity,
+                            (block,),
+                        )
+                    except BuildingBlockReceiptError:
+                        cache_workloads[block] = BlockWorkload(block=block)
+                    else:
+                        cache_workloads[block] = BlockWorkload(
+                            block=block,
+                            cache_hit=True,
+                        )
+                partition = partition_global_building_plan(
+                    global_plan,
+                    workloads=cache_workloads,
+                )
+                partition.write(partition_path)
+            self.building_task_store.create_plan(
+                parent_job_id=job.job_id,
+                global_plan_sha256=global_plan.sha256,
+                input_identity=input_identity,
+                expected_output_block_count=len(global_plan.output_blocks),
+                policy_version=partition.policy.policy_version,
+                resource_model_version="building-resource-model-untrained-v1",
+                stage="chunk_planning",
+                scheduling_weight=1,
+                admission_priority=0,
+                active_task_quota=1,
+            )
+            if not coordinator_already_ready:
+                self.building_task_store.advance_plan_stage(
+                    job.job_id, stage="chunk_planning"
+                )
+            self._persist_chunked_partition(
+                job,
+                partition=partition,
+                cache_identity_sha256=block_cache_identity[
+                    "cacheIdentitySha256"
+                ],
+            )
+            if not coordinator_already_ready:
+                self.building_task_store.advance_plan_stage(
+                    job.job_id, stage="building_chunks"
+                )
+        except (BuildingChunkSchedulingYield, BuildingCacheRetryRequired):
+            raise
+        except Exception:
+            self._mark_chunked_plan_failed(job.job_id)
+            raise
+
+        resource_metrics: dict[str, Any] = {
+            "mode": self.building_scope_mode,
+            "globalPlanSha256": global_plan.sha256,
+            "partitionPlanSha256": partition.sha256,
+            "buildingIdentitySha256": building_identity["identitySha256"],
+            "sourceSnapshotSha256": source_snapshot_sha256,
+            "sourceIndex": source_index,
+            "calibrationGeneration": calibration_execution,
+            "calibrationManifestSha256": calibration_generation["manifestSha256"],
+            "chunkCount": len(partition.chunks),
+            "cacheHitBlockCount": len(partition.cache_hit_blocks),
+            "cacheIdentitySha256": block_cache_identity["cacheIdentitySha256"],
+            "storageAdmission": storage_admission,
+        }
+        try:
+            completed_task_count = 0
+
+            def yield_after_quantum() -> None:
+                nonlocal completed_task_count
+                completed_task_count += 1
+                if (
+                    max_tasks_per_run is not None
+                    and completed_task_count >= max_tasks_per_run
+                    and any(
+                        candidate.state == "pending"
+                        for candidate in self.building_task_store.list_tasks(
+                            job.job_id
+                        )
+                    )
+                ):
+                    raise BuildingChunkSchedulingYield()
+
+            while True:
+                if cancellation_check is not None and cancellation_check():
+                    self.building_task_store.cancel_plan(job.job_id)
+                    raise BuildingScopeError(
+                        "building_chunks_incomplete",
+                        "chunked building execution was cancelled",
+                    )
+                claimed = self.building_task_store.claim_next(
+                    worker_id=worker_id,
+                    parent_job_id=job.job_id,
+                    lease_seconds=CHUNK_TASK_LEASE_SECONDS,
+                    worker_capability=worker_capability,
+                )
+                if claimed is None:
+                    pending = tuple(
+                        task
+                        for task in self.building_task_store.list_tasks(job.job_id)
+                        if task.state == "pending"
+                    )
+                    if pending:
+                        availability = (
+                            self.building_task_store.pending_task_availability(
+                                job.job_id
+                            )
+                        )
+                        if (
+                            availability["eligible"] == 0
+                            and availability["deferred"] > 0
+                        ):
+                            raise BuildingChunkSchedulingYield()
+                        if (
+                            max_tasks_per_run is not None
+                            and self.building_task_store.resource_capacity_occupied(
+                                worker_capability=worker_capability
+                            )
+                        ):
+                            raise BuildingChunkSchedulingYield()
+                        raise BuildingScopeError(
+                            "building_resource_admission",
+                            "no worker has enough admitted capacity for the next building chunk",
+                        )
+                    failed = tuple(
+                        task
+                        for task in self.building_task_store.list_tasks(job.job_id)
+                        if task.state == "failed"
+                    )
+                    if failed:
+                        raise self._terminal_chunk_failure(failed[0])
+                    break
+                task = claimed.task
+                child_scope = plan_building_chunk_scope(
+                    global_plan,
+                    tuple(MapBlock(x, y) for x, y in task.blocks),
+                )
+                lease_heartbeat = _TaskLeaseHeartbeat(
+                    self.building_task_store,
+                    task_id=task.task_id,
+                    worker_id=worker_id,
+                    lease_token=claimed.lease_token,
+                    lease_seconds=CHUNK_TASK_LEASE_SECONDS,
+                )
+                lease_heartbeat.start()
+                self._active_task_command_metrics_cursor = (
+                    self._command_execution_metrics_cursor()
+                )
+                task_started_monotonic = time.monotonic()
+
+                def task_cancellation_check() -> bool:
+                    return (
+                        lease_heartbeat.lost
+                        or self._chunk_task_cancellation_requested(
+                            cancellation_check=cancellation_check,
+                            started_monotonic=task_started_monotonic,
+                            hard_seconds=partition.policy.wall_time_hard_seconds,
+                        )
+                    )
+
+                scan_failure: BuildingScopeError | None = None
+                cache_hit_task = False
+                try:
+                    if task.kind == "building_workload_scan":
+                        receipt, scan_metrics = self._run_building_workload_scan(
+                            source_index_manifest,
+                            source_snapshot_sha256,
+                            child_scope,
+                            parent_root / "workload-scans" / task.task_id,
+                            on_phase_progress=on_phase_progress,
+                            cancellation_check=task_cancellation_check,
+                        )
+                        completed_scan = self.building_task_store.complete_workload_scan(
+                            task.task_id,
+                            worker_id=worker_id,
+                            lease_token=claimed.lease_token,
+                            workload_receipt=receipt,
+                            actual_resource=scan_metrics,
+                            phase_timings=scan_metrics.get("phaseTimings"),
+                            peak_rss_bytes=scan_metrics.get("peakResidentBytes"),
+                            worker_capability=worker_capability,
+                        )
+                        if completed_scan.state == "failed":
+                            scan_failure = BuildingScopeError(
+                                "building_pathological_block",
+                                "one building block exceeds worker memory policy",
+                            )
+                    elif task.kind == "building_chunk":
+                        predicted = task.predicted_resource or {}
+                        cache_hit_task = predicted.get("cacheHit") is True
+                        if cache_hit_task:
+                            self._publish_cached_chunk_receipts(
+                                task_id=task.task_id,
+                                worker_id=worker_id,
+                                lease_token=claimed.lease_token,
+                                cache_identity=block_cache_identity,
+                                blocks=child_scope.output_blocks,
+                            )
+                        else:
+                            workload_receipt = self._workload_receipt_for_task(
+                                task.task_id
+                            )
+                            self.build_building_chunk(
+                                job,
+                                scope_plan=child_scope,
+                                source_pbf=source_pbf,
+                                source_snapshot_sha256=source_snapshot_sha256,
+                                source_index_manifest=source_index_manifest,
+                                calibration_manifest=calibration_manifest,
+                                calibration_generation=calibration_generation,
+                                workload_receipt=workload_receipt,
+                                task_id=task.task_id,
+                                worker_id=worker_id,
+                                lease_token=claimed.lease_token,
+                                on_progress=on_progress,
+                                on_phase_progress=on_phase_progress,
+                                cancellation_check=task_cancellation_check,
+                            )
+                    else:
+                        raise BuildingTaskStoreError("unknown building task kind")
+                except BuildingBlockReceiptError as exc:
+                    lease_heartbeat.stop()
+                    if cache_hit_task:
+                        self.building_task_store.invalidate_cache_for_retry(
+                            job.job_id,
+                            blocks=task.blocks,
+                            cache_identity_sha256=block_cache_identity[
+                                "cacheIdentitySha256"
+                            ],
+                            typed_failure=exc.code,
+                            task_id=task.task_id,
+                            worker_id=worker_id,
+                            lease_token=claimed.lease_token,
+                        )
+                        yield_after_quantum()
+                        continue
+                    self.building_task_store.fail(
+                        task.task_id,
+                        worker_id=worker_id,
+                        lease_token=claimed.lease_token,
+                        typed_failure=exc.code,
+                        transient=False,
+                        actual_resource=self._last_task_failure_resource(),
+                        peak_rss_bytes=self._last_task_failure_peak_rss(),
+                    )
+                    raise
+                except BuildingChunkSplitRequired as exc:
+                    lease_heartbeat.stop()
+                    self.building_task_store.split_runtime_task(
+                        task.task_id,
+                        worker_id=worker_id,
+                        lease_token=claimed.lease_token,
+                        reason=exc.code,
+                    )
+                    yield_after_quantum()
+                    continue
+                except BuildingScopeError as exc:
+                    lease_heartbeat.stop()
+                    if lease_heartbeat.lost:
+                        raise BuildingChunkSchedulingYield() from exc
+                    if (
+                        exc.code in _CHUNK_SPLIT_FAILURE_CODES
+                        and len(task.blocks) > 1
+                    ):
+                        self.building_task_store.split_runtime_task(
+                            task.task_id,
+                            worker_id=worker_id,
+                            lease_token=claimed.lease_token,
+                            reason=exc.code,
+                        )
+                        yield_after_quantum()
+                        continue
+                    typed_failure = (
+                        "building_pathological_block"
+                        if len(task.blocks) == 1
+                        and exc.code in _CHUNK_SPLIT_FAILURE_CODES
+                        else exc.code
+                    )
+                    failure_resource = self._last_task_failure_resource()
+                    if typed_failure != exc.code:
+                        failure_resource = {
+                            **(failure_resource or {}),
+                            "rootFailureCode": exc.code,
+                        }
+                    failed_task = self.building_task_store.fail(
+                        task.task_id,
+                        worker_id=worker_id,
+                        lease_token=claimed.lease_token,
+                        typed_failure=typed_failure,
+                        transient=self._chunk_failure_is_transient(
+                            exc,
+                            typed_failure,
+                        ),
+                        actual_resource=failure_resource,
+                        peak_rss_bytes=self._last_task_failure_peak_rss(),
+                    )
+                    if failed_task.state == "pending":
+                        yield_after_quantum()
+                        continue
+                    if self._chunk_failure_is_transient(exc, typed_failure):
+                        raise self._terminal_chunk_failure(failed_task) from exc
+                    raise
+                except Exception as exc:
+                    lease_heartbeat.stop()
+                    if lease_heartbeat.lost:
+                        raise BuildingChunkSchedulingYield() from exc
+                    typed_failure = getattr(exc, "code", None) or (
+                        "building_chunk_execution_failed"
+                    )
+                    transient = self._chunk_failure_is_transient(
+                        exc,
+                        str(typed_failure),
+                    )
+                    failed_task = self.building_task_store.fail(
+                        task.task_id,
+                        worker_id=worker_id,
+                        lease_token=claimed.lease_token,
+                        typed_failure=str(typed_failure),
+                        transient=transient,
+                        actual_resource=self._last_task_failure_resource(),
+                        peak_rss_bytes=self._last_task_failure_peak_rss(),
+                    )
+                    if failed_task.state == "pending":
+                        yield_after_quantum()
+                        continue
+                    if transient:
+                        raise self._terminal_chunk_failure(failed_task) from exc
+                    raise
+                else:
+                    lease_heartbeat.stop()
+                if scan_failure is not None:
+                    raise scan_failure
+                progress = self.building_task_store.progress(job.job_id)
+                if progress is not None:
+                    self._emit_phase_progress(
+                        on_phase_progress,
+                        phase="building_chunks",
+                        unit="blocks",
+                        completed=progress["completedBlocks"],
+                        total=progress["totalBlocks"],
+                        total_blocks=progress["totalBlocks"],
+                        indeterminate=False,
+                    )
+                yield_after_quantum()
+
+            if on_status is not None:
+                on_status(JobStatus.EXTRACTING_PBF)
+            with self._parent_phase_reservation(
+                parent_job_id=job.job_id,
+                phase="map_assembly",
+                worker_id=worker_id,
+                worker_capability=worker_capability,
+                cancellation_check=cancellation_check,
+            ) as phase_cancellation_check:
+                result = self.assemble_building_chunks(
+                    job,
+                    global_plan=global_plan,
+                    source_pbf=source_pbf,
+                    source_snapshot_sha256=source_snapshot_sha256,
+                    source_index=source_index,
+                    calibration_manifest=calibration_manifest,
+                    calibration_generation=calibration_generation,
+                    parent_job_id=job.job_id,
+                    on_progress=on_progress,
+                    on_phase_progress=on_phase_progress,
+                    artifact_publication_lease=artifact_publication_lease,
+                    on_artifact_pending=on_artifact_pending,
+                    cancellation_check=phase_cancellation_check,
+                    coordinator_already_ready=coordinator_already_ready,
+                )
+            resource_metrics["receiptSetSha256"] = self.building_task_store.receipt_set_sha256(
+                job.job_id
+            )
+            resource_metrics["progress"] = self.building_task_store.progress(job.job_id)
+            if result.artifact_metrics is None:
+                result.artifact_metrics = {}
+            existing_preprocessing = result.artifact_metrics.get(
+                "buildingPreprocessing"
+            )
+            if isinstance(existing_preprocessing, dict):
+                # Preserve the identity-bearing summary emitted into the
+                # archive manifest; runtime capability/RSS evidence is
+                # additive and must not replace it for API callers.
+                existing_preprocessing["resource"] = resource_metrics
+            else:
+                result.artifact_metrics["buildingPreprocessing"] = resource_metrics
+            return result
+        except BuildingChunkSchedulingYield:
+            raise
+        except BuildingCacheRetryRequired:
+            if max_tasks_per_run is not None:
+                raise BuildingChunkSchedulingYield()
+            return self.build_chunked(
+                job,
+                worker_id=worker_id,
+                worker_capability=worker_capability,
+                on_status=on_status,
+                on_progress=on_progress,
+                on_phase_progress=on_phase_progress,
+                on_artifact_pending=on_artifact_pending,
+                artifact_publication_lease=artifact_publication_lease,
+                cancellation_check=cancellation_check,
+                max_tasks_per_run=max_tasks_per_run,
+            )
+        except Exception:
+            self._mark_chunked_plan_failed(job.job_id)
+            raise
+
+    def _mark_chunked_plan_failed(self, parent_job_id: str) -> None:
+        if self.building_task_store is None:
+            return
+        try:
+            plan = self.building_task_store.get_plan(parent_job_id)
+            if plan is not None and plan["state"] not in {
+                "observed",
+                "cancelled",
+                "failed",
+                "ready",
+            }:
+                self.building_task_store.set_plan_stage(
+                    parent_job_id, stage="failed", state="failed"
+                )
+        except Exception:
+            # Preserve the original preparation/execution failure. The public
+            # job still fails and maintenance can surface a coordinator fault.
+            pass
+
+    def _last_task_failure_resource(self) -> dict[str, Any] | None:
+        """Return bounded child-command observations for a failed task.
+
+        A chunk can fail before it reaches ``mark_ready`` (for example while
+        a conversion subprocess emits a typed relation failure). Preserve the
+        command wall time, process-tree peak RSS, and cgroup event deltas in the
+        durable attempt row so a failed task remains useful for resource-model
+        training and diagnosis.
+        """
+
+        metrics = self._active_task_command_execution_metrics()
+        if not metrics:
+            return None
+        return {
+            "commandMetrics": list(metrics),
+            "lastCommand": deepcopy(metrics[-1]),
+        }
+
+    @staticmethod
+    def _chunk_task_cancellation_requested(
+        *,
+        cancellation_check,
+        started_monotonic: float,
+        hard_seconds: int,
+        now_monotonic: float | None = None,
+    ) -> bool:
+        if cancellation_check is not None and cancellation_check():
+            return True
+        current = time.monotonic() if now_monotonic is None else now_monotonic
+        if current - started_monotonic > hard_seconds:
+            raise BuildingScopeError(
+                "building_chunk_wall_time_exceeded",
+                "building chunk exceeded the hard wall-time policy",
+            )
+        return False
+
+    @staticmethod
+    def _chunk_failure_is_transient(exc: BaseException, typed_failure: str) -> bool:
+        if isinstance(exc, BuildingScopeError):
+            if typed_failure in _TRANSIENT_CHUNK_FAILURE_CODES:
+                return True
+            # A subprocess can report a deterministic typed guard, relation,
+            # oversize, or OOM failure. Its CalledProcessError cause does not
+            # make that explicit producer result transient.
+            if typed_failure != "building_chunk_execution_failed":
+                return False
+        current: BaseException | None = exc
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            if isinstance(current, (OSError, subprocess.CalledProcessError)):
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
+    @staticmethod
+    def _terminal_chunk_failure(task) -> BuildingScopeError:
+        root_failure_code = task.typed_error or "building_chunk_execution_failed"
+        if task.transient_attempts >= MAX_TRANSIENT_TASK_ATTEMPTS:
+            return BuildingChunkRetryExhausted(
+                task_id=task.task_id,
+                root_failure_code=root_failure_code,
+            )
+        if root_failure_code not in _BUILDING_FAILURE_CODES:
+            root_failure_code = "building_chunk_execution_failed"
+        return BuildingScopeError(
+            root_failure_code,
+            "building chunk has a terminal durable failure",
+        )
+
+    def _last_task_failure_peak_rss(self) -> int | None:
+        return self._maximum_command_peak_rss(
+            self._active_task_command_execution_metrics()
+        )
+
+    def _plan_chunked_scope(self, job: MapJob, calibration=None) -> GlobalBuildingPlan:
+        calibration = calibration or load_building_calibration_window(
+            self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
+        )
+        plan = plan_global_building_scope(
+            job,
+            calibration_cell_size_meters=calibration.cell_size_meters,
+            calibration_halo_cells=calibration.halo_cells,
+            calibration_minimum_samples=calibration.minimum_samples,
+        )
+        frozen = job.building_preprocessing_inputs
+        if frozen is not None:
+            expected = frozen.get("globalPlan")
+            actual = {**plan.document, "globalPlanSha256": plan.sha256}
+            if expected is not None and expected != actual:
+                raise BuildingScopeError(
+                    "building_scope_policy_invalid",
+                    "frozen global building plan changed before retry",
+                )
+        return plan
+
+    def _admit_chunked_storage(
+        self,
+        global_plan: GlobalBuildingPlan,
+        *,
+        source_pbf: Path,
+    ) -> dict[str, Any]:
+        try:
+            source_bytes = source_pbf.stat().st_size
+            self.paths.building_cache_root.mkdir(parents=True, exist_ok=True)
+            free_bytes = shutil.disk_usage(self.paths.building_cache_root).free
+            return building_storage_admission(
+                estimated_archive_bytes=int(
+                    global_plan.summary()["estimatedArchiveBytes"]
+                ),
+                source_bytes=source_bytes,
+                free_bytes=free_bytes,
+                cache_max_bytes=self._configured_building_storage_bytes(
+                    "MAP_PLATFORM_BUILDING_BLOCK_CACHE_MAX_BYTES",
+                    DEFAULT_BUILDING_BLOCK_CACHE_MAX_BYTES,
+                ),
+                attempt_max_bytes=self._configured_building_storage_bytes(
+                    "MAP_PLATFORM_BUILDING_ATTEMPT_STORAGE_MAX_BYTES",
+                    DEFAULT_BUILDING_ATTEMPT_STORAGE_MAX_BYTES,
+                ),
+                reserve_bytes=self._configured_building_storage_bytes(
+                    "MAP_PLATFORM_BUILDING_STORAGE_RESERVE_BYTES",
+                    DEFAULT_BUILDING_STORAGE_RESERVE_BYTES,
+                ),
+            )
+        except BuildingScopeError:
+            raise
+        except (BuildingStorageAdmissionError, OSError, TypeError, ValueError) as exc:
+            raise BuildingScopeError(
+                "building_storage_admission",
+                str(exc),
+            ) from exc
+
+    @staticmethod
+    def _configured_building_storage_bytes(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None or not raw.strip():
+            return default
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise BuildingScopeError(
+                "building_storage_admission",
+                f"{name} must be a positive byte count",
+            ) from exc
+        if value <= 0:
+            raise BuildingScopeError(
+                "building_storage_admission",
+                f"{name} must be a positive byte count",
+            )
+        return value
+
+    def _freeze_chunked_inputs(
+        self,
+        job: MapJob,
+        *,
+        source_snapshot_sha256: str,
+        global_plan: GlobalBuildingPlan,
+        calibration_generation: Mapping[str, Any],
+    ) -> None:
+        frozen = {
+            "sourceSnapshotSha256": source_snapshot_sha256,
+            "globalPlan": {**global_plan.document, "globalPlanSha256": global_plan.sha256},
+            "calibrationGeneration": deepcopy(dict(calibration_generation)),
+        }
+        previous = job.building_preprocessing_inputs
+        if previous is not None:
+            for key in ("sourceSnapshotSha256", "globalPlan", "calibrationGeneration"):
+                if previous.get(key) != frozen[key]:
+                    raise BuildingScopeError(
+                        "building_scope_policy_invalid",
+                        "frozen chunked building inputs changed before retry",
+                    )
+            return
+        job.building_preprocessing_inputs = frozen
+
+    def _prepare_chunked_source_index(
+        self,
+        source_pbf: Path,
+        source_snapshot_sha256: str,
+        global_plan: GlobalBuildingPlan,
+        parent_root: Path,
+        *,
+        on_phase_progress=None,
+        cancellation_check=None,
+    ) -> tuple[Path, dict[str, Any]]:
+        scripts_root = self.paths.osm_extract_root / "scripts"
+        result_path = parent_root / "source-index-result.json"
+        self._run_preprocessing_command(
+            [
+                sys.executable,
+                str(scripts_root / "build_building_source_index.py"),
+                "--source-pbf",
+                str(source_pbf),
+                "--source-sha256",
+                source_snapshot_sha256,
+                "--cache-root",
+                str(self.paths.building_cache_root),
+                "--result-json",
+                str(result_path),
+            ],
+            cwd=scripts_root,
+            on_phase_progress=on_phase_progress,
+            default_unit="source_index",
+            total_blocks=len(global_plan.output_blocks),
+            cancellation_check=cancellation_check,
+        )
+        try:
+            source_index = json.loads(result_path.read_bytes())
+            manifest = Path(source_index.pop("manifestPath"))
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            raise BuildingScopeError(
+                "building_relation_incomplete",
+                "chunked source index did not publish valid metadata",
+            ) from exc
+        if (
+            source_index.get("sourceSnapshotSha256") != source_snapshot_sha256
+            or not manifest.is_file()
+        ):
+            raise BuildingScopeError(
+                "building_relation_incomplete",
+                "chunked source index identity is invalid",
+            )
+        return manifest, source_index
+
+    def _persist_chunked_partition(
+        self,
+        job: MapJob,
+        *,
+        partition,
+        cache_identity_sha256: str,
+    ) -> None:
+        # The task store's idempotent insertion is the resume boundary.  Shadow
+        # records created by an earlier attempt are compatible when their
+        # canonical parent identity matches this request.
+        task_specs: list[BuildingTaskSpec] = []
+        for chunk in partition.chunks:
+            kind = (
+                "building_workload_scan"
+                if chunk.workload.requires_exact_workload_scan
+                else "building_chunk"
+            )
+            blocks = tuple((block.x, block.y) for block in chunk.blocks)
+            task_specs.append(
+                BuildingTaskSpec(
+                    task_id=deterministic_building_task_id(
+                        parent_job_id=job.job_id,
+                        kind=kind,
+                        blocks=blocks,
+                        chunk_plan_sha256=partition.sha256,
+                        split_depth=chunk.split_depth,
+                    ),
+                    parent_job_id=job.job_id,
+                    kind=kind,
+                    blocks=blocks,
+                    chunk_plan_sha256=partition.sha256,
+                    split_depth=chunk.split_depth,
+                    predicted_resource={
+                        "sourceAreaM2": chunk.workload.source_area_m2,
+                        "closureObjects": chunk.workload.closure_objects,
+                        "estimatedPeakMemoryBytes": (
+                            chunk.workload.estimated_peak_memory_bytes
+                            if chunk.workload.estimated_peak_memory_bytes is not None
+                            else DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES
+                        ),
+                        "memoryEstimateSource": (
+                            "partition"
+                            if chunk.workload.estimated_peak_memory_bytes is not None
+                            else CONSERVATIVE_MEMORY_MODEL_VERSION
+                        ),
+                        "estimatedWallSeconds": chunk.workload.estimated_wall_seconds,
+                        "requiresExactWorkloadScan": chunk.workload.requires_exact_workload_scan,
+                    },
+                )
+            )
+        for block in partition.cache_hit_blocks:
+            blocks = ((block.x, block.y),)
+            task_specs.append(
+                BuildingTaskSpec(
+                    task_id=deterministic_building_task_id(
+                        parent_job_id=job.job_id,
+                        kind="building_chunk",
+                        blocks=blocks,
+                        chunk_plan_sha256=partition.sha256,
+                        split_depth=0,
+                    ),
+                    parent_job_id=job.job_id,
+                    kind="building_chunk",
+                    blocks=blocks,
+                    chunk_plan_sha256=partition.sha256,
+                    predicted_resource={
+                        "cacheHit": True,
+                        "cacheIdentitySha256": cache_identity_sha256,
+                        "estimatedPeakMemoryBytes": 0,
+                        "memoryEstimateSource": "cache_receipt",
+                        "estimatedWallSeconds": 0,
+                    },
+                )
+            )
+        resumable_specs: list[BuildingTaskSpec] = []
+        for spec in task_specs:
+            existing = self.building_task_store.get_task(spec.task_id)
+            # A completed exact workload scan deliberately keeps the stable
+            # scan task ID while changing its durable kind to building_chunk.
+            # Do not reinsert the pre-scan identity on resume.
+            if (
+                existing is not None
+                and spec.kind == "building_workload_scan"
+                and existing.kind == "building_chunk"
+            ):
+                continue
+            resumable_specs.append(spec)
+        if resumable_specs:
+            self.building_task_store.add_tasks(resumable_specs)
+
+    def _run_building_workload_scan(
+        self,
+        source_index_manifest: Path,
+        source_snapshot_sha256: str,
+        scope_plan: ScopePlan,
+        work_root: Path,
+        *,
+        on_phase_progress=None,
+        cancellation_check=None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Produce the exact indexed closure receipt for one child scope."""
+
+        scripts_root = self.paths.osm_extract_root / "scripts"
+        work_root.mkdir(parents=True, exist_ok=True)
+        scope_path = work_root / "scope-plan.json"
+        closure_path = work_root / "building-closure-plan.json"
+        ids_path = work_root / "building-closure-ids.txt"
+        scope_plan.write(scope_path)
+        started = time.perf_counter()
+        self._run_preprocessing_command(
+            [
+                sys.executable,
+                str(scripts_root / "build_building_closure.py"),
+                "--source-index-manifest",
+                str(source_index_manifest),
+                "--scope-plan",
+                str(scope_path),
+                "--closure-plan",
+                str(closure_path),
+                "--ids-output",
+                str(ids_path),
+            ],
+            cwd=scripts_root,
+            on_phase_progress=on_phase_progress,
+            default_unit="relation_closure",
+            total_blocks=len(scope_plan.output_blocks),
+            cancellation_check=cancellation_check,
+        )
+        try:
+            closure = json.loads(closure_path.read_bytes())
+            if not isinstance(closure, dict):
+                raise ValueError("closure plan is not an object")
+            closure_sha256 = closure.get("closurePlanSha256")
+            if not isinstance(closure_sha256, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", closure_sha256
+            ):
+                raise ValueError("closure plan identity is invalid")
+            sys.path.insert(0, str(scripts_root))
+            from build_building_closure import output_bounds_e7
+            from building_source_index import BuildingSourceIndex
+
+            # The source-index cache was sealed and identity-checked by the
+            # parent preparation step.  Workload scans must reuse that
+            # immutable manifest without re-auditing the multi-GB SQLite
+            # database for every child scope.
+            index = BuildingSourceIndex.from_manifest(
+                source_index_manifest,
+                validate_database=False,
+            )
+            workload = index.workload_for_bounds(
+                output_bounds_e7(scope_plan.document),
+                maximum_objects=scope_plan.document["policy"][
+                    "maxRelationObjectsPerJob"
+                ],
+                calibration_cell_size_meters=scope_plan.document["calibration"][
+                    "cellSizeMeters"
+                ],
+                calibration_halo_cells=scope_plan.document["calibration"][
+                    "haloCells"
+                ],
+            )
+            if not isinstance(workload, dict):
+                raise ValueError("source-index workload is not an object")
+        except Exception as exc:
+            raise BuildingScopeError(
+                getattr(exc, "code", "building_relation_incomplete"),
+                "chunked workload receipt is unavailable",
+            ) from exc
+        finally:
+            try:
+                sys.path.remove(str(scripts_root))
+            except ValueError:
+                pass
+        if closure.get("sourceSnapshotSha256") != source_snapshot_sha256:
+            raise BuildingScopeError(
+                "building_source_snapshot_changed",
+                "chunked workload closure source identity changed",
+            )
+        for key in (
+            "candidateKeys",
+            "requiredRelationKeys",
+            "requiredWayKeys",
+            "requiredNodeKeys",
+            "calibrationSampleCells",
+        ):
+            if list(workload.get(key, [])) != list(closure.get(key, [])):
+                raise BuildingScopeError(
+                    "building_workload_receipt_mismatch",
+                    "chunked workload receipt does not match closure",
+                )
+        workload["closurePlanSha256"] = closure_sha256
+        workload["calibrationTargetCells"] = closure.get("calibrationTargetCells", [])
+        workload["calibrationSampleCells"] = closure.get("calibrationSampleCells", [])
+        workload.setdefault("ringCount", None)
+        workload.setdefault("holeCount", None)
+        metrics = {
+            "durationSeconds": round(time.perf_counter() - started, 6),
+            "closure": {
+                key: workload.get(key)
+                for key in (
+                    "relationCount",
+                    "wayCount",
+                    "nodeCount",
+                    "totalObjectCount",
+                    "storedRelationMemberCount",
+                    "wayNodeReferenceCount",
+                    "vertexCount",
+                    "candidateOutlineCount",
+                    "candidatePartCount",
+                )
+            },
+            "peakResidentBytes": self._last_command_execution_metrics().get(
+                "peakResidentBytes"
+            ),
+            "phaseTimings": {
+                "relation_closure": round(time.perf_counter() - started, 6)
+            },
+        }
+        return workload, metrics
+
+    def _workload_receipt_for_task(self, task_id: str) -> dict[str, Any] | None:
+        if self.building_task_store is None:
+            return None
+        return self.building_task_store.workload_receipt(task_id)
+
     def uses_selected_preprocessing(self, job: MapJob) -> bool:
         if (
             renderer_format_version(job.request)
@@ -1372,7 +3275,18 @@ class MapBuildPipeline:
                 "building_scope_policy_invalid",
                 "building preprocessing rollout mode changed before retry",
             )
-        return self.building_scope_mode == "selected"
+        return self.building_scope_mode in {
+            "selected",
+            "chunked_allowlist",
+            "chunked",
+        }
+
+    def uses_chunked_preprocessing(self, job: MapJob) -> bool:
+        """Return whether this target-3 job must use the durable chunk path."""
+
+        if renderer_format_version(job.request) != BUILDING_RENDERER_FORMAT_VERSION:
+            return False
+        return self.building_scope_mode in {"chunked_allowlist", "chunked"}
 
     @staticmethod
     def _attempt_id(job: MapJob) -> str:
@@ -1419,6 +3333,1089 @@ class MapBuildPipeline:
                 )
         return scope_plan
 
+    def _record_shadow_global_plan(
+        self,
+        job: MapJob,
+        *,
+        calibration,
+        scope_diagnostics: dict[str, Any],
+    ) -> None:
+        try:
+            global_plan = plan_global_building_scope(
+                job,
+                calibration_cell_size_meters=calibration.cell_size_meters,
+                calibration_halo_cells=calibration.halo_cells,
+                calibration_minimum_samples=calibration.minimum_samples,
+            )
+            partition = partition_global_building_plan(global_plan)
+            try:
+                self._persist_shadow_building_partition(
+                    job,
+                    global_plan=global_plan,
+                    partition=partition,
+                )
+            except (BuildingTaskStoreError, OSError, TypeError, ValueError) as task_exc:
+                scope_diagnostics["globalTaskStoreError"] = {
+                    "code": getattr(
+                        task_exc,
+                        "code",
+                        "building_task_store_unavailable",
+                    )
+                }
+            scope_diagnostics["globalPlan"] = global_plan.summary()
+            scope_diagnostics["globalPartition"] = {
+                "partitionPlanSha256": partition.sha256,
+                "chunkCount": len(partition.chunks),
+                "cacheHitBlockCount": len(partition.cache_hit_blocks),
+                "requiresExactWorkloadScan": sum(
+                    1
+                    for chunk in partition.chunks
+                    if chunk.workload.requires_exact_workload_scan
+                ),
+                "chunks": [
+                    {
+                        "chunkId": chunk.chunk_id,
+                        "blockCount": len(chunk.blocks),
+                        "sourceAreaM2": chunk.workload.source_area_m2,
+                        "targetViolations": list(chunk.workload.target_violations),
+                        "hardViolations": list(chunk.workload.hard_violations),
+                        "requiresExactWorkloadScan": (
+                            chunk.workload.requires_exact_workload_scan
+                        ),
+                    }
+                    for chunk in partition.chunks
+                ],
+            }
+            print(
+                "BUILDING_GLOBAL_PLAN:"
+                + canonical_building_json(
+                    {
+                        "globalPlanSha256": global_plan.sha256,
+                        **global_plan.summary(),
+                        "partitionPlanSha256": partition.sha256,
+                        "chunkCount": len(partition.chunks),
+                        "requiresExactWorkloadScan": sum(
+                            1
+                            for chunk in partition.chunks
+                            if chunk.workload.requires_exact_workload_scan
+                        ),
+                    }
+                ).decode("utf-8"),
+                flush=True,
+            )
+        except (
+            BuildingScopeError,
+            BuildingChunkPlanningError,
+            TypeError,
+            ValueError,
+        ) as global_exc:
+            scope_diagnostics["globalPlanError"] = {
+                "code": getattr(
+                    global_exc,
+                    "code",
+                    "building_global_plan_unavailable",
+                )
+            }
+
+    def _persist_shadow_building_partition(
+        self,
+        job: MapJob,
+        *,
+        global_plan,
+        partition,
+    ) -> None:
+        """Record a shadow plan without changing the authoritative build path."""
+
+        if self.building_task_store is None:
+            return
+        input_identity = {
+            "request": job.request,
+            "geometry": job.geometry.to_dict(),
+            "sourceRegion": {
+                "id": job.source_region.id,
+                "checksum": job.source_region.checksum,
+            },
+            "globalPlanSha256": global_plan.sha256,
+        }
+        task_specs: list[BuildingTaskSpec] = []
+        for chunk in partition.chunks:
+            kind = (
+                "building_workload_scan"
+                if chunk.workload.requires_exact_workload_scan
+                else "building_chunk"
+            )
+            task_id = deterministic_building_task_id(
+                parent_job_id=job.job_id,
+                kind=kind,
+                blocks=tuple((block.x, block.y) for block in chunk.blocks),
+                chunk_plan_sha256=partition.sha256,
+                split_depth=chunk.split_depth,
+            )
+            task_specs.append(
+                BuildingTaskSpec(
+                    task_id=task_id,
+                    parent_job_id=job.job_id,
+                    kind=kind,
+                    blocks=tuple((block.x, block.y) for block in chunk.blocks),
+                    chunk_plan_sha256=partition.sha256,
+                    split_depth=chunk.split_depth,
+                    predicted_resource={
+                        "sourceAreaM2": chunk.workload.source_area_m2,
+                        "closureObjects": chunk.workload.closure_objects,
+                        "estimatedPeakMemoryBytes": (
+                            chunk.workload.estimated_peak_memory_bytes
+                            if chunk.workload.estimated_peak_memory_bytes is not None
+                            else DEFAULT_UNKNOWN_WORKLOAD_MEMORY_RESERVATION_BYTES
+                        ),
+                        "memoryEstimateSource": (
+                            "partition"
+                            if chunk.workload.estimated_peak_memory_bytes is not None
+                            else CONSERVATIVE_MEMORY_MODEL_VERSION
+                        ),
+                        "estimatedWallSeconds": chunk.workload.estimated_wall_seconds,
+                        "quotaUnits": max(1, chunk.workload.missing_block_count),
+                        "requiresExactWorkloadScan": (
+                            chunk.workload.requires_exact_workload_scan
+                        ),
+                        "targetViolations": list(chunk.workload.target_violations),
+                        "hardViolations": list(chunk.workload.hard_violations),
+                    },
+                )
+            )
+        self.building_task_store.publish_observed_plan(
+            parent_job_id=job.job_id,
+            global_plan_sha256=global_plan.sha256,
+            input_identity=input_identity,
+            expected_output_block_count=len(global_plan.output_blocks),
+            policy_version=partition.policy.policy_version,
+            resource_model_version="building-resource-model-untrained-v1",
+            tasks=task_specs,
+            scheduling_weight=1,
+            admission_priority=0,
+            active_task_quota=1,
+        )
+
+    def publish_building_chunk_receipts(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        lease_token: str,
+        cache_identity_path: Path,
+        blocks: Iterable[MapBlock],
+        validation_context: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Publish only cache entries reread and validated after extraction."""
+
+        if self.building_task_store is None:
+            raise BuildingTaskStoreError(
+                "building task store is required for chunk receipt publication"
+            )
+        try:
+            cache_identity = json.loads(cache_identity_path.read_bytes())
+        except (OSError, TypeError, ValueError) as exc:
+            raise BuildingBlockReceiptError(
+                "building_block_cache_identity_invalid",
+                "building block cache identity is unavailable",
+            ) from exc
+        receipts = read_building_block_receipts(
+            self.paths.building_cache_root,
+            cache_identity,
+            blocks,
+        )
+        context = dict(validation_context or {})
+        for receipt in receipts:
+            validation = receipt.validation()
+            validation.update(context)
+            self.building_task_store.publish_receipt(
+                task_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                block=(receipt.block.x, receipt.block.y),
+                cache_identity_sha256=receipt.cache_identity_sha256,
+                content_sha256=receipt.content_sha256,
+                producer_identity=receipt.producer_identity(),
+                validation=validation,
+            )
+        return {
+            "receiptCount": len(receipts),
+            "blocks": [[receipt.block.x, receipt.block.y] for receipt in receipts],
+            "cacheIdentitySha256": receipts[0].cache_identity_sha256,
+        }
+
+    def _publish_cached_chunk_receipts(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        lease_token: str,
+        cache_identity: Mapping[str, Any],
+        blocks: Iterable[MapBlock],
+    ) -> None:
+        """Promote already-valid cache entries without running the extractor."""
+
+        if self.building_task_store is None:
+            raise BuildingTaskStoreError(
+                "building task store is required for cache receipt publication"
+            )
+        receipts = read_building_block_receipts(
+            self.paths.building_cache_root,
+            cache_identity,
+            blocks,
+        )
+        for receipt in receipts:
+            self.building_task_store.publish_receipt(
+                task_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                block=(receipt.block.x, receipt.block.y),
+                cache_identity_sha256=receipt.cache_identity_sha256,
+                content_sha256=receipt.content_sha256,
+                producer_identity=receipt.producer_identity(),
+                validation={
+                    **receipt.validation(),
+                    "cacheHit": True,
+                },
+            )
+        self.building_task_store.mark_ready(
+            task_id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            actual_resource={"cacheHit": True, "receiptCount": len(receipts)},
+            peak_rss_bytes=0,
+        )
+
+    def assemble_building_chunks(
+        self,
+        job: MapJob,
+        *,
+        global_plan: GlobalBuildingPlan,
+        source_pbf: Path,
+        source_snapshot_sha256: str,
+        source_index: Mapping[str, Any] | None = None,
+        calibration_manifest: Path,
+        calibration_generation: Mapping[str, Any],
+        parent_job_id: str | None = None,
+        on_progress=None,
+        on_phase_progress=None,
+        artifact_publication_lease=None,
+        on_artifact_pending=None,
+        cancellation_check=None,
+        coordinator_already_ready: bool = False,
+    ) -> MapBuildResult:
+        """Assemble one map using only validated canonical building blocks.
+
+        This entry point deliberately has no fallback to building
+        normalization.  The coordinator must have a receipt for every global
+        output block before whole-map roads/labels are extracted and packaged.
+        It is opt-in while the parent worker remains on the monolithic path.
+        """
+
+        if renderer_format_version(job.request) != BUILDING_RENDERER_FORMAT_VERSION:
+            raise BuildingScopeError(
+                "building_scope_policy_invalid",
+                "building chunk assembly requires renderer format 3",
+            )
+        if not isinstance(global_plan, GlobalBuildingPlan):
+            raise BuildingScopeError(
+                "building_scope_policy_invalid", "global building plan is invalid"
+            )
+        if self.building_task_store is None:
+            raise BuildingTaskStoreError(
+                "building task store is required for chunk assembly"
+            )
+        parent_job_id = parent_job_id or job.job_id
+        if not parent_job_id:
+            raise BuildingTaskStoreError("parent job ID is required for chunk assembly")
+        if sha256_file(source_pbf) != source_snapshot_sha256:
+            raise BuildingScopeError(
+                "building_source_snapshot_changed",
+                "building source snapshot changed before chunk assembly",
+            )
+        scope_plan = plan_building_chunk_scope(
+            global_plan, global_plan.output_blocks
+        )
+        expected_blocks = tuple(sorted(global_plan.output_blocks))
+        plan_record = self.building_task_store.get_plan(parent_job_id)
+        if plan_record is None or plan_record["state"] in {
+            "cancelled",
+            "failed",
+        }:
+            raise BuildingScopeError(
+                "building_chunks_incomplete",
+                "building parent plan is not assembleable",
+            )
+        unfinished_tasks = tuple(
+            task
+            for task in self.building_task_store.list_tasks(parent_job_id)
+            if task.kind in {"building_chunk", "building_workload_scan"}
+            and task.state not in {"ready", "split", "cancelled"}
+        )
+        if unfinished_tasks:
+            raise BuildingScopeError(
+                "building_chunks_incomplete",
+                "building chunk tasks are not all ready for assembly",
+            )
+        receipt_rows = self.building_task_store.list_receipts(parent_job_id)
+        receipt_by_block = {
+            (int(row["block_x"]), int(row["block_y"])): row
+            for row in receipt_rows
+        }
+        expected_keys = {(block.x, block.y) for block in expected_blocks}
+        if set(receipt_by_block) != expected_keys:
+            raise BuildingScopeError(
+                "building_chunks_incomplete",
+                "building chunk receipts do not cover the global output block set",
+            )
+        receipt_set_sha256 = self.building_task_store.receipt_set_sha256(
+            parent_job_id
+        )
+        if receipt_set_sha256 is None:
+            raise BuildingScopeError(
+                "building_chunks_incomplete",
+                "building chunk receipt set is incomplete",
+            )
+        try:
+            expected_calibration = selected_calibration_identity(
+                source_snapshot_sha256=source_snapshot_sha256,
+                rules_path=(
+                    self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
+                ),
+                scope_plan=scope_plan,
+            )
+            calibration_document = calibration_generation_from_manifest(
+                calibration_manifest,
+                source_snapshot_sha256=source_snapshot_sha256,
+                calibration_key=expected_calibration["calibrationKey"],
+                calibration_identity=expected_calibration,
+            )
+            if dict(calibration_document) != dict(calibration_generation):
+                raise ValueError("calibration generation identity changed")
+            cache_identity = selected_building_block_cache_identity(
+                source_snapshot_sha256=source_snapshot_sha256,
+                rules_path=(
+                    self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
+                ),
+                scope_plan=scope_plan,
+                calibration_generation=calibration_document,
+            )
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            raise BuildingScopeError(
+                "building_calibration_unavailable",
+                "chunk assembly calibration generation is not compatible",
+            ) from exc
+
+        try:
+            cache_receipts = read_building_block_receipts(
+                self.paths.building_cache_root,
+                cache_identity,
+                expected_blocks,
+            )
+        except BuildingBlockReceiptError as exc:
+            failed_blocks = (
+                ((exc.block.x, exc.block.y),)
+                if exc.block is not None
+                else tuple((block.x, block.y) for block in expected_blocks)
+            )
+            self.building_task_store.invalidate_cache_for_retry(
+                parent_job_id,
+                blocks=failed_blocks,
+                cache_identity_sha256=cache_identity["cacheIdentitySha256"],
+                typed_failure=exc.code,
+            )
+            raise BuildingCacheRetryRequired() from exc
+        for receipt in cache_receipts:
+            row = receipt_by_block[(receipt.block.x, receipt.block.y)]
+            if (
+                row["cache_identity_sha256"] != receipt.cache_identity_sha256
+                or row["content_sha256"] != receipt.content_sha256
+            ):
+                self.building_task_store.invalidate_cache_for_retry(
+                    parent_job_id,
+                    blocks=((receipt.block.x, receipt.block.y),),
+                    cache_identity_sha256=cache_identity[
+                        "cacheIdentitySha256"
+                    ],
+                    typed_failure="building_block_cache_invalid",
+                )
+                raise BuildingCacheRetryRequired()
+
+        if not coordinator_already_ready:
+            self.building_task_store.advance_plan_stage(
+                parent_job_id, stage="map_assembly"
+            )
+        assembly_root = (
+            self.paths.work_root
+            / job.job_id
+            / "building-assembly"
+            / global_plan.sha256
+        )
+        if assembly_root.exists():
+            shutil.rmtree(assembly_root)
+        assembly_root.mkdir(parents=True, exist_ok=True)
+        scope_plan_path = assembly_root / "scope-plan.json"
+        scope_plan.write(scope_plan_path)
+        cache_identity_path = assembly_root / "building-block-cache-identity.json"
+        cache_identity_path.write_bytes(canonical_building_json(cache_identity) + b"\n")
+        clipped_pbf = assembly_root / "clipped.osm.pbf"
+        geojson_prefix = assembly_root / "features"
+        raw_output_dir = assembly_root / "raw-map"
+        pack_root = assembly_root / "pack"
+        map_id = job.map_id or stable_map_id(job)
+        job.map_id = map_id
+        vectmap_output = pack_root / "VECTMAP" / map_id
+        archive_path = assembly_root / f"{map_id}.zip"
+
+        source_metrics = self._extract_pbf(
+            job,
+            source_pbf,
+            clipped_pbf,
+            bounds=scope_plan.source_bounds,
+            force_bounds=True,
+            scope_plan=scope_plan,
+            source_snapshot_sha256=source_snapshot_sha256,
+            cancellation_check=cancellation_check,
+        )
+        self._convert_to_geojson(
+            job,
+            clipped_pbf,
+            geojson_prefix,
+            bounds=scope_plan.source_bounds,
+            cancellation_check=cancellation_check,
+        )
+        metrics = self._extract_features(
+            job,
+            geojson_prefix,
+            raw_output_dir,
+            bounds=scope_plan.source_bounds,
+            on_progress=on_progress,
+            scope_plan_path=scope_plan_path,
+            calibration_manifest=calibration_manifest,
+            calibration_source_sha256=source_snapshot_sha256,
+            building_block_cache_identity_path=cache_identity_path,
+            building_cache_only=True,
+            on_phase_progress=on_phase_progress,
+            planned_scope_marker=scope_plan.summary(),
+            cancellation_check=cancellation_check,
+        )
+        self._stage_vectmap(raw_output_dir, vectmap_output)
+        if not coordinator_already_ready:
+            self.building_task_store.advance_plan_stage(
+                parent_job_id, stage="artifact_validation"
+            )
+        metrics["buildingAssembly"] = {
+            "schemaVersion": 1,
+            "globalPlanSha256": global_plan.sha256,
+            "scopePlanSha256": scope_plan.sha256,
+            "blockCount": len(expected_blocks),
+            "receiptCount": len(cache_receipts),
+            "receiptSetSha256": receipt_set_sha256,
+            "cacheIdentitySha256": cache_identity["cacheIdentitySha256"],
+            "sourceExtraction": source_metrics,
+        }
+        if source_index is not None:
+            metrics["buildingPreprocessing"] = self._chunked_preprocessing_summary(
+                job,
+                global_plan=global_plan,
+                scope_plan=scope_plan,
+                source_snapshot_sha256=source_snapshot_sha256,
+                source_index=source_index,
+                calibration_generation=calibration_generation,
+                cache_identity=cache_identity,
+                parent_job_id=parent_job_id,
+            )
+        def mark_artifact_publication() -> None:
+            if not coordinator_already_ready:
+                self.building_task_store.advance_plan_stage(
+                    parent_job_id, stage="artifact_publication"
+                )
+
+        result = self._package_map(
+            job,
+            pack_root,
+            archive_path,
+            artifact_publication_lease=artifact_publication_lease,
+            on_artifact_pending=on_artifact_pending,
+            build_metrics=metrics,
+            max_archive_bytes=MAX_FINAL_ASSEMBLY_ARCHIVE_BYTES,
+            validate_final_artifact=True,
+            on_archive_validated=mark_artifact_publication,
+        )
+        return result
+
+    def _chunked_preprocessing_summary(
+        self,
+        job: MapJob,
+        *,
+        global_plan: GlobalBuildingPlan,
+        scope_plan: ScopePlan,
+        source_snapshot_sha256: str,
+        source_index: Mapping[str, Any],
+        calibration_generation: Mapping[str, Any],
+        cache_identity: Mapping[str, Any],
+        parent_job_id: str,
+    ) -> dict[str, Any]:
+        """Build the immutable manifest summary for a chunked parent."""
+
+        if self.building_task_store is None:
+            raise BuildingTaskStoreError("building task store is required")
+        required_source_index_fields = {
+            "indexKey",
+            "sourceSnapshotSha256",
+            "databaseSha256",
+            "schemaVersion",
+            "algorithmVersion",
+            "nodeCount",
+            "wayCount",
+            "relationCount",
+            "relationMemberCount",
+        }
+        if (
+            not required_source_index_fields.issubset(source_index)
+            or source_index.get("sourceSnapshotSha256")
+            != source_snapshot_sha256
+        ):
+            raise BuildingScopeError(
+                "building_relation_incomplete",
+                "chunked source index summary is incomplete or mismatched",
+            )
+        workload_rows = self.building_task_store.list_workload_receipts(parent_job_id)
+        workloads: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for row in workload_rows:
+            try:
+                value = json.loads(row["workload_json"])
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(value, dict):
+                workloads.append((row, value))
+        candidate_keys: set[str] = set()
+        required_relation_keys: set[str] = set()
+        required_way_keys: set[str] = set()
+        required_node_keys: set[str] = set()
+        for _row, value in workloads:
+            for field, target in (
+                ("candidateKeys", candidate_keys),
+                ("requiredRelationKeys", required_relation_keys),
+                ("requiredWayKeys", required_way_keys),
+                ("requiredNodeKeys", required_node_keys),
+            ):
+                target.update(
+                    item for item in value.get(field, []) if isinstance(item, str)
+                )
+        # These sets are keyed by canonical source object identity, so the
+        # closure summary remains identical when the same global blocks are
+        # reached through a different deterministic partition layout.
+        closure_payload = {
+            "globalPlanSha256": global_plan.sha256,
+            "sourceIndexKey": source_index["indexKey"],
+            "candidateKeys": sorted(candidate_keys),
+            "requiredRelationKeys": sorted(required_relation_keys),
+            "requiredWayKeys": sorted(required_way_keys),
+            "requiredNodeKeys": sorted(required_node_keys),
+        }
+        closure_digest = hashlib.sha256(
+            canonical_building_json(closure_payload)
+        ).hexdigest()
+        counts = {
+            "candidateCount": len(candidate_keys),
+            "relationCount": len(required_relation_keys),
+            "wayCount": len(required_way_keys),
+            "nodeCount": len(required_node_keys),
+        }
+        # The global plan is the parent identity. Its chunk-policy fields are
+        # projected into the existing selected-area summary shape so older
+        # manifest readers remain compatible.
+        global_document = global_plan.document
+        global_metrics = global_document["metrics"]
+        chunk_policy = global_document["chunkPolicy"]
+        scope_summary = {
+            "scopePolicyVersion": chunk_policy["policyVersion"],
+            "scopePlanSha256": global_plan.sha256,
+            "requestedApproximateAreaM2": global_metrics[
+                "requestedApproximateAreaM2"
+            ],
+            "outputAreaM2": global_metrics["outputAreaM2"],
+            "sourceAreaM2": global_metrics["sourceAreaM2"],
+            "sourceToOutputAreaBasisPoints": global_metrics[
+                "sourceToOutputAreaBasisPoints"
+            ],
+            "outputBlockCount": global_metrics["outputBlockCount"],
+            "calibrationCellCount": global_metrics["calibrationCellCount"],
+            "calibrationSampleCellCount": global_metrics[
+                "calibrationSampleCellCount"
+            ],
+            "geometryBufferMeters": chunk_policy["geometryBufferMeters"],
+            "sourceBoundsE7": global_document["sourceScope"]["boundsE7"],
+        }
+        calibration_identity = selected_calibration_identity(
+            source_snapshot_sha256=source_snapshot_sha256,
+            rules_path=(
+                self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
+            ),
+            scope_plan=global_plan,
+        )
+        calibration = {
+            "calibrationKey": calibration_generation["calibrationKey"],
+            "sourceSnapshotSha256": source_snapshot_sha256,
+            "rulesSha256": calibration_identity["rulesSha256"],
+            "manifestSha256": calibration_generation["manifestSha256"],
+            "entrySetSha256": calibration_generation["entrySetSha256"],
+            "cellCount": calibration_generation["cellCount"],
+            "cellsRequested": calibration_generation["cellCount"],
+            "cellsHits": calibration_generation["cellCount"],
+            "cellsMisses": 0,
+            "cellsRebuilt": 0,
+        }
+        identity = selected_building_identity(
+            source_snapshot_sha256=source_snapshot_sha256,
+            rules_path=(
+                self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
+            ),
+            scope_plan=global_plan,
+            calibration_generation=dict(calibration_generation),
+        )
+        partition_identity = partition_invariant_artifact_identity(
+            global_plan_sha256=global_plan.sha256,
+            source_snapshot_sha256=source_snapshot_sha256,
+            source_index_database_sha256=source_index["databaseSha256"],
+            calibration_manifest_sha256=calibration_generation["manifestSha256"],
+            cache_identity_sha256=cache_identity["cacheIdentitySha256"],
+            receipt_set_sha256=self.building_task_store.receipt_set_sha256(
+                parent_job_id
+            )
+            or "",
+        )
+        return {
+            "mode": "chunked",
+            "scope": scope_summary,
+            "identity": identity,
+            "sourceIndex": {
+                key: source_index[key]
+                for key in (
+                    "indexKey",
+                    "sourceSnapshotSha256",
+                    "databaseSha256",
+                    "schemaVersion",
+                    "algorithmVersion",
+                    "nodeCount",
+                    "wayCount",
+                    "relationCount",
+                    "relationMemberCount",
+                )
+                if key in source_index
+            },
+            "closure": {
+                "closurePlanSha256": closure_digest,
+                **counts,
+                "calibrationCellCount": global_metrics[
+                    "calibrationSampleCellCount"
+                ],
+            },
+            "calibration": calibration,
+            "blockCacheIdentity": deepcopy(dict(cache_identity)),
+            "chunked": {
+                "globalPlanSha256": global_plan.sha256,
+                "scopePlanSha256": scope_plan.sha256,
+                "receiptSetSha256": self.building_task_store.receipt_set_sha256(
+                    parent_job_id
+                ),
+                "partitionInvariantArtifactIdentity": partition_identity,
+                "workloadReceiptCount": len(workloads),
+            },
+        }
+
+    @staticmethod
+    def _raise_chunk_split_if_needed(
+        exc: BuildingScopeError,
+        *,
+        task_id: str | None,
+        scope_plan: ScopePlan,
+    ) -> None:
+        if (
+            task_id is not None
+            and exc.code in _CHUNK_SPLIT_FAILURE_CODES
+            and len(scope_plan.output_blocks) > 1
+        ):
+            raise BuildingChunkSplitRequired(
+                exc.code,
+                str(exc),
+                task_id=task_id,
+                blocks=tuple(
+                    (block.x, block.y) for block in scope_plan.output_blocks
+                ),
+            ) from exc
+
+    @staticmethod
+    def _materialize_workload_closure(
+        scope_plan: ScopePlan,
+        workload_receipt: Mapping[str, Any],
+        closure_plan_path: Path,
+        closure_ids_path: Path,
+        source_snapshot_sha256: str,
+    ) -> dict[str, Any]:
+        """Materialize a previously verified exact workload receipt.
+
+        Workload scans already run the immutable source-index closure query and
+        persist every object key plus the closure digest.  Re-running that
+        query during the build would add the same multi-minute SQLite walk a
+        second time.  Reconstruct the canonical closure document locally,
+        verify its digest against the receipt and scope, and only then write
+        the ID list consumed by ``osmium getid``.
+        """
+
+        if workload_receipt.get("sourceSnapshotSha256") != source_snapshot_sha256:
+            raise BuildingScopeError(
+                "building_source_snapshot_changed",
+                "workload receipt source identity changed",
+            )
+        required_fields = (
+            "sourceIndexKey",
+            "candidateKeys",
+            "requiredRelationKeys",
+            "requiredWayKeys",
+            "requiredNodeKeys",
+            "calibrationTargetCells",
+            "calibrationSampleCells",
+            "closurePlanSha256",
+        )
+        if any(field not in workload_receipt for field in required_fields):
+            raise BuildingScopeError(
+                "building_workload_receipt_mismatch",
+                "workload receipt is missing closure identity fields",
+            )
+        body = {
+            "schemaVersion": 1,
+            "scopePlanSha256": scope_plan.sha256,
+            "sourceIndexKey": workload_receipt["sourceIndexKey"],
+            "sourceSnapshotSha256": source_snapshot_sha256,
+            "candidateKeys": list(workload_receipt["candidateKeys"]),
+            "requiredRelationKeys": list(workload_receipt["requiredRelationKeys"]),
+            "requiredWayKeys": list(workload_receipt["requiredWayKeys"]),
+            "requiredNodeKeys": list(workload_receipt["requiredNodeKeys"]),
+            "calibrationTargetCells": list(
+                workload_receipt["calibrationTargetCells"]
+            ),
+            "calibrationSampleCells": list(
+                workload_receipt["calibrationSampleCells"]
+            ),
+        }
+        closure_sha256 = hashlib.sha256(canonical_building_json(body)).hexdigest()
+        if closure_sha256 != workload_receipt["closurePlanSha256"]:
+            raise BuildingScopeError(
+                "building_workload_receipt_mismatch",
+                "workload receipt closure identity does not match the scope",
+            )
+        closure = {**body, "closurePlanSha256": closure_sha256}
+        closure_plan_path.write_bytes(canonical_building_json(closure) + b"\n")
+        object_ids = sorted(
+            set(closure["requiredRelationKeys"])
+            | set(closure["requiredWayKeys"])
+            | set(closure["requiredNodeKeys"])
+        )
+        closure_ids_path.write_text(
+            "".join(f"{key}\n" for key in object_ids), encoding="ascii"
+        )
+        return closure
+
+    def build_building_chunk(
+        self,
+        job: MapJob,
+        *,
+        scope_plan: ScopePlan,
+        source_pbf: Path,
+        source_snapshot_sha256: str,
+        source_index_manifest: Path,
+        calibration_manifest: Path,
+        calibration_generation: Mapping[str, Any],
+        workload_receipt: Mapping[str, Any] | None = None,
+        task_id: str | None = None,
+        worker_id: str | None = None,
+        lease_token: str | None = None,
+        on_progress=None,
+        on_phase_progress=None,
+        cancellation_check=None,
+    ) -> dict[str, Any]:
+        """Execute one bounded building chunk and publish canonical receipts.
+
+        The chunked parent coordinator supplies source-index and calibration
+        artifacts once per parent, while closure, conversion, and canonical
+        block encoding remain bounded to this child scope.
+        """
+
+        self._active_task_command_metrics_cursor = (
+            self._command_execution_metrics_cursor()
+        )
+        if renderer_format_version(job.request) != BUILDING_RENDERER_FORMAT_VERSION:
+            raise BuildingScopeError(
+                "building_scope_policy_invalid",
+                "building chunks require renderer format 3",
+            )
+        if not isinstance(scope_plan, ScopePlan) or not scope_plan.output_blocks:
+            raise BuildingScopeError(
+                "building_scope_policy_invalid", "building chunk scope is invalid"
+            )
+        if any(value is None for value in (task_id, worker_id, lease_token)) and any(
+            value is not None for value in (task_id, worker_id, lease_token)
+        ):
+            raise BuildingScopeError(
+                "building_scope_policy_invalid",
+                "chunk task publication identity is incomplete",
+            )
+        if sha256_file(source_pbf) != source_snapshot_sha256:
+            raise BuildingScopeError(
+                "building_source_snapshot_changed",
+                "building source snapshot changed before chunk execution",
+            )
+        try:
+            expected_calibration = selected_calibration_identity(
+                source_snapshot_sha256=source_snapshot_sha256,
+                rules_path=(
+                    self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
+                ),
+                scope_plan=scope_plan,
+            )
+            calibration_generation_document = calibration_generation_from_manifest(
+                calibration_manifest,
+                source_snapshot_sha256=source_snapshot_sha256,
+                calibration_key=expected_calibration["calibrationKey"],
+                calibration_identity=expected_calibration,
+            )
+            if dict(calibration_generation_document) != dict(calibration_generation):
+                raise ValueError("calibration generation identity changed")
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            raise BuildingScopeError(
+                "building_calibration_unavailable",
+                "chunk calibration generation is not compatible",
+            ) from exc
+
+        chunk_root = (
+            self.paths.work_root
+            / job.job_id
+            / "building-chunks"
+            / scope_plan.sha256
+        )
+        if chunk_root.exists():
+            shutil.rmtree(chunk_root)
+        chunk_root.mkdir(parents=True, exist_ok=True)
+        scope_plan_path = chunk_root / "scope-plan.json"
+        scope_plan.write(scope_plan_path)
+        clipped_pbf = chunk_root / "clipped.osm.pbf"
+        geojson_prefix = chunk_root / "features"
+        raw_output_dir = chunk_root / "raw-map"
+        closure_plan_path = chunk_root / "building-closure-plan.json"
+        closure_ids_path = chunk_root / "building-closure-ids.txt"
+        block_cache_identity_path = chunk_root / "building-block-cache-identity.json"
+        block_cache_identity = selected_building_block_cache_identity(
+            source_snapshot_sha256=source_snapshot_sha256,
+            rules_path=(
+                self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
+            ),
+            scope_plan=scope_plan,
+            calibration_generation=dict(calibration_generation_document),
+        )
+        block_cache_identity_path.write_bytes(
+            canonical_building_json(block_cache_identity) + b"\n"
+        )
+        try:
+            extraction_metrics = self._extract_pbf(
+                job,
+                source_pbf,
+                clipped_pbf,
+                bounds=scope_plan.source_bounds,
+                force_bounds=True,
+                scope_plan=scope_plan,
+                source_snapshot_sha256=source_snapshot_sha256,
+                cancellation_check=cancellation_check,
+            )
+        except BuildingScopeError as exc:
+            self._raise_chunk_split_if_needed(
+                exc, task_id=task_id, scope_plan=scope_plan
+            )
+            raise
+        preprocessing_timings: dict[str, float] = {}
+        if workload_receipt is not None:
+            started = time.perf_counter()
+            closure = self._materialize_workload_closure(
+                scope_plan,
+                workload_receipt,
+                closure_plan_path,
+                closure_ids_path,
+                source_snapshot_sha256,
+            )
+            preprocessing_timings["relation_closure"] = round(
+                time.perf_counter() - started, 6
+            )
+            self._emit_phase_progress(
+                on_phase_progress,
+                unit="relation_closure",
+                completed=1,
+                total=1,
+                total_blocks=len(scope_plan.output_blocks),
+                indeterminate=False,
+            )
+            closure_output = {
+                "reusedWorkloadReceipt": True,
+                "closurePlanSha256": closure["closurePlanSha256"],
+            }
+        else:
+            try:
+                closure_output = self._run_preprocessing_command(
+                    [
+                        sys.executable,
+                        str(
+                            self.paths.osm_extract_root
+                            / "scripts"
+                            / "build_building_closure.py"
+                        ),
+                        "--source-index-manifest",
+                        str(source_index_manifest),
+                        "--scope-plan",
+                        str(scope_plan_path),
+                        "--closure-plan",
+                        str(closure_plan_path),
+                        "--ids-output",
+                        str(closure_ids_path),
+                    ],
+                    cwd=self.paths.osm_extract_root / "scripts",
+                    on_phase_progress=on_phase_progress,
+                    default_unit="relation_closure",
+                    total_blocks=len(scope_plan.output_blocks),
+                    timings=preprocessing_timings,
+                    cancellation_check=cancellation_check,
+                )
+            except BuildingScopeError as exc:
+                self._raise_chunk_split_if_needed(
+                    exc, task_id=task_id, scope_plan=scope_plan
+                )
+                raise
+        try:
+            closure = json.loads(closure_plan_path.read_bytes())
+        except (OSError, TypeError, ValueError) as exc:
+            raise BuildingScopeError(
+                "building_relation_incomplete",
+                "chunk relation closure did not publish valid metadata",
+            ) from exc
+        if closure.get("sourceSnapshotSha256") != source_snapshot_sha256:
+            raise BuildingScopeError(
+                "building_source_snapshot_changed",
+                "chunk relation closure source identity changed",
+            )
+        if workload_receipt is not None:
+            for key in (
+                "requiredRelationKeys",
+                "requiredWayKeys",
+                "requiredNodeKeys",
+            ):
+                if list(closure.get(key, [])) != list(workload_receipt.get(key, [])):
+                    raise BuildingScopeError(
+                        "building_workload_receipt_mismatch",
+                        f"chunk workload receipt {key} does not match closure",
+                    )
+        if closure.get("requiredRelationKeys") or closure.get("requiredWayKeys") or closure.get("requiredNodeKeys"):
+            try:
+                self._rehydrate_building_closure(
+                    source_pbf,
+                    clipped_pbf,
+                    closure_ids_path,
+                    source_snapshot_sha256,
+                    chunk_root,
+                    cancellation_check=cancellation_check,
+                )
+            except BuildingScopeError as exc:
+                self._raise_chunk_split_if_needed(
+                    exc, task_id=task_id, scope_plan=scope_plan
+                )
+                raise
+        try:
+            self._convert_to_geojson(
+                job,
+                clipped_pbf,
+                geojson_prefix,
+                bounds=scope_plan.source_bounds,
+                source_index_manifest=source_index_manifest,
+                scope_plan_path=scope_plan_path,
+                building_closure_plan_path=closure_plan_path,
+                cancellation_check=cancellation_check,
+                parse_building_failures=True,
+            )
+            feature_metrics = self._extract_features(
+                job,
+                geojson_prefix,
+                raw_output_dir,
+                bounds=scope_plan.source_bounds,
+                on_progress=on_progress,
+                scope_plan_path=scope_plan_path,
+                calibration_manifest=calibration_manifest,
+                calibration_source_sha256=source_snapshot_sha256,
+                building_block_cache_identity_path=block_cache_identity_path,
+                on_phase_progress=on_phase_progress,
+                planned_scope_marker=scope_plan.summary(),
+                cancellation_check=cancellation_check,
+            )
+        except BuildingScopeError as exc:
+            self._raise_chunk_split_if_needed(
+                exc, task_id=task_id, scope_plan=scope_plan
+            )
+            raise
+        command_metrics = self._active_task_command_execution_metrics()
+        peak_rss_bytes = self._maximum_command_peak_rss(command_metrics)
+        if peak_rss_bytes is None:
+            extraction_peak = extraction_metrics.get("peakResidentBytes")
+            if (
+                isinstance(extraction_peak, int)
+                and not isinstance(extraction_peak, bool)
+                and extraction_peak >= 0
+            ):
+                peak_rss_bytes = extraction_peak
+        result: dict[str, Any] = {
+            "scopePlanSha256": scope_plan.sha256,
+            "closurePlanSha256": closure.get("closurePlanSha256"),
+            "workloadClosurePlanSha256": (
+                workload_receipt.get("closurePlanSha256")
+                if workload_receipt is not None
+                else None
+            ),
+            "sourceExtraction": extraction_metrics,
+            "closureCommand": closure_output,
+            "featureMetrics": feature_metrics,
+            "commandMetrics": list(command_metrics),
+            "phaseTimings": {
+                key: round(value, 6) for key, value in preprocessing_timings.items()
+            },
+        }
+        if task_id is not None:
+            assert worker_id is not None and lease_token is not None
+            result["receipts"] = self.publish_building_chunk_receipts(
+                task_id=task_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                cache_identity_path=block_cache_identity_path,
+                blocks=scope_plan.output_blocks,
+                validation_context={
+                    "scopePlanSha256": scope_plan.sha256,
+                    "closurePlanSha256": closure.get("closurePlanSha256"),
+                    "workloadClosurePlanSha256": result[
+                        "workloadClosurePlanSha256"
+                    ],
+                },
+            )
+            actual_resource = {
+                "sourceExtraction": extraction_metrics,
+                "featureMetrics": feature_metrics,
+                "commandMetrics": list(command_metrics),
+            }
+            if peak_rss_bytes is not None:
+                actual_resource["peakResidentBytes"] = peak_rss_bytes
+            result["task"] = self.building_task_store.mark_ready(
+                task_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                actual_resource=actual_resource,
+                phase_timings=result["phaseTimings"],
+                peak_rss_bytes=peak_rss_bytes,
+            )
+        return result
+
     @staticmethod
     def _freeze_selected_inputs(
         job: MapJob,
@@ -1462,7 +4459,11 @@ class MapBuildPipeline:
         calibration = load_building_calibration_window(
             self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
         )
-        scope_plan = self._plan_selected_scope(job, calibration)
+        scope_plan = (
+            self._plan_chunked_scope(job, calibration)
+            if self.uses_chunked_preprocessing(job)
+            else self._plan_selected_scope(job, calibration)
+        )
         return len(scope_plan.output_blocks)
 
     @staticmethod
@@ -1524,8 +4525,8 @@ class MapBuildPipeline:
             )
             cache_wait_started = time.monotonic()
             try:
-                resolved_source = self.source_cache.ensure(
-                    job.source_region,
+                resolved_source = self._ensure_source_cached(
+                    job,
                     cancellation_check=cancellation_check,
                 )
             finally:
@@ -1546,8 +4547,8 @@ class MapBuildPipeline:
                 )
             source_snapshot_sha256 = resolved_source.sha256
         if not re.fullmatch(r"[0-9a-f]{64}", source_snapshot_sha256 or ""):
-            resolved_source = resolved_source or self.source_cache.ensure(
-                job.source_region,
+            resolved_source = resolved_source or self._ensure_source_cached(
+                job,
                 cancellation_check=cancellation_check,
             )
             source_snapshot_sha256 = resolved_source.sha256
@@ -1593,35 +4594,72 @@ class MapBuildPipeline:
         if (
             renderer_format_version(job.request)
             == BUILDING_RENDERER_FORMAT_VERSION
-            and self.building_scope_mode == "selected"
+            and self.building_scope_mode
+            in {"selected", "chunked_allowlist", "chunked"}
         ):
             calibration = load_building_calibration_window(
                 self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
             )
-            scope_plan = self._plan_selected_scope(job, calibration)
-            calibration_generation_execution: dict[str, Any] = {}
-            _, calibration_generation = self._ensure_selected_calibration_generation(
-                cached_source.path,
-                source_snapshot_sha256,
-                scope_plan,
-                **(
-                    {"on_phase_progress": on_phase_progress}
-                    if on_phase_progress is not None
-                    else {}
-                ),
-                execution_sink=calibration_generation_execution,
-                cancellation_check=cancellation_check,
+            chunked = self.uses_chunked_preprocessing(job)
+            scope_plan = (
+                self._plan_chunked_scope(job, calibration)
+                if chunked
+                else self._plan_selected_scope(job, calibration)
             )
+            if chunked:
+                # Reuse identity preparation can write the calibration cache
+                # before build_chunked is entered. Run the complete admission
+                # model here as soon as the global plan is available.
+                self._admit_chunked_storage(
+                    scope_plan,
+                    source_pbf=cached_source.path,
+                )
+            calibration_generation_execution: dict[str, Any] = {}
+            phase_context = (
+                self._parent_phase_reservation(
+                    parent_job_id=job.job_id,
+                    phase="source_preparation",
+                    worker_id=job.worker_id,
+                    worker_capability=self._job_worker_capability(job),
+                    cancellation_check=cancellation_check,
+                )
+                if chunked and job.worker_id
+                else nullcontext(cancellation_check)
+            )
+            with phase_context as phase_cancellation_check:
+                _, calibration_generation = (
+                    self._ensure_selected_calibration_generation(
+                        cached_source.path,
+                        source_snapshot_sha256,
+                        scope_plan,
+                        temporary_parent=self.paths.work_root / job.job_id / "reuse",
+                        **(
+                            {"on_phase_progress": on_phase_progress}
+                            if on_phase_progress is not None
+                            else {}
+                        ),
+                        execution_sink=calibration_generation_execution,
+                        cancellation_check=phase_cancellation_check,
+                    )
+                )
             if job.building_preprocessing_runtime is None:
                 job.building_preprocessing_runtime = {
                     "calibrationGeneration": calibration_generation_execution
                 }
-            self._freeze_selected_inputs(
-                job,
-                source_snapshot_sha256=source_snapshot_sha256,
-                scope_plan=scope_plan,
-                calibration_generation=calibration_generation,
-            )
+            if chunked:
+                self._freeze_chunked_inputs(
+                    job,
+                    source_snapshot_sha256=source_snapshot_sha256,
+                    global_plan=scope_plan,
+                    calibration_generation=calibration_generation,
+                )
+            else:
+                self._freeze_selected_inputs(
+                    job,
+                    source_snapshot_sha256=source_snapshot_sha256,
+                    scope_plan=scope_plan,
+                    calibration_generation=calibration_generation,
+                )
             building_identity = selected_building_identity(
                 source_snapshot_sha256=source_snapshot_sha256,
                 rules_path=(
@@ -1721,9 +4759,11 @@ class MapBuildPipeline:
         original_map_id = job.map_id
         job.map_id = stable_map_id(job)
         try:
+            reuse_root = self.paths.work_root / job.job_id / "exact-reuse"
+            reuse_root.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(
                 prefix="exact-reuse-validation-",
-                dir=self.paths.work_root,
+                dir=reuse_root,
             ) as temporary:
                 pack_root = Path(temporary) / "pack"
                 manifest = self._stage_subset_pack(job, candidate, pack_root)
@@ -2081,6 +5121,7 @@ class MapBuildPipeline:
                 source_snapshot_sha256,
                 scope_plan,
                 calibration_generation,
+                temporary_parent=self.paths.work_root / job.job_id / "reuse",
                 on_phase_progress=on_phase_progress,
                 cancellation_check=cancellation_check,
             )
@@ -2137,6 +5178,9 @@ class MapBuildPipeline:
         artifact_publication_lease=None,
         on_artifact_pending=None,
         build_metrics: dict[str, Any] | None = None,
+        max_archive_bytes: int | None = None,
+        validate_final_artifact: bool = False,
+        on_archive_validated=None,
     ) -> MapBuildResult:
         map_id = job.map_id or stable_map_id(job)
         job.map_id = map_id
@@ -2164,6 +5208,13 @@ class MapBuildPipeline:
         ):
             raise RuntimeError("map preview changed after build identity reservation")
         write_pack_archive(pack_root, manifest, archive_path)
+        if max_archive_bytes is not None:
+            archive_bytes = archive_path.stat().st_size
+            if archive_bytes > max_archive_bytes:
+                raise BuildingScopeError(
+                    "building_artifact_too_large",
+                    "final map archive exceeds the assembly size limit",
+                )
         artifacts: list[ArtifactRecord] = []
         packaging_seconds = time.perf_counter() - packaging_started
         if renderer_format_version(job.request) in {
@@ -2177,11 +5228,31 @@ class MapBuildPipeline:
             building_phase_timings = metrics.setdefault("buildingPhaseTimings", {})
             if isinstance(building_phase_timings, dict):
                 building_phase_timings["packaging"] = packaging_seconds
-        if self.artifact_store is not None:
+        zip_sha256 = None
+        zip_record = None
+        if self.artifact_store is not None or validate_final_artifact:
             hashing_started = time.perf_counter()
             zip_sha256 = sha256_file(archive_path)
             metrics["zipHashingSeconds"] = time.perf_counter() - hashing_started
             zip_key = zip_object_key(map_id, zip_sha256)
+            zip_record = ArtifactRecord(
+                format=ZIP_STORED_FORMAT,
+                media_type=ZIP_MEDIA_TYPE,
+                filename=archive_path.name,
+                object_key=zip_key,
+                bytes=archive_path.stat().st_size,
+                sha256=zip_sha256,
+            )
+        if validate_final_artifact:
+            assert zip_record is not None
+            metrics["finalArtifactValidation"] = validate_final_assembly_artifact(
+                archive_path,
+                (zip_record,),
+            )
+        if on_archive_validated is not None:
+            on_archive_validated()
+        if self.artifact_store is not None:
+            assert zip_sha256 is not None and zip_record is not None
             lease = (
                 artifact_publication_lease(zip_key)
                 if artifact_publication_lease
@@ -2198,16 +5269,7 @@ class MapBuildPipeline:
                     media_type=ZIP_MEDIA_TYPE,
                 )
             metrics["zipStorageSeconds"] = time.perf_counter() - storage_started
-            artifacts.append(
-                ArtifactRecord(
-                    format=ZIP_STORED_FORMAT,
-                    media_type=ZIP_MEDIA_TYPE,
-                    filename=archive_path.name,
-                    object_key=zip_key,
-                    bytes=archive_path.stat().st_size,
-                    sha256=zip_sha256,
-                )
-            )
+            artifacts.append(zip_record)
 
         if self.map_signer is not None:
             stream_path = job_dir / f"{map_id}.bmap"
@@ -2296,7 +5358,11 @@ class MapBuildPipeline:
 
     @staticmethod
     def _building_preprocessing_summary(value: Any) -> dict[str, Any] | None:
-        if not isinstance(value, dict) or value.get("mode") != "selected":
+        if not isinstance(value, dict) or value.get("mode") not in {
+            "selected",
+            "chunked_allowlist",
+            "chunked",
+        }:
             return None
         try:
             scope = value["scope"]
@@ -2305,6 +5371,7 @@ class MapBuildPipeline:
             closure = value["closure"]
             calibration = value["calibration"]
             block_cache = value.get("blockCacheIdentity")
+            chunked = value.get("chunked")
             identity_body = {
                 key: item
                 for key, item in identity.items()
@@ -2366,6 +5433,25 @@ class MapBuildPipeline:
                 raise ValueError(
                     "selected building preprocessing identity is inconsistent"
                 )
+            if value["mode"] in {"chunked_allowlist", "chunked"}:
+                if not isinstance(chunked, dict):
+                    raise ValueError("chunked building summary is incomplete")
+                for key in (
+                    "globalPlanSha256",
+                    "scopePlanSha256",
+                    "receiptSetSha256",
+                ):
+                    if not re.fullmatch(r"[0-9a-f]{64}", str(chunked.get(key) or "")):
+                        raise ValueError("chunked building summary identity is invalid")
+                if chunked["globalPlanSha256"] != scope["scopePlanSha256"]:
+                    raise ValueError("chunked global plan identity is inconsistent")
+                partition_identity = chunked.get(
+                    "partitionInvariantArtifactIdentity"
+                )
+                if partition_identity is not None:
+                    validate_partition_invariant_artifact_identity(
+                        partition_identity
+                    )
             summary = {
                 "schemaVersion": 1,
                 "identitySha256": identity["identitySha256"],
@@ -2429,6 +5515,17 @@ class MapBuildPipeline:
             }
             if block_cache is not None:
                 summary["blockCache"] = deepcopy(block_cache)
+            if value["mode"] in {"chunked_allowlist", "chunked"}:
+                summary["chunked"] = {
+                    key: chunked[key]
+                    for key in (
+                        "globalPlanSha256",
+                        "scopePlanSha256",
+                        "receiptSetSha256",
+                        "partitionInvariantArtifactIdentity",
+                    )
+                    if key in chunked
+                }
             if "attemptScope" in value:
                 attempt_scope = value["attemptScope"]
                 summary["attemptScope"] = {
@@ -2466,6 +5563,12 @@ class MapBuildPipeline:
                 summary["blockCache"]["calibration"]["calibrationKey"],
                 summary["blockCache"]["calibration"]["manifestSha256"],
                 summary["blockCache"]["calibration"]["entrySetSha256"],
+            )
+        if "chunked" in summary:
+            digest_paths += (
+                summary["chunked"]["globalPlanSha256"],
+                summary["chunked"]["scopePlanSha256"],
+                summary["chunked"]["receiptSetSha256"],
             )
         if "attemptScope" in summary:
             digest_paths += (
@@ -2581,7 +5684,11 @@ class MapBuildPipeline:
 
     def _cached_source_for_job(self, job: MapJob):
         leased = getattr(job, "_leased_cached_source", None)
-        cached = leased if leased is not None else self.source_cache.ensure(job.source_region)
+        cached = (
+            leased
+            if leased is not None
+            else self._ensure_source_cached(job)
+        )
         frozen = job.building_preprocessing_inputs
         if (
             frozen is not None
@@ -2592,6 +5699,27 @@ class MapBuildPipeline:
                 "frozen source snapshot changed before selected-area build",
             )
         return cached
+
+    def _ensure_source_cached(self, job: MapJob, *, cancellation_check=None):
+        minimum_free_bytes = (
+            self._configured_building_storage_bytes(
+                "MAP_PLATFORM_BUILDING_STORAGE_RESERVE_BYTES",
+                DEFAULT_BUILDING_STORAGE_RESERVE_BYTES,
+            )
+            if self.uses_chunked_preprocessing(job)
+            else None
+        )
+        try:
+            return self.source_cache.ensure(
+                job.source_region,
+                cancellation_check=cancellation_check,
+                minimum_free_bytes=minimum_free_bytes,
+            )
+        except SourceCacheStorageError as exc:
+            raise BuildingScopeError(
+                "building_storage_admission",
+                str(exc),
+            ) from exc
 
     def _run_command(
         self,
@@ -2607,11 +5735,23 @@ class MapBuildPipeline:
             kwargs["cancellation_check"] = cancellation_check
         return self.runner.run(args, **kwargs)
 
-    def _last_command_execution_metrics(self) -> dict[str, int | float]:
-        raw = getattr(self.runner, "last_execution_metrics", None)
-        if not isinstance(raw, dict):
+    @staticmethod
+    def _sanitize_command_execution_metrics(
+        raw: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(raw, Mapping):
             return {}
-        metrics = {}
+        metrics: dict[str, Any] = {}
+        sequence = raw.get("sequence")
+        if (
+            isinstance(sequence, int)
+            and not isinstance(sequence, bool)
+            and sequence > 0
+        ):
+            metrics["sequence"] = sequence
+        executable = raw.get("executable")
+        if isinstance(executable, str) and executable:
+            metrics["executable"] = Path(executable).name[:128]
         wall_seconds = raw.get("wallSeconds")
         if (
             isinstance(wall_seconds, (int, float))
@@ -2627,7 +5767,88 @@ class MapBuildPipeline:
             and peak_resident_bytes >= 0
         ):
             metrics["peakResidentBytes"] = peak_resident_bytes
+        raw_memory_events = raw.get("memoryEventsDelta")
+        if isinstance(raw_memory_events, Mapping):
+            memory_events = {
+                key: value
+                for key, value in sorted(raw_memory_events.items())
+                if isinstance(key, str)
+                and re.fullmatch(r"[a-z0-9_]{1,64}", key)
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+                and value >= 0
+            }
+            if memory_events:
+                metrics["memoryEventsDelta"] = memory_events
         return metrics
+
+    def _last_command_execution_metrics(self) -> dict[str, Any]:
+        return self._sanitize_command_execution_metrics(
+            getattr(self.runner, "last_execution_metrics", None)
+        )
+
+    def _command_execution_metrics_cursor(self) -> int | None:
+        cursor_method = getattr(self.runner, "execution_metrics_cursor", None)
+        if not callable(cursor_method):
+            return None
+        try:
+            cursor = cursor_method()
+        except (RuntimeError, TypeError, ValueError):
+            return None
+        if (
+            isinstance(cursor, int)
+            and not isinstance(cursor, bool)
+            and cursor >= 0
+        ):
+            return cursor
+        return None
+
+    def _command_execution_metrics_since(
+        self,
+        cursor: int | None,
+    ) -> tuple[dict[str, Any], ...]:
+        if cursor is not None:
+            history_method = getattr(
+                self.runner, "execution_metrics_since", None
+            )
+            if not callable(history_method):
+                return ()
+            try:
+                raw_history = history_method(cursor)
+            except (RuntimeError, TypeError, ValueError):
+                return ()
+            if not isinstance(raw_history, (list, tuple)):
+                return ()
+            return tuple(
+                metrics
+                for raw in raw_history
+                if (
+                    metrics := self._sanitize_command_execution_metrics(raw)
+                )
+            )
+        last = self._last_command_execution_metrics()
+        return (last,) if last else ()
+
+    def _active_task_command_execution_metrics(
+        self,
+    ) -> tuple[dict[str, Any], ...]:
+        return self._command_execution_metrics_since(
+            self._active_task_command_metrics_cursor
+        )
+
+    @staticmethod
+    def _maximum_command_peak_rss(
+        metrics: Iterable[Mapping[str, Any]],
+    ) -> int | None:
+        peaks = [
+            value
+            for metric in metrics
+            if isinstance(metric, Mapping)
+            and isinstance((value := metric.get("peakResidentBytes")), int)
+            and not isinstance(value, bool)
+            and value >= 0
+        ]
+        return max(peaks) if peaks else None
 
     def _extract_pbf(
         self,
@@ -2951,6 +6172,7 @@ class MapBuildPipeline:
         source_snapshot_sha256: str,
         scope_plan: ScopePlan,
         *,
+        temporary_parent: Path,
         on_phase_progress=None,
         execution_sink: dict[str, Any] | None = None,
         cancellation_check=None,
@@ -3000,9 +6222,10 @@ class MapBuildPipeline:
             return sealed_manifest_path, generation
         except ValueError:
             pass
+        temporary_parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
             prefix="building-calibration-generation-",
-            dir=self.paths.work_root,
+            dir=temporary_parent,
         ) as temporary:
             temporary_root = Path(temporary)
             scope_path = temporary_root / "scope-plan.json"
@@ -3260,14 +6483,15 @@ class MapBuildPipeline:
         scope_plan: ScopePlan,
         calibration_generation: dict[str, Any],
         *,
+        temporary_parent: Path,
         on_phase_progress=None,
         cancellation_check=None,
     ) -> dict[str, Any]:
-        self.paths.work_root.mkdir(parents=True, exist_ok=True)
+        temporary_parent.mkdir(parents=True, exist_ok=True)
         scripts_root = self.paths.osm_extract_root / "scripts"
         with tempfile.TemporaryDirectory(
             prefix="building-dependency-metadata-",
-            dir=self.paths.work_root,
+            dir=temporary_parent,
         ) as temporary:
             root = Path(temporary)
             scope_path = root / "scope-plan.json"
@@ -3406,7 +6630,9 @@ class MapBuildPipeline:
         bounds=None,
         source_index_manifest: Path | None = None,
         scope_plan_path: Path | None = None,
+        building_closure_plan_path: Path | None = None,
         relation_retry_count: int = 0,
+        parse_building_failures: bool = False,
         cancellation_check=None,
     ) -> None:
         bounds = bounds or job.geometry.bounds
@@ -3424,6 +6650,8 @@ class MapBuildPipeline:
         if source_index_manifest is not None:
             if scope_plan_path is None:
                 raise ValueError("source index audit requires a scope plan")
+            if building_closure_plan_path is not None and not building_closure_plan_path.is_file():
+                raise ValueError("building closure plan is unavailable")
             if relation_retry_count < 0:
                 raise ValueError("relation retry count cannot be negative")
             args.extend(
@@ -3433,11 +6661,32 @@ class MapBuildPipeline:
                     str(relation_retry_count),
                 ]
             )
-        self._run_command(
-            args,
-            cwd=self.paths.osm_extract_root / "scripts",
-            cancellation_check=cancellation_check,
-        )
+            if building_closure_plan_path is not None:
+                args.append(str(building_closure_plan_path))
+        try:
+            self._run_command(
+                args,
+                cwd=self.paths.osm_extract_root / "scripts",
+                cancellation_check=cancellation_check,
+            )
+        except subprocess.CalledProcessError as exc:
+            if not parse_building_failures:
+                raise
+            output = "\n".join(
+                value
+                for value in (
+                    getattr(exc, "stdout", None),
+                    getattr(exc, "stderr", None),
+                    getattr(exc, "output", None),
+                )
+                if isinstance(value, str)
+            )
+            failure = parse_building_failure(output)
+            if failure is not None:
+                raise BuildingScopeError(
+                    failure["code"], failure["message"]
+                ) from exc
+            raise
 
     def _extract_features(
         self,
@@ -3451,6 +6700,7 @@ class MapBuildPipeline:
         calibration_manifest: Path | None = None,
         calibration_source_sha256: str | None = None,
         building_block_cache_identity_path: Path | None = None,
+        building_cache_only: bool = False,
         on_phase_progress=None,
         planned_scope_marker: dict[str, Any] | None = None,
         cancellation_check=None,
@@ -3498,6 +6748,12 @@ class MapBuildPipeline:
                     "--building-block-workers",
                     str(self.building_block_workers),
                 ]
+            )
+            if building_cache_only:
+                args.append("--building-cache-only")
+        elif building_cache_only:
+            raise ValueError(
+                "cache-only building assembly requires a block cache identity"
             )
         if (
             format_version == BUILDING_RENDERER_FORMAT_VERSION
@@ -3606,30 +6862,39 @@ class MapBuildPipeline:
                     raise RuntimeError("building-aware extraction emitted BUILDING_SCOPE more than once")
                 building_scope = parsed_building_scope
 
-        if (
-            on_progress or on_phase_progress or cancellation_check is not None
-        ) and hasattr(self.runner, "run_streaming"):
-            streaming_kwargs = {
-                "cwd": self.paths.osm_extract_root / "scripts",
-                "on_output": handle_output,
-            }
-            if cancellation_check is not None:
-                streaming_kwargs["cancellation_check"] = cancellation_check
-            self.runner.run_streaming(args, **streaming_kwargs)
-            return self._build_metrics(
-                format_version,
-                label_stats,
-                building_stats,
-                planned_scope_marker or building_scope,
-                building_complexity,
-                require_building_scope=(
-                    scope_plan_path is not None and planned_scope_marker is None
-                ),
+        try:
+            if (
+                on_progress or on_phase_progress or cancellation_check is not None
+            ) and hasattr(self.runner, "run_streaming"):
+                streaming_kwargs = {
+                    "cwd": self.paths.osm_extract_root / "scripts",
+                    "on_output": handle_output,
+                }
+                if cancellation_check is not None:
+                    streaming_kwargs["cancellation_check"] = cancellation_check
+                self.runner.run_streaming(args, **streaming_kwargs)
+            else:
+                output = self.runner.run(
+                    args, cwd=self.paths.osm_extract_root / "scripts"
+                )
+                for line in output.splitlines():
+                    handle_output(line)
+        except subprocess.CalledProcessError as exc:
+            output = "\n".join(
+                value
+                for value in (
+                    getattr(exc, "stdout", None),
+                    getattr(exc, "stderr", None),
+                    getattr(exc, "output", None),
+                )
+                if isinstance(value, str)
             )
-
-        output = self.runner.run(args, cwd=self.paths.osm_extract_root / "scripts")
-        for line in output.splitlines():
-            handle_output(line)
+            failure = parse_building_failure(output)
+            if failure is not None:
+                raise BuildingScopeError(
+                    failure["code"], failure["message"]
+                ) from exc
+            raise
         return self._build_metrics(
             format_version,
             label_stats,
@@ -4008,6 +7273,22 @@ def run_job(
     monitoring_store: MapMonitoringStore | None = None,
     estimate_coordinator=None,
 ) -> MapJob:
+    queued_job = store.get(job_id)
+    if (
+        queued_job is not None
+        and isinstance(pipeline, MapBuildPipeline)
+        and pipeline.uses_chunked_preprocessing(queued_job)
+    ):
+        raise RuntimeError(
+            "chunked map jobs require the normal MapWorker worker loop; "
+            "the direct run_job development runner cannot schedule task quanta"
+        )
+    try:
+        from .resource_report import worker_resource_report
+
+        worker_capability = worker_resource_report().get("capability")
+    except Exception:
+        worker_capability = None
     worker_id = f"api-{uuid.uuid4().hex[:8]}"
     job = store.claim(job_id, worker_id)
     attempt_started_monotonic = time.monotonic()
@@ -4026,6 +7307,16 @@ def run_job(
             monitoring_store.record_job(job)
         except Exception:
             # Observability must never turn a completed map into a failed map.
+            pass
+
+    def reconcile_public_ready() -> None:
+        if pipeline.building_task_store is None:
+            return
+        try:
+            pipeline.building_task_store.reconcile_ready_plans((job_id,))
+        except Exception:
+            # The public artifact is already terminal. Maintenance retries and
+            # reports this additive cross-store coordinator repair.
             pass
 
     def update(status: JobStatus) -> None:
@@ -4185,6 +7476,7 @@ def run_job(
                             ),
                         )
                         if reused is not None:
+                            reconcile_public_ready()
                             record_monitoring(reused)
                             return reused
                     build_result = None
@@ -4196,33 +7488,50 @@ def run_job(
                             outcome_class="full_build",
                             force=True,
                         )
-                    for parent in store.find_subset_reuse_candidates(
-                        job,
-                        build_compatibility_key=reuse_identity.compatibility,
-                    ):
-                        try:
-                            build_result = pipeline.build_subset(
+                    if not pipeline.uses_chunked_preprocessing(job):
+                        for parent in store.find_subset_reuse_candidates(
+                            job,
+                            build_compatibility_key=reuse_identity.compatibility,
+                        ):
+                            try:
+                                build_result = pipeline.build_subset(
+                                    job,
+                                    parent,
+                                    **build_kwargs,
+                                )
+                            except SubsetReuseUnavailable:
+                                continue
+                            reuse_strategy = "subset"
+                            reuse_source_job_id = parent.job_id
+                            if estimate_coordinator is not None:
+                                estimate_coordinator.publish(
+                                    job_id,
+                                    worker_id=worker_id,
+                                    phase="reuse_subset",
+                                    outcome_class="subset_reuse",
+                                    force=True,
+                                )
+                            break
+                    if build_result is None:
+                        if pipeline.uses_chunked_preprocessing(job):
+                            build_result = pipeline.build_chunked(
                                 job,
-                                parent,
+                                worker_id=worker_id,
+                                worker_capability=worker_capability,
                                 **build_kwargs,
                             )
-                        except SubsetReuseUnavailable:
-                            continue
-                        reuse_strategy = "subset"
-                        reuse_source_job_id = parent.job_id
-                        if estimate_coordinator is not None:
-                            estimate_coordinator.publish(
-                                job_id,
-                                worker_id=worker_id,
-                                phase="reuse_subset",
-                                outcome_class="subset_reuse",
-                                force=True,
-                            )
-                        break
-                    if build_result is None:
-                        build_result = pipeline.build(job, **build_kwargs)
+                        else:
+                            build_result = pipeline.build(job, **build_kwargs)
             else:
-                build_result = pipeline.build(job, **build_kwargs)
+                if isinstance(pipeline, MapBuildPipeline) and pipeline.uses_chunked_preprocessing(job):
+                    build_result = pipeline.build_chunked(
+                        job,
+                        worker_id=worker_id,
+                        worker_capability=worker_capability,
+                        **build_kwargs,
+                    )
+                else:
+                    build_result = pipeline.build(job, **build_kwargs)
             map_id, archive_path = build_result
         published_archive = (
             pipeline.published_archive_path(map_id, job.job_id)
@@ -4254,8 +7563,13 @@ def run_job(
             reuse_strategy=reuse_strategy,
             reuse_source_job_id=reuse_source_job_id,
         )
+        reconcile_public_ready()
         record_monitoring(finished)
         return finished
+    except BuildingChunkSchedulingYield:
+        yielded = store.yield_chunked_job(job_id, worker_id=worker_id)
+        record_monitoring(yielded)
+        return yielded
     except Exception as exc:
         if isinstance(pipeline, MapBuildPipeline):
             try:
@@ -4263,6 +7577,11 @@ def run_job(
             except OSError:
                 pass
         current = store.get(job_id)
+        if current.status == JobStatus.READY:
+            # Never demote a published artifact because an additive action
+            # after complete_job failed.
+            record_monitoring(current)
+            return current
         if current.status == JobStatus.CANCELLED or current.worker_id != worker_id:
             if (
                 current.status == JobStatus.CANCELLED

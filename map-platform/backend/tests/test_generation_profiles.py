@@ -36,7 +36,7 @@ class GenerationProfilePolicyTests(unittest.TestCase):
                 profile.renderer_format_version
                 for profile in policy.available_profiles("production")
             ],
-            [2, 1],
+            [3, 2, 1],
         )
         self.assertEqual(
             [

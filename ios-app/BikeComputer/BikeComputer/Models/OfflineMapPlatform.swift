@@ -306,6 +306,7 @@ struct OfflineMapJob: Decodable, Equatable {
     let geometry: OfflineMapJobGeometry?
     let sourceRegion: OfflineMapSourceRegion?
     let progress: OfflineMapJobProgress?
+    let buildingProgress: OfflineMapBuildingProgress?
     let clientInstallationId: String?
     let clientRequestId: String?
     let installOnDevice: Bool?
@@ -324,6 +325,50 @@ struct OfflineMapJob: Decodable, Equatable {
     var mayBeLegacyRetryTransition: Bool {
         guard status == "failed", let attempts, let maxAttempts else { return false }
         return attempts >= 0 && maxAttempts > 0 && attempts < maxAttempts
+    }
+}
+
+/// Durable whole-job progress from the chunk coordinator.
+///
+/// `progress` remains the phase-local detail shown below the overall bar. The
+/// coordinator's block receipts are the stable denominator for the overall
+/// percentage; chunk counts are supporting diagnostics because chunks can
+/// contain different numbers of output blocks.
+struct OfflineMapBuildingProgress: Decodable, Equatable {
+    let completedBlocks: Int?
+    let totalBlocks: Int?
+    let readyChunks: Int?
+    let totalChunks: Int?
+    let activeChunks: Int?
+    let indeterminate: Bool?
+
+    var fraction: Double? {
+        guard indeterminate != true,
+              let completedBlocks,
+              let totalBlocks,
+              totalBlocks > 0 else {
+            return nil
+        }
+        return min(max(Double(completedBlocks) / Double(totalBlocks), 0), 1)
+    }
+
+    var percentage: Int? {
+        guard let fraction else { return nil }
+        return Int((fraction * 100).rounded())
+    }
+
+    var detail: String {
+        var parts: [String] = []
+        if let completedBlocks, let totalBlocks, totalBlocks > 0 {
+            parts.append("\(completedBlocks) of \(totalBlocks) map blocks")
+        }
+        if let readyChunks, let totalChunks, totalChunks > 0 {
+            parts.append("\(readyChunks) of \(totalChunks) chunks ready")
+        }
+        if let activeChunks, activeChunks > 0 {
+            parts.append("\(activeChunks) active")
+        }
+        return parts.isEmpty ? "Planning map chunks" : parts.joined(separator: " · ")
     }
 }
 

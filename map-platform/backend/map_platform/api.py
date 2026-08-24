@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import secrets
 import time
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
@@ -18,6 +19,8 @@ else:
 
 from .admin_inventory import map_inventory
 from .artifacts import BIKE_MAP_STREAM_FORMAT, create_artifact_store_from_environment
+from .building_tasks import BuildingTaskStore
+from .building_operations import building_plan_alerts
 from .downloads import DownloadSigner, DownloadTokenError
 from .generation_profiles import (
     configured_deployment_channel,
@@ -75,6 +78,36 @@ from .source_cache import (
 )
 from .sources import SourceIndex
 from .worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
+
+
+def _project_building_progress(
+    result: dict[str, Any],
+    building_progress: Mapping[str, Any] | None,
+) -> None:
+    """Project coordinator progress into the existing parent-job response.
+
+    The durable coordinator owns aggregate block receipts, but older workers
+    may still persist the legacy ``progress`` counters on the parent job.  Add
+    only fields that are not already present so those counters retain their
+    original meaning while new clients can consume chunk-level telemetry.
+    ``buildingProgress`` is an explicit, additive copy for clients that need
+    the coordinator state without guessing which producer supplied a field.
+    """
+
+    if not isinstance(building_progress, Mapping):
+        return
+    projected = dict(building_progress)
+    if projected.get("state") == "observed":
+        # Shadow planning is diagnostic evidence, not executable progress for
+        # the authoritative legacy parent job.
+        result["buildingPlanObservation"] = projected
+        return
+    existing = result.get("progress")
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    for key, value in projected.items():
+        merged.setdefault(key, value)
+    result["progress"] = merged
+    result["buildingProgress"] = projected
 
 
 def create_app():
@@ -221,6 +254,7 @@ def create_app():
     limits = JobLimits(max_active_jobs=int(os.environ.get("MAP_PLATFORM_MAX_ACTIVE_JOBS", "25")))
     source_provider = GeofabrikSourceProvider.from_environment(data_root)
     job_store = JobStore(data_root / "jobs")
+    building_task_store = BuildingTaskStore(data_root / "building-tasks.sqlite3")
     preprocessing_scope_mode = building_preprocessing_scope_mode()
     estimate_coordinator = load_estimate_coordinator(
         repo_root=repo_root,
@@ -239,6 +273,7 @@ def create_app():
         generation_profile_policy=generation_profile_policy,
         deployment_channel=deployment_channel,
         estimate_coordinator=estimate_coordinator,
+        building_task_store=building_task_store,
     )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
     pipeline = MapBuildPipeline(
@@ -251,6 +286,7 @@ def create_app():
             if source_provider is not None
             else None
         ),
+        building_task_store=building_task_store,
     )
 
     app = FastAPI(title="Open Bike Computer Offline Map Platform", version="0.1.0")
@@ -261,6 +297,7 @@ def create_app():
     app.state.artifact_store = artifact_store
     app.state.installation_store = installation_store
     app.state.job_store = service.store
+    app.state.building_task_store = building_task_store
     app.state.monitoring_store = monitoring_store
     app.state.preparation_estimate_mode = estimate_coordinator.mode.value
     app.state.map_stream_rollout = map_stream_rollout
@@ -327,6 +364,10 @@ def create_app():
         client_app_build_sha256: str | None,
     ) -> dict[str, Any]:
         result = job.to_dict()
+        _project_building_progress(
+            result,
+            building_task_store.progress(job.job_id),
+        )
         public_artifacts: list[dict[str, Any]] = []
         stream_allowed = False
         for artifact in result.get("artifacts", []):
@@ -464,6 +505,63 @@ def create_app():
             pseudonym_secret=installation_secret or download_secret,
             include_undownloaded=includeUndownloaded,
         )
+
+    @app.get(
+        "/v1/admin/building-plans/{parent_job_id}",
+        dependencies=[Depends(require_admin_token)],
+    )
+    def admin_building_plan(
+        parent_job_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        plan = building_task_store.get_plan(parent_job_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="building plan not found")
+        try:
+            page = building_task_store.diagnostic_page(
+                parent_job_id,
+                limit=limit,
+                offset=offset,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "plan": plan,
+            "progress": building_task_store.progress(parent_job_id),
+            "page": {
+                key: page[key]
+                for key in ("limit", "offset", "counts", "hasMore")
+            },
+            "tasks": [asdict(task) for task in page["tasks"]],
+            "workloadReceipts": list(page["workloadReceipts"]),
+            "receipts": list(page["receipts"]),
+            "attempts": list(page["attempts"]),
+            "resourceModel": building_task_store.resource_model_summary(parent_job_id),
+            "resourceReservations": list(page["resourceReservations"]),
+            "parentPhaseReservations": list(page["parentPhaseReservations"]),
+        }
+
+    @app.get(
+        "/v1/admin/building-plans/{parent_job_id}/alerts",
+        dependencies=[Depends(require_admin_token)],
+    )
+    def admin_building_plan_alerts(
+        parent_job_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        if building_task_store.get_plan(parent_job_id) is None:
+            raise HTTPException(status_code=404, detail="building plan not found")
+        try:
+            return building_plan_alerts(
+                building_task_store,
+                parent_job_id,
+                limit=limit,
+                offset=offset,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get(
         "/v1/admin/map-monitoring",

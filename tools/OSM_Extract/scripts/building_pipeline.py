@@ -173,6 +173,7 @@ def load_relation_index(
             "ambiguousParts": 0,
         }
     value = json.loads(path.read_text(encoding="utf-8"))
+    standalone_part_keys = value.get("standalonePartKeys", [])
     closure = value.get("closureAudit")
     closure_count_fields = {
         "closureRelationCount",
@@ -206,6 +207,13 @@ def load_relation_index(
         not isinstance(value, dict)
         or value.get("schemaVersion") != 1
         or not isinstance(value.get("partParents"), dict)
+        or not isinstance(standalone_part_keys, list)
+        or any(
+            not isinstance(key, str)
+            or not key.startswith("w")
+            or key in value.get("partParents", {})
+            for key in standalone_part_keys
+        )
         or any(
             not isinstance(child, str)
             or not child.startswith(("w", "r"))
@@ -252,9 +260,16 @@ def collect_building_features(
     """
     collected = list(polygon_features)
     part_parents = dict((relation_index or {}).get("partParents", {}))
+    standalone_part_keys = set(
+        (relation_index or {}).get("standalonePartKeys", ())
+    )
     required_relation_ways = {
         key
-        for key in {*part_parents, *part_parents.values()}
+        for key in {
+            *part_parents,
+            *part_parents.values(),
+            *standalone_part_keys,
+        }
         if key.startswith("w")
     }
     known_keys = {
@@ -339,6 +354,9 @@ def prepare_buildings(
         )
     diagnostics: dict[str, int] = {}
     part_parents = dict((relation_index or {}).get("partParents", {}))
+    standalone_part_keys = set(
+        (relation_index or {}).get("standalonePartKeys", ())
+    )
     parent_tags = dict((relation_index or {}).get("parentTags", {}))
     explicit_parent_keys = set(part_parents.values())
     sources: list[SourceBuilding] = []
@@ -353,7 +371,10 @@ def prepare_buildings(
             feature,
             rules,
             diagnostics,
-            explicit_part=object_key in part_parents,
+            explicit_part=(
+                object_key in part_parents
+                or object_key in standalone_part_keys
+            ),
             explicit_parent=object_key in explicit_parent_keys,
             explicit_parent_tags=parent_tags.get(object_key),
         )
@@ -378,7 +399,9 @@ def prepare_buildings(
 
     outlines = [source for source in sources if not source.is_part]
     unresolved_parts = sum(
-        source.is_part and part_parents.get(source.object_key) is None
+        source.is_part
+        and source.object_key not in standalone_part_keys
+        and part_parents.get(source.object_key) is None
         for source in sources
     )
     containment_index = OutlineSpatialIndex(outlines)
@@ -390,6 +413,9 @@ def prepare_buildings(
     for source in sources:
         if not source.is_part:
             associated.append(source)
+            continue
+        if source.object_key in standalone_part_keys:
+            associated.append(replace(source, association="standalone"))
             continue
         parent_key = part_parents.get(source.object_key)
         association = "relation" if parent_key in by_key else "none"
@@ -520,6 +546,9 @@ def prepare_buildings(
         "flatOutlineCount": len(flat_outline_keys),
         "holeCount": holes,
         "relationAssociationCount": sum(source.association == "relation" for source in resolved_sources),
+        "standaloneRelationPartCount": sum(
+            source.association == "standalone" for source in resolved_sources
+        ),
         "containmentAssociationCount": sum(source.association == "containment" for source in resolved_sources),
         "unassociatedPartCount": sum(source.is_part and source.parent_key is None for source in resolved_sources),
         "relationCount": int((relation_index or {}).get("relations", 0)),

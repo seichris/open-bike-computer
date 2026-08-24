@@ -8,7 +8,7 @@
   "algorithmVersions": {
     "buildingNormalization": 2,
     "buildingSourceIndex": 2,
-    "relationClosure": 1
+    "relationClosure": 2
   },
   "baselines": {
     "1": {

@@ -103,6 +103,13 @@ class CalibrationCache:
         self._median_cache: dict[tuple[int, int, str], float | None] = {}
         self._lookup_diagnostics = {"lookups": 0, "underThreshold": 0}
         self._manifest_cells: dict[tuple[int, int], str] | None = None
+        # A complete source snapshot proves that every source-derived domain
+        # cell was materialized.  Cells outside that derived domain are
+        # therefore known-empty, rather than missing/corrupt cache inputs.
+        # Incomplete (lazy) manifests must continue to fail closed for an
+        # unbound lookup.
+        self._complete_source_snapshot = False
+        self._complete_domain_cells: frozenset[tuple[int, int]] | None = None
 
     @classmethod
     def from_manifest(cls, path: str | Path) -> "CalibrationCache":
@@ -127,7 +134,9 @@ class CalibrationCache:
         cache.key_root = path.parent
         if value.get("calibrationKey") != cache.key:
             raise CalibrationCacheError("building_calibration_unavailable", "calibration manifest key is invalid")
-        cache._read_manifest(validate_cells=True, bind_reader=True)
+        manifest = cache._read_manifest(validate_cells=True, bind_reader=True)
+        cache._complete_source_snapshot = manifest["completeSourceSnapshot"]
+        cache._complete_domain_cells = frozenset(cache._manifest_cells or ())
         return cache
 
     def cell_path(self, cell: tuple[int, int]) -> Path:
@@ -181,7 +190,10 @@ class CalibrationCache:
         histogram: Counter[int] = Counter()
         for x in range(cell[0] - self.identity.halo_cells, cell[0] + self.identity.halo_cells + 1):
             for y in range(cell[1] - self.identity.halo_cells, cell[1] + self.identity.halo_cells + 1):
-                entry = self.load_cell((x, y))
+                neighbor = (x, y)
+                if self._is_known_empty_cell(neighbor):
+                    continue
+                entry = self.load_cell(neighbor)
                 class_entry = entry["classes"].get(building_class)
                 if class_entry:
                     histogram.update({int(height): int(count) for height, count in class_entry["heightHistogramDm"].items()})
@@ -207,6 +219,28 @@ class CalibrationCache:
         result = median_dm / 10.0
         self._median_cache[lookup_key] = result
         return result
+
+    def can_resolve_cell(self, cell: tuple[int, int]) -> bool:
+        """Return whether a local-median lookup is valid for ``cell``.
+
+        Complete source manifests are sparse by design: the manifest lists
+        every source-derived cell, while cells outside that domain are
+        proven-empty.  Lazy manifests cannot make that proof and therefore
+        only allow explicitly bound cells.
+        """
+        cell = self._validate_cell_coordinate(cell)
+        if self._manifest_cells is None:
+            raise CalibrationCacheError(
+                "building_calibration_unavailable",
+                "calibration cache is not bound to a manifest",
+            )
+        return self._complete_source_snapshot or cell in self._manifest_cells
+
+    def _is_known_empty_cell(self, cell: tuple[int, int]) -> bool:
+        if not self._complete_source_snapshot:
+            return False
+        bound = self._manifest_cells or self._complete_domain_cells
+        return bound is not None and cell not in bound
 
     def lookup_diagnostics(self) -> dict[str, int]:
         return dict(self._lookup_diagnostics)
@@ -793,6 +827,10 @@ class CalibrationCache:
         manifest["manifestSha256"] = hashlib.sha256(canonical_json(manifest)).hexdigest()
         atomic_write_json(path, manifest)
         self._manifest_cells = None
+        self._complete_source_snapshot = complete_source_snapshot
+        self._complete_domain_cells = (
+            frozenset(existing_cells) if complete_source_snapshot else None
+        )
 
 
 class _CacheLock:

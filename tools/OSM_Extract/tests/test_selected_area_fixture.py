@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from building_pipeline import clip_buildings, load_rules, prepare_buildings  # noqa: E402
-from map_format import _building_section  # noqa: E402
+from map_format import encode_building_section  # noqa: E402
 
 
 class SelectedAreaFixtureTests(unittest.TestCase):
@@ -55,11 +55,45 @@ class SelectedAreaFixtureTests(unittest.TestCase):
         }.items():
             min_x, min_y = (int(value) for value in origin.split(","))
             records, _stats = clip_buildings(buildings, block, min_x, min_y)
-            section, metadata = _building_section(records)
+            section, metadata = encode_building_section(records)
             golden = expected["buildingSections"][origin]
             self.assertEqual(len(records), golden["records"])
             self.assertEqual(metadata["buildingBytes"], golden["bytes"])
             self.assertEqual(hashlib.sha256(section).hexdigest(), golden["sha256"])
+
+    def test_block_encoding_is_invariant_to_group_iteration_layout(self):
+        """Pin encoder ordering only; preprocessing equivalence is a separate gate."""
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "selected_area_buildings.json").read_text()
+        )
+        rules, _rules_sha256 = load_rules(ROOT / "conf" / "building_height_rules.yaml")
+        buildings, _report, _flat = prepare_buildings(
+            fixture["features"], rules, fixture["relationIndex"]
+        )
+        positions = ((0, 0), (4096, 0), (0, 4096), (4096, 4096))
+        layouts = (
+            (positions,),
+            (((0, 0), (4096, 0)), ((0, 4096), (4096, 4096))),
+            (((0, 0), (0, 4096)), ((4096, 0), (4096, 4096))),
+        )
+
+        encoded_layouts = []
+        for layout in layouts:
+            encoded_blocks = {}
+            for chunk in layout:
+                for min_x, min_y in chunk:
+                    records, _stats = clip_buildings(
+                        buildings,
+                        box(min_x, min_y, min_x + 4096, min_y + 4096),
+                        min_x,
+                        min_y,
+                    )
+                    encoded_blocks[(min_x, min_y)] = encode_building_section(records)[0]
+            encoded_layouts.append(encoded_blocks)
+
+        for position in positions:
+            first = encoded_layouts[0][position]
+            self.assertTrue(all(layout[position] == first for layout in encoded_layouts[1:]))
 
 
 if __name__ == "__main__":

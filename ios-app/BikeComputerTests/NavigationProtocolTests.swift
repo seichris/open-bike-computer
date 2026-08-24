@@ -5737,6 +5737,14 @@ struct NavigationProtocolTests {
             {
               "jobId": "job-progress",
               "status": "converting_features",
+              "buildingProgress": {
+                "completedBlocks": 231,
+                "totalBlocks": 266,
+                "readyChunks": 7,
+                "totalChunks": 8,
+                "activeChunks": 1,
+                "indeterminate": false
+              },
               "progress": {
                 "phase": "building_preprocessing",
                 "unit": "calibration_cells",
@@ -5763,6 +5771,18 @@ struct NavigationProtocolTests {
         assertEqual(progress.percentage, 40, "map progress calculates phase percentage")
         assert(abs(progress.fraction - 0.79) < 0.000001, "map progress calculates fraction")
         assertEqual(progress.detail, "Preparing deterministic building heights", "map progress explains preprocessing")
+
+        guard let buildingProgress = job.buildingProgress else {
+            assert(false, "aggregate building progress should decode")
+            return
+        }
+        assertEqual(buildingProgress.percentage, 87, "aggregate progress uses completed blocks")
+        assert(abs((buildingProgress.fraction ?? 0) - (231.0 / 266.0)) < 0.000001, "aggregate progress calculates block fraction")
+        assertEqual(
+            buildingProgress.detail,
+            "231 of 266 map blocks · 7 of 8 chunks ready · 1 active",
+            "aggregate progress explains block and chunk completion"
+        )
     }
 
     static func testOfflineMapJobProgressAbsentFallback() {
@@ -5772,6 +5792,7 @@ struct NavigationProtocolTests {
             return
         }
         assertEqual(job.progress, nil, "legacy server response keeps indeterminate progress fallback")
+        assertEqual(job.buildingProgress, nil, "legacy server response keeps aggregate progress optional")
     }
 
     static func testOfflineMapJobPersistence() {

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 from .artifacts import create_artifact_store_from_environment
@@ -23,7 +24,12 @@ from .building_cache_maintenance import (
     DEFAULT_BUILDING_BLOCK_CACHE_RETENTION_DAYS,
     prune_building_block_cache,
 )
-from .map_signing import load_map_artifact_signer_from_environment
+from .building_tasks import (
+    DEFAULT_BUILDING_TASK_RETENTION_DAYS,
+    BuildingTaskStore,
+)
+from .building_resource_model import train_resource_model
+from .building_operations import building_plan_alerts
 from .map_stream_build_identity import (
     image_digest_from_reference,
     verify_map_stream_build_identity,
@@ -36,6 +42,7 @@ from .monitoring import (
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .preparation_estimates import load_estimate_coordinator
 from .rate_limits import purge_expired_rate_limits
+from .resource_report import worker_resource_report
 from .source_cache import SourceCache, default_backend_data_root
 from .sources import SourceIndex
 from .worker import (
@@ -223,6 +230,8 @@ def _perform_maintenance(
     monitoring_retention_days: int | None = None,
     building_cache_retention_days: int = DEFAULT_BUILDING_BLOCK_CACHE_RETENTION_DAYS,
     building_cache_max_bytes: int = DEFAULT_BUILDING_BLOCK_CACHE_MAX_BYTES,
+    building_task_store: BuildingTaskStore | None = None,
+    building_task_retention_days: int = DEFAULT_BUILDING_TASK_RETENTION_DAYS,
 ) -> dict[str, object]:
     result: dict[str, object] = {
         "maintenance": True,
@@ -232,6 +241,28 @@ def _perform_maintenance(
         "buildingBlockCache": {},
     }
     failures: dict[str, object] = {}
+
+    def prune_building_cache() -> dict[str, int]:
+        kwargs: dict[str, object] = {
+            "older_than_days": building_cache_retention_days,
+            "max_bytes": building_cache_max_bytes,
+            "max_items": max_gc_items,
+        }
+        if building_task_store is not None:
+            protection = building_task_store.cache_retention_protection()
+            kwargs.update(
+                {
+                    "protected_cache_identity_sha256s": protection[
+                        "protectedCacheIdentitySha256s"
+                    ],
+                    "protect_all": protection["protectAll"],
+                }
+            )
+        return prune_building_block_cache(
+            data_root / "building-cache",
+            **kwargs,
+        )
+
     tasks = (
         (
             "expired",
@@ -252,14 +283,48 @@ def _perform_maintenance(
         ),
         (
             "buildingBlockCache",
-            lambda: prune_building_block_cache(
-                data_root / "building-cache",
-                older_than_days=building_cache_retention_days,
-                max_bytes=building_cache_max_bytes,
-                max_items=max_gc_items,
-            ),
+            prune_building_cache,
         ),
     )
+    if building_task_store is not None:
+        ready_parent_ids = tuple(
+            job.job_id
+            for job in store.list()
+            if getattr(job.status, "value", job.status) == "ready"
+        )
+        result["buildingTaskReady"] = {}
+        tasks += (
+            (
+                "buildingTaskReady",
+                lambda: building_task_store.reconcile_ready_plans(
+                    ready_parent_ids
+                ),
+            ),
+        )
+        cancelled_parent_ids = tuple(
+            job.job_id
+            for job in store.list()
+            if getattr(job.status, "value", job.status) == "cancelled"
+        )
+        result["buildingTaskCancellation"] = {}
+        tasks += (
+            (
+                "buildingTaskCancellation",
+                lambda: building_task_store.reconcile_cancelled_plans(
+                    cancelled_parent_ids
+                ),
+            ),
+        )
+        result["buildingTaskEvidence"] = {}
+        tasks += (
+            (
+                "buildingTaskEvidence",
+                lambda: building_task_store.prune_terminal_evidence(
+                    older_than_days=building_task_retention_days,
+                    max_plans=max_gc_items,
+                ),
+            ),
+        )
     if monitoring_store is not None:
         tasks += (
             (
@@ -363,6 +428,16 @@ def main() -> int:
         ),
     )
     maintenance_loop.add_argument(
+        "--building-task-retention-days",
+        type=int,
+        default=int(
+            os.environ.get(
+                "MAP_PLATFORM_BUILDING_TASK_RETENTION_DAYS",
+                str(DEFAULT_BUILDING_TASK_RETENTION_DAYS),
+            )
+        ),
+    )
+    maintenance_loop.add_argument(
         "--heartbeat-path",
         default=os.environ.get(
             "MAP_PLATFORM_MAINTENANCE_HEARTBEAT_PATH",
@@ -378,8 +453,85 @@ def main() -> int:
     expire.add_argument("--older-than-days", type=int, default=30)
 
     subparsers.add_parser("cleanup-work")
+    build_plan = subparsers.add_parser(
+        "build-plan",
+        help="inspect durable internal building chunk plans",
+    )
+    build_plan_subparsers = build_plan.add_subparsers(
+        dest="build_plan_command",
+        required=True,
+    )
+    build_plan_inspect = build_plan_subparsers.add_parser(
+        "inspect",
+        help="show the parent plan, tasks, and block receipts",
+    )
+    build_plan_inspect.add_argument("job_id")
+    build_plan_inspect.add_argument("--limit", type=int, default=100)
+    build_plan_inspect.add_argument("--offset", type=int, default=0)
+    build_plan_tasks = build_plan_subparsers.add_parser(
+        "tasks",
+        help="show durable child task state",
+    )
+    build_plan_tasks.add_argument("job_id")
+    build_plan_tasks.add_argument("--limit", type=int, default=100)
+    build_plan_tasks.add_argument("--offset", type=int, default=0)
+    build_plan_workload = build_plan_subparsers.add_parser(
+        "complete-workload-scan",
+        help=(
+            "INTERNAL MUTATING: commit an exact source-index workload receipt "
+            "under a live fenced lease"
+        ),
+        description=(
+            "INTERNAL MUTATING command: commit an exact source-index workload "
+            "receipt under a live fenced lease. This is not an operator "
+            "inspection or retry command."
+        ),
+    )
+    build_plan_workload.add_argument("task_id")
+    build_plan_workload.add_argument("--worker-id", required=True)
+    build_plan_workload.add_argument("--lease-token", required=True)
+    build_plan_workload.add_argument("--receipt-json", required=True, type=Path)
+    build_plan_workload.add_argument("--peak-rss-bytes", type=int)
+    build_plan_resource_model = build_plan_subparsers.add_parser(
+        "resource-model",
+        help="train a reviewable resource model from retained successful attempts",
+    )
+    build_plan_resource_model.add_argument(
+        "job_id",
+        nargs="?",
+        help="parent job to scope observations to (omit with --all-plans)",
+    )
+    build_plan_resource_model.add_argument(
+        "--all-plans",
+        action="store_true",
+        help="aggregate retained observations across every retained parent plan",
+    )
+    build_plan_resource_model.add_argument(
+        "--minimum-observations",
+        type=int,
+        default=8,
+    )
+    build_plan_resource_model.add_argument(
+        "--safety-margin",
+        type=float,
+        default=1.10,
+    )
+    build_plan_alerts_command = build_plan_subparsers.add_parser(
+        "alerts",
+        help="show read-only operator alerts for a building plan",
+    )
+    build_plan_alerts_command.add_argument("job_id")
+    build_plan_alerts_command.add_argument("--limit", type=int, default=100)
+    build_plan_alerts_command.add_argument("--offset", type=int, default=0)
+    subparsers.add_parser(
+        "resource-report",
+        help="print a read-only worker cgroup and memory capability report",
+    )
 
     args = parser.parse_args()
+    if args.command == "resource-report":
+        print(json.dumps(worker_resource_report(), indent=2, sort_keys=True))
+        return 0
     repo_root = Path(args.repo_root).resolve()
     data_root = (
         Path(args.data_root).resolve()
@@ -396,6 +548,116 @@ def main() -> int:
         / "source-regions.json"
     )
     store = JobStore(data_root / "jobs")
+    building_task_store = BuildingTaskStore(data_root / "building-tasks.sqlite3")
+    if args.command == "build-plan":
+        if args.build_plan_command == "complete-workload-scan":
+            try:
+                receipt = json.loads(args.receipt_json.read_bytes())
+            except (OSError, TypeError, ValueError) as exc:
+                raise SystemExit(f"workload receipt is unavailable: {exc}") from exc
+            task = building_task_store.complete_workload_scan(
+                args.task_id,
+                worker_id=args.worker_id,
+                lease_token=args.lease_token,
+                workload_receipt=receipt,
+                peak_rss_bytes=args.peak_rss_bytes,
+            )
+            print(json.dumps(asdict(task), indent=2, sort_keys=True))
+            return 0
+        if args.build_plan_command == "resource-model":
+            if (args.job_id is None) == (not args.all_plans):
+                raise SystemExit(
+                    "build-plan resource-model requires JOB_ID or --all-plans"
+                )
+            print(
+                json.dumps(
+                    train_resource_model(
+                        building_task_store.resource_model_observations(
+                            None if args.all_plans else args.job_id
+                        ),
+                        minimum_observations=args.minimum_observations,
+                        safety_margin=args.safety_margin,
+                    ),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
+        plan = building_task_store.get_plan(args.job_id)
+        if plan is None:
+            raise SystemExit(f"building plan not found: {args.job_id}")
+        if args.build_plan_command == "alerts":
+            try:
+                alert_report = building_plan_alerts(
+                    building_task_store,
+                    args.job_id,
+                    limit=args.limit,
+                    offset=args.offset,
+                )
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            print(
+                json.dumps(
+                    alert_report,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
+        try:
+            diagnostic_page = building_task_store.diagnostic_page(
+                args.job_id,
+                limit=args.limit,
+                offset=args.offset,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        tasks = [asdict(task) for task in diagnostic_page["tasks"]]
+        page = {
+            key: diagnostic_page[key]
+            for key in ("limit", "offset", "counts", "hasMore")
+        }
+        if args.build_plan_command == "tasks":
+            print(
+                json.dumps(
+                    {
+                        "plan": plan,
+                        "progress": building_task_store.progress(args.job_id),
+                        "page": page,
+                        "tasks": tasks,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(
+                json.dumps(
+                    {
+                        "plan": plan,
+                        "progress": building_task_store.progress(args.job_id),
+                        "page": page,
+                        "tasks": tasks,
+                        "workloadReceipts": list(
+                            diagnostic_page["workloadReceipts"]
+                        ),
+                        "receipts": list(diagnostic_page["receipts"]),
+                        "attempts": list(diagnostic_page["attempts"]),
+                        "resourceModel": building_task_store.resource_model_summary(
+                            args.job_id
+                        ),
+                        "resourceReservations": list(
+                            diagnostic_page["resourceReservations"]
+                        ),
+                        "parentPhaseReservations": list(
+                            diagnostic_page["parentPhaseReservations"]
+                        ),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        return 0
     monitoring_retention_days = int(
         os.environ.get(
             "MAP_PLATFORM_MONITORING_RETENTION_DAYS",
@@ -440,11 +702,14 @@ def main() -> int:
         source_index,
         store,
         estimate_coordinator=estimate_coordinator,
+        building_task_store=building_task_store,
         **generation_controls,
     )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
 
     def create_pipeline() -> MapBuildPipeline:
+        from .map_signing import load_map_artifact_signer_from_environment
+
         map_signer = load_map_artifact_signer_from_environment()
         worker_image_reference = os.environ.get(
             "MAP_PLATFORM_WORKER_IMAGE_REFERENCE",
@@ -475,6 +740,7 @@ def main() -> int:
                 if source_provider is not None
                 else None
             ),
+            building_task_store=building_task_store,
         )
         estimate_coordinator.producer_build_sha256 = producer_build_sha256
         estimate_coordinator.producer_image_digest = producer_image_digest
@@ -609,6 +875,8 @@ def main() -> int:
                         args.building_cache_retention_days
                     ),
                     building_cache_max_bytes=args.building_cache_max_bytes,
+                    building_task_store=building_task_store,
+                    building_task_retention_days=args.building_task_retention_days,
                 )
             except MaintenanceIterationError as exc:
                 maintenance_result = exc.result

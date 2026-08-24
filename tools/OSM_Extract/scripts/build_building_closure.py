@@ -90,7 +90,13 @@ def main() -> None:
     scope, scope_sha256 = _load_scope(args.scope_plan)
     policy = scope["policy"]
     calibration = scope["calibration"]
-    index = BuildingSourceIndex.from_manifest(args.source_index_manifest)
+    # The source-index builder binds the exact database bytes to a stable-file
+    # verification receipt. Closure workers validate that receipt and file
+    # identity here without repeating the multi-gigabyte hash/audit per chunk.
+    index = BuildingSourceIndex.from_manifest(
+        args.source_index_manifest,
+        validate_database=False,
+    )
     closure = index.closure_for_bounds(
         output_bounds_e7(scope),
         maximum_objects=policy["maxRelationObjectsPerJob"],

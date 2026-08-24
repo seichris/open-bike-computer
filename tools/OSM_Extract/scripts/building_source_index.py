@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import tempfile
 from typing import Any, Iterable
 import uuid
@@ -25,6 +26,8 @@ SOURCE_INDEX_SCHEMA_VERSION = 1
 SOURCE_INDEX_ALGORITHM_VERSION = 2
 SOURCE_INDEX_CREATION_TOOL = "open-bike-building-source-index"
 SOURCE_INDEX_MAX_RELATION_DEPTH = 256
+SOURCE_INDEX_VERIFICATION_SCHEMA_VERSION = 1
+SOURCE_INDEX_VERIFICATION_TOOL = "open-bike-building-source-index-verification"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _OBJECT_KEY = re.compile(r"[nwr][0-9]+")
 _EARTH_RADIUS_METERS = 6_378_137
@@ -91,14 +94,23 @@ class BuildingSourceIndex:
         )
         self.database_path = self.index_root / "index.sqlite"
         self.manifest_path = self.index_root / "manifest.json"
+        self.verification_path = self.index_root / "verification.json"
+        self._verified_database_identity: dict[str, int] | None = None
 
     @classmethod
-    def from_manifest(cls, path: str | Path) -> "BuildingSourceIndex":
+    def from_manifest(
+        cls,
+        path: str | Path,
+        *,
+        validate_database: bool = True,
+    ) -> "BuildingSourceIndex":
         path = Path(path)
         try:
-            value = json.loads(path.read_bytes())
+            raw = json.loads(path.read_bytes())
+            value = dict(raw)
+            digest = value.pop("manifestSha256")
             source_sha256 = value["sourceSnapshotSha256"]
-        except (OSError, TypeError, ValueError, KeyError) as exc:
+        except (AttributeError, OSError, TypeError, ValueError, KeyError) as exc:
             raise BuildingSourceIndexError(
                 "building_relation_incomplete", "source index manifest is unavailable"
             ) from exc
@@ -106,26 +118,26 @@ class BuildingSourceIndex:
         index.index_root = path.parent
         index.database_path = path.parent / "index.sqlite"
         index.manifest_path = path
+        index.verification_path = path.parent / "verification.json"
         if value.get("indexKey") != index.index_key:
             raise BuildingSourceIndexError(
                 "building_relation_incomplete", "source index manifest key is invalid"
             )
-        index.validate()
+        index._validate_manifest_document(value, digest)
+        if validate_database:
+            index.validate()
+        else:
+            index.validate_verified_database()
         return index
 
-    def validate(self) -> dict[str, Any]:
-        try:
-            manifest = json.loads(self.manifest_path.read_bytes())
-            digest = manifest.pop("manifestSha256")
-        except (OSError, ValueError, KeyError) as exc:
-            raise BuildingSourceIndexError("building_relation_incomplete", "source index manifest is unavailable") from exc
-        try:
-            database_sha256 = file_sha256(self.database_path)
-        except OSError as exc:
-            raise BuildingSourceIndexError("building_relation_incomplete", "source index database is unavailable") from exc
+    def _validate_manifest_document(self, manifest, digest: str) -> None:
         expected_manifest_keys = set(self.identity) | {
-            "indexKey", "databaseSha256", "nodeCount", "wayCount",
-            "relationCount", "relationMemberCount",
+            "indexKey",
+            "databaseSha256",
+            "nodeCount",
+            "wayCount",
+            "relationCount",
+            "relationMemberCount",
         }
         if (
             set(manifest) != expected_manifest_keys
@@ -133,19 +145,83 @@ class BuildingSourceIndex:
             or hashlib.sha256(canonical_json(manifest)).hexdigest() != digest
             or any(manifest.get(key) != value for key, value in self.identity.items())
             or manifest.get("indexKey") != self.index_key
-            or manifest.get("databaseSha256") != database_sha256
+            or not _SHA256.fullmatch(str(manifest.get("databaseSha256") or ""))
             or any(
                 isinstance(manifest.get(key), bool)
                 or not isinstance(manifest.get(key), int)
                 or manifest.get(key) < 0
                 for key in (
-                    "nodeCount", "wayCount", "relationCount", "relationMemberCount"
+                    "nodeCount",
+                    "wayCount",
+                    "relationCount",
+                    "relationMemberCount",
                 )
             )
         ):
-            raise BuildingSourceIndexError("building_relation_incomplete", "source index identity is invalid")
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index manifest is invalid"
+            )
+
+    def _read_validated_manifest(self) -> dict[str, Any]:
         try:
-            connection = sqlite3.connect(f"file:{self.database_path}?mode=ro", uri=True)
+            manifest = json.loads(self.manifest_path.read_bytes())
+            digest = manifest.pop("manifestSha256")
+        except (AttributeError, OSError, TypeError, ValueError, KeyError) as exc:
+            raise BuildingSourceIndexError("building_relation_incomplete", "source index manifest is unavailable") from exc
+        self._validate_manifest_document(manifest, digest)
+        return {**manifest, "manifestSha256": digest}
+
+    def _database_file_identity(self) -> dict[str, int]:
+        try:
+            value = os.stat(self.database_path, follow_symlinks=False)
+        except OSError as exc:
+            raise BuildingSourceIndexError("building_relation_incomplete", "source index database is unavailable") from exc
+        if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database file identity is invalid"
+            )
+        return {
+            "device": value.st_dev,
+            "inode": value.st_ino,
+            "mode": value.st_mode,
+            "ownerUserId": value.st_uid,
+            "ownerGroupId": value.st_gid,
+            "size": value.st_size,
+            "modifiedTimeNs": value.st_mtime_ns,
+            "changedTimeNs": value.st_ctime_ns,
+        }
+
+    def _validate_database_sha256(self, manifest: dict[str, Any]) -> dict[str, int]:
+        identity_before = self._database_file_identity()
+        try:
+            database_sha256 = file_sha256(self.database_path)
+        except OSError as exc:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database is unavailable"
+            ) from exc
+        identity_after = self._database_file_identity()
+        if identity_after != identity_before:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database changed during validation"
+            )
+        if manifest.get("databaseSha256") != database_sha256:
+            raise BuildingSourceIndexError("building_relation_incomplete", "source index identity is invalid")
+        return identity_after
+
+    def validate_database_identity(self) -> dict[str, Any]:
+        """Bind the exact published database bytes without a semantic rescan."""
+
+        manifest = self._read_validated_manifest()
+        self._verified_database_identity = self._validate_database_sha256(manifest)
+        return manifest
+
+    def validate(self) -> dict[str, Any]:
+        manifest = self._read_validated_manifest()
+        verified_identity = self._validate_database_sha256(manifest)
+        try:
+            connection = sqlite3.connect(
+                f"file:{self.database_path}?mode=ro&immutable=1", uri=True
+            )
             metadata = dict(connection.execute("SELECT key, value FROM metadata"))
             counts = verify_source_index_database(
                 connection, repair_relation_bounds=False
@@ -157,6 +233,10 @@ class BuildingSourceIndex:
         finally:
             if "connection" in locals():
                 connection.close()
+        if self._database_file_identity() != verified_identity:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database changed during validation"
+            )
         if any(manifest.get(key) != value for key, value in counts.items()):
             raise BuildingSourceIndexError("building_relation_incomplete", "source index has incomplete relation members")
         expected_metadata = {
@@ -167,7 +247,115 @@ class BuildingSourceIndex:
         }
         if metadata != expected_metadata:
             raise BuildingSourceIndexError("building_relation_incomplete", "source index metadata is invalid")
-        return {**manifest, "manifestSha256": digest}
+        self._verified_database_identity = verified_identity
+        return manifest
+
+    def _write_verification_receipt_locked(self, manifest: dict[str, Any]) -> None:
+        identity = self._verified_database_identity
+        if identity is None or self._database_file_identity() != identity:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database is not verified"
+            )
+        receipt = {
+            "schemaVersion": SOURCE_INDEX_VERIFICATION_SCHEMA_VERSION,
+            "creationTool": SOURCE_INDEX_VERIFICATION_TOOL,
+            "indexKey": self.index_key,
+            "manifestSha256": manifest["manifestSha256"],
+            "databaseSha256": manifest["databaseSha256"],
+            "databaseFileIdentity": identity,
+        }
+        receipt["verificationSha256"] = hashlib.sha256(
+            canonical_json(receipt)
+        ).hexdigest()
+        atomic_write_json(self.verification_path, receipt)
+
+    def validate_verified_database(self) -> dict[str, Any]:
+        """Validate a prior full-byte verification receipt without rehashing SQLite."""
+
+        manifest = self._read_validated_manifest()
+        try:
+            receipt = json.loads(self.verification_path.read_bytes())
+            digest = receipt.pop("verificationSha256")
+        except (AttributeError, OSError, TypeError, ValueError, KeyError) as exc:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index verification is unavailable"
+            ) from exc
+        expected_keys = {
+            "schemaVersion",
+            "creationTool",
+            "indexKey",
+            "manifestSha256",
+            "databaseSha256",
+            "databaseFileIdentity",
+        }
+        file_identity = receipt.get("databaseFileIdentity")
+        identity_keys = {
+            "device",
+            "inode",
+            "mode",
+            "ownerUserId",
+            "ownerGroupId",
+            "size",
+            "modifiedTimeNs",
+            "changedTimeNs",
+        }
+        if (
+            set(receipt) != expected_keys
+            or not _SHA256.fullmatch(str(digest or ""))
+            or hashlib.sha256(canonical_json(receipt)).hexdigest() != digest
+            or receipt.get("schemaVersion") != SOURCE_INDEX_VERIFICATION_SCHEMA_VERSION
+            or receipt.get("creationTool") != SOURCE_INDEX_VERIFICATION_TOOL
+            or receipt.get("indexKey") != self.index_key
+            or receipt.get("manifestSha256") != manifest["manifestSha256"]
+            or receipt.get("databaseSha256") != manifest["databaseSha256"]
+            or not isinstance(file_identity, dict)
+            or set(file_identity) != identity_keys
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in file_identity.values()
+            )
+        ):
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index verification is invalid"
+            )
+        current_identity = self._database_file_identity()
+        if current_identity != file_identity:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database changed after verification"
+            )
+        self._verified_database_identity = current_identity
+        return manifest
+
+    def verify_database_unchanged(self) -> None:
+        if (
+            self._verified_database_identity is None
+            or self._database_file_identity() != self._verified_database_identity
+        ):
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database changed after verification"
+            )
+
+    def connect_verified_database(self) -> sqlite3.Connection:
+        self.verify_database_unchanged()
+        try:
+            connection = sqlite3.connect(
+                f"file:{self.database_path}?mode=ro&immutable=1", uri=True
+            )
+        except sqlite3.Error as exc:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "source index database is invalid"
+            ) from exc
+        try:
+            self.verify_database_unchanged()
+        except BuildingSourceIndexError:
+            connection.close()
+            raise
+        return connection
+
+    def validate_manifest_only(self) -> dict[str, Any]:
+        """Compatibility alias for the verified warm-reader boundary."""
+
+        return self.validate_verified_database()
 
     def build(
         self,
@@ -223,7 +411,7 @@ class BuildingSourceIndex:
                 raise BuildingSourceIndexError(
                     "building_scope_policy_invalid", "building closure bounds are invalid"
                 )
-        connection = sqlite3.connect(f"file:{self.database_path}?mode=ro", uri=True)
+        connection = self.connect_verified_database()
         try:
             spatial_clause = " OR ".join(
                 """(
@@ -264,61 +452,106 @@ class BuildingSourceIndex:
             pending_objects = list(sorted(seed_ways | seed_relations))
             visited_parents: set[str] = set()
             while pending_objects:
-                member_key = pending_objects.pop()
-                if member_key not in visited_parents:
+                batch: list[str] = []
+                while pending_objects and len(batch) < 400:
+                    member_key = pending_objects.pop()
+                    if member_key in visited_parents:
+                        continue
                     visited_parents.add(member_key)
-                    for parent_key, tags_json in connection.execute(
-                        """
-                        SELECT relation_members.relation_key, relations.tags_json
-                        FROM relation_members
-                        JOIN relations
-                          ON relations.object_key = relation_members.relation_key
-                        WHERE member_key = ? ORDER BY relation_key
-                        """,
-                        (member_key,),
-                    ):
-                        if not _eligible_building_parent(json.loads(tags_json)):
-                            continue
-                        if parent_key not in required_relations:
-                            required_relations.add(parent_key)
-                            pending_objects.append(parent_key)
-                if member_key.startswith("r"):
-                    relation = connection.execute(
-                        "SELECT members_json FROM relations WHERE object_key = ?",
-                        (member_key,),
-                    ).fetchone()
-                    if relation is None:
-                        raise BuildingSourceIndexError(
-                            "building_relation_incomplete", f"source relation {member_key} is unavailable"
+                    batch.append(member_key)
+                if not batch:
+                    continue
+                placeholders = ",".join("?" for _ in batch)
+                parent_rows = connection.execute(
+                    f"""
+                    SELECT relation_members.member_key,
+                           relation_members.relation_key,
+                           relations.tags_json
+                    FROM relation_members
+                    JOIN relations
+                      ON relations.object_key = relation_members.relation_key
+                    WHERE relation_members.member_key IN ({placeholders})
+                    ORDER BY relation_members.member_key,
+                             relation_members.relation_key
+                    """,
+                    tuple(batch),
+                )
+                for member_key, parent_key, tags_json in parent_rows:
+                    if not _eligible_building_parent(json.loads(tags_json)):
+                        continue
+                    if parent_key not in required_relations:
+                        required_relations.add(parent_key)
+                        pending_objects.append(parent_key)
+
+                relation_keys = [key for key in batch if key.startswith("r")]
+                if relation_keys:
+                    relation_placeholders = ",".join(
+                        "?" for _ in relation_keys
+                    )
+                    relation_rows = {
+                        key: members_json
+                        for key, members_json in connection.execute(
+                            f"""
+                            SELECT object_key, members_json
+                            FROM relations
+                            WHERE object_key IN ({relation_placeholders})
+                            ORDER BY object_key
+                            """,
+                            tuple(relation_keys),
                         )
-                    for member in json.loads(relation[0]):
-                        key = member["key"]
-                        if member["type"] == "r" and key not in required_relations:
-                            required_relations.add(key)
-                            pending_objects.append(key)
-                        elif member["type"] == "w" and key not in required_ways:
-                            required_ways.add(key)
-                            pending_objects.append(key)
-                        elif member["type"] == "n":
-                            required_nodes.add(key)
+                    }
+                    for member_key in sorted(relation_keys):
+                        members_json = relation_rows.get(member_key)
+                        if members_json is None:
+                            raise BuildingSourceIndexError(
+                                "building_relation_incomplete",
+                                f"source relation {member_key} is unavailable",
+                            )
+                        for member in json.loads(members_json):
+                            key = member["key"]
+                            if member["type"] == "r" and key not in required_relations:
+                                required_relations.add(key)
+                                pending_objects.append(key)
+                            elif member["type"] == "w" and key not in required_ways:
+                                required_ways.add(key)
+                                pending_objects.append(key)
+                            elif member["type"] == "n":
+                                required_nodes.add(key)
                 if len(required_relations) + len(required_ways) + len(required_nodes) > maximum_objects:
                     raise BuildingSourceIndexError(
                         "building_object_limit_exceeded", "building closure exceeds the job object limit"
                     )
 
-            for way_key in sorted(required_ways):
-                way = connection.execute(
-                    "SELECT nodes_json FROM ways WHERE object_key = ?", (way_key,)
-                ).fetchone()
-                if way is None:
-                    raise BuildingSourceIndexError(
-                        "building_relation_incomplete", f"source way {way_key} is unavailable"
+            way_keys = sorted(required_ways)
+            for offset in range(0, len(way_keys), 400):
+                way_batch = way_keys[offset : offset + 400]
+                placeholders = ",".join("?" for _ in way_batch)
+                way_rows = {
+                    key: nodes_json
+                    for key, nodes_json in connection.execute(
+                        f"""
+                        SELECT object_key, nodes_json
+                        FROM ways
+                        WHERE object_key IN ({placeholders})
+                        ORDER BY object_key
+                        """,
+                        tuple(way_batch),
                     )
-                required_nodes.update(node["key"] for node in json.loads(way[0]))
-                if len(required_relations) + len(required_ways) + len(required_nodes) > maximum_objects:
-                    raise BuildingSourceIndexError(
-                        "building_object_limit_exceeded", "building closure exceeds the job object limit"
+                }
+                for way_key in way_batch:
+                    nodes_json = way_rows.get(way_key)
+                    if nodes_json is None:
+                        raise BuildingSourceIndexError(
+                            "building_relation_incomplete",
+                            f"source way {way_key} is unavailable",
+                        )
+                    required_nodes.update(
+                        node["key"] for node in json.loads(nodes_json)
                     )
+                    if len(required_relations) + len(required_ways) + len(required_nodes) > maximum_objects:
+                        raise BuildingSourceIndexError(
+                            "building_object_limit_exceeded", "building closure exceeds the job object limit"
+                        )
 
             target_cells = set()
             for key in sorted(seed_ways | seed_relations):
@@ -363,6 +596,119 @@ class BuildingSourceIndex:
             ) from exc
         finally:
             connection.close()
+            self.verify_database_unchanged()
+
+    def workload_for_bounds(
+        self,
+        bounds_e7: Iterable[tuple[int, int, int, int]],
+        *,
+        maximum_objects: int,
+        calibration_cell_size_meters: int,
+        calibration_halo_cells: int,
+    ) -> dict[str, Any]:
+        """Return exact closure counters without decoding source geometry.
+
+        The closure ID sets are still materialized because they are the
+        correctness receipt used by execution.  Geometry payloads are not
+        decoded; the additional counters come from indexed JSON lengths and
+        tags, making this operation suitable for planner admission.
+        """
+
+        closure = self.closure_for_bounds(
+            bounds_e7,
+            maximum_objects=maximum_objects,
+            calibration_cell_size_meters=calibration_cell_size_meters,
+            calibration_halo_cells=calibration_halo_cells,
+        )
+        relation_keys = tuple(closure["requiredRelationKeys"])
+        way_keys = tuple(closure["requiredWayKeys"])
+        node_keys = tuple(closure["requiredNodeKeys"])
+        connection = self.connect_verified_database()
+        try:
+            connection.execute(
+                "CREATE TEMP TABLE workload_relation_keys(object_key TEXT PRIMARY KEY)"
+            )
+            connection.executemany(
+                "INSERT INTO workload_relation_keys(object_key) VALUES (?)",
+                ((key,) for key in relation_keys),
+            )
+            connection.execute(
+                "CREATE TEMP TABLE workload_way_keys(object_key TEXT PRIMARY KEY)"
+            )
+            connection.executemany(
+                "INSERT INTO workload_way_keys(object_key) VALUES (?)",
+                ((key,) for key in way_keys),
+            )
+            relation_members = 0
+            if relation_keys:
+                relation_members = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM relation_members members
+                        JOIN workload_relation_keys selected
+                          ON selected.object_key = members.relation_key
+                        """
+                    ).fetchone()[0]
+                )
+            way_node_references = 0
+            vertex_count = 0
+            part_count = 0
+            outline_count = 0
+            if way_keys:
+                rows = connection.execute(
+                    """
+                    SELECT ways.tags_json, ways.nodes_json
+                    FROM ways
+                    JOIN workload_way_keys selected
+                      ON selected.object_key = ways.object_key
+                    ORDER BY ways.object_key
+                    """
+                )
+                for tags_json, nodes_json in rows:
+                    tags = json.loads(tags_json)
+                    nodes = json.loads(nodes_json)
+                    references = len(nodes)
+                    way_node_references += references
+                    vertex_count += references
+                    if tags.get("building:part") not in (None, "", "no"):
+                        part_count += 1
+                    elif _building_tags(tags):
+                        outline_count += 1
+            closure_body = {
+                "schemaVersion": SOURCE_INDEX_SCHEMA_VERSION,
+                "sourceIndexKey": self.index_key,
+                "sourceSnapshotSha256": self.source_snapshot_sha256,
+                "candidateKeys": closure["candidateKeys"],
+                "requiredRelationKeys": relation_keys,
+                "requiredWayKeys": way_keys,
+                "requiredNodeKeys": node_keys,
+            }
+            closure_plan_sha256 = hashlib.sha256(
+                canonical_json(closure_body)
+            ).hexdigest()
+            return {
+                **closure,
+                "closurePlanSha256": closure_plan_sha256,
+                "relationCount": len(relation_keys),
+                "wayCount": len(way_keys),
+                "nodeCount": len(node_keys),
+                "totalObjectCount": len(relation_keys) + len(way_keys) + len(node_keys),
+                "storedRelationMemberCount": relation_members,
+                "wayNodeReferenceCount": way_node_references,
+                "vertexCount": vertex_count,
+                "candidateOutlineCount": outline_count,
+                "candidatePartCount": part_count,
+                "ringCount": None,
+                "holeCount": None,
+            }
+        except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError) as exc:
+            raise BuildingSourceIndexError(
+                "building_relation_incomplete", "building workload query failed"
+            ) from exc
+        finally:
+            connection.close()
+            self.verify_database_unchanged()
 
     def build_with_scanner(self, scanner, *, lock_timeout_seconds: float | None = None):
         """Run the expensive source scan once, while holding the artifact lock."""
@@ -370,7 +716,9 @@ class BuildingSourceIndex:
             self.index_root.mkdir(parents=True, exist_ok=True)
             with _CacheLock(self.index_root / ".write.lock", timeout_seconds=lock_timeout_seconds):
                 self._cleanup_unpublished_scans_locked()
-                existing = self._validate_or_quarantine_locked()
+                existing = self._validate_or_quarantine_locked(
+                    validate_database=False
+                )
                 if existing is not None:
                     return existing
                 descriptor, temporary_name = tempfile.mkstemp(
@@ -427,17 +775,25 @@ class BuildingSourceIndex:
             if path.is_file() or path.is_symlink():
                 path.unlink(missing_ok=True)
 
-    def _validate_or_quarantine_locked(self):
+    def _validate_or_quarantine_locked(self, *, validate_database: bool = True):
         artifacts = (self.database_path, self.manifest_path)
         if not any(path.exists() for path in artifacts):
             return None
         if all(path.is_file() for path in artifacts):
             try:
-                return self.validate()
+                if validate_database:
+                    manifest = self.validate()
+                else:
+                    try:
+                        manifest = self.validate_verified_database()
+                    except BuildingSourceIndexError:
+                        manifest = self.validate_database_identity()
+                self._write_verification_receipt_locked(manifest)
+                return manifest
             except BuildingSourceIndexError:
                 pass
         quarantine_id = uuid.uuid4().hex
-        for path in artifacts:
+        for path in (*artifacts, self.verification_path):
             if path.exists():
                 os.replace(path, path.with_name(f"{path.name}.corrupt-{quarantine_id}"))
         return None
@@ -593,7 +949,9 @@ class BuildingSourceIndex:
         }
         manifest["manifestSha256"] = hashlib.sha256(canonical_json(manifest)).hexdigest()
         atomic_write_json(self.manifest_path, manifest)
-        return self.validate()
+        validated = self.validate()
+        self._write_verification_receipt_locked(validated)
+        return validated
 
 
 def _normalize_node(value):

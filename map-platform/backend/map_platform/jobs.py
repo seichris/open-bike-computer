@@ -13,7 +13,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .artifacts import ArtifactRecord
 from .generation_profiles import GenerationProfilePolicy
@@ -473,6 +473,7 @@ class JobStore:
         job = self.get(job_id)
         previous_status = job.status
         job.status = status
+        job.scheduler_yielded = False
         job.updated_at = utc_now_iso()
         job.error = error
         job.error_code = error_code
@@ -909,7 +910,13 @@ class JobStore:
         worker_id: str,
         building_preprocessing_mode: str,
     ) -> MapJob:
-        if building_preprocessing_mode not in {"legacy", "shadow", "selected"}:
+        if building_preprocessing_mode not in {
+            "legacy",
+            "shadow",
+            "selected",
+            "chunked_allowlist",
+            "chunked",
+        }:
             raise ValueError("building preprocessing mode is invalid")
         with self._queue_lock():
             job = self.get(job_id)
@@ -1270,6 +1277,16 @@ class JobStore:
         stop = threading.Event()
 
         def heartbeat_loop() -> None:
+            # Refresh the lease before the long-running phase starts.  Waiting
+            # for the first interval leaves a narrow window in which a worker
+            # can be reclaimed even though it has already entered the guarded
+            # phase (especially with short test or development leases).
+            try:
+                self.heartbeat_unless_cancelled(job_id, worker_id=worker_id)
+                if on_heartbeat is not None:
+                    on_heartbeat()
+            except (KeyError, RuntimeError):
+                return
             while not stop.wait(interval_seconds):
                 try:
                     self.heartbeat_unless_cancelled(job_id, worker_id=worker_id)
@@ -1293,11 +1310,88 @@ class JobStore:
                 raise JobClaimError(f"job is {job.status.value}, not queued")
             return self._claim_unlocked(job, worker_id)
 
-    def claim_next(self, worker_id: str, *, interrupted_job_stale_seconds: float | None = None) -> MapJob | None:
+    def claim_next(
+        self,
+        worker_id: str,
+        *,
+        interrupted_job_stale_seconds: float | None = None,
+        preferred_job_id: str | None = None,
+        resumable_job_ids: Iterable[str] | None = None,
+    ) -> MapJob | None:
         with self._queue_lock():
-            for job in self.list():
-                if job.status != JobStatus.QUEUED:
+            jobs = self.list()
+            allowed_resumable_ids = (
+                None
+                if resumable_job_ids is None
+                else frozenset(str(value) for value in resumable_job_ids)
+            )
+            # Merge initial admission and yielded parents by their durable
+            # waiting timestamp. A completed quantum refreshes updated_at, so
+            # an older never-started job runs next; admitting it in turn leaves
+            # an older yielded parent next. This gives both classes a bounded
+            # turn under sustained arrivals without adding volatile state.
+            never_started = sorted(
+                (
+                    job
+                    for job in jobs
+                    if job.status == JobStatus.QUEUED
+                    and not job.scheduler_yielded
+                    and job.attempts == 0
+                ),
+                key=lambda job: (job.created_at, job.job_id),
+            )
+            resumable = [
+                job
+                for job in jobs
+                if job.scheduler_yielded and job.worker_id is None
+                and (
+                    allowed_resumable_ids is None
+                    or job.job_id in allowed_resumable_ids
+                )
+            ]
+            if preferred_job_id is not None:
+                resumable.sort(
+                    key=lambda job: (
+                        job.job_id != preferred_job_id,
+                        job.updated_at,
+                        job.job_id,
+                    )
+                )
+            else:
+                resumable.sort(key=lambda job: (job.updated_at, job.job_id))
+            queued_retries = sorted(
+                (
+                    job
+                    for job in jobs
+                    if job.status == JobStatus.QUEUED
+                    and not job.scheduler_yielded
+                    and job.attempts > 0
+                ),
+                key=lambda job: (job.updated_at, job.job_id),
+            )
+            initial_and_resumable: list[MapJob] = []
+            while never_started or resumable:
+                if not never_started:
+                    initial_and_resumable.append(resumable.pop(0))
                     continue
+                if not resumable:
+                    initial_and_resumable.append(never_started.pop(0))
+                    continue
+                never_started_key = (
+                    never_started[0].created_at,
+                    never_started[0].job_id,
+                )
+                resumable_key = (
+                    resumable[0].updated_at,
+                    resumable[0].job_id,
+                )
+                if never_started_key <= resumable_key:
+                    initial_and_resumable.append(never_started.pop(0))
+                else:
+                    initial_and_resumable.append(resumable.pop(0))
+            for job in (*initial_and_resumable, *queued_retries):
+                if job.scheduler_yielded:
+                    return self._resume_yielded_unlocked(job, worker_id)
                 claimed = self._claim_unlocked(job, worker_id)
                 if claimed.status == JobStatus.VALIDATING:
                     return claimed
@@ -1328,6 +1422,36 @@ class JobStore:
                     return claimed
             return None
 
+    def yield_chunked_job(self, job_id: str, *, worker_id: str) -> MapJob:
+        """Release one active public parent without consuming a retry."""
+
+        with self._queue_lock():
+            job = self.get(job_id)
+            if job.worker_id != worker_id:
+                raise RuntimeError("job is owned by another worker")
+            if job.status in {
+                JobStatus.QUEUED,
+                JobStatus.READY,
+                JobStatus.FAILED,
+                JobStatus.CANCELLED,
+                JobStatus.EXPIRED,
+            }:
+                raise RuntimeError("job is not yieldable")
+            job.scheduler_yielded = True
+            job.worker_id = None
+            job.updated_at = utc_now_iso()
+            self.save(job)
+            return job
+
+    def _resume_yielded_unlocked(self, job: MapJob, worker_id: str) -> MapJob:
+        if not job.scheduler_yielded or job.worker_id is not None:
+            raise JobClaimError("job is not available for scheduler resume")
+        job.scheduler_yielded = False
+        job.worker_id = worker_id
+        job.updated_at = utc_now_iso()
+        self.save(job)
+        return job
+
     def _claim_unlocked(self, job: MapJob, worker_id: str) -> MapJob:
         if job.attempts >= job.max_attempts:
             return self._update_status_unlocked(
@@ -1338,6 +1462,7 @@ class JobStore:
                 finished=True,
             )
         job.status = JobStatus.VALIDATING
+        job.scheduler_yielded = False
         job.updated_at = utc_now_iso()
         job.started_at = job.started_at or job.updated_at
         job.worker_id = worker_id
@@ -1361,11 +1486,20 @@ class JobStore:
         self.save(job)
         return job
 
-    def requeue_retryable_failures(self) -> int:
+    def requeue_retryable_failures(
+        self,
+        *,
+        non_retryable_error_codes: Iterable[str] = (),
+    ) -> int:
+        non_retryable = frozenset(str(value) for value in non_retryable_error_codes)
         count = 0
         with self._queue_lock():
             for job in self.list():
-                if job.status == JobStatus.FAILED and job.attempts < job.max_attempts:
+                if (
+                    job.status == JobStatus.FAILED
+                    and job.attempts < job.max_attempts
+                    and job.error_code not in non_retryable
+                ):
                     job.status = JobStatus.QUEUED
                     job.updated_at = utc_now_iso()
                     job.finished_at = None
@@ -1456,6 +1590,7 @@ class MapJobService:
         generation_profile_policy: GenerationProfilePolicy | None = None,
         deployment_channel: str = "production",
         estimate_coordinator=None,
+        building_task_store=None,
     ):
         self.source_index = source_index
         self.store = store
@@ -1466,6 +1601,7 @@ class MapJobService:
         self.generation_profile_policy = generation_profile_policy
         self.deployment_channel = deployment_channel
         self.estimate_coordinator = estimate_coordinator
+        self.building_task_store = building_task_store
 
     def supported_renderer_format_versions(
         self,
@@ -1697,7 +1833,19 @@ class MapJobService:
         return max(candidates, key=lambda job: job.created_at)
 
     def cancel_job(self, job_id: str) -> MapJob:
-        return self.store.cancel_if_active(job_id)
+        job = self.store.cancel_if_active(job_id)
+        if job.status == JobStatus.CANCELLED and self.building_task_store is not None:
+            try:
+                # Fence leased/pending child tasks immediately.  The worker's
+                # cancellation check remains the normal path, but an API
+                # cancellation can race a long read-only scan and otherwise
+                # leave its resource reservation active until lease expiry.
+                self.building_task_store.cancel_plan(job_id)
+            except Exception:
+                # Cancellation of the public job must remain idempotent even
+                # if the optional coordinator store is temporarily unavailable.
+                pass
+        return job
 
     def update_user_label_for_installation(
         self,

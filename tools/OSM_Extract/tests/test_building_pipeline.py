@@ -119,6 +119,28 @@ class BuildingPipelineTests(unittest.TestCase):
         self.assertEqual(report["partCount"], 1)
         self.assertEqual(report["relationAssociationCount"], 1)
 
+    def test_retains_a_safe_single_part_relation_without_containment(self):
+        standalone = feature(
+            2,
+            box(10, 10, 90, 90),
+            '"height"=>"12"',
+            building="yes",
+        )
+
+        buildings, report, _flat = prepare_buildings(
+            [standalone],
+            self.rules,
+            {"standalonePartKeys": ["w2"]},
+            strict_relations=True,
+        )
+
+        self.assertEqual(len(buildings), 1)
+        self.assertTrue(buildings[0].is_part)
+        self.assertIsNone(buildings[0].parent_key)
+        self.assertEqual(buildings[0].association, "standalone")
+        self.assertEqual(report["standaloneRelationPartCount"], 1)
+        self.assertEqual(report["containmentAssociationCount"], 0)
+
     def test_complexity_snapshot_precedes_containment_and_is_bounded(self):
         outline = feature(1, box(0, 0, 100, 100), '"building"=>"yes"')
         part = feature(

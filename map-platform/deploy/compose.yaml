@@ -1,5 +1,5 @@
-# control-plane-source-commit: 0e11648494e2ab9398ccddf1e4c8aa07290c87c7
-# worker-source-commit: 0e11648494e2ab9398ccddf1e4c8aa07290c87c7
+# control-plane-source-commit: ac783931148cdacaa6a29ea18a3bd7c99c472306
+# worker-source-commit: 4601abf6df57310f12b36ad682a5b2946c627c5d
 
 # These digest-pinned images are the production deployment manifest. The API
 # and maintenance control plane may advance to carry a rollout approval while
@@ -10,8 +10,8 @@
 # and `/app/config`. New images retain aliases at those paths so control-plane
 # and worker pins can advance independently without a coordinated outage.
 x-map-platform-images:
-  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:a698050644a4d7c0e1290a9e8882a52d6907d5492d6e1794d93e174b06812a74
-  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:a698050644a4d7c0e1290a9e8882a52d6907d5492d6e1794d93e174b06812a74
+  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:9a327a4e3daac6c0c36806332760ac4847956a7f97f47864055814d78246fb74
+  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:ccee49f00672002c5d7656c8d04ffc3326b9aec1ad75cdaa43a310c2db59f1c3
 
 services:
   map-platform-api:
@@ -86,6 +86,10 @@ services:
 
   map-platform-worker:
     image: *map-platform-worker-image
+    # Chunk admission requires a real cgroup memory ceiling. Keep the
+    # production default aligned with the reviewed 12 GiB validation cap;
+    # operators may lower it only with a corresponding resource review.
+    mem_limit: ${MAP_PLATFORM_WORKER_MEMORY_LIMIT:-12g}
     command: ["map-platform", "worker-loop", "--idle-sleep-seconds", "10"]
     environment:
       MAP_PLATFORM_REPO_ROOT: /app
@@ -118,7 +122,10 @@ services:
       AWS_REGION: ${AWS_REGION:-}
       MAP_PLATFORM_MAP_STREAM_ENABLED: ${MAP_PLATFORM_MAP_STREAM_ENABLED:-0}
       MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE: ${MAP_PLATFORM_BUILDING_PREPROCESSING_SCOPE_MODE:-shadow}
+      MAP_PLATFORM_BUILDING_MAX_RELATION_OBJECTS_PER_JOB: ${MAP_PLATFORM_BUILDING_MAX_RELATION_OBJECTS_PER_JOB:-500000}
       MAP_PLATFORM_BUILDING_BLOCK_WORKERS: ${MAP_PLATFORM_BUILDING_BLOCK_WORKERS:-4}
+      MAP_PLATFORM_WORKER_MAX_CONCURRENT_TASKS: ${MAP_PLATFORM_WORKER_MAX_CONCURRENT_TASKS:-1}
+      MAP_PLATFORM_WORKER_MEMORY_LIMIT_BYTES: ${MAP_PLATFORM_WORKER_MEMORY_LIMIT_BYTES:-}
       MAP_PLATFORM_WORKER_IMAGE_REFERENCE: *map-platform-worker-image
       MAP_PLATFORM_MAP_SIGNING_KEY_ID: ${MAP_PLATFORM_MAP_SIGNING_KEY_ID:-}
       MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64: ${MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64:-}
@@ -146,7 +153,13 @@ services:
       MAP_PLATFORM_PREPARATION_ESTIMATE_MODEL_PATH: ${MAP_PLATFORM_PREPARATION_ESTIMATE_MODEL_PATH:-/app/map-platform/backend/config/preparation-estimate-profile-v1.json}
       MAP_PLATFORM_ESTIMATOR_WORKER_CLASS: ${MAP_PLATFORM_ESTIMATOR_WORKER_CLASS:-unclassified}
       MAP_PLATFORM_ESTIMATOR_WORKER_CONCURRENCY_CLASS: ${MAP_PLATFORM_ESTIMATOR_WORKER_CONCURRENCY_CLASS:-single}
+      MAP_PLATFORM_ESTIMATE_MIN_HISTORY_SAMPLES: ${MAP_PLATFORM_ESTIMATE_MIN_HISTORY_SAMPLES:-20}
+      MAP_PLATFORM_ESTIMATE_HIGH_CONFIDENCE_SAMPLES: ${MAP_PLATFORM_ESTIMATE_HIGH_CONFIDENCE_SAMPLES:-50}
       MAP_PLATFORM_ESTIMATE_VALIDATED_CONFIDENCE: ${MAP_PLATFORM_ESTIMATE_VALIDATED_CONFIDENCE:-low}
+      MAP_PLATFORM_ESTIMATE_MAX_REVISIONS_PER_JOB: ${MAP_PLATFORM_ESTIMATE_MAX_REVISIONS_PER_JOB:-16}
+      MAP_PLATFORM_ESTIMATE_MIN_UPDATE_SECONDS: ${MAP_PLATFORM_ESTIMATE_MIN_UPDATE_SECONDS:-5}
+      MAP_PLATFORM_ESTIMATE_MATERIAL_CHANGE_BPS: ${MAP_PLATFORM_ESTIMATE_MATERIAL_CHANGE_BPS:-1000}
+      MAP_PLATFORM_ESTIMATE_MAX_SECONDS: ${MAP_PLATFORM_ESTIMATE_MAX_SECONDS:-604800}
       MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS: ${MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS:-3600}
       MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS: ${MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS:-100}
       MAP_PLATFORM_BUILDING_BLOCK_CACHE_RETENTION_DAYS: ${MAP_PLATFORM_BUILDING_BLOCK_CACHE_RETENTION_DAYS:-14}

@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-08-19",
+  "productionPolicy": {
+    "sourceAreaHardM2": 1200000000,
+    "closureObjectsHard": 500000,
+    "workerMemoryLimitBytes": null,
+    "workerMemoryLimitStatus": "not_configured"
+  },
+  "observations": [
+    {
+      "jobId": "d7fc2b82dc924107aa09",
+      "requestName": "shanghai-632km2-500k-failure",
+      "requestedAreaM2": 631792599,
+      "sourceAreaM2": 971243520,
+      "outputBlockCount": 56,
+      "closureObjects": 552499,
+      "relationCount": 640,
+      "wayCount": 75931,
+      "nodeCount": 475928,
+      "relationObjectsLimit": 500000,
+      "result": "building_object_limit_exceeded",
+      "artifactBytes": null,
+      "processingSeconds": null,
+      "workerCgroupPeakBytes": null
+    },
+    {
+      "jobId": "e79c891c12d44ac882f8",
+      "requestName": "shanghai-632km2-600k-dev-success",
+      "requestedAreaM2": 631792599,
+      "sourceAreaM2": 971243520,
+      "outputBlockCount": 56,
+      "closureObjects": 552499,
+      "relationCount": 640,
+      "wayCount": 75931,
+      "nodeCount": 475928,
+      "relationObjectsLimit": 600000,
+      "result": "ready",
+      "artifactBytes": 14948080,
+      "processingSeconds": 929.889504,
+      "totalSeconds": 934.24593,
+      "workerCgroupPeakBytes": 4033191936,
+      "workerCgroupMemoryLimitBytes": null
+    },
+    {
+      "jobId": "707d717d591145c6a731",
+      "requestName": "china-3344km2-global-admission-boundary",
+      "requestedAreaM2": 3344321671,
+      "alignedOutputAreaM2": 4781506560,
+      "candidateOutputBlockCount": 285,
+      "maximumMonolithicOutputBlocks": 71,
+      "result": "building_scope_exceeded",
+      "attempts": 3,
+      "processingSeconds": 0.210659,
+      "sourceExtractionStarted": false,
+      "closureMeasured": false,
+      "workerCgroupPeakBytes": null
+    }
+  ]
+}
