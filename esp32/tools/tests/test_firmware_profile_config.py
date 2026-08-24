@@ -142,6 +142,21 @@ for environment, (base, target) in remote_debug_profiles.items():
     assert f"${{{base}.build_flags}}" in flags
     assert "-DDEVICE_REMOTE_DEBUG=1" in flags
 
+large_diagnostic_profiles = (
+    *remote_debug_profiles,
+    "env:WAVESHARE_AMOLED_175_MAPIO_DIAGNOSTICS",
+    "env:WAVESHARE_AMOLED_206_MAPIO_DIAGNOSTICS",
+    "env:WAVESHARE_AMOLED_175_POWER_METRICS",
+    "env:WAVESHARE_AMOLED_206_POWER_METRICS",
+    "env:WAVESHARE_AMOLED_175_LIGHT_SLEEP",
+    "env:WAVESHARE_AMOLED_206_LIGHT_SLEEP",
+)
+for environment in large_diagnostic_profiles:
+    assert (
+        inherited_option(environment, "board_build.partitions")
+        == "partitions_remote_debug.csv"
+    )
+
 light_sleep_profiles = {
     "env:WAVESHARE_AMOLED_175_LIGHT_SLEEP": (
         "env:WAVESHARE_AMOLED_175_POWER_METRICS",

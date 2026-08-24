@@ -55,6 +55,12 @@ class MapMemoryDiagnosticsTests(unittest.TestCase):
             "WAVESHARE_AMOLED_206_MAPIO_DIAGNOSTICS",
         ):
             self.assertIn(f"[env:{profile}]", PLATFORMIO_SOURCE)
+            section = PLATFORMIO_SOURCE.split(f"[env:{profile}]", 1)[1].split(
+                "\n[", 1
+            )[0]
+            self.assertIn(
+                "board_build.partitions = partitions_remote_debug.csv", section
+            )
         self.assertGreaterEqual(
             PLATFORMIO_SOURCE.count("-DWAVESHARE_MAPIO_TIMING_LOG=1"), 2
         )
