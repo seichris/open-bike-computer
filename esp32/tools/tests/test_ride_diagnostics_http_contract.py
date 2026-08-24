@@ -19,15 +19,24 @@ class RideDiagnosticsHttpContractTests(unittest.TestCase):
         ]
         gate = handler.index("server_->isRequestAuthorized(request)")
         mode = handler.index('server_->status().mode != "diagnostics"')
-        self.assertLess(gate, handler.index('kPrefix) + "status"'))
-        self.assertLess(mode, handler.index('kPrefix) + "status"'))
-        for route in ("status", "index", "chunks/", "active-tail", "session/exit"):
-            self.assertIn(f'kPrefix) + "{route}', handler)
+        dispatch = handler.index("http_policy::parseRoute")
+        non_exit = handler.index(
+            "route.kind != http_policy::RouteKind::Exit", dispatch
+        )
+        unknown = handler.index(
+            "route.kind == http_policy::RouteKind::Unknown", dispatch
+        )
+        self.assertLess(gate, dispatch)
+        self.assertLess(mode, dispatch)
+        self.assertLess(non_exit, unknown)
+        self.assertIn("http_policy::parseRoute", handler)
+        for route in ("Status", "Index", "Chunk", "ActiveTail", "Exit"):
+            self.assertIn(f"http_policy::RouteKind::{route}", handler)
 
     def test_index_and_chunk_routes_use_snapshot_and_exact_bytes(self):
         index = HTTP[
-            HTTP.index('kPrefix) + "index"') :
-            HTTP.index("const std::string chunkPrefix")
+            HTTP.index("http_policy::RouteKind::Index") :
+            HTTP.index("http_policy::RouteKind::Chunk")
         ]
         self.assertIn("beginTransferSnapshotLease()", index)
         self.assertIn("endTransferSnapshotLease()", index)
@@ -36,8 +45,8 @@ class RideDiagnosticsHttpContractTests(unittest.TestCase):
         self.assertIn("snapshot.dropped", index)
 
         chunk = HTTP[
-            HTTP.index("const std::string chunkPrefix") :
-            HTTP.index('kPrefix) + "active-tail"')
+            HTTP.index("http_policy::RouteKind::Chunk") :
+            HTTP.index("http_policy::RouteKind::ActiveTail")
         ]
         self.assertIn("resolveClosedChunk", chunk)
         self.assertIn("sendFile(client, chunk, server_, request)", chunk)

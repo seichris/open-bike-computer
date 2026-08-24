@@ -96,8 +96,22 @@ nonisolated private enum DeviceDiagnosticsHTTPClient {
 }
 
 @MainActor
+protocol DeviceDiagnosticsSessionControlling: AnyObject {
+    var diagnosticsRecorder: (any RideDiagnosticsEventSink)? { get set }
+
+    func enterDiagnostics(
+        bleManager: BLEManager,
+        status: @escaping @MainActor (String) -> Void
+    ) async throws -> DeviceTransferSession
+
+    func exitDiagnostics(bleManager: BLEManager) async throws
+}
+
+extension DeviceTransferManager: DeviceDiagnosticsSessionControlling {}
+
+@MainActor
 final class DeviceDiagnosticsTransferManager {
-    private let transferManager = DeviceTransferManager()
+    private let transferManager: any DeviceDiagnosticsSessionControlling
     private let sessionConfiguration: () -> URLSessionConfiguration
     private let maximumChunkBytes = 256 * 1024
     private let maximumIndexBytes = 64 * 1024
@@ -117,10 +131,12 @@ final class DeviceDiagnosticsTransferManager {
     }
 
     init(
+        transferManager: (any DeviceDiagnosticsSessionControlling)? = nil,
         sessionConfiguration: @escaping () -> URLSessionConfiguration = {
             .ephemeral
         }
     ) {
+        self.transferManager = transferManager ?? DeviceTransferManager()
         self.sessionConfiguration = sessionConfiguration
     }
 

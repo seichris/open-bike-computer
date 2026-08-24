@@ -2,6 +2,7 @@
 
 #include "../storage/storage.hpp"
 #include "ride_diagnostics.hpp"
+#include "ride_diagnostics_http_policy.hpp"
 
 #include <Arduino.h>
 #include <dirent.h>
@@ -315,16 +316,20 @@ bool RideDiagnosticsHttp::handleRequest(
                                    "diagnostics session is not authorized");
     return true;
   }
-  const std::string exitPath = std::string(kPrefix) + "session/exit";
-  if (request.path != exitPath) {
+  const http_policy::Route route =
+      http_policy::parseRoute(request.method, request.path, kPrefix);
+  if (route.kind != http_policy::RouteKind::Exit) {
     // A prior peer may have failed to close its exit response cleanly. Any
     // authenticated non-exit request belongs to the live session and cancels
     // that stale deferred shutdown.
     exitAfterResponse_ = false;
     refreshTransferSnapshotLease();
   }
-  if (request.path == std::string(kPrefix) + "status" &&
-      request.method == "GET") {
+  if (route.kind == http_policy::RouteKind::Unknown) {
+    return device_transfer::sendHttpError(client, 404, "not_found",
+                                          "diagnostic endpoint not found");
+  }
+  if (route.kind == http_policy::RouteKind::Status) {
     const Stats snapshot = stats();
     const std::string body =
         "{\"schema\":1,\"ready\":true,\"bootSequence\":" +
@@ -334,7 +339,7 @@ bool RideDiagnosticsHttp::handleRequest(
         (snapshot.storageAvailable ? "true" : "false") + "}";
     return sendBody(client, body, "application/json", server_, request);
   }
-  if (request.path == std::string(kPrefix) + "index" && request.method == "GET") {
+  if (route.kind == http_policy::RouteKind::Index) {
     beginTransferSnapshotLease();
     const std::vector<Chunk> chunks = listChunks(server_, request);
     if (!requestStillAuthorized(server_, request)) {
@@ -374,33 +379,23 @@ bool RideDiagnosticsHttp::handleRequest(
     return sendBody(client, body, "application/json", server_, request);
   }
 
-  const std::string chunkPrefix = std::string(kPrefix) + "chunks/";
-  if (request.method == "GET" && request.path.rfind(chunkPrefix, 0) == 0) {
-    const std::string rest = request.path.substr(chunkPrefix.size());
-    const std::size_t slash = rest.find('/');
-    if (slash == std::string::npos || rest.find('/', slash + 1) != std::string::npos)
-      return device_transfer::sendHttpError(client, 400, "invalid_chunk_path",
-                                            "chunk path is invalid");
-    uint32_t boot = 0;
-    uint32_t number = 0;
-    if (!parseUnsigned(rest.substr(0, slash), boot) ||
-        !parseUnsigned(rest.substr(slash + 1), number) ||
-        !isClosedChunk(boot, number))
+  if (route.kind == http_policy::RouteKind::Chunk) {
+    if (!isClosedChunk(route.boot, route.chunk))
       return device_transfer::sendHttpError(client, 404, "chunk_unavailable",
                                             "diagnostic chunk is unavailable");
     Chunk chunk;
-    if (!resolveClosedChunk(boot, number, chunk))
+    if (!resolveClosedChunk(route.boot, route.chunk, chunk))
       return device_transfer::sendHttpError(client, 404, "chunk_unavailable",
                                             "diagnostic chunk is unavailable");
     return sendFile(client, chunk, server_, request);
   }
 
-  if (request.path == std::string(kPrefix) + "active-tail" && request.method == "GET") {
+  if (route.kind == http_policy::RouteKind::ActiveTail) {
     return device_transfer::sendHttpError(client, 404, "active_tail_disabled",
                                           "active diagnostic tail is not exposed");
   }
 
-  if (request.path == exitPath && request.method == "POST") {
+  if (route.kind == http_policy::RouteKind::Exit) {
     if (request.hasContentLength && request.contentLength != 0)
       return device_transfer::sendHttpError(client, 400, "body_not_allowed",
                                             "session exit does not accept a body");

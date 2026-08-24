@@ -231,6 +231,35 @@ final class OfflineMapTestURLProtocol: URLProtocol {
 }
 
 @MainActor
+final class TestDeviceDiagnosticsSessionController:
+    DeviceDiagnosticsSessionControlling
+{
+    weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
+    let session: DeviceTransferSession
+    private(set) var enterCount = 0
+    private(set) var exitCount = 0
+
+    init(session: DeviceTransferSession) {
+        self.session = session
+    }
+
+    func enterDiagnostics(
+        bleManager: BLEManager,
+        status: @escaping @MainActor (String) -> Void
+    ) async throws -> DeviceTransferSession {
+        _ = bleManager
+        enterCount += 1
+        status("test diagnostics session ready")
+        return session
+    }
+
+    func exitDiagnostics(bleManager: BLEManager) async throws {
+        _ = bleManager
+        exitCount += 1
+    }
+}
+
+@MainActor
 func waitForMapTaskCompletion(
     _ manager: OfflineMapManager,
     timeout: TimeInterval = 3
@@ -715,6 +744,7 @@ struct NavigationProtocolTests {
         await testDeviceTransferManagerConfirmsDebugExit()
         await testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus()
         await testDeviceDiagnosticsTransferPolicy()
+        await testDeviceDiagnosticsDownloadEndToEnd()
         await testOfflineMapInstallationCredentialClient()
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
@@ -16036,6 +16066,122 @@ struct NavigationProtocolTests {
             ) == nil,
             "JSON numbers cannot impersonate firmware boolean fields"
         )
+    }
+
+    @MainActor
+    static func testDeviceDiagnosticsDownloadEndToEnd() async {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "device-diagnostics-e2e-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer {
+            OfflineMapTestURLProtocol.reset()
+            try? FileManager.default.removeItem(at: root)
+        }
+        let defaultsSuite =
+            "DeviceDiagnosticsDownloadEndToEnd.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: defaultsSuite)!
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        let recorder = RideDiagnosticsRecorder(
+            rootURL: root,
+            userDefaults: defaults
+        )
+        let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting(
+            "01234567-89ab-cdef-0123-456789abcdef"
+        )
+        let stream = Data("""
+        {"schema":1,"source":"firmware","sequence":7,"level":"info","category":"boot","event":"ready","fields":{"bootSequence":1,"firmwareFingerprint":"A1B2C3D4"}}
+
+        """.utf8)
+        let digest = SHA256.hash(data: stream).map {
+            String(format: "%02x", $0)
+        }.joined()
+        let index = Data("""
+        {"schema":1,"source":"firmware","bootSequence":1,"activeChunk":2,"stats":{"enqueued":1,"written":1,"dropped":0,"storageErrors":0},"chunks":[{"bootSequence":1,"chunk":1,"bytes":\(stream.count),"sha256":"\(digest)"}]}
+        """.utf8)
+        let session = DeviceTransferSession(
+            mode: .diagnostics,
+            baseURL: URL(string: "https://diagnostics.test")!,
+            accessPointSSID: nil,
+            sessionToken: "test-token"
+        )
+        let sessionController = TestDeviceDiagnosticsSessionController(
+            session: session
+        )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/device-diagnostics/v1/index"):
+                return (200, index)
+            case ("GET", "/device-diagnostics/v1/chunks/1/1"):
+                return (200, stream)
+            case ("POST", "/device-diagnostics/v1/session/exit"):
+                return (200, Data("{\"ok\":true}".utf8))
+            default:
+                return (404, Data())
+            }
+        }
+        let manager = DeviceDiagnosticsTransferManager(
+            transferManager: sessionController,
+            sessionConfiguration: { configuration }
+        )
+        var statuses: [String] = []
+        do {
+            let imported = try await manager.downloadDeviceLogs(
+                bleManager: bleManager,
+                recorder: recorder,
+                status: { statuses.append($0) }
+            )
+            assertEqual(imported, 1,
+                        "end-to-end diagnostics imports one new chunk")
+            assertEqual(sessionController.enterCount, 1,
+                        "end-to-end diagnostics enters one session")
+            assertEqual(sessionController.exitCount, 1,
+                        "end-to-end diagnostics exits one session")
+            let deviceDigest = recorder.deviceDigest(
+                for: "01234567-89ab-cdef-0123-456789abcdef"
+            )
+            assertEqual(
+                recorder.importedDeviceChunkData(
+                    deviceDigest: deviceDigest,
+                    bootSequence: 1,
+                    chunk: 1,
+                    sha256: digest
+                ),
+                stream,
+                "end-to-end diagnostics persists the verified chunk"
+            )
+            let requests = OfflineMapTestURLProtocol.requests()
+            assertEqual(
+                requests.compactMap { $0.url?.path },
+                [
+                    "/device-diagnostics/v1/index",
+                    "/device-diagnostics/v1/chunks/1/1",
+                    "/device-diagnostics/v1/session/exit",
+                ],
+                "end-to-end diagnostics performs index, chunk, and exit requests"
+            )
+            assert(
+                requests.allSatisfy {
+                    $0.value(
+                        forHTTPHeaderField: "X-BikeComputer-Transfer-Token"
+                    ) == "test-token"
+                },
+                "end-to-end diagnostics authenticates every HTTP request"
+            )
+            assertEqual(
+                requests.last?.value(forHTTPHeaderField: "Content-Length"),
+                "0",
+                "end-to-end diagnostics sends an empty authenticated exit"
+            )
+            assert(statuses.contains("test diagnostics session ready"),
+                   "end-to-end diagnostics reports session readiness")
+        } catch {
+            assert(false, "end-to-end diagnostics succeeds: \(error)")
+        }
     }
 
     static func testDeviceTransferManagerWaitsForFreshDebugToken() async {

@@ -5370,6 +5370,10 @@ class BLEManager: NSObject, ObservableObject {
     }
 
 #if HOST_TESTING
+    func setConnectedDeviceIDForTesting(_ deviceID: String?) {
+        connectedDeviceID = deviceID
+    }
+
     func installWorkoutTelemetryWriteEndpoint(
         _ endpoint: WorkoutTelemetryWriteEndpoint?
     ) {
