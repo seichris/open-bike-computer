@@ -1592,6 +1592,8 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var downloadByteProgress: OfflineMapByteProgress?
     @Published private(set) var transferProgress: Double = 0
     @Published private(set) var isBusy = false
+    @Published private(set) var isMapJobProcessing = false
+    @Published private(set) var isDeviceTransferBusy = false
     @Published private(set) var hasActiveBackgroundUpload = false
     @Published private(set) var isServerRecoveryCheckPending = false
     @Published private(set) var isMapAreaSelectionActive = false
@@ -1969,6 +1971,7 @@ final class OfflineMapManager: ObservableObject {
         mapJobTask?.cancel()
         mapJobTask = nil
         mapJobTaskID = nil
+        isMapJobProcessing = false
         clearPersistedJob(markHandled: true)
         currentJob = nil
         downloadURL = nil
@@ -2021,13 +2024,11 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func transferDownloadedPack(bleManager: BLEManager) {
-        Task {
-            await runBusy {
-                guard let packURL = self.downloadedPackURL else {
-                    throw OfflineMapPlatformError.missingDownloadURL
-                }
-                try await self.transferPack(at: packURL, bleManager: bleManager)
+        startDeviceTransfer { manager in
+            guard let packURL = manager.downloadedPackURL else {
+                throw OfflineMapPlatformError.missingDownloadURL
             }
+            try await manager.transferPack(at: packURL, bleManager: bleManager)
         }
     }
 
@@ -2076,14 +2077,12 @@ final class OfflineMapManager: ObservableObject {
         bleManager: BLEManager,
         resumePausedUpload: Bool
     ) {
-        Task {
-            await runBusy {
-                try await self.transferPack(
-                    at: packURL,
-                    bleManager: bleManager,
-                    resumePausedUpload: resumePausedUpload
-                )
-            }
+        startDeviceTransfer { manager in
+            try await manager.transferPack(
+                at: packURL,
+                bleManager: bleManager,
+                resumePausedUpload: resumePausedUpload
+            )
         }
     }
 
@@ -2622,6 +2621,7 @@ final class OfflineMapManager: ObservableObject {
         guard mapJobTask == nil else { return }
         let taskID = UUID()
         mapJobTaskID = taskID
+        isMapJobProcessing = true
         mapJobTask = Task { [weak self] in
             guard let self else { return }
             await runBusy {
@@ -2630,6 +2630,7 @@ final class OfflineMapManager: ObservableObject {
             if mapJobTaskID == taskID {
                 mapJobTask = nil
                 mapJobTaskID = nil
+                isMapJobProcessing = false
             }
         }
     }
@@ -3502,7 +3503,27 @@ final class OfflineMapManager: ObservableObject {
         guard let packURL = downloadedPackURL else {
             throw OfflineMapPlatformError.missingDownloadURL
         }
+        while isDeviceTransferBusy || hasActiveBackgroundUpload {
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        isDeviceTransferBusy = true
+        defer { isDeviceTransferBusy = false }
         try await transferPack(at: packURL, bleManager: bleManager)
+    }
+
+    private func startDeviceTransfer(
+        _ operation: @MainActor @escaping (OfflineMapManager) async throws -> Void
+    ) {
+        guard !isDeviceTransferBusy else { return }
+        isDeviceTransferBusy = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isDeviceTransferBusy = false }
+            await self.runBusy {
+                try await operation(self)
+            }
+        }
     }
 
     private func transferPack(

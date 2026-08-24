@@ -731,6 +731,20 @@ nonisolated enum PausedMapUploadResumePolicy {
     }
 }
 
+nonisolated enum SavedMapDeviceTransferPolicy {
+    // Server-side preparation is independent; only device-side conflicts block transfer.
+    static func canStart(
+        isDeviceTransferBusy: Bool,
+        hasActiveBackgroundUpload: Bool,
+        isPausedUpload: Bool,
+        isNavigationReady: Bool
+    ) -> Bool {
+        !isDeviceTransferBusy &&
+            (isPausedUpload || !hasActiveBackgroundUpload) &&
+            isNavigationReady
+    }
+}
+
 struct OfflineMapJobGeometry: Decodable, Equatable {
     let mode: String
     let bounds: [Double]

@@ -671,7 +671,14 @@ private struct DownloadingMapsSettingsSection: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(manager.isBusy || !bleManager.isNavigationReady)
+                .disabled(
+                    !SavedMapDeviceTransferPolicy.canStart(
+                        isDeviceTransferBusy: manager.isDeviceTransferBusy,
+                        hasActiveBackgroundUpload: manager.hasActiveBackgroundUpload,
+                        isPausedUpload: true,
+                        isNavigationReady: bleManager.isNavigationReady
+                    )
+                )
                 .accessibilityLabel("Resume map upload")
                 .accessibilityHint("Reconnects to the device Wi-Fi and resumes the saved map")
             } else if let activationProgress = manager.activationProgress {
@@ -747,7 +754,7 @@ private struct DownloadingMapsSettingsSection: View {
                     .foregroundColor(.red)
             }
 
-            if manager.isBusy, manager.hasPendingMapJob {
+            if manager.isMapJobProcessing, manager.hasPendingMapJob {
                 Button(role: .destructive) {
                     manager.pausePendingMapJob()
                 } label: {
@@ -1020,9 +1027,12 @@ private struct SavedMapRow: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(
-                    manager.isBusy ||
-                        (!isPausedUpload && manager.hasActiveBackgroundUpload) ||
-                        !bleManager.isNavigationReady
+                    !SavedMapDeviceTransferPolicy.canStart(
+                        isDeviceTransferBusy: manager.isDeviceTransferBusy,
+                        hasActiveBackgroundUpload: manager.hasActiveBackgroundUpload,
+                        isPausedUpload: isPausedUpload,
+                        isNavigationReady: bleManager.isNavigationReady
+                    )
                 )
                 .accessibilityLabel(
                     isPausedUpload
