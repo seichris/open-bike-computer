@@ -144,12 +144,25 @@ accepted Linux x86-64 and Apple Silicon bundles in the
 `firmware-runtime-2026-08-10-1` prerelease. Unsupported hosts and any runtime
 whose locked bytes have changed still stop before PlatformIO.
 
-View ESP32 serial logs:
+### Capture diagnostic logs
+
+For firmware boot or crash logs, identify the board's stable USB serial with
+`pio device list`, start a bounded capture, and reproduce the problem while it
+is running:
 
 ```sh
 cd esp32
-pio device monitor -b 115200
+python3 tools/capture_boot.py \
+  --device-serial SERIAL_FROM_PIO_DEVICE_LIST --duration 90 --reset
 ```
+
+For a structured support bundle, open **Settings -> Diagnostics** in the iOS
+app, enable detailed capture only while reproducing the issue, optionally tap
+**Mark Issue Now**, then tap **Download Device Logs** and **Export Support
+Bundle**. A Mac can collect the same app container with
+`ios-app/scripts/collect-ride-diagnostics.sh`; run it with `--help` for the
+connected-device arguments. Do not include Wi-Fi credentials, hotspot
+passwords, or temporary transfer URLs/tokens in reports.
 
 ### Debug a physical device in the browser
 
