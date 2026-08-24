@@ -160,9 +160,9 @@ For a structured support bundle, open **Settings -> Diagnostics** in the iOS
 app, enable detailed capture only while reproducing the issue, optionally tap
 **Mark Issue Now**, then tap **Download Device Logs** and **Export Support
 Bundle**. A Mac can collect the same app container with
-`ios-app/scripts/collect-ride-diagnostics.sh`; run it with `--help` for the
-connected-device arguments. Do not include Wi-Fi credentials, hotspot
-passwords, or temporary transfer URLs/tokens in reports.
+`ios-app/scripts/collect-ride-diagnostics.sh --device DEVICE_IDENTIFIER
+--bundle-id LetItRide.BikeComputer.dev`. Do not include Wi-Fi credentials,
+hotspot passwords, or temporary transfer URLs/tokens in reports.
 
 ### Debug a physical device in the browser
 
