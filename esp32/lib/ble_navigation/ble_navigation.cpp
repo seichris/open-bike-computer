@@ -1779,9 +1779,9 @@ struct ActiveMapStatusSnapshot {
   map_transfer::MapPresentationMetadata presentation;
 };
 
-// Keep filesystem/manifest work out of the JSON composition frame. The
-// Arduino loop task has an 8 KiB stack and the VFS stat path is deep enough
-// that combining both phases can trip its stack canary on a status request.
+// Keep filesystem/manifest work out of the JSON composition frame. The VFS
+// stat path is deep enough that combining both phases can consume most of the
+// Arduino loop task stack during an iPhone status request.
 __attribute__((noinline)) static const ActiveMapStatusSnapshot &
 readActiveMapStatusSnapshot() {
   static ActivePresentationCache activePresentationCache;

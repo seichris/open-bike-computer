@@ -45,6 +45,7 @@ assert "CONFIG_PM_ENABLE=y" in waveshare_sdkconfig
 assert "CONFIG_PM_DFS_INIT_AUTO=n" in waveshare_sdkconfig
 assert "CONFIG_PM_PROFILING=n" in waveshare_sdkconfig
 assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n" in waveshare_sdkconfig
+assert "CONFIG_ARDUINO_LOOP_STACK_SIZE=16384" in waveshare_sdkconfig
 waveshare_unflags = config.get("waveshare_amoled_common", "build_unflags")
 assert "-Wl,--wrap=log_printf" in waveshare_unflags
 waveshare_flags = config.get("waveshare_amoled_common", "build_flags")
@@ -158,6 +159,7 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y" in sdkconfig
     assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n" not in sdkconfig
     assert "CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y" in sdkconfig
+    assert "CONFIG_ARDUINO_LOOP_STACK_SIZE=16384" in sdkconfig
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
     assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" in flags
