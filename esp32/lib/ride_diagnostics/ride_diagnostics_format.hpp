@@ -23,7 +23,8 @@ constexpr const char *kAllowedFieldKeys[] = {
     "importedCount",            "kind",                      "lastCriticalCategory",
     "lastCriticalEvent",        "lastGapMs",                  "lastMissingUptimeMs",
     "lastFailureStage",         "lastFailureCompletedStage",  "lastFailureResetReason",
-    "maximumGapMs",              "messageBytes",               "messageDigest",
+    "mapDetail",                "mapPhase",                  "mapProgressMs",
+    "maximumGapMs",             "messageBytes",               "messageDigest",
     "mode",                     "navigating",                "networkTransport",
     "origin",                   "pendingControl",            "profileVersion",
     "ready",                    "reason",                    "resetReason",
@@ -34,7 +35,10 @@ constexpr const char *kAllowedFieldKeys[] = {
     "sessionPresent",           "sha256Prefix",               "simulation",
     "sourceHealthMask",         "speedAvailable",              "startMode",
     "state",                    "storage",                    "storageErrorCount",
-    "transition",               "viewingMap",                  "workoutActive",
+    "transition",               "uiPhase",                    "uiProgressMs",
+    "viewingMap",               "watchdogCoreMask",            "watchdogUptimeMs",
+    "workoutActive",            "writerDetail",                "writerPhase",
+    "writerProgressMs",
 };
 
 constexpr std::size_t kAllowedFieldKeyCount =
@@ -72,9 +76,12 @@ inline bool allowedFieldValueKind(const char *key, FieldValueKind kind) {
       "firmwareBuild",    "firstMissingUptimeMs", "importedCount",
       "lastGapMs",        "lastMissingUptimeMs", "maximumGapMs",
       "lastFailureStage", "lastFailureCompletedStage", "lastFailureResetReason",
-      "messageBytes",     "profileVersion",    "resetReason",
+      "mapDetail",        "mapProgressMs",     "messageBytes",
+      "profileVersion",   "resetReason",
       "rideGeneration",   "runtimeBootSequence", "sampleCount",
       "sequence",         "sourceHealthMask",  "storageErrorCount",
+      "uiProgressMs",     "watchdogCoreMask", "watchdogUptimeMs",
+      "writerDetail",     "writerProgressMs",
   };
   static constexpr const char *kBooleanKeys[] = {
       "accuracyAvailable", "active",           "autoPauseEnabled",

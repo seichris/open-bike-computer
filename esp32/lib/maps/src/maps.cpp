@@ -25,6 +25,7 @@
 #include "../../power_management/power_management.hpp"
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../renderer_diagnostics/renderer_diagnostics.hpp"
+#include "../../runtime_watchdog_diagnostics/runtime_watchdog_diagnostics.hpp"
 #include "../../utils/src/line_rasterizer.hpp"
 #include "../../ui_scheduler/ui_scheduler.hpp"
 
@@ -137,6 +138,14 @@ std::atomic<bool> gMapRenderControlOperation{false};
 std::atomic<uint32_t> gMapRenderSliceCount{0};
 std::atomic<uint32_t> gMapRenderLongestSliceUs{0};
 uint32_t gMapRenderLastCheckpointUs = 0;
+uint32_t gMapRenderLastIdleReleaseUs = 0;
+constexpr uint32_t kMapRenderIdleReleaseIntervalUs = 10000;
+static_assert(configUSE_PREEMPTION == 1,
+              "map worker fairness requires FreeRTOS preemption");
+static_assert(configUSE_TIME_SLICING == 1,
+              "map worker fairness requires FreeRTOS time slicing");
+static_assert(configIDLE_SHOULD_YIELD == 0,
+              "map worker fairness requires the pinned IDF idle policy");
 
 inline bool onMapRenderWorkerTask() {
   return gMapRenderWorkerTaskHandle != nullptr &&
@@ -146,6 +155,9 @@ inline bool onMapRenderWorkerTask() {
 bool shouldCancelMapRenderWork() {
   if (onMapRenderWorkerTask()) {
     const uint32_t nowUs = micros();
+    runtime_watchdog_diagnostics::heartbeat(
+        runtime_watchdog_diagnostics::Role::MapRender,
+        gMapRenderActiveSequence.load(std::memory_order_relaxed));
     if (gMapRenderLastCheckpointUs != 0) {
       const uint32_t elapsedUs = nowUs - gMapRenderLastCheckpointUs;
       gMapRenderSliceCount.fetch_add(1, std::memory_order_relaxed);
@@ -155,8 +167,16 @@ bool shouldCancelMapRenderWork() {
              !gMapRenderLongestSliceUs.compare_exchange_weak(
                  longest, elapsedUs, std::memory_order_relaxed)) {
       }
-      if (elapsedUs >= 2000U)
-        taskYIELD();
+      // IDLE0 feeds the production task watchdog. The renderer deliberately
+      // runs at idle priority, and this bounded block guarantees an idle
+      // window during CPU-heavy parsing/rasterization instead of relying on
+      // taskYIELD() semantics or waiting for an entire frame to finish.
+      if (gMapRenderLastIdleReleaseUs == 0 ||
+          static_cast<uint32_t>(nowUs - gMapRenderLastIdleReleaseUs) >=
+              kMapRenderIdleReleaseIntervalUs) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+        gMapRenderLastIdleReleaseUs = micros();
+      }
     }
     gMapRenderLastCheckpointUs = micros();
     return map_render_job::shouldCancelWorkerOperation(
@@ -1206,6 +1226,13 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
   std::string filePath = fileName.c_str() + std::string(".fmb");
   bool isBinary = true;
 
+  if (onMapRenderWorkerTask()) {
+    runtime_watchdog_diagnostics::notePhase(
+        runtime_watchdog_diagnostics::Role::MapRender,
+        runtime_watchdog_diagnostics::Phase::MapBlockIo,
+        gMapRenderActiveSequence.load(std::memory_order_relaxed));
+  }
+
   const uint32_t openStartMs = MAPIO_TIME_MS();
   int fd = ::open(filePath.c_str(), O_RDONLY);
 
@@ -1308,6 +1335,13 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
       free(file);
       Maps::isMapFound = false;
       return mblock;
+    }
+
+    if (onMapRenderWorkerTask()) {
+      runtime_watchdog_diagnostics::notePhase(
+          runtime_watchdog_diagnostics::Role::MapRender,
+          runtime_watchdog_diagnostics::Phase::MapBlockParse,
+          gMapRenderActiveSequence.load(std::memory_order_relaxed));
     }
 
     if (isBinary) {
@@ -4176,9 +4210,13 @@ bool Maps::startRenderWorker() {
   // Wi-Fi driver before it has a chance to report an allocation failure. The
   // AMOLED boards have PSRAM and their SDK configuration explicitly permits
   // external task stacks, so reserve internal RAM for radio/driver work.
+  // IDLE0 is the only production TWDT subscriber. Keeping this continuously
+  // runnable worker at the same priority lets IDLE0 time-slice even if a
+  // preemptible FatFs/SPI read takes longer than a cooperative checkpoint.
   BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
       renderWorkerTaskThunk, "map_render", MAP_RENDER_WORKER_STACK_BYTES, this,
-      1, &renderWorkerTaskHandle, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      tskIDLE_PRIORITY, &renderWorkerTaskHandle, 0,
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (created != pdPASS) {
     renderWorkerTaskHandle = nullptr;
     renderWorkerExited.store(true, std::memory_order_release);
@@ -4245,6 +4283,9 @@ void Maps::renderWorkerTaskThunk(void *argument) {
 
 void Maps::renderWorkerLoop() {
   gMapRenderWorkerTaskHandle = xTaskGetCurrentTaskHandle();
+  runtime_watchdog_diagnostics::registerCurrentTask(
+      runtime_watchdog_diagnostics::Role::MapRender,
+      runtime_watchdog_diagnostics::Phase::Waiting);
   MAPIO_LOG("MAPIO: render-worker started core=%d\n", xPortGetCoreID());
   while (!renderWorkerShutdown.load(std::memory_order_acquire)) {
     (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
@@ -4264,6 +4305,7 @@ void Maps::renderWorkerLoop() {
       gMapRenderSliceCount.store(0, std::memory_order_relaxed);
       gMapRenderLongestSliceUs.store(0, std::memory_order_relaxed);
       gMapRenderLastCheckpointUs = micros();
+      gMapRenderLastIdleReleaseUs = gMapRenderLastCheckpointUs;
       const uint32_t startMs = millis();
       RenderResult result;
       result.version = request.version;
@@ -4300,6 +4342,10 @@ void Maps::renderWorkerLoop() {
       {
         power_management::ScopedLock powerLock(
             power_management::LockDomain::Map);
+        runtime_watchdog_diagnostics::notePhase(
+            runtime_watchdog_diagnostics::Role::MapRender,
+            runtime_watchdog_diagnostics::Phase::MapBlockPlanning,
+            request.version.sequence);
         const uint32_t blocksStartMs = millis();
         const bool blocksLoaded =
             getMapBlocks(result.viewport.bbox, memCache);
@@ -4309,6 +4355,10 @@ void Maps::renderWorkerLoop() {
           const size_t requiredBytes = request.renderStridePixels *
                                        request.renderHeight * sizeof(uint16_t);
           if (bufMapTemp != nullptr && requiredBytes <= bufMapTempSize) {
+            runtime_watchdog_diagnostics::notePhase(
+                runtime_watchdog_diagnostics::Role::MapRender,
+                runtime_watchdog_diagnostics::Phase::MapRaster,
+                request.version.sequence);
             map_surface::Rgb565Surface target{
                 static_cast<uint16_t *>(bufMapTemp), request.renderWidth,
                 request.renderHeight, request.renderStridePixels};
@@ -4422,6 +4472,10 @@ void Maps::renderWorkerLoop() {
 
       if (renderWorkerShutdown.load(std::memory_order_acquire))
         break;
+      runtime_watchdog_diagnostics::notePhase(
+          runtime_watchdog_diagnostics::Role::MapRender,
+          runtime_watchdog_diagnostics::Phase::Waiting,
+          request.version.sequence);
       taskYIELD();
       if (processPendingVectorMapActivation())
         break;
@@ -5429,9 +5483,21 @@ bool Maps::processPendingVectorMapActivation() {
       gMapRenderCancellationGeneration.load(std::memory_order_acquire),
       std::memory_order_release);
   gMapRenderControlOperation.store(true, std::memory_order_release);
+  if (onMapRenderWorkerTask()) {
+    runtime_watchdog_diagnostics::notePhase(
+        runtime_watchdog_diagnostics::Role::MapRender,
+        runtime_watchdog_diagnostics::Phase::MapActivation,
+        request.sequence);
+  }
   const bool loaded = probeVectorMapFolderOnStorageOwner(request.folder) &&
                       switchVectorMapFolderOnStorageOwner(request.folder);
   gMapRenderControlOperation.store(false, std::memory_order_release);
+  if (onMapRenderWorkerTask()) {
+    runtime_watchdog_diagnostics::notePhase(
+        runtime_watchdog_diagnostics::Role::MapRender,
+        runtime_watchdog_diagnostics::Phase::Waiting,
+        request.sequence);
+  }
 
   if (renderStateMutex != nullptr &&
       xSemaphoreTake(renderStateMutex, portMAX_DELAY) == pdTRUE) {
