@@ -17,6 +17,11 @@ The catalog provides:
 - a production promotion grant for validating and re-signing a development
   final ZIP without regenerating the map.
 
+Before either an initial publication or a production promotion becomes live,
+the Worker HEAD-verifies every proposed object's exact bucket, key, byte count,
+and `sha256` metadata through its read-only R2 credential. An exact
+idempotency replay does not repeat those reads.
+
 R2 buckets are private. The Worker has Object Read-only credentials for each
 bucket and creates 15-minute presigned GET URLs. Coolify publishers use
 different bucket-scoped write credentials.
@@ -55,6 +60,33 @@ production step in
   per-location Cloudflare rate-limit bindings. The counters are intentionally
   separate between staging and production; keep their namespace IDs unique
   within the Cloudflare account.
+- Public D1 mutations are limited to 6 per library per minute and 20 aggregate
+  per Cloudflare location per minute. The library counter is consumed first so
+  one credential cannot spend the whole aggregate allowance. Bootstrap has
+  separate 6-per-client and 12-per-location limits. Cloudflare rate-limit
+  counters are location-local and eventually consistent, so the durable map,
+  share, and link-code quotas below remain the authoritative cost bound.
+- Signed map-service mutations use a separate 30-per-channel counter. Public
+  callers cannot consume publication, retention, or promotion capacity.
+- A library may retain at most 100 map references, 100 active shares, 500
+  total share rows, 500 recipient share claims, 8 active credentials, 5 live
+  link codes, and 50 total link-code rows. Checks are atomic in D1, including
+  share claims and library-link merges. Old inactive shares are reclaimed only
+  beyond `RETENTION_GRACE_DAYS`; expired unclaimed link codes are reclaimed
+  immediately, and claimed link evidence is retained through that grace
+  window.
+- `DELETE /v1/library/maps/{mapEntryId}` removes only the authenticated
+  library's reference. It returns 204 for both the first detach and an
+  idempotent retry; it never deletes another library's claimed copy, a share,
+  or R2 bytes. Detach also removes that library's incoming claims for the map
+  and recalculates the affected shares' claim counts, recovering claim quota.
+  Active outgoing shares independently keep artifacts retained.
+- Download grants and expired link codes are purged in bounded batches during
+  later mutations, preventing unbounded D1 accumulation.
+- Production promotion has one durable lease per map. The backend renews the
+  exact source-artifact lease while downloading, validating, repacking,
+  signing, and uploading. Expired leases can be recovered after a crash;
+  retries short-circuit once the production artifact is already live.
 
 Schema changes belong in numbered files under `migrations/` and must be applied
 to staging before production.

@@ -195,6 +195,8 @@ class ArtifactRecord:
 
 
 class FileSystemArtifactStore:
+    catalog_delivery_backed = False
+
     def __init__(self, root: str | Path):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -259,6 +261,9 @@ class FileSystemArtifactStore:
             and sha256_file(path) == sha256
         )
 
+    def absent(self, object_key: str) -> bool:
+        return self.local_path(object_key) is None
+
     def read_prefix(self, object_key: str, *, maximum_bytes: int) -> bytes | None:
         if not 0 < maximum_bytes <= MAXIMUM_STREAM_ARTIFACT_BYTES:
             raise ValueError("artifact prefix limit is invalid")
@@ -302,6 +307,8 @@ class FileSystemArtifactStore:
 
 
 class S3ArtifactStore:
+    catalog_delivery_backed = True
+
     def __init__(
         self,
         client,
@@ -393,6 +400,10 @@ class S3ArtifactStore:
             return False
         return True
 
+    def absent(self, object_key: str) -> bool:
+        _validate_object_key(object_key)
+        return self._head(self._key(object_key)) is None
+
     def read_prefix(self, object_key: str, *, maximum_bytes: int) -> bytes | None:
         _validate_object_key(object_key)
         if not 0 < maximum_bytes <= MAXIMUM_STREAM_ARTIFACT_BYTES:
@@ -479,6 +490,10 @@ class MirroredArtifactStore:
         self.primary = primary
         self.mirror = mirror
 
+    @property
+    def catalog_delivery_backed(self) -> bool:
+        return bool(getattr(self.mirror, "catalog_delivery_backed", False))
+
     def put(
         self,
         source: str | Path,
@@ -513,6 +528,53 @@ class MirroredArtifactStore:
             sha256=sha256,
             expected_bytes=expected_bytes,
         )
+
+    def absent(self, object_key: str) -> bool:
+        return self.primary.absent(object_key) and self.mirror.absent(object_key)
+
+    def backfill_from_primary(
+        self,
+        object_key: str,
+        *,
+        sha256: str,
+        expected_bytes: int,
+        media_type: str,
+    ) -> bool:
+        """Copy one already-recorded immutable primary object into the mirror.
+
+        This intentionally is not part of ``put`` or catalog publication retry:
+        importing filesystem-era READY jobs into shared delivery must be an
+        explicit operator action. The exact recorded bytes are verified before
+        and after the conditional mirror write.
+        """
+        source = self.primary.local_path(object_key)
+        if source is None or not self.primary.verify(
+            object_key,
+            sha256=sha256,
+            expected_bytes=expected_bytes,
+        ):
+            raise ArtifactStoreError(
+                "recorded primary artifact is missing or does not match its identity"
+            )
+        already_present = self.mirror.verify(
+            object_key,
+            sha256=sha256,
+            expected_bytes=expected_bytes,
+        )
+        if not already_present:
+            self.mirror.put(
+                source,
+                object_key,
+                sha256=sha256,
+                media_type=media_type,
+            )
+        if not self.verify(
+            object_key,
+            sha256=sha256,
+            expected_bytes=expected_bytes,
+        ):
+            raise ArtifactStoreError("artifact mirror backfill verification failed")
+        return not already_present
 
     def read_prefix(self, object_key: str, *, maximum_bytes: int) -> bytes | None:
         return self.primary.read_prefix(

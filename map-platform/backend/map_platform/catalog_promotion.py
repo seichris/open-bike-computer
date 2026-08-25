@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -38,10 +40,109 @@ class CatalogPromotionError(RuntimeError):
     code = "catalog_promotion_failed"
 
 
+class _PromotionLeaseHeartbeat:
+    def __init__(
+        self,
+        *,
+        catalog_client: CatalogClient,
+        entry_id: str,
+        lease_id: str,
+        artifact: dict[str, Any],
+        interval_seconds: float = 300.0,
+    ) -> None:
+        self.catalog_client = catalog_client
+        self.entry_id = entry_id
+        self.lease_id = lease_id
+        self.artifact = artifact
+        self.interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._error: Exception | None = None
+
+    def __enter__(self) -> _PromotionLeaseHeartbeat:
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"promotion-lease-{self.entry_id[-8:]}",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, exception_type, *_: Any) -> None:
+        self.stop()
+        if exception_type is None:
+            self.check()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            try:
+                result = self.catalog_client.renew_promotion_lease(
+                    self.entry_id,
+                    lease_id=self.lease_id,
+                    artifact=self.artifact,
+                )
+                if (
+                    result.get("mapEntryId") != self.entry_id
+                    or result.get("leaseId") != self.lease_id
+                    or not isinstance(result.get("leaseExpiresAt"), str)
+                ):
+                    raise CatalogPromotionError(
+                        "promotion lease renewal returned invalid identity"
+                    )
+            except Exception as exc:  # noqa: BLE001 - surfaced on the main thread
+                self._error = exc
+                self._stop.set()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+
+    def check(self) -> None:
+        if self._error is not None:
+            raise CatalogPromotionError("promotion lease renewal failed") from self._error
+
+
 def _require_string(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise CatalogPromotionError(f"promotion {field} is invalid")
     return value
+
+
+def already_production_result(
+    entry_id: str,
+    grant: dict[str, Any],
+) -> dict[str, Any] | None:
+    if grant.get("state") != "already_production":
+        return None
+    artifact = grant.get("artifact")
+    if grant.get("mapEntryId") != entry_id or not isinstance(artifact, dict):
+        raise CatalogPromotionError("existing production promotion is invalid")
+    artifact_id_value = _require_string(artifact.get("artifactId"), "artifact ID")
+    object_key = _require_string(artifact.get("objectKey"), "object key")
+    sha256 = _require_string(artifact.get("sha256"), "artifact receipt")
+    byte_count = artifact.get("bytes")
+    if (
+        artifact.get("format") != BIKE_MAP_STREAM_FORMAT
+        or artifact.get("deliveryTier") != "production"
+        or type(byte_count) is not int
+        or byte_count <= 0
+        or len(sha256) != 64
+    ):
+        raise CatalogPromotionError("existing production artifact is invalid")
+    publication_id = grant.get("publicationId")
+    if publication_id is not None and not isinstance(publication_id, str):
+        raise CatalogPromotionError("existing production publication is invalid")
+    return {
+        "mapEntryId": entry_id,
+        "publicationId": publication_id,
+        "artifactId": artifact_id_value,
+        "objectKey": object_key,
+        "bytes": byte_count,
+        "sha256": sha256,
+        "state": "already_production",
+    }
 
 
 def _download_exact_zip(
@@ -121,12 +222,22 @@ def promote_catalog_map(
     producer_build_sha256: str,
     producer_image_digest: str,
     work_root: Path,
+    grant: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Repackage one validated development ZIP as a production-signed stream."""
 
     if catalog_client.channel != "production":
         raise CatalogPromotionError("catalog promotion requires the production channel")
-    grant = catalog_client.promotion_grant(entry_id)
+    if grant is None:
+        grant = catalog_client.promotion_grant(entry_id)
+    existing = already_production_result(entry_id, grant)
+    if existing is not None:
+        return existing
+    if grant.get("state") != "granted":
+        raise CatalogPromotionError("promotion grant state is invalid")
+    lease_id = _require_string(grant.get("leaseId"), "lease ID")
+    if re.fullmatch(r"promotion_lease_v1_[A-Za-z0-9_-]{32}", lease_id) is None:
+        raise CatalogPromotionError("promotion lease ID is invalid")
     artifact = grant.get("artifact")
     map_value = grant.get("map")
     if not isinstance(artifact, dict) or not isinstance(map_value, dict):
@@ -144,7 +255,16 @@ def promote_catalog_map(
         raise CatalogPromotionError("promotion ZIP identity is invalid")
     r2_endpoint = os.environ.get("MAP_PLATFORM_S3_ENDPOINT_URL", "").rstrip("/")
     work_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="catalog-promotion-", dir=work_root) as temporary:
+    heartbeat = _PromotionLeaseHeartbeat(
+        catalog_client=catalog_client,
+        entry_id=entry_id,
+        lease_id=lease_id,
+        artifact=artifact,
+    )
+    with heartbeat, tempfile.TemporaryDirectory(
+        prefix="catalog-promotion-",
+        dir=work_root,
+    ) as temporary:
         temporary_root = Path(temporary)
         archive_path = temporary_root / "source.zip"
         _download_exact_zip(
@@ -156,6 +276,7 @@ def promote_catalog_map(
             r2_endpoint=r2_endpoint,
             timeout_seconds=catalog_client.timeout_seconds,
         )
+        heartbeat.check()
         zip_record = ArtifactRecord(
             format=ZIP_STORED_FORMAT,
             media_type=ZIP_MEDIA_TYPE,
@@ -169,6 +290,7 @@ def promote_catalog_map(
         pack_root = temporary_root / "pack"
         pack_root.mkdir()
         manifest = _extract_validated_archive(archive_path, pack_root)
+        heartbeat.check()
 
         map_id = _require_string(map_value.get("mapId"), "map ID")
         format_version = map_value.get("rendererFormatVersion")
@@ -228,6 +350,7 @@ def promote_catalog_map(
             manifest["files"],
             format_version,
         )
+        heartbeat.check()
         stream_manifest = dict(manifest)
         stream_manifest["producer"] = {
             "buildSha256": producer_build_sha256,
@@ -240,6 +363,7 @@ def promote_catalog_map(
             signer,
             stream_path,
         )
+        heartbeat.check()
         object_key = map_stream_object_key(
             map_id,
             stream.signed_manifest_receipt,
@@ -268,6 +392,19 @@ def promote_catalog_map(
             producer_build_sha256=producer_build_sha256,
             producer_image_digest=producer_image_digest,
         )
+        if not bool(getattr(artifact_store, "catalog_delivery_backed", False)):
+            raise CatalogPromotionError(
+                "promotion requires shared artifact storage"
+            )
+        if not artifact_store.verify(
+            stream_record.object_key,
+            sha256=stream_record.sha256,
+            expected_bytes=stream_record.bytes,
+        ):
+            raise CatalogPromotionError(
+                "promotion artifact is missing from shared delivery storage"
+            )
+        heartbeat.check()
         delivery = catalog_delivery_requirements("production")
         if not delivery:
             raise CatalogPromotionError("production catalog delivery identity is not configured")
@@ -312,7 +449,13 @@ def promote_catalog_map(
                 }
             ],
         }
-        result = catalog_client.finalize_promotion(entry_id, publication)
+        heartbeat.stop()
+        heartbeat.check()
+        result = catalog_client.finalize_promotion(
+            entry_id,
+            publication,
+            lease_id=lease_id,
+        )
         if result.get("mapEntryId") != entry_id or result.get("state") != "finalized":
             raise CatalogPromotionError("promotion finalize returned invalid identity")
         return {

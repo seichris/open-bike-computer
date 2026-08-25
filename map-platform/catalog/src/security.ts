@@ -148,17 +148,36 @@ export async function authenticatedLibraryID(
   request: Request,
   env: Env,
 ): Promise<string> {
+  return (await authenticatedLibraryPrincipal(request, env)).libraryID;
+}
+
+export interface AuthenticatedLibraryPrincipal {
+  libraryID: string;
+  credentialHash: string;
+}
+
+export async function authenticatedLibraryPrincipal(
+  request: Request,
+  env: Env,
+): Promise<AuthenticatedLibraryPrincipal> {
   const authorization = request.headers.get("authorization") ?? "";
   if (!authorization.startsWith("Bearer "))
     throw new HttpError(401, "library authorization required");
   const credential = authorization.slice("Bearer ".length);
-  return libraryIDForCredential(credential, env);
+  return libraryPrincipalForCredential(credential, env);
 }
 
 export async function libraryIDForCredential(
   credential: string,
   env: Env,
 ): Promise<string> {
+  return (await libraryPrincipalForCredential(credential, env)).libraryID;
+}
+
+async function libraryPrincipalForCredential(
+  credential: string,
+  env: Env,
+): Promise<AuthenticatedLibraryPrincipal> {
   if (!TOKEN.test(credential))
     throw new HttpError(401, "invalid library authorization");
   const credentialHash = await sha256Hex(credential);
@@ -173,13 +192,18 @@ export async function libraryIDForCredential(
     .bind(credentialHash)
     .first<{ library_id: string }>();
   if (!row) throw new HttpError(401, "invalid library authorization");
-  const now = new Date().toISOString();
+  const clock = new Date();
+  const now = clock.toISOString();
+  const staleBefore = new Date(
+    clock.getTime() - 24 * 60 * 60 * 1000,
+  ).toISOString();
   await env.DB.prepare(
-    "UPDATE library_credentials SET last_used_at = ? WHERE credential_hash = ?",
+    `UPDATE library_credentials SET last_used_at = ?
+      WHERE credential_hash = ? AND last_used_at <= ?`,
   )
-    .bind(now, credentialHash)
+    .bind(now, credentialHash, staleBefore)
     .run();
-  return row.library_id;
+  return { libraryID: row.library_id, credentialHash };
 }
 
 export function requireToken(value: string): string {

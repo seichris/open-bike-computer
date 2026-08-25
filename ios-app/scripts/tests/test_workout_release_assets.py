@@ -127,7 +127,15 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "BICINO_APP_ICON_NAME": "AppIconDev",
             "BICINO_MAP_SERVICE_HOST": "maps-dev.8o.vc",
             "BICINO_MAP_CATALOG_HOST": "maps-share.8o.vc",
-            "BICINO_MAP_R2_DOWNLOAD_HOST": "invalid.invalid",
+            "BICINO_MAP_R2_DOWNLOAD_HOST": (
+                "5834cd65d5f197557149dbc10074d37f."
+                "r2.cloudflarestorage.com"
+            ),
+            "BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID": "map-dev-2026-08",
+            "BICINO_MAP_DEVELOPMENT_SIGNING_PUBLIC_KEY_X963_HEX": (
+                "04a3b3bec1db96a28ca372e203af005936427e20ddba7dc7e955dfb42ec701e91"
+                "a99b1d9dc45dd3565aecf2f165cce3a5292c22066e5494fe002660bb08f0b1241"
+            ),
         }
         expected_production = {
             "BICINO_IOS_BUNDLE_IDENTIFIER": "LetItRide.BikeComputer",
@@ -146,10 +154,43 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "BICINO_APP_ICON_NAME": "AppIcon",
             "BICINO_MAP_SERVICE_HOST": "maps.8o.vc",
             "BICINO_MAP_CATALOG_HOST": "maps-share.8o.vc",
-            "BICINO_MAP_R2_DOWNLOAD_HOST": "invalid.invalid",
+            "BICINO_MAP_R2_DOWNLOAD_HOST": (
+                "5834cd65d5f197557149dbc10074d37f."
+                "r2.cloudflarestorage.com"
+            ),
+            "BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID": "",
+            "BICINO_MAP_DEVELOPMENT_SIGNING_PUBLIC_KEY_X963_HEX": "",
         }
         self.assertEqual(development, expected_development)
         self.assertEqual(production, expected_production)
+
+        development_key_id = development[
+            "BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID"
+        ]
+        development_public_key = development[
+            "BICINO_MAP_DEVELOPMENT_SIGNING_PUBLIC_KEY_X963_HEX"
+        ]
+        self.assertRegex(development_key_id, r"^[A-Za-z0-9._-]{1,64}$")
+        self.assertRegex(development_public_key, r"^04[0-9a-f]{128}$")
+        self.assertEqual(
+            production["BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID"], ""
+        )
+        self.assertEqual(
+            production[
+                "BICINO_MAP_DEVELOPMENT_SIGNING_PUBLIC_KEY_X963_HEX"
+            ],
+            "",
+        )
+
+        info = load_plist(IOS_PROJECT / "BikeComputer" / "Info.plist")
+        self.assertEqual(
+            info["BicinoMapDevelopmentSigningKeyID"],
+            "$(BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID)",
+        )
+        self.assertEqual(
+            info["BicinoMapDevelopmentSigningPublicKeyX963Hex"],
+            "$(BICINO_MAP_DEVELOPMENT_SIGNING_PUBLIC_KEY_X963_HEX)",
+        )
 
         entitlements = load_plist(
             IOS_PROJECT / "BikeComputer" / "BikeComputer.entitlements"

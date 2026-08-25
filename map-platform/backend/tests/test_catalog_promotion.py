@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
+import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from map_platform.catalog import map_entry_id_for_descriptor
 from map_platform.catalog_promotion import (
     CatalogPromotionError,
+    _PromotionLeaseHeartbeat,
     _download_exact_zip,
     promote_catalog_map,
 )
@@ -47,6 +50,14 @@ class FakePromotionCatalog:
     def promotion_grant(self, entry_id):
         del entry_id
         return self.grant
+
+    def renew_promotion_lease(self, entry_id, *, lease_id, artifact):
+        del artifact
+        return {
+            "mapEntryId": entry_id,
+            "leaseId": lease_id,
+            "leaseExpiresAt": "2026-08-25T01:00:00Z",
+        }
 
 
 class CatalogPromotionDownloadTests(unittest.TestCase):
@@ -89,6 +100,58 @@ class CatalogPromotionDownloadTests(unittest.TestCase):
                         r2_endpoint="https://a" + "1" * 31 + ".r2.cloudflarestorage.com",
                         timeout_seconds=10,
                     )
+
+
+class PromotionLeaseHeartbeatTests(unittest.TestCase):
+    def test_renews_the_exact_lease_during_long_running_promotion(self):
+        renewed = threading.Event()
+        catalog = Mock()
+
+        def renew(entry_id, *, lease_id, artifact):
+            renewed.set()
+            self.assertEqual(entry_id, "map_v1_" + "m" * 43)
+            self.assertEqual(lease_id, "promotion_lease_v1_" + "L" * 32)
+            self.assertEqual(artifact["artifactId"], "artifact_v1_" + "A" * 43)
+            return {
+                "mapEntryId": entry_id,
+                "leaseId": lease_id,
+                "leaseExpiresAt": "2026-08-25T01:00:00Z",
+            }
+
+        catalog.renew_promotion_lease.side_effect = renew
+        heartbeat = _PromotionLeaseHeartbeat(
+            catalog_client=catalog,
+            entry_id="map_v1_" + "m" * 43,
+            lease_id="promotion_lease_v1_" + "L" * 32,
+            artifact={"artifactId": "artifact_v1_" + "A" * 43},
+            interval_seconds=0.01,
+        )
+        with heartbeat:
+            self.assertTrue(renewed.wait(1))
+            heartbeat.check()
+        catalog.renew_promotion_lease.assert_called()
+
+    def test_surfaces_lease_loss_on_the_promotion_thread(self):
+        attempted = threading.Event()
+        catalog = Mock()
+
+        def fail(*_args, **_kwargs):
+            attempted.set()
+            raise RuntimeError("lease lost")
+
+        catalog.renew_promotion_lease.side_effect = fail
+        heartbeat = _PromotionLeaseHeartbeat(
+            catalog_client=catalog,
+            entry_id="map_v1_" + "m" * 43,
+            lease_id="promotion_lease_v1_" + "L" * 32,
+            artifact={"artifactId": "artifact_v1_" + "A" * 43},
+            interval_seconds=0.01,
+        )
+        heartbeat.__enter__()
+        self.assertTrue(attempted.wait(1))
+        with self.assertRaisesRegex(CatalogPromotionError, "renewal failed"):
+            heartbeat.check()
+        heartbeat.stop()
 
     def test_download_rejects_receipt_mismatch(self):
         body = b"changed"
@@ -134,10 +197,14 @@ class CatalogPromotionIdentityTests(unittest.TestCase):
     @staticmethod
     def grant(*, content_receipt, entry_id):
         return {
+            "state": "granted",
+            "leaseId": "promotion_lease_v1_" + "L" * 32,
+            "leaseExpiresAt": "2026-08-25T01:00:00Z",
             "downloadURL": (
                 "https://maps-share.8o.vc/v1/internal/promotions/downloads/token"
             ),
             "artifact": {
+                "artifactId": "artifact_v1_" + "A" * 43,
                 "format": "zip-stored-v1",
                 "deliveryTier": "development",
                 "filename": "promotion-map.zip",
@@ -192,6 +259,38 @@ class CatalogPromotionIdentityTests(unittest.TestCase):
                 work_root=Path(temporary),
             )
 
+    def test_already_production_short_circuits_all_local_work(self):
+        entry_id = "map_v1_" + "M" * 43
+        grant = {
+            "state": "already_production",
+            "mapEntryId": entry_id,
+            "publicationId": "promotion:production:" + "9" * 64,
+            "artifact": {
+                "artifactId": "artifact_v1_" + "P" * 43,
+                "format": "bike-map-stream-v1",
+                "deliveryTier": "production",
+                "objectKey": "maps/promotion-map/production.bmap",
+                "bytes": 123,
+                "sha256": "8" * 64,
+            },
+        }
+        artifact_store = Mock()
+        signer = Mock()
+
+        result = promote_catalog_map(
+            entry_id,
+            catalog_client=FakePromotionCatalog(grant),
+            artifact_store=artifact_store,
+            signer=signer,
+            producer_build_sha256="2" * 64,
+            producer_image_digest="sha256:" + "3" * 64,
+            work_root=Path("/path/that/must/not/be/created"),
+        )
+
+        self.assertEqual(result["state"], "already_production")
+        artifact_store.assert_not_called()
+        signer.assert_not_called()
+
     def test_promotion_rejects_catalog_content_receipt_not_derived_from_zip(self):
         manifest = self.manifest()
         forged_receipt = "4" * 64
@@ -227,6 +326,70 @@ class CatalogPromotionIdentityTests(unittest.TestCase):
 
         with self.assertRaisesRegex(CatalogPromotionError, "map entry identity"):
             self.promote_until_identity_validation(grant, manifest)
+
+    def test_promotion_never_finalizes_an_unverified_shared_object(self):
+        manifest = self.manifest()
+        receipt = manifest_receipt(canonical_stream_manifest_bytes(manifest))
+        entry_id = map_entry_id_for_descriptor(
+            content_receipt=receipt,
+            renderer="esp32-fmb",
+            renderer_format_version=1,
+            features=[],
+        )
+        catalog = FakePromotionCatalog(
+            self.grant(content_receipt=receipt, entry_id=entry_id)
+        )
+        catalog.finalize_promotion = Mock()
+        artifact_store = SimpleNamespace(
+            catalog_delivery_backed=True,
+            put=Mock(),
+            verify=Mock(return_value=False),
+        )
+        stream = SimpleNamespace(
+            signed_manifest_receipt="5" * 64,
+            signature_key_id="production",
+            sha256="6" * 64,
+            bytes=123,
+            manifest_receipt=receipt,
+        )
+        signer = SimpleNamespace(public_key_sha256="7" * 64)
+        environment = {
+            "MAP_PLATFORM_S3_ENDPOINT_URL": (
+                "https://a" + "1" * 31 + ".r2.cloudflarestorage.com"
+            ),
+            "MAP_PLATFORM_CATALOG_REQUIRED_IOS_BUILD": "202608250001",
+            "MAP_PLATFORM_CATALOG_REQUIRED_IOS_GIT_SHA": "8" * 40,
+            "MAP_PLATFORM_CATALOG_REQUIRED_IOS_BUILD_SHA256": "9" * 64,
+        }
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(
+            "os.environ",
+            environment,
+            clear=True,
+        ), patch(
+            "map_platform.catalog_promotion._download_exact_zip"
+        ), patch(
+            "map_platform.catalog_promotion.validate_final_assembly_artifact"
+        ), patch(
+            "map_platform.catalog_promotion._extract_validated_archive",
+            return_value=manifest,
+        ), patch(
+            "map_platform.catalog_promotion.validate_renderer_artifacts"
+        ), patch(
+            "map_platform.catalog_promotion.write_map_stream_artifact",
+            return_value=stream,
+        ):
+            with self.assertRaisesRegex(CatalogPromotionError, "missing"):
+                promote_catalog_map(
+                    entry_id,
+                    catalog_client=catalog,
+                    artifact_store=artifact_store,
+                    signer=signer,
+                    producer_build_sha256="2" * 64,
+                    producer_image_digest="sha256:" + "3" * 64,
+                    work_root=Path(temporary),
+                )
+        artifact_store.verify.assert_called_once()
+        catalog.finalize_promotion.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

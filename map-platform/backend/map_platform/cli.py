@@ -8,7 +8,13 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .artifacts import create_artifact_store_from_environment
-from .catalog import CatalogClient, publish_ready_job, retry_ready_publications
+from .catalog import (
+    CatalogClient,
+    backfill_ready_job_artifacts,
+    delete_catalog_retention_artifacts,
+    publish_ready_job,
+    retry_ready_publications,
+)
 from .generation_profiles import (
     configured_deployment_channel,
     load_generation_profile_policy,
@@ -271,6 +277,7 @@ def _perform_maintenance(
             lambda: retry_ready_publications(
                 store,
                 catalog_client,
+                artifact_store=artifact_store,
                 maximum_jobs=max_gc_items,
             ),
         ),
@@ -281,6 +288,15 @@ def _perform_maintenance(
                 older_than_days=retention_days,
                 artifact_store=artifact_store,
                 max_gc_items=max_gc_items,
+            ),
+        ),
+        (
+            "catalogRetention",
+            lambda: delete_catalog_retention_artifacts(
+                store,
+                catalog_client,
+                artifact_store,
+                maximum_artifacts=min(max_gc_items, 10),
             ),
         ),
         (
@@ -381,6 +397,12 @@ def main() -> int:
 
     run = subparsers.add_parser("run-job")
     run.add_argument("job_id")
+
+    backfill_catalog = subparsers.add_parser(
+        "backfill-catalog-job",
+        help="explicitly verify and copy one filesystem-era READY job into shared storage",
+    )
+    backfill_catalog.add_argument("job_id")
 
     monitoring_summary = subparsers.add_parser("monitoring-summary")
     monitoring_summary.add_argument("--window-hours", type=int, default=168)
@@ -723,12 +745,48 @@ def main() -> int:
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
     catalog_client = CatalogClient.from_environment()
 
+    if args.command == "backfill-catalog-job":
+        if catalog_client is None:
+            raise SystemExit("MAP_PLATFORM_CATALOG_URL is required")
+        artifact_store = create_artifact_store_from_environment(data_root)
+        backfill = backfill_ready_job_artifacts(
+            store,
+            artifact_store,
+            args.job_id,
+        )
+        job = publish_ready_job(
+            store,
+            catalog_client,
+            args.job_id,
+            artifact_store=artifact_store,
+        )
+        print(
+            json.dumps(
+                {
+                    "jobId": job.job_id,
+                    "publicationState": job.catalog_publication_state,
+                    "backfill": backfill,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
     if args.command == "promote-catalog-map":
-        from .catalog_promotion import promote_catalog_map
+        from .catalog_promotion import (
+            already_production_result,
+            promote_catalog_map,
+        )
         from .map_signing import load_map_artifact_signer_from_environment
 
         if catalog_client is None:
             raise SystemExit("MAP_PLATFORM_CATALOG_URL is required")
+        grant = catalog_client.promotion_grant(args.map_entry_id)
+        existing = already_production_result(args.map_entry_id, grant)
+        if existing is not None:
+            print(json.dumps(existing, indent=2, sort_keys=True))
+            return 0
         signer = load_map_artifact_signer_from_environment()
         if signer is None:
             raise SystemExit("production map stream signing is not enabled")
@@ -747,6 +805,7 @@ def main() -> int:
             producer_build_sha256=producer_build_sha256,
             producer_image_digest=producer_image_digest,
             work_root=data_root / "promotions",
+            grant=grant,
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
@@ -810,6 +869,7 @@ def main() -> int:
             store,
             catalog_client,
             completed.job_id,
+            artifact_store=pipeline.artifact_store,
         )
         print(
             json.dumps(

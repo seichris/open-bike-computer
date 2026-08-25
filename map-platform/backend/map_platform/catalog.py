@@ -8,6 +8,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
@@ -21,6 +22,13 @@ from .models import JobStatus, MapJob, utc_now_iso
 CATALOG_STATES = frozenset({"pending", "finalized", "failed", "quarantined"})
 CATALOG_ID_PATTERN = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 SERVICE_KEY_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
+RETENTION_ARTIFACT_ID_PATTERN = re.compile(r"artifact_v1_[A-Za-z0-9_-]{43}")
+RETENTION_LEASE_ID_PATTERN = re.compile(
+    r"retention_lease_v1_[A-Za-z0-9_-]{32}"
+)
+RETENTION_OBJECT_KEY_PATTERN = re.compile(
+    r"(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9!_.*'()/-]{1,1024}"
+)
 
 
 class CatalogPublicationError(RuntimeError):
@@ -361,15 +369,129 @@ class CatalogClient:
         self,
         entry_id: str,
         payload: dict[str, Any],
+        *,
+        lease_id: str,
     ) -> dict[str, Any]:
         publication_id_value = payload.get("publicationId")
         if not isinstance(publication_id_value, str):
             raise ValueError("promotion publication ID is invalid")
+        if re.fullmatch(r"promotion_lease_v1_[A-Za-z0-9_-]{32}", lease_id) is None:
+            raise ValueError("promotion lease ID is invalid")
         return self._request(
             f"/v1/internal/promotions/{quote(entry_id, safe='')}/finalize",
-            payload,
+            {"leaseId": lease_id, "publication": payload},
             idempotency_key=publication_id_value,
         )
+
+    def renew_promotion_lease(
+        self,
+        entry_id: str,
+        *,
+        lease_id: str,
+        artifact: dict[str, Any],
+    ) -> dict[str, Any]:
+        if re.fullmatch(r"promotion_lease_v1_[A-Za-z0-9_-]{32}", lease_id) is None:
+            raise ValueError("promotion lease ID is invalid")
+        payload = {
+            "artifactId": artifact.get("artifactId"),
+            "objectKey": artifact.get("objectKey"),
+            "bytes": artifact.get("bytes"),
+            "sha256": artifact.get("sha256"),
+        }
+        return self._request(
+            f"/v1/internal/promotions/{quote(entry_id, safe='')}"
+            f"/leases/{quote(lease_id, safe='')}/renew",
+            payload,
+            idempotency_key=(
+                f"promotion-renew:{lease_id}:{int(time.time() // 300)}"
+            ),
+        )
+
+    def retention_authorizations(
+        self,
+        *,
+        maximum_artifacts: int,
+    ) -> list[dict[str, Any]]:
+        if not 1 <= maximum_artifacts <= 10:
+            raise ValueError("catalog retention limit is invalid")
+        result = self._request(
+            "/v1/internal/retention/authorizations",
+            {"limit": maximum_artifacts},
+            idempotency_key=(
+                f"retention-authorize:{self.channel}:{int(time.time() // 600)}"
+            ),
+        )
+        artifacts = result.get("artifacts")
+        if not isinstance(artifacts, list) or len(artifacts) > maximum_artifacts:
+            raise CatalogPublicationError(
+                "catalog retention authorization response is invalid"
+            )
+        if any(not isinstance(value, dict) for value in artifacts):
+            raise CatalogPublicationError(
+                "catalog retention authorization response is invalid"
+            )
+        return artifacts
+
+    def claim_retention_deletion(
+        self,
+        authorization: dict[str, Any],
+    ) -> dict[str, Any]:
+        artifact_id_value = authorization.get("artifactId")
+        if (
+            not isinstance(artifact_id_value, str)
+            or RETENTION_ARTIFACT_ID_PATTERN.fullmatch(artifact_id_value) is None
+        ):
+            raise CatalogPublicationError("catalog retention artifact ID is invalid")
+        payload = {
+            "bucketSlot": authorization["bucketSlot"],
+            "objectKey": authorization["objectKey"],
+            "bytes": authorization["bytes"],
+            "sha256": authorization["sha256"],
+        }
+        result = self._request(
+            "/v1/internal/retention/artifacts/"
+            f"{quote(artifact_id_value, safe='')}/claim",
+            payload,
+            idempotency_key=f"retention-claim:{artifact_id_value}",
+        )
+        if result.get("artifactId") != artifact_id_value:
+            raise CatalogPublicationError(
+                "catalog retention claim response is invalid"
+            )
+        return result
+
+    def confirm_retention_deletion(
+        self,
+        authorization: dict[str, Any],
+    ) -> dict[str, Any]:
+        artifact_id_value = authorization.get("artifactId")
+        if (
+            not isinstance(artifact_id_value, str)
+            or RETENTION_ARTIFACT_ID_PATTERN.fullmatch(artifact_id_value) is None
+        ):
+            raise CatalogPublicationError("catalog retention artifact ID is invalid")
+        payload = {
+            "bucketSlot": authorization["bucketSlot"],
+            "objectKey": authorization["objectKey"],
+            "bytes": authorization["bytes"],
+            "sha256": authorization["sha256"],
+            "leaseId": authorization["leaseId"],
+            "confirmedAbsent": True,
+        }
+        result = self._request(
+            "/v1/internal/retention/artifacts/"
+            f"{quote(artifact_id_value, safe='')}/deleted",
+            payload,
+            idempotency_key=f"retention-deleted:{artifact_id_value}",
+        )
+        if (
+            result.get("artifactId") != artifact_id_value
+            or result.get("state") != "deleted"
+        ):
+            raise CatalogPublicationError(
+                "catalog retention confirmation response is invalid"
+            )
+        return result
 
     def _request(
         self,
@@ -440,7 +562,57 @@ def catalog_status_from_environment() -> dict[str, Any]:
     }
 
 
-def publish_ready_job(store, client: CatalogClient | None, job_id: str) -> MapJob:
+def _verify_catalog_artifacts(job: MapJob, artifact_store) -> None:
+    if not bool(getattr(artifact_store, "catalog_delivery_backed", False)):
+        raise CatalogPublicationError(
+            "catalog publication requires shared artifact storage"
+        )
+    if not job.artifacts:
+        raise CatalogPublicationError("ready map has no recorded artifacts")
+    for artifact in job.artifacts:
+        if not artifact_store.verify(
+            artifact.object_key,
+            sha256=artifact.sha256,
+            expected_bytes=artifact.bytes,
+        ):
+            raise CatalogPublicationError(
+                "recorded artifact is missing from shared delivery storage"
+            )
+
+
+def backfill_ready_job_artifacts(store, artifact_store, job_id: str) -> dict[str, int]:
+    """Explicitly import one filesystem-era READY job into a configured mirror."""
+    job = store.get(job_id)
+    if job.status != JobStatus.READY:
+        raise CatalogPublicationError("only READY jobs can be backfilled")
+    backfill = getattr(artifact_store, "backfill_from_primary", None)
+    if not callable(backfill) or not bool(
+        getattr(artifact_store, "catalog_delivery_backed", False)
+    ):
+        raise CatalogPublicationError(
+            "catalog backfill requires mirror artifact storage"
+        )
+    copied = 0
+    for artifact in job.artifacts:
+        copied += int(
+            backfill(
+                artifact.object_key,
+                sha256=artifact.sha256,
+                expected_bytes=artifact.bytes,
+                media_type=artifact.media_type,
+            )
+        )
+    _verify_catalog_artifacts(job, artifact_store)
+    return {"artifacts": len(job.artifacts), "copied": copied}
+
+
+def publish_ready_job(
+    store,
+    client: CatalogClient | None,
+    job_id: str,
+    *,
+    artifact_store=None,
+) -> MapJob:
     if client is None:
         return store.get(job_id)
     job = store.get(job_id)
@@ -455,6 +627,7 @@ def publish_ready_job(store, client: CatalogClient | None, job_id: str) -> MapJo
     job.updated_at = utc_now_iso()
     store.save(job)
     try:
+        _verify_catalog_artifacts(job, artifact_store)
         result = client.finalize(job)
     except Exception as exc:
         current = store.get(job_id)
@@ -483,6 +656,7 @@ def retry_ready_publications(
     store,
     client: CatalogClient | None,
     *,
+    artifact_store=None,
     maximum_jobs: int = 10,
 ) -> dict[str, int]:
     if maximum_jobs <= 0:
@@ -500,11 +674,136 @@ def retry_ready_publications(
     )[:maximum_jobs]
     finalized = 0
     for job in candidates:
-        result = publish_ready_job(store, client, job.job_id)
+        result = publish_ready_job(
+            store,
+            client,
+            job.job_id,
+            artifact_store=artifact_store,
+        )
         if result.catalog_publication_state == "finalized":
             finalized += 1
     return {
         "attempted": len(candidates),
         "finalized": finalized,
         "failed": len(candidates) - finalized,
+    }
+
+
+def _validated_retention_authorization(
+    value: dict[str, Any],
+    *,
+    channel: str,
+    claimed: bool = False,
+) -> dict[str, Any]:
+    expected_fields = {
+        "artifactId",
+        "bucketSlot",
+        "objectKey",
+        "bytes",
+        "sha256",
+        "authorizationExpiresAt",
+    }
+    if claimed:
+        expected_fields.add("leaseId")
+    if set(value) != expected_fields:
+        raise CatalogPublicationError("catalog retention authorization is invalid")
+    if (
+        not isinstance(value["artifactId"], str)
+        or RETENTION_ARTIFACT_ID_PATTERN.fullmatch(value["artifactId"]) is None
+        or value["bucketSlot"] != channel
+        or not isinstance(value["objectKey"], str)
+        or RETENTION_OBJECT_KEY_PATTERN.fullmatch(value["objectKey"]) is None
+        or type(value["bytes"]) is not int
+        or not 1 <= value["bytes"] <= (1 << 63) - 1
+        or not isinstance(value["sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", value["sha256"]) is None
+        or not isinstance(value["authorizationExpiresAt"], str)
+        or (
+            claimed
+            and (
+                not isinstance(value["leaseId"], str)
+                or RETENTION_LEASE_ID_PATTERN.fullmatch(value["leaseId"])
+                is None
+            )
+        )
+    ):
+        raise CatalogPublicationError("catalog retention authorization is invalid")
+    try:
+        expires_at = datetime.fromisoformat(
+            value["authorizationExpiresAt"].replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise CatalogPublicationError(
+            "catalog retention authorization is invalid"
+        ) from exc
+    if expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc):
+        raise CatalogPublicationError("catalog retention authorization has expired")
+    return value
+
+
+def delete_catalog_retention_artifacts(
+    store,
+    client: CatalogClient | None,
+    artifact_store,
+    *,
+    maximum_artifacts: int = 100,
+) -> dict[str, int]:
+    if not 1 <= maximum_artifacts <= 10:
+        raise ValueError("catalog retention limit is invalid")
+    if client is None:
+        return {"authorized": 0, "deleted": 0, "deferred": 0}
+    if not bool(getattr(artifact_store, "catalog_delivery_backed", False)):
+        raise CatalogPublicationError(
+            "catalog retention requires shared artifact storage"
+        )
+    authorizations = [
+        _validated_retention_authorization(value, channel=client.channel)
+        for value in client.retention_authorizations(
+            maximum_artifacts=maximum_artifacts
+        )
+    ]
+    deleted = 0
+    deferred = 0
+    for authorization in authorizations:
+        referencing_jobs = []
+        for job in store.list():
+            references = [
+                artifact
+                for artifact in job.artifacts
+                if artifact.object_key == authorization["objectKey"]
+            ]
+            if not references:
+                continue
+            if any(
+                artifact.sha256 != authorization["sha256"]
+                or artifact.bytes != authorization["bytes"]
+                for artifact in references
+            ):
+                raise CatalogPublicationError(
+                    "catalog retention identity conflicts with a local job"
+                )
+            referencing_jobs.append(job)
+        if any(
+            job.status != JobStatus.EXPIRED
+            or job.catalog_publication_state != "finalized"
+            for job in referencing_jobs
+        ):
+            deferred += 1
+            continue
+        claim = _validated_retention_authorization(
+            client.claim_retention_deletion(authorization),
+            channel=client.channel,
+            claimed=True,
+        )
+        artifact_store.delete(claim["objectKey"])
+        if not artifact_store.absent(claim["objectKey"]):
+            raise CatalogPublicationError(
+                "catalog-retained artifact remains after deletion"
+            )
+        client.confirm_retention_deletion(claim)
+        deleted += 1
+    return {
+        "authorized": len(authorizations),
+        "deleted": deleted,
+        "deferred": deferred,
     }

@@ -1,18 +1,23 @@
 import {
   attachLibrary,
   bootstrapLibrary,
+  claimRetentionDeletion,
   claimLinkCode,
   claimShare,
+  confirmRetentionDeletion,
   createLibraryDownloadGrant,
   createLinkCode,
   createPromotionGrant,
   createShare,
+  detachLibraryMap,
   finalizePublication,
   getLibraryMap,
   listLibraryMaps,
   listShares,
+  prepareRetentionAuthorizations,
   quarantinePublication,
   refreshLibrary,
+  renewPromotionLease,
   resolveDownloadGrant,
   revokeShare,
   sharePreview,
@@ -22,6 +27,7 @@ import { presignedDownloadURL } from "./r2";
 import {
   HttpError,
   authenticatedLibraryID,
+  authenticatedLibraryPrincipal,
   jsonBody,
   libraryIDForCredential,
   parseObject,
@@ -76,6 +82,61 @@ function bootstrapClientRateLimitKey(request: Request): string {
     return "library-bootstrap:unknown-client";
   }
   return `library-bootstrap:${address}`;
+}
+
+function clientRateLimitKey(request: Request, scope: string): string {
+  const address = request.headers.get("cf-connecting-ip")?.trim().toLowerCase();
+  if (!address || !/^[0-9a-f:.]{2,64}$/.test(address)) {
+    return `${scope}:unknown-client`;
+  }
+  return `${scope}:${address}`;
+}
+
+async function enforceRateLimit(
+  limiter: RateLimit,
+  key: string,
+  label: string,
+): Promise<void> {
+  let outcome: RateLimitOutcome;
+  try {
+    outcome = await limiter.limit({ key });
+  } catch {
+    throw new HttpError(503, `${label} is temporarily unavailable`);
+  }
+  if (!outcome.success) {
+    throw new HttpError(429, `${label} rate limit exceeded`);
+  }
+}
+
+async function enforceGlobalMutationRateLimit(env: Env): Promise<void> {
+  await enforceRateLimit(
+    env.PUBLIC_MUTATION_GLOBAL_RATE_LIMITER,
+    "public-mutation",
+    "catalog mutation",
+  );
+}
+
+async function enforceLibraryMutationRateLimit(
+  env: Env,
+  libraryID: string,
+): Promise<void> {
+  await enforceRateLimit(
+    env.LIBRARY_MUTATION_RATE_LIMITER,
+    `library-mutation:${libraryID}`,
+    "library mutation",
+  );
+  await enforceGlobalMutationRateLimit(env);
+}
+
+async function enforceServiceMutationRateLimit(
+  env: Env,
+  channel: Channel,
+): Promise<void> {
+  await enforceRateLimit(
+    env.SERVICE_MUTATION_RATE_LIMITER,
+    `service-mutation:${channel}`,
+    "service mutation",
+  );
 }
 
 async function enforceLibraryBootstrapRateLimit(
@@ -192,24 +253,37 @@ async function handle(request: Request, env: Env): Promise<Response> {
     if (authorization)
       throw new HttpError(401, "invalid library authorization");
     await enforceLibraryBootstrapRateLimit(request, env);
+    await enforceGlobalMutationRateLimit(env);
     return json(await bootstrapLibrary(env), 201);
   }
 
   if (request.method === "POST" && path === "/v1/libraries/link-codes") {
-    return json(
-      await createLinkCode(env, await authenticatedLibraryID(request, env)),
-      201,
+    const libraryID = await authenticatedLibraryID(request, env);
+    await enforceLibraryMutationRateLimit(env, libraryID);
+    await enforceRateLimit(
+      env.LINK_CODE_CREATE_RATE_LIMITER,
+      `link-code-create:${libraryID}`,
+      "link code creation",
     );
+    return json(await createLinkCode(env, libraryID), 201);
   }
   const linkCodeClaim = match(
     path,
     /^\/v1\/libraries\/link-codes\/([^/]+)\/claim$/,
   );
   if (request.method === "POST" && linkCodeClaim) {
+    const principal = await authenticatedLibraryPrincipal(request, env);
+    await enforceLibraryMutationRateLimit(env, principal.libraryID);
+    await enforceRateLimit(
+      env.LINK_CODE_CLAIM_RATE_LIMITER,
+      `link-code-claim:${principal.libraryID}`,
+      "link code claim",
+    );
     return json(
       await claimLinkCode(
         env,
-        await authenticatedLibraryID(request, env),
+        principal.libraryID,
+        principal.credentialHash,
         linkCodeClaim[0],
       ),
     );
@@ -236,60 +310,81 @@ async function handle(request: Request, env: Env): Promise<Response> {
     );
   }
   if (request.method === "PATCH" && libraryMap) {
+    const libraryID = await authenticatedLibraryID(request, env);
+    await enforceLibraryMutationRateLimit(env, libraryID);
     const body = await jsonBody<Record<string, unknown>>(request);
     requireExactKeys(body, ["alias"], ["expectedRevision"]);
     return json(
       await updateAlias(
         env,
-        await authenticatedLibraryID(request, env),
+        libraryID,
         libraryMap[0],
         body.alias,
         body.expectedRevision,
       ),
     );
   }
+  if (request.method === "DELETE" && libraryMap) {
+    const libraryID = await authenticatedLibraryID(request, env);
+    await enforceLibraryMutationRateLimit(env, libraryID);
+    await detachLibraryMap(env, libraryID, libraryMap[0]);
+    return new Response(null, { status: 204 });
+  }
 
   const createMapShare = match(path, /^\/v1\/library\/maps\/([^/]+)\/shares$/);
   if (request.method === "POST" && createMapShare) {
+    const libraryID = await authenticatedLibraryID(request, env);
+    await enforceLibraryMutationRateLimit(env, libraryID);
+    await enforceRateLimit(
+      env.SHARE_CREATE_RATE_LIMITER,
+      `share-create:${libraryID}`,
+      "share creation",
+    );
     const body = await jsonBody<Record<string, unknown>>(request);
     requireExactKeys(body, [], ["expiresAt"]);
     return json(
-      await createShare(
-        env,
-        await authenticatedLibraryID(request, env),
-        createMapShare[0],
-        body.expiresAt,
-      ),
+      await createShare(env, libraryID, createMapShare[0], body.expiresAt),
       201,
     );
   }
   if (request.method === "GET" && path === "/v1/library/shares") {
     return json(
-      await listShares(env, await authenticatedLibraryID(request, env)),
+      await listShares(
+        env,
+        await authenticatedLibraryID(request, env),
+        url.searchParams.get("cursor"),
+        url.searchParams.get("limit"),
+      ),
     );
   }
   const deleteShare = match(path, /^\/v1\/library\/shares\/([^/]+)$/);
   if (request.method === "DELETE" && deleteShare) {
-    await revokeShare(
-      env,
-      await authenticatedLibraryID(request, env),
-      deleteShare[0],
-    );
+    const libraryID = await authenticatedLibraryID(request, env);
+    await enforceLibraryMutationRateLimit(env, libraryID);
+    await revokeShare(env, libraryID, deleteShare[0]);
     return new Response(null, { status: 204 });
   }
 
   const previewShare = match(path, /^\/v1\/shares\/([^/]+)$/);
   if (request.method === "GET" && previewShare) {
+    await enforceRateLimit(
+      env.SHARE_PREVIEW_RATE_LIMITER,
+      clientRateLimitKey(request, "share-preview"),
+      "share preview",
+    );
     return json(await sharePreview(env, requireToken(previewShare[0])));
   }
   const claimMapShare = match(path, /^\/v1\/shares\/([^/]+)\/claim$/);
   if (request.method === "POST" && claimMapShare) {
+    const libraryID = await authenticatedLibraryID(request, env);
+    await enforceLibraryMutationRateLimit(env, libraryID);
+    await enforceRateLimit(
+      env.SHARE_CLAIM_RATE_LIMITER,
+      `share-claim:${libraryID}`,
+      "share claim",
+    );
     return json(
-      await claimShare(
-        env,
-        await authenticatedLibraryID(request, env),
-        requireToken(claimMapShare[0]),
-      ),
+      await claimShare(env, libraryID, requireToken(claimMapShare[0])),
     );
   }
 
@@ -298,12 +393,14 @@ async function handle(request: Request, env: Env): Promise<Response> {
     /^\/v1\/library\/maps\/([^/]+)\/download-grants$/,
   );
   if (request.method === "POST" && createDownload) {
+    const libraryID = await authenticatedLibraryID(request, env);
+    await enforceLibraryMutationRateLimit(env, libraryID);
     const body = await jsonBody<Record<string, unknown>>(request);
     requireExactKeys(body, ["channel", "acceptedSigners", "appIdentity"]);
     return json(
       await createLibraryDownloadGrant(
         env,
-        await authenticatedLibraryID(request, env),
+        libraryID,
         createDownload[0],
         parseChannel(body.channel),
         body.acceptedSigners,
@@ -327,6 +424,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     path === "/v1/internal/publications/finalize"
   ) {
     const verified = await verifyServiceRequest(request, env);
+    await enforceServiceMutationRateLimit(env, verified.channel);
     const publication = validatePublication(parseObject(verified.bodyText));
     if (
       verified.channel !== publication.deliveryState ||
@@ -350,6 +448,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
   );
   if (request.method === "POST" && attach) {
     const verified = await verifyServiceRequest(request, env);
+    await enforceServiceMutationRateLimit(env, verified.channel);
     const body = parseObject<Record<string, unknown>>(verified.bodyText);
     requireExactKeys(body, ["libraryCredential"], ["alias"]);
     if (typeof body.libraryCredential !== "string") {
@@ -372,8 +471,71 @@ async function handle(request: Request, env: Env): Promise<Response> {
   );
   if (request.method === "POST" && quarantine) {
     const verified = await verifyServiceRequest(request, env);
+    await enforceServiceMutationRateLimit(env, verified.channel);
     await quarantinePublication(env, quarantine[0], verified.channel);
     return json({ publicationId: quarantine[0], state: "quarantined" });
+  }
+  if (
+    request.method === "POST" &&
+    path === "/v1/internal/retention/authorizations"
+  ) {
+    const verified = await verifyServiceRequest(request, env);
+    await enforceServiceMutationRateLimit(env, verified.channel);
+    const body = parseObject<Record<string, unknown>>(verified.bodyText);
+    requireExactKeys(body, ["limit"]);
+    return json(
+      await prepareRetentionAuthorizations(env, verified.channel, body.limit),
+    );
+  }
+  const retentionDeleted = match(
+    path,
+    /^\/v1\/internal\/retention\/artifacts\/([^/]+)\/deleted$/,
+  );
+  const retentionClaim = match(
+    path,
+    /^\/v1\/internal\/retention\/artifacts\/([^/]+)\/claim$/,
+  );
+  if (request.method === "POST" && retentionClaim) {
+    const verified = await verifyServiceRequest(request, env);
+    await enforceServiceMutationRateLimit(env, verified.channel);
+    const body = parseObject<Record<string, unknown>>(verified.bodyText);
+    requireExactKeys(body, ["bucketSlot", "objectKey", "bytes", "sha256"]);
+    return json(
+      await claimRetentionDeletion(env, retentionClaim[0], verified.channel, {
+        bucketSlot: body.bucketSlot,
+        objectKey: body.objectKey,
+        bytes: body.bytes,
+        sha256: body.sha256,
+      }),
+    );
+  }
+  if (request.method === "POST" && retentionDeleted) {
+    const verified = await verifyServiceRequest(request, env);
+    await enforceServiceMutationRateLimit(env, verified.channel);
+    const body = parseObject<Record<string, unknown>>(verified.bodyText);
+    requireExactKeys(body, [
+      "bucketSlot",
+      "objectKey",
+      "bytes",
+      "sha256",
+      "leaseId",
+      "confirmedAbsent",
+    ]);
+    return json(
+      await confirmRetentionDeletion(
+        env,
+        retentionDeleted[0],
+        verified.channel,
+        {
+          bucketSlot: body.bucketSlot,
+          objectKey: body.objectKey,
+          bytes: body.bytes,
+          sha256: body.sha256,
+          leaseId: body.leaseId,
+          confirmedAbsent: body.confirmedAbsent,
+        },
+      ),
+    );
   }
   const promotionGrant = match(
     path,
@@ -384,15 +546,69 @@ async function handle(request: Request, env: Env): Promise<Response> {
     if (verified.channel !== "production") {
       throw new HttpError(403, "production service authorization required");
     }
+    await enforceServiceMutationRateLimit(env, verified.channel);
+    await enforceRateLimit(
+      env.PROMOTION_RATE_LIMITER,
+      `promotion:${promotionGrant[0]}`,
+      "promotion",
+    );
     return json(await createPromotionGrant(env, promotionGrant[0]), 201);
   }
   const promotionFinalize = match(
     path,
     /^\/v1\/internal\/promotions\/([^/]+)\/finalize$/,
   );
+  const promotionRenew = match(
+    path,
+    /^\/v1\/internal\/promotions\/([^/]+)\/leases\/([^/]+)\/renew$/,
+  );
+  if (request.method === "POST" && promotionRenew) {
+    const verified = await verifyServiceRequest(request, env);
+    if (verified.channel !== "production") {
+      throw new HttpError(403, "production service authorization required");
+    }
+    await enforceServiceMutationRateLimit(env, verified.channel);
+    await enforceRateLimit(
+      env.PROMOTION_RATE_LIMITER,
+      `promotion:${promotionRenew[0]}`,
+      "promotion",
+    );
+    const body = parseObject<Record<string, unknown>>(verified.bodyText);
+    requireExactKeys(body, ["artifactId", "objectKey", "bytes", "sha256"]);
+    return json(
+      await renewPromotionLease(env, promotionRenew[0], promotionRenew[1], {
+        artifactId: body.artifactId,
+        objectKey: body.objectKey,
+        bytes: body.bytes,
+        sha256: body.sha256,
+      }),
+    );
+  }
   if (request.method === "POST" && promotionFinalize) {
     const verified = await verifyServiceRequest(request, env);
-    const publication = validatePublication(parseObject(verified.bodyText));
+    if (verified.channel === "production") {
+      await enforceServiceMutationRateLimit(env, verified.channel);
+      await enforceRateLimit(
+        env.PROMOTION_RATE_LIMITER,
+        `promotion:${promotionFinalize[0]}`,
+        "promotion",
+      );
+    }
+    const body = parseObject<Record<string, unknown>>(verified.bodyText);
+    requireExactKeys(body, ["leaseId", "publication"]);
+    if (typeof body.leaseId !== "string") {
+      throw new HttpError(400, "promotion lease is invalid");
+    }
+    if (
+      body.publication === null ||
+      Array.isArray(body.publication) ||
+      typeof body.publication !== "object"
+    ) {
+      throw new HttpError(400, "promotion publication is invalid");
+    }
+    const publication = validatePublication(
+      body.publication as Record<string, unknown>,
+    );
     if (
       verified.channel !== "production" ||
       publication.mapEntryId !== promotionFinalize[0] ||
@@ -407,6 +623,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
         publication,
         verified.idempotencyKey,
         verified.bodySha256,
+        body.leaseId,
       ),
       201,
     );
@@ -426,6 +643,11 @@ async function handle(request: Request, env: Env): Promise<Response> {
 
   const landing = match(path, /^\/(?:dev\/)?s\/([^/]+)$/);
   if (request.method === "GET" && landing) {
+    await enforceRateLimit(
+      env.SHARE_LANDING_RATE_LIMITER,
+      clientRateLimitKey(request, "share-landing"),
+      "share landing",
+    );
     return shareLanding(env, requireToken(landing[0]));
   }
 

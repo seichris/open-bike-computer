@@ -283,6 +283,48 @@ class ArtifactStoreTests(unittest.TestCase):
             )
             self.assertIsNotNone(store.local_path(key))
 
+    def test_mirrored_store_explicitly_backfills_verified_primary_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "map.zip"
+            source.write_bytes(b"filesystem-era-ready-map")
+            digest = sha256_file(source)
+            primary = FileSystemArtifactStore(root / "primary")
+            mirror_client = FakeS3Client()
+            mirror = S3ArtifactStore(mirror_client, "bucket")
+            store = MirroredArtifactStore(primary, mirror)
+            key = f"maps/map/zip/{digest}.zip"
+            primary.put(
+                source,
+                key,
+                sha256=digest,
+                media_type="application/zip",
+            )
+
+            copied = store.backfill_from_primary(
+                key,
+                sha256=digest,
+                expected_bytes=source.stat().st_size,
+                media_type="application/zip",
+            )
+
+            self.assertTrue(copied)
+            self.assertTrue(
+                store.verify(
+                    key,
+                    sha256=digest,
+                    expected_bytes=source.stat().st_size,
+                )
+            )
+            self.assertFalse(
+                store.backfill_from_primary(
+                    key,
+                    sha256=digest,
+                    expected_bytes=source.stat().st_size,
+                    media_type="application/zip",
+                )
+            )
+
     def test_r2_factory_requires_auto_region(self):
         environment = {
             "MAP_PLATFORM_ARTIFACT_STORE": "s3",

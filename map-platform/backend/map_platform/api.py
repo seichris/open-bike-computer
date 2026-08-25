@@ -872,7 +872,12 @@ def create_app():
             if job.status != JobStatus.READY:
                 raise HTTPException(status_code=409, detail="map is not ready")
             if job.catalog_publication_state != "finalized":
-                job = publish_ready_job(service.store, catalog_client, job_id)
+                job = publish_ready_job(
+                    service.store,
+                    catalog_client,
+                    job_id,
+                    artifact_store=artifact_store,
+                )
             if (
                 job.catalog_publication_state != "finalized"
                 or not job.catalog_publication_id
@@ -966,6 +971,7 @@ def create_app():
                     service.store,
                     catalog_client,
                     job_id,
+                    artifact_store=artifact_store,
                 )
             return completed.to_dict()
         except JobClaimError as exc:

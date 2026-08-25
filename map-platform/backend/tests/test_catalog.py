@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from map_platform.artifacts import ArtifactRecord
 from map_platform.catalog import (
@@ -14,6 +14,7 @@ from map_platform.catalog import (
     CatalogPublicationError,
     artifact_id,
     catalog_delivery_requirements,
+    delete_catalog_retention_artifacts,
     map_entry_id,
     publication_payload,
     publish_ready_job,
@@ -113,6 +114,56 @@ class FailingCatalog:
         raise RuntimeError("catalog unavailable with secret value hidden")
 
 
+class VerifyingArtifactStore:
+    catalog_delivery_backed = True
+
+    def __init__(self, *, valid=True):
+        self.valid = valid
+        self.verified = []
+
+    def verify(self, object_key, *, sha256, expected_bytes):
+        self.verified.append((object_key, sha256, expected_bytes))
+        return self.valid
+
+
+class RetentionArtifactStore:
+    catalog_delivery_backed = True
+
+    def __init__(self, object_keys):
+        self.object_keys = set(object_keys)
+        self.deleted = []
+
+    def delete(self, object_key):
+        self.deleted.append(object_key)
+        return self.object_keys.discard(object_key) is None
+
+    def absent(self, object_key):
+        return object_key not in self.object_keys
+
+
+class RetentionCatalog:
+    channel = "production"
+
+    def __init__(self, authorizations):
+        self.authorizations = authorizations
+        self.claimed = []
+        self.confirmed = []
+
+    def retention_authorizations(self, *, maximum_artifacts):
+        return self.authorizations[:maximum_artifacts]
+
+    def claim_retention_deletion(self, authorization):
+        self.claimed.append(authorization["artifactId"])
+        return {
+            **authorization,
+            "leaseId": "retention_lease_v1_" + "a" * 32,
+        }
+
+    def confirm_retention_deletion(self, authorization):
+        self.confirmed.append(authorization["artifactId"])
+        return {"artifactId": authorization["artifactId"], "state": "deleted"}
+
+
 class CatalogTests(unittest.TestCase):
     def test_catalog_identity_is_exact_and_independent_of_user_label(self):
         job = ready_job()
@@ -150,11 +201,18 @@ class CatalogTests(unittest.TestCase):
             store = JobStore(Path(tmp) / "jobs")
             original = ready_job()
             store.save(original)
-            published = publish_ready_job(store, SuccessfulCatalog(), original.job_id)
+            artifact_store = VerifyingArtifactStore()
+            published = publish_ready_job(
+                store,
+                SuccessfulCatalog(),
+                original.job_id,
+                artifact_store=artifact_store,
+            )
             self.assertEqual(published.status, JobStatus.READY)
             self.assertEqual(published.catalog_publication_state, "finalized")
             self.assertEqual(published.catalog_map_entry_id, map_entry_id(original))
             self.assertEqual(published.artifacts, original.artifacts)
+            self.assertEqual(len(artifact_store.verified), len(original.artifacts))
 
             round_trip = MapJob.from_dict(
                 json.loads(json.dumps(published.to_dict(include_internal=True)))
@@ -166,11 +224,95 @@ class CatalogTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = JobStore(Path(tmp) / "jobs")
             store.save(ready_job())
-            result = publish_ready_job(store, FailingCatalog(), "job-catalog-test")
+            result = publish_ready_job(
+                store,
+                FailingCatalog(),
+                "job-catalog-test",
+                artifact_store=VerifyingArtifactStore(),
+            )
             self.assertEqual(result.status, JobStatus.READY)
             self.assertEqual(result.catalog_publication_state, "failed")
             self.assertEqual(result.catalog_publication_attempts, 1)
             self.assertNotIn("secret value", result.catalog_publication_error)
+
+    def test_catalog_never_finalizes_without_every_shared_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp) / "jobs")
+            store.save(ready_job())
+            catalog = SuccessfulCatalog()
+            catalog.finalize = Mock(wraps=catalog.finalize)
+            result = publish_ready_job(
+                store,
+                catalog,
+                "job-catalog-test",
+                artifact_store=VerifyingArtifactStore(valid=False),
+            )
+            self.assertEqual(result.status, JobStatus.READY)
+            self.assertEqual(result.catalog_publication_state, "failed")
+            catalog.finalize.assert_not_called()
+
+    def test_catalog_retention_deletes_only_expired_finalized_local_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp) / "jobs")
+            job = ready_job()
+            job.status = JobStatus.EXPIRED
+            job.catalog_publication_state = "finalized"
+            store.save(job)
+            artifact = job.artifacts[0]
+            authorization = {
+                "artifactId": artifact_id(artifact),
+                "bucketSlot": "production",
+                "objectKey": artifact.object_key,
+                "bytes": artifact.bytes,
+                "sha256": artifact.sha256,
+                "authorizationExpiresAt": "2999-01-01T00:00:00Z",
+            }
+            catalog = RetentionCatalog([authorization])
+            artifact_store = RetentionArtifactStore([artifact.object_key])
+
+            result = delete_catalog_retention_artifacts(
+                store,
+                catalog,
+                artifact_store,
+                maximum_artifacts=10,
+            )
+
+            self.assertEqual(
+                result,
+                {"authorized": 1, "deleted": 1, "deferred": 0},
+            )
+            self.assertEqual(artifact_store.deleted, [artifact.object_key])
+            self.assertEqual(catalog.claimed, [artifact_id(artifact)])
+            self.assertEqual(catalog.confirmed, [artifact_id(artifact)])
+
+            live = ready_job()
+            live.job_id = "job-live-retention"
+            live.artifacts = [live.artifacts[1]]
+            live.catalog_publication_state = "finalized"
+            store.save(live)
+            protected = live.artifacts[0]
+            protected_authorization = {
+                "artifactId": artifact_id(protected),
+                "bucketSlot": "production",
+                "objectKey": protected.object_key,
+                "bytes": protected.bytes,
+                "sha256": protected.sha256,
+                "authorizationExpiresAt": "2999-01-01T00:00:00Z",
+            }
+            protected_catalog = RetentionCatalog([protected_authorization])
+            protected_store = RetentionArtifactStore([protected.object_key])
+            self.assertEqual(
+                delete_catalog_retention_artifacts(
+                    store,
+                    protected_catalog,
+                    protected_store,
+                    maximum_artifacts=10,
+                ),
+                {"authorized": 1, "deleted": 0, "deferred": 1},
+            )
+            self.assertEqual(protected_store.deleted, [])
+            self.assertEqual(protected_catalog.claimed, [])
+            self.assertEqual(protected_catalog.confirmed, [])
 
     def test_catalog_client_requires_https_and_long_service_secret(self):
         with self.assertRaisesRegex(ValueError, "HTTPS origin"):

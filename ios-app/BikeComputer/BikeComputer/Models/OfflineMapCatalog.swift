@@ -10,6 +10,10 @@ nonisolated enum OfflineMapCatalogConfig {
         "4H5PK8686H.LetItRide.BikeComputer.map-library"
     static let catalogHostInfoKey = "BicinoMapCatalogHost"
     static let r2DownloadHostInfoKey = "BicinoMapR2DownloadHost"
+    static let developmentSigningKeyIDInfoKey =
+        "BicinoMapDevelopmentSigningKeyID"
+    static let developmentSigningPublicKeyInfoKey =
+        "BicinoMapDevelopmentSigningPublicKeyX963Hex"
 
     private static let allowedCatalogHosts = [
         developmentHost,
@@ -57,6 +61,61 @@ nonisolated enum OfflineMapCatalogConfig {
                 OfflineMapServiceConfig.developmentServerURLString
             ) ? "development" : "production"
     }
+
+    static var mapStreamTrustStore: BikeMapStreamTrustStore {
+        mapStreamTrustStore(infoDictionary: Bundle.main.infoDictionary ?? [:])
+    }
+
+    static func mapStreamTrustStore(
+        infoDictionary: [String: Any]
+    ) -> BikeMapStreamTrustStore {
+        let production = BikeMapStreamTrustStore.production
+        guard OfflineMapServiceConfig.serverURLString(
+            infoDictionary: infoDictionary
+        ) == OfflineMapServiceConfig.developmentServerURLString,
+        let rawKeyID = infoDictionary[developmentSigningKeyIDInfoKey] as? String,
+        let rawPublicKey = infoDictionary[
+            developmentSigningPublicKeyInfoKey
+        ] as? String else {
+            return production
+        }
+        let keyID = rawKeyID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let publicKeyHex = rawPublicKey.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).lowercased()
+        guard keyID.range(
+            of: "^[A-Za-z0-9._-]{1,64}$",
+            options: .regularExpression
+        ) != nil,
+        publicKeyHex.range(
+            of: "^04[0-9a-f]{128}$",
+            options: .regularExpression
+        ) != nil,
+        let publicKey = hexadecimalData(publicKeyHex),
+        let development = production.including(
+            keyID: keyID,
+            publicKeyX963: publicKey
+        ) else {
+            return production
+        }
+        return development
+    }
+
+    private static func hexadecimalData(_ value: String) -> Data? {
+        guard value.count.isMultiple(of: 2) else { return nil }
+        var data = Data()
+        data.reserveCapacity(value.count / 2)
+        var index = value.startIndex
+        while index < value.endIndex {
+            let next = value.index(index, offsetBy: 2)
+            guard let byte = UInt8(value[index..<next], radix: 16) else {
+                return nil
+            }
+            data.append(byte)
+            index = next
+        }
+        return data
+    }
 }
 
 nonisolated enum OfflineMapCatalogError: LocalizedError, Equatable {
@@ -93,6 +152,9 @@ nonisolated struct OfflineMapCatalogCredential: Codable, Equatable {
 nonisolated final class OfflineMapCatalogCredentialStore: @unchecked Sendable {
     private static let service = "vc.8o.bicino.map-library"
     private static let productionAccount = "shared-library-v1"
+#if os(iOS)
+    private static let missingEntitlementStatus = OSStatus(-34_018)
+#endif
     private let defaults: UserDefaults
     private let account: String
     private let fallbackDefaultsKey: String
@@ -114,53 +176,104 @@ nonisolated final class OfflineMapCatalogCredentialStore: @unchecked Sendable {
 
     func load() -> OfflineMapCatalogCredential? {
 #if os(iOS)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessGroup as String: OfflineMapCatalogConfig.sharedKeychainAccessGroup,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else {
+        let shared = loadFromKeychain(
+            accessGroup: OfflineMapCatalogConfig.sharedKeychainAccessGroup
+        )
+        if let credential = shared.credential {
+            return credential
+        }
+        guard shared.status == errSecItemNotFound ||
+                shared.status == Self.missingEntitlementStatus else {
             return nil
         }
+        return loadFromKeychain(accessGroup: nil).credential
 #else
         guard let data = defaults.data(forKey: fallbackDefaultsKey) else { return nil }
-#endif
         return try? JSONDecoder().decode(OfflineMapCatalogCredential.self, from: data)
+#endif
     }
 
     func save(_ credential: OfflineMapCatalogCredential) throws {
         let data = try JSONEncoder().encode(credential)
 #if os(iOS)
-        let identity: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessGroup as String: OfflineMapCatalogConfig.sharedKeychainAccessGroup,
-        ]
-        let status = SecItemUpdate(
-            identity as CFDictionary,
-            [kSecValueData as String: data] as CFDictionary
+        let sharedStatus = saveToKeychain(
+            data,
+            accessGroup: OfflineMapCatalogConfig.sharedKeychainAccessGroup
         )
-        if status == errSecItemNotFound {
-            var item = identity
-            item[kSecValueData as String] = data
-            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            let addStatus = SecItemAdd(item as CFDictionary, nil)
-            guard addStatus == errSecSuccess else {
-                throw OfflineMapCatalogError.keychain(addStatus)
-            }
-        } else if status != errSecSuccess {
-            throw OfflineMapCatalogError.keychain(status)
+        if sharedStatus == errSecSuccess {
+            return
+        }
+        guard sharedStatus == Self.missingEntitlementStatus else {
+            throw OfflineMapCatalogError.keychain(sharedStatus)
+        }
+        let localStatus = saveToKeychain(data, accessGroup: nil)
+        guard localStatus == errSecSuccess else {
+            throw OfflineMapCatalogError.keychain(localStatus)
         }
 #else
         defaults.set(data, forKey: fallbackDefaultsKey)
 #endif
     }
+
+#if os(iOS)
+    private func keychainIdentity(accessGroup: String?) -> [String: Any] {
+        var identity: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecAttrAccount as String: account,
+        ]
+        if let accessGroup {
+            identity[kSecAttrAccessGroup as String] = accessGroup
+        }
+        return identity
+    }
+
+    private func loadFromKeychain(
+        accessGroup: String?
+    ) -> (status: OSStatus, credential: OfflineMapCatalogCredential?) {
+        var query = keychainIdentity(accessGroup: accessGroup)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess,
+              let data = item as? Data,
+              let credential = try? JSONDecoder().decode(
+                OfflineMapCatalogCredential.self,
+                from: data
+              ) else {
+            return (status, nil)
+        }
+        return (status, credential)
+    }
+
+    private func saveToKeychain(
+        _ data: Data,
+        accessGroup: String?
+    ) -> OSStatus {
+        let identity = keychainIdentity(accessGroup: accessGroup)
+        let update = [kSecValueData as String: data]
+        let updateStatus = SecItemUpdate(
+            identity as CFDictionary,
+            update as CFDictionary
+        )
+        guard updateStatus == errSecItemNotFound else {
+            return updateStatus
+        }
+        var item = identity
+        item[kSecValueData as String] = data
+        item[kSecAttrAccessible as String] =
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let addStatus = SecItemAdd(item as CFDictionary, nil)
+        if addStatus == errSecDuplicateItem {
+            return SecItemUpdate(
+                identity as CFDictionary,
+                update as CFDictionary
+            )
+        }
+        return addStatus
+    }
+#endif
 }
 
 nonisolated struct OfflineMapCatalogArtifact: Codable, Equatable, Sendable {
@@ -250,6 +363,35 @@ nonisolated struct OfflineMapCreatedShare: Codable, Equatable, Sendable {
     let expiresAt: String?
 }
 
+nonisolated struct OfflineMapCatalogShare: Codable, Equatable, Sendable, Identifiable {
+    var id: String { shareId }
+    let shareId: String
+    let mapEntryId: String
+    let title: String
+    let createdAt: String
+    let expiresAt: String?
+    let revokedAt: String?
+    let claimCount: Int
+
+    var isActive: Bool {
+        guard revokedAt == nil else { return false }
+        guard let expiresAt else { return true }
+        let fractionalFormatter = ISO8601DateFormatter()
+        fractionalFormatter.formatOptions = [
+            .withInternetDateTime,
+            .withFractionalSeconds,
+        ]
+        let date = fractionalFormatter.date(from: expiresAt) ??
+            ISO8601DateFormatter().date(from: expiresAt)
+        return date.map { $0 > Date() } ?? false
+    }
+}
+
+nonisolated struct OfflineMapLibraryLinkCode: Codable, Equatable, Sendable {
+    let code: String
+    let expiresAt: String
+}
+
 nonisolated struct OfflineMapCatalogDownloadGrant: Codable, Equatable, Sendable {
     let downloadURL: URL
     let expiresAt: String
@@ -270,6 +412,25 @@ nonisolated enum OfflineMapCatalogAliasPolicy {
             return nil
         }
         return alias
+    }
+}
+
+nonisolated enum OfflineMapCatalogReconciliationPolicy {
+    static func matchingMapIndex(
+        catalogMapEntryID: String?,
+        localArtifactSHA256s: Set<String>,
+        catalogMaps: [OfflineMapCatalogMap]
+    ) -> Int? {
+        if let catalogMapEntryID {
+            return catalogMaps.firstIndex { $0.mapEntryId == catalogMapEntryID }
+        }
+        guard !localArtifactSHA256s.isEmpty else { return nil }
+        let matches = catalogMaps.indices.filter { index in
+            catalogMaps[index].artifacts.contains {
+                localArtifactSHA256s.contains($0.sha256)
+            }
+        }
+        return matches.count == 1 ? matches[0] : nil
     }
 }
 
@@ -373,6 +534,18 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
         )
     }
 
+    func removeMapFromLibrary(
+        mapEntryId: String,
+        credential: String
+    ) async throws {
+        var request = try request(
+            path: "/v1/library/maps/\(encodedPath(mapEntryId))",
+            method: "DELETE"
+        )
+        authorize(credential, request: &request)
+        try await sendNoContent(request, expectedStatus: 204)
+    }
+
     func createShare(
         mapEntryId: String,
         credential: String
@@ -381,6 +554,72 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
             path: "/v1/library/maps/\(encodedPath(mapEntryId))/shares",
             method: "POST",
             body: EmptyRequest(),
+            credential: credential
+        )
+    }
+
+    func shares(credential: String) async throws -> [OfflineMapCatalogShare] {
+        var result: [OfflineMapCatalogShare] = []
+        var cursor: String?
+        repeat {
+            var path = "/v1/library/shares?limit=100"
+            if let cursor {
+                path += "&cursor=\(cursor.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")"
+            }
+            var request = try request(path: path)
+            authorize(credential, request: &request)
+            let page: SharesResponse = try await send(request)
+            result.append(contentsOf: page.shares)
+            cursor = page.nextCursor
+            if result.count > 10_000 { throw OfflineMapCatalogError.invalidResponse }
+        } while cursor != nil
+        return result
+    }
+
+    func revokeShare(
+        shareId: String,
+        credential: String
+    ) async throws {
+        var request = try request(
+            path: "/v1/library/shares/\(encodedPath(shareId))",
+            method: "DELETE"
+        )
+        authorize(credential, request: &request)
+        try await sendNoContent(request, expectedStatus: 204)
+    }
+
+    func createLinkCode(
+        credential: String
+    ) async throws -> OfflineMapLibraryLinkCode {
+        try await mutation(
+            path: "/v1/libraries/link-codes",
+            method: "POST",
+            body: EmptyRequest(),
+            credential: credential
+        )
+    }
+
+    func claimLinkCode(
+        _ code: String,
+        credential: String
+    ) async throws -> OfflineMapCatalogCredential {
+        let normalized = code
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+        guard normalized.range(
+            of: "^[A-Z0-9_-]{4}-[A-Z0-9_-]{4}$",
+            options: .regularExpression
+        ) != nil else {
+            throw OfflineMapCatalogError.invalidResponse
+        }
+        let response: LinkClaimResponse = try await mutation(
+            path: "/v1/libraries/link-codes/\(encodedPath(normalized))/claim",
+            method: "POST",
+            body: EmptyRequest(),
+            credential: credential
+        )
+        return OfflineMapCatalogCredential(
+            libraryId: response.libraryId,
             credential: credential
         )
     }
@@ -486,6 +725,20 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
         }
     }
 
+    private func sendNoContent(
+        _ request: URLRequest,
+        expectedStatus: Int
+    ) async throws {
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw OfflineMapCatalogError.invalidResponse
+        }
+        guard http.statusCode == expectedStatus else {
+            let detail = String(data: data.prefix(4096), encoding: .utf8) ?? ""
+            throw OfflineMapCatalogError.serverStatus(http.statusCode, detail)
+        }
+    }
+
     private func encodedPath(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
     }
@@ -499,6 +752,13 @@ nonisolated private struct BootstrapResponse: Decodable {
 nonisolated private struct MapsResponse: Decodable {
     let maps: [OfflineMapCatalogMap]
     let nextCursor: String?
+}
+nonisolated private struct SharesResponse: Decodable {
+    let shares: [OfflineMapCatalogShare]
+    let nextCursor: String?
+}
+nonisolated private struct LinkClaimResponse: Decodable {
+    let libraryId: String
 }
 
 nonisolated private struct EmptyRequest: Encodable {}

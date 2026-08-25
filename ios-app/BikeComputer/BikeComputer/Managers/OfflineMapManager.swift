@@ -1569,6 +1569,43 @@ nonisolated struct SavedMapListItem: Identifiable, Equatable, Sendable {
     var isOnIPhone: Bool { localRecord != nil }
     var isActiveOnDevice: Bool { deviceMap != nil }
     var isAvailableInLibrary: Bool { catalogMap != nil }
+    var hasKnownMapLibraryCopy: Bool {
+        isAvailableInLibrary || localRecord?.catalogMapEntryID != nil
+    }
+    var canRemoveFromMapLibrary: Bool {
+        SavedMapRemovalPolicy.canRemoveFromMapLibrary(
+            isOnIPhone: isOnIPhone,
+            isActiveOnDevice: isActiveOnDevice,
+            isAvailableInLibrary: isAvailableInLibrary
+        )
+    }
+}
+
+nonisolated enum SavedMapRemovalPolicy {
+    static func canRemoveFromMapLibrary(
+        isOnIPhone: Bool,
+        isActiveOnDevice _: Bool,
+        isAvailableInLibrary: Bool
+    ) -> Bool {
+        isAvailableInLibrary && !isOnIPhone
+    }
+
+    static func localDeletionMessage(
+        displayName: String,
+        libraryCopyRemains: Bool
+    ) -> String {
+        var message = "This removes \(displayName) from Saved Maps on this iPhone."
+        if libraryCopyRemains {
+            message += " The copy in your Map Library remains and can be removed separately."
+        }
+        return message + " A copy already installed on the Bike Computer remains there."
+    }
+
+    static func libraryRemovalMessage(displayName: String) -> String {
+        "This removes \(displayName) from your Map Library. Copies already " +
+            "downloaded to an iPhone, installed on a Bike Computer, or added " +
+            "by friends are unaffected."
+    }
 }
 
 @MainActor
@@ -1613,6 +1650,8 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var lastTransferMapId: String
     @Published private(set) var lastTransferOutcome: String
     @Published private(set) var catalogMaps: [OfflineMapCatalogMap] = []
+    @Published private(set) var catalogShares: [OfflineMapCatalogShare] = []
+    @Published private(set) var libraryLinkCode: OfflineMapLibraryLinkCode?
     @Published private(set) var pendingSharePreview: OfflineMapSharePreview?
     @Published private(set) var createdShareURL: URL?
 
@@ -1689,7 +1728,7 @@ final class OfflineMapManager: ObservableObject {
         defaults: UserDefaults = .standard,
         mapPlatformSession: URLSession = .shared,
         cacheDirectory: URL? = nil,
-        mapStreamTrustStore: BikeMapStreamTrustStore = .production,
+        mapStreamTrustStore: BikeMapStreamTrustStore? = nil,
         catalogClient: OfflineMapCatalogClient? = nil,
         packDownload: @escaping PackDownloadOperation = { url, constraints, onProgress, onByteProgress in
             try await OfflineMapPackDownloader.download(
@@ -1735,7 +1774,8 @@ final class OfflineMapManager: ObservableObject {
             tokenStore: legacyBearerTokenStore
         )
         self.legacyBearerTokenStore = legacyBearerTokenStore
-        self.mapStreamTrustStore = mapStreamTrustStore
+        self.mapStreamTrustStore = mapStreamTrustStore ??
+            OfflineMapCatalogConfig.mapStreamTrustStore
         self.catalogCredentialStore = OfflineMapCatalogCredentialStore(defaults: defaults)
 #if HOST_TESTING
         self.catalogClient = catalogClient
@@ -2170,10 +2210,19 @@ final class OfflineMapManager: ObservableObject {
         var items: [SavedMapListItem] = []
 
         func takeCatalogMap(for record: SavedMapLocalRecord) -> OfflineMapCatalogMap? {
-            let index = remainingCatalogMaps.firstIndex { map in
-                record.catalogMapEntryID.map { $0 == map.mapEntryId } ??
-                    (record.mapID == map.mapId)
-            }
+            let metadata = SavedMapArtifactMetadataStore.load(for: record.packURL)
+            let localArtifactSHA256s = Set<String>([
+                metadata?.primaryArtifact?.sha256,
+                metadata?.legacyArtifact?.sha256,
+            ].compactMap { value in
+                guard let value, !value.isEmpty else { return nil }
+                return value
+            })
+            let index = OfflineMapCatalogReconciliationPolicy.matchingMapIndex(
+                catalogMapEntryID: record.catalogMapEntryID,
+                localArtifactSHA256s: localArtifactSHA256s,
+                catalogMaps: remainingCatalogMaps
+            )
             guard let index else { return nil }
             return remainingCatalogMaps.remove(at: index)
         }
@@ -2590,7 +2639,119 @@ final class OfflineMapManager: ObservableObject {
                     credential: credential.credential
                 )
                 self.createdShareURL = share.url
+                if let shares = try? await client.shares(
+                    credential: credential.credential
+                ) {
+                    self.catalogShares = shares
+                }
                 self.statusMessage = "share link ready"
+            }
+        }
+    }
+
+    func removeCatalogMapFromLibrary(_ map: OfflineMapCatalogMap) {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.runBusy {
+                guard let client = self.catalogClient,
+                      let credential = try await self.ensureCatalogCredential() else {
+                    throw OfflineMapCatalogError.invalidConfiguration
+                }
+                try await client.removeMapFromLibrary(
+                    mapEntryId: map.mapEntryId,
+                    credential: credential.credential
+                )
+                self.catalogMaps.removeAll { $0.mapEntryId == map.mapEntryId }
+                self.refreshCachedPacks()
+                self.catalogMaps = try await client.maps(
+                    credential: credential.credential
+                )
+                self.catalogShares = try await client.shares(
+                    credential: credential.credential
+                )
+                self.refreshCachedPacks()
+                self.statusMessage = "removed from map library"
+            }
+        }
+    }
+
+    func refreshCatalogShares() {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.runBusy {
+                guard let client = self.catalogClient,
+                      let credential = try await self.ensureCatalogCredential() else {
+                    throw OfflineMapCatalogError.invalidConfiguration
+                }
+                self.catalogShares = try await client.shares(
+                    credential: credential.credential
+                )
+            }
+        }
+    }
+
+    func revokeCatalogShare(_ share: OfflineMapCatalogShare) {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.runBusy {
+                guard let client = self.catalogClient,
+                      let credential = try await self.ensureCatalogCredential() else {
+                    throw OfflineMapCatalogError.invalidConfiguration
+                }
+                try await client.revokeShare(
+                    shareId: share.shareId,
+                    credential: credential.credential
+                )
+                self.catalogShares = try await client.shares(
+                    credential: credential.credential
+                )
+                self.statusMessage = "share link revoked"
+            }
+        }
+    }
+
+    func createLibraryLinkCode() {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.runBusy {
+                guard let client = self.catalogClient,
+                      let credential = try await self.ensureCatalogCredential() else {
+                    throw OfflineMapCatalogError.invalidConfiguration
+                }
+                self.libraryLinkCode = try await client.createLinkCode(
+                    credential: credential.credential
+                )
+                self.statusMessage = "one-time link code ready"
+            }
+        }
+    }
+
+    func clearLibraryLinkCode() {
+        libraryLinkCode = nil
+    }
+
+    func claimLibraryLinkCode(_ code: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.runBusy {
+                guard let client = self.catalogClient,
+                      let current = try await self.ensureCatalogCredential() else {
+                    throw OfflineMapCatalogError.invalidConfiguration
+                }
+                let linked = try await client.claimLinkCode(
+                    code,
+                    credential: current.credential
+                )
+                try self.catalogCredentialStore.save(linked)
+                self.libraryLinkCode = nil
+                self.catalogMaps = try await client.maps(
+                    credential: linked.credential
+                )
+                self.catalogShares = try await client.shares(
+                    credential: linked.credential
+                )
+                self.refreshCachedPacks()
+                self.statusMessage = "map libraries linked"
             }
         }
     }

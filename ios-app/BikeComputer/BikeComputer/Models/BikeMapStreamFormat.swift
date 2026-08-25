@@ -87,6 +87,16 @@ nonisolated struct BikeMapStreamTrustStore: Equatable {
         return capabilities.isEmpty ? nil : capabilities.joined(separator: ",")
     }
 
+    func including(keyID: String, publicKeyX963: Data) -> Self? {
+        if let existing = publicKeysByID[keyID], existing != publicKeyX963 {
+            return nil
+        }
+        var keys = publicKeysByID
+        keys[keyID] = publicKeyX963
+        let combined = Self(publicKeysByID: keys)
+        return combined.contains(keyID: keyID) ? combined : nil
+    }
+
     var isEmpty: Bool { publicKeysByID.isEmpty }
 
 }

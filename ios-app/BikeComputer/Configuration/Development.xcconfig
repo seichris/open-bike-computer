@@ -12,6 +12,9 @@ BICINO_MAP_SERVICE_HOST = maps-dev.8o.vc
 // Bicino Dev shares the production library identity and catalog with Bicino.
 // Staging validation builds override this setting at build time.
 BICINO_MAP_CATALOG_HOST = maps-share.8o.vc
-// Set to the exact account R2 S3 hostname during the infrastructure rollout.
-// Shared-map downloads fail closed while this remains unconfigured.
-BICINO_MAP_R2_DOWNLOAD_HOST = invalid.invalid
+// Exact Cloudflare account S3 hostname; bucket names remain path components.
+BICINO_MAP_R2_DOWNLOAD_HOST = 5834cd65d5f197557149dbc10074d37f.r2.cloudflarestorage.com
+// Public verification identity for the dedicated development signer.
+// Bicino Dev accepts it in addition to production signers; Bicino never does.
+BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID = map-dev-2026-08
+BICINO_MAP_DEVELOPMENT_SIGNING_PUBLIC_KEY_X963_HEX = 04a3b3bec1db96a28ca372e203af005936427e20ddba7dc7e955dfb42ec701e91a99b1d9dc45dd3565aecf2f165cce3a5292c22066e5494fe002660bb08f0b1241

@@ -326,6 +326,11 @@ class MaintenanceTests(unittest.TestCase):
                     "finalized": 0,
                     "failed": 0,
                 },
+                "catalogRetention": {
+                    "authorized": 0,
+                    "deleted": 0,
+                    "deferred": 0,
+                },
                 "buildingBlockCache": {
                     "removedNamespaces": 1,
                     "removedBytes": 200,

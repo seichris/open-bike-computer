@@ -632,7 +632,12 @@ class MapWorker:
 
     def _publish_catalog_ready(self, job_id: str) -> MapJob:
         try:
-            return publish_ready_job(self.store, self.catalog_client, job_id)
+            return publish_ready_job(
+                self.store,
+                self.catalog_client,
+                job_id,
+                artifact_store=getattr(self.pipeline, "artifact_store", None),
+            )
         except Exception:
             # Catalog publication is additive. A READY map remains available
             # through the existing same-environment API and maintenance can
