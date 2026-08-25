@@ -1,10 +1,13 @@
 #include "../../lib/ride_diagnostics/ride_diagnostics_http_policy.hpp"
+#include "../../lib/ride_diagnostics/ride_diagnostics_index_policy.hpp"
 
 #include <cassert>
 #include <cstdint>
 #include <string>
 
 using ride_diagnostics::http_policy::RouteKind;
+using ride_diagnostics::index_policy::CandidateDisposition;
+using ride_diagnostics::index_policy::classifyCandidate;
 
 int main() {
   constexpr char prefix[] = "/device-diagnostics/v1/";
@@ -27,6 +30,15 @@ int main() {
   assert(ride_diagnostics::http_policy::parseRoute(
              "GET", std::string(prefix) + "session/exit", prefix)
              .kind == RouteKind::Unknown);
+
+  assert(classifyCandidate(0, 256 * 1024) ==
+         CandidateDisposition::IgnoreEmpty);
+  // The firmware indexes readable crash-tail bytes as-is. iOS verifies the
+  // checksum and ignores only the incomplete final JSON record.
+  assert(classifyCandidate(66560, 256 * 1024) ==
+         CandidateDisposition::Include);
+  assert(classifyCandidate(256 * 1024 + 1, 256 * 1024) ==
+         CandidateDisposition::Reject);
 
   const auto chunk = ride_diagnostics::http_policy::parseRoute(
       "GET", std::string(prefix) + "chunks/12/34", prefix);

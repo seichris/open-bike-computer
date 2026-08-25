@@ -261,11 +261,13 @@ final class TestDeviceDiagnosticsSessionController:
 {
     weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
     let session: DeviceTransferSession
+    let enterError: Error?
     private(set) var enterCount = 0
     private(set) var exitCount = 0
 
-    init(session: DeviceTransferSession) {
+    init(session: DeviceTransferSession, enterError: Error? = nil) {
         self.session = session
+        self.enterError = enterError
     }
 
     func enterDiagnostics(
@@ -274,6 +276,9 @@ final class TestDeviceDiagnosticsSessionController:
     ) async throws -> DeviceTransferSession {
         _ = bleManager
         enterCount += 1
+        if let enterError {
+            throw enterError
+        }
         status("test diagnostics session ready")
         return session
     }
@@ -786,6 +791,8 @@ struct NavigationProtocolTests {
         await testDeviceTransferManagerConfirmsDebugExit()
         await testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus()
         await testDeviceDiagnosticsTransferPolicy()
+        await testDeviceDiagnosticsFailsFastOnFirmwareRejection()
+        await testDeviceDiagnosticsRecordsEntryFailure()
         await testDeviceDiagnosticsDownloadEndToEnd()
         await testOfflineMapInstallationCredentialClient()
         testOfflineMapPreparationTimeEstimate()
@@ -17899,6 +17906,29 @@ struct NavigationProtocolTests {
             assert(false, "oversized diagnostics stream has the right error")
         }
 
+        OfflineMapTestURLProtocol.configure { _ in
+            (500, Data("""
+            {"ok":false,"error":{"code":"diagnostics_index_unreadable","message":"chunk could not be read"}}
+            """.utf8))
+        }
+        do {
+            _ = try await manager.requestForTesting(
+                session: session,
+                path: "device-diagnostics/v1/index",
+                maximumBytes: 4096
+            )
+            assert(false, "structured diagnostics rejection is thrown")
+        } catch DeviceDiagnosticsTransferError.deviceRejected(
+            let code, let message
+        ) {
+            assertEqual(code, "diagnostics_index_unreadable",
+                        "HTTP diagnostics errors retain their firmware code")
+            assert(message.contains("chunk could not be read"),
+                   "HTTP diagnostics errors retain their firmware detail")
+        } catch {
+            assert(false, "structured diagnostics rejection has the right error")
+        }
+
         let validIndex = Data("""
         {"schema":1,"source":"firmware","bootSequence":1,"activeChunk":2,"stats":{"enqueued":2,"written":1,"dropped":0,"storageErrors":0},"chunks":[{"bootSequence":1,"chunk":1,"bytes":3,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
         """.utf8)
@@ -17976,7 +18006,14 @@ struct NavigationProtocolTests {
             ]),
             "chunks from one boot cannot silently change firmware identity"
         )
-        let truncatedFirstStream = validStream + Data("{\"schema\":".utf8)
+        let truncatedFirstStream = validStream +
+            Data("\n{\"schema\":".utf8)
+        assert(
+            DeviceDiagnosticsTransferManager.validateJSONLForTesting(
+                truncatedFirstStream
+            ) != nil,
+            "one truncated crash-tail record is recoverable on a final chunk"
+        )
         assert(
             !DeviceDiagnosticsTransferManager.streamsAreOrderedForTesting([
                 (1, truncatedFirstStream), (1, laterStream),
@@ -18017,6 +18054,132 @@ struct NavigationProtocolTests {
     }
 
     @MainActor
+    static func testDeviceDiagnosticsFailsFastOnFirmwareRejection() async {
+        let bleManager = BLEManager()
+        let initialRevision = bleManager.deviceTransferStatusRevision
+        let manager = DeviceTransferManager()
+        let started = Date()
+        let wait = Task {
+            try await manager.waitForDiagnosticsSessionForTesting(
+                bleManager: bleManager,
+                afterRevision: initialRevision,
+                attemptCount: 32
+            )
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        let rejectedStatus = """
+        {"configured":true,"enabled":false,"mode":"","lastError":{"code":"diagnostics_writable_probe_failed","message":"probe failed"}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(rejectedStatus.utf8)
+        )
+        do {
+            _ = try await wait.value
+            assert(false, "firmware diagnostics rejection must fail entry")
+        } catch RemoteDeviceDebugError.rejected(let code, let message) {
+            assertEqual(code, "diagnostics_writable_probe_failed",
+                        "diagnostics handshake retains the firmware code")
+            assert(message.contains("diagnostics_writable_probe_failed"),
+                   "diagnostics rejection presented to the user includes its code")
+            assert(Date().timeIntervalSince(started) < 1.5,
+                   "fresh firmware rejection bypasses the full polling window")
+        } catch {
+            assert(false, "firmware diagnostics rejection has the right error")
+        }
+    }
+
+    @MainActor
+    static func testDeviceDiagnosticsRecordsEntryFailure() async {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "device-diagnostics-entry-failure-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaultsSuite =
+            "DeviceDiagnosticsEntryFailure.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: defaultsSuite)!
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        let recorder = RideDiagnosticsRecorder(
+            rootURL: root,
+            userDefaults: defaults
+        )
+        let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting(
+            "01234567-89ab-cdef-0123-456789abcdef"
+        )
+        let session = DeviceTransferSession(
+            mode: .diagnostics,
+            baseURL: URL(string: "https://diagnostics.test")!,
+            accessPointSSID: nil,
+            sessionToken: "unused-token"
+        )
+        let sessionController = TestDeviceDiagnosticsSessionController(
+            session: session,
+            enterError: RemoteDeviceDebugError.rejected(
+                code: "diagnostics_seal_timeout",
+                message: "seal timed out [diagnostics_seal_timeout]"
+            )
+        )
+        let manager = DeviceDiagnosticsTransferManager(
+            transferManager: sessionController
+        )
+        do {
+            _ = try await manager.downloadDeviceLogs(
+                bleManager: bleManager,
+                recorder: recorder,
+                status: { _ in }
+            )
+            assert(false, "diagnostics entry rejection must fail download")
+        } catch RemoteDeviceDebugError.rejected(let code, _) {
+            assertEqual(code, "diagnostics_seal_timeout",
+                        "entry rejection reaches the diagnostics caller")
+        } catch {
+            assert(false, "diagnostics entry failure has the right error")
+        }
+        recorder.flush()
+        assertEqual(sessionController.enterCount, 1,
+                    "entry failure performs one diagnostics entry attempt")
+        assertEqual(sessionController.exitCount, 0,
+                    "entry failure does not exit a session that never opened")
+
+        var failureEvent: RideDiagnosticEvent?
+        let appDirectory = root
+            .appendingPathComponent("app", isDirectory: true)
+            .appendingPathComponent(
+                recorder.processId.uuidString.lowercased(),
+                isDirectory: true
+            )
+        let eventFiles = (try? FileManager.default.contentsOfDirectory(
+            at: appDirectory,
+            includingPropertiesForKeys: nil
+        )) ?? []
+        for fileURL in eventFiles where fileURL.pathExtension == "jsonl" {
+            guard let data = try? Data(contentsOf: fileURL),
+                  let text = String(data: data, encoding: .utf8) else {
+                continue
+            }
+            for line in text.split(separator: "\n") {
+                guard let event = try? JSONDecoder().decode(
+                    RideDiagnosticEvent.self,
+                    from: Data(line.utf8)
+                ), event.event == "diagnostics_download_failed" else {
+                    continue
+                }
+                failureEvent = event
+            }
+        }
+        assertEqual(failureEvent?.fields["reason"], "entry_failed",
+                    "iOS records that diagnostics failed during entry")
+        assertEqual(
+            failureEvent?.fields["code"],
+            "diagnostics_seal_timeout",
+            "iOS records the exact firmware diagnostics rejection code"
+        )
+    }
+
+    @MainActor
     static func testDeviceDiagnosticsDownloadEndToEnd() async {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(
@@ -18041,8 +18204,7 @@ struct NavigationProtocolTests {
         )
         let stream = Data("""
         {"schema":1,"source":"firmware","sequence":7,"level":"info","category":"boot","event":"ready","fields":{"bootSequence":1,"firmwareFingerprint":"A1B2C3D4"}}
-
-        """.utf8)
+        """.utf8) + Data("\n{\"schema\":1,\"source\":\"firmware\"".utf8)
         let digest = SHA256.hash(data: stream).map {
             String(format: "%02x", $0)
         }.joined()
@@ -18100,7 +18262,7 @@ struct NavigationProtocolTests {
                     sha256: digest
                 ),
                 stream,
-                "end-to-end diagnostics persists the verified chunk"
+                "end-to-end diagnostics preserves the verified crash-tail chunk"
             )
             let requests = OfflineMapTestURLProtocol.requests()
             assertEqual(

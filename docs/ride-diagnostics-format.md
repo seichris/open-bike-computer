@@ -47,6 +47,15 @@ fields are strings; all three validators enforce the same source-specific type
 contract. A truncated final line is reported and ignored; a
 truncated line in the middle of a stream is an error.
 
+Firmware may leave a zero-byte closed-chunk filename when power is lost after
+file creation but before its first complete record. The authenticated device
+index omits that empty artifact because it contains no evidence. It includes a
+non-empty final chunk byte-for-byte even when the last JSON record is truncated;
+the checksum binds the original crash tail and validators salvage the preceding
+complete records. A truncated tail cannot be followed by another non-empty
+chunk in the same boot. Any other non-empty candidate that cannot be read and
+hashed makes the index fail closed instead of silently dropping evidence.
+
 Firmware that starts before its wall clock is valid omits `wallTime`. Its first
 later timestamped event and every subsequent RTC correction emit a
 `lifecycle.clock_anchor` carrying the same uptime and persistent boot sequence.

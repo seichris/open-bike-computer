@@ -2702,12 +2702,14 @@ private struct RemoteDeviceDebugSettingsSection: View {
                         password: lanPassword
                     ) else {
                         throw RemoteDeviceDebugError.rejected(
-                            lanValidationMessage ?? "Invalid local Wi-Fi credentials."
+                            code: "invalid_lan_credentials",
+                            message: lanValidationMessage ?? "Invalid local Wi-Fi credentials."
                         )
                     }
                     guard credentialStore.save(validated) else {
                         throw RemoteDeviceDebugError.rejected(
-                            "The local Wi-Fi credentials could not be saved to Keychain."
+                            code: "lan_credentials_not_saved",
+                            message: "The local Wi-Fi credentials could not be saved to Keychain."
                         )
                     }
                     credentials = validated

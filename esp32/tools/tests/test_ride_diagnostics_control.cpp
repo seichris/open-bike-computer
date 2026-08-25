@@ -1,4 +1,5 @@
 #include "../../lib/ride_diagnostics/ride_diagnostics_control.hpp"
+#include "../../lib/ride_diagnostics/ride_diagnostics_transfer_policy.hpp"
 
 #include <cassert>
 #include <iostream>
@@ -45,6 +46,27 @@ int main() {
   assert(markerSequenceAfterBinding(captureA, captureA, 7) == 7);
   assert(markerSequenceAfterBinding(captureA, captureB, 7) == 0);
   assert(markerSequenceAfterBinding(nullptr, captureB, 7) == 0);
+
+  using namespace ride_diagnostics::transfer_policy;
+  assert(storageReady(StoragePreparation::ReadyRemovable));
+  assert(storageReady(StoragePreparation::ReadyInternalFallback));
+  assert(usingInternalFallback(StoragePreparation::ReadyInternalFallback));
+  assert(!storageReady(StoragePreparation::CardMissing));
+  assert(std::string(storageFailure(StoragePreparation::MountFailed).code) ==
+         "diagnostics_mount_failed");
+  assert(std::string(storageFailure(StoragePreparation::CardMissing).code) ==
+         "diagnostics_card_missing");
+  assert(std::string(
+             storageFailure(StoragePreparation::WritableProbeFailed).code) ==
+         "diagnostics_writable_probe_failed");
+  assert(std::string(sealFailure(SealPreparation::FlushFailed).code) ==
+         "diagnostics_flush_failed");
+  assert(std::string(sealFailure(SealPreparation::CloseFailed).code) ==
+         "diagnostics_close_failed");
+  assert(std::string(sealFailure(SealPreparation::DrainTimeout).code) ==
+         "diagnostics_seal_timeout");
+  assert(std::string(sealFailure(SealPreparation::SealFailed).code) ==
+         "diagnostics_seal_failed");
 
   std::cout << "ride diagnostics control tests passed\n";
   return 0;
