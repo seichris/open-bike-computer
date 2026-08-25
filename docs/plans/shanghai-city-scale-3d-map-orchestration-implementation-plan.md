@@ -139,10 +139,13 @@ and 26,285 nodes), so neither the relation-object ceiling nor host RAM was the
 cause. Reproducing the preserved clipped PBF showed source relation `r11258294`
 (`Guangfulin Culture Exhibition Hall`) is tagged `type=building` but contains
 only a `part` member and no outline. That is an invalid/incomplete relation and
-is not eligible for the general relation policy. The reviewed narrow fallback
-now retains a single direct way member as a standalone part only when that way
-itself is explicitly tagged `building=yes`; ambiguous, multi-part, or untagged
-cases remain fail-closed. The worker
+is not eligible for the general relation policy. At that historical checkpoint,
+the fallback retained a single direct way member
+as a standalone part only when that way itself was explicitly tagged
+`building=yes`; ambiguous, multi-part, or untagged cases remained fail-closed.
+PR #278 later broadened this identity-versioned fallback to unambiguous
+incomplete relations whose direct members are all explicitly tagged
+`building=yes` or `building:part=yes`. The worker
 cgroup peaked at 6,121,091,072 bytes during the final retry, with no OOM event;
 the prior generic task error also exposed a diagnostics gap. The follow-up
 pipeline change parses typed conversion failures in chunk execution and stores
@@ -1327,10 +1330,12 @@ A subsequent image's relation-heavy validation probe
 `a932f748a388475ca0e1` (26.537229464 km² around Guangfulin) reached
 `ready` with 4/4 receipts, an 894,886-byte ZIP, and artifact SHA-256
 `9f88a32fa8ef4274cd0e0ca330d55fe77f397afa90721bf146b71029607ec2e1`.
-This confirms the reviewed narrow fallback: a malformed `type=building`
-relation with exactly one direct way explicitly tagged `building=yes` is
+This confirms the then-active narrow fallback: a malformed `type=building`
+relation with exactly one direct way explicitly tagged `building=yes` was
 retained as a standalone part; ambiguous, multi-part, and untagged cases still
-fail closed. The exact full-bbox retry `c2b1ae53bede438ab02e` was then run
+failed closed. The later #278 policy also accepts an unambiguous multi-part
+relation when every direct way is explicitly tagged `building=yes` or
+`building:part=yes`. The exact full-bbox retry `c2b1ae53bede438ab02e` was then run
 against the cached China parent snapshot as a 16-chunk, 442-block cold
 acceptance benchmark. Its first two chunks published 48 receipts with no
 retries or splits before the calibration edge failure described below; the
