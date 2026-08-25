@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import fcntl
 import shutil
 import time
+import urllib.error
 import urllib.request
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import SourceRegion, utc_now_iso
@@ -26,6 +29,9 @@ class SourceCacheStorageError(SourceCacheError):
     """Raised before a source download would violate the disk reserve."""
 
 
+DEFAULT_SOURCE_REVALIDATE_SECONDS = 24 * 60 * 60
+
+
 @dataclass(frozen=True)
 class CachedSource:
     region_id: str
@@ -33,6 +39,13 @@ class CachedSource:
     bytes: int
     sha256: str
     cached_at: str
+    source_url: str | None = None
+    resolved_url: str | None = None
+    etag: str | None = None
+    last_modified: str | None = None
+    downloaded_at: str | None = None
+    validated_at: str | None = None
+    source_published_at: str | None = None
 
 
 def default_backend_data_root(repo_root: str | Path) -> Path:
@@ -67,6 +80,7 @@ class SourceCache:
         data_root: str | Path | None = None,
         *,
         lock_stale_seconds: float = 3600.0,
+        revalidate_after_seconds: float | None = None,
     ):
         self.repo_root = Path(repo_root)
         self.data_root = (
@@ -79,8 +93,25 @@ class SourceCache:
             if metadata_path
             else self.data_root / "source-cache.json"
         )
-        self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_stale_seconds = lock_stale_seconds
+        raw_revalidation_seconds = revalidate_after_seconds
+        if raw_revalidation_seconds is None:
+            raw_revalidation_seconds = os.environ.get(
+                "MAP_PLATFORM_SOURCE_CACHE_REVALIDATE_SECONDS",
+                str(DEFAULT_SOURCE_REVALIDATE_SECONDS),
+            )
+        if isinstance(raw_revalidation_seconds, bool):
+            raise ValueError("source cache revalidation interval must be numeric")
+        try:
+            interval = float(raw_revalidation_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("source cache revalidation interval must be numeric") from exc
+        if not math.isfinite(interval) or interval < 0:
+            raise ValueError(
+                "source cache revalidation interval must be finite and nonnegative"
+            )
+        self.revalidate_after_seconds = interval
+        self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
 
     def ensure(
         self,
@@ -119,28 +150,40 @@ class SourceCache:
                 except SourceCacheError:
                     pass
                 else:
-                    self._record(cached, cancellation_check=cancellation_check)
-                    return cached
+                    if not self._requires_revalidation(region, cached):
+                        self._record(
+                            cached,
+                            cancellation_check=cancellation_check,
+                        )
+                        return cached
         with self._lock(
             lock_path,
             cancellation_check=cancellation_check,
             exclusive=True,
         ):
+            existing = None
             if target.exists() and not force:
-                cached = self._cached_source(
+                existing = self._cached_source(
                     region,
                     target,
                     cancellation_check=cancellation_check,
                 )
                 try:
-                    self._verify_expected_checksum(region, cached.sha256)
+                    self._verify_expected_checksum(region, existing.sha256)
                 except SourceCacheCancelled:
                     raise
                 except SourceCacheError:
-                    target.unlink()
+                    # Preserve the stable path until a replacement has been
+                    # verified, but never reuse validators from bytes that
+                    # failed their configured checksum.
+                    existing = None
                 else:
-                    self._record(cached, cancellation_check=cancellation_check)
-                    return cached
+                    if not self._requires_revalidation(region, existing):
+                        self._record(
+                            existing,
+                            cancellation_check=cancellation_check,
+                        )
+                        return existing
 
             if not region.url:
                 raise SourceCacheError(f"source region {region.id} has no download URL")
@@ -168,8 +211,21 @@ class SourceCache:
                     )
 
                     try:
+                        conditional_headers = (
+                            self._conditional_headers(region, existing)
+                            if existing is not None and not force
+                            else {}
+                        )
+                        request = (
+                            urllib.request.Request(
+                                region.url,
+                                headers=conditional_headers,
+                            )
+                            if conditional_headers
+                            else region.url
+                        )
                         with urllib.request.urlopen(
-                            region.url, timeout=60
+                            request, timeout=60
                         ) as response, tmp_path.open("wb") as output:
                             headers = getattr(response, "headers", None)
                             content_length = (
@@ -205,6 +261,48 @@ class SourceCache:
                                 )
                                 output.write(chunk)
                             _raise_if_cancelled(cancellation_check)
+                            resolved_url = (
+                                response.geturl()
+                                if hasattr(response, "geturl")
+                                else region.url
+                            )
+                            response_etag = (
+                                headers.get("ETag") if headers is not None else None
+                            )
+                            response_last_modified = (
+                                headers.get("Last-Modified")
+                                if headers is not None
+                                else None
+                            )
+                    except urllib.error.HTTPError as exc:
+                        if (
+                            exc.code == 304
+                            and existing is not None
+                            and not force
+                            and conditional_headers
+                        ):
+                            resolved_url = exc.geturl()
+                            if resolved_url == region.url and existing.resolved_url:
+                                resolved_url = existing.resolved_url
+                            validated = self._validated_cached_source(
+                                region,
+                                existing,
+                                resolved_url=resolved_url,
+                                etag=exc.headers.get("ETag") if exc.headers else None,
+                                last_modified=(
+                                    exc.headers.get("Last-Modified")
+                                    if exc.headers
+                                    else None
+                                ),
+                            )
+                            self._record(
+                                validated,
+                                cancellation_check=cancellation_check,
+                            )
+                            return validated
+                        raise SourceCacheError(
+                            f"failed to download source PBF for {region.id}: {exc}"
+                        ) from exc
                     except Exception as exc:
                         if isinstance(exc, SourceCacheError):
                             raise
@@ -212,13 +310,24 @@ class SourceCache:
                             f"failed to download source PBF for {region.id}: {exc}"
                         ) from exc
 
+                    downloaded_at = utc_now_iso()
                     cached = self._cached_source(
                         region,
                         tmp_path,
                         cancellation_check=cancellation_check,
+                        provenance={
+                            "sourceUrl": region.url,
+                            "resolvedUrl": resolved_url,
+                            "etag": response_etag,
+                            "lastModified": response_last_modified,
+                            "downloadedAt": downloaded_at,
+                            "validatedAt": downloaded_at,
+                            "sourcePublishedAt": region.published_at,
+                        },
                     )
                     self._verify_expected_checksum(region, cached.sha256)
                     tmp_path.replace(target)
+                    cached = replace(cached, path=target)
                     published = True
             finally:
                 # Hashing, checksum validation, cancellation, and an atomic
@@ -227,11 +336,6 @@ class SourceCache:
                 # a stable target until the replace itself succeeds.
                 if not published:
                     tmp_path.unlink(missing_ok=True)
-            cached = self._cached_source(
-                region,
-                target,
-                cancellation_check=cancellation_check,
-            )
             self._record(cached, cancellation_check=cancellation_check)
             return cached
 
@@ -280,8 +384,15 @@ class SourceCache:
 
     def metadata(self) -> dict[str, object]:
         if not self.metadata_path.exists():
-            return {"sources": {}}
+            return {"schemaVersion": 1, "sources": {}, "snapshots": {}}
         return json.loads(self.metadata_path.read_text())
+
+    def _metadata_for_region(self, region_id: str) -> dict[str, object]:
+        sources = self.metadata().get("sources", {})
+        if not isinstance(sources, dict):
+            return {}
+        value = sources.get(region_id, {})
+        return dict(value) if isinstance(value, dict) else {}
 
     def _target_path(self, region: SourceRegion) -> Path:
         if not region.local_path:
@@ -313,15 +424,92 @@ class SourceCache:
         path: Path,
         *,
         cancellation_check=None,
+        provenance: dict[str, object] | None = None,
     ) -> CachedSource:
         if not path.exists():
             raise SourceCacheError(f"cached source is missing: {path}")
+        sha256 = _hash_file(path, cancellation_check=cancellation_check)
+        stored = self._metadata_for_region(region.id)
+        if stored.get("sha256") != sha256:
+            stored = {}
+        provenance = {**stored, **(provenance or {})}
+        downloaded_at = _optional_text(provenance.get("downloadedAt"))
+        if downloaded_at is None:
+            downloaded_at = _file_timestamp(path)
         return CachedSource(
             region_id=region.id,
             path=path,
             bytes=path.stat().st_size,
-            sha256=_hash_file(path, cancellation_check=cancellation_check),
-            cached_at=utc_now_iso(),
+            sha256=sha256,
+            cached_at=downloaded_at,
+            source_url=_optional_text(provenance.get("sourceUrl")),
+            resolved_url=_optional_text(provenance.get("resolvedUrl")),
+            etag=_optional_text(provenance.get("etag")),
+            last_modified=_optional_text(provenance.get("lastModified")),
+            downloaded_at=downloaded_at,
+            validated_at=_optional_text(provenance.get("validatedAt")),
+            source_published_at=_optional_text(
+                provenance.get("sourcePublishedAt")
+            ),
+        )
+
+    def _requires_revalidation(
+        self,
+        region: SourceRegion,
+        cached: CachedSource,
+    ) -> bool:
+        if region.checksum:
+            return False
+        if cached.source_url is not None and cached.source_url != region.url:
+            return True
+        if (
+            region.published_at is not None
+            and cached.source_published_at != region.published_at
+        ):
+            return True
+        checked_at = cached.validated_at or _file_timestamp(cached.path)
+        checked_timestamp = _parse_timestamp(checked_at)
+        if checked_timestamp is None:
+            return True
+        age_seconds = time.time() - checked_timestamp
+        return age_seconds < 0 or age_seconds >= self.revalidate_after_seconds
+
+    @staticmethod
+    def _conditional_headers(
+        region: SourceRegion,
+        cached: CachedSource,
+    ) -> dict[str, str]:
+        if cached.source_url != region.url:
+            return {}
+        headers = {}
+        if cached.etag:
+            headers["If-None-Match"] = cached.etag
+        if cached.last_modified:
+            headers["If-Modified-Since"] = cached.last_modified
+        return headers
+
+    @staticmethod
+    def _validated_cached_source(
+        region: SourceRegion,
+        cached: CachedSource,
+        *,
+        resolved_url: str | None,
+        etag: str | None,
+        last_modified: str | None,
+    ) -> CachedSource:
+        return CachedSource(
+            region_id=cached.region_id,
+            path=cached.path,
+            bytes=cached.bytes,
+            sha256=cached.sha256,
+            cached_at=cached.cached_at,
+            source_url=region.url,
+            resolved_url=resolved_url or cached.resolved_url,
+            etag=etag or cached.etag,
+            last_modified=last_modified or cached.last_modified,
+            downloaded_at=cached.downloaded_at,
+            validated_at=utc_now_iso(),
+            source_published_at=region.published_at,
         )
 
     def _record(self, cached: CachedSource, *, cancellation_check=None) -> None:
@@ -334,16 +522,54 @@ class SourceCache:
             exclusive=True,
         ):
             metadata = self.metadata()
-            sources = dict(metadata.get("sources", {}))
-            sources[cached.region_id] = {
+            stored_sources = metadata.get("sources", {})
+            sources = dict(stored_sources) if isinstance(stored_sources, dict) else {}
+            current_record = {
                 "path": str(cached.path),
                 "bytes": cached.bytes,
                 "sha256": cached.sha256,
                 "cachedAt": cached.cached_at,
+                "sourceUrl": cached.source_url,
+                "resolvedUrl": cached.resolved_url,
+                "etag": cached.etag,
+                "lastModified": cached.last_modified,
+                "downloadedAt": cached.downloaded_at,
+                "validatedAt": cached.validated_at,
+                "sourcePublishedAt": cached.source_published_at,
             }
-            self.metadata_path.write_text(
-                json.dumps({"sources": sources}, indent=2, sort_keys=True) + "\n"
+            sources[cached.region_id] = current_record
+            stored_snapshots = metadata.get("snapshots", {})
+            snapshots = (
+                dict(stored_snapshots) if isinstance(stored_snapshots, dict) else {}
             )
+            stored_region_snapshots = snapshots.get(cached.region_id, {})
+            region_snapshots = (
+                dict(stored_region_snapshots)
+                if isinstance(stored_region_snapshots, dict)
+                else {}
+            )
+            region_snapshots[cached.sha256] = dict(current_record)
+            snapshots[cached.region_id] = region_snapshots
+            serialized = (
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "sources": sources,
+                        "snapshots": snapshots,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            temporary = self.metadata_path.with_suffix(
+                self.metadata_path.suffix + ".tmp"
+            )
+            try:
+                temporary.write_text(serialized)
+                temporary.replace(self.metadata_path)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def _verify_expected_checksum(self, region: SourceRegion, actual_sha256: str) -> None:
         if region.checksum and region.checksum.lower() != actual_sha256.lower():
@@ -404,3 +630,24 @@ def _hash_file(path: Path, *, cancellation_check=None) -> str:
             digest.update(chunk)
     _raise_if_cancelled(cancellation_check)
     return digest.hexdigest()
+
+
+def _optional_text(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _file_timestamp(path: Path) -> str:
+    return (
+        datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _parse_timestamp(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None

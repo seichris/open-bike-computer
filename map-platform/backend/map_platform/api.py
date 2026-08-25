@@ -962,6 +962,13 @@ def create_app():
             "bytes": cached.bytes,
             "sha256": cached.sha256,
             "cachedAt": cached.cached_at,
+            "sourceUrl": cached.source_url,
+            "resolvedUrl": cached.resolved_url,
+            "etag": cached.etag,
+            "lastModified": cached.last_modified,
+            "downloadedAt": cached.downloaded_at,
+            "validatedAt": cached.validated_at,
+            "sourcePublishedAt": cached.source_published_at,
         }
 
     @app.post("/v1/maintenance/expire", dependencies=[Depends(require_admin_token)])
