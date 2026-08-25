@@ -141,6 +141,43 @@ class BuildingPipelineTests(unittest.TestCase):
         self.assertEqual(report["standaloneRelationPartCount"], 1)
         self.assertEqual(report["containmentAssociationCount"], 0)
 
+    def test_singapore_relation_parts_emit_five_target3_buildings(self):
+        members = [
+            feature(
+                1_077_928_781 + index,
+                box(100 + index * 40, 100, 130 + index * 40, 130),
+                '"building:part"=>"yes","building:levels"=>"5"',
+                building=None,
+            )
+            for index in range(5)
+        ]
+        standalone_keys = [
+            f"w{1_077_928_781 + index}" for index in range(5)
+        ]
+
+        buildings, report, _flat = prepare_buildings(
+            members,
+            self.rules,
+            {"standalonePartKeys": standalone_keys},
+            strict_relations=True,
+        )
+        records, stats = clip_buildings(
+            buildings,
+            box(0, 0, 400, 400),
+            0,
+            0,
+        )
+        section, metadata = _building_section(records)
+
+        self.assertEqual(len(buildings), 5)
+        self.assertEqual(report["standaloneRelationPartCount"], 5)
+        self.assertEqual(len(records), 5)
+        self.assertEqual(metadata["buildings"], 5)
+        self.assertGreater(metadata["buildingPoints"], 0)
+        self.assertGreater(metadata["buildingBytes"], 16)
+        self.assertEqual(metadata["buildingBytes"], len(section))
+        self.assertGreater(stats["emittedWallCount"], 0)
+
     def test_complexity_snapshot_precedes_containment_and_is_bounded(self):
         outline = feature(1, box(0, 0, 100, 100), '"building"=>"yes"')
         part = feature(

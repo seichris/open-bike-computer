@@ -23,6 +23,9 @@ from extract_building_relations import (  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "building_relations.osm"
+SINGAPORE_FIXTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "singapore_r14346906.osm"
+)
 SCRIPT = ROOT / "scripts" / "extract_building_relations.py"
 
 
@@ -188,6 +191,145 @@ class BuildingRelationIngressTests(unittest.TestCase):
 
         self.assertEqual(handler.standalone_part_keys, {"w31", "w32"})
         self.assertFalse(handler.parts_without_outline)
+
+    def test_unoutlined_relation_with_shared_part_remains_fail_closed(self):
+        handler = BuildingRelationHandler(
+            expected_closure={
+                "requiredRelationKeys": ["r109", "r110"],
+                "requiredWayKeys": ["w33"],
+            }
+        )
+
+        class Tags(list):
+            def get(self, key):
+                return next((tag.v for tag in self if tag.k == key), None)
+
+        handler.way(
+            SimpleNamespace(
+                id=33,
+                nodes=[],
+                tags=Tags([SimpleNamespace(k="building:part", v="yes")]),
+            )
+        )
+        for relation_id in (109, 110):
+            handler.relation(
+                self.relation(
+                    relation_id,
+                    [{"type": "w", "ref": 33, "role": "part"}],
+                )
+            )
+        handler.finalize()
+
+        self.assertFalse(handler.standalone_part_keys)
+        self.assertEqual(handler.parts_without_outline, {"w33"})
+
+    def test_unoutlined_part_reused_as_outline_remains_fail_closed(self):
+        handler = BuildingRelationHandler(
+            expected_closure={
+                "requiredRelationKeys": ["r111", "r112"],
+                "requiredWayKeys": ["w33", "w34"],
+            }
+        )
+
+        class Tags(list):
+            def get(self, key):
+                return next((tag.v for tag in self if tag.k == key), None)
+
+        for way_id in (33, 34):
+            handler.way(
+                SimpleNamespace(
+                    id=way_id,
+                    nodes=[],
+                    tags=Tags([SimpleNamespace(k="building:part", v="yes")]),
+                )
+            )
+        handler.relation(
+            self.relation(
+                111,
+                [
+                    {"type": "w", "ref": 33, "role": "outline"},
+                    {"type": "w", "ref": 34, "role": "part"},
+                ],
+            )
+        )
+        handler.relation(
+            self.relation(
+                112,
+                [{"type": "w", "ref": 33, "role": "part"}],
+            )
+        )
+        handler.finalize()
+
+        self.assertFalse(handler.standalone_part_keys)
+        self.assertEqual(handler.parts_without_outline, {"w33"})
+
+    def test_singapore_r14346906_fixture_passes_exact_scope_closure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_sha = hashlib.sha256(SINGAPORE_FIXTURE.read_bytes()).hexdigest()
+            index = BuildingSourceIndex(root / "cache", source_sha)
+            index.build_with_scanner(
+                lambda path: scan_source(SINGAPORE_FIXTURE, path)
+            )
+            scope = {
+                "schemaVersion": 1,
+                "policy": {
+                    "relationClosureMode": "source_snapshot_index",
+                    "maxRelationObjectsPerJob": 1_000,
+                },
+                # plan_building_scope for bbox [103.852, 1.302, 103.858, 1.308].
+                "outputBlocks": [
+                    {
+                        "x": 2822,
+                        "y": 35,
+                        "boundsMeters": [11558912, 143360, 11563008, 147456],
+                    }
+                ],
+                "calibration": {"cellSizeMeters": 8192, "haloCells": 1},
+            }
+            scope_path = root / "scope.json"
+            scope_path.write_bytes(
+                canonical_json(
+                    {
+                        **scope,
+                        "scopePlanSha256": hashlib.sha256(
+                            canonical_json(scope)
+                        ).hexdigest(),
+                    }
+                )
+            )
+            output = root / "relation-index.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(SINGAPORE_FIXTURE),
+                    str(output),
+                    "--source-index-manifest",
+                    str(index.manifest_path),
+                    "--scope-plan",
+                    str(scope_path),
+                ],
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            value = json.loads(output.read_text())
+            self.assertEqual(
+                value["standalonePartKeys"],
+                [
+                    "w1077928781",
+                    "w1077928782",
+                    "w1077928783",
+                    "w1077928784",
+                    "w1077928785",
+                ],
+            )
+            self.assertEqual(value["closureAudit"]["closureRelationCount"], 1)
+            self.assertEqual(value["closureAudit"]["closureWayCount"], 5)
+            self.assertEqual(value["closureAudit"]["closureNodeCount"], 20)
+            self.assertEqual(value["closureAudit"]["relationRetryCount"], 0)
 
     def test_cli_indexes_real_osm_building_relations_deterministically(self):
         with tempfile.TemporaryDirectory() as tmp:
