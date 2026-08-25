@@ -132,9 +132,10 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         """Apply the narrow standalone-part normalization after all ways arrive.
 
         OSM objects are normally delivered ways before relations, but the
-        policy must not depend on callback order. Only a single direct way
-        member with an explicit ``building`` tag qualifies. Any part shared
-        with another malformed relation remains fail-closed rather than being
+        policy must not depend on callback order. Every direct member must be
+        a way with an explicit ``building`` or ``building:part`` tag. Parts
+        shared with another incomplete relation, or already associated with a
+        different building relation, remain fail-closed rather than being
         silently reinterpreted.
         """
 
@@ -166,7 +167,7 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         unsafe_parts.update(
             part
             for part, count in relation_part_counts.items()
-            if count != 1 or part in self.part_parents
+            if count != 1 or part in self.part_parents or part in self.parent_tags
         )
         safe_relations = {
             relation_key
