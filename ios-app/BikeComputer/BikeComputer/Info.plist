@@ -4,6 +4,8 @@
 <dict>
 	<key>BicinoMapServiceHost</key>
 	<string>$(BICINO_MAP_SERVICE_HOST)</string>
+	<key>BicinoMapCatalogHost</key>
+	<string>$(BICINO_MAP_CATALOG_HOST)</string>
 	<key>BicinoMapR2DownloadHost</key>
 	<string>$(BICINO_MAP_R2_DOWNLOAD_HOST)</string>
 	<key>CFBundleDisplayName</key>

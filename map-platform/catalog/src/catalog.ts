@@ -370,8 +370,38 @@ export async function finalizePublication(
       existingArtifact &&
       (existingArtifact.id !== artifact.artifactId ||
         existingArtifact.map_entry_id !== publication.mapEntryId ||
+        existingArtifact.bucket_slot !== artifact.bucketSlot ||
+        existingArtifact.object_key !== artifact.objectKey ||
+        existingArtifact.format !== artifact.format ||
+        existingArtifact.media_type !== artifact.mediaType ||
+        existingArtifact.filename !== artifact.filename ||
         existingArtifact.sha256 !== artifact.sha256 ||
-        existingArtifact.byte_count !== artifact.bytes)
+        existingArtifact.byte_count !== artifact.bytes ||
+        existingArtifact.manifest_receipt !==
+          (artifact.manifestReceipt ?? null) ||
+        existingArtifact.signed_manifest_receipt !==
+          (artifact.signedManifestReceipt ?? null) ||
+        existingArtifact.signature_key_id !==
+          (artifact.signatureKeyId ?? null) ||
+        existingArtifact.signature_key_sha256 !==
+          (artifact.signatureKeySha256 ?? null) ||
+        existingArtifact.producer_build_sha256 !==
+          (artifact.producerBuildSha256 ?? null) ||
+        existingArtifact.producer_image_digest !==
+          (artifact.producerImageDigest ?? null) ||
+        existingArtifact.required_ios_build !==
+          (artifact.requiredIosBuild ?? null) ||
+        existingArtifact.required_ios_git_sha !==
+          (artifact.requiredIosGitSha ?? null) ||
+        existingArtifact.required_ios_build_sha256 !==
+          (artifact.requiredIosBuildSha256 ?? null) ||
+        existingArtifact.required_firmware_version !==
+          (artifact.requiredFirmwareVersion ?? null) ||
+        existingArtifact.required_firmware_build !==
+          (artifact.requiredFirmwareBuild ?? null) ||
+        existingArtifact.required_firmware_git_sha !==
+          (artifact.requiredFirmwareGitSha ?? null) ||
+        existingArtifact.delivery_tier !== artifact.deliveryTier)
     ) {
       throw new HttpError(409, "artifact identity conflict");
     }
@@ -996,22 +1026,54 @@ export async function claimLinkCode(
   const credential = randomToken(32);
   const credentialHash = await sha256Hex(credential);
   const now = new Date().toISOString();
-  await env.DB.batch([
+  const codeHash = await sha256Hex(code);
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE linked_library_codes
+          SET claimed_at = ?, claim_credential_hash = ?
+        WHERE code_hash = ? AND claimed_at IS NULL AND expires_at > ?
+          AND source_library_id <> ?
+          AND NOT EXISTS (
+            SELECT 1 FROM library_maps WHERE library_id = ?
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM shares WHERE owner_library_id = ?
+          )`,
+    ).bind(
+      now,
+      credentialHash,
+      codeHash,
+      now,
+      targetLibraryID,
+      targetLibraryID,
+      targetLibraryID,
+    ),
     env.DB.prepare(
       `INSERT INTO library_credentials(
          credential_hash, library_id, created_at, last_used_at
-       ) VALUES (?, ?, ?, ?)`,
-    ).bind(credentialHash, row.source_library_id, now, now),
+       ) SELECT ?, source_library_id, ?, ?
+           FROM linked_library_codes
+          WHERE code_hash = ? AND claim_credential_hash = ?`,
+    ).bind(credentialHash, now, now, codeHash, credentialHash),
     env.DB.prepare(
       `UPDATE library_credentials SET revoked_at = ?
-        WHERE library_id = ? AND revoked_at IS NULL`,
-    ).bind(now, targetLibraryID),
+        WHERE library_id = ? AND revoked_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM linked_library_codes
+             WHERE code_hash = ? AND claim_credential_hash = ?
+          )`,
+    ).bind(now, targetLibraryID, codeHash, credentialHash),
     env.DB.prepare(
-      "UPDATE libraries SET revoked_at = ?, updated_at = ? WHERE id = ?",
-    ).bind(now, now, targetLibraryID),
-    env.DB.prepare(
-      "UPDATE linked_library_codes SET claimed_at = ? WHERE code_hash = ?",
-    ).bind(now, await sha256Hex(code)),
+      `UPDATE libraries SET revoked_at = ?, updated_at = ?
+        WHERE id = ?
+          AND EXISTS (
+            SELECT 1 FROM linked_library_codes
+             WHERE code_hash = ? AND claim_credential_hash = ?
+          )`,
+    ).bind(now, now, targetLibraryID, codeHash, credentialHash),
   ]);
+  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+    throw new HttpError(404, "link code not found");
+  }
   return { libraryId: row.source_library_id, credential };
 }

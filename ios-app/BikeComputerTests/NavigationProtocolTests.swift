@@ -722,8 +722,11 @@ struct NavigationProtocolTests {
         testNavigationEngineReplacesRouteWithoutResettingTelemetry()
         testOfflineMapCustomBBoxRequest()
         testOfflineMapServiceConfigChannels()
+        testOfflineMapCatalogConfigChannels()
         testOfflineMapShareLinkValidation()
         testOfflineMapCatalogR2HostValidation()
+        testOfflineMapCatalogCredentialNamespaces()
+        testOfflineMapCatalogAliasAttachmentPolicy()
         await testOfflineMapCapabilitiesContract()
         await testOfflineMapClientRejectsUnsupportedRendererWithoutDowngrade()
         testStreetLabelMapContract()
@@ -5214,29 +5217,74 @@ struct NavigationProtocolTests {
         let token = String(repeating: "A", count: 43)
         assertEqual(
             OfflineMapShareLink.token(
-                from: URL(string: "https://maps-share.8o.vc/s/\(token)")!
+                from: URL(string: "https://maps-share.8o.vc/s/\(token)")!,
+                catalogHost: OfflineMapCatalogConfig.productionHost
             ),
             token,
             "production share links resolve an opaque token"
         )
         assertEqual(
             OfflineMapShareLink.token(
-                from: URL(string: "https://maps-share.8o.vc/dev/s/\(token)")!
+                from: URL(string: "https://maps-share.8o.vc/dev/s/\(token)")!,
+                catalogHost: OfflineMapCatalogConfig.productionHost
             ),
             token,
             "development share links resolve the same opaque token"
         )
         assert(
             OfflineMapShareLink.token(
-                from: URL(string: "https://attacker.example/s/\(token)")!
+                from: URL(string: "https://attacker.example/s/\(token)")!,
+                catalogHost: OfflineMapCatalogConfig.productionHost
             ) == nil,
             "share links reject substituted hosts"
         )
         assert(
             OfflineMapShareLink.token(
-                from: URL(string: "https://maps-share.8o.vc/s/short?download=1")!
+                from: URL(string: "https://maps-share.8o.vc/s/short?download=1")!,
+                catalogHost: OfflineMapCatalogConfig.productionHost
             ) == nil,
             "share links reject malformed tokens and query parameters"
+        )
+        assertEqual(
+            OfflineMapShareLink.token(
+                from: URL(
+                    string: "https://maps-share-staging.8o.vc/dev/s/\(token)"
+                )!,
+                catalogHost: OfflineMapCatalogConfig.developmentHost
+            ),
+            token,
+            "development builds accept staging catalog share links"
+        )
+        assert(
+            OfflineMapShareLink.token(
+                from: URL(string: "https://maps-share.8o.vc/s/\(token)")!,
+                catalogHost: OfflineMapCatalogConfig.developmentHost
+            ) == nil,
+            "development builds reject production-host share substitution"
+        )
+    }
+
+    static func testOfflineMapCatalogConfigChannels() {
+        assertEqual(
+            OfflineMapCatalogConfig.catalogHost(infoDictionary: [
+                OfflineMapCatalogConfig.catalogHostInfoKey:
+                    " MAPS-SHARE-STAGING.8O.VC "
+            ]),
+            OfflineMapCatalogConfig.developmentHost,
+            "an explicit validation-build override selects the staging catalog"
+        )
+        assertEqual(
+            OfflineMapCatalogConfig.catalogHost(infoDictionary: [
+                OfflineMapCatalogConfig.catalogHostInfoKey: "maps-share.8o.vc"
+            ]),
+            OfflineMapCatalogConfig.productionHost,
+            "both shipped app configurations select the shared production catalog"
+        )
+        assert(
+            OfflineMapCatalogConfig.catalogHost(infoDictionary: [
+                OfflineMapCatalogConfig.catalogHostInfoKey: "attacker.example"
+            ]) == nil,
+            "catalog configuration rejects arbitrary hosts"
         )
     }
 
@@ -5256,6 +5304,77 @@ struct NavigationProtocolTests {
                     "maps.example.com"
             ]) == nil,
             "catalog downloads reject arbitrary configured hosts"
+        )
+    }
+
+    static func testOfflineMapCatalogAliasAttachmentPolicy() {
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.aliasToApplyAfterAttachment(
+                localDisplayName: "  Favorite climb  ",
+                userDefinedDisplayName: true,
+                attachedAlias: "Shanghai"
+            ),
+            "Favorite climb",
+            "a local rename is applied immediately after first catalog attachment"
+        )
+        assert(
+            OfflineMapCatalogAliasPolicy.aliasToApplyAfterAttachment(
+                localDisplayName: "Shanghai",
+                userDefinedDisplayName: true,
+                attachedAlias: "Shanghai"
+            ) == nil,
+            "an attachment that already has the user alias needs no extra revision"
+        )
+        assert(
+            OfflineMapCatalogAliasPolicy.aliasToApplyAfterAttachment(
+                localDisplayName: "Generated map name",
+                userDefinedDisplayName: false,
+                attachedAlias: "Shanghai"
+            ) == nil,
+            "generated local names never overwrite the catalog alias"
+        )
+    }
+
+    static func testOfflineMapCatalogCredentialNamespaces() {
+        let suite = "OfflineMapCatalogCredentialNamespaces-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let productionStore = OfflineMapCatalogCredentialStore(
+            defaults: defaults,
+            catalogHost: OfflineMapCatalogConfig.productionHost
+        )
+        let stagingStore = OfflineMapCatalogCredentialStore(
+            defaults: defaults,
+            catalogHost: OfflineMapCatalogConfig.developmentHost
+        )
+        let production = OfflineMapCatalogCredential(
+            libraryId: "library-production",
+            credential: "credential-production"
+        )
+        let staging = OfflineMapCatalogCredential(
+            libraryId: "library-staging",
+            credential: "credential-staging"
+        )
+        try! productionStore.save(production)
+        assertEqual(
+            productionStore.load(),
+            production,
+            "Bicino and Bicino Dev retain their shared production library credential"
+        )
+        assert(
+            stagingStore.load() == nil,
+            "a staging override never sends the production library credential"
+        )
+        try! stagingStore.save(staging)
+        assertEqual(
+            stagingStore.load(),
+            staging,
+            "staging validation keeps its own catalog library identity"
+        )
+        assertEqual(
+            productionStore.load(),
+            production,
+            "staging validation cannot overwrite the shared production identity"
         )
     }
 

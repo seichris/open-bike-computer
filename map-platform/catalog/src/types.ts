@@ -1,5 +1,7 @@
 export interface Env {
   DB: D1Database;
+  LIBRARY_BOOTSTRAP_CLIENT_RATE_LIMITER: RateLimit;
+  LIBRARY_BOOTSTRAP_GLOBAL_RATE_LIMITER: RateLimit;
   ENVIRONMENT: "staging" | "production";
   PUBLIC_BASE_URL: string;
   R2_ACCOUNT_ID: string;

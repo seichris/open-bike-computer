@@ -28,6 +28,7 @@ function client(slot: BucketSlot, env: Env): S3Client {
   return new S3Client({
     region: "auto",
     endpoint: `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    forcePathStyle: true,
     credentials,
   });
 }

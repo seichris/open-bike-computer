@@ -126,6 +126,8 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "BICINO_URL_SCHEME": "bikecomputer-dev",
             "BICINO_APP_ICON_NAME": "AppIconDev",
             "BICINO_MAP_SERVICE_HOST": "maps-dev.8o.vc",
+            "BICINO_MAP_CATALOG_HOST": "maps-share.8o.vc",
+            "BICINO_MAP_R2_DOWNLOAD_HOST": "invalid.invalid",
         }
         expected_production = {
             "BICINO_IOS_BUNDLE_IDENTIFIER": "LetItRide.BikeComputer",
@@ -143,9 +145,19 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "BICINO_URL_SCHEME": "bikecomputer",
             "BICINO_APP_ICON_NAME": "AppIcon",
             "BICINO_MAP_SERVICE_HOST": "maps.8o.vc",
+            "BICINO_MAP_CATALOG_HOST": "maps-share.8o.vc",
+            "BICINO_MAP_R2_DOWNLOAD_HOST": "invalid.invalid",
         }
         self.assertEqual(development, expected_development)
         self.assertEqual(production, expected_production)
+
+        entitlements = load_plist(
+            IOS_PROJECT / "BikeComputer" / "BikeComputer.entitlements"
+        )
+        self.assertEqual(
+            entitlements["com.apple.developer.associated-domains"],
+            ["applinks:$(BICINO_MAP_CATALOG_HOST)"],
+        )
 
         self.assertIn(
             "baseConfigurationReference = D3A000012F10000100000001 "

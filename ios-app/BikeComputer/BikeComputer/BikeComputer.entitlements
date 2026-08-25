@@ -4,7 +4,7 @@
 <dict>
 	<key>com.apple.developer.associated-domains</key>
 	<array>
-		<string>applinks:maps-share.8o.vc</string>
+		<string>applinks:$(BICINO_MAP_CATALOG_HOST)</string>
 	</array>
 	<key>com.apple.developer.healthkit</key>
 	<true/>

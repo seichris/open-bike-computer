@@ -197,6 +197,48 @@ describe("catalog library", () => {
       libraryIDForCredential(target.credential!, env),
     ).rejects.toMatchObject({ status: 401 });
   });
+
+  it("allows only one concurrent claim for a one-time link code", async () => {
+    const source = await bootstrapLibrary(env);
+    const targets = await Promise.all([
+      bootstrapLibrary(env),
+      bootstrapLibrary(env),
+    ]);
+    const link = await createLinkCode(env, source.libraryId);
+    const claims = await Promise.allSettled(
+      targets.map((target) => claimLinkCode(env, target.libraryId, link.code)),
+    );
+
+    const winnerIndex = claims.findIndex(
+      (claim) => claim.status === "fulfilled",
+    );
+    const loserIndex = claims.findIndex((claim) => claim.status === "rejected");
+    expect(winnerIndex).toBeGreaterThanOrEqual(0);
+    expect(loserIndex).toBeGreaterThanOrEqual(0);
+    expect(claims.filter((claim) => claim.status === "fulfilled")).toHaveLength(
+      1,
+    );
+    expect(claims.filter((claim) => claim.status === "rejected")).toHaveLength(
+      1,
+    );
+
+    const winner = claims[winnerIndex];
+    const loser = claims[loserIndex];
+    if (winner.status !== "fulfilled" || loser.status !== "rejected") {
+      throw new Error("link-code claim result shape is invalid");
+    }
+    expect(winner.value.libraryId).toBe(source.libraryId);
+    expect(await libraryIDForCredential(winner.value.credential, env)).toBe(
+      source.libraryId,
+    );
+    expect(loser.reason).toMatchObject({ status: 404 });
+    await expect(
+      libraryIDForCredential(targets[winnerIndex].credential!, env),
+    ).rejects.toMatchObject({ status: 401 });
+    expect(
+      await libraryIDForCredential(targets[loserIndex].credential!, env),
+    ).toBe(targets[loserIndex].libraryId);
+  });
 });
 
 describe("validation", () => {
@@ -215,5 +257,96 @@ describe("validation", () => {
         "f".repeat(64),
       ),
     ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("rejects changes to every immutable artifact field", async () => {
+    await seededLibrary();
+    const mutations: Array<
+      [
+        string,
+        (artifact: ReturnType<typeof publication>["artifacts"][number]) => void,
+      ]
+    > = [
+      [
+        "artifactId",
+        (artifact) => (artifact.artifactId = `artifact_v1_${"s".repeat(43)}`),
+      ],
+      ["bucketSlot", (artifact) => (artifact.bucketSlot = "development")],
+      ["objectKey", (artifact) => (artifact.objectKey += ".other")],
+      ["format", (artifact) => (artifact.format = "other-v1")],
+      [
+        "mediaType",
+        (artifact) => (artifact.mediaType = "application/octet-stream"),
+      ],
+      ["filename", (artifact) => (artifact.filename = "other.bmap")],
+      ["bytes", (artifact) => (artifact.bytes += 1)],
+      ["sha256", (artifact) => (artifact.sha256 = "0".repeat(64))],
+      [
+        "manifestReceipt",
+        (artifact) => (artifact.manifestReceipt = "1".repeat(64)),
+      ],
+      [
+        "signedManifestReceipt",
+        (artifact) => (artifact.signedManifestReceipt = "2".repeat(64)),
+      ],
+      ["signatureKeyId", (artifact) => (artifact.signatureKeyId = "other")],
+      [
+        "signatureKeySha256",
+        (artifact) => (artifact.signatureKeySha256 = "3".repeat(64)),
+      ],
+      [
+        "producerBuildSha256",
+        (artifact) => (artifact.producerBuildSha256 = "4".repeat(64)),
+      ],
+      [
+        "producerImageDigest",
+        (artifact) =>
+          (artifact.producerImageDigest = `sha256:${"5".repeat(64)}`),
+      ],
+      [
+        "requiredIosBuild",
+        (artifact) => (artifact.requiredIosBuild = "202608250002"),
+      ],
+      [
+        "requiredIosGitSha",
+        (artifact) => (artifact.requiredIosGitSha = "a".repeat(40)),
+      ],
+      [
+        "requiredIosBuildSha256",
+        (artifact) => (artifact.requiredIosBuildSha256 = "6".repeat(64)),
+      ],
+      [
+        "requiredFirmwareVersion",
+        (artifact) => (artifact.requiredFirmwareVersion = "1.0.0"),
+      ],
+      [
+        "requiredFirmwareBuild",
+        (artifact) => (artifact.requiredFirmwareBuild = 1),
+      ],
+      [
+        "requiredFirmwareGitSha",
+        (artifact) => (artifact.requiredFirmwareGitSha = "b".repeat(40)),
+      ],
+      ["deliveryTier", (artifact) => (artifact.deliveryTier = "development")],
+    ];
+
+    for (const [field, mutate] of mutations) {
+      const candidate = publication();
+      candidate.publicationId = `job-conflict-${field}`;
+      mutate(candidate.artifacts[0]);
+      await expect(
+        finalizePublication(
+          env,
+          candidate,
+          `conflict:${field}`,
+          await sha256Hex(JSON.stringify(candidate)),
+        ),
+      ).rejects.toMatchObject({ status: 409 });
+    }
+
+    const eventCount = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM publication_events",
+    ).first<{ count: number }>();
+    expect(eventCount?.count).toBe(1);
   });
 });

@@ -70,6 +70,37 @@ function parseChannel(value: unknown): Channel {
   return value;
 }
 
+function bootstrapClientRateLimitKey(request: Request): string {
+  const address = request.headers.get("cf-connecting-ip")?.trim().toLowerCase();
+  if (!address || !/^[0-9a-f:.]{2,64}$/.test(address)) {
+    return "library-bootstrap:unknown-client";
+  }
+  return `library-bootstrap:${address}`;
+}
+
+async function enforceLibraryBootstrapRateLimit(
+  request: Request,
+  env: Env,
+): Promise<void> {
+  let client: RateLimitOutcome;
+  let global: RateLimitOutcome;
+  try {
+    [client, global] = await Promise.all([
+      env.LIBRARY_BOOTSTRAP_CLIENT_RATE_LIMITER.limit({
+        key: bootstrapClientRateLimitKey(request),
+      }),
+      env.LIBRARY_BOOTSTRAP_GLOBAL_RATE_LIMITER.limit({
+        key: "library-bootstrap",
+      }),
+    ]);
+  } catch {
+    throw new HttpError(503, "library bootstrap is temporarily unavailable");
+  }
+  if (!client.success || !global.success) {
+    throw new HttpError(429, "library bootstrap rate limit exceeded");
+  }
+}
+
 function appleAppSiteAssociation(env: Env): Response {
   const teamID = env.APPLE_TEAM_ID;
   if (!/^[A-Z0-9]{10}$/.test(teamID)) {
@@ -160,6 +191,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     }
     if (authorization)
       throw new HttpError(401, "invalid library authorization");
+    await enforceLibraryBootstrapRateLimit(request, env);
     return json(await bootstrapLibrary(env), 201);
   }
 

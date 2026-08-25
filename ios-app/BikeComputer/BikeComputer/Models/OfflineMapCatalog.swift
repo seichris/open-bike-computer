@@ -5,10 +5,35 @@ import Security
 
 nonisolated enum OfflineMapCatalogConfig {
     static let productionHost = "maps-share.8o.vc"
-    static let productionBaseURL = URL(string: "https://maps-share.8o.vc")!
+    static let developmentHost = "maps-share-staging.8o.vc"
     static let sharedKeychainAccessGroup =
         "4H5PK8686H.LetItRide.BikeComputer.map-library"
+    static let catalogHostInfoKey = "BicinoMapCatalogHost"
     static let r2DownloadHostInfoKey = "BicinoMapR2DownloadHost"
+
+    private static let allowedCatalogHosts = [
+        developmentHost,
+        productionHost,
+    ]
+
+    static var catalogHost: String? {
+        catalogHost(infoDictionary: Bundle.main.infoDictionary ?? [:])
+    }
+
+    static var baseURL: URL? {
+        guard let catalogHost else { return nil }
+        return URL(string: "https://\(catalogHost)")
+    }
+
+    static func catalogHost(infoDictionary: [String: Any]) -> String? {
+        guard let raw = infoDictionary[catalogHostInfoKey] as? String else { return nil }
+        let host = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return isAllowedCatalogHost(host) ? host : nil
+    }
+
+    static func isAllowedCatalogHost(_ host: String) -> Bool {
+        allowedCatalogHosts.contains(host.lowercased())
+    }
 
     static var r2DownloadHost: String? {
         r2DownloadHost(infoDictionary: Bundle.main.infoDictionary ?? [:])
@@ -67,11 +92,24 @@ nonisolated struct OfflineMapCatalogCredential: Codable, Equatable {
 
 nonisolated final class OfflineMapCatalogCredentialStore: @unchecked Sendable {
     private static let service = "vc.8o.bicino.map-library"
-    private static let account = "shared-library-v1"
+    private static let productionAccount = "shared-library-v1"
     private let defaults: UserDefaults
+    private let account: String
+    private let fallbackDefaultsKey: String
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        catalogHost: String? = OfflineMapCatalogConfig.catalogHost
+    ) {
         self.defaults = defaults
+        if catalogHost?.lowercased() == OfflineMapCatalogConfig.developmentHost {
+            self.account = "\(Self.productionAccount).\(OfflineMapCatalogConfig.developmentHost)"
+            self.fallbackDefaultsKey =
+                "\(Self.service).\(OfflineMapCatalogConfig.developmentHost)"
+        } else {
+            self.account = Self.productionAccount
+            self.fallbackDefaultsKey = Self.service
+        }
     }
 
     func load() -> OfflineMapCatalogCredential? {
@@ -79,7 +117,7 @@ nonisolated final class OfflineMapCatalogCredentialStore: @unchecked Sendable {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
-            kSecAttrAccount as String: Self.account,
+            kSecAttrAccount as String: account,
             kSecAttrAccessGroup as String: OfflineMapCatalogConfig.sharedKeychainAccessGroup,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
@@ -90,7 +128,7 @@ nonisolated final class OfflineMapCatalogCredentialStore: @unchecked Sendable {
             return nil
         }
 #else
-        guard let data = defaults.data(forKey: Self.service) else { return nil }
+        guard let data = defaults.data(forKey: fallbackDefaultsKey) else { return nil }
 #endif
         return try? JSONDecoder().decode(OfflineMapCatalogCredential.self, from: data)
     }
@@ -101,7 +139,7 @@ nonisolated final class OfflineMapCatalogCredentialStore: @unchecked Sendable {
         let identity: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
-            kSecAttrAccount as String: Self.account,
+            kSecAttrAccount as String: account,
             kSecAttrAccessGroup as String: OfflineMapCatalogConfig.sharedKeychainAccessGroup,
         ]
         let status = SecItemUpdate(
@@ -120,7 +158,7 @@ nonisolated final class OfflineMapCatalogCredentialStore: @unchecked Sendable {
             throw OfflineMapCatalogError.keychain(status)
         }
 #else
-        defaults.set(data, forKey: Self.service)
+        defaults.set(data, forKey: fallbackDefaultsKey)
 #endif
     }
 }
@@ -218,10 +256,31 @@ nonisolated struct OfflineMapCatalogDownloadGrant: Codable, Equatable, Sendable 
     let artifact: OfflineMapCatalogArtifact
 }
 
+nonisolated enum OfflineMapCatalogAliasPolicy {
+    static func aliasToApplyAfterAttachment(
+        localDisplayName: String?,
+        userDefinedDisplayName: Bool?,
+        attachedAlias: String
+    ) -> String? {
+        guard userDefinedDisplayName == true,
+              let alias = localDisplayName?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !alias.isEmpty,
+              alias != attachedAlias else {
+            return nil
+        }
+        return alias
+    }
+}
+
 nonisolated enum OfflineMapShareLink {
-    static func token(from url: URL) -> String? {
+    static func token(
+        from url: URL,
+        catalogHost: String? = OfflineMapCatalogConfig.catalogHost
+    ) -> String? {
+        guard let catalogHost else { return nil }
         guard url.scheme?.lowercased() == "https",
-              url.host?.lowercased() == OfflineMapCatalogConfig.productionHost,
+              url.host?.lowercased() == catalogHost.lowercased(),
               url.user == nil,
               url.password == nil,
               url.port == nil,
@@ -250,11 +309,13 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
     let session: URLSession
 
     init(
-        baseURL: URL = OfflineMapCatalogConfig.productionBaseURL,
+        baseURL: URL? = nil,
         session: URLSession = .shared
     ) throws {
-        guard baseURL.scheme == "https",
-              baseURL.host == OfflineMapCatalogConfig.productionHost,
+        guard let baseURL = baseURL ?? OfflineMapCatalogConfig.baseURL,
+              baseURL.scheme == "https",
+              let host = baseURL.host?.lowercased(),
+              OfflineMapCatalogConfig.isAllowedCatalogHost(host),
               baseURL.port == nil,
               baseURL.path.isEmpty || baseURL.path == "/" else {
             throw OfflineMapCatalogError.invalidConfiguration
@@ -394,7 +455,7 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
         guard path.hasPrefix("/v1/"),
               let url = URL(string: path, relativeTo: baseURL)?.absoluteURL,
               url.scheme == "https",
-              url.host == OfflineMapCatalogConfig.productionHost else {
+              url.host?.lowercased() == baseURL.host?.lowercased() else {
             throw OfflineMapCatalogError.invalidConfiguration
         }
         var request = URLRequest(url: url)

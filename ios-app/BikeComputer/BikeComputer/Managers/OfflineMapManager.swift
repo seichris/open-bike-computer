@@ -2690,12 +2690,13 @@ final class OfflineMapManager: ObservableObject {
         statusMessage = "downloading shared map"
         downloadProgress = 0
         downloadByteProgress = nil
-        guard let r2DownloadHost = OfflineMapCatalogConfig.r2DownloadHost else {
+        guard let catalogHost = OfflineMapCatalogConfig.catalogHost,
+              let r2DownloadHost = OfflineMapCatalogConfig.r2DownloadHost else {
             throw OfflineMapCatalogError.invalidConfiguration
         }
         let constraints = try OfflineMapDownloadConstraints.catalogArtifact(
             artifact,
-            catalogHost: OfflineMapCatalogConfig.productionHost,
+            catalogHost: catalogHost,
             r2DownloadHost: r2DownloadHost
         )
         let temporaryURL = try await packDownload(
@@ -3190,12 +3191,36 @@ final class OfflineMapManager: ObservableObject {
                     jobId: jobID,
                     libraryCredential: catalogCredential.credential
                 )
+                var aliasRevision = attachment.aliasRevision
+                if let alias = OfflineMapCatalogAliasPolicy.aliasToApplyAfterAttachment(
+                    localDisplayName: metadata.displayName,
+                    userDefinedDisplayName: metadata.userDefinedDisplayName,
+                    attachedAlias: attachment.alias
+                ) {
+                    guard let catalogClient else {
+                        throw OfflineMapCatalogError.invalidConfiguration
+                    }
+                    let updated = try await catalogClient.updateAlias(
+                        mapEntryId: attachment.catalogMapEntryId,
+                        alias: alias,
+                        expectedRevision: attachment.aliasRevision,
+                        credential: catalogCredential.credential
+                    )
+                    aliasRevision = updated.aliasRevision
+                    if let index = catalogMaps.firstIndex(where: {
+                        $0.mapEntryId == updated.mapEntryId
+                    }) {
+                        catalogMaps[index] = updated
+                    } else {
+                        catalogMaps.append(updated)
+                    }
+                }
                 metadata.catalogMapEntryID = attachment.catalogMapEntryId
                 metadata.catalogLibraryID = catalogCredential.libraryId
                 metadata.originChannel = OfflineMapCatalogConfig.channel(
                     generationServerURLString: savedServerURL
                 )
-                metadata.catalogAliasRevision = attachment.aliasRevision
+                metadata.catalogAliasRevision = aliasRevision
                 metadata.catalogSyncState = "synced"
                 try SavedMapArtifactMetadataStore.save(metadata, for: packURL)
             } catch {

@@ -19,9 +19,18 @@ from .artifacts import (
     ArtifactRecord,
     map_stream_object_key,
 )
-from .catalog import CatalogClient, artifact_id, catalog_delivery_requirements
+from .catalog import (
+    CatalogClient,
+    artifact_id,
+    catalog_delivery_requirements,
+    map_entry_id_for_descriptor,
+)
 from .map_artifact_validation import validate_renderer_artifacts
-from .map_stream import write_map_stream_artifact
+from .map_stream import (
+    canonical_stream_manifest_bytes,
+    manifest_receipt,
+    write_map_stream_artifact,
+)
 from .pipeline import validate_final_assembly_artifact
 
 
@@ -183,6 +192,26 @@ def promote_catalog_map(
         }.get(format_version)
         if expected_features is None or features != expected_features:
             raise CatalogPromotionError("promotion renderer features are unsupported")
+        canonical_content_receipt = manifest_receipt(
+            canonical_stream_manifest_bytes(manifest)
+        )
+        if (
+            artifact.get("manifestReceipt") != canonical_content_receipt
+            or map_value.get("contentReceipt") != canonical_content_receipt
+        ):
+            raise CatalogPromotionError(
+                "promotion content receipt does not match its ZIP"
+            )
+        expected_entry_id = map_entry_id_for_descriptor(
+            content_receipt=canonical_content_receipt,
+            renderer=map_value.get("renderer"),
+            renderer_format_version=format_version,
+            features=features,
+        )
+        if entry_id != expected_entry_id:
+            raise CatalogPromotionError(
+                "promotion map entry identity does not match its ZIP"
+            )
         source = manifest.get("source")
         attribution = map_value.get("attribution")
         if (

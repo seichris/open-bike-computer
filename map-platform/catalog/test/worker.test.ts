@@ -5,6 +5,15 @@ import worker from "../src/index";
 
 const encoder = new TextEncoder();
 
+function rateLimiter(success: boolean, keys: string[]): RateLimit {
+  return {
+    async limit({ key }) {
+      keys.push(key);
+      return { success };
+    },
+  };
+}
+
 function hex(bytes: ArrayBuffer): string {
   return Array.from(new Uint8Array(bytes), (byte) =>
     byte.toString(16).padStart(2, "0"),
@@ -76,6 +85,62 @@ describe("worker public surfaces", () => {
       libraryId: body.libraryId,
       created: false,
     });
+  });
+
+  it("rate limits unauthenticated bootstrap before writing to D1", async () => {
+    const clientKeys: string[] = [];
+    const globalKeys: string[] = [];
+    const before = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM libraries",
+    ).first<{ count: number }>();
+    const response = await worker.fetch(
+      new Request("https://maps-share-staging.8o.vc/v1/libraries/bootstrap", {
+        method: "POST",
+        headers: { "cf-connecting-ip": "203.0.113.7" },
+      }),
+      {
+        ...env,
+        LIBRARY_BOOTSTRAP_CLIENT_RATE_LIMITER: rateLimiter(false, clientKeys),
+        LIBRARY_BOOTSTRAP_GLOBAL_RATE_LIMITER: rateLimiter(true, globalKeys),
+      },
+    );
+
+    expect(response.status).toBe(429);
+    expect(await response.json()).toEqual({
+      error: "library bootstrap rate limit exceeded",
+    });
+    expect(clientKeys).toEqual(["library-bootstrap:203.0.113.7"]);
+    expect(globalKeys).toEqual(["library-bootstrap"]);
+    const libraries = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM libraries",
+    ).first<{ count: number }>();
+    expect(libraries?.count).toBe(before?.count);
+  });
+
+  it("fails closed when the bootstrap rate limiter is unavailable", async () => {
+    const before = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM libraries",
+    ).first<{ count: number }>();
+    const response = await worker.fetch(
+      new Request("https://maps-share-staging.8o.vc/v1/libraries/bootstrap", {
+        method: "POST",
+      }),
+      {
+        ...env,
+        LIBRARY_BOOTSTRAP_CLIENT_RATE_LIMITER: {
+          async limit() {
+            throw new Error("rate limiter unavailable");
+          },
+        },
+        LIBRARY_BOOTSTRAP_GLOBAL_RATE_LIMITER: rateLimiter(true, []),
+      },
+    );
+
+    expect(response.status).toBe(503);
+    const libraries = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM libraries",
+    ).first<{ count: number }>();
+    expect(libraries?.count).toBe(before?.count);
   });
 
   it("serves path-scoped associated domains without a redirect", async () => {

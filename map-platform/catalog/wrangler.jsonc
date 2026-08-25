@@ -9,23 +9,35 @@
     "enabled": true,
     "head_sampling_rate": 0.1,
   },
+  "ratelimits": [
+    {
+      "name": "LIBRARY_BOOTSTRAP_CLIENT_RATE_LIMITER",
+      "namespace_id": "2026082501",
+      "simple": { "limit": 6, "period": 60 },
+    },
+    {
+      "name": "LIBRARY_BOOTSTRAP_GLOBAL_RATE_LIMITER",
+      "namespace_id": "2026082502",
+      "simple": { "limit": 120, "period": 60 },
+    },
+  ],
   "vars": {
     "ENVIRONMENT": "staging",
     "PUBLIC_BASE_URL": "https://maps-share-staging.8o.vc",
-    "R2_ACCOUNT_ID": "replace-with-cloudflare-account-id",
+    "R2_ACCOUNT_ID": "5834cd65d5f197557149dbc10074d37f",
     "R2_DEVELOPMENT_BUCKET": "bicino-final-maps-dev-staging",
     "R2_PRODUCTION_BUCKET": "bicino-final-maps-prod-staging",
     "R2_OBJECT_PREFIX": "map-artifacts",
-    "APPLE_TEAM_ID": "replace-with-apple-team-id",
+    "APPLE_TEAM_ID": "4H5PK8686H",
     "PRODUCTION_BUNDLE_ID": "LetItRide.BikeComputer",
     "DEVELOPMENT_BUNDLE_ID": "LetItRide.BikeComputer.dev",
-    "APP_STORE_URL": "https://apps.apple.com/app/id0000000000",
+    "APP_STORE_URL": "https://apps.apple.com/app/id6788977349",
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "bicino-map-catalog-staging",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "8ece9c3b-1a73-4af6-92ba-f6c44dbe7408",
       "migrations_dir": "migrations",
     },
   ],
@@ -34,6 +46,18 @@
       "name": "bicino-map-catalog",
       "workers_dev": false,
       "preview_urls": false,
+      "ratelimits": [
+        {
+          "name": "LIBRARY_BOOTSTRAP_CLIENT_RATE_LIMITER",
+          "namespace_id": "2026082511",
+          "simple": { "limit": 6, "period": 60 },
+        },
+        {
+          "name": "LIBRARY_BOOTSTRAP_GLOBAL_RATE_LIMITER",
+          "namespace_id": "2026082512",
+          "simple": { "limit": 120, "period": 60 },
+        },
+      ],
       "routes": [
         {
           "pattern": "maps-share.8o.vc/*",
@@ -43,14 +67,14 @@
       "vars": {
         "ENVIRONMENT": "production",
         "PUBLIC_BASE_URL": "https://maps-share.8o.vc",
-        "R2_ACCOUNT_ID": "replace-with-cloudflare-account-id",
+        "R2_ACCOUNT_ID": "5834cd65d5f197557149dbc10074d37f",
         "R2_DEVELOPMENT_BUCKET": "bicino-final-maps-dev",
         "R2_PRODUCTION_BUCKET": "bicino-final-maps-prod",
         "R2_OBJECT_PREFIX": "map-artifacts",
-        "APPLE_TEAM_ID": "replace-with-apple-team-id",
+        "APPLE_TEAM_ID": "4H5PK8686H",
         "PRODUCTION_BUNDLE_ID": "LetItRide.BikeComputer",
         "DEVELOPMENT_BUNDLE_ID": "LetItRide.BikeComputer.dev",
-        "APP_STORE_URL": "https://apps.apple.com/app/id0000000000",
+        "APP_STORE_URL": "https://apps.apple.com/app/id6788977349",
       },
       "d1_databases": [
         {

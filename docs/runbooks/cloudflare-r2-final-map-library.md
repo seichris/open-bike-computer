@@ -21,6 +21,10 @@ environment-local.
 
 ## 1. Provision staging
 
+The Cloudflare account must have an active R2 subscription before Wrangler can
+create or inspect buckets. R2 includes a free monthly allowance, but activation
+is a billed usage subscription and must be completed by the account owner.
+
 Create staging resources in the Cloudflare account:
 
 1. R2 buckets `bicino-final-maps-dev-staging` and
@@ -34,12 +38,13 @@ Create staging resources in the Cloudflare account:
 Never give the development publisher authority over the production bucket.
 Never reuse publisher credentials in the Worker.
 
-Replace the staging placeholders in `map-platform/catalog/wrangler.jsonc` with
-the actual Cloudflare account ID, D1 ID, Apple team ID, and App Store URL. The
-production section must remain pointed at production resources.
+Verify the checked-in staging account ID, D1 ID, Apple team ID, and App Store
+URL still match the target accounts. The production D1 placeholder must remain
+invalid until the complete staging flow passes.
 
 Create independent random values of at least 32 bytes for the service HMAC
-secrets. Store them only as Worker/Coolify secrets:
+secrets. Store them only as Worker/Coolify secrets. These commands target the
+top-level staging Worker explicitly by omitting a named environment:
 
 ```sh
 cd map-platform/catalog
@@ -132,6 +137,18 @@ the rollback window.
 
 ## 4. Validate the complete staging flow
 
+Both shipped app configurations use the shared production catalog. For a
+staging validation build, override both hosts at build time without editing the
+tracked xcconfig files:
+
+```text
+BICINO_MAP_CATALOG_HOST=maps-share-staging.8o.vc
+BICINO_MAP_R2_DOWNLOAD_HOST=5834cd65d5f197557149dbc10074d37f.r2.cloudflarestorage.com
+```
+
+The staging override uses an isolated Keychain account, so it cannot send or
+replace the production library credential.
+
 Use non-production app builds and disposable maps to prove:
 
 1. a dev-generated 2D and 3D map publishes and appears in both apps;
@@ -175,9 +192,23 @@ entry. A production app never receives the original development stream.
 
 Repeat provisioning with `bicino-final-maps-dev`,
 `bicino-final-maps-prod`, `bicino-map-catalog`, and `maps-share.8o.vc`. Apply D1
-migrations before deploying the production Worker. Move one environment at a
-time through `filesystem` to `mirror` to `s3` and inspect health/catalog state
-at every step.
+migrations before deploying the production Worker. Wrangler secrets are scoped
+to the selected environment, so provision the production Worker independently:
+
+```sh
+cd map-platform/catalog
+pnpm exec wrangler secret put SERVICE_KEYS_JSON --env production
+pnpm exec wrangler secret put R2_DEVELOPMENT_ACCESS_KEY_ID --env production
+pnpm exec wrangler secret put R2_DEVELOPMENT_SECRET_ACCESS_KEY --env production
+pnpm exec wrangler secret put R2_PRODUCTION_ACCESS_KEY_ID --env production
+pnpm exec wrangler secret put R2_PRODUCTION_SECRET_ACCESS_KEY --env production
+pnpm exec wrangler d1 migrations apply bicino-map-catalog --env production --remote
+pnpm exec wrangler deploy --env production
+```
+
+Do not assume staging secrets carry into `--env production`, and do not copy a
+staging secret value into production. Move one environment at a time through
+`filesystem` to `mirror` to `s3` and inspect health/catalog state at every step.
 
 Rollback order:
 

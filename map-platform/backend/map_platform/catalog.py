@@ -101,17 +101,58 @@ def catalog_content_receipt(job: MapJob) -> str:
     raise CatalogPublicationError("ready map has no unambiguous catalog content receipt")
 
 
-def map_entry_id(job: MapJob) -> str:
-    renderer, format_version, features = renderer_features(job)
+def map_entry_id_for_descriptor(
+    *,
+    content_receipt: str,
+    renderer: str,
+    renderer_format_version: int,
+    features: list[str],
+) -> str:
+    if (
+        not isinstance(content_receipt, str)
+        or re.fullmatch(r"[0-9a-f]{64}", content_receipt) is None
+    ):
+        raise CatalogPublicationError("catalog content receipt is invalid")
+    if (
+        not isinstance(renderer, str)
+        or re.fullmatch(r"[a-z0-9._-]{1,64}", renderer) is None
+    ):
+        raise CatalogPublicationError("catalog renderer is invalid")
+    if (
+        isinstance(renderer_format_version, bool)
+        or not isinstance(renderer_format_version, int)
+        or renderer_format_version <= 0
+    ):
+        raise CatalogPublicationError("catalog renderer format is invalid")
+    if (
+        not isinstance(features, list)
+        or any(
+            not isinstance(feature, str)
+            or re.fullmatch(r"[a-z0-9._-]{1,64}", feature) is None
+            for feature in features
+        )
+        or len(set(features)) != len(features)
+    ):
+        raise CatalogPublicationError("catalog renderer features are invalid")
     descriptor = {
         "schemaVersion": 1,
-        "contentReceipt": catalog_content_receipt(job),
+        "contentReceipt": content_receipt,
         "renderer": renderer,
-        "rendererFormatVersion": format_version,
+        "rendererFormatVersion": renderer_format_version,
         "features": features,
     }
     digest = bytes.fromhex(_canonical_sha256(descriptor))
     return f"map_v1_{_base64url(digest)}"
+
+
+def map_entry_id(job: MapJob) -> str:
+    renderer, format_version, features = renderer_features(job)
+    return map_entry_id_for_descriptor(
+        content_receipt=catalog_content_receipt(job),
+        renderer=renderer,
+        renderer_format_version=format_version,
+        features=features,
+    )
 
 
 def publication_id(job: MapJob, channel: str) -> str:

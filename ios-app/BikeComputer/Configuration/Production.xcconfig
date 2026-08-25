@@ -9,6 +9,7 @@ BICINO_COMPLICATION_DISPLAY_NAME = Start Ride
 BICINO_URL_SCHEME = bikecomputer
 BICINO_APP_ICON_NAME = AppIcon
 BICINO_MAP_SERVICE_HOST = maps.8o.vc
+BICINO_MAP_CATALOG_HOST = maps-share.8o.vc
 // Set to the exact account R2 S3 hostname during the infrastructure rollout.
 // Shared-map downloads fail closed while this remains unconfigured.
 BICINO_MAP_R2_DOWNLOAD_HOST = invalid.invalid

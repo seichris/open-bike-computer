@@ -34,9 +34,10 @@ pnpm check
 `pnpm check` typechecks the Worker, runs the D1 integration tests, and performs
 staging and production Wrangler dry-runs. It does not deploy anything.
 
-The checked-in `wrangler.jsonc` intentionally contains invalid placeholder D1,
-Cloudflare, Apple, and App Store identifiers. Replace those only as part of the
-staging provisioning procedure in
+The checked-in `wrangler.jsonc` contains the provisioned staging D1 binding and
+the repository owner's non-secret Cloudflare/Apple identifiers. The production
+D1 binding remains invalid until staging passes; replace it only during the
+production step in
 [`../../docs/runbooks/cloudflare-r2-final-map-library.md`](../../docs/runbooks/cloudflare-r2-final-map-library.md).
 
 ## Security boundaries
@@ -50,6 +51,10 @@ staging provisioning procedure in
 - Share previews contain bounded metadata and never reveal an R2 key or a
   download URL.
 - Opening a share landing page never claims or downloads a map.
+- Unauthenticated library bootstrap is protected by per-client and
+  per-location Cloudflare rate-limit bindings. The counters are intentionally
+  separate between staging and production; keep their namespace IDs unique
+  within the Cloudflare account.
 
 Schema changes belong in numbered files under `migrations/` and must be applied
 to staging before production.

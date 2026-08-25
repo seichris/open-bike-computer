@@ -9,6 +9,9 @@ BICINO_COMPLICATION_DISPLAY_NAME = Start Ride Dev
 BICINO_URL_SCHEME = bikecomputer-dev
 BICINO_APP_ICON_NAME = AppIconDev
 BICINO_MAP_SERVICE_HOST = maps-dev.8o.vc
+// Bicino Dev shares the production library identity and catalog with Bicino.
+// Staging validation builds override this setting at build time.
+BICINO_MAP_CATALOG_HOST = maps-share.8o.vc
 // Set to the exact account R2 S3 hostname during the infrastructure rollout.
 // Shared-map downloads fail closed while this remains unconfigured.
 BICINO_MAP_R2_DOWNLOAD_HOST = invalid.invalid
