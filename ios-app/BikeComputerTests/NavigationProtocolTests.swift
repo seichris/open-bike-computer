@@ -5937,6 +5937,42 @@ struct NavigationProtocolTests {
 
     @MainActor
     static func testOfflineMapCatalogPendingAliasPersistenceAndConflictPolicy() async {
+        let snapshotPending = OfflineMapCatalogPendingAlias(
+            mapEntryID: "map-snapshot",
+            alias: "Before request",
+            expectedRevision: 3,
+            state: .pending
+        )
+        let recreatedPending = snapshotPending
+        let snapshotToken = UUID()
+        let recreatedToken = UUID()
+        assertEqual(
+            recreatedPending,
+            snapshotPending,
+            "the ABA regression uses structurally identical pending aliases"
+        )
+        assert(
+            OfflineMapCatalogPendingAliasPolicy.belongsToRequestSnapshot(
+                currentToken: snapshotToken,
+                requestStartToken: snapshotToken
+            ),
+            "an unchanged pending alias belongs to the authoritative request snapshot"
+        )
+        assert(
+            !OfflineMapCatalogPendingAliasPolicy.belongsToRequestSnapshot(
+                currentToken: recreatedToken,
+                requestStartToken: snapshotToken
+            ),
+            "an identical alias recreated during the request belongs to a newer snapshot"
+        )
+        assert(
+            !OfflineMapCatalogPendingAliasPolicy.belongsToRequestSnapshot(
+                currentToken: recreatedToken,
+                requestStartToken: nil
+            ),
+            "a pending alias created during the request is absent from its snapshot"
+        )
+
         let suite = "OfflineMapPendingAlias-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }

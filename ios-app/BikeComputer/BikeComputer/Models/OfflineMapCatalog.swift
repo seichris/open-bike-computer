@@ -771,6 +771,14 @@ nonisolated enum OfflineMapCatalogPendingAliasPolicy {
         }
         return .retry
     }
+
+    static func belongsToRequestSnapshot(
+        currentToken: UUID?,
+        requestStartToken: UUID?
+    ) -> Bool {
+        guard let requestStartToken else { return false }
+        return currentToken == requestStartToken
+    }
 }
 
 nonisolated final class OfflineMapCatalogPendingAliasStore: @unchecked Sendable {
