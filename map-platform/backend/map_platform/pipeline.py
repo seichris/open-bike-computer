@@ -5242,6 +5242,9 @@ class MapBuildPipeline:
                 object_key=zip_key,
                 bytes=archive_path.stat().st_size,
                 sha256=zip_sha256,
+                manifest_receipt=manifest_receipt(
+                    canonical_stream_manifest_bytes(manifest)
+                ),
             )
         if validate_final_artifact:
             assert zip_record is not None

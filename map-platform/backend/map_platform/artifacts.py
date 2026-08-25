@@ -195,6 +195,8 @@ class ArtifactRecord:
 
 
 class FileSystemArtifactStore:
+    catalog_delivery_backed = False
+
     def __init__(self, root: str | Path):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -259,6 +261,9 @@ class FileSystemArtifactStore:
             and sha256_file(path) == sha256
         )
 
+    def absent(self, object_key: str) -> bool:
+        return self.local_path(object_key) is None
+
     def read_prefix(self, object_key: str, *, maximum_bytes: int) -> bytes | None:
         if not 0 < maximum_bytes <= MAXIMUM_STREAM_ARTIFACT_BYTES:
             raise ValueError("artifact prefix limit is invalid")
@@ -302,12 +307,26 @@ class FileSystemArtifactStore:
 
 
 class S3ArtifactStore:
-    def __init__(self, client, bucket: str, *, prefix: str = "map-artifacts"):
+    catalog_delivery_backed = True
+
+    def __init__(
+        self,
+        client,
+        bucket: str,
+        *,
+        prefix: str = "map-artifacts",
+        checksum_mode: str = "sha256",
+    ):
         if not bucket:
             raise ValueError("S3 artifact bucket must not be empty")
+        if checksum_mode not in {"sha256", "md5", "metadata-only"}:
+            raise ValueError(
+                "S3 artifact checksum mode must be sha256, md5, or metadata-only"
+            )
         self.client = client
         self.bucket = bucket
         self.prefix = prefix.strip("/")
+        self.checksum_mode = checksum_mode
         if self.prefix:
             _validate_object_key(self.prefix)
 
@@ -339,16 +358,20 @@ class S3ArtifactStore:
                 return
             try:
                 with source_path.open("rb") as body:
-                    self.client.put_object(
-                        Bucket=self.bucket,
-                        Key=key,
-                        Body=body,
-                        ContentLength=source_bytes,
-                        ContentType=media_type,
-                        ChecksumSHA256=checksum,
-                        Metadata={"sha256": sha256},
-                        IfNoneMatch="*",
-                    )
+                    request = {
+                        "Bucket": self.bucket,
+                        "Key": key,
+                        "Body": body,
+                        "ContentLength": source_bytes,
+                        "ContentType": media_type,
+                        "Metadata": {"sha256": sha256},
+                        "IfNoneMatch": "*",
+                    }
+                    if self.checksum_mode == "sha256":
+                        request["ChecksumSHA256"] = checksum
+                    elif self.checksum_mode == "md5":
+                        request["ContentMD5"] = _md5_base64(source_path)
+                    self.client.put_object(**request)
                 break
             except Exception as exc:
                 status = _error_status(exc)
@@ -376,6 +399,10 @@ class S3ArtifactStore:
         except ArtifactStoreError:
             return False
         return True
+
+    def absent(self, object_key: str) -> bool:
+        _validate_object_key(object_key)
+        return self._head(self._key(object_key)) is None
 
     def read_prefix(self, object_key: str, *, maximum_bytes: int) -> bytes | None:
         _validate_object_key(object_key)
@@ -451,6 +478,131 @@ class S3ArtifactStore:
             raise ArtifactStoreError("immutable artifact object conflicts with expected content")
 
 
+class MirroredArtifactStore:
+    """Publish immutable artifacts to a primary store and an additive mirror.
+
+    Reads remain primary-authoritative during the R2 shadow phase. A mirror
+    failure fails the publication before the job becomes READY, so the final
+    artifact set cannot be silently incomplete.
+    """
+
+    def __init__(self, primary, mirror):
+        self.primary = primary
+        self.mirror = mirror
+
+    @property
+    def catalog_delivery_backed(self) -> bool:
+        return bool(getattr(self.mirror, "catalog_delivery_backed", False))
+
+    def put(
+        self,
+        source: str | Path,
+        object_key: str,
+        *,
+        sha256: str,
+        media_type: str,
+    ) -> None:
+        self.primary.put(
+            source,
+            object_key,
+            sha256=sha256,
+            media_type=media_type,
+        )
+        self.mirror.put(
+            source,
+            object_key,
+            sha256=sha256,
+            media_type=media_type,
+        )
+
+    def local_path(self, object_key: str) -> Path | None:
+        return self.primary.local_path(object_key)
+
+    def verify(self, object_key: str, *, sha256: str, expected_bytes: int) -> bool:
+        return self.primary.verify(
+            object_key,
+            sha256=sha256,
+            expected_bytes=expected_bytes,
+        ) and self.mirror.verify(
+            object_key,
+            sha256=sha256,
+            expected_bytes=expected_bytes,
+        )
+
+    def absent(self, object_key: str) -> bool:
+        return self.primary.absent(object_key) and self.mirror.absent(object_key)
+
+    def backfill_from_primary(
+        self,
+        object_key: str,
+        *,
+        sha256: str,
+        expected_bytes: int,
+        media_type: str,
+    ) -> bool:
+        """Copy one already-recorded immutable primary object into the mirror.
+
+        This intentionally is not part of ``put`` or catalog publication retry:
+        importing filesystem-era READY jobs into shared delivery must be an
+        explicit operator action. The exact recorded bytes are verified before
+        and after the conditional mirror write.
+        """
+        source = self.primary.local_path(object_key)
+        if source is None or not self.primary.verify(
+            object_key,
+            sha256=sha256,
+            expected_bytes=expected_bytes,
+        ):
+            raise ArtifactStoreError(
+                "recorded primary artifact is missing or does not match its identity"
+            )
+        already_present = self.mirror.verify(
+            object_key,
+            sha256=sha256,
+            expected_bytes=expected_bytes,
+        )
+        if not already_present:
+            self.mirror.put(
+                source,
+                object_key,
+                sha256=sha256,
+                media_type=media_type,
+            )
+        if not self.verify(
+            object_key,
+            sha256=sha256,
+            expected_bytes=expected_bytes,
+        ):
+            raise ArtifactStoreError("artifact mirror backfill verification failed")
+        return not already_present
+
+    def read_prefix(self, object_key: str, *, maximum_bytes: int) -> bytes | None:
+        return self.primary.read_prefix(
+            object_key,
+            maximum_bytes=maximum_bytes,
+        )
+
+    def create_download_url(
+        self,
+        object_key: str,
+        *,
+        expires_in_seconds: int,
+        filename: str,
+        media_type: str,
+    ) -> str | None:
+        return self.primary.create_download_url(
+            object_key,
+            expires_in_seconds=expires_in_seconds,
+            filename=filename,
+            media_type=media_type,
+        )
+
+    def delete(self, object_key: str) -> bool:
+        primary_deleted = self.primary.delete(object_key)
+        mirror_deleted = self.mirror.delete(object_key)
+        return primary_deleted or mirror_deleted
+
+
 def create_artifact_store_from_environment(
     data_root: str | Path,
     *,
@@ -462,8 +614,8 @@ def create_artifact_store_from_environment(
     if backend == "filesystem":
         root = Path(os.environ.get("MAP_PLATFORM_ARTIFACT_ROOT", Path(data_root) / "artifacts"))
         return FileSystemArtifactStore(root)
-    if backend != "s3":
-        raise ValueError("MAP_PLATFORM_ARTIFACT_STORE must be filesystem or s3")
+    if backend not in {"s3", "mirror"}:
+        raise ValueError("MAP_PLATFORM_ARTIFACT_STORE must be filesystem, mirror, or s3")
     try:
         import boto3
     except ImportError as exc:
@@ -477,6 +629,12 @@ def create_artifact_store_from_environment(
         or os.environ.get("AWS_DEFAULT_REGION")
         or ("auto" if endpoint_url else "us-east-1")
     )
+    if (
+        endpoint_url
+        and ".r2.cloudflarestorage.com" in endpoint_url.lower()
+        and region_name != "auto"
+    ):
+        raise ValueError("Cloudflare R2 artifact storage requires AWS_REGION=auto")
     client_options = {
         "endpoint_url": endpoint_url,
         "region_name": region_name,
@@ -510,11 +668,24 @@ def create_artifact_store_from_environment(
             if session_token:
                 client_options["aws_session_token"] = session_token
     client = boto3.client("s3", **client_options)
-    return S3ArtifactStore(
+    s3_store = S3ArtifactStore(
         client,
         bucket,
         prefix=os.environ.get("MAP_PLATFORM_S3_PREFIX", "map-artifacts"),
+        checksum_mode=os.environ.get(
+            "MAP_PLATFORM_S3_CHECKSUM_MODE",
+            "sha256",
+        ).strip().lower(),
     )
+    if backend == "mirror":
+        root = Path(
+            os.environ.get(
+                "MAP_PLATFORM_ARTIFACT_ROOT",
+                Path(data_root) / "artifacts",
+            )
+        )
+        return MirroredArtifactStore(FileSystemArtifactStore(root), s3_store)
+    return s3_store
 
 
 def zip_object_key(map_id: str, sha256: str) -> str:
@@ -558,6 +729,14 @@ def sha256_file(path: str | Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _md5_base64(path: Path) -> str:
+    digest = hashlib.md5(usedforsecurity=False)
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return base64.b64encode(digest.digest()).decode("ascii")
 
 
 def _validate_object_key(object_key: str) -> None:

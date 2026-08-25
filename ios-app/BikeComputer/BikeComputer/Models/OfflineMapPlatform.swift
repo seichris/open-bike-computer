@@ -328,6 +328,14 @@ struct OfflineMapJob: Decodable, Equatable {
     }
 }
 
+nonisolated struct OfflineMapCatalogAttachment: Decodable, Equatable {
+    let jobId: String
+    let catalogPublicationId: String
+    let catalogMapEntryId: String
+    let alias: String
+    let aliasRevision: Int
+}
+
 /// Durable whole-job progress from the chunk coordinator.
 ///
 /// `progress` remains the phase-local detail shown below the overall bar. The
@@ -716,6 +724,8 @@ nonisolated enum PausedMapUploadResumePolicy {
         lastTransferOutcome: String,
         lastTransferMapID: String,
         candidateMapID: String,
+        lastTransferArtifactFilename: String? = nil,
+        candidateArtifactFilename: String? = nil,
         lastDeviceState: String?,
         statusMessage: String = ""
     ) -> Bool {
@@ -723,6 +733,12 @@ nonisolated enum PausedMapUploadResumePolicy {
               !lastTransferMapID.isEmpty,
               lastTransferMapID == candidateMapID else {
             return false
+        }
+        if let lastTransferArtifactFilename {
+            guard !lastTransferArtifactFilename.isEmpty,
+                  lastTransferArtifactFilename == candidateArtifactFilename else {
+                return false
+            }
         }
         return lastDeviceState == "paused" ||
             lastDeviceState == "idle" ||
@@ -1382,6 +1398,7 @@ nonisolated enum MapInstallProtocolSelector {
         currentIosGitSha: String? = nil,
         currentIosBuildSha256: String? = nil,
         compatibleArtifactAppIdentities: [MapStreamAppBuildIdentity] = [],
+        readerRequirements: OfflineMapReaderRequirements? = nil,
         requiredFirmwareVersion: String? = nil,
         requiredFirmwareBuild: UInt32? = nil,
         requiredFirmwareGitSha: String? = nil,
@@ -1396,41 +1413,54 @@ nonisolated enum MapInstallProtocolSelector {
         ) else {
             return .legacyArtifactRequired
         }
-        let requirements = (
+        let appRequirements = (
             requiredIosBuild,
             requiredIosGitSha,
-            requiredIosBuildSha256,
+            requiredIosBuildSha256
+        )
+        if let readerRequirements {
+            guard readerRequirements.streamFormat ==
+                    OfflineMapArtifact.bikeMapStreamFormat,
+                  OfflineMapReaderCompatibilityPolicy.supports(
+                    readerRequirements
+                  ) else {
+                return .legacyArtifactRequired
+            }
+        } else {
+            guard let requiredAppBuild = appRequirements.0,
+                  let requiredAppGitSHA = appRequirements.1,
+                  let requiredAppBuildSHA256 = appRequirements.2,
+                  let currentAppBuild = currentIosBuild,
+                  let currentAppGitSHA = currentIosGitSha,
+                  let currentAppBuildSHA256 = currentIosBuildSha256 else {
+                return .legacyArtifactRequired
+            }
+            let requiredAppIdentity = MapStreamAppBuildIdentity(
+                schemaVersion: 1,
+                build: requiredAppBuild,
+                gitSha: requiredAppGitSHA,
+                componentSha256: requiredAppBuildSHA256
+            )
+            let currentAppIdentity = MapStreamAppBuildIdentity(
+                schemaVersion: 1,
+                build: currentAppBuild,
+                gitSha: currentAppGitSHA,
+                componentSha256: currentAppBuildSHA256
+            )
+            guard requiredAppIdentity.isReleaseGrade,
+                  currentAppIdentity.isReleaseGrade,
+                  requiredAppIdentity == currentAppIdentity ||
+                    compatibleArtifactAppIdentities.contains(
+                        requiredAppIdentity
+                    ) else {
+                return .legacyArtifactRequired
+            }
+        }
+        let deviceRequirements = (
             requiredFirmwareVersion,
             requiredFirmwareBuild,
             requiredFirmwareGitSha
         )
-        guard let requiredAppBuild = requirements.0,
-              let requiredAppGitSHA = requirements.1,
-              let requiredAppBuildSHA256 = requirements.2,
-              let currentAppBuild = currentIosBuild,
-              let currentAppGitSHA = currentIosGitSha,
-              let currentAppBuildSHA256 = currentIosBuildSha256 else {
-            return .legacyArtifactRequired
-        }
-        let requiredAppIdentity = MapStreamAppBuildIdentity(
-            schemaVersion: 1,
-            build: requiredAppBuild,
-            gitSha: requiredAppGitSHA,
-            componentSha256: requiredAppBuildSHA256
-        )
-        let currentAppIdentity = MapStreamAppBuildIdentity(
-            schemaVersion: 1,
-            build: currentAppBuild,
-            gitSha: currentAppGitSHA,
-            componentSha256: currentAppBuildSHA256
-        )
-        guard requiredAppIdentity.isReleaseGrade,
-              currentAppIdentity.isReleaseGrade,
-              requiredAppIdentity == currentAppIdentity ||
-                  compatibleArtifactAppIdentities.contains(requiredAppIdentity) else {
-            return .legacyArtifactRequired
-        }
-        let deviceRequirements = (requirements.3, requirements.4, requirements.5)
         if deviceRequirements.0 == nil && deviceRequirements.1 == nil &&
             deviceRequirements.2 == nil {
             return .streamV2
@@ -3016,6 +3046,28 @@ struct OfflineMapPlatformClient {
         guard response.jobId == jobId else {
             throw OfflineMapPlatformError.invalidResponse
         }
+    }
+
+    func attachCatalogLibrary(
+        jobId: String,
+        libraryCredential: String
+    ) async throws -> OfflineMapCatalogAttachment {
+        var request = try Self.makeInstallationScopedURLRequest(
+            baseURL: baseURL,
+            path: "/v1/map-jobs/\(jobId)/catalog-library",
+            method: "POST",
+            clientInstallationId: clientInstallationId
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder.offlineMap.encode(
+            ["libraryCredential": libraryCredential]
+        )
+        authorizeInstallation(&request)
+        let response: OfflineMapCatalogAttachment = try await send(request: request)
+        guard response.jobId == jobId else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        return response
     }
 
     func recordDownload(

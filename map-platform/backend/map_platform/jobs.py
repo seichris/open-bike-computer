@@ -749,6 +749,7 @@ class JobStore:
                 if (
                     job.status == JobStatus.EXPIRED
                     and job.artifacts
+                    and job.catalog_publication_state != "finalized"
                     and staging_budget != 0
                 ):
                     artifacts_to_stage = job.artifacts[
@@ -795,7 +796,10 @@ class JobStore:
                         protected = any(
                             object_key in job.pending_artifact_keys
                             or (
-                                job.status != JobStatus.EXPIRED
+                                (
+                                    job.status != JobStatus.EXPIRED
+                                    or job.catalog_publication_state == "finalized"
+                                )
                                 and any(
                                     artifact.object_key == object_key
                                     for artifact in job.artifacts

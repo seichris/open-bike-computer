@@ -328,6 +328,42 @@ struct ContentView: View {
             synchronizeRideMetricsSheet()
             presentNearbyBicinoIfEligible()
         }
+        .onOpenURL { url in
+            offlineMapManager.handleShareURL(url)
+        }
+        .alert(
+            "Add Shared Map?",
+            isPresented: Binding(
+                get: { offlineMapManager.pendingSharePreview != nil },
+                set: { if !$0 { offlineMapManager.dismissPendingShare() } }
+            )
+        ) {
+            Button(
+                offlineMapManager.pendingSharePreview.map {
+                    offlineMapManager.catalogAvailability(for: $0).claimActionTitle
+                } ?? "Add Map"
+            ) {
+                offlineMapManager.claimPendingShare()
+            }
+            Button("Cancel", role: .cancel) {
+                offlineMapManager.dismissPendingShare()
+            }
+        } message: {
+            if let preview = offlineMapManager.pendingSharePreview {
+                let availability = offlineMapManager.catalogAvailability(for: preview)
+                let summary =
+                    "\(preview.title) · \(preview.features.joined(separator: ", ")) · " +
+                    ByteCountFormatter.string(
+                        fromByteCount: preview.approximateBytes,
+                        countStyle: .file
+                    )
+                Text(
+                    [summary, availability.statusText]
+                        .compactMap { $0 }
+                        .joined(separator: "\n")
+                )
+            }
+        }
         .onChange(of: presentedSheet) { destination in
             if let destination {
                 activeSheetDestination = destination

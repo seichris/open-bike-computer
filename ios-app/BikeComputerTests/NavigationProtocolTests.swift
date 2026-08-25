@@ -134,19 +134,44 @@ func makePreviewReadableBikeMapStream(manifest: Data) -> Data {
 
 actor AsyncTestGate {
     private var isOpen = false
-    private var waiter: CheckedContinuation<Void, Never>?
+    private var waiters: [CheckedContinuation<Void, Never>] = []
 
     func wait() async {
         if isOpen { return }
         await withCheckedContinuation { continuation in
-            waiter = continuation
+            waiters.append(continuation)
         }
     }
 
     func open() {
         isOpen = true
-        waiter?.resume()
-        waiter = nil
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending {
+            waiter.resume()
+        }
+    }
+}
+
+actor CatalogCredentialBootstrapRecorder {
+    private let gate = AsyncTestGate()
+    private var count = 0
+    private let credential: OfflineMapCatalogCredential
+
+    init(credential: OfflineMapCatalogCredential) {
+        self.credential = credential
+    }
+
+    func bootstrap(existingCredential _: String?) async -> OfflineMapCatalogCredential {
+        count += 1
+        await gate.wait()
+        return credential
+    }
+
+    func invocationCount() -> Int { count }
+
+    func release() async {
+        await gate.open()
     }
 }
 
@@ -722,6 +747,22 @@ struct NavigationProtocolTests {
         testNavigationEngineReplacesRouteWithoutResettingTelemetry()
         testOfflineMapCustomBBoxRequest()
         testOfflineMapServiceConfigChannels()
+        testOfflineMapCatalogConfigChannels()
+        testOfflineMapCatalogTrustStoreChannels()
+        testOfflineMapShareLinkValidation()
+        testOfflineMapCatalogR2HostValidation()
+        testOfflineMapCatalogCredentialNamespaces()
+        testOfflineMapCatalogAliasAttachmentPolicy()
+        testOfflineMapCatalogContentSafeReconciliation()
+        testOfflineMapCatalogLocalArtifactIdentity()
+        testOfflineMapCatalogAvailabilityPolicy()
+        testSavedMapRemovalPolicy()
+        await testOfflineMapCatalogCredentialBootstrapCoalescesConcurrentCallers()
+        await testOfflineMapCatalogCredentialBootstrapFirstWriterWinsAcrossCoordinators()
+        await testOfflineMapCatalogPendingAliasPersistenceAndConflictPolicy()
+        await testOfflineMapCatalogInventorySyncSurvivesCatalogFailure()
+        await testOfflineMapCatalogClaimRetainsRetryState()
+        await testOfflineMapCatalogShareAndLinkContracts()
         await testOfflineMapCapabilitiesContract()
         await testOfflineMapClientRejectsUnsupportedRendererWithoutDowngrade()
         testStreetLabelMapContract()
@@ -734,6 +775,7 @@ struct NavigationProtocolTests {
         testBackgroundMapUploadArbitration()
         testBackgroundMapUploadSessionNamespace()
         testPausedMapUploadResumePolicy()
+        testPausedMapUploadExactArtifactDeletion()
         testBackgroundMapUploadResponseBufferIsBounded()
         testMapStreamBackgroundUploadRequest()
         testDeviceTransferServerProbePolicy()
@@ -1007,7 +1049,8 @@ struct NavigationProtocolTests {
         func artifact(
             bytes: Data,
             sha: String? = nil,
-            objectKey: String? = nil
+            objectKey: String? = nil,
+            includesRequiredAppIdentity: Bool = true
         ) -> OfflineMapArtifact {
             OfflineMapArtifact(
                 format: OfflineMapArtifact.bikeMapStreamFormat,
@@ -1027,9 +1070,13 @@ struct NavigationProtocolTests {
                 signatureKeySha256: sha256(publicKey),
                 producerBuildSha256: String(repeating: "1", count: 64),
                 producerImageDigest: "sha256:" + String(repeating: "2", count: 64),
-                requiredIosBuild: "100",
-                requiredIosGitSha: String(repeating: "a", count: 40),
-                requiredIosBuildSha256: String(repeating: "b", count: 64),
+                requiredIosBuild: includesRequiredAppIdentity ? "100" : nil,
+                requiredIosGitSha: includesRequiredAppIdentity
+                    ? String(repeating: "a", count: 40)
+                    : nil,
+                requiredIosBuildSha256: includesRequiredAppIdentity
+                    ? String(repeating: "b", count: 64)
+                    : nil,
                 requiredFirmwareVersion: nil,
                 requiredFirmwareBuild: nil,
                 requiredFirmwareGitSha: nil
@@ -1058,6 +1105,99 @@ struct NavigationProtocolTests {
             )
         } catch {
             assert(false, "valid complete map stream is accepted: \(error)")
+        }
+
+        let catalogReaderRequirements = OfflineMapReaderRequirements(
+            schemaVersion: 1,
+            streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+            manifestSchemaVersion: 1,
+            renderer: "esp32-fmb",
+            rendererFormatVersion: 1,
+            requiredFeatures: []
+        )
+        let catalogArtifact = artifact(
+            bytes: stream,
+            includesRequiredAppIdentity: false
+        )
+        do {
+            let verified = try BikeMapStreamArtifactValidator.validate(
+                url: streamURL,
+                artifact: catalogArtifact,
+                expectedMapID: "golden-map",
+                trustStore: trustStore,
+                readerRequirements: catalogReaderRequirements
+            )
+            assertEqual(
+                verified.readerRequirements,
+                catalogReaderRequirements,
+                "catalog validation retains the reader contract verified against the signed manifest"
+            )
+            assert(
+                verified.requiredIosBuild == nil &&
+                    verified.requiredIosGitSHA == nil &&
+                    verified.requiredIosBuildSHA256 == nil,
+                "catalog validation does not invent immutable app-build requirements"
+            )
+        } catch {
+            assert(false, "a capability-compatible catalog stream is accepted: \(error)")
+        }
+        do {
+            _ = try BikeMapStreamArtifactValidator.validate(
+                url: streamURL,
+                artifact: catalogArtifact,
+                expectedMapID: "golden-map",
+                trustStore: trustStore
+            )
+            assert(false, "a build-unbound stream without reader requirements fails closed")
+        } catch {
+            guard case .invalidArtifactMetadata = error as? BikeMapStreamFormatError else {
+                assert(false, "missing reader requirements produce a typed rejection: \(error)")
+                return
+            }
+        }
+        do {
+            _ = try BikeMapStreamArtifactValidator.validate(
+                url: streamURL,
+                artifact: catalogArtifact,
+                expectedMapID: "golden-map",
+                trustStore: trustStore,
+                readerRequirements: OfflineMapReaderRequirements(
+                    schemaVersion: 2,
+                    streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+                    manifestSchemaVersion: 1,
+                    renderer: "esp32-fmb",
+                    rendererFormatVersion: 1,
+                    requiredFeatures: []
+                )
+            )
+            assert(false, "an unknown reader contract schema fails closed")
+        } catch {
+            guard case .invalidArtifactMetadata = error as? BikeMapStreamFormatError else {
+                assert(false, "unknown reader requirements produce a typed rejection: \(error)")
+                return
+            }
+        }
+        do {
+            _ = try BikeMapStreamArtifactValidator.validate(
+                url: streamURL,
+                artifact: catalogArtifact,
+                expectedMapID: "golden-map",
+                trustStore: trustStore,
+                readerRequirements: OfflineMapReaderRequirements(
+                    schemaVersion: 1,
+                    streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+                    manifestSchemaVersion: 1,
+                    renderer: "esp32-fmb",
+                    rendererFormatVersion: 2,
+                    requiredFeatures: ["street-labels"]
+                )
+            )
+            assert(false, "reader requirements cannot contradict the signed manifest")
+        } catch {
+            guard case .invalidArtifactMetadata = error as? BikeMapStreamFormatError else {
+                assert(false, "manifest/reader mismatch produces a typed rejection: \(error)")
+                return
+            }
         }
 
         do {
@@ -1556,6 +1696,56 @@ struct NavigationProtocolTests {
             .streamV2,
             "stream artifact selects v2 only when protocol and format match"
         )
+        let catalogReaderRequirements = OfflineMapReaderRequirements(
+            schemaVersion: 1,
+            streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+            manifestSchemaVersion: 1,
+            renderer: "esp32-fmb",
+            rendererFormatVersion: 1,
+            requiredFeatures: []
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability:
+                    "map-prod-1=" + String(repeating: "5", count: 64),
+                readerRequirements: catalogReaderRequirements,
+                requiredFirmwareVersion: stream.requiredFirmwareVersion,
+                requiredFirmwareBuild: stream.requiredFirmwareBuild,
+                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
+                deviceStatus: v2Status
+            ),
+            .streamV2,
+            "a verified catalog reader contract selects stream v2 without app-build binding"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability:
+                    "map-prod-1=" + String(repeating: "5", count: 64),
+                deviceStatus: v2Status
+            ),
+            .legacyArtifactRequired,
+            "a build-unbound stream without a verified reader contract fails closed"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability:
+                    "map-prod-1=" + String(repeating: "5", count: 64),
+                readerRequirements: OfflineMapReaderRequirements(
+                    schemaVersion: 2,
+                    streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+                    manifestSchemaVersion: 1,
+                    renderer: "esp32-fmb",
+                    rendererFormatVersion: 1,
+                    requiredFeatures: []
+                ),
+                deviceStatus: v2Status
+            ),
+            .legacyArtifactRequired,
+            "unknown catalog reader contracts fail closed during install selection"
+        )
         let wrongFirmwareStatus = MapTransferDeviceStatus(
             enabled: true,
             activeMapId: nil,
@@ -1790,9 +1980,9 @@ struct NavigationProtocolTests {
             signatureKeySha256: String(repeating: "5", count: 64),
             producerBuildSha256: String(repeating: "1", count: 64),
             producerImageDigest: "sha256:" + String(repeating: "2", count: 64),
-            requiredIosBuild: "100",
-            requiredIosGitSha: String(repeating: "8", count: 40),
-            requiredIosBuildSha256: String(repeating: "9", count: 64),
+            requiredIosBuild: nil,
+            requiredIosGitSha: nil,
+            requiredIosBuildSha256: nil,
             requiredFirmwareVersion: nil,
             requiredFirmwareBuild: nil,
             requiredFirmwareGitSha: nil
@@ -1820,9 +2010,27 @@ struct NavigationProtocolTests {
             lastDeviceProgress: 42,
             expectedActiveMapID: "map-id",
             expectedActiveSessionID: nil,
-            lastTransferOutcome: nil
+            lastTransferOutcome: nil,
+            readerRequirements: OfflineMapReaderRequirements(
+                schemaVersion: 1,
+                streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+                manifestSchemaVersion: 1,
+                renderer: "esp32-fmb",
+                rendererFormatVersion: 2,
+                requiredFeatures: ["street-labels"]
+            )
         )
         try! SavedMapArtifactMetadataStore.save(metadata, for: artifactURL)
+        assertEqual(
+            SavedMapArtifactMetadataStore.load(for: artifactURL)?.readerRequirements,
+            metadata.readerRequirements,
+            "verified catalog reader requirements persist with the downloaded artifact"
+        )
+        assert(
+            SavedMapArtifactMetadataStore.load(for: artifactURL)?
+                .primaryArtifact?.requiredIosBuild == nil,
+            "persisted catalog metadata keeps app-build requirements absent"
+        )
         let manager = OfflineMapManager(defaults: defaults, cacheDirectory: directory)
         assertEqual(
             manager.activationProgress?.label,
@@ -2130,6 +2338,121 @@ struct NavigationProtocolTests {
                 lastDeviceState: "paused"
             ),
             "a terminal transfer does not expose a stale resume action"
+        )
+        assert(
+            !PausedMapUploadResumePolicy.isAvailable(
+                lastTransferOutcome: "unconfirmed",
+                lastTransferMapID: "shared-map-id",
+                candidateMapID: "shared-map-id",
+                lastTransferArtifactFilename: "catalog-2d.bmap",
+                candidateArtifactFilename: "catalog-3d.bmap",
+                lastDeviceState: "paused"
+            ),
+            "same-mapID rendering variants require the exact paused artifact filename"
+        )
+    }
+
+    @MainActor
+    static func testPausedMapUploadExactArtifactDeletion() {
+        let suite = "PausedMapExactArtifact-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("paused-map-exact-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let twoDEntryID = "map_v1_" + String(repeating: "d", count: 43)
+        let threeDEntryID = "map_v1_" + String(repeating: "e", count: 43)
+        let twoDURL = directory.appendingPathComponent(
+            OfflineMapCatalogLocalArtifactPolicy.filename(
+                mapEntryID: twoDEntryID,
+                fileExtension: "bmap"
+            )!
+        )
+        let threeDURL = directory.appendingPathComponent(
+            OfflineMapCatalogLocalArtifactPolicy.filename(
+                mapEntryID: threeDEntryID,
+                fileExtension: "bmap"
+            )!
+        )
+        try! Data([0x2d]).write(to: twoDURL)
+        try! Data([0x3d]).write(to: threeDURL)
+
+        func metadata(
+            for url: URL,
+            entryID: String,
+            state: String?
+        ) -> SavedMapArtifactMetadata {
+            SavedMapArtifactMetadata(
+                schemaVersion: SavedMapArtifactMetadata.currentSchemaVersion,
+                mapID: "shared-map-id",
+                displayName: entryID == twoDEntryID ? "2D map" : "3D map",
+                localArtifactFilename: url.lastPathComponent,
+                streamFormatVersion: 1,
+                rendererFormatVersion: entryID == twoDEntryID ? 2 : 3,
+                jobID: nil,
+                serverURLString: nil,
+                clientInstallationID: nil,
+                primaryArtifact: nil,
+                legacyArtifact: nil,
+                lastTransferProtocol: entryID == twoDEntryID ? 2 : nil,
+                lastTransferStreamFormat: entryID == twoDEntryID ? 1 : nil,
+                lastTransferSessionID: entryID == twoDEntryID ? "paused-session" : nil,
+                lastBackgroundTaskID: nil,
+                lastDeviceSequence: nil,
+                lastDeviceState: state,
+                lastDeviceStep: state == nil ? nil : 1,
+                lastDeviceStepCount: state == nil ? nil : 3,
+                lastDeviceProgress: state == nil ? nil : 40,
+                expectedActiveMapID: entryID == twoDEntryID ? "shared-map-id" : nil,
+                expectedActiveSessionID: entryID == twoDEntryID ? "paused-session" : nil,
+                lastTransferOutcome: entryID == twoDEntryID ? "unconfirmed" : nil,
+                catalogMapEntryID: entryID
+            )
+        }
+        try! SavedMapArtifactMetadataStore.save(
+            metadata(for: twoDURL, entryID: twoDEntryID, state: "paused"),
+            for: twoDURL
+        )
+        try! SavedMapArtifactMetadataStore.save(
+            metadata(for: threeDURL, entryID: threeDEntryID, state: nil),
+            for: threeDURL
+        )
+        defaults.set("shared-map-id", forKey: "offlineMap.lastTransfer.mapId")
+        defaults.set("paused-session", forKey: "offlineMap.lastTransfer.sessionId")
+        defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.set(
+            twoDURL.lastPathComponent,
+            forKey: "offlineMap.lastTransfer.artifactFilename"
+        )
+
+        let manager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: directory
+        )
+        assert(manager.isPausedMapUpload(twoDURL), "the exact 2D artifact is resumable")
+        assert(
+            !manager.isPausedMapUpload(threeDURL),
+            "the same-mapID 3D sibling never inherits the paused resume action"
+        )
+        manager.deleteCachedPack(at: twoDURL)
+        assert(
+            !manager.hasPausedMapUpload,
+            "deleting the exact paused artifact invalidates the resume state"
+        )
+        assertEqual(
+            manager.lastTransferMapId,
+            "",
+            "deleting the exact paused artifact clears its legacy map identity"
+        )
+        assert(
+            FileManager.default.fileExists(atPath: threeDURL.path),
+            "deleting one rendering variant preserves the sibling artifact"
+        )
+        assert(
+            !manager.isPausedMapUpload(threeDURL),
+            "resume never falls back to the surviving same-mapID sibling"
         )
     }
 
@@ -5205,6 +5528,1565 @@ struct NavigationProtocolTests {
             ),
             "https://invalid.invalid",
             "an unexpected managed host fails closed"
+        )
+    }
+
+    static func testOfflineMapShareLinkValidation() {
+        let token = String(repeating: "A", count: 43)
+        assertEqual(
+            OfflineMapShareLink.token(
+                from: URL(string: "https://maps-share.8o.vc/s/\(token)")!,
+                catalogHost: OfflineMapCatalogConfig.productionHost
+            ),
+            token,
+            "production share links resolve an opaque token"
+        )
+        assertEqual(
+            OfflineMapShareLink.token(
+                from: URL(string: "https://maps-share.8o.vc/dev/s/\(token)")!,
+                catalogHost: OfflineMapCatalogConfig.productionHost
+            ),
+            token,
+            "development share links resolve the same opaque token"
+        )
+        assert(
+            OfflineMapShareLink.token(
+                from: URL(string: "https://attacker.example/s/\(token)")!,
+                catalogHost: OfflineMapCatalogConfig.productionHost
+            ) == nil,
+            "share links reject substituted hosts"
+        )
+        assert(
+            OfflineMapShareLink.token(
+                from: URL(string: "https://maps-share.8o.vc/s/short?download=1")!,
+                catalogHost: OfflineMapCatalogConfig.productionHost
+            ) == nil,
+            "share links reject malformed tokens and query parameters"
+        )
+        assertEqual(
+            OfflineMapShareLink.token(
+                from: URL(
+                    string: "https://maps-share-staging.8o.vc/dev/s/\(token)"
+                )!,
+                catalogHost: OfflineMapCatalogConfig.developmentHost
+            ),
+            token,
+            "development builds accept staging catalog share links"
+        )
+        assert(
+            OfflineMapShareLink.token(
+                from: URL(string: "https://maps-share.8o.vc/s/\(token)")!,
+                catalogHost: OfflineMapCatalogConfig.developmentHost
+            ) == nil,
+            "development builds reject production-host share substitution"
+        )
+    }
+
+    static func testOfflineMapCatalogConfigChannels() {
+        assertEqual(
+            OfflineMapCatalogConfig.catalogHost(infoDictionary: [
+                OfflineMapCatalogConfig.catalogHostInfoKey:
+                    " MAPS-SHARE-STAGING.8O.VC "
+            ]),
+            OfflineMapCatalogConfig.developmentHost,
+            "an explicit validation-build override selects the staging catalog"
+        )
+        assertEqual(
+            OfflineMapCatalogConfig.catalogHost(infoDictionary: [
+                OfflineMapCatalogConfig.catalogHostInfoKey: "maps-share.8o.vc"
+            ]),
+            OfflineMapCatalogConfig.productionHost,
+            "both shipped app configurations select the shared production catalog"
+        )
+        assert(
+            OfflineMapCatalogConfig.catalogHost(infoDictionary: [
+                OfflineMapCatalogConfig.catalogHostInfoKey: "attacker.example"
+            ]) == nil,
+            "catalog configuration rejects arbitrary hosts"
+        )
+    }
+
+    static func testOfflineMapCatalogTrustStoreChannels() {
+        let developmentKeyID = "map-dev-2026-08"
+        let developmentPublicKey =
+            "04a3b3bec1db96a28ca372e203af005936427e20ddba7dc7e955dfb42ec701e91" +
+            "a99b1d9dc45dd3565aecf2f165cce3a5292c22066e5494fe002660bb08f0b1241"
+        let configuredValues: [String: Any] = [
+            OfflineMapCatalogConfig.developmentSigningKeyIDInfoKey:
+                developmentKeyID,
+            OfflineMapCatalogConfig.developmentSigningPublicKeyInfoKey:
+                developmentPublicKey,
+        ]
+        let development = OfflineMapCatalogConfig.mapStreamTrustStore(
+            infoDictionary: configuredValues.merging([
+                OfflineMapServiceConfig.infoDictionaryHostKey:
+                    "maps-dev.8o.vc"
+            ]) { _, new in new }
+        )
+        assert(
+            development.contains(keyID: developmentKeyID),
+            "Bicino Dev trusts its commissioned development signer"
+        )
+        assert(
+            development.contains(keyID: "map-prod-2026-07"),
+            "Bicino Dev continues to trust production-promoted maps"
+        )
+
+        let production = OfflineMapCatalogConfig.mapStreamTrustStore(
+            infoDictionary: configuredValues.merging([
+                OfflineMapServiceConfig.infoDictionaryHostKey: "maps.8o.vc"
+            ]) { _, new in new }
+        )
+        assert(
+            !production.contains(keyID: developmentKeyID),
+            "Bicino production ignores development signer configuration"
+        )
+        assert(
+            production.contains(keyID: "map-prod-2026-07"),
+            "Bicino production retains only its commissioned production trust"
+        )
+
+        let malformed = OfflineMapCatalogConfig.mapStreamTrustStore(
+            infoDictionary: [
+                OfflineMapServiceConfig.infoDictionaryHostKey:
+                    "maps-dev.8o.vc",
+                OfflineMapCatalogConfig.developmentSigningKeyIDInfoKey:
+                    developmentKeyID,
+                OfflineMapCatalogConfig.developmentSigningPublicKeyInfoKey:
+                    "04deadbeef",
+            ]
+        )
+        assert(
+            !malformed.contains(keyID: developmentKeyID),
+            "a malformed development public key fails closed"
+        )
+    }
+
+    static func testOfflineMapCatalogR2HostValidation() {
+        let accountHost = String(repeating: "a", count: 32) +
+            ".r2.cloudflarestorage.com"
+        assertEqual(
+            OfflineMapCatalogConfig.r2DownloadHost(infoDictionary: [
+                OfflineMapCatalogConfig.r2DownloadHostInfoKey: accountHost.uppercased()
+            ]),
+            accountHost,
+            "catalog downloads accept only the exact R2 S3 account host shape"
+        )
+        assert(
+            OfflineMapCatalogConfig.r2DownloadHost(infoDictionary: [
+                OfflineMapCatalogConfig.r2DownloadHostInfoKey:
+                    "maps.example.com"
+            ]) == nil,
+            "catalog downloads reject arbitrary configured hosts"
+        )
+    }
+
+    static func testOfflineMapCatalogAliasAttachmentPolicy() {
+        let emoji40 = String(repeating: "\u{1F6B2}", count: 40)
+        let emoji41 = String(repeating: "\u{1F6B2}", count: 41)
+        let emoji60 = String(repeating: "\u{1F6B2}", count: 60)
+        let emoji61 = String(repeating: "\u{1F6B2}", count: 61)
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.normalizedAlias("  e\u{301}  "),
+            "\u{E9}",
+            "catalog aliases are NFC-normalized after whitespace trimming"
+        )
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.normalizedAlias("\u{FEFF}Ride name\u{FEFF}"),
+            "Ride name",
+            "catalog aliases mirror JavaScript trimming of byte-order marks"
+        )
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.normalizedAlias(emoji40),
+            emoji40,
+            "40 supplementary emoji count as 40 Unicode code points"
+        )
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.normalizedAlias(emoji41),
+            emoji41,
+            "41 supplementary emoji remain below both catalog limits"
+        )
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.normalizedAlias(emoji60),
+            emoji60,
+            "60 four-byte emoji exactly meet the UTF-8 byte limit"
+        )
+        assert(
+            OfflineMapCatalogAliasPolicy.normalizedAlias(emoji61) == nil,
+            "61 four-byte emoji exceed the UTF-8 byte limit"
+        )
+        assert(
+            OfflineMapCatalogAliasPolicy.normalizedAlias(
+                String(repeating: "a", count: 81)
+            ) == nil,
+            "catalog aliases reject more than 80 Unicode code points"
+        )
+        assert(
+            OfflineMapCatalogAliasPolicy.normalizedAlias("\tTrimmed control") == nil &&
+                OfflineMapCatalogAliasPolicy.normalizedAlias("embedded\u{7F}control") == nil,
+            "general-category control scalars are rejected before trimming"
+        )
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.normalizedAlias("A\u{200D}B"),
+            "A\u{200D}B",
+            "format scalars are not misclassified as general-category controls"
+        )
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.normalizedAlias("\u{200B}Ride name\u{200B}"),
+            "\u{200B}Ride name\u{200B}",
+            "catalog aliases preserve U+200B exactly like JavaScript trim"
+        )
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.aliasToApplyAfterAttachment(
+                localDisplayName: "  Favorite climb  ",
+                userDefinedDisplayName: true,
+                attachedAlias: "Shanghai"
+            ),
+            "Favorite climb",
+            "a local rename is applied immediately after first catalog attachment"
+        )
+        assert(
+            OfflineMapCatalogAliasPolicy.aliasToApplyAfterAttachment(
+                localDisplayName: "Shanghai",
+                userDefinedDisplayName: true,
+                attachedAlias: "Shanghai"
+            ) == nil,
+            "an attachment that already has the user alias needs no extra revision"
+        )
+        assert(
+            OfflineMapCatalogAliasPolicy.aliasToApplyAfterAttachment(
+                localDisplayName: "Generated map name",
+                userDefinedDisplayName: false,
+                attachedAlias: "Shanghai"
+            ) == nil,
+            "generated local names never overwrite the catalog alias"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapCatalogCredentialBootstrapCoalescesConcurrentCallers() async {
+        let expected = OfflineMapCatalogCredential(
+            libraryId: "library-coalesced",
+            credential: "credential-coalesced"
+        )
+        let recorder = CatalogCredentialBootstrapRecorder(credential: expected)
+        let coordinator = OfflineMapCatalogCredentialCoordinator()
+        var savedCredentials: [OfflineMapCatalogCredential] = []
+        var loadCount = 0
+
+        func load() -> OfflineMapCatalogCredential? {
+            loadCount += 1
+            return savedCredentials.last
+        }
+        func save(_ credential: OfflineMapCatalogCredential) {
+            savedCredentials.append(credential)
+        }
+
+        let first = Task { @MainActor in
+            try! await coordinator.credential(
+                loadExisting: load,
+                bootstrap: recorder.bootstrap,
+                persistAnonymousBootstrap: { credential in
+                    save(credential)
+                    return credential
+                }
+            )
+        }
+        let firstRequestDeadline = Date().addingTimeInterval(2)
+        while await recorder.invocationCount() == 0 && Date() < firstRequestDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let second = Task { @MainActor in
+            try! await coordinator.credential(
+                loadExisting: load,
+                bootstrap: recorder.bootstrap,
+                persistAnonymousBootstrap: { credential in
+                    save(credential)
+                    return credential
+                }
+            )
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        assertEqual(
+            await recorder.invocationCount(),
+            1,
+            "a second caller joins the suspended first bootstrap"
+        )
+        await recorder.release()
+        let firstCredential = await first.value
+        let secondCredential = await second.value
+        assertEqual(
+            firstCredential,
+            expected,
+            "the first catalog caller receives the bootstrap credential"
+        )
+        assertEqual(
+            secondCredential,
+            expected,
+            "the later catalog caller receives the same in-flight credential"
+        )
+        assertEqual(loadCount, 1, "coalescing reads existing credentials once")
+        assertEqual(
+            savedCredentials,
+            [expected],
+            "coalescing persists exactly one library identity regardless of completion order"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapCatalogCredentialBootstrapFirstWriterWinsAcrossCoordinators() async {
+        let suite = "OfflineMapCatalogCredentialRace-\(UUID().uuidString)"
+        let firstDefaults = UserDefaults(suiteName: suite)!
+        let secondDefaults = UserDefaults(suiteName: suite)!
+        defer { firstDefaults.removePersistentDomain(forName: suite) }
+        let firstStore = OfflineMapCatalogCredentialStore(
+            defaults: firstDefaults,
+            catalogHost: OfflineMapCatalogConfig.productionHost
+        )
+        let secondStore = OfflineMapCatalogCredentialStore(
+            defaults: secondDefaults,
+            catalogHost: OfflineMapCatalogConfig.productionHost
+        )
+        let firstCandidate = OfflineMapCatalogCredential(
+            libraryId: "library-first-candidate",
+            credential: "credential-first-candidate"
+        )
+        let secondCandidate = OfflineMapCatalogCredential(
+            libraryId: "library-second-winner",
+            credential: "credential-second-winner"
+        )
+        let firstRecorder = CatalogCredentialBootstrapRecorder(
+            credential: firstCandidate
+        )
+        let secondRecorder = CatalogCredentialBootstrapRecorder(
+            credential: secondCandidate
+        )
+        let firstCoordinator = OfflineMapCatalogCredentialCoordinator()
+        let secondCoordinator = OfflineMapCatalogCredentialCoordinator()
+
+        let first = Task { @MainActor in
+            try! await firstCoordinator.credential(
+                loadExisting: firstStore.load,
+                bootstrap: firstRecorder.bootstrap,
+                persistAnonymousBootstrap: firstStore.saveAnonymousBootstrapIfAbsent
+            )
+        }
+        let second = Task { @MainActor in
+            try! await secondCoordinator.credential(
+                loadExisting: secondStore.load,
+                bootstrap: secondRecorder.bootstrap,
+                persistAnonymousBootstrap: secondStore.saveAnonymousBootstrapIfAbsent
+            )
+        }
+        let bothStartedDeadline = Date().addingTimeInterval(2)
+        while Date() < bothStartedDeadline {
+            let firstCount = await firstRecorder.invocationCount()
+            let secondCount = await secondRecorder.invocationCount()
+            if firstCount > 0 && secondCount > 0 {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assertEqual(
+            await firstRecorder.invocationCount(),
+            1,
+            "the first independent coordinator reaches anonymous bootstrap"
+        )
+        assertEqual(
+            await secondRecorder.invocationCount(),
+            1,
+            "the second independent coordinator reads before either bootstrap persists"
+        )
+
+        await secondRecorder.release()
+        let secondResult = await second.value
+        await firstRecorder.release()
+        let firstResult = await first.value
+        assertEqual(
+            firstResult,
+            secondCandidate,
+            "a later bootstrap response returns the credential already persisted by the winner"
+        )
+        assertEqual(
+            secondResult,
+            secondCandidate,
+            "the first persistence winner returns its own credential"
+        )
+        assertEqual(
+            firstStore.load(),
+            secondCandidate,
+            "the first writer remains the shared persisted library identity"
+        )
+        assertEqual(
+            secondStore.load(),
+            secondCandidate,
+            "independent stores converge on the same library identity"
+        )
+
+        let linked = OfflineMapCatalogCredential(
+            libraryId: "library-linked",
+            credential: secondCandidate.credential
+        )
+        try! firstStore.save(linked)
+        assertEqual(
+            secondStore.load(),
+            linked,
+            "an intentional link-code claim can still replace the library association"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapCatalogPendingAliasPersistenceAndConflictPolicy() async {
+        let snapshotPending = OfflineMapCatalogPendingAlias(
+            mapEntryID: "map-snapshot",
+            alias: "Before request",
+            expectedRevision: 3,
+            state: .pending
+        )
+        let recreatedPending = snapshotPending
+        let snapshotToken = UUID()
+        let recreatedToken = UUID()
+        assertEqual(
+            recreatedPending,
+            snapshotPending,
+            "the ABA regression uses structurally identical pending aliases"
+        )
+        assert(
+            OfflineMapCatalogPendingAliasPolicy.belongsToRequestSnapshot(
+                currentToken: snapshotToken,
+                requestStartToken: snapshotToken
+            ),
+            "an unchanged pending alias belongs to the authoritative request snapshot"
+        )
+        assert(
+            !OfflineMapCatalogPendingAliasPolicy.belongsToRequestSnapshot(
+                currentToken: recreatedToken,
+                requestStartToken: snapshotToken
+            ),
+            "an identical alias recreated during the request belongs to a newer snapshot"
+        )
+        assert(
+            !OfflineMapCatalogPendingAliasPolicy.belongsToRequestSnapshot(
+                currentToken: recreatedToken,
+                requestStartToken: nil
+            ),
+            "a pending alias created during the request is absent from its snapshot"
+        )
+
+        let suite = "OfflineMapPendingAlias-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            OfflineMapTestURLProtocol.reset()
+        }
+        let mapEntryID = "map_v1_" + String(repeating: "p", count: 43)
+        func map(alias: String, revision: Int) -> OfflineMapCatalogMap {
+            OfflineMapCatalogMap(
+                mapEntryId: mapEntryID,
+                mapId: "same-region",
+                alias: alias,
+                aliasSource: revision == 7 ? "generated" : "user",
+                aliasRevision: revision,
+                canonicalName: "Same region",
+                originChannel: "production",
+                sourceRegionName: "Same region",
+                bounds: [1, 2, 3, 4],
+                renderer: "esp32-fmb",
+                rendererFormatVersion: 2,
+                features: ["street-labels"],
+                deliveryState: "production",
+                generatedAt: nil,
+                addedAt: "2026-08-25T00:00:00.000Z",
+                updatedAt: "2026-08-25T00:00:00.000Z",
+                artifacts: []
+            )
+        }
+        func mapsPage(_ map: OfflineMapCatalogMap) -> Data {
+            let object = try! JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(map)
+            )
+            return try! JSONSerialization.data(withJSONObject: [
+                "maps": [object],
+                "nextCursor": NSNull(),
+            ])
+        }
+        func waitUntil(
+            _ condition: @escaping @MainActor () -> Bool
+        ) async -> Bool {
+            let deadline = Date().addingTimeInterval(2)
+            while !condition() && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            return condition()
+        }
+        let originalMap = map(alias: "Server name", revision: 7)
+        let client = try! OfflineMapCatalogClient(
+            baseURL: URL(string: "https://maps-share.8o.vc")!,
+            session: session
+        )
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (
+                    201,
+                    Data(#"{"libraryId":"library-alias","credential":"credential-alias"}"#.utf8)
+                )
+            case ("PATCH", "/v1/library/maps/\(mapEntryID)"):
+                let body = try! JSONSerialization.jsonObject(
+                    with: OfflineMapTestURLProtocol.bodyData(from: request)
+                ) as! [String: Any]
+                assertEqual(body["alias"] as? String, "Weekend climb", "rename sends alias")
+                assertEqual(body["expectedRevision"] as? Int, 7, "rename preserves CAS revision")
+                return (503, Data(#"{"error":"temporarily unavailable"}"#.utf8))
+            default:
+                assert(false, "unexpected failed-alias request \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+        let manager = OfflineMapManager(
+            defaults: defaults,
+            mapPlatformSession: session,
+            catalogHost: OfflineMapCatalogConfig.productionHost,
+            catalogClient: client
+        )
+        assertEqual(
+            manager.renameCatalogMap(originalMap, to: "\tImpossible alias"),
+            originalMap.alias,
+            "an alias the server must reject never becomes optimistic local state"
+        )
+        assert(
+            manager.catalogAliasStatus(for: mapEntryID) == nil &&
+                OfflineMapTestURLProtocol.requests().isEmpty,
+            "an impossible alias creates neither durable retry state nor a network request"
+        )
+        assertEqual(
+            manager.renameCatalogMap(originalMap, to: "  Weekend climb  "),
+            "Weekend climb",
+            "a catalog-only rename is normalized before persistence"
+        )
+        let firstRenameReachedServer = await waitUntil {
+            OfflineMapTestURLProtocol.requests().contains {
+                $0.httpMethod == "PATCH"
+            }
+        }
+        assert(
+            firstRenameReachedServer,
+            "the first catalog-only rename reaches the failing server"
+        )
+        assertEqual(
+            manager.catalogAliasStatus(for: mapEntryID),
+            "Name change pending; retries automatically",
+            "an offline catalog-only rename exposes its retry state"
+        )
+
+        let retriedMap = map(alias: "Weekend climb", revision: 8)
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (200, Data(#"{"libraryId":"library-alias","created":false}"#.utf8))
+            case ("GET", "/v1/library/maps"):
+                return (200, mapsPage(originalMap))
+            case ("PATCH", "/v1/library/maps/\(mapEntryID)"):
+                return (200, try! JSONEncoder().encode(retriedMap))
+            default:
+                assert(false, "unexpected alias-retry request \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+        let restoredManager = OfflineMapManager(
+            defaults: defaults,
+            mapPlatformSession: session,
+            catalogHost: OfflineMapCatalogConfig.productionHost,
+            catalogClient: client
+        )
+        assertEqual(
+            restoredManager.catalogAliasStatus(for: mapEntryID),
+            "Name change pending; retries automatically",
+            "the retryable alias survives app relaunch before refresh"
+        )
+        restoredManager.syncCatalogLibraryForTesting()
+        let retryCompleted = await waitUntil {
+            restoredManager.catalogMaps.first?.alias == "Weekend climb" &&
+                restoredManager.catalogAliasStatus(for: mapEntryID) == nil
+        }
+        assert(
+            retryCompleted,
+            "a relaunched manager retries and clears the durable alias after success"
+        )
+
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (200, Data(#"{"libraryId":"library-alias","created":false}"#.utf8))
+            case ("PATCH", "/v1/library/maps/\(mapEntryID)"):
+                return (503, Data(#"{"error":"temporarily unavailable"}"#.utf8))
+            default:
+                assert(false, "unexpected second failed-alias request \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+        _ = restoredManager.renameCatalogMap(retriedMap, to: "Offline favorite")
+        let secondRenameReachedServer = await waitUntil {
+            OfflineMapTestURLProtocol.requests().contains {
+                $0.httpMethod == "PATCH"
+            }
+        }
+        assert(
+            secondRenameReachedServer,
+            "the second offline rename is durably attempted"
+        )
+
+        let newerServerMap = map(alias: "Renamed on Bicino Dev", revision: 9)
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (200, Data(#"{"libraryId":"library-alias","created":false}"#.utf8))
+            case ("GET", "/v1/library/maps"):
+                return (200, mapsPage(newerServerMap))
+            case ("PATCH", "/v1/library/maps/\(mapEntryID)"):
+                assert(false, "a stale pending alias must not overwrite revision 9")
+                return (409, Data())
+            default:
+                assert(false, "unexpected alias-conflict request \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+        let conflictManager = OfflineMapManager(
+            defaults: defaults,
+            mapPlatformSession: session,
+            catalogHost: OfflineMapCatalogConfig.productionHost,
+            catalogClient: client
+        )
+        conflictManager.syncCatalogLibraryForTesting()
+        let conflictLoaded = await waitUntil {
+            conflictManager.catalogMaps.first?.aliasRevision == 9
+        }
+        assert(
+            conflictLoaded,
+            "conflict refresh retains the newer authoritative revision"
+        )
+        assertEqual(
+            conflictManager.catalogMaps.first?.alias,
+            "Offline favorite",
+            "the pending local name remains visible without mutating the server"
+        )
+        assertEqual(
+            conflictManager.catalogAliasStatus(for: mapEntryID),
+            "Name changed in another app; rename again to apply this name",
+            "the stale alias becomes an explicit user-resolvable conflict"
+        )
+        assert(
+            !OfflineMapTestURLProtocol.requests().contains { $0.httpMethod == "PATCH" },
+            "conflict reconciliation does not issue a stale compare-and-swap"
+        )
+
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (200, Data(#"{"libraryId":"library-alias","created":false}"#.utf8))
+            case ("DELETE", "/v1/library/maps/\(mapEntryID)"):
+                // Model a DELETE that committed remotely but whose successful
+                // response was lost. The next complete list is authoritative.
+                return (500, Data(#"{"error":"response lost"}"#.utf8))
+            case ("GET", "/v1/library/maps"):
+                return (200, Data(#"{"maps":[],"nextCursor":null}"#.utf8))
+            case ("GET", "/v1/library/shares"):
+                return (200, Data(#"{"shares":[],"nextCursor":null}"#.utf8))
+            default:
+                assert(false, "unexpected alias-detach request \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+        conflictManager.removeCatalogMapFromLibrary(newerServerMap)
+        let deleteAttempted = await waitUntil {
+            OfflineMapTestURLProtocol.requests().contains {
+                $0.httpMethod == "DELETE" &&
+                    $0.url?.path == "/v1/library/maps/\(mapEntryID)"
+            }
+        }
+        assert(deleteAttempted, "the response-loss scenario attempts detach")
+        conflictManager.syncCatalogLibraryForTesting()
+        let detached = await waitUntil {
+            conflictManager.catalogMaps.isEmpty &&
+                conflictManager.catalogAliasStatus(for: mapEntryID) == nil
+        }
+        assert(
+            detached,
+            "an authoritative absent row clears pending alias after a lost DELETE response"
+        )
+
+        let reclaimedMap = map(alias: "Shared original", revision: 0)
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (200, Data(#"{"libraryId":"library-alias","created":false}"#.utf8))
+            case ("GET", "/v1/library/maps"):
+                return (200, mapsPage(reclaimedMap))
+            case ("PATCH", "/v1/library/maps/\(mapEntryID)"):
+                assert(false, "a detached pending alias must not replay after reclaim")
+                return (409, Data())
+            default:
+                assert(false, "unexpected alias-reclaim request \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+        let reclaimedManager = OfflineMapManager(
+            defaults: defaults,
+            mapPlatformSession: session,
+            catalogHost: OfflineMapCatalogConfig.productionHost,
+            catalogClient: client
+        )
+        reclaimedManager.syncCatalogLibraryForTesting()
+        let reclaimLoaded = await waitUntil {
+            reclaimedManager.catalogMaps.first?.alias == "Shared original"
+        }
+        assert(
+            reclaimLoaded && reclaimedManager.catalogAliasStatus(for: mapEntryID) == nil,
+            "reclaim keeps the server alias without resurrecting detached pending state"
+        )
+        assert(
+            !OfflineMapTestURLProtocol.requests().contains { $0.httpMethod == "PATCH" },
+            "reclaim does not issue a stale alias update"
+        )
+    }
+
+    static func testOfflineMapCatalogContentSafeReconciliation() {
+        func artifact(id: String, sha256: String) -> OfflineMapCatalogArtifact {
+            OfflineMapCatalogArtifact(
+                artifactId: id,
+                objectKey: "maps/test/\(id).zip",
+                format: OfflineMapArtifact.storedZipFormat,
+                mediaType: "application/zip",
+                filename: "test.zip",
+                bytes: 100,
+                sha256: sha256,
+                manifestReceipt: nil,
+                signedManifestReceipt: nil,
+                signatureKeyId: nil,
+                signatureKeySha256: nil,
+                producerBuildSha256: nil,
+                producerImageDigest: nil,
+                requiredIosBuild: nil,
+                requiredIosGitSha: nil,
+                requiredIosBuildSha256: nil,
+                requiredFirmwareVersion: nil,
+                requiredFirmwareBuild: nil,
+                requiredFirmwareGitSha: nil,
+                deliveryTier: "development"
+            )
+        }
+
+        func map(
+            entryID: String,
+            rendererFormatVersion: Int,
+            artifact: OfflineMapCatalogArtifact
+        ) -> OfflineMapCatalogMap {
+            OfflineMapCatalogMap(
+                mapEntryId: entryID,
+                mapId: "same-region",
+                alias: rendererFormatVersion == 2 ? "2D map" : "3D map",
+                aliasSource: "generated",
+                aliasRevision: 1,
+                canonicalName: "Same region",
+                originChannel: "development",
+                sourceRegionName: "Same region",
+                bounds: [1, 2, 3, 4],
+                renderer: "esp32-fmb",
+                rendererFormatVersion: rendererFormatVersion,
+                features: [],
+                deliveryState: "development",
+                generatedAt: nil,
+                addedAt: "2026-08-25T00:00:00.000Z",
+                updatedAt: "2026-08-25T00:00:00.000Z",
+                artifacts: [artifact]
+            )
+        }
+
+        let twoDSHA = String(repeating: "2", count: 64)
+        let threeDSHA = String(repeating: "3", count: 64)
+        let maps = [
+            map(
+                entryID: "map_v1_" + String(repeating: "a", count: 43),
+                rendererFormatVersion: 2,
+                artifact: artifact(id: "artifact-2d", sha256: twoDSHA)
+            ),
+            map(
+                entryID: "map_v1_" + String(repeating: "b", count: 43),
+                rendererFormatVersion: 3,
+                artifact: artifact(id: "artifact-3d", sha256: threeDSHA)
+            ),
+        ]
+        assert(
+            OfflineMapCatalogReconciliationPolicy.matchingMapIndex(
+                catalogMapEntryID: nil,
+                localArtifactSHA256s: [],
+                catalogMaps: maps
+            ) == nil,
+            "a legacy local map is never joined by non-unique mapId alone"
+        )
+        assertEqual(
+            OfflineMapCatalogReconciliationPolicy.matchingMapIndex(
+                catalogMapEntryID: nil,
+                localArtifactSHA256s: [threeDSHA],
+                catalogMaps: maps
+            ),
+            1,
+            "an exact artifact hash safely binds the matching 3D catalog entry"
+        )
+        assertEqual(
+            OfflineMapCatalogReconciliationPolicy.matchingMapIndex(
+                catalogMapEntryID: maps[0].mapEntryId,
+                localArtifactSHA256s: [],
+                catalogMaps: maps
+            ),
+            0,
+            "a persisted content-derived map entry ID remains authoritative"
+        )
+    }
+
+    static func testOfflineMapCatalogLocalArtifactIdentity() {
+        let twoDEntryID = "map_v1_" + String(repeating: "a", count: 43)
+        let threeDEntryID = "map_v1_" + String(repeating: "b", count: 43)
+        let twoDFilename = OfflineMapCatalogLocalArtifactPolicy.filename(
+            mapEntryID: twoDEntryID,
+            fileExtension: "bmap"
+        )
+        let threeDFilename = OfflineMapCatalogLocalArtifactPolicy.filename(
+            mapEntryID: threeDEntryID,
+            fileExtension: "bmap"
+        )
+        assertEqual(
+            twoDFilename,
+            "catalog-\(twoDEntryID).bmap",
+            "catalog files use the content-derived entry identity"
+        )
+        assert(
+            twoDFilename != threeDFilename,
+            "2D and 3D entries sharing a legacy map ID retain distinct local files"
+        )
+        assert(
+            OfflineMapCatalogLocalArtifactPolicy.filename(
+                mapEntryID: "../../escape",
+                fileExtension: "bmap"
+            ) == nil,
+            "catalog storage rejects unsafe entry IDs"
+        )
+    }
+
+    static func testOfflineMapCatalogAvailabilityPolicy() {
+        let capability = BikeMapStreamTrustStore.production.capabilityHeaderValue?
+            .split(separator: ",").first?.split(separator: "=", maxSplits: 1)
+        guard let capability, capability.count == 2 else {
+            assert(false, "production map trust exposes a test capability")
+            return
+        }
+        let keyID = String(capability[0])
+        let keySHA256 = String(capability[1])
+        let identity = MapStreamAppBuildIdentity(
+            schemaVersion: 1,
+            build: "100",
+            gitSha: String(repeating: "a", count: 40),
+            componentSha256: String(repeating: "b", count: 64)
+        )
+
+        func artifact(
+            id: String,
+            tier: String,
+            requiredBuild: String?,
+            includesReaderRequirements: Bool = true,
+            readerSchemaVersion: Int = 1,
+            streamFormat: String = OfflineMapArtifact.bikeMapStreamFormat,
+            renderer: String = "esp32-fmb",
+            rendererFormatVersion: Int = 3,
+            requiredFeatures: [String] = ["3d-buildings", "street-labels"]
+        ) -> OfflineMapCatalogArtifact {
+            OfflineMapCatalogArtifact(
+                artifactId: id,
+                objectKey: "maps/test/\(id).bmap",
+                format: OfflineMapArtifact.bikeMapStreamFormat,
+                mediaType: "application/vnd.openbikecomputer.map-stream",
+                filename: "test.bmap",
+                bytes: 100,
+                sha256: String(repeating: "c", count: 64),
+                manifestReceipt: String(repeating: "d", count: 64),
+                signedManifestReceipt: String(repeating: "e", count: 64),
+                signatureKeyId: keyID,
+                signatureKeySha256: keySHA256,
+                producerBuildSha256: String(repeating: "f", count: 64),
+                producerImageDigest: "sha256:" + String(repeating: "1", count: 64),
+                requiredIosBuild: requiredBuild,
+                requiredIosGitSha: requiredBuild == nil ? nil : identity.gitSha,
+                requiredIosBuildSha256: requiredBuild == nil
+                    ? nil
+                    : identity.componentSha256,
+                requiredFirmwareVersion: nil,
+                requiredFirmwareBuild: nil,
+                requiredFirmwareGitSha: nil,
+                deliveryTier: tier,
+                readerRequirements: includesReaderRequirements
+                    ? OfflineMapReaderRequirements(
+                        schemaVersion: readerSchemaVersion,
+                        streamFormat: streamFormat,
+                        manifestSchemaVersion: 1,
+                        renderer: renderer,
+                        rendererFormatVersion: rendererFormatVersion,
+                        requiredFeatures: requiredFeatures
+                    )
+                    : nil
+            )
+        }
+
+        func map(
+            deliveryState: String,
+            artifact: OfflineMapCatalogArtifact
+        ) -> OfflineMapCatalogMap {
+            OfflineMapCatalogMap(
+                mapEntryId: "map_v1_" + String(repeating: "m", count: 43),
+                mapId: "same-region",
+                alias: "Favorite climb",
+                aliasSource: "user",
+                aliasRevision: 2,
+                canonicalName: "Same region",
+                originChannel: "development",
+                sourceRegionName: "Same region",
+                bounds: [1, 2, 3, 4],
+                renderer: "esp32-fmb",
+                rendererFormatVersion: 3,
+                features: ["street-labels", "3d-buildings"],
+                deliveryState: deliveryState,
+                generatedAt: nil,
+                addedAt: "2026-08-25T00:00:00.000Z",
+                updatedAt: "2026-08-25T00:00:00.000Z",
+                artifacts: [artifact]
+            )
+        }
+
+        let developmentMap = map(
+            deliveryState: "development",
+            artifact: artifact(id: "dev", tier: "development", requiredBuild: nil)
+        )
+        assertEqual(
+            OfflineMapCatalogAvailabilityPolicy.availability(
+                for: developmentMap,
+                channel: "production",
+                trustStore: .production
+            ),
+            .awaitingProductionPromotion,
+            "production identifies a development-only map before download"
+        )
+        assertEqual(
+            OfflineMapCatalogAvailabilityPolicy.availability(
+                for: developmentMap,
+                channel: "development",
+                trustStore: .production
+            ),
+            .available,
+            "development accepts a trusted development-tier artifact"
+        )
+
+        let productionMap = map(
+            deliveryState: "production",
+            artifact: artifact(id: "prod", tier: "production", requiredBuild: identity.build)
+        )
+        assertEqual(
+            OfflineMapCatalogAvailabilityPolicy.availability(
+                for: productionMap,
+                channel: "production",
+                trustStore: .production
+            ),
+            .available,
+            "production exposes an exact compatible promoted artifact"
+        )
+        let olderBuildMap = map(
+            deliveryState: "production",
+            artifact: artifact(id: "old", tier: "production", requiredBuild: "99")
+        )
+        assertEqual(
+            OfflineMapCatalogAvailabilityPolicy.availability(
+                for: olderBuildMap,
+                channel: "production",
+                trustStore: .production
+            ),
+            .available,
+            "a newer app can read an older build's compatible map contract"
+        )
+        assertEqual(
+            OfflineMapCatalogAvailabilityPolicy.availability(
+                for: map(
+                    deliveryState: "blocked",
+                    artifact: productionMap.artifacts[0]
+                ),
+                channel: "production",
+                trustStore: .production
+            ),
+            .unavailable,
+            "blocked catalog entries never expose a download"
+        )
+
+        let rejectedRequirements = [
+            artifact(
+                id: "schema",
+                tier: "production",
+                requiredBuild: nil,
+                readerSchemaVersion: 2
+            ).readerRequirements!,
+            artifact(
+                id: "stream",
+                tier: "production",
+                requiredBuild: nil,
+                streamFormat: "bike-map-stream-v2"
+            ).readerRequirements!,
+            artifact(
+                id: "renderer",
+                tier: "production",
+                requiredBuild: nil,
+                renderer: "future-renderer"
+            ).readerRequirements!,
+            artifact(
+                id: "version",
+                tier: "production",
+                requiredBuild: nil,
+                rendererFormatVersion: 99
+            ).readerRequirements!,
+            artifact(
+                id: "feature",
+                tier: "production",
+                requiredBuild: nil,
+                requiredFeatures: ["street-labels", "topography"]
+            ).readerRequirements!,
+        ]
+        for requirements in rejectedRequirements {
+            assert(
+                !OfflineMapReaderCompatibilityPolicy.supports(requirements),
+                "unknown reader schemas, formats, renderers, versions, and features fail closed"
+            )
+        }
+        let missingRequirementsMap = map(
+            deliveryState: "production",
+            artifact: artifact(
+                id: "missing-contract",
+                tier: "production",
+                requiredBuild: nil,
+                includesReaderRequirements: false
+            )
+        )
+        assertEqual(
+            OfflineMapCatalogAvailabilityPolicy.availability(
+                for: missingRequirementsMap,
+                channel: "production",
+                trustStore: .production
+            ),
+            .incompatible,
+            "a bike map without reader requirements fails closed"
+        )
+
+        let preview = OfflineMapSharePreview(
+            shareId: "share-preview",
+            mapEntryId: developmentMap.mapEntryId,
+            title: developmentMap.alias,
+            bounds: developmentMap.bounds,
+            renderer: developmentMap.renderer,
+            rendererFormatVersion: developmentMap.rendererFormatVersion,
+            features: developmentMap.features,
+            approximateBytes: 100,
+            deliveryState: "promotion_pending",
+            expiresAt: nil
+        )
+        let previewAvailability = OfflineMapCatalogAvailabilityPolicy.availability(
+            for: preview,
+            channel: "production"
+        )
+        assertEqual(
+            previewAvailability,
+            .awaitingProductionPromotion,
+            "share previews expose promotion state before claim"
+        )
+        assertEqual(
+            previewAvailability.claimActionTitle,
+            "Add to Library",
+            "an unavailable share is not presented as an immediate download"
+        )
+    }
+
+    static func testOfflineMapCatalogInventorySyncSurvivesCatalogFailure() async {
+        enum CatalogFailure: Error { case unavailable }
+        var generationSyncRan = false
+        let credential = await OfflineMapCatalogInventorySyncPolicy
+            .bestEffortCredential {
+                throw CatalogFailure.unavailable
+            }
+        generationSyncRan = true
+        assert(
+            credential == nil,
+            "catalog bootstrap failure degrades to an unattached inventory sync"
+        )
+        assert(
+            generationSyncRan,
+            "the generation-server inventory path continues after catalog failure"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapCatalogClaimRetainsRetryState() async {
+        let suite = "OfflineMapCatalogClaimRetry-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            OfflineMapTestURLProtocol.reset()
+        }
+
+        let capability = BikeMapStreamTrustStore.production.capabilityHeaderValue?
+            .split(separator: ",").first?.split(separator: "=", maxSplits: 1)
+        guard let capability, capability.count == 2 else {
+            assert(false, "production map trust exposes a test capability")
+            return
+        }
+        let identity = MapStreamAppBuildIdentity(
+            schemaVersion: 1,
+            build: "100",
+            gitSha: String(repeating: "a", count: 40),
+            componentSha256: String(repeating: "b", count: 64)
+        )
+        let mapEntryID = "map_v1_" + String(repeating: "r", count: 43)
+        let token = String(repeating: "T", count: 43)
+        let artifact = OfflineMapCatalogArtifact(
+            artifactId: "artifact-retry",
+            objectKey: "maps/test/retry.bmap",
+            format: OfflineMapArtifact.bikeMapStreamFormat,
+            mediaType: "application/vnd.openbikecomputer.map-stream",
+            filename: "retry.bmap",
+            bytes: 100,
+            sha256: String(repeating: "c", count: 64),
+            manifestReceipt: String(repeating: "d", count: 64),
+            signedManifestReceipt: String(repeating: "e", count: 64),
+            signatureKeyId: String(capability[0]),
+            signatureKeySha256: String(capability[1]),
+            producerBuildSha256: String(repeating: "f", count: 64),
+            producerImageDigest: "sha256:" + String(repeating: "1", count: 64),
+            requiredIosBuild: identity.build,
+            requiredIosGitSha: identity.gitSha,
+            requiredIosBuildSha256: identity.componentSha256,
+            requiredFirmwareVersion: nil,
+            requiredFirmwareBuild: nil,
+            requiredFirmwareGitSha: nil,
+            deliveryTier: "production",
+            readerRequirements: OfflineMapReaderRequirements(
+                schemaVersion: 1,
+                streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+                manifestSchemaVersion: 1,
+                renderer: "esp32-fmb",
+                rendererFormatVersion: 3,
+                requiredFeatures: ["3d-buildings", "street-labels"]
+            )
+        )
+        let map = OfflineMapCatalogMap(
+            mapEntryId: mapEntryID,
+            mapId: "retry-region",
+            alias: "Retry map",
+            aliasSource: "share",
+            aliasRevision: 1,
+            canonicalName: "Retry region",
+            originChannel: "production",
+            sourceRegionName: "Retry region",
+            bounds: [1, 2, 3, 4],
+            renderer: "esp32-fmb",
+            rendererFormatVersion: 3,
+            features: ["street-labels", "3d-buildings"],
+            deliveryState: "production",
+            generatedAt: nil,
+            addedAt: "2026-08-25T00:00:00.000Z",
+            updatedAt: "2026-08-25T00:00:00.000Z",
+            artifacts: [artifact]
+        )
+        let preview = OfflineMapSharePreview(
+            shareId: "share-retry",
+            mapEntryId: mapEntryID,
+            title: map.alias,
+            bounds: map.bounds,
+            renderer: map.renderer,
+            rendererFormatVersion: map.rendererFormatVersion,
+            features: map.features,
+            approximateBytes: artifact.bytes,
+            deliveryState: map.deliveryState,
+            expiresAt: nil
+        )
+        let grant = OfflineMapCatalogDownloadGrant(
+            downloadURL: URL(string: "https://maps-share.8o.vc/v1/downloads/retry")!,
+            expiresAt: "2099-01-01T00:00:00.000Z",
+            artifact: artifact
+        )
+        var grantRequestCount = 0
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/v1/shares/\(token)"):
+                return (200, try! JSONEncoder().encode(preview))
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (
+                    201,
+                    Data(#"{"libraryId":"library-retry","credential":"credential-retry"}"#.utf8)
+                )
+            case ("POST", "/v1/shares/\(token)/claim"):
+                return (200, try! JSONEncoder().encode(map))
+            case ("POST", "/v1/library/maps/\(mapEntryID)/download-grants"):
+                grantRequestCount += 1
+                let body = try! JSONSerialization.jsonObject(
+                    with: OfflineMapTestURLProtocol.bodyData(from: request)
+                ) as! [String: Any]
+                let capabilities = body["readerCapabilities"] as! [String: Any]
+                let streams = capabilities["streamFormats"] as! [[String: Any]]
+                let renderers = capabilities["renderers"] as! [[String: Any]]
+                assertEqual(
+                    capabilities["schemaVersion"] as? Int,
+                    1,
+                    "download grants advertise reader capability schema 1"
+                )
+                assertEqual(
+                    streams.first?["format"] as? String,
+                    OfflineMapArtifact.bikeMapStreamFormat,
+                    "download grants advertise the exact stream container"
+                )
+                assertEqual(
+                    streams.first?["manifestSchemaVersions"] as? [Int],
+                    [1],
+                    "download grants advertise discrete manifest schemas"
+                )
+                assertEqual(
+                    renderers.first?["formatVersions"] as? [Int],
+                    [1, 2, 3],
+                    "download grants advertise discrete renderer versions"
+                )
+                return (200, try! JSONEncoder().encode(grant))
+            default:
+                assert(
+                    false,
+                    "unexpected claim retry request: \(request.httpMethod ?? "") \(request.url?.path ?? "")"
+                )
+                return (500, Data())
+            }
+        }
+        let client = try! OfflineMapCatalogClient(
+            baseURL: URL(string: "https://maps-share.8o.vc")!,
+            session: session
+        )
+        let manager = OfflineMapManager(
+            defaults: defaults,
+            mapPlatformSession: session,
+            mapStreamTrustStore: .production,
+            catalogAppIdentity: identity,
+            catalogHost: "maps-share.8o.vc",
+            catalogClient: client,
+            packDownload: { _, _, _, _ in
+                throw URLError(.networkConnectionLost)
+            }
+        )
+        manager.handleShareURL(
+            URL(string: "https://maps-share.8o.vc/s/\(token)")!
+        )
+        let previewDeadline = Date().addingTimeInterval(2)
+        while manager.pendingSharePreview == nil && Date() < previewDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let didLoadPreview = manager.pendingSharePreview != nil
+        assert(
+            didLoadPreview,
+            "a valid share reaches the explicit claim confirmation"
+        )
+        manager.claimPendingShare()
+        let didFinish = await waitForMapTaskCompletion(manager)
+        assert(
+            didFinish,
+            "the failed post-claim download finishes without hanging"
+        )
+        assertEqual(
+            grantRequestCount,
+            1,
+            "a compatible claimed map proceeds to the download grant"
+        )
+        let claimedMapRemains = manager.catalogMaps.contains {
+            $0.mapEntryId == mapEntryID
+        }
+        assert(
+            claimedMapRemains,
+            "a claimed map remains in the in-session library when download fails"
+        )
+        let retryStateIsVisible = manager.pendingSharePreview == nil &&
+            manager.errorMessage != nil
+        assert(
+            retryStateIsVisible,
+            "the failed download leaves a visible retry row and an error state"
+        )
+    }
+
+    static func testSavedMapRemovalPolicy() {
+        assert(
+            SavedMapRemovalPolicy.canRemoveFromMapLibrary(
+                isOnIPhone: false,
+                isActiveOnDevice: false,
+                isAvailableInLibrary: true
+            ),
+            "a remote-only catalog row can be removed from the map library"
+        )
+        assert(
+            !SavedMapRemovalPolicy.canRemoveFromMapLibrary(
+                isOnIPhone: true,
+                isActiveOnDevice: false,
+                isAvailableInLibrary: true
+            ),
+            "a local map keeps cloud and iPhone removal as separate actions"
+        )
+        assert(
+            SavedMapRemovalPolicy.canRemoveFromMapLibrary(
+                isOnIPhone: false,
+                isActiveOnDevice: true,
+                isAvailableInLibrary: true
+            ),
+            "an installed map can release its cloud reference without deleting the device copy"
+        )
+        let localCopy = SavedMapRemovalPolicy.localDeletionMessage(
+            displayName: "Favorite climb",
+            libraryCopyRemains: true
+        )
+        assert(
+            localCopy.contains("copy in your Map Library remains") &&
+                localCopy.contains("Bike Computer remains"),
+            "local deletion explains that cloud and device copies remain"
+        )
+        let libraryCopy = SavedMapRemovalPolicy.libraryRemovalMessage(
+            displayName: "Favorite climb"
+        )
+        assert(
+            libraryCopy.contains("downloaded to an iPhone") &&
+                libraryCopy.contains("added by friends are unaffected"),
+            "catalog removal explains that independent copies are unaffected"
+        )
+    }
+
+    static func testOfflineMapCatalogShareAndLinkContracts() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            OfflineMapTestURLProtocol.reset()
+        }
+        let credential = "library-secret"
+        let shareID = "share_v1_" + String(repeating: "s", count: 24)
+        let mapEntryID = "map_v1_" + String(repeating: "m", count: 43)
+        let firstPageShares: [[String: Any]] = (0..<100).map { index in
+            [
+                "shareId": index == 0 ? shareID : "share-page-one-\(index)",
+                "mapEntryId": mapEntryID,
+                "title": index == 0 ? "Favorite climb" : "Shared map \(index)",
+                "createdAt": "2026-08-25T00:00:00.000Z",
+                "expiresAt": NSNull(),
+                "revokedAt": NSNull(),
+                "claimCount": index == 0 ? 2 : 0,
+            ]
+        }
+        let finalPageShare: [String: Any] = [
+            "shareId": "share-page-two-100",
+            "mapEntryId": mapEntryID,
+            "title": "Oldest shared map",
+            "createdAt": "2026-08-24T00:00:00.000Z",
+            "expiresAt": NSNull(),
+            "revokedAt": NSNull(),
+            "claimCount": 0,
+        ]
+        OfflineMapTestURLProtocol.configure { request in
+            assertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer \(credential)",
+                "catalog library mutations use the library credential"
+            )
+            switch (request.httpMethod, request.url?.path) {
+            case ("DELETE", "/v1/library/maps/\(mapEntryID)"):
+                return (204, Data())
+            case ("GET", "/v1/library/shares"):
+                let query = URLComponents(
+                    url: request.url!,
+                    resolvingAgainstBaseURL: false
+                )?.queryItems ?? []
+                assertEqual(
+                    query.first(where: { $0.name == "limit" })?.value,
+                    "100",
+                    "share management requests bounded pages"
+                )
+                let cursor = query.first(where: { $0.name == "cursor" })?.value
+                if cursor == nil {
+                    return (
+                        200,
+                        try! JSONSerialization.data(withJSONObject: [
+                            "shares": firstPageShares,
+                            "nextCursor": "share-cursor-100",
+                        ])
+                    )
+                }
+                assertEqual(
+                    cursor,
+                    "share-cursor-100",
+                    "share management follows the server cursor"
+                )
+                return (
+                    200,
+                    try! JSONSerialization.data(withJSONObject: [
+                        "shares": [finalPageShare],
+                        "nextCursor": NSNull(),
+                    ])
+                )
+            case ("DELETE", "/v1/library/shares/\(shareID)"):
+                return (204, Data())
+            case ("POST", "/v1/libraries/link-codes"):
+                assertEqual(
+                    String(decoding: OfflineMapTestURLProtocol.bodyData(from: request), as: UTF8.self),
+                    "{}",
+                    "link-code creation has an exact empty request body"
+                )
+                return (
+                    201,
+                    Data(
+                        #"{"code":"ABCD-EFGH","expiresAt":"2099-01-01T00:00:00.000Z"}"#.utf8
+                    )
+                )
+            case ("POST", "/v1/libraries/link-codes/ABCD-EFGH/claim"):
+                return (
+                    200,
+                    Data(#"{"libraryId":"library-linked"}"#.utf8)
+                )
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (200, Data(#"{"libraryId":"library-linked"}"#.utf8))
+            default:
+                assert(false, "unexpected catalog request: \(request.httpMethod ?? "") \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+        let client = try! OfflineMapCatalogClient(
+            baseURL: URL(string: "https://maps-share.8o.vc")!,
+            session: session
+        )
+        try! await client.removeMapFromLibrary(
+            mapEntryId: mapEntryID,
+            credential: credential
+        )
+        try! await client.removeMapFromLibrary(
+            mapEntryId: mapEntryID,
+            credential: credential
+        )
+        let detachRequests = OfflineMapTestURLProtocol.requests().filter {
+            $0.httpMethod == "DELETE" &&
+                $0.url?.path == "/v1/library/maps/\(mapEntryID)"
+        }
+        assertEqual(
+            detachRequests.count,
+            2,
+            "repeating an idempotent catalog detach accepts the same 204 contract"
+        )
+        let shares = try! await client.shares(credential: credential)
+        assertEqual(shares.count, 101, "share management follows every bounded page")
+        assert(shares[0].isActive, "an unrevoked non-expiring share is active")
+        assertEqual(shares[0].claimCount, 2, "share claim counts remain visible")
+        assertEqual(
+            shares.last?.shareId,
+            "share-page-two-100",
+            "older active links remain visible and revocable"
+        )
+        let futureFractionalShare = OfflineMapCatalogShare(
+            shareId: "fractional-future",
+            mapEntryId: "map-fractional",
+            title: "Fractional expiry",
+            createdAt: "2026-08-25T00:00:00.000Z",
+            expiresAt: "2099-01-01T00:00:00.000Z",
+            revokedAt: nil,
+            claimCount: 0
+        )
+        let futurePlainShare = OfflineMapCatalogShare(
+            shareId: "plain-future",
+            mapEntryId: "map-plain",
+            title: "Plain expiry",
+            createdAt: "2026-08-25T00:00:00Z",
+            expiresAt: "2099-01-01T00:00:00Z",
+            revokedAt: nil,
+            claimCount: 0
+        )
+        assert(
+            futureFractionalShare.isActive,
+            "Cloudflare fractional-second expiry timestamps remain active"
+        )
+        assert(
+            futurePlainShare.isActive,
+            "plain ISO-8601 expiry timestamps remain active"
+        )
+        try! await client.revokeShare(
+            shareId: shareID,
+            credential: credential
+        )
+        let code = try! await client.createLinkCode(credential: credential)
+        assertEqual(code.code, "ABCD-EFGH", "link-code creation returns the one-time code")
+        let linked = try! await client.claimLinkCode(
+            " abcd-efgh ",
+            credential: credential
+        )
+        assertEqual(linked.libraryId, "library-linked", "claim switches to the source library")
+        assertEqual(
+            linked.credential,
+            credential,
+            "claim keeps the already-persisted bearer while the server reparents it"
+        )
+        let recovered = try! await client.bootstrap(existingCredential: credential)
+        assertEqual(
+            recovered,
+            linked,
+            "bootstrap recovers the linked library after an ambiguous claim response"
+        )
+    }
+
+    static func testOfflineMapCatalogCredentialNamespaces() {
+        let suite = "OfflineMapCatalogCredentialNamespaces-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let productionStore = OfflineMapCatalogCredentialStore(
+            defaults: defaults,
+            catalogHost: OfflineMapCatalogConfig.productionHost
+        )
+        let stagingStore = OfflineMapCatalogCredentialStore(
+            defaults: defaults,
+            catalogHost: OfflineMapCatalogConfig.developmentHost
+        )
+        let production = OfflineMapCatalogCredential(
+            libraryId: "library-production",
+            credential: "credential-production"
+        )
+        let staging = OfflineMapCatalogCredential(
+            libraryId: "library-staging",
+            credential: "credential-staging"
+        )
+        try! productionStore.save(production)
+        assertEqual(
+            productionStore.load(),
+            production,
+            "Bicino and Bicino Dev retain their shared production library credential"
+        )
+        assert(
+            stagingStore.load() == nil,
+            "a staging override never sends the production library credential"
+        )
+        try! stagingStore.save(staging)
+        assertEqual(
+            stagingStore.load(),
+            staging,
+            "staging validation keeps its own catalog library identity"
+        )
+        assertEqual(
+            productionStore.load(),
+            production,
+            "staging validation cannot overwrite the shared production identity"
         )
     }
 
@@ -8398,7 +10280,7 @@ struct NavigationProtocolTests {
             "settings form passes its focus binding into Saved Maps"
         )
         assert(
-            source.contains("Spacer()\n                .contentShape(Rectangle())\n                .onTapGesture {\n                    focusedPackFilename = nil\n                }"),
+            source.contains("Spacer()\n                    .contentShape(Rectangle())\n                    .onTapGesture {\n                        focusedPackFilename = nil\n                    }"),
             "tapping outside the saved-map name clears focus without covering form controls"
         )
         assert(
@@ -8449,6 +10331,20 @@ struct NavigationProtocolTests {
                 source.contains("\"Delete Saved Map?\"") &&
                 source.contains("Button(\"Delete\", role: .destructive)"),
             "deleting a saved map requires explicit confirmation"
+        )
+        assert(
+            source.contains("if item.canRemoveFromMapLibrary") &&
+                source.contains(
+                    "Button(\"Remove from Map Library\", role: .destructive)"
+                ) &&
+                source.contains("manager.removeCatalogMapFromLibrary(map)"),
+            "remote-only maps expose a clearly named confirmed library removal action"
+        )
+        assert(
+            source.contains("catalogAvailability?.statusText") &&
+                source.contains("catalogAvailability?.canDownload != true") &&
+                source.contains("clock.badge.exclamationmark"),
+            "catalog rows explain and disable downloads that are pending or incompatible"
         )
         assert(
             source.contains("SavedMapDeviceTransferPolicy.canStart(") &&

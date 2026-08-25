@@ -14,6 +14,7 @@ from map_platform.artifacts import (
     ArtifactStoreError,
     FileSystemArtifactStore,
     MAXIMUM_STREAM_ARTIFACT_BYTES,
+    MirroredArtifactStore,
     S3ArtifactStore,
     create_artifact_store_from_environment,
     sha256_file,
@@ -58,7 +59,8 @@ class FakeS3Client:
             "body": body,
             "metadata": kwargs["Metadata"],
             "content_type": kwargs["ContentType"],
-            "checksum": kwargs["ChecksumSHA256"],
+            "checksum": kwargs.get("ChecksumSHA256"),
+            "content_md5": kwargs.get("ContentMD5"),
         }
         self.put_calls += 1
 
@@ -240,6 +242,104 @@ class ArtifactStoreTests(unittest.TestCase):
             self.assertIn("expires=900", url)
             self.assertTrue(store.delete(key))
             self.assertFalse(store.delete(key))
+
+    def test_s3_store_supports_r2_content_md5_with_full_sha_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "map.zip"
+            source.write_bytes(b"r2-map-artifact")
+            digest = sha256_file(source)
+            client = FakeS3Client()
+            store = S3ArtifactStore(
+                client,
+                "bucket",
+                prefix="final",
+                checksum_mode="md5",
+            )
+            store.put(
+                source,
+                f"maps/map/zip/{digest}.zip",
+                sha256=digest,
+                media_type="application/zip",
+            )
+            stored = next(iter(client.objects.values()))
+            self.assertIsNone(stored["checksum"])
+            self.assertIsNotNone(stored["content_md5"])
+            self.assertEqual(stored["metadata"]["sha256"], digest)
+
+    def test_mirrored_store_requires_both_immutable_copies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "map.zip"
+            source.write_bytes(b"mirrored-map-artifact")
+            digest = sha256_file(source)
+            primary = FileSystemArtifactStore(root / "primary")
+            mirror_client = FakeS3Client()
+            mirror = S3ArtifactStore(mirror_client, "bucket")
+            store = MirroredArtifactStore(primary, mirror)
+            key = f"maps/map/zip/{digest}.zip"
+            store.put(source, key, sha256=digest, media_type="application/zip")
+            self.assertTrue(
+                store.verify(key, sha256=digest, expected_bytes=source.stat().st_size)
+            )
+            self.assertIsNotNone(store.local_path(key))
+
+    def test_mirrored_store_explicitly_backfills_verified_primary_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "map.zip"
+            source.write_bytes(b"filesystem-era-ready-map")
+            digest = sha256_file(source)
+            primary = FileSystemArtifactStore(root / "primary")
+            mirror_client = FakeS3Client()
+            mirror = S3ArtifactStore(mirror_client, "bucket")
+            store = MirroredArtifactStore(primary, mirror)
+            key = f"maps/map/zip/{digest}.zip"
+            primary.put(
+                source,
+                key,
+                sha256=digest,
+                media_type="application/zip",
+            )
+
+            copied = store.backfill_from_primary(
+                key,
+                sha256=digest,
+                expected_bytes=source.stat().st_size,
+                media_type="application/zip",
+            )
+
+            self.assertTrue(copied)
+            self.assertTrue(
+                store.verify(
+                    key,
+                    sha256=digest,
+                    expected_bytes=source.stat().st_size,
+                )
+            )
+            self.assertFalse(
+                store.backfill_from_primary(
+                    key,
+                    sha256=digest,
+                    expected_bytes=source.stat().st_size,
+                    media_type="application/zip",
+                )
+            )
+
+    def test_r2_factory_requires_auto_region(self):
+        environment = {
+            "MAP_PLATFORM_ARTIFACT_STORE": "s3",
+            "MAP_PLATFORM_S3_BUCKET": "bucket",
+            "MAP_PLATFORM_S3_ENDPOINT_URL": (
+                "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com"
+            ),
+            "AWS_REGION": "us-east-1",
+        }
+        with patch.dict(os.environ, environment, clear=False), patch.dict(
+            sys.modules,
+            {"boto3": SimpleNamespace(client=lambda *args, **kwargs: FakeS3Client())},
+        ):
+            with self.assertRaisesRegex(ValueError, "AWS_REGION=auto"):
+                create_artifact_store_from_environment("/unused")
 
     def test_api_s3_factory_uses_separate_temporary_credentials(self):
         captured = {}
