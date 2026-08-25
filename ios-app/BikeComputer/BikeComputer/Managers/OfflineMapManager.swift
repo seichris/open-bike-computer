@@ -1655,6 +1655,9 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var libraryLinkCode: OfflineMapLibraryLinkCode?
     @Published private(set) var pendingSharePreview: OfflineMapSharePreview?
     @Published private(set) var createdShareURL: URL?
+    @Published private var pendingCatalogAliases: [
+        String: OfflineMapCatalogPendingAlias
+    ]
 
     weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
 
@@ -1705,7 +1708,9 @@ final class OfflineMapManager: ObservableObject {
     private let catalogAppIdentity: MapStreamAppBuildIdentity?
     private let catalogHost: String?
     private let catalogCredentialStore: OfflineMapCatalogCredentialStore
+    private let catalogPendingAliasStore: OfflineMapCatalogPendingAliasStore
     private let catalogClient: OfflineMapCatalogClient?
+    private let catalogCredentialCoordinator = OfflineMapCatalogCredentialCoordinator()
     private let legacyClientInstallationId: String
     private(set) var clientInstallationId: String
     private(set) var clientInstallationToken: String?
@@ -1783,7 +1788,16 @@ final class OfflineMapManager: ObservableObject {
             OfflineMapCatalogConfig.mapStreamTrustStore
         self.catalogAppIdentity = catalogAppIdentity
         self.catalogHost = catalogHost
-        self.catalogCredentialStore = OfflineMapCatalogCredentialStore(defaults: defaults)
+        self.catalogCredentialStore = OfflineMapCatalogCredentialStore(
+            defaults: defaults,
+            catalogHost: catalogHost
+        )
+        let catalogPendingAliasStore = OfflineMapCatalogPendingAliasStore(
+            defaults: defaults,
+            catalogHost: catalogHost
+        )
+        self.catalogPendingAliasStore = catalogPendingAliasStore
+        self.pendingCatalogAliases = catalogPendingAliasStore.load()
 #if HOST_TESTING
         self.catalogClient = catalogClient
 #else
@@ -2131,6 +2145,10 @@ final class OfflineMapManager: ObservableObject {
             lastTransferOutcome: lastTransferOutcome,
             lastTransferMapID: lastTransferMapId,
             candidateMapID: savedMapID(for: packURL),
+            lastTransferArtifactFilename: defaults.string(
+                forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey
+            ),
+            candidateArtifactFilename: packURL.lastPathComponent,
             lastDeviceState: metadata?.lastDeviceState,
             statusMessage: statusMessage
         )
@@ -2162,8 +2180,14 @@ final class OfflineMapManager: ObservableObject {
     func deleteCachedPack(at packURL: URL) {
         do {
             let mapID = savedMapID(for: packURL)
+            let deletesLastTransferArtifact = defaults.string(
+                forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey
+            ) == packURL.lastPathComponent
             if FileManager.default.fileExists(atPath: packURL.path) {
                 try FileManager.default.removeItem(at: packURL)
+            }
+            if deletesLastTransferArtifact {
+                invalidateLastTransferForDeletedArtifact()
             }
             invalidateCachedPreview(for: packURL)
             try SavedMapArtifactMetadataStore.delete(for: packURL)
@@ -2577,8 +2601,28 @@ final class OfflineMapManager: ObservableObject {
         _ map: OfflineMapCatalogMap,
         to proposedName: String
     ) -> String {
-        let alias = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !alias.isEmpty else { return map.alias }
+        guard let alias = OfflineMapCatalogAliasPolicy.normalizedAlias(
+            proposedName
+        ) else {
+            return map.alias
+        }
+        if pendingCatalogAliases[map.mapEntryId] == nil,
+           alias == map.alias {
+            return alias
+        }
+        setPendingCatalogAlias(
+            OfflineMapCatalogPendingAlias(
+                mapEntryID: map.mapEntryId,
+                alias: alias,
+                expectedRevision: map.aliasRevision,
+                state: .pending
+            )
+        )
+        if let index = catalogMaps.firstIndex(where: {
+            $0.mapEntryId == map.mapEntryId
+        }) {
+            catalogMaps[index].alias = alias
+        }
         updateCatalogAlias(
             mapEntryID: map.mapEntryId,
             alias: alias,
@@ -2605,12 +2649,24 @@ final class OfflineMapManager: ObservableObject {
                     expectedRevision: expectedRevision,
                     credential: credential.credential
                 )
+                var visibleMap = updated
+                let requestOwnsPendingAlias = self.pendingCatalogAliases[mapEntryID].map {
+                    $0.alias == alias && $0.expectedRevision == expectedRevision
+                } == true
+                if packURL == nil,
+                   !requestOwnsPendingAlias,
+                   let newerPending = self.pendingCatalogAliases[mapEntryID] {
+                    visibleMap.alias = newerPending.alias
+                }
                 if let index = self.catalogMaps.firstIndex(where: {
                     $0.mapEntryId == mapEntryID
                 }) {
-                    self.catalogMaps[index] = updated
+                    self.catalogMaps[index] = visibleMap
                 } else {
-                    self.catalogMaps.append(updated)
+                    self.catalogMaps.append(visibleMap)
+                }
+                if packURL == nil, requestOwnsPendingAlias {
+                    self.removePendingCatalogAlias(mapEntryID: mapEntryID)
                 }
                 if let packURL,
                    var metadata = SavedMapArtifactMetadataStore.load(for: packURL) {
@@ -2620,10 +2676,42 @@ final class OfflineMapManager: ObservableObject {
                 }
                 self.refreshCachedPacks()
             } catch {
-                // The local alias remains visible and a later library refresh
-                // resolves revision conflicts without changing map bytes.
+                if packURL == nil,
+                   case OfflineMapCatalogError.serverStatus(409, _) = error,
+                   var pending = self.pendingCatalogAliases[mapEntryID],
+                   pending.alias == alias,
+                   pending.expectedRevision == expectedRevision {
+                    pending.state = .conflict
+                    self.setPendingCatalogAlias(pending)
+                    self.syncCatalogLibraryIfNeeded()
+                }
+                // A catalog-only alias remains durable and visible. Transient
+                // failures retry on the next library refresh; conflicts wait
+                // for an explicit rename against the refreshed revision.
             }
         }
+    }
+
+    func catalogAliasStatus(for mapEntryID: String) -> String? {
+        guard let pending = pendingCatalogAliases[mapEntryID] else { return nil }
+        switch pending.state {
+        case .pending:
+            return "Name change pending; retries automatically"
+        case .conflict:
+            return "Name changed in another app; rename again to apply this name"
+        }
+    }
+
+    private func setPendingCatalogAlias(
+        _ pending: OfflineMapCatalogPendingAlias
+    ) {
+        pendingCatalogAliases[pending.mapEntryID] = pending
+        catalogPendingAliasStore.save(pendingCatalogAliases)
+    }
+
+    private func removePendingCatalogAlias(mapEntryID: String) {
+        pendingCatalogAliases.removeValue(forKey: mapEntryID)
+        catalogPendingAliasStore.save(pendingCatalogAliases)
     }
 
     func catalogAvailability(
@@ -3509,12 +3597,19 @@ final class OfflineMapManager: ObservableObject {
 
     private func ensureCatalogCredential() async throws -> OfflineMapCatalogCredential? {
         guard let catalogClient else { return nil }
-        let existing = catalogCredentialStore.load()
-        let credential = try await catalogClient.bootstrap(
-            existingCredential: existing?.credential
+        return try await catalogCredentialCoordinator.credential(
+            loadExisting: { [catalogCredentialStore] in
+                catalogCredentialStore.load()
+            },
+            bootstrap: { existingCredential in
+                try await catalogClient.bootstrap(
+                    existingCredential: existingCredential
+                )
+            },
+            save: { [catalogCredentialStore] credential in
+                try catalogCredentialStore.save(credential)
+            }
         )
-        try catalogCredentialStore.save(credential)
-        return credential
     }
 
     private func syncCatalogLibraryIfNeeded() {
@@ -3533,6 +3628,11 @@ final class OfflineMapManager: ObservableObject {
                     client: catalogClient,
                     credential: credential
                 )
+                maps = await self.pushPendingCatalogOnlyAliases(
+                    into: maps,
+                    client: catalogClient,
+                    credential: credential
+                )
                 self.catalogMaps = maps
                 self.refreshCachedPacks()
             } catch {
@@ -3541,6 +3641,12 @@ final class OfflineMapManager: ObservableObject {
             }
         }
     }
+
+#if HOST_TESTING
+    func syncCatalogLibraryForTesting() {
+        syncCatalogLibraryIfNeeded()
+    }
+#endif
 
     private func pushPendingCatalogAliases(
         into maps: [OfflineMapCatalogMap],
@@ -3578,6 +3684,83 @@ final class OfflineMapManager: ObservableObject {
             } catch {
                 // Preserve the local pending alias and retry after the next
                 // authoritative catalog refresh.
+            }
+        }
+        return reconciled
+    }
+
+    private func pushPendingCatalogOnlyAliases(
+        into maps: [OfflineMapCatalogMap],
+        client: OfflineMapCatalogClient,
+        credential: OfflineMapCatalogCredential
+    ) async -> [OfflineMapCatalogMap] {
+        var reconciled = maps
+        for mapEntryID in pendingCatalogAliases.keys.sorted() {
+            guard let pending = pendingCatalogAliases[mapEntryID],
+                  let remoteIndex = reconciled.firstIndex(where: {
+                    $0.mapEntryId == mapEntryID
+                  }) else {
+                continue
+            }
+            let remote = reconciled[remoteIndex]
+            switch OfflineMapCatalogPendingAliasPolicy.resolution(
+                pending: pending,
+                remoteAlias: remote.alias,
+                remoteRevision: remote.aliasRevision
+            ) {
+            case .fulfilled:
+                removePendingCatalogAlias(mapEntryID: mapEntryID)
+            case .conflict:
+                var conflict = pending
+                conflict.state = .conflict
+                setPendingCatalogAlias(conflict)
+                reconciled[remoteIndex].alias = pending.alias
+            case .retry:
+                do {
+                    var updated = try await client.updateAlias(
+                        mapEntryId: mapEntryID,
+                        alias: pending.alias,
+                        expectedRevision: pending.expectedRevision,
+                        credential: credential.credential
+                    )
+                    let requestOwnsPendingAlias = pendingCatalogAliases[mapEntryID].map {
+                        $0.alias == pending.alias &&
+                            $0.expectedRevision == pending.expectedRevision
+                    } == true
+                    if requestOwnsPendingAlias {
+                        removePendingCatalogAlias(mapEntryID: mapEntryID)
+                    } else if let newerPending = pendingCatalogAliases[mapEntryID] {
+                        updated.alias = newerPending.alias
+                    }
+                    reconciled[remoteIndex] = updated
+                } catch {
+                    let requestOwnsPendingAlias = pendingCatalogAliases[mapEntryID].map {
+                        $0.alias == pending.alias &&
+                            $0.expectedRevision == pending.expectedRevision
+                    } == true
+                    let isRevisionConflict: Bool
+                    if case OfflineMapCatalogError.serverStatus(409, _) = error {
+                        isRevisionConflict = true
+                    } else {
+                        isRevisionConflict = false
+                    }
+                    if requestOwnsPendingAlias, isRevisionConflict {
+                        var conflict = pending
+                        conflict.state = .conflict
+                        setPendingCatalogAlias(conflict)
+                        if let refreshed = try? await client.maps(
+                            credential: credential.credential
+                        ) {
+                            reconciled = refreshed
+                        }
+                    }
+                    if let currentPending = pendingCatalogAliases[mapEntryID],
+                       let currentIndex = reconciled.firstIndex(where: {
+                        $0.mapEntryId == mapEntryID
+                       }) {
+                        reconciled[currentIndex].alias = currentPending.alias
+                    }
+                }
             }
         }
         return reconciled
@@ -5352,6 +5535,31 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
+    private func invalidateLastTransferForDeletedArtifact() {
+        activationReconciliationTask?.cancel()
+        activationReconciliationTask = nil
+        for key in [
+            OfflineMapDefaults.lastTransferMapIdKey,
+            OfflineMapDefaults.lastTransferSessionIdKey,
+            OfflineMapDefaults.lastTransferPreviousMapIdKey,
+            OfflineMapDefaults.lastTransferPreviousSessionIdKey,
+            OfflineMapDefaults.lastTransferPreviousSequenceKey,
+            OfflineMapDefaults.lastTransferAcceptedSequenceKey,
+            OfflineMapDefaults.lastTransferOutcomeKey,
+            OfflineMapDefaults.lastTransferProtocolKey,
+            OfflineMapDefaults.lastTransferStreamFormatKey,
+            OfflineMapDefaults.lastTransferArtifactFilenameKey,
+            OfflineMapDefaults.lastTransferBackgroundTaskIDKey,
+        ] {
+            defaults.removeObject(forKey: key)
+        }
+        lastTransferMapId = ""
+        lastTransferOutcome = ""
+        transferProgress = 0
+        activationProgress = nil
+        statusMessage = ""
+    }
+
     func updateSavedMapTransferMetadata(
         mapID: String,
         protocolVersion: Int?,
@@ -5460,14 +5668,18 @@ final class OfflineMapManager: ObservableObject {
         guard !mapID.isEmpty else { return nil }
         if let filename = defaults.string(
             forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey
-        ), !filename.isEmpty,
-        URL(fileURLWithPath: filename).lastPathComponent == filename,
-        let directory = try? cachedPackDirectory() {
+        ) {
+            guard !filename.isEmpty,
+                  URL(fileURLWithPath: filename).lastPathComponent == filename,
+                  let directory = try? cachedPackDirectory() else {
+                return nil
+            }
             let candidate = directory.appendingPathComponent(filename)
             if FileManager.default.fileExists(atPath: candidate.path),
                savedMapID(for: candidate) == mapID {
                 return candidate
             }
+            return nil
         }
         for fileExtension in ["bmap", "zip"] {
             guard let candidate = try? cachedPackURL(
@@ -5482,6 +5694,11 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func transferArtifactURLs(mapID: String) -> [URL] {
+        if defaults.string(
+            forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey
+        ) != nil {
+            return lastTransferArtifactURL(mapID: mapID).map { [$0] } ?? []
+        }
         if let exact = lastTransferArtifactURL(mapID: mapID) {
             return [exact]
         }

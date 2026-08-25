@@ -134,19 +134,44 @@ func makePreviewReadableBikeMapStream(manifest: Data) -> Data {
 
 actor AsyncTestGate {
     private var isOpen = false
-    private var waiter: CheckedContinuation<Void, Never>?
+    private var waiters: [CheckedContinuation<Void, Never>] = []
 
     func wait() async {
         if isOpen { return }
         await withCheckedContinuation { continuation in
-            waiter = continuation
+            waiters.append(continuation)
         }
     }
 
     func open() {
         isOpen = true
-        waiter?.resume()
-        waiter = nil
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending {
+            waiter.resume()
+        }
+    }
+}
+
+actor CatalogCredentialBootstrapRecorder {
+    private let gate = AsyncTestGate()
+    private var count = 0
+    private let credential: OfflineMapCatalogCredential
+
+    init(credential: OfflineMapCatalogCredential) {
+        self.credential = credential
+    }
+
+    func bootstrap(existingCredential _: String?) async -> OfflineMapCatalogCredential {
+        count += 1
+        await gate.wait()
+        return credential
+    }
+
+    func invocationCount() -> Int { count }
+
+    func release() async {
+        await gate.open()
     }
 }
 
@@ -732,6 +757,8 @@ struct NavigationProtocolTests {
         testOfflineMapCatalogLocalArtifactIdentity()
         testOfflineMapCatalogAvailabilityPolicy()
         testSavedMapRemovalPolicy()
+        await testOfflineMapCatalogCredentialBootstrapCoalescesConcurrentCallers()
+        await testOfflineMapCatalogPendingAliasPersistenceAndConflictPolicy()
         await testOfflineMapCatalogInventorySyncSurvivesCatalogFailure()
         await testOfflineMapCatalogClaimRetainsRetryState()
         await testOfflineMapCatalogShareAndLinkContracts()
@@ -747,6 +774,7 @@ struct NavigationProtocolTests {
         testBackgroundMapUploadArbitration()
         testBackgroundMapUploadSessionNamespace()
         testPausedMapUploadResumePolicy()
+        testPausedMapUploadExactArtifactDeletion()
         testBackgroundMapUploadResponseBufferIsBounded()
         testMapStreamBackgroundUploadRequest()
         testDeviceTransferServerProbePolicy()
@@ -2309,6 +2337,121 @@ struct NavigationProtocolTests {
                 lastDeviceState: "paused"
             ),
             "a terminal transfer does not expose a stale resume action"
+        )
+        assert(
+            !PausedMapUploadResumePolicy.isAvailable(
+                lastTransferOutcome: "unconfirmed",
+                lastTransferMapID: "shared-map-id",
+                candidateMapID: "shared-map-id",
+                lastTransferArtifactFilename: "catalog-2d.bmap",
+                candidateArtifactFilename: "catalog-3d.bmap",
+                lastDeviceState: "paused"
+            ),
+            "same-mapID rendering variants require the exact paused artifact filename"
+        )
+    }
+
+    @MainActor
+    static func testPausedMapUploadExactArtifactDeletion() {
+        let suite = "PausedMapExactArtifact-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("paused-map-exact-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let twoDEntryID = "map_v1_" + String(repeating: "d", count: 43)
+        let threeDEntryID = "map_v1_" + String(repeating: "e", count: 43)
+        let twoDURL = directory.appendingPathComponent(
+            OfflineMapCatalogLocalArtifactPolicy.filename(
+                mapEntryID: twoDEntryID,
+                fileExtension: "bmap"
+            )!
+        )
+        let threeDURL = directory.appendingPathComponent(
+            OfflineMapCatalogLocalArtifactPolicy.filename(
+                mapEntryID: threeDEntryID,
+                fileExtension: "bmap"
+            )!
+        )
+        try! Data([0x2d]).write(to: twoDURL)
+        try! Data([0x3d]).write(to: threeDURL)
+
+        func metadata(
+            for url: URL,
+            entryID: String,
+            state: String?
+        ) -> SavedMapArtifactMetadata {
+            SavedMapArtifactMetadata(
+                schemaVersion: SavedMapArtifactMetadata.currentSchemaVersion,
+                mapID: "shared-map-id",
+                displayName: entryID == twoDEntryID ? "2D map" : "3D map",
+                localArtifactFilename: url.lastPathComponent,
+                streamFormatVersion: 1,
+                rendererFormatVersion: entryID == twoDEntryID ? 2 : 3,
+                jobID: nil,
+                serverURLString: nil,
+                clientInstallationID: nil,
+                primaryArtifact: nil,
+                legacyArtifact: nil,
+                lastTransferProtocol: entryID == twoDEntryID ? 2 : nil,
+                lastTransferStreamFormat: entryID == twoDEntryID ? 1 : nil,
+                lastTransferSessionID: entryID == twoDEntryID ? "paused-session" : nil,
+                lastBackgroundTaskID: nil,
+                lastDeviceSequence: nil,
+                lastDeviceState: state,
+                lastDeviceStep: state == nil ? nil : 1,
+                lastDeviceStepCount: state == nil ? nil : 3,
+                lastDeviceProgress: state == nil ? nil : 40,
+                expectedActiveMapID: entryID == twoDEntryID ? "shared-map-id" : nil,
+                expectedActiveSessionID: entryID == twoDEntryID ? "paused-session" : nil,
+                lastTransferOutcome: entryID == twoDEntryID ? "unconfirmed" : nil,
+                catalogMapEntryID: entryID
+            )
+        }
+        try! SavedMapArtifactMetadataStore.save(
+            metadata(for: twoDURL, entryID: twoDEntryID, state: "paused"),
+            for: twoDURL
+        )
+        try! SavedMapArtifactMetadataStore.save(
+            metadata(for: threeDURL, entryID: threeDEntryID, state: nil),
+            for: threeDURL
+        )
+        defaults.set("shared-map-id", forKey: "offlineMap.lastTransfer.mapId")
+        defaults.set("paused-session", forKey: "offlineMap.lastTransfer.sessionId")
+        defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.set(
+            twoDURL.lastPathComponent,
+            forKey: "offlineMap.lastTransfer.artifactFilename"
+        )
+
+        let manager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: directory
+        )
+        assert(manager.isPausedMapUpload(twoDURL), "the exact 2D artifact is resumable")
+        assert(
+            !manager.isPausedMapUpload(threeDURL),
+            "the same-mapID 3D sibling never inherits the paused resume action"
+        )
+        manager.deleteCachedPack(at: twoDURL)
+        assert(
+            !manager.hasPausedMapUpload,
+            "deleting the exact paused artifact invalidates the resume state"
+        )
+        assertEqual(
+            manager.lastTransferMapId,
+            "",
+            "deleting the exact paused artifact clears its legacy map identity"
+        )
+        assert(
+            FileManager.default.fileExists(atPath: threeDURL.path),
+            "deleting one rendering variant preserves the sibling artifact"
+        )
+        assert(
+            !manager.isPausedMapUpload(threeDURL),
+            "resume never falls back to the surviving same-mapID sibling"
         )
     }
 
@@ -5562,6 +5705,274 @@ struct NavigationProtocolTests {
                 attachedAlias: "Shanghai"
             ) == nil,
             "generated local names never overwrite the catalog alias"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapCatalogCredentialBootstrapCoalescesConcurrentCallers() async {
+        let expected = OfflineMapCatalogCredential(
+            libraryId: "library-coalesced",
+            credential: "credential-coalesced"
+        )
+        let recorder = CatalogCredentialBootstrapRecorder(credential: expected)
+        let coordinator = OfflineMapCatalogCredentialCoordinator()
+        var savedCredentials: [OfflineMapCatalogCredential] = []
+        var loadCount = 0
+
+        func load() -> OfflineMapCatalogCredential? {
+            loadCount += 1
+            return savedCredentials.last
+        }
+        func save(_ credential: OfflineMapCatalogCredential) {
+            savedCredentials.append(credential)
+        }
+
+        let first = Task { @MainActor in
+            try! await coordinator.credential(
+                loadExisting: load,
+                bootstrap: recorder.bootstrap,
+                save: save
+            )
+        }
+        let firstRequestDeadline = Date().addingTimeInterval(2)
+        while await recorder.invocationCount() == 0 && Date() < firstRequestDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let second = Task { @MainActor in
+            try! await coordinator.credential(
+                loadExisting: load,
+                bootstrap: recorder.bootstrap,
+                save: save
+            )
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        assertEqual(
+            await recorder.invocationCount(),
+            1,
+            "a second caller joins the suspended first bootstrap"
+        )
+        await recorder.release()
+        let firstCredential = await first.value
+        let secondCredential = await second.value
+        assertEqual(
+            firstCredential,
+            expected,
+            "the first catalog caller receives the bootstrap credential"
+        )
+        assertEqual(
+            secondCredential,
+            expected,
+            "the later catalog caller receives the same in-flight credential"
+        )
+        assertEqual(loadCount, 1, "coalescing reads existing credentials once")
+        assertEqual(
+            savedCredentials,
+            [expected],
+            "coalescing persists exactly one library identity regardless of completion order"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapCatalogPendingAliasPersistenceAndConflictPolicy() async {
+        let suite = "OfflineMapPendingAlias-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            OfflineMapTestURLProtocol.reset()
+        }
+        let mapEntryID = "map_v1_" + String(repeating: "p", count: 43)
+        func map(alias: String, revision: Int) -> OfflineMapCatalogMap {
+            OfflineMapCatalogMap(
+                mapEntryId: mapEntryID,
+                mapId: "same-region",
+                alias: alias,
+                aliasSource: revision == 7 ? "generated" : "user",
+                aliasRevision: revision,
+                canonicalName: "Same region",
+                originChannel: "production",
+                sourceRegionName: "Same region",
+                bounds: [1, 2, 3, 4],
+                renderer: "esp32-fmb",
+                rendererFormatVersion: 2,
+                features: ["street-labels"],
+                deliveryState: "production",
+                generatedAt: nil,
+                addedAt: "2026-08-25T00:00:00.000Z",
+                updatedAt: "2026-08-25T00:00:00.000Z",
+                artifacts: []
+            )
+        }
+        func mapsPage(_ map: OfflineMapCatalogMap) -> Data {
+            let object = try! JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(map)
+            )
+            return try! JSONSerialization.data(withJSONObject: [
+                "maps": [object],
+                "nextCursor": NSNull(),
+            ])
+        }
+        func waitUntil(
+            _ condition: @escaping @MainActor () -> Bool
+        ) async -> Bool {
+            let deadline = Date().addingTimeInterval(2)
+            while !condition() && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            return condition()
+        }
+        let originalMap = map(alias: "Server name", revision: 7)
+        let client = try! OfflineMapCatalogClient(
+            baseURL: URL(string: "https://maps-share.8o.vc")!,
+            session: session
+        )
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (
+                    201,
+                    Data(#"{"libraryId":"library-alias","credential":"credential-alias"}"#.utf8)
+                )
+            case ("PATCH", "/v1/library/maps/\(mapEntryID)"):
+                let body = try! JSONSerialization.jsonObject(
+                    with: OfflineMapTestURLProtocol.bodyData(from: request)
+                ) as! [String: Any]
+                assertEqual(body["alias"] as? String, "Weekend climb", "rename sends alias")
+                assertEqual(body["expectedRevision"] as? Int, 7, "rename preserves CAS revision")
+                return (503, Data(#"{"error":"temporarily unavailable"}"#.utf8))
+            default:
+                assert(false, "unexpected failed-alias request \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+        let manager = OfflineMapManager(
+            defaults: defaults,
+            mapPlatformSession: session,
+            catalogHost: OfflineMapCatalogConfig.productionHost,
+            catalogClient: client
+        )
+        assertEqual(
+            manager.renameCatalogMap(originalMap, to: "  Weekend climb  "),
+            "Weekend climb",
+            "a catalog-only rename is normalized before persistence"
+        )
+        let firstRenameReachedServer = await waitUntil {
+            OfflineMapTestURLProtocol.requests().contains {
+                $0.httpMethod == "PATCH"
+            }
+        }
+        assert(
+            firstRenameReachedServer,
+            "the first catalog-only rename reaches the failing server"
+        )
+        assertEqual(
+            manager.catalogAliasStatus(for: mapEntryID),
+            "Name change pending; retries automatically",
+            "an offline catalog-only rename exposes its retry state"
+        )
+
+        let retriedMap = map(alias: "Weekend climb", revision: 8)
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (200, Data(#"{"libraryId":"library-alias","created":false}"#.utf8))
+            case ("GET", "/v1/library/maps"):
+                return (200, mapsPage(originalMap))
+            case ("PATCH", "/v1/library/maps/\(mapEntryID)"):
+                return (200, try! JSONEncoder().encode(retriedMap))
+            default:
+                assert(false, "unexpected alias-retry request \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+        let restoredManager = OfflineMapManager(
+            defaults: defaults,
+            mapPlatformSession: session,
+            catalogHost: OfflineMapCatalogConfig.productionHost,
+            catalogClient: client
+        )
+        assertEqual(
+            restoredManager.catalogAliasStatus(for: mapEntryID),
+            "Name change pending; retries automatically",
+            "the retryable alias survives app relaunch before refresh"
+        )
+        restoredManager.syncCatalogLibraryForTesting()
+        let retryCompleted = await waitUntil {
+            restoredManager.catalogMaps.first?.alias == "Weekend climb" &&
+                restoredManager.catalogAliasStatus(for: mapEntryID) == nil
+        }
+        assert(
+            retryCompleted,
+            "a relaunched manager retries and clears the durable alias after success"
+        )
+
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (200, Data(#"{"libraryId":"library-alias","created":false}"#.utf8))
+            case ("PATCH", "/v1/library/maps/\(mapEntryID)"):
+                return (503, Data(#"{"error":"temporarily unavailable"}"#.utf8))
+            default:
+                assert(false, "unexpected second failed-alias request \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+        _ = restoredManager.renameCatalogMap(retriedMap, to: "Offline favorite")
+        let secondRenameReachedServer = await waitUntil {
+            OfflineMapTestURLProtocol.requests().contains {
+                $0.httpMethod == "PATCH"
+            }
+        }
+        assert(
+            secondRenameReachedServer,
+            "the second offline rename is durably attempted"
+        )
+
+        let newerServerMap = map(alias: "Renamed on Bicino Dev", revision: 9)
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (200, Data(#"{"libraryId":"library-alias","created":false}"#.utf8))
+            case ("GET", "/v1/library/maps"):
+                return (200, mapsPage(newerServerMap))
+            case ("PATCH", "/v1/library/maps/\(mapEntryID)"):
+                assert(false, "a stale pending alias must not overwrite revision 9")
+                return (409, Data())
+            default:
+                assert(false, "unexpected alias-conflict request \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+        let conflictManager = OfflineMapManager(
+            defaults: defaults,
+            mapPlatformSession: session,
+            catalogHost: OfflineMapCatalogConfig.productionHost,
+            catalogClient: client
+        )
+        conflictManager.syncCatalogLibraryForTesting()
+        let conflictLoaded = await waitUntil {
+            conflictManager.catalogMaps.first?.aliasRevision == 9
+        }
+        assert(
+            conflictLoaded,
+            "conflict refresh retains the newer authoritative revision"
+        )
+        assertEqual(
+            conflictManager.catalogMaps.first?.alias,
+            "Offline favorite",
+            "the pending local name remains visible without mutating the server"
+        )
+        assertEqual(
+            conflictManager.catalogAliasStatus(for: mapEntryID),
+            "Name changed in another app; rename again to apply this name",
+            "the stale alias becomes an explicit user-resolvable conflict"
+        )
+        assert(
+            !OfflineMapTestURLProtocol.requests().contains { $0.httpMethod == "PATCH" },
+            "conflict reconciliation does not issue a stale compare-and-swap"
         )
     }
 

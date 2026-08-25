@@ -72,6 +72,9 @@ export interface ArtifactRow {
   producer_build_sha256: string | null;
   producer_image_digest: string | null;
   reader_requirements_json: string | null;
+  generation_class: string;
+  superseded_at: string | null;
+  generation_head: number;
   required_ios_build: string | null;
   required_ios_git_sha: string | null;
   required_ios_build_sha256: string | null;

@@ -568,7 +568,7 @@ nonisolated struct OfflineMapCatalogMap: Codable, Equatable, Sendable, Identifia
     var id: String { mapEntryId }
     let mapEntryId: String
     let mapId: String
-    let alias: String
+    var alias: String
     let aliasSource: String
     let aliasRevision: Int
     let canonicalName: String
@@ -641,19 +641,150 @@ nonisolated struct OfflineMapCatalogDownloadGrant: Codable, Equatable, Sendable 
 }
 
 nonisolated enum OfflineMapCatalogAliasPolicy {
+    static func normalizedAlias(_ value: String) -> String? {
+        let alias = value
+            .precomposedStringWithCanonicalMapping
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !alias.isEmpty,
+              alias.count <= 80,
+              alias.utf8.count <= 240,
+              alias.rangeOfCharacter(from: .controlCharacters) == nil else {
+            return nil
+        }
+        return alias
+    }
+
     static func aliasToApplyAfterAttachment(
         localDisplayName: String?,
         userDefinedDisplayName: Bool?,
         attachedAlias: String
     ) -> String? {
         guard userDefinedDisplayName == true,
-              let alias = localDisplayName?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-              !alias.isEmpty,
+              let localDisplayName,
+              let alias = normalizedAlias(localDisplayName),
               alias != attachedAlias else {
             return nil
         }
         return alias
+    }
+}
+
+nonisolated enum OfflineMapCatalogPendingAliasState: String, Codable, Equatable, Sendable {
+    case pending
+    case conflict
+}
+
+nonisolated struct OfflineMapCatalogPendingAlias: Codable, Equatable, Sendable {
+    let mapEntryID: String
+    let alias: String
+    let expectedRevision: Int
+    var state: OfflineMapCatalogPendingAliasState
+}
+
+nonisolated enum OfflineMapCatalogPendingAliasPolicy {
+    enum Resolution: Equatable {
+        case retry
+        case fulfilled
+        case conflict
+    }
+
+    static func resolution(
+        pending: OfflineMapCatalogPendingAlias,
+        remoteAlias: String,
+        remoteRevision: Int
+    ) -> Resolution {
+        if remoteAlias == pending.alias {
+            return .fulfilled
+        }
+        guard pending.state == .pending,
+              remoteRevision == pending.expectedRevision else {
+            return .conflict
+        }
+        return .retry
+    }
+}
+
+nonisolated final class OfflineMapCatalogPendingAliasStore: @unchecked Sendable {
+    private static let keyPrefix = "vc.8o.bicino.map-library.pending-aliases-v1"
+    private let defaults: UserDefaults
+    private let key: String
+
+    init(
+        defaults: UserDefaults = .standard,
+        catalogHost: String? = OfflineMapCatalogConfig.catalogHost
+    ) {
+        self.defaults = defaults
+        let namespace = catalogHost?.lowercased() == OfflineMapCatalogConfig.developmentHost
+            ? OfflineMapCatalogConfig.developmentHost
+            : OfflineMapCatalogConfig.productionHost
+        self.key = "\(Self.keyPrefix).\(namespace)"
+    }
+
+    func load() -> [String: OfflineMapCatalogPendingAlias] {
+        guard let data = defaults.data(forKey: key),
+              let decoded = try? JSONDecoder().decode(
+                [String: OfflineMapCatalogPendingAlias].self,
+                from: data
+              ) else {
+            return [:]
+        }
+        return decoded.filter { mapEntryID, pending in
+            mapEntryID == pending.mapEntryID &&
+                OfflineMapCatalogLocalArtifactPolicy.filename(
+                    mapEntryID: mapEntryID,
+                    fileExtension: "bmap"
+                ) != nil &&
+                OfflineMapCatalogAliasPolicy.normalizedAlias(pending.alias) == pending.alias &&
+                pending.expectedRevision >= 0
+        }
+    }
+
+    func save(_ pendingAliases: [String: OfflineMapCatalogPendingAlias]) {
+        guard !pendingAliases.isEmpty else {
+            defaults.removeObject(forKey: key)
+            return
+        }
+        guard let data = try? JSONEncoder().encode(pendingAliases) else { return }
+        defaults.set(data, forKey: key)
+    }
+}
+
+@MainActor
+final class OfflineMapCatalogCredentialCoordinator {
+    private var inFlight: (
+        id: UUID,
+        task: Task<OfflineMapCatalogCredential, Error>
+    )?
+
+    func credential(
+        loadExisting: @escaping @MainActor () -> OfflineMapCatalogCredential?,
+        bootstrap: @escaping @MainActor (String?) async throws -> OfflineMapCatalogCredential,
+        save: @escaping @MainActor (OfflineMapCatalogCredential) throws -> Void
+    ) async throws -> OfflineMapCatalogCredential {
+        if let inFlight {
+            return try await inFlight.task.value
+        }
+
+        let id = UUID()
+        let task = Task { @MainActor in
+            let existing = loadExisting()
+            let credential = try await bootstrap(existing?.credential)
+            try save(credential)
+            return credential
+        }
+        inFlight = (id, task)
+        do {
+            let credential = try await task.value
+            if inFlight?.id == id {
+                inFlight = nil
+            }
+            return credential
+        } catch {
+            if inFlight?.id == id {
+                inFlight = nil
+            }
+            throw error
+        }
     }
 }
 

@@ -176,6 +176,18 @@ R2 absence, and only then records deletion in D1. Keep physical deletion
 enabled only after reviewing the zero-reference report in staging; increasing
 the grace is safe, while shortening it requires a separate retention review.
 
+Repeated publication of the same map is also bounded. The catalog retains one
+live head for each exact bucket/tier, format, signer fingerprint, reader
+requirements, and firmware compatibility class. A newly verified same-class
+head makes older generations eligible for the same grace-and-lease deletion
+flow, even when the map remains in a library. Active download grants and
+promotion leases delay supersession, and every deletion phase rechecks that a
+live same-class replacement remains. Each map is limited to 16 live classes;
+publication 17 fails atomically instead of silently dropping compatibility.
+Before staging migration 0008, query for any map over that bound and explicitly
+review which obsolete class can be quarantined or retired. The migration fails
+closed if the database is already over the limit.
+
 ## 4. Validate the complete staging flow
 
 Both shipped app configurations use the shared production catalog. For a

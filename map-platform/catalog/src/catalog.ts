@@ -26,6 +26,7 @@ const MAX_TOTAL_LINK_CODES = 50;
 const MAX_SHARE_CLAIMS = 500;
 const MAX_ACTIVE_LIBRARY_CREDENTIALS = 8;
 const MAX_LINKED_LIBRARY_PRINCIPALS = 8;
+const MAX_LIVE_ARTIFACT_GENERATION_CLASSES = 16;
 const MAX_RETENTION_BATCH = 10;
 const RETENTION_AUTHORIZATION_MILLISECONDS = 15 * 60 * 1000;
 const PROMOTION_LEASE_MILLISECONDS = 60 * 60 * 1000;
@@ -199,7 +200,8 @@ async function artifactsForMaps(
             map_entries.renderer_format_version AS map_renderer_format_version,
             map_entries.features_json AS map_features_json
        FROM artifacts JOIN map_entries ON map_entries.id = artifacts.map_entry_id
-      WHERE artifacts.map_entry_id IN (${placeholders}) AND artifacts.state = 'live'
+      WHERE artifacts.map_entry_id IN (${placeholders})
+        AND artifacts.generation_head = 1 AND artifacts.state = 'live'
       ORDER BY artifacts.map_entry_id ASC, artifacts.delivery_tier DESC,
                artifacts.format ASC, artifacts.created_at DESC`,
   )
@@ -424,6 +426,21 @@ function artifactReaderRequirementsJSON(
     : JSON.stringify(artifact.readerRequirements);
 }
 
+function artifactGenerationClass(artifact: PublicationArtifactInput): string {
+  return JSON.stringify({
+    schemaVersion: 1,
+    bucketSlot: artifact.bucketSlot,
+    deliveryTier: artifact.deliveryTier,
+    format: artifact.format,
+    signatureKeyId: artifact.signatureKeyId ?? null,
+    signatureKeySha256: artifact.signatureKeySha256 ?? null,
+    readerRequirementsJSON: artifactReaderRequirementsJSON(artifact),
+    requiredFirmwareVersion: artifact.requiredFirmwareVersion ?? null,
+    requiredFirmwareBuild: artifact.requiredFirmwareBuild ?? null,
+    requiredFirmwareGitSha: artifact.requiredFirmwareGitSha ?? null,
+  });
+}
+
 function artifactMatchesPublication(
   existing: ArtifactRow,
   mapEntryID: string,
@@ -448,6 +465,7 @@ function artifactMatchesPublication(
     existing.producer_image_digest === (artifact.producerImageDigest ?? null) &&
     existing.reader_requirements_json ===
       artifactReaderRequirementsJSON(artifact) &&
+    existing.generation_class === artifactGenerationClass(artifact) &&
     existing.required_ios_build === (artifact.requiredIosBuild ?? null) &&
     existing.required_ios_git_sha === (artifact.requiredIosGitSha ?? null) &&
     existing.required_ios_build_sha256 ===
@@ -459,7 +477,7 @@ function artifactMatchesPublication(
     existing.required_firmware_git_sha ===
       (artifact.requiredFirmwareGitSha ?? null) &&
     existing.delivery_tier === artifact.deliveryTier &&
-    existing.state === "live"
+    (existing.state === "live" || existing.superseded_at !== null)
   );
 }
 
@@ -579,6 +597,9 @@ export async function finalizePublication(
       producer_build_sha256: artifact.producerBuildSha256 ?? null,
       producer_image_digest: artifact.producerImageDigest ?? null,
       reader_requirements_json: artifactReaderRequirementsJSON(artifact),
+      generation_class: artifactGenerationClass(artifact),
+      superseded_at: null,
+      generation_head: 1,
       required_ios_build: artifact.requiredIosBuild ?? null,
       required_ios_git_sha: artifact.requiredIosGitSha ?? null,
       required_ios_build_sha256: artifact.requiredIosBuildSha256 ?? null,
@@ -591,6 +612,27 @@ export async function finalizePublication(
       verified_at: now,
     }),
   );
+  if (
+    new Set(proposedArtifacts.map((artifact) => artifact.generation_class))
+      .size !== proposedArtifacts.length
+  ) {
+    throw new HttpError(400, "publication artifact generations are duplicated");
+  }
+  const liveGenerationClasses = await env.DB.prepare(
+    `SELECT DISTINCT generation_class FROM artifacts
+      WHERE map_entry_id = ? AND generation_head = 1 AND state = 'live'`,
+  )
+    .bind(publication.mapEntryId)
+    .all<{ generation_class: string }>();
+  const resultingGenerationClasses = new Set(
+    liveGenerationClasses.results.map((row) => row.generation_class),
+  );
+  for (const artifact of proposedArtifacts) {
+    resultingGenerationClasses.add(artifact.generation_class);
+  }
+  if (resultingGenerationClasses.size > MAX_LIVE_ARTIFACT_GENERATION_CLASSES) {
+    throw new HttpError(409, "map artifact generation class quota exceeded");
+  }
   for (const artifact of publication.artifacts) {
     const existingArtifact = await env.DB.prepare(
       "SELECT * FROM artifacts WHERE id = ? OR (bucket_slot = ? AND object_key = ?)",
@@ -653,19 +695,54 @@ export async function finalizePublication(
       ).bind(now, publication.mapEntryId),
     );
   }
+  const artifactIDPlaceholders = publication.artifacts
+    .map(() => "?")
+    .join(", ");
+  statements.push(
+    env.DB.prepare(
+      `DELETE FROM artifact_deletion_leases
+        WHERE expires_at <= ? AND artifact_id IN (${artifactIDPlaceholders})`,
+    ).bind(
+      now,
+      ...publication.artifacts.map((artifact) => artifact.artifactId),
+    ),
+  );
   for (const artifact of publication.artifacts) {
+    const generationClass = artifactGenerationClass(artifact);
     statements.push(
       env.DB.prepare(
-        `INSERT OR IGNORE INTO artifacts(
+        `UPDATE artifacts
+            SET generation_head = 0, superseded_at = COALESCE(superseded_at, ?),
+                verified_at = CASE WHEN superseded_at IS NULL THEN ? ELSE verified_at END
+          WHERE map_entry_id = ? AND generation_class = ? AND id <> ?
+            AND generation_head = 1 AND state IN ('live', 'quarantined')`,
+      ).bind(
+        now,
+        now,
+        publication.mapEntryId,
+        generationClass,
+        artifact.artifactId,
+      ),
+      env.DB.prepare(
+        `INSERT INTO artifacts(
           id, map_entry_id, bucket_slot, object_key, format, media_type,
           filename, byte_count, sha256, manifest_receipt, signed_manifest_receipt,
           signature_key_id, signature_key_sha256, producer_build_sha256,
           producer_image_digest, reader_requirements_json,
+          generation_class, superseded_at, generation_head,
           required_ios_build, required_ios_git_sha,
           required_ios_build_sha256, required_firmware_version,
           required_firmware_build, required_firmware_git_sha,
           delivery_tier, state, created_at, verified_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          state = 'live', superseded_at = NULL, generation_head = 1,
+          verified_at = excluded.verified_at
+        WHERE (artifacts.generation_head = 0 OR artifacts.superseded_at IS NOT NULL)
+          AND NOT EXISTS (
+            SELECT 1 FROM artifact_deletion_leases lease
+             WHERE lease.artifact_id = artifacts.id
+          )`,
       ).bind(
         artifact.artifactId,
         publication.mapEntryId,
@@ -683,6 +760,7 @@ export async function finalizePublication(
         artifact.producerBuildSha256 ?? null,
         artifact.producerImageDigest ?? null,
         artifactReaderRequirementsJSON(artifact),
+        generationClass,
         artifact.requiredIosBuild ?? null,
         artifact.requiredIosGitSha ?? null,
         artifact.requiredIosBuildSha256 ?? null,
@@ -690,6 +768,37 @@ export async function finalizePublication(
         artifact.requiredFirmwareBuild ?? null,
         artifact.requiredFirmwareGitSha ?? null,
         artifact.deliveryTier,
+        now,
+        now,
+      ),
+      env.DB.prepare(
+        `UPDATE artifacts AS older
+            SET state = 'tombstoned'
+          WHERE older.map_entry_id = ? AND older.generation_class = ?
+            AND older.id <> ? AND older.generation_head = 0
+            AND older.superseded_at IS NOT NULL
+            AND older.state IN ('live', 'quarantined')
+            AND EXISTS (
+              SELECT 1 FROM artifacts replacement
+               WHERE replacement.id = ? AND replacement.generation_head = 1
+                 AND replacement.map_entry_id = older.map_entry_id
+                 AND replacement.generation_class = older.generation_class
+                 AND replacement.state = 'live'
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM download_grants grant_row
+               WHERE grant_row.artifact_id = older.id AND grant_row.expires_at > ?
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM promotion_leases lease
+               WHERE lease.source_artifact_id = older.id
+                 AND lease.state = 'active' AND lease.expires_at > ?
+            )`,
+      ).bind(
+        publication.mapEntryId,
+        generationClass,
+        artifact.artifactId,
+        artifact.artifactId,
         now,
         now,
       ),
@@ -762,6 +871,12 @@ export async function finalizePublication(
         replayed: true,
       };
     }
+    if (
+      error instanceof Error &&
+      error.message.includes("artifact generation class limit")
+    ) {
+      throw new HttpError(409, "map artifact generation class quota exceeded");
+    }
     for (const artifact of publication.artifacts) {
       const conflictingArtifact = await env.DB.prepare(
         "SELECT * FROM artifacts WHERE id = ? OR (bucket_slot = ? AND object_key = ?)",
@@ -777,6 +892,17 @@ export async function finalizePublication(
         )
       ) {
         throw new HttpError(409, "artifact identity conflict");
+      }
+      if (conflictingArtifact && conflictingArtifact.superseded_at !== null) {
+        const activeDeletion = await env.DB.prepare(
+          `SELECT 1 AS present FROM artifact_deletion_leases
+            WHERE artifact_id = ? AND expires_at > ?`,
+        )
+          .bind(conflictingArtifact.id, now)
+          .first<{ present: number }>();
+        if (activeDeletion) {
+          throw new HttpError(409, "artifact deletion is in progress");
+        }
       }
     }
     if (promotionLeaseID !== null) {
@@ -836,8 +962,9 @@ export async function attachLibrary(
   const staleLeases = await env.DB.prepare(
     `SELECT a.*
        FROM artifact_deletion_leases lease
-       JOIN artifacts a ON a.id = lease.artifact_id
+      JOIN artifacts a ON a.id = lease.artifact_id
       WHERE a.map_entry_id = ? AND lease.channel = ? AND lease.expires_at <= ?
+        AND a.superseded_at IS NULL
       ORDER BY a.id ASC LIMIT 33`,
   )
     .bind(publication.map_entry_id, serviceChannel, now)
@@ -845,8 +972,9 @@ export async function attachLibrary(
   const activeLease = await env.DB.prepare(
     `SELECT 1 AS present
        FROM artifact_deletion_leases lease
-       JOIN artifacts a ON a.id = lease.artifact_id
+      JOIN artifacts a ON a.id = lease.artifact_id
       WHERE a.map_entry_id = ? AND lease.channel = ? AND lease.expires_at > ?
+        AND a.superseded_at IS NULL
       LIMIT 1`,
   )
     .bind(publication.map_entry_id, serviceChannel, now)
@@ -867,11 +995,13 @@ export async function attachLibrary(
       `DELETE FROM artifact_deletion_leases
         WHERE channel = ? AND expires_at <= ? AND artifact_id IN (
           SELECT id FROM artifacts WHERE map_entry_id = ? AND bucket_slot = ?
+            AND superseded_at IS NULL
         )`,
     ).bind(serviceChannel, now, publication.map_entry_id, serviceChannel),
     env.DB.prepare(
       `UPDATE artifacts AS a SET state = 'live', verified_at = ?
         WHERE a.map_entry_id = ? AND a.bucket_slot = ? AND a.state = 'tombstoned'
+          AND a.superseded_at IS NULL AND a.generation_head = 1
           AND NOT EXISTS (
             SELECT 1 FROM artifact_deletion_leases lease
              WHERE lease.artifact_id = a.id
@@ -883,7 +1013,7 @@ export async function attachLibrary(
                 WHEN EXISTS (
                   SELECT 1 FROM artifacts a
                    WHERE a.map_entry_id = me.id AND a.bucket_slot = 'production'
-                     AND a.state = 'live'
+                     AND a.generation_head = 1 AND a.state = 'live'
                 ) THEN 'production'
                 ELSE ?
               END,
@@ -891,7 +1021,8 @@ export async function attachLibrary(
         WHERE me.id = ?
           AND EXISTS (
             SELECT 1 FROM artifacts a
-             WHERE a.map_entry_id = me.id AND a.bucket_slot = ? AND a.state = 'live'
+             WHERE a.map_entry_id = me.id AND a.bucket_slot = ?
+               AND a.generation_head = 1 AND a.state = 'live'
           )`,
     ).bind(serviceChannel, now, publication.map_entry_id, serviceChannel),
     env.DB.prepare(
@@ -900,7 +1031,8 @@ export async function attachLibrary(
        ) SELECT ?, ?, ?, ?, ?, ?
           WHERE EXISTS (
             SELECT 1 FROM artifacts a
-             WHERE a.map_entry_id = ? AND a.bucket_slot = ? AND a.state = 'live'
+             WHERE a.map_entry_id = ? AND a.bucket_slot = ?
+               AND a.generation_head = 1 AND a.state = 'live'
           )
             AND NOT EXISTS (
               SELECT 1 FROM artifact_deletion_leases lease
@@ -1171,7 +1303,7 @@ async function sharePreviewByHash(
   }
   const bytes = await env.DB.prepare(
     `SELECT MAX(byte_count) AS byte_count FROM artifacts
-      WHERE map_entry_id = ? AND state = 'live'`,
+      WHERE map_entry_id = ? AND generation_head = 1 AND state = 'live'`,
   )
     .bind(row.id)
     .first<{ byte_count: number | null }>();
@@ -1524,7 +1656,8 @@ export async function createLibraryDownloadGrant(
             map_entries.renderer_format_version AS map_renderer_format_version,
             map_entries.features_json AS map_features_json
        FROM artifacts JOIN map_entries ON map_entries.id = artifacts.map_entry_id
-      WHERE artifacts.map_entry_id = ? AND artifacts.state = 'live'
+      WHERE artifacts.map_entry_id = ? AND artifacts.generation_head = 1
+        AND artifacts.state = 'live'
         AND artifacts.delivery_tier IN (?, ?)
       ORDER BY CASE artifacts.delivery_tier WHEN ? THEN 0 ELSE 1 END,
                artifacts.created_at DESC`,
@@ -1625,7 +1758,7 @@ async function existingProductionPromotion(
     `SELECT * FROM artifacts
       WHERE map_entry_id = ? AND bucket_slot = 'production'
         AND delivery_tier = 'production' AND format = 'bike-map-stream-v1'
-        AND state = 'live'
+        AND generation_head = 1 AND state = 'live'
       ORDER BY created_at DESC LIMIT 1`,
   )
     .bind(mapEntryID)
@@ -1678,7 +1811,7 @@ export async function createPromotionGrant(
     `SELECT * FROM artifacts
       WHERE map_entry_id = ? AND bucket_slot = 'development'
         AND delivery_tier = 'development' AND format = 'zip-stored-v1'
-        AND state = 'live'
+        AND generation_head = 1 AND state = 'live'
       ORDER BY created_at DESC LIMIT 1`,
   )
     .bind(mapEntryID)
@@ -1915,10 +2048,7 @@ interface RetentionCandidate extends ArtifactRow {
   map_updated_at: string;
 }
 
-function noReferencePredicates(
-  artifactAlias: string,
-  mapAlias: string,
-): string {
+function noMapReferencePredicates(mapAlias: string): string {
   return `NOT EXISTS (
             SELECT 1 FROM library_maps lm WHERE lm.map_entry_id = ${mapAlias}.id
           )
@@ -1926,10 +2056,52 @@ function noReferencePredicates(
             SELECT 1 FROM shares s
              WHERE s.map_entry_id = ${mapAlias}.id AND s.revoked_at IS NULL
                AND (s.expires_at IS NULL OR s.expires_at > ?)
-          )
-          AND NOT EXISTS (
+          )`;
+}
+
+function noActiveArtifactUsePredicates(artifactAlias: string): string {
+  return `NOT EXISTS (
             SELECT 1 FROM download_grants dg
              WHERE dg.artifact_id = ${artifactAlias}.id AND dg.expires_at > ?
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM promotion_leases lease
+             WHERE lease.source_artifact_id = ${artifactAlias}.id
+               AND lease.state = 'active' AND lease.expires_at > ?
+          )`;
+}
+
+function liveGenerationReplacementPredicate(artifactAlias: string): string {
+  return `EXISTS (
+            SELECT 1 FROM artifacts replacement
+             WHERE replacement.map_entry_id = ${artifactAlias}.map_entry_id
+               AND replacement.generation_class = ${artifactAlias}.generation_class
+               AND replacement.id <> ${artifactAlias}.id
+               AND replacement.generation_head = 1
+               AND replacement.state = 'live'
+          )`;
+}
+
+function zeroReferencePredicates(
+  artifactAlias: string,
+  mapAlias: string,
+): string {
+  return `${noMapReferencePredicates(mapAlias)}
+          AND ${noActiveArtifactUsePredicates(artifactAlias)}`;
+}
+
+function deletionEligibilityPredicates(
+  artifactAlias: string,
+  mapAlias: string,
+): string {
+  return `(
+            (
+              ${artifactAlias}.superseded_at IS NOT NULL
+              AND ${liveGenerationReplacementPredicate(artifactAlias)}
+              AND ${noActiveArtifactUsePredicates(artifactAlias)}
+            ) OR (
+              ${zeroReferencePredicates(artifactAlias, mapAlias)}
+            )
           )`;
 }
 
@@ -1950,15 +2122,40 @@ export async function prepareRetentionAuthorizations(
   const now = clock.toISOString();
   const retentionGrace = retentionGraceMilliseconds(env);
   const cutoff = new Date(clock.getTime() - retentionGrace).toISOString();
+
+  await env.DB.prepare(
+    `UPDATE artifacts AS older
+        SET state = 'tombstoned'
+      WHERE older.id IN (
+        SELECT candidate.id FROM artifacts candidate
+         WHERE candidate.bucket_slot = ?
+           AND candidate.state IN ('live', 'quarantined')
+           AND candidate.generation_head = 0
+           AND candidate.superseded_at IS NOT NULL
+           AND EXISTS (
+             SELECT 1 FROM artifacts replacement
+              WHERE replacement.map_entry_id = candidate.map_entry_id
+                AND replacement.generation_class = candidate.generation_class
+                AND replacement.generation_head = 1
+                AND replacement.state = 'live'
+           )
+           AND ${noActiveArtifactUsePredicates("candidate")}
+         ORDER BY candidate.created_at ASC, candidate.id ASC LIMIT ?
+      )`,
+  )
+    .bind(serviceChannel, now, now, limit)
+    .run();
+
   const candidates = await env.DB.prepare(
     `SELECT a.*, me.updated_at AS map_updated_at
        FROM artifacts a JOIN map_entries me ON me.id = a.map_entry_id
       WHERE a.bucket_slot = ? AND a.state IN ('live', 'quarantined')
+        AND a.superseded_at IS NULL
         AND me.updated_at <= ?
-        AND ${noReferencePredicates("a", "me")}
+        AND ${zeroReferencePredicates("a", "me")}
       ORDER BY me.updated_at ASC, a.id ASC LIMIT ?`,
   )
-    .bind(serviceChannel, cutoff, cutoff, now, limit)
+    .bind(serviceChannel, cutoff, cutoff, now, now, limit)
     .all<RetentionCandidate>();
 
   if (candidates.results.length > 0) {
@@ -1968,12 +2165,13 @@ export async function prepareRetentionAuthorizations(
           `UPDATE artifacts AS a SET state = 'tombstoned', verified_at = ?
           WHERE a.id = ? AND a.bucket_slot = ?
             AND a.state IN ('live', 'quarantined')
+            AND a.superseded_at IS NULL
             AND EXISTS (
               SELECT 1 FROM map_entries me
                WHERE me.id = a.map_entry_id AND me.updated_at <= ?
-                 AND ${noReferencePredicates("a", "me")}
+                 AND ${zeroReferencePredicates("a", "me")}
             )`,
-        ).bind(now, artifact.id, serviceChannel, cutoff, cutoff, now),
+        ).bind(now, artifact.id, serviceChannel, cutoff, cutoff, now, now),
     );
     for (const mapEntryID of new Set(
       candidates.results.map((artifact) => artifact.map_entry_id),
@@ -2006,14 +2204,14 @@ export async function prepareRetentionAuthorizations(
        FROM artifacts a JOIN map_entries me ON me.id = a.map_entry_id
       WHERE a.bucket_slot = ? AND a.state = 'tombstoned'
         AND a.verified_at <= ?
-        AND ${noReferencePredicates("a", "me")}
+        AND ${deletionEligibilityPredicates("a", "me")}
         AND NOT EXISTS (
           SELECT 1 FROM artifact_deletion_leases lease
            WHERE lease.artifact_id = a.id AND lease.expires_at > ?
         )
       ORDER BY a.verified_at ASC, a.id ASC LIMIT ?`,
   )
-    .bind(serviceChannel, cutoff, cutoff, now, now, limit)
+    .bind(serviceChannel, cutoff, now, now, cutoff, now, now, now, limit)
     .all<RetentionCandidate>();
   const authorizationExpiresAt = new Date(
     clock.getTime() + RETENTION_AUTHORIZATION_MILLISECONDS,
@@ -2136,7 +2334,7 @@ export async function claimRetentionDeletion(
               SELECT 1 FROM artifact_deletion_leases lease
                WHERE lease.artifact_id = a.id AND lease.expires_at > ?
             )
-            AND ${noReferencePredicates("a", "me")}`,
+            AND ${deletionEligibilityPredicates("a", "me")}`,
     ).bind(
       leaseID,
       serviceChannel,
@@ -2148,7 +2346,10 @@ export async function claimRetentionDeletion(
       identity.bytes,
       identity.sha256,
       now,
+      now,
+      now,
       shareCutoff,
+      now,
       now,
     ),
   ]);
@@ -2227,7 +2428,7 @@ export async function confirmRetentionDeletion(
           AND EXISTS (
             SELECT 1 FROM map_entries me
              WHERE me.id = a.map_entry_id
-               AND ${noReferencePredicates("a", "me")}
+               AND ${deletionEligibilityPredicates("a", "me")}
           )`,
     ).bind(
       now,
@@ -2239,7 +2440,10 @@ export async function confirmRetentionDeletion(
       identity.leaseId,
       serviceChannel,
       now,
+      now,
+      now,
       shareCutoff,
+      now,
       now,
     ),
     env.DB.prepare(

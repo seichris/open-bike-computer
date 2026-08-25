@@ -91,6 +91,21 @@ production step in
   exact source-artifact lease while downloading, validating, repacking,
   signing, and uploading. Expired leases can be recovered after a crash;
   retries short-circuit once the production artifact is already live.
+- Artifact generations are bounded by an exact compatibility class containing
+  bucket/channel, delivery tier, format, signer ID and fingerprint, canonical
+  reader requirements, and any firmware gate. Producer/build identity is not
+  part of the class. Publishing a verified replacement tombstones older rows
+  in that class; an active download grant or promotion lease delays the
+  transition until maintenance observes expiry. Superseded bytes become
+  deletion-lease eligible after `RETENTION_GRACE_DAYS` even while the map stays
+  in a library, provided a live same-class replacement still exists at
+  authorization, claim, and confirmation.
+- A map may have at most 16 distinct live compatibility classes. The D1 trigger
+  enforces the limit atomically under concurrent publication and the 0008
+  migration refuses an already-over-limit database. Adding a seventeenth class
+  fails closed; never evict a different signer or reader contract implicitly.
+  Retire an obsolete class through a separately reviewed quarantine/retirement
+  operation before publishing its replacement capability set.
 
 Schema changes belong in numbered files under `migrations/` and must be applied
 to staging before production.

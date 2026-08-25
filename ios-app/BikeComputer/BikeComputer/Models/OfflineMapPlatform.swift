@@ -724,6 +724,8 @@ nonisolated enum PausedMapUploadResumePolicy {
         lastTransferOutcome: String,
         lastTransferMapID: String,
         candidateMapID: String,
+        lastTransferArtifactFilename: String? = nil,
+        candidateArtifactFilename: String? = nil,
         lastDeviceState: String?,
         statusMessage: String = ""
     ) -> Bool {
@@ -731,6 +733,12 @@ nonisolated enum PausedMapUploadResumePolicy {
               !lastTransferMapID.isEmpty,
               lastTransferMapID == candidateMapID else {
             return false
+        }
+        if let lastTransferArtifactFilename {
+            guard !lastTransferArtifactFilename.isEmpty,
+                  lastTransferArtifactFilename == candidateArtifactFilename else {
+                return false
+            }
         }
         return lastDeviceState == "paused" ||
             lastDeviceState == "idle" ||

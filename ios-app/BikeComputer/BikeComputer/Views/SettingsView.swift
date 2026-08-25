@@ -1284,6 +1284,14 @@ private struct SavedMapRow: View {
                     .accessibilityLabel("\(displayName): \(status)")
             }
 
+            if let mapEntryID = item.catalogMap?.mapEntryId,
+               let aliasStatus = manager.catalogAliasStatus(for: mapEntryID) {
+                Label(aliasStatus, systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .accessibilityLabel("\(displayName): \(aliasStatus)")
+            }
+
             if item.canRemoveFromMapLibrary {
                 Button("Remove from Map Library", role: .destructive) {
                     finishRenaming()

@@ -19,6 +19,7 @@ import {
   listShares,
   prepareRetentionAuthorizations,
   quarantinePublication,
+  resolveDownloadGrant,
   renewPromotionLease,
   revokeShare,
   sharePreview,
@@ -228,7 +229,8 @@ async function copyFixtureArtifact(
        id, map_entry_id, bucket_slot, object_key, format, media_type,
        filename, byte_count, sha256, manifest_receipt, signed_manifest_receipt,
        signature_key_id, signature_key_sha256, producer_build_sha256,
-       producer_image_digest, reader_requirements_json, required_ios_build,
+       producer_image_digest, reader_requirements_json, generation_class,
+       superseded_at, generation_head, required_ios_build,
        required_ios_git_sha, required_ios_build_sha256,
        required_firmware_version, required_firmware_build,
        required_firmware_git_sha, delivery_tier, state, created_at, verified_at
@@ -236,6 +238,7 @@ async function copyFixtureArtifact(
               byte_count + ?, sha256, manifest_receipt, signed_manifest_receipt,
               signature_key_id, signature_key_sha256, producer_build_sha256,
               producer_image_digest, reader_requirements_json,
+              generation_class, superseded_at, 0,
               required_ios_build, required_ios_git_sha,
               required_ios_build_sha256, required_firmware_version,
               required_firmware_build, required_firmware_git_sha,
@@ -1361,6 +1364,281 @@ describe("catalog library", () => {
   });
 });
 
+describe("bounded artifact generations", () => {
+  it("supersedes one compatibility generation without breaking its active grant", async () => {
+    const source = uniquePublication("generation-supersession");
+    await finalizePublication(
+      env,
+      source,
+      "generation-supersession-source",
+      await sha256Hex(JSON.stringify(source)),
+      null,
+      verifyTestArtifact,
+    );
+    const library = await bootstrapLibrary(env);
+    await attachLibrary(
+      env,
+      source.publicationId,
+      library.libraryId,
+      undefined,
+      "production",
+    );
+    const originalGrant = await createLibraryDownloadGrant(
+      env,
+      library.libraryId,
+      source.mapEntryId,
+      "production",
+      [{ keyId: "prod", keySha256: signerSha }],
+      appIdentity,
+      readerCapabilities,
+    );
+    expect(originalGrant.artifact.artifactId).toBe(
+      source.artifacts[0].artifactId,
+    );
+
+    const replacement = structuredClone(source);
+    replacement.publicationId = "job-generation-supersession-replacement";
+    replacement.artifacts[0].artifactId = fixtureID("artifact");
+    replacement.artifacts[0].objectKey += ".replacement";
+    replacement.artifacts[0].sha256 = "7".repeat(64);
+    replacement.artifacts[0].signedManifestReceipt = "8".repeat(64);
+    replacement.artifacts[0].producerBuildSha256 = "6".repeat(64);
+    replacement.artifacts[0].producerImageDigest = `sha256:${"5".repeat(64)}`;
+    await finalizePublication(
+      env,
+      replacement,
+      "generation-supersession-replacement",
+      await sha256Hex(JSON.stringify(replacement)),
+      null,
+      verifyTestArtifact,
+    );
+
+    expect(
+      await env.DB.prepare(
+        "SELECT state, superseded_at FROM artifacts WHERE id = ?",
+      )
+        .bind(source.artifacts[0].artifactId)
+        .first<{ state: string; superseded_at: string | null }>(),
+    ).toMatchObject({ state: "live" });
+    const protectedGeneration = await env.DB.prepare(
+      "SELECT superseded_at, generation_head FROM artifacts WHERE id = ?",
+    )
+      .bind(source.artifacts[0].artifactId)
+      .first<{ superseded_at: string | null; generation_head: number }>();
+    expect(protectedGeneration?.superseded_at).not.toBeNull();
+    expect(protectedGeneration?.generation_head).toBe(0);
+    const originalGrantToken = new URL(originalGrant.downloadURL).pathname
+      .split("/")
+      .at(-1)!;
+    expect(
+      (await resolveDownloadGrant(env, originalGrantToken, "library")).id,
+    ).toBe(source.artifacts[0].artifactId);
+
+    const afterGrantExpiry = new Date(Date.now() + 16 * 60 * 1000);
+    await prepareRetentionAuthorizations(
+      env,
+      "production",
+      10,
+      afterGrantExpiry,
+    );
+    const superseded = await env.DB.prepare(
+      "SELECT state, superseded_at FROM artifacts WHERE id = ?",
+    )
+      .bind(source.artifacts[0].artifactId)
+      .first<{ state: string; superseded_at: string | null }>();
+    expect(superseded?.state).toBe("tombstoned");
+    expect(superseded?.superseded_at).toBe(protectedGeneration?.superseded_at);
+    expect(
+      (
+        await getLibraryMap(env, library.libraryId, source.mapEntryId)
+      ).artifacts.map((artifact) => artifact.artifactId),
+    ).toEqual([replacement.artifacts[0].artifactId]);
+
+    const afterGrace = new Date(
+      afterGrantExpiry.getTime() + 31 * 24 * 60 * 60 * 1000,
+    );
+    const authorization = (
+      await prepareRetentionAuthorizations(env, "production", 10, afterGrace)
+    ).artifacts.find(
+      (artifact) => artifact.artifactId === source.artifacts[0].artifactId,
+    );
+    expect(authorization).toBeDefined();
+    const claim = await claimRetentionDeletion(
+      env,
+      source.artifacts[0].artifactId,
+      "production",
+      authorization!,
+      afterGrace,
+    );
+    const deletionRaceReplay = structuredClone(source);
+    deletionRaceReplay.publicationId =
+      "job-generation-supersession-deletion-race";
+    await expect(
+      finalizePublication(
+        env,
+        deletionRaceReplay,
+        "generation-supersession-deletion-race",
+        await sha256Hex(JSON.stringify(deletionRaceReplay)),
+        null,
+        verifyTestArtifact,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(
+      await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM publication_events WHERE publication_id = ?",
+      )
+        .bind(deletionRaceReplay.publicationId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 0 });
+    await confirmRetentionDeletion(
+      env,
+      source.artifacts[0].artifactId,
+      "production",
+      { ...claim, confirmedAbsent: true },
+      new Date(afterGrace.getTime() + 60_000),
+    );
+    expect(
+      await env.DB.prepare("SELECT state FROM artifacts WHERE id = ?")
+        .bind(source.artifacts[0].artifactId)
+        .first<{ state: string }>(),
+    ).toMatchObject({ state: "deleted" });
+  });
+
+  it("keeps an active promotion source live until its lease expires", async () => {
+    const source = developmentPublication("generation-promotion-source");
+    await finalizePublication(
+      env,
+      source,
+      "generation-promotion-source",
+      await sha256Hex(JSON.stringify(source)),
+      null,
+      verifyTestArtifact,
+    );
+    const clock = new Date();
+    await createPromotionGrant(env, source.mapEntryId, clock);
+
+    const replacement = structuredClone(source);
+    replacement.publicationId = "job-generation-promotion-replacement";
+    replacement.artifacts[0].artifactId = fixtureID("artifact");
+    replacement.artifacts[0].objectKey += ".replacement";
+    replacement.artifacts[0].sha256 = "4".repeat(64);
+    await finalizePublication(
+      env,
+      replacement,
+      "generation-promotion-replacement",
+      await sha256Hex(JSON.stringify(replacement)),
+      null,
+      verifyTestArtifact,
+    );
+
+    await prepareRetentionAuthorizations(
+      env,
+      "development",
+      10,
+      new Date(clock.getTime() + 16 * 60 * 1000),
+    );
+    expect(
+      await env.DB.prepare("SELECT state FROM artifacts WHERE id = ?")
+        .bind(source.artifacts[0].artifactId)
+        .first<{ state: string }>(),
+    ).toMatchObject({ state: "live" });
+
+    await prepareRetentionAuthorizations(
+      env,
+      "development",
+      10,
+      new Date(clock.getTime() + 61 * 60 * 1000),
+    );
+    expect(
+      await env.DB.prepare("SELECT state FROM artifacts WHERE id = ?")
+        .bind(source.artifacts[0].artifactId)
+        .first<{ state: string }>(),
+    ).toMatchObject({ state: "tombstoned" });
+    expect(
+      await env.DB.prepare("SELECT state FROM artifacts WHERE id = ?")
+        .bind(replacement.artifacts[0].artifactId)
+        .first<{ state: string }>(),
+    ).toMatchObject({ state: "live" });
+  });
+
+  it("atomically caps each map at sixteen live compatibility classes", async () => {
+    const initial = uniquePublication("generation-class-boundary");
+    await finalizePublication(
+      env,
+      initial,
+      "generation-class-boundary-0",
+      await sha256Hex(JSON.stringify(initial)),
+      null,
+      verifyTestArtifact,
+    );
+
+    const classPublication = (index: number) => {
+      const candidate = structuredClone(initial);
+      const classIdentity = index.toString(16).padStart(2, "0").repeat(32);
+      candidate.publicationId = `job-generation-class-boundary-${index}`;
+      candidate.artifacts[0].artifactId = fixtureID("artifact");
+      candidate.artifacts[0].objectKey += `.class-${index}`;
+      candidate.artifacts[0].sha256 = classIdentity;
+      candidate.artifacts[0].signedManifestReceipt = classIdentity;
+      candidate.artifacts[0].signatureKeyId = `class-${index}`;
+      candidate.artifacts[0].signatureKeySha256 = classIdentity;
+      return candidate;
+    };
+
+    for (let index = 1; index < 15; index += 1) {
+      const candidate = classPublication(index);
+      await finalizePublication(
+        env,
+        candidate,
+        `generation-class-boundary-${index}`,
+        await sha256Hex(JSON.stringify(candidate)),
+        null,
+        verifyTestArtifact,
+      );
+    }
+
+    const contenders = [classPublication(15), classPublication(16)];
+    const results = await Promise.allSettled(
+      contenders.map((candidate, index) =>
+        finalizePublication(
+          env,
+          candidate,
+          `generation-class-boundary-contender-${index}`,
+          "f".repeat(64),
+          null,
+          verifyTestArtifact,
+        ),
+      ),
+    );
+    expect(
+      results.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    const rejected = results.find((result) => result.status === "rejected");
+    if (rejected?.status !== "rejected") {
+      throw new Error("generation class quota result is invalid");
+    }
+    expect(rejected.reason).toMatchObject({ status: 409 });
+    expect(
+      await env.DB.prepare(
+        `SELECT COUNT(DISTINCT generation_class) AS count
+           FROM artifacts WHERE map_entry_id = ? AND state = 'live'`,
+      )
+        .bind(initial.mapEntryId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 16 });
+
+    const library = await bootstrapLibrary(env);
+    const attached = await attachLibrary(
+      env,
+      initial.publicationId,
+      library.libraryId,
+      undefined,
+      "production",
+    );
+    expect(attached.artifacts).toHaveLength(16);
+  });
+});
+
 describe("validation", () => {
   it("normalizes names and rejects control characters", () => {
     expect(normalizeAlias("  Cafe\u0301 route  ")).toBe("Café route");
@@ -1593,6 +1871,11 @@ describe("validation", () => {
       env.DB.prepare("DELETE FROM artifacts WHERE id = ?").bind(
         exact.artifacts[0].artifactId,
       ),
+      env.DB.prepare(
+        `UPDATE artifacts
+            SET state = 'live', superseded_at = NULL, generation_head = 1
+          WHERE id = ?`,
+      ).bind(artifactID),
     ]);
   });
 
