@@ -149,6 +149,247 @@ nonisolated struct OfflineMapCatalogCredential: Codable, Equatable {
     let credential: String
 }
 
+nonisolated enum OfflineMapCatalogAvailability: Equatable, Sendable {
+    case available
+    case awaitingProductionPromotion
+    case incompatible
+    case unavailable
+
+    var canDownload: Bool { self == .available }
+
+    var statusText: String? {
+        switch self {
+        case .available:
+            return nil
+        case .awaitingProductionPromotion:
+            return "Awaiting production promotion"
+        case .incompatible:
+            return "Not compatible with this app build"
+        case .unavailable:
+            return "Map is unavailable"
+        }
+    }
+
+    var claimActionTitle: String {
+        canDownload ? "Add and Download" : "Add to Library"
+    }
+
+    var postClaimStatusMessage: String {
+        switch self {
+        case .available:
+            return "shared map added"
+        case .awaitingProductionPromotion:
+            return "shared map added; awaiting production promotion"
+        case .incompatible:
+            return "shared map added; no compatible download is available"
+        case .unavailable:
+            return "shared map added; map is unavailable"
+        }
+    }
+}
+
+nonisolated enum OfflineMapCatalogAvailabilityPolicy {
+    static func availability(
+        for map: OfflineMapCatalogMap,
+        channel: String,
+        trustStore: BikeMapStreamTrustStore,
+        readerCapabilities: OfflineMapReaderCapabilities = .current
+    ) -> OfflineMapCatalogAvailability {
+        let deliveryState = map.deliveryState.lowercased()
+        if deliveryState == "blocked" || deliveryState == "tombstoned" {
+            return .unavailable
+        }
+
+        if map.artifacts.contains(where: {
+            isCompatible(
+                $0,
+                map: map,
+                channel: channel,
+                trustStore: trustStore,
+                readerCapabilities: readerCapabilities
+            )
+        }) {
+            return .available
+        }
+
+        if channel == "production" {
+            let hasProductionStream = map.artifacts.contains {
+                $0.platformArtifact.isBikeMapStream &&
+                    $0.deliveryTier.lowercased() == "production"
+            }
+            if !hasProductionStream ||
+                deliveryState == "development" ||
+                deliveryState == "promotion_pending" {
+                return .awaitingProductionPromotion
+            }
+        }
+        return .incompatible
+    }
+
+    static func availability(
+        for preview: OfflineMapSharePreview,
+        channel: String
+    ) -> OfflineMapCatalogAvailability {
+        switch preview.deliveryState.lowercased() {
+        case "blocked", "tombstoned":
+            return .unavailable
+        case "development", "promotion_pending":
+            return channel == "production" ? .awaitingProductionPromotion : .available
+        case "production":
+            return .available
+        default:
+            return .incompatible
+        }
+    }
+
+    private static func isCompatible(
+        _ artifact: OfflineMapCatalogArtifact,
+        map: OfflineMapCatalogMap,
+        channel: String,
+        trustStore: BikeMapStreamTrustStore,
+        readerCapabilities: OfflineMapReaderCapabilities
+    ) -> Bool {
+        guard artifact.platformArtifact.isBikeMapStream else { return false }
+        let tier = artifact.deliveryTier.lowercased()
+        guard tier == "production" || (channel == "development" && tier == "development"),
+              let keyID = artifact.signatureKeyId,
+              let keySHA256 = artifact.signatureKeySha256,
+              trustStore.capability(for: keyID) == "\(keyID)=\(keySHA256)",
+              OfflineMapReaderCompatibilityPolicy.isCompatible(
+                artifact: artifact,
+                map: map,
+                capabilities: readerCapabilities
+              ) else {
+            return false
+        }
+        return true
+    }
+}
+
+nonisolated enum OfflineMapCatalogLocalArtifactPolicy {
+    static func filename(mapEntryID: String, fileExtension: String) -> String? {
+        guard mapEntryID.range(
+            of: "^map_v1_[A-Za-z0-9_-]{43}$",
+            options: .regularExpression
+        ) != nil,
+        fileExtension.range(
+            of: "^[a-z0-9]{1,8}$",
+            options: .regularExpression
+        ) != nil else {
+            return nil
+        }
+        return "catalog-\(mapEntryID).\(fileExtension)"
+    }
+}
+
+@MainActor
+enum OfflineMapCatalogInventorySyncPolicy {
+    static func bestEffortCredential(
+        _ load: () async throws -> OfflineMapCatalogCredential?
+    ) async -> OfflineMapCatalogCredential? {
+        do {
+            return try await load()
+        } catch {
+            return nil
+        }
+    }
+}
+
+nonisolated struct OfflineMapReaderCapabilities: Codable, Equatable, Sendable {
+    struct StreamFormat: Codable, Equatable, Sendable {
+        let format: String
+        let manifestSchemaVersions: [Int]
+    }
+
+    struct Renderer: Codable, Equatable, Sendable {
+        let renderer: String
+        let formatVersions: [Int]
+        let features: [String]
+    }
+
+    let schemaVersion: Int
+    let streamFormats: [StreamFormat]
+    let renderers: [Renderer]
+
+    static let current = Self(
+        schemaVersion: 1,
+        streamFormats: [
+            StreamFormat(
+                format: OfflineMapArtifact.bikeMapStreamFormat,
+                manifestSchemaVersions: [1]
+            ),
+        ],
+        renderers: [
+            Renderer(
+                renderer: "esp32-fmb",
+                formatVersions: [1, 2, 3],
+                features: ["3d-buildings", "street-labels"]
+            ),
+        ]
+    )
+}
+
+nonisolated struct OfflineMapReaderRequirements: Codable, Equatable, Sendable {
+    let schemaVersion: Int
+    let streamFormat: String
+    let manifestSchemaVersion: Int
+    let renderer: String
+    let rendererFormatVersion: Int
+    let requiredFeatures: [String]
+}
+
+nonisolated enum OfflineMapReaderCompatibilityPolicy {
+    static func isCompatible(
+        artifact: OfflineMapCatalogArtifact,
+        map: OfflineMapCatalogMap,
+        capabilities: OfflineMapReaderCapabilities = .current
+    ) -> Bool {
+        guard let requirements = artifact.readerRequirements,
+              requirements.streamFormat == artifact.format,
+              requirements.renderer == map.renderer,
+              requirements.rendererFormatVersion == map.rendererFormatVersion,
+              Set(requirements.requiredFeatures) == Set(map.features) else {
+            return false
+        }
+        return supports(requirements, capabilities: capabilities)
+    }
+
+    static func supports(
+        _ requirements: OfflineMapReaderRequirements,
+        capabilities: OfflineMapReaderCapabilities = .current
+    ) -> Bool {
+        guard capabilities.schemaVersion == 1,
+              requirements.schemaVersion == 1,
+              requirements.manifestSchemaVersion > 0,
+              requirements.rendererFormatVersion > 0,
+              isUniqueBounded(requirements.requiredFeatures, allowsEmpty: true) else {
+            return false
+        }
+        let supportsStream = capabilities.streamFormats.contains { stream in
+            stream.format == requirements.streamFormat &&
+                isUniqueBounded(stream.manifestSchemaVersions) &&
+                stream.manifestSchemaVersions.contains(requirements.manifestSchemaVersion)
+        }
+        guard supportsStream else { return false }
+        return capabilities.renderers.contains { renderer in
+            renderer.renderer == requirements.renderer &&
+                isUniqueBounded(renderer.formatVersions) &&
+                renderer.formatVersions.contains(requirements.rendererFormatVersion) &&
+                isUniqueBounded(renderer.features) &&
+                Set(requirements.requiredFeatures).isSubset(of: Set(renderer.features))
+        }
+    }
+
+    private static func isUniqueBounded<T: Hashable>(
+        _ values: [T],
+        allowsEmpty: Bool = false
+    ) -> Bool {
+        (allowsEmpty || !values.isEmpty) &&
+            values.count <= 32 &&
+            Set(values).count == values.count
+    }
+}
+
 nonisolated final class OfflineMapCatalogCredentialStore: @unchecked Sendable {
     private static let service = "vc.8o.bicino.map-library"
     private static let productionAccount = "shared-library-v1"
@@ -297,6 +538,7 @@ nonisolated struct OfflineMapCatalogArtifact: Codable, Equatable, Sendable {
     let requiredFirmwareBuild: UInt32?
     let requiredFirmwareGitSha: String?
     let deliveryTier: String
+    var readerRequirements: OfflineMapReaderRequirements? = nil
 
     var platformArtifact: OfflineMapArtifact {
         OfflineMapArtifact(
@@ -667,6 +909,7 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
             body: DownloadGrantRequest(
                 channel: channel,
                 acceptedSigners: acceptedSigners,
+                readerCapabilities: .current,
                 appIdentity: AppIdentityRequest(
                     build: appIdentity.build,
                     gitSha: appIdentity.gitSha,
@@ -778,5 +1021,6 @@ nonisolated private struct AppIdentityRequest: Encodable {
 nonisolated private struct DownloadGrantRequest: Encodable {
     let channel: String
     let acceptedSigners: [AcceptedSigner]
+    let readerCapabilities: OfflineMapReaderCapabilities
     let appIdentity: AppIdentityRequest
 }

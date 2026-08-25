@@ -406,8 +406,6 @@ def promote_catalog_map(
             )
         heartbeat.check()
         delivery = catalog_delivery_requirements("production")
-        if not delivery:
-            raise CatalogPromotionError("production catalog delivery identity is not configured")
         publication_id = f"promotion:production:{stream.sha256}"
         publication = {
             "publicationId": publication_id,
@@ -444,6 +442,14 @@ def promote_catalog_map(
                     "signatureKeySha256": stream_record.signature_key_sha256,
                     "producerBuildSha256": stream_record.producer_build_sha256,
                     "producerImageDigest": stream_record.producer_image_digest,
+                    "readerRequirements": {
+                        "schemaVersion": 1,
+                        "streamFormat": BIKE_MAP_STREAM_FORMAT,
+                        "manifestSchemaVersion": 1,
+                        "renderer": map_value.get("renderer"),
+                        "rendererFormatVersion": format_version,
+                        "requiredFeatures": features,
+                    },
                     **delivery,
                     "deliveryTier": "production",
                 }

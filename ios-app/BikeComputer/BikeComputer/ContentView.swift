@@ -338,7 +338,11 @@ struct ContentView: View {
                 set: { if !$0 { offlineMapManager.dismissPendingShare() } }
             )
         ) {
-            Button("Add and Download") {
+            Button(
+                offlineMapManager.pendingSharePreview.map {
+                    offlineMapManager.catalogAvailability(for: $0).claimActionTitle
+                } ?? "Add Map"
+            ) {
                 offlineMapManager.claimPendingShare()
             }
             Button("Cancel", role: .cancel) {
@@ -346,12 +350,17 @@ struct ContentView: View {
             }
         } message: {
             if let preview = offlineMapManager.pendingSharePreview {
-                Text(
+                let availability = offlineMapManager.catalogAvailability(for: preview)
+                let summary =
                     "\(preview.title) · \(preview.features.joined(separator: ", ")) · " +
                     ByteCountFormatter.string(
                         fromByteCount: preview.approximateBytes,
                         countStyle: .file
                     )
+                Text(
+                    [summary, availability.statusText]
+                        .compactMap { $0 }
+                        .joined(separator: "\n")
                 )
             }
         }

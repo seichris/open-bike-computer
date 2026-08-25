@@ -238,6 +238,9 @@ describe("worker public surfaces", () => {
   it("applies endpoint-specific public limits with library and client keys", async () => {
     const library = await bootstrapCredential();
     const authorization = { authorization: `Bearer ${library.credential}` };
+    const credentialHash = hex(
+      await crypto.subtle.digest("SHA-256", encoder.encode(library.credential)),
+    );
     const mapID = `map_v1_${"m".repeat(43)}`;
     const endpointCases: Array<{
       request: Request;
@@ -274,7 +277,7 @@ describe("worker public surfaces", () => {
           { method: "POST", headers: authorization },
         ),
         binding: "LINK_CODE_CLAIM_RATE_LIMITER",
-        expectedKey: `link-code-claim:${library.libraryId}`,
+        expectedKey: `link-code-claim:${credentialHash}`,
       },
       {
         request: new Request(

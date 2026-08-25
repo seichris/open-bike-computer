@@ -1,7 +1,14 @@
-import { HttpError, normalizeAlias, randomToken, sha256Hex } from "./security";
+import {
+  HttpError,
+  normalizeAlias,
+  randomToken,
+  requireExactKeys,
+  sha256Hex,
+} from "./security";
 import { verifyArtifactObject } from "./r2";
 import type { ArtifactRow, Channel, Env, MapEntryRow } from "./types";
-import type { PublicationInput } from "./validation";
+import type { PublicationArtifactInput, PublicationInput } from "./validation";
+import type { ReaderRequirements } from "./validation";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -18,6 +25,7 @@ const MAX_ACTIVE_LINK_CODES = 5;
 const MAX_TOTAL_LINK_CODES = 50;
 const MAX_SHARE_CLAIMS = 500;
 const MAX_ACTIVE_LIBRARY_CREDENTIALS = 8;
+const MAX_LINKED_LIBRARY_PRINCIPALS = 8;
 const MAX_RETENTION_BATCH = 10;
 const RETENTION_AUTHORIZATION_MILLISECONDS = 15 * 60 * 1000;
 const PROMOTION_LEASE_MILLISECONDS = 60 * 60 * 1000;
@@ -77,9 +85,7 @@ export interface PublicArtifact {
   signatureKeySha256: string | null;
   producerBuildSha256: string | null;
   producerImageDigest: string | null;
-  requiredIosBuild: string | null;
-  requiredIosGitSha: string | null;
-  requiredIosBuildSha256: string | null;
+  readerRequirements: ReaderRequirements | null;
   requiredFirmwareVersion: string | null;
   requiredFirmwareBuild: number | null;
   requiredFirmwareGitSha: string | null;
@@ -115,6 +121,12 @@ interface LibraryMapRow extends MapEntryRow {
   library_map_updated_at: string;
 }
 
+interface ArtifactWithReaderDescriptor extends ArtifactRow {
+  map_renderer?: string;
+  map_renderer_format_version?: number;
+  map_features_json?: string;
+}
+
 function parseJSON<T>(value: string | null, fallback: T): T {
   if (value === null) return fallback;
   try {
@@ -124,7 +136,34 @@ function parseJSON<T>(value: string | null, fallback: T): T {
   }
 }
 
-function publicArtifact(row: ArtifactRow): PublicArtifact {
+function readerRequirementsForArtifact(
+  row: ArtifactWithReaderDescriptor,
+): ReaderRequirements | null {
+  const stored = parseJSON<ReaderRequirements | null>(
+    row.reader_requirements_json,
+    null,
+  );
+  if (stored !== null) return stored;
+  if (
+    row.format !== "bike-map-stream-v1" ||
+    row.map_renderer === undefined ||
+    row.map_renderer_format_version === undefined ||
+    row.map_features_json === undefined
+  ) {
+    return null;
+  }
+  return {
+    schemaVersion: 1,
+    streamFormat: "bike-map-stream-v1",
+    manifestSchemaVersion: 1,
+    renderer: row.map_renderer,
+    rendererFormatVersion: row.map_renderer_format_version,
+    requiredFeatures: parseJSON<string[]>(row.map_features_json, []),
+  };
+}
+
+function publicArtifact(row: ArtifactWithReaderDescriptor): PublicArtifact {
+  const readerRequirements = readerRequirementsForArtifact(row);
   return {
     artifactId: row.id,
     objectKey: row.object_key,
@@ -139,9 +178,7 @@ function publicArtifact(row: ArtifactRow): PublicArtifact {
     signatureKeySha256: row.signature_key_sha256,
     producerBuildSha256: row.producer_build_sha256,
     producerImageDigest: row.producer_image_digest,
-    requiredIosBuild: row.required_ios_build,
-    requiredIosGitSha: row.required_ios_git_sha,
-    requiredIosBuildSha256: row.required_ios_build_sha256,
+    readerRequirements,
     requiredFirmwareVersion: row.required_firmware_version,
     requiredFirmwareBuild: row.required_firmware_build,
     requiredFirmwareGitSha: row.required_firmware_git_sha,
@@ -158,12 +195,16 @@ async function artifactsForMaps(
   if (mapEntryIDs.length === 0) return artifacts;
   const placeholders = mapEntryIDs.map(() => "?").join(", ");
   const result = await env.DB.prepare(
-    `SELECT * FROM artifacts
-      WHERE map_entry_id IN (${placeholders}) AND state = 'live'
-      ORDER BY map_entry_id ASC, delivery_tier DESC, format ASC, created_at DESC`,
+    `SELECT artifacts.*, map_entries.renderer AS map_renderer,
+            map_entries.renderer_format_version AS map_renderer_format_version,
+            map_entries.features_json AS map_features_json
+       FROM artifacts JOIN map_entries ON map_entries.id = artifacts.map_entry_id
+      WHERE artifacts.map_entry_id IN (${placeholders}) AND artifacts.state = 'live'
+      ORDER BY artifacts.map_entry_id ASC, artifacts.delivery_tier DESC,
+               artifacts.format ASC, artifacts.created_at DESC`,
   )
     .bind(...mapEntryIDs)
-    .all<ArtifactRow>();
+    .all<ArtifactWithReaderDescriptor>();
   for (const row of result.results) {
     artifacts.get(row.map_entry_id)?.push(publicArtifact(row));
   }
@@ -374,6 +415,54 @@ export async function updateAlias(
   return getLibraryMap(env, libraryID, mapEntryID);
 }
 
+function artifactReaderRequirementsJSON(
+  artifact: PublicationArtifactInput,
+): string | null {
+  return artifact.readerRequirements === null ||
+    artifact.readerRequirements === undefined
+    ? null
+    : JSON.stringify(artifact.readerRequirements);
+}
+
+function artifactMatchesPublication(
+  existing: ArtifactRow,
+  mapEntryID: string,
+  artifact: PublicationArtifactInput,
+): boolean {
+  return (
+    existing.id === artifact.artifactId &&
+    existing.map_entry_id === mapEntryID &&
+    existing.bucket_slot === artifact.bucketSlot &&
+    existing.object_key === artifact.objectKey &&
+    existing.format === artifact.format &&
+    existing.media_type === artifact.mediaType &&
+    existing.filename === artifact.filename &&
+    existing.sha256 === artifact.sha256 &&
+    existing.byte_count === artifact.bytes &&
+    existing.manifest_receipt === (artifact.manifestReceipt ?? null) &&
+    existing.signed_manifest_receipt ===
+      (artifact.signedManifestReceipt ?? null) &&
+    existing.signature_key_id === (artifact.signatureKeyId ?? null) &&
+    existing.signature_key_sha256 === (artifact.signatureKeySha256 ?? null) &&
+    existing.producer_build_sha256 === (artifact.producerBuildSha256 ?? null) &&
+    existing.producer_image_digest === (artifact.producerImageDigest ?? null) &&
+    existing.reader_requirements_json ===
+      artifactReaderRequirementsJSON(artifact) &&
+    existing.required_ios_build === (artifact.requiredIosBuild ?? null) &&
+    existing.required_ios_git_sha === (artifact.requiredIosGitSha ?? null) &&
+    existing.required_ios_build_sha256 ===
+      (artifact.requiredIosBuildSha256 ?? null) &&
+    existing.required_firmware_version ===
+      (artifact.requiredFirmwareVersion ?? null) &&
+    existing.required_firmware_build ===
+      (artifact.requiredFirmwareBuild ?? null) &&
+    existing.required_firmware_git_sha ===
+      (artifact.requiredFirmwareGitSha ?? null) &&
+    existing.delivery_tier === artifact.deliveryTier &&
+    existing.state === "live"
+  );
+}
+
 export async function finalizePublication(
   env: Env,
   publication: PublicationInput,
@@ -489,6 +578,7 @@ export async function finalizePublication(
       signature_key_sha256: artifact.signatureKeySha256 ?? null,
       producer_build_sha256: artifact.producerBuildSha256 ?? null,
       producer_image_digest: artifact.producerImageDigest ?? null,
+      reader_requirements_json: artifactReaderRequirementsJSON(artifact),
       required_ios_build: artifact.requiredIosBuild ?? null,
       required_ios_git_sha: artifact.requiredIosGitSha ?? null,
       required_ios_build_sha256: artifact.requiredIosBuildSha256 ?? null,
@@ -509,41 +599,11 @@ export async function finalizePublication(
       .first<ArtifactRow>();
     if (
       existingArtifact &&
-      (existingArtifact.id !== artifact.artifactId ||
-        existingArtifact.map_entry_id !== publication.mapEntryId ||
-        existingArtifact.bucket_slot !== artifact.bucketSlot ||
-        existingArtifact.object_key !== artifact.objectKey ||
-        existingArtifact.format !== artifact.format ||
-        existingArtifact.media_type !== artifact.mediaType ||
-        existingArtifact.filename !== artifact.filename ||
-        existingArtifact.sha256 !== artifact.sha256 ||
-        existingArtifact.byte_count !== artifact.bytes ||
-        existingArtifact.manifest_receipt !==
-          (artifact.manifestReceipt ?? null) ||
-        existingArtifact.signed_manifest_receipt !==
-          (artifact.signedManifestReceipt ?? null) ||
-        existingArtifact.signature_key_id !==
-          (artifact.signatureKeyId ?? null) ||
-        existingArtifact.signature_key_sha256 !==
-          (artifact.signatureKeySha256 ?? null) ||
-        existingArtifact.producer_build_sha256 !==
-          (artifact.producerBuildSha256 ?? null) ||
-        existingArtifact.producer_image_digest !==
-          (artifact.producerImageDigest ?? null) ||
-        existingArtifact.required_ios_build !==
-          (artifact.requiredIosBuild ?? null) ||
-        existingArtifact.required_ios_git_sha !==
-          (artifact.requiredIosGitSha ?? null) ||
-        existingArtifact.required_ios_build_sha256 !==
-          (artifact.requiredIosBuildSha256 ?? null) ||
-        existingArtifact.required_firmware_version !==
-          (artifact.requiredFirmwareVersion ?? null) ||
-        existingArtifact.required_firmware_build !==
-          (artifact.requiredFirmwareBuild ?? null) ||
-        existingArtifact.required_firmware_git_sha !==
-          (artifact.requiredFirmwareGitSha ?? null) ||
-        existingArtifact.delivery_tier !== artifact.deliveryTier ||
-        existingArtifact.state !== "live")
+      !artifactMatchesPublication(
+        existingArtifact,
+        publication.mapEntryId,
+        artifact,
+      )
     ) {
       throw new HttpError(409, "artifact identity conflict");
     }
@@ -600,11 +660,12 @@ export async function finalizePublication(
           id, map_entry_id, bucket_slot, object_key, format, media_type,
           filename, byte_count, sha256, manifest_receipt, signed_manifest_receipt,
           signature_key_id, signature_key_sha256, producer_build_sha256,
-          producer_image_digest, required_ios_build, required_ios_git_sha,
+          producer_image_digest, reader_requirements_json,
+          required_ios_build, required_ios_git_sha,
           required_ios_build_sha256, required_firmware_version,
           required_firmware_build, required_firmware_git_sha,
           delivery_tier, state, created_at, verified_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ?)`,
       ).bind(
         artifact.artifactId,
         publication.mapEntryId,
@@ -621,6 +682,7 @@ export async function finalizePublication(
         artifact.signatureKeySha256 ?? null,
         artifact.producerBuildSha256 ?? null,
         artifact.producerImageDigest ?? null,
+        artifactReaderRequirementsJSON(artifact),
         artifact.requiredIosBuild ?? null,
         artifact.requiredIosGitSha ?? null,
         artifact.requiredIosBuildSha256 ?? null,
@@ -699,6 +761,23 @@ export async function finalizePublication(
         state: replay.state,
         replayed: true,
       };
+    }
+    for (const artifact of publication.artifacts) {
+      const conflictingArtifact = await env.DB.prepare(
+        "SELECT * FROM artifacts WHERE id = ? OR (bucket_slot = ? AND object_key = ?)",
+      )
+        .bind(artifact.artifactId, artifact.bucketSlot, artifact.objectKey)
+        .first<ArtifactRow>();
+      if (
+        conflictingArtifact &&
+        !artifactMatchesPublication(
+          conflictingArtifact,
+          publication.mapEntryId,
+          artifact,
+        )
+      ) {
+        throw new HttpError(409, "artifact identity conflict");
+      }
     }
     if (promotionLeaseID !== null) {
       const lease = await env.DB.prepare(
@@ -1242,6 +1321,144 @@ interface AppIdentity {
   buildSha256: string;
 }
 
+interface ReaderCapabilities {
+  schemaVersion: 1;
+  streamFormats: Array<{
+    format: string;
+    manifestSchemaVersions: number[];
+  }>;
+  renderers: Array<{
+    renderer: string;
+    formatVersions: number[];
+    features: string[];
+  }>;
+}
+
+const READER_IDENTIFIER = /^[a-z0-9._-]{1,64}$/;
+
+function readerVersionArray(value: unknown, field: string): number[] {
+  if (
+    !Array.isArray(value) ||
+    value.length < 1 ||
+    value.length > 32 ||
+    value.some(
+      (version) =>
+        !Number.isSafeInteger(version) ||
+        Number(version) < 1 ||
+        Number(version) > 255,
+    ) ||
+    new Set(value).size !== value.length
+  ) {
+    throw new HttpError(400, `${field} are invalid`);
+  }
+  return value.map(Number);
+}
+
+function parseReaderCapabilities(value: unknown): ReaderCapabilities {
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    throw new HttpError(400, "readerCapabilities are invalid");
+  }
+  const capabilities = value as Record<string, unknown>;
+  requireExactKeys(capabilities, [
+    "schemaVersion",
+    "streamFormats",
+    "renderers",
+  ]);
+  if (
+    capabilities.schemaVersion !== 1 ||
+    !Array.isArray(capabilities.streamFormats) ||
+    capabilities.streamFormats.length < 1 ||
+    capabilities.streamFormats.length > 16 ||
+    !Array.isArray(capabilities.renderers) ||
+    capabilities.renderers.length < 1 ||
+    capabilities.renderers.length > 16
+  ) {
+    throw new HttpError(400, "readerCapabilities are invalid");
+  }
+  const streamFormats = capabilities.streamFormats.map((raw) => {
+    if (raw === null || Array.isArray(raw) || typeof raw !== "object") {
+      throw new HttpError(400, "readerCapabilities streamFormats are invalid");
+    }
+    const stream = raw as Record<string, unknown>;
+    requireExactKeys(stream, ["format", "manifestSchemaVersions"]);
+    if (
+      typeof stream.format !== "string" ||
+      !READER_IDENTIFIER.test(stream.format)
+    ) {
+      throw new HttpError(400, "readerCapabilities streamFormats are invalid");
+    }
+    return {
+      format: stream.format,
+      manifestSchemaVersions: readerVersionArray(
+        stream.manifestSchemaVersions,
+        "readerCapabilities manifestSchemaVersions",
+      ),
+    };
+  });
+  const renderers = capabilities.renderers.map((raw) => {
+    if (raw === null || Array.isArray(raw) || typeof raw !== "object") {
+      throw new HttpError(400, "readerCapabilities renderers are invalid");
+    }
+    const renderer = raw as Record<string, unknown>;
+    requireExactKeys(renderer, ["renderer", "formatVersions", "features"]);
+    if (
+      typeof renderer.renderer !== "string" ||
+      !READER_IDENTIFIER.test(renderer.renderer) ||
+      !Array.isArray(renderer.features) ||
+      renderer.features.length > 32 ||
+      renderer.features.some(
+        (feature) =>
+          typeof feature !== "string" || !READER_IDENTIFIER.test(feature),
+      ) ||
+      new Set(renderer.features).size !== renderer.features.length
+    ) {
+      throw new HttpError(400, "readerCapabilities renderers are invalid");
+    }
+    return {
+      renderer: renderer.renderer,
+      formatVersions: readerVersionArray(
+        renderer.formatVersions,
+        "readerCapabilities formatVersions",
+      ),
+      features: renderer.features as string[],
+    };
+  });
+  if (
+    new Set(streamFormats.map((stream) => stream.format)).size !==
+      streamFormats.length ||
+    new Set(renderers.map((renderer) => renderer.renderer)).size !==
+      renderers.length
+  ) {
+    throw new HttpError(400, "readerCapabilities contain duplicates");
+  }
+  return { schemaVersion: 1, streamFormats, renderers };
+}
+
+function readerCanUse(
+  capabilities: ReaderCapabilities,
+  requirements: ReaderRequirements,
+): boolean {
+  if (requirements.schemaVersion !== capabilities.schemaVersion) return false;
+  const stream = capabilities.streamFormats.find(
+    (candidate) => candidate.format === requirements.streamFormat,
+  );
+  if (
+    !stream?.manifestSchemaVersions.includes(requirements.manifestSchemaVersion)
+  ) {
+    return false;
+  }
+  const renderer = capabilities.renderers.find(
+    (candidate) => candidate.renderer === requirements.renderer,
+  );
+  return (
+    renderer?.formatVersions.includes(requirements.rendererFormatVersion) ===
+      true &&
+    requirements.requiredFeatures.every((feature) =>
+      renderer.features.includes(feature),
+    )
+  );
+}
+
 export async function createLibraryDownloadGrant(
   env: Env,
   libraryID: string,
@@ -1249,6 +1466,7 @@ export async function createLibraryDownloadGrant(
   channel: Channel,
   acceptedSignersValue: unknown,
   appIdentityValue: unknown,
+  readerCapabilitiesValue: unknown,
 ): Promise<{
   downloadURL: string;
   expiresAt: string;
@@ -1295,16 +1513,24 @@ export async function createLibraryDownloadGrant(
   ) {
     throw new HttpError(400, "appIdentity is invalid");
   }
+  // The build tuple is retained in the signed request as audit context. It is
+  // deliberately not an immutable artifact requirement or compatibility key.
+  const readerCapabilities = parseReaderCapabilities(readerCapabilitiesValue);
+  void appIdentity;
   const tiers =
     channel === "production" ? ["production"] : ["development", "production"];
   const result = await env.DB.prepare(
-    `SELECT * FROM artifacts
-      WHERE map_entry_id = ? AND state = 'live' AND format = 'bike-map-stream-v1'
-        AND delivery_tier IN (?, ?)
-      ORDER BY CASE delivery_tier WHEN ? THEN 0 ELSE 1 END, created_at DESC`,
+    `SELECT artifacts.*, map_entries.renderer AS map_renderer,
+            map_entries.renderer_format_version AS map_renderer_format_version,
+            map_entries.features_json AS map_features_json
+       FROM artifacts JOIN map_entries ON map_entries.id = artifacts.map_entry_id
+      WHERE artifacts.map_entry_id = ? AND artifacts.state = 'live'
+        AND artifacts.delivery_tier IN (?, ?)
+      ORDER BY CASE artifacts.delivery_tier WHEN ? THEN 0 ELSE 1 END,
+               artifacts.created_at DESC`,
   )
     .bind(mapEntryID, tiers[0], tiers[1] ?? tiers[0], tiers[0])
-    .all<ArtifactRow>();
+    .all<ArtifactWithReaderDescriptor>();
   const artifact = result.results.find((candidate) => {
     const signerAccepted = acceptedSigners.some(
       (signer) =>
@@ -1312,17 +1538,13 @@ export async function createLibraryDownloadGrant(
         signer.keySha256 === candidate.signature_key_sha256,
     );
     if (!signerAccepted) return false;
-    if (candidate.required_ios_build === null) {
-      return channel === "development";
-    }
+    const requirements = readerRequirementsForArtifact(candidate);
     return (
-      candidate.required_ios_build === appIdentity.build &&
-      candidate.required_ios_git_sha === appIdentity.gitSha &&
-      candidate.required_ios_build_sha256 === appIdentity.buildSha256
+      requirements !== null && readerCanUse(readerCapabilities, requirements)
     );
   });
   if (!artifact) {
-    if (channel === "production")
+    if (channel === "production" && result.results.length === 0)
       throw new HttpError(409, "production promotion required");
     throw new HttpError(409, "no compatible artifact is available");
   }
@@ -1349,11 +1571,6 @@ export async function createLibraryDownloadGrant(
     ),
   ]);
   const publicValue = publicArtifact(artifact);
-  if (publicValue.requiredIosBuild === null && channel === "development") {
-    publicValue.requiredIosBuild = appIdentity.build as string;
-    publicValue.requiredIosGitSha = appIdentity.gitSha as string;
-    publicValue.requiredIosBuildSha256 = appIdentity.buildSha256 as string;
-  }
   return {
     downloadURL: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/v1/downloads/${grant}`,
     expiresAt: expires.toISOString(),
@@ -2182,6 +2399,10 @@ export async function claimLinkCode(
           AND (
             SELECT COUNT(*) FROM library_credentials
              WHERE library_id IN (?, ?) AND revoked_at IS NULL
+          ) <= ?
+          AND (
+            SELECT SUM(merge_principal_count) FROM libraries
+             WHERE id IN (?, ?) AND revoked_at IS NULL
           ) <= ?`,
     ).bind(
       now,
@@ -2215,6 +2436,27 @@ export async function claimLinkCode(
       row.source_library_id,
       targetLibraryID,
       MAX_ACTIVE_LIBRARY_CREDENTIALS,
+      row.source_library_id,
+      targetLibraryID,
+      MAX_LINKED_LIBRARY_PRINCIPALS,
+    ),
+    env.DB.prepare(
+      `UPDATE libraries
+          SET merge_principal_count = (
+            SELECT SUM(merge_principal_count) FROM libraries
+             WHERE id IN (?, ?)
+          ), updated_at = ?
+        WHERE id = ? AND EXISTS (
+          SELECT 1 FROM linked_library_codes
+           WHERE code_hash = ? AND claim_credential_hash = ?
+        )`,
+    ).bind(
+      row.source_library_id,
+      targetLibraryID,
+      now,
+      row.source_library_id,
+      codeHash,
+      targetCredentialHash,
     ),
     env.DB.prepare(
       `INSERT OR IGNORE INTO library_maps(
@@ -2402,7 +2644,10 @@ export async function claimLinkCode(
            )) AS share_claim_count,
            (SELECT COUNT(*) FROM library_credentials
              WHERE library_id IN (?, ?) AND revoked_at IS NULL
-           ) AS active_credential_count`,
+           ) AS active_credential_count,
+           (SELECT SUM(merge_principal_count) FROM libraries
+             WHERE id IN (?, ?) AND revoked_at IS NULL
+           ) AS merge_principal_count`,
       )
         .bind(
           row.source_library_id,
@@ -2421,6 +2666,8 @@ export async function claimLinkCode(
           targetLibraryID,
           row.source_library_id,
           targetLibraryID,
+          row.source_library_id,
+          targetLibraryID,
         )
         .first<{
           map_count: number;
@@ -2430,6 +2677,7 @@ export async function claimLinkCode(
           active_link_code_count: number;
           share_claim_count: number;
           active_credential_count: number;
+          merge_principal_count: number;
         }>();
       if (
         quota &&
@@ -2439,7 +2687,8 @@ export async function claimLinkCode(
           quota.total_link_code_count > MAX_TOTAL_LINK_CODES ||
           quota.active_link_code_count > MAX_ACTIVE_LINK_CODES + 1 ||
           quota.share_claim_count > MAX_SHARE_CLAIMS ||
-          quota.active_credential_count > MAX_ACTIVE_LIBRARY_CREDENTIALS)
+          quota.active_credential_count > MAX_ACTIVE_LIBRARY_CREDENTIALS ||
+          quota.merge_principal_count > MAX_LINKED_LIBRARY_PRINCIPALS)
       ) {
         throw new HttpError(409, "merged library quota exceeded");
       }

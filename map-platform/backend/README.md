@@ -344,6 +344,12 @@ Useful production environment variables:
   default `3600`.
 - `MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS`: maximum content objects attempted
   per maintenance cycle, default `100`.
+- `MAP_PLATFORM_CATALOG_PUBLICATION_RETRY_BATCH`: maximum catalog publication
+  retries per maintenance cycle, default and hard maximum `4`.
+- `MAP_PLATFORM_CATALOG_RETENTION_BATCH`: maximum catalog retention objects per
+  maintenance cycle, default and hard maximum `5`. Together the defaults use
+  at most 15 catalog mutation calls per channel and leave half of the
+  30/minute service limiter available for immediate publication and promotion.
 - `MAP_PLATFORM_WORKER_HEALTH_MAX_AGE_SECONDS`: maximum age of the real worker
   heartbeat, default `120`. Idle polls and the active job-lease thread refresh
   it, so queue-lock stalls become unhealthy without misclassifying long builds.
@@ -375,10 +381,12 @@ Useful production environment variables:
   `MAP_PLATFORM_CATALOG_SERVICE_SECRET`: opt into authenticated publication of
   verified READY artifacts to the shared Cloudflare map catalog. Catalog
   failure is recorded but never demotes a locally READY map.
-- `MAP_PLATFORM_CATALOG_REQUIRED_IOS_*` and optional complete
-  `MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_*` tuples bind a catalog stream to an
-  exact reviewed consumer identity. Production catalog downloads fail closed
-  when the exact iOS tuple is absent.
+- Optional complete `MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_*` tuples bind a
+  catalog stream to an exact reviewed firmware identity. iOS compatibility is
+  instead an immutable `readerRequirements` contract (stream and manifest
+  schema, renderer format, and required features) matched against the app's
+  discrete `readerCapabilities`; app build identity remains audit context and
+  never expires otherwise compatible map bytes.
 - `MAP_PLATFORM_DYNAMIC_SOURCE_DISCOVERY`: enable Geofabrik catalog fallback,
   default `1`.
 - `MAP_PLATFORM_GEOFABRIK_INDEX_URL`: provider catalog URL, default

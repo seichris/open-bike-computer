@@ -28,6 +28,7 @@ export interface PublicationArtifactInput {
   signatureKeySha256?: string | null;
   producerBuildSha256?: string | null;
   producerImageDigest?: string | null;
+  readerRequirements?: ReaderRequirements | null;
   requiredIosBuild?: string | null;
   requiredIosGitSha?: string | null;
   requiredIosBuildSha256?: string | null;
@@ -35,6 +36,15 @@ export interface PublicationArtifactInput {
   requiredFirmwareBuild?: number | null;
   requiredFirmwareGitSha?: string | null;
   deliveryTier: Channel;
+}
+
+export interface ReaderRequirements {
+  schemaVersion: 1;
+  streamFormat: string;
+  manifestSchemaVersion: number;
+  renderer: string;
+  rendererFormatVersion: number;
+  requiredFeatures: string[];
 }
 
 export interface PublicationInput {
@@ -76,6 +86,58 @@ function channel(value: unknown, field: string): Channel {
     throw new HttpError(400, `${field} is invalid`);
   }
   return value;
+}
+
+function readerRequirements(value: unknown): ReaderRequirements | null {
+  if (value === null || value === undefined) return null;
+  if (Array.isArray(value) || typeof value !== "object") {
+    throw new HttpError(400, "artifact readerRequirements are invalid");
+  }
+  const requirements = value as Record<string, unknown>;
+  requireExactKeys(requirements, [
+    "schemaVersion",
+    "streamFormat",
+    "manifestSchemaVersion",
+    "renderer",
+    "rendererFormatVersion",
+    "requiredFeatures",
+  ]);
+  if (
+    requirements.schemaVersion !== 1 ||
+    !Number.isSafeInteger(requirements.manifestSchemaVersion) ||
+    Number(requirements.manifestSchemaVersion) < 1 ||
+    Number(requirements.manifestSchemaVersion) > 255 ||
+    !Number.isSafeInteger(requirements.rendererFormatVersion) ||
+    Number(requirements.rendererFormatVersion) < 1 ||
+    Number(requirements.rendererFormatVersion) > 255 ||
+    !Array.isArray(requirements.requiredFeatures) ||
+    requirements.requiredFeatures.length > 32 ||
+    requirements.requiredFeatures.some(
+      (feature) => typeof feature !== "string" || !FORMAT.test(feature),
+    ) ||
+    requirements.requiredFeatures.join("\u0000") !==
+      [...requirements.requiredFeatures].sort().join("\u0000") ||
+    new Set(requirements.requiredFeatures).size !==
+      requirements.requiredFeatures.length
+  ) {
+    throw new HttpError(400, "artifact readerRequirements are invalid");
+  }
+  return {
+    schemaVersion: 1,
+    streamFormat: stringField(
+      requirements.streamFormat,
+      FORMAT,
+      "readerRequirements streamFormat",
+    ),
+    manifestSchemaVersion: Number(requirements.manifestSchemaVersion),
+    renderer: stringField(
+      requirements.renderer,
+      FORMAT,
+      "readerRequirements renderer",
+    ),
+    rendererFormatVersion: Number(requirements.rendererFormatVersion),
+    requiredFeatures: requirements.requiredFeatures as string[],
+  };
 }
 
 export function validatePublication(
@@ -179,6 +241,7 @@ export function validatePublication(
         "signatureKeySha256",
         "producerBuildSha256",
         "producerImageDigest",
+        "readerRequirements",
         "requiredIosBuild",
         "requiredIosGitSha",
         "requiredIosBuildSha256",
@@ -237,6 +300,7 @@ export function validatePublication(
         OCI_DIGEST,
         "producerImageDigest",
       ),
+      readerRequirements: readerRequirements(artifact.readerRequirements),
       requiredIosBuild: nullableString(
         artifact.requiredIosBuild,
         /^[0-9]{1,18}(?:\.[0-9]{1,18}){0,2}$/,
@@ -271,6 +335,7 @@ export function validatePublication(
     };
   });
   for (const artifact of artifacts) {
+    const requirements = artifact.readerRequirements ?? null;
     const iosIdentity = [
       artifact.requiredIosBuild,
       artifact.requiredIosGitSha,
@@ -299,6 +364,25 @@ export function validatePublication(
         artifact.requiredFirmwareBuild <= 0)
     ) {
       throw new HttpError(400, "requiredFirmwareBuild is invalid");
+    }
+    if (
+      requirements !== null &&
+      (requirements.streamFormat !== artifact.format ||
+        requirements.renderer !== value.renderer ||
+        requirements.rendererFormatVersion !== value.rendererFormatVersion ||
+        requirements.requiredFeatures.join("\u0000") !==
+          (value.features as string[]).join("\u0000"))
+    ) {
+      throw new HttpError(
+        400,
+        "artifact readerRequirements do not match the map descriptor",
+      );
+    }
+    if (artifact.format === "bike-map-stream-v1" && requirements === null) {
+      throw new HttpError(
+        400,
+        "bike map stream artifact readerRequirements are required",
+      );
     }
   }
   if (

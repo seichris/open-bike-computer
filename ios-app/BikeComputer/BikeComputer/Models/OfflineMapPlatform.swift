@@ -1390,6 +1390,7 @@ nonisolated enum MapInstallProtocolSelector {
         currentIosGitSha: String? = nil,
         currentIosBuildSha256: String? = nil,
         compatibleArtifactAppIdentities: [MapStreamAppBuildIdentity] = [],
+        readerRequirements: OfflineMapReaderRequirements? = nil,
         requiredFirmwareVersion: String? = nil,
         requiredFirmwareBuild: UInt32? = nil,
         requiredFirmwareGitSha: String? = nil,
@@ -1404,41 +1405,54 @@ nonisolated enum MapInstallProtocolSelector {
         ) else {
             return .legacyArtifactRequired
         }
-        let requirements = (
+        let appRequirements = (
             requiredIosBuild,
             requiredIosGitSha,
-            requiredIosBuildSha256,
+            requiredIosBuildSha256
+        )
+        if let readerRequirements {
+            guard readerRequirements.streamFormat ==
+                    OfflineMapArtifact.bikeMapStreamFormat,
+                  OfflineMapReaderCompatibilityPolicy.supports(
+                    readerRequirements
+                  ) else {
+                return .legacyArtifactRequired
+            }
+        } else {
+            guard let requiredAppBuild = appRequirements.0,
+                  let requiredAppGitSHA = appRequirements.1,
+                  let requiredAppBuildSHA256 = appRequirements.2,
+                  let currentAppBuild = currentIosBuild,
+                  let currentAppGitSHA = currentIosGitSha,
+                  let currentAppBuildSHA256 = currentIosBuildSha256 else {
+                return .legacyArtifactRequired
+            }
+            let requiredAppIdentity = MapStreamAppBuildIdentity(
+                schemaVersion: 1,
+                build: requiredAppBuild,
+                gitSha: requiredAppGitSHA,
+                componentSha256: requiredAppBuildSHA256
+            )
+            let currentAppIdentity = MapStreamAppBuildIdentity(
+                schemaVersion: 1,
+                build: currentAppBuild,
+                gitSha: currentAppGitSHA,
+                componentSha256: currentAppBuildSHA256
+            )
+            guard requiredAppIdentity.isReleaseGrade,
+                  currentAppIdentity.isReleaseGrade,
+                  requiredAppIdentity == currentAppIdentity ||
+                    compatibleArtifactAppIdentities.contains(
+                        requiredAppIdentity
+                    ) else {
+                return .legacyArtifactRequired
+            }
+        }
+        let deviceRequirements = (
             requiredFirmwareVersion,
             requiredFirmwareBuild,
             requiredFirmwareGitSha
         )
-        guard let requiredAppBuild = requirements.0,
-              let requiredAppGitSHA = requirements.1,
-              let requiredAppBuildSHA256 = requirements.2,
-              let currentAppBuild = currentIosBuild,
-              let currentAppGitSHA = currentIosGitSha,
-              let currentAppBuildSHA256 = currentIosBuildSha256 else {
-            return .legacyArtifactRequired
-        }
-        let requiredAppIdentity = MapStreamAppBuildIdentity(
-            schemaVersion: 1,
-            build: requiredAppBuild,
-            gitSha: requiredAppGitSHA,
-            componentSha256: requiredAppBuildSHA256
-        )
-        let currentAppIdentity = MapStreamAppBuildIdentity(
-            schemaVersion: 1,
-            build: currentAppBuild,
-            gitSha: currentAppGitSHA,
-            componentSha256: currentAppBuildSHA256
-        )
-        guard requiredAppIdentity.isReleaseGrade,
-              currentAppIdentity.isReleaseGrade,
-              requiredAppIdentity == currentAppIdentity ||
-                  compatibleArtifactAppIdentities.contains(requiredAppIdentity) else {
-            return .legacyArtifactRequired
-        }
-        let deviceRequirements = (requirements.3, requirements.4, requirements.5)
         if deviceRequirements.0 == nil && deviceRequirements.1 == nil &&
             deviceRequirements.2 == nil {
             return .streamV2

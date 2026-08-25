@@ -276,7 +276,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     await enforceLibraryMutationRateLimit(env, principal.libraryID);
     await enforceRateLimit(
       env.LINK_CODE_CLAIM_RATE_LIMITER,
-      `link-code-claim:${principal.libraryID}`,
+      `link-code-claim:${principal.credentialHash}`,
       "link code claim",
     );
     return json(
@@ -396,7 +396,12 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const libraryID = await authenticatedLibraryID(request, env);
     await enforceLibraryMutationRateLimit(env, libraryID);
     const body = await jsonBody<Record<string, unknown>>(request);
-    requireExactKeys(body, ["channel", "acceptedSigners", "appIdentity"]);
+    requireExactKeys(body, [
+      "channel",
+      "acceptedSigners",
+      "appIdentity",
+      "readerCapabilities",
+    ]);
     return json(
       await createLibraryDownloadGrant(
         env,
@@ -405,6 +410,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
         parseChannel(body.channel),
         body.acceptedSigners,
         body.appIdentity,
+        body.readerCapabilities,
       ),
       201,
     );

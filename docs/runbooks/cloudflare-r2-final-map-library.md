@@ -139,16 +139,15 @@ repository, logs, or API service. Rotate the development identity by first
 shipping its new public key in Bicino Dev, then changing the development worker
 signer; retain old public keys while their maps remain downloadable.
 
-For production-tier streams, also configure one reviewed, exact app identity:
-
-```text
-MAP_PLATFORM_CATALOG_REQUIRED_IOS_BUILD=<CFBundleVersion>
-MAP_PLATFORM_CATALOG_REQUIRED_IOS_GIT_SHA=<40-hex-source-SHA>
-MAP_PLATFORM_CATALOG_REQUIRED_IOS_BUILD_SHA256=<64-hex-build-identity>
-```
-
-If firmware compatibility is fixed for the map, configure all three firmware
-fields together. Partial iOS or firmware identity tuples fail closed.
+Every stream publication persists a versioned reader contract covering the
+stream format, manifest schema, renderer format version, and required features.
+Dev, production, and future app builds receive a grant only when their discrete
+capability set contains every requirement and their exact signer key ID and
+fingerprint is trusted. App build identity remains signed audit context; it is
+not immutable map compatibility and does not make old maps expire after an app
+release. Unknown reader-contract schemas and missing capabilities fail closed.
+If firmware compatibility is fixed for the map, configure all three
+`MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_*` fields together.
 
 Start with `mirror`: the filesystem remains primary while R2 receives the same
 immutable final bytes. Compare sampled SHA-256 values and catalog publication
@@ -328,12 +327,15 @@ Duration: 10 seconds
 
 Leave **Also apply rate limiting to cached assets** enabled, do not add a
 custom counting expression, and do not configure a custom response. The
-largest bounded maintenance burst is 21 internal calls for a 10-item retention
-pass: one authorization, 10 claims, and 10 confirmations. Development and
-production maintenance can overlap behind the same Coolify source IP, making
-42 requests in 10 seconds. The 60-request threshold leaves 18 requests of
-headroom for concurrent app, publisher, and network-retry traffic while still
-putting a short brake on one abusive source.
+checked-in maintenance defaults retry at most four catalog publications and
+process at most five retention objects per channel. That is a maximum of 15
+internal calls per pass: four finalizations, one authorization, five claims,
+and five confirmations. Development and production maintenance can overlap
+behind the same Coolify source IP, making 30 requests in 10 seconds. The
+60-request threshold leaves 30 requests of headroom for immediate publication,
+promotion, app traffic, and network retries. Do not raise either catalog batch:
+the backend rejects values above 4 or 5, and the shared service limiter remains
+30 calls per channel per minute.
 Because Free counts by IP and Cloudflare data center, shared carrier/NAT users
 can share a counter, distributed attackers can use separate counters, and
 counter propagation is not instantaneous. This is not a hard request or spend
@@ -409,9 +411,9 @@ map-platform promote-catalog-map <mapEntryId>
 ```
 
 Run this only in a production worker image with production catalog credentials,
-the production bucket, production map-signing key, exact producer identity, and
-exact iOS delivery identity configured. The command streams and verifies the
-ZIP, validates every payload file and renderer capability, signs a new
+the production bucket, production map-signing key, and exact producer identity.
+The command streams and verifies the ZIP, validates every payload file and
+renderer capability, records the discrete reader contract, signs a new
 `bike-map-stream-v1`, uploads it immutably, and finalizes it under the same map
 entry. A production app never receives the original development stream.
 

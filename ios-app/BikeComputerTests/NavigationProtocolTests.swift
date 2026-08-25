@@ -729,7 +729,11 @@ struct NavigationProtocolTests {
         testOfflineMapCatalogCredentialNamespaces()
         testOfflineMapCatalogAliasAttachmentPolicy()
         testOfflineMapCatalogContentSafeReconciliation()
+        testOfflineMapCatalogLocalArtifactIdentity()
+        testOfflineMapCatalogAvailabilityPolicy()
         testSavedMapRemovalPolicy()
+        await testOfflineMapCatalogInventorySyncSurvivesCatalogFailure()
+        await testOfflineMapCatalogClaimRetainsRetryState()
         await testOfflineMapCatalogShareAndLinkContracts()
         await testOfflineMapCapabilitiesContract()
         await testOfflineMapClientRejectsUnsupportedRendererWithoutDowngrade()
@@ -1016,7 +1020,8 @@ struct NavigationProtocolTests {
         func artifact(
             bytes: Data,
             sha: String? = nil,
-            objectKey: String? = nil
+            objectKey: String? = nil,
+            includesRequiredAppIdentity: Bool = true
         ) -> OfflineMapArtifact {
             OfflineMapArtifact(
                 format: OfflineMapArtifact.bikeMapStreamFormat,
@@ -1036,9 +1041,13 @@ struct NavigationProtocolTests {
                 signatureKeySha256: sha256(publicKey),
                 producerBuildSha256: String(repeating: "1", count: 64),
                 producerImageDigest: "sha256:" + String(repeating: "2", count: 64),
-                requiredIosBuild: "100",
-                requiredIosGitSha: String(repeating: "a", count: 40),
-                requiredIosBuildSha256: String(repeating: "b", count: 64),
+                requiredIosBuild: includesRequiredAppIdentity ? "100" : nil,
+                requiredIosGitSha: includesRequiredAppIdentity
+                    ? String(repeating: "a", count: 40)
+                    : nil,
+                requiredIosBuildSha256: includesRequiredAppIdentity
+                    ? String(repeating: "b", count: 64)
+                    : nil,
                 requiredFirmwareVersion: nil,
                 requiredFirmwareBuild: nil,
                 requiredFirmwareGitSha: nil
@@ -1067,6 +1076,99 @@ struct NavigationProtocolTests {
             )
         } catch {
             assert(false, "valid complete map stream is accepted: \(error)")
+        }
+
+        let catalogReaderRequirements = OfflineMapReaderRequirements(
+            schemaVersion: 1,
+            streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+            manifestSchemaVersion: 1,
+            renderer: "esp32-fmb",
+            rendererFormatVersion: 1,
+            requiredFeatures: []
+        )
+        let catalogArtifact = artifact(
+            bytes: stream,
+            includesRequiredAppIdentity: false
+        )
+        do {
+            let verified = try BikeMapStreamArtifactValidator.validate(
+                url: streamURL,
+                artifact: catalogArtifact,
+                expectedMapID: "golden-map",
+                trustStore: trustStore,
+                readerRequirements: catalogReaderRequirements
+            )
+            assertEqual(
+                verified.readerRequirements,
+                catalogReaderRequirements,
+                "catalog validation retains the reader contract verified against the signed manifest"
+            )
+            assert(
+                verified.requiredIosBuild == nil &&
+                    verified.requiredIosGitSHA == nil &&
+                    verified.requiredIosBuildSHA256 == nil,
+                "catalog validation does not invent immutable app-build requirements"
+            )
+        } catch {
+            assert(false, "a capability-compatible catalog stream is accepted: \(error)")
+        }
+        do {
+            _ = try BikeMapStreamArtifactValidator.validate(
+                url: streamURL,
+                artifact: catalogArtifact,
+                expectedMapID: "golden-map",
+                trustStore: trustStore
+            )
+            assert(false, "a build-unbound stream without reader requirements fails closed")
+        } catch {
+            guard case .invalidArtifactMetadata = error as? BikeMapStreamFormatError else {
+                assert(false, "missing reader requirements produce a typed rejection: \(error)")
+                return
+            }
+        }
+        do {
+            _ = try BikeMapStreamArtifactValidator.validate(
+                url: streamURL,
+                artifact: catalogArtifact,
+                expectedMapID: "golden-map",
+                trustStore: trustStore,
+                readerRequirements: OfflineMapReaderRequirements(
+                    schemaVersion: 2,
+                    streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+                    manifestSchemaVersion: 1,
+                    renderer: "esp32-fmb",
+                    rendererFormatVersion: 1,
+                    requiredFeatures: []
+                )
+            )
+            assert(false, "an unknown reader contract schema fails closed")
+        } catch {
+            guard case .invalidArtifactMetadata = error as? BikeMapStreamFormatError else {
+                assert(false, "unknown reader requirements produce a typed rejection: \(error)")
+                return
+            }
+        }
+        do {
+            _ = try BikeMapStreamArtifactValidator.validate(
+                url: streamURL,
+                artifact: catalogArtifact,
+                expectedMapID: "golden-map",
+                trustStore: trustStore,
+                readerRequirements: OfflineMapReaderRequirements(
+                    schemaVersion: 1,
+                    streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+                    manifestSchemaVersion: 1,
+                    renderer: "esp32-fmb",
+                    rendererFormatVersion: 2,
+                    requiredFeatures: ["street-labels"]
+                )
+            )
+            assert(false, "reader requirements cannot contradict the signed manifest")
+        } catch {
+            guard case .invalidArtifactMetadata = error as? BikeMapStreamFormatError else {
+                assert(false, "manifest/reader mismatch produces a typed rejection: \(error)")
+                return
+            }
         }
 
         do {
@@ -1565,6 +1667,56 @@ struct NavigationProtocolTests {
             .streamV2,
             "stream artifact selects v2 only when protocol and format match"
         )
+        let catalogReaderRequirements = OfflineMapReaderRequirements(
+            schemaVersion: 1,
+            streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+            manifestSchemaVersion: 1,
+            renderer: "esp32-fmb",
+            rendererFormatVersion: 1,
+            requiredFeatures: []
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability:
+                    "map-prod-1=" + String(repeating: "5", count: 64),
+                readerRequirements: catalogReaderRequirements,
+                requiredFirmwareVersion: stream.requiredFirmwareVersion,
+                requiredFirmwareBuild: stream.requiredFirmwareBuild,
+                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
+                deviceStatus: v2Status
+            ),
+            .streamV2,
+            "a verified catalog reader contract selects stream v2 without app-build binding"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability:
+                    "map-prod-1=" + String(repeating: "5", count: 64),
+                deviceStatus: v2Status
+            ),
+            .legacyArtifactRequired,
+            "a build-unbound stream without a verified reader contract fails closed"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability:
+                    "map-prod-1=" + String(repeating: "5", count: 64),
+                readerRequirements: OfflineMapReaderRequirements(
+                    schemaVersion: 2,
+                    streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+                    manifestSchemaVersion: 1,
+                    renderer: "esp32-fmb",
+                    rendererFormatVersion: 1,
+                    requiredFeatures: []
+                ),
+                deviceStatus: v2Status
+            ),
+            .legacyArtifactRequired,
+            "unknown catalog reader contracts fail closed during install selection"
+        )
         let wrongFirmwareStatus = MapTransferDeviceStatus(
             enabled: true,
             activeMapId: nil,
@@ -1799,9 +1951,9 @@ struct NavigationProtocolTests {
             signatureKeySha256: String(repeating: "5", count: 64),
             producerBuildSha256: String(repeating: "1", count: 64),
             producerImageDigest: "sha256:" + String(repeating: "2", count: 64),
-            requiredIosBuild: "100",
-            requiredIosGitSha: String(repeating: "8", count: 40),
-            requiredIosBuildSha256: String(repeating: "9", count: 64),
+            requiredIosBuild: nil,
+            requiredIosGitSha: nil,
+            requiredIosBuildSha256: nil,
             requiredFirmwareVersion: nil,
             requiredFirmwareBuild: nil,
             requiredFirmwareGitSha: nil
@@ -1829,9 +1981,27 @@ struct NavigationProtocolTests {
             lastDeviceProgress: 42,
             expectedActiveMapID: "map-id",
             expectedActiveSessionID: nil,
-            lastTransferOutcome: nil
+            lastTransferOutcome: nil,
+            readerRequirements: OfflineMapReaderRequirements(
+                schemaVersion: 1,
+                streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+                manifestSchemaVersion: 1,
+                renderer: "esp32-fmb",
+                rendererFormatVersion: 2,
+                requiredFeatures: ["street-labels"]
+            )
         )
         try! SavedMapArtifactMetadataStore.save(metadata, for: artifactURL)
+        assertEqual(
+            SavedMapArtifactMetadataStore.load(for: artifactURL)?.readerRequirements,
+            metadata.readerRequirements,
+            "verified catalog reader requirements persist with the downloaded artifact"
+        )
+        assert(
+            SavedMapArtifactMetadataStore.load(for: artifactURL)?
+                .primaryArtifact?.requiredIosBuild == nil,
+            "persisted catalog metadata keeps app-build requirements absent"
+        )
         let manager = OfflineMapManager(defaults: defaults, cacheDirectory: directory)
         assertEqual(
             manager.activationProgress?.label,
@@ -5489,6 +5659,483 @@ struct NavigationProtocolTests {
         )
     }
 
+    static func testOfflineMapCatalogLocalArtifactIdentity() {
+        let twoDEntryID = "map_v1_" + String(repeating: "a", count: 43)
+        let threeDEntryID = "map_v1_" + String(repeating: "b", count: 43)
+        let twoDFilename = OfflineMapCatalogLocalArtifactPolicy.filename(
+            mapEntryID: twoDEntryID,
+            fileExtension: "bmap"
+        )
+        let threeDFilename = OfflineMapCatalogLocalArtifactPolicy.filename(
+            mapEntryID: threeDEntryID,
+            fileExtension: "bmap"
+        )
+        assertEqual(
+            twoDFilename,
+            "catalog-\(twoDEntryID).bmap",
+            "catalog files use the content-derived entry identity"
+        )
+        assert(
+            twoDFilename != threeDFilename,
+            "2D and 3D entries sharing a legacy map ID retain distinct local files"
+        )
+        assert(
+            OfflineMapCatalogLocalArtifactPolicy.filename(
+                mapEntryID: "../../escape",
+                fileExtension: "bmap"
+            ) == nil,
+            "catalog storage rejects unsafe entry IDs"
+        )
+    }
+
+    static func testOfflineMapCatalogAvailabilityPolicy() {
+        let capability = BikeMapStreamTrustStore.production.capabilityHeaderValue?
+            .split(separator: ",").first?.split(separator: "=", maxSplits: 1)
+        guard let capability, capability.count == 2 else {
+            assert(false, "production map trust exposes a test capability")
+            return
+        }
+        let keyID = String(capability[0])
+        let keySHA256 = String(capability[1])
+        let identity = MapStreamAppBuildIdentity(
+            schemaVersion: 1,
+            build: "100",
+            gitSha: String(repeating: "a", count: 40),
+            componentSha256: String(repeating: "b", count: 64)
+        )
+
+        func artifact(
+            id: String,
+            tier: String,
+            requiredBuild: String?,
+            includesReaderRequirements: Bool = true,
+            readerSchemaVersion: Int = 1,
+            streamFormat: String = OfflineMapArtifact.bikeMapStreamFormat,
+            renderer: String = "esp32-fmb",
+            rendererFormatVersion: Int = 3,
+            requiredFeatures: [String] = ["3d-buildings", "street-labels"]
+        ) -> OfflineMapCatalogArtifact {
+            OfflineMapCatalogArtifact(
+                artifactId: id,
+                objectKey: "maps/test/\(id).bmap",
+                format: OfflineMapArtifact.bikeMapStreamFormat,
+                mediaType: "application/vnd.openbikecomputer.map-stream",
+                filename: "test.bmap",
+                bytes: 100,
+                sha256: String(repeating: "c", count: 64),
+                manifestReceipt: String(repeating: "d", count: 64),
+                signedManifestReceipt: String(repeating: "e", count: 64),
+                signatureKeyId: keyID,
+                signatureKeySha256: keySHA256,
+                producerBuildSha256: String(repeating: "f", count: 64),
+                producerImageDigest: "sha256:" + String(repeating: "1", count: 64),
+                requiredIosBuild: requiredBuild,
+                requiredIosGitSha: requiredBuild == nil ? nil : identity.gitSha,
+                requiredIosBuildSha256: requiredBuild == nil
+                    ? nil
+                    : identity.componentSha256,
+                requiredFirmwareVersion: nil,
+                requiredFirmwareBuild: nil,
+                requiredFirmwareGitSha: nil,
+                deliveryTier: tier,
+                readerRequirements: includesReaderRequirements
+                    ? OfflineMapReaderRequirements(
+                        schemaVersion: readerSchemaVersion,
+                        streamFormat: streamFormat,
+                        manifestSchemaVersion: 1,
+                        renderer: renderer,
+                        rendererFormatVersion: rendererFormatVersion,
+                        requiredFeatures: requiredFeatures
+                    )
+                    : nil
+            )
+        }
+
+        func map(
+            deliveryState: String,
+            artifact: OfflineMapCatalogArtifact
+        ) -> OfflineMapCatalogMap {
+            OfflineMapCatalogMap(
+                mapEntryId: "map_v1_" + String(repeating: "m", count: 43),
+                mapId: "same-region",
+                alias: "Favorite climb",
+                aliasSource: "user",
+                aliasRevision: 2,
+                canonicalName: "Same region",
+                originChannel: "development",
+                sourceRegionName: "Same region",
+                bounds: [1, 2, 3, 4],
+                renderer: "esp32-fmb",
+                rendererFormatVersion: 3,
+                features: ["street-labels", "3d-buildings"],
+                deliveryState: deliveryState,
+                generatedAt: nil,
+                addedAt: "2026-08-25T00:00:00.000Z",
+                updatedAt: "2026-08-25T00:00:00.000Z",
+                artifacts: [artifact]
+            )
+        }
+
+        let developmentMap = map(
+            deliveryState: "development",
+            artifact: artifact(id: "dev", tier: "development", requiredBuild: nil)
+        )
+        assertEqual(
+            OfflineMapCatalogAvailabilityPolicy.availability(
+                for: developmentMap,
+                channel: "production",
+                trustStore: .production
+            ),
+            .awaitingProductionPromotion,
+            "production identifies a development-only map before download"
+        )
+        assertEqual(
+            OfflineMapCatalogAvailabilityPolicy.availability(
+                for: developmentMap,
+                channel: "development",
+                trustStore: .production
+            ),
+            .available,
+            "development accepts a trusted development-tier artifact"
+        )
+
+        let productionMap = map(
+            deliveryState: "production",
+            artifact: artifact(id: "prod", tier: "production", requiredBuild: identity.build)
+        )
+        assertEqual(
+            OfflineMapCatalogAvailabilityPolicy.availability(
+                for: productionMap,
+                channel: "production",
+                trustStore: .production
+            ),
+            .available,
+            "production exposes an exact compatible promoted artifact"
+        )
+        let olderBuildMap = map(
+            deliveryState: "production",
+            artifact: artifact(id: "old", tier: "production", requiredBuild: "99")
+        )
+        assertEqual(
+            OfflineMapCatalogAvailabilityPolicy.availability(
+                for: olderBuildMap,
+                channel: "production",
+                trustStore: .production
+            ),
+            .available,
+            "a newer app can read an older build's compatible map contract"
+        )
+        assertEqual(
+            OfflineMapCatalogAvailabilityPolicy.availability(
+                for: map(
+                    deliveryState: "blocked",
+                    artifact: productionMap.artifacts[0]
+                ),
+                channel: "production",
+                trustStore: .production
+            ),
+            .unavailable,
+            "blocked catalog entries never expose a download"
+        )
+
+        let rejectedRequirements = [
+            artifact(
+                id: "schema",
+                tier: "production",
+                requiredBuild: nil,
+                readerSchemaVersion: 2
+            ).readerRequirements!,
+            artifact(
+                id: "stream",
+                tier: "production",
+                requiredBuild: nil,
+                streamFormat: "bike-map-stream-v2"
+            ).readerRequirements!,
+            artifact(
+                id: "renderer",
+                tier: "production",
+                requiredBuild: nil,
+                renderer: "future-renderer"
+            ).readerRequirements!,
+            artifact(
+                id: "version",
+                tier: "production",
+                requiredBuild: nil,
+                rendererFormatVersion: 99
+            ).readerRequirements!,
+            artifact(
+                id: "feature",
+                tier: "production",
+                requiredBuild: nil,
+                requiredFeatures: ["street-labels", "topography"]
+            ).readerRequirements!,
+        ]
+        for requirements in rejectedRequirements {
+            assert(
+                !OfflineMapReaderCompatibilityPolicy.supports(requirements),
+                "unknown reader schemas, formats, renderers, versions, and features fail closed"
+            )
+        }
+        let missingRequirementsMap = map(
+            deliveryState: "production",
+            artifact: artifact(
+                id: "missing-contract",
+                tier: "production",
+                requiredBuild: nil,
+                includesReaderRequirements: false
+            )
+        )
+        assertEqual(
+            OfflineMapCatalogAvailabilityPolicy.availability(
+                for: missingRequirementsMap,
+                channel: "production",
+                trustStore: .production
+            ),
+            .incompatible,
+            "a bike map without reader requirements fails closed"
+        )
+
+        let preview = OfflineMapSharePreview(
+            shareId: "share-preview",
+            mapEntryId: developmentMap.mapEntryId,
+            title: developmentMap.alias,
+            bounds: developmentMap.bounds,
+            renderer: developmentMap.renderer,
+            rendererFormatVersion: developmentMap.rendererFormatVersion,
+            features: developmentMap.features,
+            approximateBytes: 100,
+            deliveryState: "promotion_pending",
+            expiresAt: nil
+        )
+        let previewAvailability = OfflineMapCatalogAvailabilityPolicy.availability(
+            for: preview,
+            channel: "production"
+        )
+        assertEqual(
+            previewAvailability,
+            .awaitingProductionPromotion,
+            "share previews expose promotion state before claim"
+        )
+        assertEqual(
+            previewAvailability.claimActionTitle,
+            "Add to Library",
+            "an unavailable share is not presented as an immediate download"
+        )
+    }
+
+    static func testOfflineMapCatalogInventorySyncSurvivesCatalogFailure() async {
+        enum CatalogFailure: Error { case unavailable }
+        var generationSyncRan = false
+        let credential = await OfflineMapCatalogInventorySyncPolicy
+            .bestEffortCredential {
+                throw CatalogFailure.unavailable
+            }
+        generationSyncRan = true
+        assert(
+            credential == nil,
+            "catalog bootstrap failure degrades to an unattached inventory sync"
+        )
+        assert(
+            generationSyncRan,
+            "the generation-server inventory path continues after catalog failure"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapCatalogClaimRetainsRetryState() async {
+        let suite = "OfflineMapCatalogClaimRetry-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            OfflineMapTestURLProtocol.reset()
+        }
+
+        let capability = BikeMapStreamTrustStore.production.capabilityHeaderValue?
+            .split(separator: ",").first?.split(separator: "=", maxSplits: 1)
+        guard let capability, capability.count == 2 else {
+            assert(false, "production map trust exposes a test capability")
+            return
+        }
+        let identity = MapStreamAppBuildIdentity(
+            schemaVersion: 1,
+            build: "100",
+            gitSha: String(repeating: "a", count: 40),
+            componentSha256: String(repeating: "b", count: 64)
+        )
+        let mapEntryID = "map_v1_" + String(repeating: "r", count: 43)
+        let token = String(repeating: "T", count: 43)
+        let artifact = OfflineMapCatalogArtifact(
+            artifactId: "artifact-retry",
+            objectKey: "maps/test/retry.bmap",
+            format: OfflineMapArtifact.bikeMapStreamFormat,
+            mediaType: "application/vnd.openbikecomputer.map-stream",
+            filename: "retry.bmap",
+            bytes: 100,
+            sha256: String(repeating: "c", count: 64),
+            manifestReceipt: String(repeating: "d", count: 64),
+            signedManifestReceipt: String(repeating: "e", count: 64),
+            signatureKeyId: String(capability[0]),
+            signatureKeySha256: String(capability[1]),
+            producerBuildSha256: String(repeating: "f", count: 64),
+            producerImageDigest: "sha256:" + String(repeating: "1", count: 64),
+            requiredIosBuild: identity.build,
+            requiredIosGitSha: identity.gitSha,
+            requiredIosBuildSha256: identity.componentSha256,
+            requiredFirmwareVersion: nil,
+            requiredFirmwareBuild: nil,
+            requiredFirmwareGitSha: nil,
+            deliveryTier: "production",
+            readerRequirements: OfflineMapReaderRequirements(
+                schemaVersion: 1,
+                streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+                manifestSchemaVersion: 1,
+                renderer: "esp32-fmb",
+                rendererFormatVersion: 3,
+                requiredFeatures: ["3d-buildings", "street-labels"]
+            )
+        )
+        let map = OfflineMapCatalogMap(
+            mapEntryId: mapEntryID,
+            mapId: "retry-region",
+            alias: "Retry map",
+            aliasSource: "share",
+            aliasRevision: 1,
+            canonicalName: "Retry region",
+            originChannel: "production",
+            sourceRegionName: "Retry region",
+            bounds: [1, 2, 3, 4],
+            renderer: "esp32-fmb",
+            rendererFormatVersion: 3,
+            features: ["street-labels", "3d-buildings"],
+            deliveryState: "production",
+            generatedAt: nil,
+            addedAt: "2026-08-25T00:00:00.000Z",
+            updatedAt: "2026-08-25T00:00:00.000Z",
+            artifacts: [artifact]
+        )
+        let preview = OfflineMapSharePreview(
+            shareId: "share-retry",
+            mapEntryId: mapEntryID,
+            title: map.alias,
+            bounds: map.bounds,
+            renderer: map.renderer,
+            rendererFormatVersion: map.rendererFormatVersion,
+            features: map.features,
+            approximateBytes: artifact.bytes,
+            deliveryState: map.deliveryState,
+            expiresAt: nil
+        )
+        let grant = OfflineMapCatalogDownloadGrant(
+            downloadURL: URL(string: "https://maps-share.8o.vc/v1/downloads/retry")!,
+            expiresAt: "2099-01-01T00:00:00.000Z",
+            artifact: artifact
+        )
+        var grantRequestCount = 0
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/v1/shares/\(token)"):
+                return (200, try! JSONEncoder().encode(preview))
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (
+                    201,
+                    Data(#"{"libraryId":"library-retry","credential":"credential-retry"}"#.utf8)
+                )
+            case ("POST", "/v1/shares/\(token)/claim"):
+                return (200, try! JSONEncoder().encode(map))
+            case ("POST", "/v1/library/maps/\(mapEntryID)/download-grants"):
+                grantRequestCount += 1
+                let body = try! JSONSerialization.jsonObject(
+                    with: OfflineMapTestURLProtocol.bodyData(from: request)
+                ) as! [String: Any]
+                let capabilities = body["readerCapabilities"] as! [String: Any]
+                let streams = capabilities["streamFormats"] as! [[String: Any]]
+                let renderers = capabilities["renderers"] as! [[String: Any]]
+                assertEqual(
+                    capabilities["schemaVersion"] as? Int,
+                    1,
+                    "download grants advertise reader capability schema 1"
+                )
+                assertEqual(
+                    streams.first?["format"] as? String,
+                    OfflineMapArtifact.bikeMapStreamFormat,
+                    "download grants advertise the exact stream container"
+                )
+                assertEqual(
+                    streams.first?["manifestSchemaVersions"] as? [Int],
+                    [1],
+                    "download grants advertise discrete manifest schemas"
+                )
+                assertEqual(
+                    renderers.first?["formatVersions"] as? [Int],
+                    [1, 2, 3],
+                    "download grants advertise discrete renderer versions"
+                )
+                return (200, try! JSONEncoder().encode(grant))
+            default:
+                assert(
+                    false,
+                    "unexpected claim retry request: \(request.httpMethod ?? "") \(request.url?.path ?? "")"
+                )
+                return (500, Data())
+            }
+        }
+        let client = try! OfflineMapCatalogClient(
+            baseURL: URL(string: "https://maps-share.8o.vc")!,
+            session: session
+        )
+        let manager = OfflineMapManager(
+            defaults: defaults,
+            mapPlatformSession: session,
+            mapStreamTrustStore: .production,
+            catalogAppIdentity: identity,
+            catalogHost: "maps-share.8o.vc",
+            catalogClient: client,
+            packDownload: { _, _, _, _ in
+                throw URLError(.networkConnectionLost)
+            }
+        )
+        manager.handleShareURL(
+            URL(string: "https://maps-share.8o.vc/s/\(token)")!
+        )
+        let previewDeadline = Date().addingTimeInterval(2)
+        while manager.pendingSharePreview == nil && Date() < previewDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let didLoadPreview = manager.pendingSharePreview != nil
+        assert(
+            didLoadPreview,
+            "a valid share reaches the explicit claim confirmation"
+        )
+        manager.claimPendingShare()
+        let didFinish = await waitForMapTaskCompletion(manager)
+        assert(
+            didFinish,
+            "the failed post-claim download finishes without hanging"
+        )
+        assertEqual(
+            grantRequestCount,
+            1,
+            "a compatible claimed map proceeds to the download grant"
+        )
+        let claimedMapRemains = manager.catalogMaps.contains {
+            $0.mapEntryId == mapEntryID
+        }
+        assert(
+            claimedMapRemains,
+            "a claimed map remains in the in-session library when download fails"
+        )
+        let retryStateIsVisible = manager.pendingSharePreview == nil &&
+            manager.errorMessage != nil
+        assert(
+            retryStateIsVisible,
+            "the failed download leaves a visible retry row and an error state"
+        )
+    }
+
     static func testSavedMapRemovalPolicy() {
         assert(
             SavedMapRemovalPolicy.canRemoveFromMapLibrary(
@@ -9003,6 +9650,12 @@ struct NavigationProtocolTests {
                 ) &&
                 source.contains("manager.removeCatalogMapFromLibrary(map)"),
             "remote-only maps expose a clearly named confirmed library removal action"
+        )
+        assert(
+            source.contains("catalogAvailability?.statusText") &&
+                source.contains("catalogAvailability?.canDownload != true") &&
+                source.contains("clock.badge.exclamationmark"),
+            "catalog rows explain and disable downloads that are pending or incompatible"
         )
         assert(
             source.contains("SavedMapDeviceTransferPolicy.canStart(") &&

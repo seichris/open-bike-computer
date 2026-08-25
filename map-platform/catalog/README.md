@@ -12,7 +12,8 @@ The catalog provides:
   access group;
 - immutable map and artifact identities with mutable per-library aliases;
 - revocable share links with explicit recipient claim;
-- exact app-build and signing-key checks before selecting an artifact;
+- versioned reader-capability, delivery-tier, and exact signing-key checks
+  before selecting an artifact;
 - authenticated, idempotent publication from both map servers; and
 - a production promotion grant for validating and re-signing a development
   final ZIP without regenerating the map.
@@ -71,7 +72,10 @@ production step in
 - A library may retain at most 100 map references, 100 active shares, 500
   total share rows, 500 recipient share claims, 8 active credentials, 5 live
   link codes, and 50 total link-code rows. Checks are atomic in D1, including
-  share claims and library-link merges. Old inactive shares are reclaimed only
+  share claims and library-link merges. A linked group also carries an
+  additive, non-resetting eight-principal merge budget across library-ID
+  reparenting, and claim rate limits use the credential hash rather than the
+  mutable library ID. Old inactive shares are reclaimed only
   beyond `RETENTION_GRACE_DAYS`; expired unclaimed link codes are reclaimed
   immediately, and claimed link evidence is retained through that grace
   window.

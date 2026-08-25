@@ -40,6 +40,19 @@ const appIdentity = {
   gitSha: "f".repeat(40),
   buildSha256: "9".repeat(64),
 };
+const readerCapabilities = {
+  schemaVersion: 1,
+  streamFormats: [
+    { format: "bike-map-stream-v1", manifestSchemaVersions: [1] },
+  ],
+  renderers: [
+    {
+      renderer: "esp32-fmb",
+      formatVersions: [1, 2, 3],
+      features: ["3d-buildings", "street-labels"],
+    },
+  ],
+};
 const verifyTestArtifact = async () => true;
 let fixtureSequence = 0;
 
@@ -125,6 +138,7 @@ function developmentPublication(label: string) {
   artifact.signatureKeySha256 = null;
   artifact.producerBuildSha256 = null;
   artifact.producerImageDigest = null;
+  artifact.readerRequirements = null;
   artifact.requiredIosBuild = null;
   artifact.requiredIosGitSha = null;
   artifact.requiredIosBuildSha256 = null;
@@ -163,6 +177,14 @@ function publication() {
         signatureKeySha256: signerSha,
         producerBuildSha256: producerSha,
         producerImageDigest: `sha256:${imageSha}`,
+        readerRequirements: {
+          schemaVersion: 1,
+          streamFormat: "bike-map-stream-v1",
+          manifestSchemaVersion: 1,
+          renderer: "esp32-fmb",
+          rendererFormatVersion: 3,
+          requiredFeatures: ["3d-buildings", "street-labels"],
+        },
         requiredIosBuild: appIdentity.build,
         requiredIosGitSha: appIdentity.gitSha,
         requiredIosBuildSha256: appIdentity.buildSha256,
@@ -194,6 +216,34 @@ async function seededLibrary(): Promise<{
     "production",
   );
   return { libraryId: library.libraryId, credential: library.credential! };
+}
+
+async function copyFixtureArtifact(
+  id: string,
+  objectKey: string,
+  byteDelta = 0,
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO artifacts(
+       id, map_entry_id, bucket_slot, object_key, format, media_type,
+       filename, byte_count, sha256, manifest_receipt, signed_manifest_receipt,
+       signature_key_id, signature_key_sha256, producer_build_sha256,
+       producer_image_digest, reader_requirements_json, required_ios_build,
+       required_ios_git_sha, required_ios_build_sha256,
+       required_firmware_version, required_firmware_build,
+       required_firmware_git_sha, delivery_tier, state, created_at, verified_at
+     ) SELECT ?, map_entry_id, bucket_slot, ?, format, media_type, filename,
+              byte_count + ?, sha256, manifest_receipt, signed_manifest_receipt,
+              signature_key_id, signature_key_sha256, producer_build_sha256,
+              producer_image_digest, reader_requirements_json,
+              required_ios_build, required_ios_git_sha,
+              required_ios_build_sha256, required_firmware_version,
+              required_firmware_build, required_firmware_git_sha,
+              delivery_tier, state, created_at, verified_at
+         FROM artifacts WHERE id = ?`,
+  )
+    .bind(id, objectKey, byteDelta, artifactID)
+    .run();
 }
 
 describe("catalog library", () => {
@@ -639,12 +689,13 @@ describe("catalog library", () => {
       "production",
       [{ keyId: "prod", keySha256: signerSha }],
       appIdentity,
+      readerCapabilities,
     );
     expect(grant.artifact.deliveryTier).toBe("production");
     expect(grant.downloadURL).not.toContain("map-artifacts");
   });
 
-  it("rejects a production download from a different app build", async () => {
+  it("allows future app builds with the same exact reader capabilities", async () => {
     const library = await seededLibrary();
     await expect(
       createLibraryDownloadGrant(
@@ -654,8 +705,101 @@ describe("catalog library", () => {
         "production",
         [{ keyId: "prod", keySha256: signerSha }],
         { ...appIdentity, build: "202608250002" },
+        readerCapabilities,
       ),
-    ).rejects.toMatchObject({ status: 409 });
+    ).resolves.toMatchObject({
+      artifact: {
+        readerRequirements: {
+          streamFormat: "bike-map-stream-v1",
+          renderer: "esp32-fmb",
+          rendererFormatVersion: 3,
+        },
+      },
+    });
+  });
+
+  it("allows Dev to read production bytes but rejects every missing reader capability", async () => {
+    const library = await seededLibrary();
+    await expect(
+      createLibraryDownloadGrant(
+        env,
+        library.libraryId,
+        mapEntryID,
+        "development",
+        [{ keyId: "prod", keySha256: signerSha }],
+        { ...appIdentity, buildSha256: "8".repeat(64) },
+        readerCapabilities,
+      ),
+    ).resolves.toMatchObject({ artifact: { deliveryTier: "production" } });
+
+    const incompatible = [
+      {
+        ...readerCapabilities,
+        streamFormats: [
+          { format: "topographic-map-v1", manifestSchemaVersions: [1] },
+        ],
+      },
+      {
+        ...readerCapabilities,
+        streamFormats: [
+          { format: "bike-map-stream-v1", manifestSchemaVersions: [2] },
+        ],
+      },
+      {
+        ...readerCapabilities,
+        renderers: [
+          {
+            renderer: "topographic-renderer",
+            formatVersions: [3],
+            features: ["3d-buildings", "street-labels"],
+          },
+        ],
+      },
+      {
+        ...readerCapabilities,
+        renderers: [
+          {
+            renderer: "esp32-fmb",
+            formatVersions: [2],
+            features: ["3d-buildings", "street-labels"],
+          },
+        ],
+      },
+      {
+        ...readerCapabilities,
+        renderers: [
+          {
+            renderer: "esp32-fmb",
+            formatVersions: [3],
+            features: ["street-labels"],
+          },
+        ],
+      },
+    ];
+    for (const capabilities of incompatible) {
+      await expect(
+        createLibraryDownloadGrant(
+          env,
+          library.libraryId,
+          mapEntryID,
+          "production",
+          [{ keyId: "prod", keySha256: signerSha }],
+          appIdentity,
+          capabilities,
+        ),
+      ).rejects.toMatchObject({ status: 409 });
+    }
+    await expect(
+      createLibraryDownloadGrant(
+        env,
+        library.libraryId,
+        mapEntryID,
+        "production",
+        [{ keyId: "prod", keySha256: signerSha }],
+        appIdentity,
+        { ...readerCapabilities, schemaVersion: 2 },
+      ),
+    ).rejects.toMatchObject({ status: 400 });
   });
 
   it("boundedly purges expired download grants while creating a new grant", async () => {
@@ -682,6 +826,7 @@ describe("catalog library", () => {
       "production",
       [{ keyId: "prod", keySha256: signerSha }],
       appIdentity,
+      readerCapabilities,
     );
     expect(
       await env.DB.prepare(
@@ -764,6 +909,7 @@ describe("catalog library", () => {
       "production",
       [{ keyId: "prod", keySha256: signerSha }],
       appIdentity,
+      readerCapabilities,
     );
     const targetOwnedCode = await createLinkCode(env, target.libraryId);
     const credentialsBefore = await env.DB.prepare(
@@ -1006,6 +1152,44 @@ describe("catalog library", () => {
     ).toBe(targets[loserIndex].libraryId);
   });
 
+  it("durably bounds repeated source-survivor merges across library ID changes", async () => {
+    const populated = await seededLibrary();
+    let currentLibraryID = populated.libraryId;
+    const credentialHash = await sha256Hex(populated.credential);
+
+    for (let principalCount = 2; principalCount <= 8; principalCount += 1) {
+      const freshSource = await bootstrapLibrary(env);
+      const code = await createLinkCode(env, freshSource.libraryId);
+      await expect(
+        claimLinkCode(env, currentLibraryID, credentialHash, code.code),
+      ).resolves.toEqual({ libraryId: freshSource.libraryId });
+      currentLibraryID = freshSource.libraryId;
+      expect(
+        await env.DB.prepare(
+          "SELECT merge_principal_count FROM libraries WHERE id = ?",
+        )
+          .bind(currentLibraryID)
+          .first<{ merge_principal_count: number }>(),
+      ).toMatchObject({ merge_principal_count: principalCount });
+    }
+
+    const rejectedSource = await bootstrapLibrary(env);
+    const rejectedCode = await createLinkCode(env, rejectedSource.libraryId);
+    await expect(
+      claimLinkCode(env, currentLibraryID, credentialHash, rejectedCode.code),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(
+      await env.DB.prepare(
+        "SELECT claimed_at FROM linked_library_codes WHERE code_hash = ?",
+      )
+        .bind(await sha256Hex(rejectedCode.code))
+        .first<{ claimed_at: string | null }>(),
+    ).toMatchObject({ claimed_at: null });
+    expect(await libraryIDForCredential(populated.credential, env)).toBe(
+      currentLibraryID,
+    );
+  });
+
   it("atomically caps live link codes and reclaims expired capacity", async () => {
     const library = await bootstrapLibrary(env);
     await env.DB.batch(
@@ -1245,6 +1429,14 @@ describe("validation", () => {
           (artifact.producerImageDigest = `sha256:${"5".repeat(64)}`),
       ],
       [
+        "readerRequirements",
+        (artifact) =>
+          (artifact.readerRequirements = {
+            ...artifact.readerRequirements!,
+            manifestSchemaVersion: 2,
+          }),
+      ],
+      [
         "requiredIosBuild",
         (artifact) => (artifact.requiredIosBuild = "202608250002"),
       ],
@@ -1291,6 +1483,117 @@ describe("validation", () => {
       "SELECT COUNT(*) AS count FROM publication_events",
     ).first<{ count: number }>();
     expect(eventCount?.count).toBe(before?.count);
+  });
+
+  it("atomically aborts a publication when artifact identity changes after its precheck", async () => {
+    await seededLibrary();
+    const candidate = publication();
+    candidate.publicationId = "job-artifact-race-conflict";
+    candidate.artifacts[0].artifactId = `artifact_v1_${"R".repeat(43)}`;
+    candidate.artifacts[0].objectKey += ".race-conflict";
+    let interposed = false;
+    await expect(
+      finalizePublication(
+        env,
+        candidate,
+        "artifact-race-conflict",
+        await sha256Hex(JSON.stringify(candidate)),
+        null,
+        async () => {
+          if (!interposed) {
+            interposed = true;
+            await copyFixtureArtifact(
+              candidate.artifacts[0].artifactId,
+              candidate.artifacts[0].objectKey,
+              1,
+            );
+          }
+          return true;
+        },
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(
+      await env.DB.prepare("SELECT byte_count FROM artifacts WHERE id = ?")
+        .bind(candidate.artifacts[0].artifactId)
+        .first<{ byte_count: number }>(),
+    ).toMatchObject({ byte_count: candidate.artifacts[0].bytes + 1 });
+    expect(
+      await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM publication_events WHERE publication_id = ?",
+      )
+        .bind(candidate.publicationId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 0 });
+
+    const keyConflict = publication();
+    keyConflict.publicationId = "job-artifact-race-key-conflict";
+    keyConflict.artifacts[0].artifactId = `artifact_v1_${"T".repeat(43)}`;
+    keyConflict.artifacts[0].objectKey += ".race-key-conflict";
+    const occupyingArtifactID = `artifact_v1_${"U".repeat(43)}`;
+    let occupiedKey = false;
+    await expect(
+      finalizePublication(
+        env,
+        keyConflict,
+        "artifact-race-key-conflict",
+        await sha256Hex(JSON.stringify(keyConflict)),
+        null,
+        async () => {
+          if (!occupiedKey) {
+            occupiedKey = true;
+            await copyFixtureArtifact(
+              occupyingArtifactID,
+              keyConflict.artifacts[0].objectKey,
+            );
+          }
+          return true;
+        },
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(
+      await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM publication_events WHERE publication_id = ?",
+      )
+        .bind(keyConflict.publicationId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 0 });
+
+    const exact = publication();
+    exact.publicationId = "job-artifact-race-exact";
+    exact.artifacts[0].artifactId = `artifact_v1_${"S".repeat(43)}`;
+    exact.artifacts[0].objectKey += ".race-exact";
+    let insertedExact = false;
+    await expect(
+      finalizePublication(
+        env,
+        exact,
+        "artifact-race-exact",
+        await sha256Hex(JSON.stringify(exact)),
+        null,
+        async () => {
+          if (!insertedExact) {
+            insertedExact = true;
+            await copyFixtureArtifact(
+              exact.artifacts[0].artifactId,
+              exact.artifacts[0].objectKey,
+            );
+          }
+          return true;
+        },
+      ),
+    ).resolves.toMatchObject({ state: "finalized", replayed: false });
+    await env.DB.batch([
+      env.DB.prepare(
+        "DELETE FROM publication_events WHERE publication_id = ?",
+      ).bind(exact.publicationId),
+      env.DB.prepare("DELETE FROM artifacts WHERE id IN (?, ?)").bind(
+        candidate.artifacts[0].artifactId,
+        occupyingArtifactID,
+      ),
+      env.DB.prepare("DELETE FROM artifacts WHERE id = ?").bind(
+        exact.artifacts[0].artifactId,
+      ),
+    ]);
   });
 
   it("verifies every proposed R2 object before making a publication live", async () => {

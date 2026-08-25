@@ -23,6 +23,7 @@ describe("R2 downloads", () => {
       signature_key_sha256: null,
       producer_build_sha256: null,
       producer_image_digest: null,
+      reader_requirements_json: null,
       required_ios_build: null,
       required_ios_git_sha: null,
       required_ios_build_sha256: null,

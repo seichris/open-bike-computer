@@ -1088,6 +1088,7 @@ private struct SavedMapRow: View {
         let packURL = item.packURL
         let isPausedUpload = packURL.map(manager.isPausedMapUpload) ?? false
         let previewImage = manager.previewImage(for: item)
+        let catalogAvailability = item.catalogMap.map(manager.catalogAvailability(for:))
 
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
@@ -1226,12 +1227,21 @@ private struct SavedMapRow: View {
                         focusedPackFilename = nil
                         manager.downloadCatalogMap(catalogMap)
                     } label: {
-                        Image(systemName: "arrow.down.circle")
+                        Image(
+                            systemName: catalogAvailability?.canDownload == true
+                                ? "arrow.down.circle"
+                                : "clock.badge.exclamationmark"
+                        )
                             .frame(width: 32, height: 32)
                     }
                     .buttonStyle(.borderless)
-                    .disabled(manager.isBusy)
+                    .disabled(
+                        manager.isBusy || catalogAvailability?.canDownload != true
+                    )
                     .accessibilityLabel("Download \(displayName) to this iPhone")
+                    .accessibilityHint(
+                        catalogAvailability?.statusText ?? "Downloads this saved map"
+                    )
                 }
 
                 if item.isAvailableInLibrary {
@@ -1265,6 +1275,13 @@ private struct SavedMapRow: View {
                         .frame(width: 32, height: 32)
                         .accessibilityHidden(true)
                 }
+            }
+
+            if let status = catalogAvailability?.statusText {
+                Label(status, systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .accessibilityLabel("\(displayName): \(status)")
             }
 
             if item.canRemoveFromMapLibrary {

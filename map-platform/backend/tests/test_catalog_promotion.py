@@ -357,9 +357,6 @@ class CatalogPromotionIdentityTests(unittest.TestCase):
             "MAP_PLATFORM_S3_ENDPOINT_URL": (
                 "https://a" + "1" * 31 + ".r2.cloudflarestorage.com"
             ),
-            "MAP_PLATFORM_CATALOG_REQUIRED_IOS_BUILD": "202608250001",
-            "MAP_PLATFORM_CATALOG_REQUIRED_IOS_GIT_SHA": "8" * 40,
-            "MAP_PLATFORM_CATALOG_REQUIRED_IOS_BUILD_SHA256": "9" * 64,
         }
         with tempfile.TemporaryDirectory() as temporary, patch.dict(
             "os.environ",

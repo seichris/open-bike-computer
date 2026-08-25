@@ -174,13 +174,6 @@ def publication_id(job: MapJob, channel: str) -> str:
 
 def catalog_delivery_requirements(channel: str) -> dict[str, Any]:
     values: dict[str, Any] = {}
-    ios = {
-        "requiredIosBuild": os.environ.get("MAP_PLATFORM_CATALOG_REQUIRED_IOS_BUILD"),
-        "requiredIosGitSha": os.environ.get("MAP_PLATFORM_CATALOG_REQUIRED_IOS_GIT_SHA"),
-        "requiredIosBuildSha256": os.environ.get(
-            "MAP_PLATFORM_CATALOG_REQUIRED_IOS_BUILD_SHA256"
-        ),
-    }
     firmware: dict[str, Any] = {
         "requiredFirmwareVersion": os.environ.get(
             "MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_VERSION"
@@ -192,10 +185,6 @@ def catalog_delivery_requirements(channel: str) -> dict[str, Any]:
             "MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_GIT_SHA"
         ),
     }
-    if any(ios.values()):
-        if not all(ios.values()):
-            raise CatalogPublicationError("catalog iOS delivery identity is incomplete")
-        values.update(ios)
     if any(firmware.values()):
         if not all(firmware.values()):
             raise CatalogPublicationError("catalog firmware delivery identity is incomplete")
@@ -210,10 +199,9 @@ def catalog_delivery_requirements(channel: str) -> dict[str, Any]:
         if firmware["requiredFirmwareBuild"] <= 0:
             raise CatalogPublicationError("catalog firmware delivery build is invalid")
         values.update(firmware)
-    # Production publication is allowed without an app identity so immutable
-    # bytes can be recorded before an app rollout is approved. The catalog
-    # refuses to grant a production download until all exact iOS identity
-    # fields are present on the selected artifact.
+    # App build identity is request audit context, not immutable map
+    # compatibility. Reader compatibility is represented by the discrete
+    # readerRequirements contract emitted with each stream artifact.
     del channel
     return values
 
@@ -248,6 +236,14 @@ def publication_payload(job: MapJob, channel: str) -> dict[str, Any]:
         }
         value.update({key: item for key, item in optional.items() if item is not None})
         if artifact.format == BIKE_MAP_STREAM_FORMAT:
+            value["readerRequirements"] = {
+                "schemaVersion": 1,
+                "streamFormat": BIKE_MAP_STREAM_FORMAT,
+                "manifestSchemaVersion": 1,
+                "renderer": renderer,
+                "rendererFormatVersion": format_version,
+                "requiredFeatures": features,
+            }
             value.update(delivery_requirements)
         artifact_values.append(value)
     return {

@@ -179,6 +179,17 @@ class CatalogTests(unittest.TestCase):
             ["bike-map-stream-v1", "zip-stored-v1"],
         )
         self.assertEqual(
+            payload["artifacts"][0]["readerRequirements"],
+            {
+                "schemaVersion": 1,
+                "streamFormat": "bike-map-stream-v1",
+                "manifestSchemaVersion": 1,
+                "renderer": "esp32-fmb",
+                "rendererFormatVersion": 3,
+                "requiredFeatures": ["3d-buildings", "street-labels"],
+            },
+        )
+        self.assertEqual(
             artifact_id(job.artifacts[0]),
             "artifact_v1_" + "ERERERERERERERERERERERERERERERERERERERERERE",
         )
@@ -320,10 +331,10 @@ class CatalogTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least 32 bytes"):
             CatalogClient("https://maps.invalid", "development", "dev", "short")
 
-    def test_catalog_delivery_identity_requires_complete_exact_tuple(self):
+    def test_catalog_delivery_identity_only_accepts_complete_firmware_tuple(self):
         with patch.dict(
             os.environ,
-            {"MAP_PLATFORM_CATALOG_REQUIRED_IOS_BUILD": "123"},
+            {"MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_VERSION": "1.2.3"},
             clear=True,
         ):
             with self.assertRaisesRegex(
@@ -334,15 +345,16 @@ class CatalogTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "MAP_PLATFORM_CATALOG_REQUIRED_IOS_BUILD": "123",
-                "MAP_PLATFORM_CATALOG_REQUIRED_IOS_GIT_SHA": "a" * 40,
-                "MAP_PLATFORM_CATALOG_REQUIRED_IOS_BUILD_SHA256": "b" * 64,
+                "MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_VERSION": "1.2.3",
+                "MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_BUILD": "123",
+                "MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_GIT_SHA": "a" * 40,
             },
             clear=True,
         ):
             self.assertEqual(
-                catalog_delivery_requirements("production")["requiredIosBuild"],
-                "123",
+                catalog_delivery_requirements("production")
+                ["requiredFirmwareBuild"],
+                123,
             )
 
 

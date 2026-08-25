@@ -67,6 +67,11 @@ class MaintenanceIterationError(RuntimeError):
         self.result = result
 
 
+MAX_CATALOG_PUBLICATION_RETRY_BATCH = 4
+MAX_CATALOG_RETENTION_BATCH = 5
+MAX_CATALOG_MAINTENANCE_CALLS = 15
+
+
 def _safe_error_summary(exc: Exception) -> dict[str, object]:
     chain: list[Exception] = []
     current: BaseException | None = exc
@@ -233,6 +238,8 @@ def _perform_maintenance(
     retention_days: int,
     artifact_store,
     max_gc_items: int,
+    catalog_publication_retry_batch: int = MAX_CATALOG_PUBLICATION_RETRY_BATCH,
+    catalog_retention_batch: int = MAX_CATALOG_RETENTION_BATCH,
     monitoring_store: MapMonitoringStore | None = None,
     monitoring_retention_days: int | None = None,
     building_cache_retention_days: int = DEFAULT_BUILDING_BLOCK_CACHE_RETENTION_DAYS,
@@ -241,12 +248,22 @@ def _perform_maintenance(
     building_task_retention_days: int = DEFAULT_BUILDING_TASK_RETENTION_DAYS,
     catalog_client: CatalogClient | None = None,
 ) -> dict[str, object]:
+    if not 1 <= catalog_publication_retry_batch <= MAX_CATALOG_PUBLICATION_RETRY_BATCH:
+        raise ValueError("catalog publication retry batch is invalid")
+    if not 1 <= catalog_retention_batch <= MAX_CATALOG_RETENTION_BATCH:
+        raise ValueError("catalog retention batch is invalid")
+    catalog_call_budget = (
+        catalog_publication_retry_batch + 1 + 2 * catalog_retention_batch
+    )
+    if catalog_call_budget > MAX_CATALOG_MAINTENANCE_CALLS:
+        raise ValueError("catalog maintenance call budget is invalid")
     result: dict[str, object] = {
         "maintenance": True,
         "expired": 0,
         "removedWorkDirs": 0,
         "removedRateLimits": 0,
         "buildingBlockCache": {},
+        "catalogMutationCallBudget": catalog_call_budget,
     }
     failures: dict[str, object] = {}
 
@@ -278,7 +295,7 @@ def _perform_maintenance(
                 store,
                 catalog_client,
                 artifact_store=artifact_store,
-                maximum_jobs=max_gc_items,
+                maximum_jobs=catalog_publication_retry_batch,
             ),
         ),
         (
@@ -296,7 +313,7 @@ def _perform_maintenance(
                 store,
                 catalog_client,
                 artifact_store,
-                maximum_artifacts=min(max_gc_items, 10),
+                maximum_artifacts=min(max_gc_items, catalog_retention_batch),
             ),
         ),
         (
@@ -438,6 +455,26 @@ def main() -> int:
         "--max-gc-items",
         type=int,
         default=int(os.environ.get("MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS", "100")),
+    )
+    maintenance_loop.add_argument(
+        "--catalog-publication-retry-batch",
+        type=int,
+        default=int(
+            os.environ.get(
+                "MAP_PLATFORM_CATALOG_PUBLICATION_RETRY_BATCH",
+                str(MAX_CATALOG_PUBLICATION_RETRY_BATCH),
+            )
+        ),
+    )
+    maintenance_loop.add_argument(
+        "--catalog-retention-batch",
+        type=int,
+        default=int(
+            os.environ.get(
+                "MAP_PLATFORM_CATALOG_RETENTION_BATCH",
+                str(MAX_CATALOG_RETENTION_BATCH),
+            )
+        ),
     )
     maintenance_loop.add_argument(
         "--building-cache-retention-days",
@@ -982,6 +1019,10 @@ def main() -> int:
                     retention_days=args.retention_days,
                     artifact_store=artifact_store,
                     max_gc_items=args.max_gc_items,
+                    catalog_publication_retry_batch=(
+                        args.catalog_publication_retry_batch
+                    ),
+                    catalog_retention_batch=args.catalog_retention_batch,
                     monitoring_store=monitoring_store,
                     monitoring_retention_days=monitoring_retention_days,
                     building_cache_retention_days=(
