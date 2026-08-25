@@ -32,6 +32,7 @@ struct MetricLabels {
 lv_obj_t *ridePage = nullptr;
 lv_obj_t *rideStatus = nullptr;
 lv_obj_t *rideSpeedValue = nullptr;
+lv_obj_t *rideSpeedUnit = nullptr;
 MetricLabels rideHeartRate{};
 lv_obj_t *rideHeartRateHeart = nullptr;
 lv_obj_t *rideZoneTitle = nullptr;
@@ -328,13 +329,16 @@ void updateZoneMetric(const ride_telemetry_presenter::ViewModel &model) {
 void updateHeartRateMetric(
     const ride_telemetry_presenter::ViewModel &model) {
   const ride_telemetry_layout::Rect &metric = rideMetricPlacement.heartRate;
+  const bool ended = model.sessionState ==
+                     workout_telemetry_protocol::SessionState::Ended;
+  const auto heartRate = ended ? model.averageHeartRateBpm
+                               : model.currentHeartRateBpm;
   char value[24];
-  ride_telemetry_presenter::formatInteger(model.currentHeartRateBpm, value,
-                                          sizeof(value));
+  ride_telemetry_presenter::formatInteger(heartRate, value, sizeof(value));
   const ride_telemetry_layout::HeartRatePresentation presentation =
       ride_telemetry_layout::makeHeartRatePresentation(
           metric, rideLayout.screenWidth,
-          model.currentHeartRateBpm.available);
+          heartRate.available);
 
   if (!presentation.showHeart) {
     lv_obj_set_pos(rideHeartRate.value, presentation.unavailableValue.x,
@@ -757,13 +761,13 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   lv_obj_set_style_text_align(rideSpeedValue, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_text_static(rideSpeedValue, "0.0");
 
-  lv_obj_t *speedUnit = lv_label_create(ridePage);
-  lv_obj_set_width(speedUnit, rideLayout.heroUnit.width);
-  lv_obj_set_pos(speedUnit, rideLayout.heroUnit.x, rideLayout.heroUnit.y);
-  lv_obj_set_style_text_font(speedUnit, &lv_font_montserrat_18, 0);
-  lv_obj_set_style_text_color(speedUnit, lv_color_hex(0x999999), 0);
-  lv_obj_set_style_text_align(speedUnit, LV_TEXT_ALIGN_CENTER, 0);
-  lv_label_set_text_static(speedUnit, "km/h");
+  rideSpeedUnit = lv_label_create(ridePage);
+  lv_obj_set_width(rideSpeedUnit, rideLayout.heroUnit.width);
+  lv_obj_set_pos(rideSpeedUnit, rideLayout.heroUnit.x, rideLayout.heroUnit.y);
+  lv_obj_set_style_text_font(rideSpeedUnit, &lv_font_montserrat_18, 0);
+  lv_obj_set_style_text_color(rideSpeedUnit, lv_color_hex(0x999999), 0);
+  lv_obj_set_style_text_align(rideSpeedUnit, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_text_static(rideSpeedUnit, "km/h");
 
   rideHeartRate =
       createMetric(ridePage, "Heart rate", rideLayout.metrics[0]);
@@ -842,8 +846,21 @@ void updateRideTelemetryEvent(lv_event_t *) {
   updateStatusLabel(rideStatus, model);
   updateDetectionWaitingMessage(millis());
 
+  const bool ended = model.usesWorkout &&
+                     model.sessionState ==
+                         workout_telemetry_protocol::SessionState::Ended;
+  setLabelIfChanged(rideSpeedUnit, ended ? "average km/h" : "km/h");
+  if (model.usesWorkout) {
+    setLabelIfChanged(rideHeartRate.title,
+                      ended ? "Average HR" : "Heart rate");
+  }
+
   char value[24];
-  ride_telemetry_presenter::formatSpeed(model, value, sizeof(value));
+  if (ended) {
+    ride_telemetry_presenter::formatAverageSpeed(model, value, sizeof(value));
+  } else {
+    ride_telemetry_presenter::formatSpeed(model, value, sizeof(value));
+  }
   setLabelIfChanged(rideSpeedValue, value);
   if (model.usesWorkout) {
     updateHeartRateMetric(model);

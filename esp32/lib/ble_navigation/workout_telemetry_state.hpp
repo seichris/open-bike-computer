@@ -29,6 +29,10 @@ struct State {
   OptionalMetric<uint32_t> elapsedSeconds{};
   OptionalMetric<uint32_t> distanceMeters{};
   OptionalMetric<uint16_t> speedCentimetersPerSecond{};
+  // Highest speed observed in the accepted workout telemetry stream. HealthKit
+  // exposes the speed samples, but the device only needs the terminal maximum
+  // and can retain it without expanding the BLE frame contract.
+  OptionalMetric<uint16_t> maximumSpeedCentimetersPerSecond{};
   OptionalMetric<uint16_t> currentHeartRateBpm{};
 
   uint8_t sourceFlags = 0;
@@ -70,6 +74,8 @@ inline bool operator==(const State &lhs, const State &rhs) {
          lhs.elapsedSeconds == rhs.elapsedSeconds &&
          lhs.distanceMeters == rhs.distanceMeters &&
          lhs.speedCentimetersPerSecond == rhs.speedCentimetersPerSecond &&
+         lhs.maximumSpeedCentimetersPerSecond ==
+             rhs.maximumSpeedCentimetersPerSecond &&
          lhs.currentHeartRateBpm == rhs.currentHeartRateBpm &&
          lhs.sourceFlags == rhs.sourceFlags &&
          lhs.averageHeartRateBpm == rhs.averageHeartRateBpm &&
@@ -358,6 +364,11 @@ private:
       next.distanceMeters = decodeUnsignedMetric(distance, UNAVAILABLE_UINT32);
       next.speedCentimetersPerSecond =
           decodeUnsignedMetric(speed, UNAVAILABLE_UINT16);
+      if (speed != UNAVAILABLE_UINT16 &&
+          (!next.maximumSpeedCentimetersPerSecond.available ||
+           speed > next.maximumSpeedCentimetersPerSecond.value)) {
+        next.maximumSpeedCentimetersPerSecond = {true, speed};
+      }
       next.currentHeartRateBpm =
           decodeUnsignedMetric(currentHeartRate, UNAVAILABLE_UINT16);
     }
