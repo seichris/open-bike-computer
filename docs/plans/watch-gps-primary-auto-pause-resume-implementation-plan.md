@@ -93,7 +93,9 @@ candidate path:
 - speed, capture age, and horizontal accuracy are available and valid;
 - the sample is no more than three seconds old at the firmware monotonic clock;
 - horizontal uncertainty is no more than `12.5 m`; and
-- the sample sequence is current for this authenticated workout transport.
+- the motion epoch and sample sequence are current for this active workout; and
+- the frame's running-or-automatically-paused phase matches the firmware's
+  confirmed workout phase.
 
 Watch GPS remains primary even when the presentation speed comes from a paired
 cycling sensor. This preserves the requested Watch behavior while keeping the
@@ -205,11 +207,11 @@ GPS. Source switching is explicit and traceable.
    trusted for policy timing.
 6. Carry horizontal accuracy with the fast Watch speed. A fast value without
    explicit quality is presentation-only and cannot control a workout.
-7. Add a stable location sample sequence to the shared Watch snapshot so
-   direct Watch BLE and Watch-to-iPhone relay preserve the same sample identity.
-   The iPhone relay must build this evidence from the authoritative raw Watch
-   envelope, never from a presentation snapshot that may contain iPhone
-   location fallback.
+7. Add a stable location sample epoch and sequence to the shared Watch snapshot
+   so direct Watch BLE and Watch-to-iPhone relay preserve the same sample
+   identity across process recovery. The iPhone relay must build this evidence
+   from the authoritative raw Watch envelope, never from a presentation
+   snapshot that may contain iPhone location fallback.
 8. Continue location reception while automatically paused, but keep paused
    samples out of HealthKit route insertion, route distance, and moving-time
    metrics.
@@ -256,21 +258,37 @@ fallback.
 
 ## Shared Watch location contract
 
-Extend `WorkoutLocationV1` with an optional, monotonically advancing
-`motionSampleSequence: UInt32?` assigned when Watch accepts a new `CLLocation`.
+Extend `WorkoutLocationV1` with optional `motionSampleEpoch: UInt16?` and
+`motionSampleSequence: UInt32?` values assigned by Watch. The epoch identifies
+one recoverable Watch location-producer generation; the sequence advances for
+new `CLLocation` samples within that epoch.
 
 Contract rules:
 
-- the sequence advances only for a new accepted Core Location sample;
+- the epoch is nonzero, stored with the active Watch workout recovery identity,
+  and advances before a recovered or replaced location producer publishes new
+  evidence;
+- the sequence advances only for a new accepted Core Location sample within
+  the current epoch;
+- an accepted motion location is no earlier than the workout start and has a
+  capture timestamp strictly newer than the prior motion location in that
+  epoch, so cached or reordered Core Location callbacks cannot advance motion
+  evidence;
 - snapshot heartbeats and unrelated HealthKit metric updates preserve the same
-  sequence for the same location;
-- the direct Watch builder and iPhone relay builder copy the same sequence;
-- missing sequence means the peer is legacy and cannot produce motion evidence
-  v1;
-- delayed or regressing sequence values are rejected within one authenticated
-  transport epoch;
-- wraparound comparison is unsigned and covered by tests; and
-- the sequence is ephemeral evidence identity, not persisted rider identity.
+  epoch and sequence for the same location;
+- the direct Watch builder and iPhone relay builder copy the same epoch and
+  sequence;
+- missing epoch or sequence means the peer is legacy and cannot produce motion
+  evidence v1;
+- a newer epoch resets the firmware Watch candidate and sequence baseline
+  before its first sample is accepted;
+- delayed older epochs and regressing sequences within the current epoch are
+  rejected even when the iPhone-device authenticated BLE transport remained
+  connected across a Watch process recovery;
+- epoch and sequence wraparound comparisons use serial-number arithmetic and
+  are covered by tests; and
+- both values are session-local evidence identity, never rider or device
+  identity.
 
 Adding the optional field must preserve decoding of old snapshots and old
 recovery records. Update sanitization, merge, equality, fixtures, and schema
@@ -314,19 +332,22 @@ payload:
 | Offset | Field | Encoding |
 | ---: | --- | --- |
 | 0 | Frame kind | `UInt8`, value `4` |
-| 1 | Flags | bit 0 fix valid; bit 1 speed available; bit 2 accuracy available; bit 3 current Watch sample; bits 4...7 zero |
+| 1 | Flags | bit 0 fix valid; bit 1 speed available; bit 2 accuracy available; bit 3 current Watch sample; bit 4 automatically-paused phase; bits 5...7 zero |
 | 2 | Session token | `UInt16LE`, must match the active workout |
-| 4 | Motion sample sequence | `UInt32LE` |
+| 4 | Motion sample sequence | `UInt32LE` within the current epoch |
 | 8 | Watch speed | `UInt16LE` centimetres/second; `0xFFFF` unavailable |
 | 10 | Horizontal accuracy | `UInt16LE` decimetres; `0xFFFF` unavailable |
 | 12 | Sample age | `UInt16LE` milliseconds; `0xFFFF` unavailable |
-| 14 | Reserved | two zero bytes in schema v1 |
+| 14 | Motion sample epoch | nonzero `UInt16LE` producer generation |
 
 Validation rules:
 
-- unknown flags or nonzero reserved bytes reject the frame;
+- unknown flags or a zero motion sample epoch reject the frame;
 - `fix valid` requires speed, accuracy, sample age, current-sample flag, and a
   nonzero session token;
+- valid running evidence requires the phase bit clear; valid automatic-resume
+  evidence requires the phase bit set; a frame that does not match the
+  firmware's confirmed workout phase is ignored without changing evidence;
 - flag/sentinel disagreement rejects the frame;
 - speed and accuracy encode only finite nonnegative source values;
 - sample age is computed at send time and saturates to unavailable rather than
@@ -368,7 +389,8 @@ motion evidence so replacing a location sample cannot delete lifecycle frames.
 Refactor `WatchRouteRecorder` reception into two stages:
 
 1. validate and publish the newest motion/location sample while the workout is
-   active; then
+   active, using a motion timestamp gate that rejects pre-workout, duplicate,
+   and regressing capture times but does not apply the route pause gate; then
 2. only when the workout is running, apply the route timestamp gate, distance
    accumulation, route batching, and HealthKit insertion.
 
@@ -398,6 +420,7 @@ Add an allocation-free state object under `esp32/lib/ble_navigation/` or
 `esp32/lib/ride_automation/` containing:
 
 - active session token;
+- last accepted motion sample epoch;
 - last accepted sample sequence;
 - speed and horizontal uncertainty;
 - firmware-monotonic capture time reconstructed from arrival and sample age;
@@ -405,11 +428,12 @@ Add an allocation-free state object under `esp32/lib/ble_navigation/` or
 - availability/quality flags;
 - authenticated transport generation; and
 - bounded counters for applied, duplicate, stale, malformed, wrong-session,
-  and sequence-regression frames.
+  sequence-regression, and lifecycle-phase-mismatch frames.
 
 Only the BLE owner path mutates the store. The ride runtime consumes a coherent
 snapshot. Reset on disconnect, authentication reset, writer-lease transfer,
-workout token change, idle/ended workout, and firmware runtime reset.
+workout token change, confirmed running/automatically-paused phase change,
+idle/ended workout, and firmware runtime reset.
 
 ### Evidence model
 
@@ -422,6 +446,8 @@ TimedMetric watchGpsHorizontalUncertaintyMeters;
 TimedFlag watchGpsFixValid;
 uint32_t watchGpsSampleSequence;
 bool watchGpsSampleSequenceAvailable;
+uint16_t watchGpsSampleEpoch;
+bool watchGpsSampleEpochAvailable;
 ```
 
 Extend normalized evidence with:
@@ -462,8 +488,9 @@ Add a Watch sample-span latch that:
 - advances only when a newer accepted sample sequence arrives;
 - requires low-speed qualified samples spanning at least five seconds;
 - resets on a sample gap greater than three seconds, poor quality, threshold
-  contradiction, session change, or moving wheel/cadence veto;
-- handles `millis()` and sample sequence wraparound; and
+  contradiction, confirmed lifecycle-phase, session, or motion-epoch change,
+  or moving wheel/cadence veto;
+- handles `millis()`, motion-epoch, and sample-sequence wraparound; and
 - reports candidate start and progress using reconstructed monotonic capture
   times.
 
@@ -503,12 +530,12 @@ Bump the privacy-safe ride-automation trace schema and add:
 
 - Watch GPS speed value and age;
 - Watch GPS horizontal-accuracy value and age;
-- sample sequence or a bounded sequence-change indicator;
+- bounded motion-epoch and sample-sequence change indicators;
 - Watch evidence health;
 - selected pause/resume path;
 - candidate sample span and largest sample gap;
 - source-conflict counters; and
-- motion-frame applied, duplicate, stale, and rejected counters.
+- motion-frame applied, duplicate, stale, phase-mismatch, and rejected counters.
 
 Do not record coordinates, raw HealthKit metrics, session tokens, owner keys, or
 raw Core Location objects. Keep schema-2 replay support by treating missing
@@ -529,8 +556,8 @@ These buckets distinguish detector latency from BLE and HealthKit latency.
 
 ### Phase 1: shared contract and negotiated transport
 
-1. Add the optional Watch motion sample sequence to `WorkoutLocationV1` and
-   preserve old snapshot/recovery decoding.
+1. Add the optional Watch motion sample epoch and sequence to
+   `WorkoutLocationV1` and preserve old snapshot/recovery decoding.
 2. Add capability client version `20` and CAP2 bit `22`, after rechecking the
    live allocation.
 3. Add kind-4 frame builder/decoder, golden vectors, authenticated native and
@@ -605,6 +632,7 @@ the new contract and host tests pass.
 - `ios-app/BikeComputer/BikeComputerWatch/Managers/WatchRouteRecorder.swift`
 - `ios-app/BikeComputer/BikeComputerWatch/Managers/WatchLocationService.swift`
 - `ios-app/BikeComputer/BikeComputerWatch/Managers/WatchWorkoutManager.swift`
+- `ios-app/BikeComputer/BikeComputerWatch/Managers/WatchWorkoutRecoveryStore.swift`
 - `ios-app/BikeComputer/BikeComputerWatch/Managers/WatchWorkoutDeviceBridge.swift`
 - `ios-app/BikeComputer/BikeComputerWatch/Managers/WatchDeviceLink.swift`
 - `ios-app/BikeComputer/BikeComputer/Managers/WorkoutDeviceRelay.swift`
@@ -628,9 +656,14 @@ Cover:
   speeds;
 - capability advertisement by client version;
 - native and fallback authenticated transport;
-- unknown flags, nonzero reserved bytes, bad sentinel/flag combinations,
-  invalid token, stale age, and malformed length rejection;
-- duplicate, out-of-order, wraparound, and transport-reset sequences;
+- unknown flags, zero motion epoch, bad sentinel/flag combinations, invalid
+  token, stale age, and malformed length rejection;
+- running/automatically-paused phase-bit acceptance and lifecycle-phase
+  mismatch rejection;
+- duplicate, out-of-order, epoch/sequence wraparound, and transport-reset
+  sequences;
+- a Watch producer epoch change while the iPhone-device BLE session remains
+  connected;
 - session-token replacement and idle/end clearing; and
 - old core/extended/origin frames remaining unchanged.
 
@@ -655,21 +688,31 @@ Cover:
 - structured GPS plus IMU remains a fallback;
 - manually paused workouts never auto-resume;
 - pending-decision cancellation is source aware;
-- profile, timestamp, and sequence wraparound; and
+- delayed frames from the prior lifecycle phase cannot advance pause or resume;
+- profile, timestamp, and sequence wraparound;
+- producer-epoch replacement resets the candidate without losing replay
+  determinism; and
 - legacy schema-2 traces reproduce their previous decisions.
 
 ### Swift contract and scheduling tests
 
 Cover:
 
-- old snapshots decode without `motionSampleSequence`;
-- the sequence advances only for a new Watch location;
+- old snapshots decode without `motionSampleEpoch` or `motionSampleSequence`;
+- the epoch survives active-workout recovery and advances when a recovered
+  producer replaces the prior producer;
+- the sequence advances only for a new Watch location within that epoch;
+- cached pre-workout, duplicate-time, and out-of-order locations do not advance
+  the motion sample sequence;
 - the ride-automation location demand selects and restores Core Location
   configuration without disrupting navigation or route recording;
 - detector motion uses `snapshot.location.speed` even when `currentSpeed` comes
   from a paired cycling sensor;
-- direct Watch and iPhone relay produce identical motion bytes for the same
-  snapshot;
+- direct Watch and iPhone relay encode identical kind, flags, session token,
+  epoch, sequence, speed, and accuracy for the same snapshot, while each
+  computes sample age at its own send time;
+- both senders derive the lifecycle-phase flag from the authoritative Watch
+  snapshot rather than presentation fallback;
 - sample age grows on heartbeat while sample sequence remains fixed;
 - stale or invalid Watch location produces explicit unavailability;
 - new motion replaces only queued motion, never core/extended lifecycle frames;
@@ -757,7 +800,8 @@ The feature is complete only when all of these pass:
    duplicates never fabricate sample duration or duplicate transitions.
 6. **Conflict safety:** fresh moving wheel/cadence prevents every contradictory
    Watch-driven pause in the physical matrix.
-7. **Manual precedence:** no automatic resume crosses a manual pause, finish,
+7. **Lifecycle precedence:** no motion candidate carries evidence across a
+   confirmed running/automatically-paused change, manual pause, finish,
    discard, recovery, or session-generation boundary.
 8. **Route integrity:** zero paused points or paused-distance growth in saved
    HealthKit workouts, including recovery and delayed batches.
