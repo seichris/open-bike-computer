@@ -138,6 +138,8 @@ int main() {
   assert(reducer.state().elapsedSeconds.value == 3661);
   assert(reducer.state().distanceMeters.value == 12345);
   assert(reducer.state().speedCentimetersPerSecond.value == 1234);
+  assert(reducer.state().maximumSpeedCentimetersPerSecond.available);
+  assert(reducer.state().maximumSpeedCentimetersPerSecond.value == 1234);
   assert(reducer.state().currentHeartRateBpm.value == 157);
   assert(reducer.applyFrame(extended, sizeof(extended), 300, true) ==
          ApplyResult::Applied);
@@ -335,6 +337,60 @@ int main() {
   auto nonFiveZoneModel = pausedModel;
   nonFiveZoneModel.heartRateZoneCount.value = 6;
   assert(ride_telemetry_presenter::fiveZoneIndex(nonFiveZoneModel) == -1);
+
+  Reducer endedReducer;
+  assert(endedReducer.applyFrame(core, sizeof(core), 1000, true) ==
+         ApplyResult::Applied);
+  uint8_t fasterCore[sizeof(core)];
+  std::memcpy(fasterCore, core, sizeof(fasterCore));
+  writeUInt16LE(fasterCore, 12, 2000);
+  assert(endedReducer.applyFrame(fasterCore, sizeof(fasterCore), 1100, true) ==
+         ApplyResult::Applied);
+  assert(endedReducer.state().maximumSpeedCentimetersPerSecond.value == 2000);
+  assert(endedReducer.applyFrame(extended, sizeof(extended), 1200, true) ==
+         ApplyResult::Applied);
+  uint8_t summaryEndedCore[sizeof(core)];
+  std::memcpy(summaryEndedCore, fasterCore, sizeof(summaryEndedCore));
+  summaryEndedCore[1] = static_cast<uint8_t>(SessionState::Ended);
+  writeUInt16LE(summaryEndedCore, 12,
+                workout_telemetry_protocol::UNAVAILABLE_UINT16);
+  assert(endedReducer.applyFrame(summaryEndedCore, sizeof(summaryEndedCore),
+                                 1300, true) == ApplyResult::Applied);
+  assert(endedReducer.state().sessionState == SessionState::Ended);
+  assert(endedReducer.state().maximumSpeedCentimetersPerSecond.value == 2000);
+  uint8_t summaryEndedExtended[sizeof(extended)];
+  std::memcpy(summaryEndedExtended, extended, sizeof(summaryEndedExtended));
+  summaryEndedExtended[1] &= static_cast<uint8_t>(~0x03);
+  assert(endedReducer.applyFrame(summaryEndedExtended,
+                                 sizeof(summaryEndedExtended), 1400, true) ==
+         ApplyResult::Applied);
+  const auto summaryEndedModel = ride_telemetry_presenter::makeViewModel(
+      workout_telemetry::makeSnapshot(endedReducer.state(), 1400),
+      ride_telemetry_presenter::LegacyRideTelemetry{});
+  assert(summaryEndedModel.sessionState == SessionState::Ended);
+  ride_telemetry_presenter::formatAverageSpeed(summaryEndedModel, formatted,
+                                                sizeof(formatted));
+  assertText(formatted, "12.1");
+  ride_telemetry_presenter::formatMaximumSpeed(summaryEndedModel, formatted,
+                                                sizeof(formatted));
+  assertText(formatted, "72.0");
+  assertBottomMetrics(summaryEndedModel,
+                      ride_telemetry_presenter::BottomMetric::MaximumSpeed,
+                      ride_telemetry_presenter::BottomMetric::Energy);
+  assertText(ride_telemetry_presenter::bottomMetricTitle(
+                 ride_telemetry_presenter::BottomMetric::MaximumSpeed),
+             "Max speed");
+  assertText(ride_telemetry_presenter::bottomMetricTitle(
+                 ride_telemetry_presenter::BottomMetric::Energy),
+             "Calories");
+  ride_telemetry_presenter::formatBottomMetric(
+      ride_telemetry_presenter::BottomMetric::MaximumSpeed, summaryEndedModel,
+      formatted, sizeof(formatted));
+  assertText(formatted, "72.0");
+  ride_telemetry_presenter::formatBottomMetric(
+      ride_telemetry_presenter::BottomMetric::Energy, summaryEndedModel,
+      formatted, sizeof(formatted));
+  assertText(formatted, "456.7");
 
   using ride_telemetry_presenter::BottomMetric;
   assertBottomMetrics(pausedModel, BottomMetric::WallElapsed,

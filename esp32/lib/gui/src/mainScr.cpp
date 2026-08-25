@@ -215,6 +215,7 @@ uint64_t workoutSignature(uint32_t nowMs) {
   hashOptionalMetric(hash, state.elapsedSeconds);
   hashOptionalMetric(hash, state.distanceMeters);
   hashOptionalMetric(hash, state.speedCentimetersPerSecond);
+  hashOptionalMetric(hash, state.maximumSpeedCentimetersPerSecond);
   hashOptionalMetric(hash, state.currentHeartRateBpm);
   hashScalar(hash, state.sourceFlags);
   hashOptionalMetric(hash, state.averageHeartRateBpm);
