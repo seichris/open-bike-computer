@@ -154,6 +154,19 @@ to strict relation processing; ordinary legacy conversions retain GDAL's
 default filtering, and unrelated tagless ways are rejected by building
 collection.
 
+A `type=building` relation may declare several explicit `outline` members for
+one building complex. Those members are not competing relations: the relation
+index records them as the only allowed parent candidates for each part, and
+the spatial association stage selects the smallest declared outline that
+contains the part. Explicit relation candidates permit up to 25 cm of boundary
+drift to accommodate nearly coincident OSM rings; ordinary inferred
+containment keeps its 5 cm tolerance. If GDAL suppresses a sole closed outer
+way because it also emits an enclosing building multipolygon, the relation
+index restores that exact relation geometry under the way's outline identity.
+A missing or non-unique geometry provider, a part outside every declared
+outline tolerance, or a part shared across different building relations still
+fails closed.
+
 Buildings are clipped only when FMB blocks are emitted; new clip edges receive
 a cleared wall bit so adjacent blocks do not render artificial seam facades.
 Plan-aware builds cache the canonical FMB building section for each global
