@@ -37,7 +37,8 @@ CREATE TRIGGER promotion_publication_requires_live_lease
 BEFORE INSERT ON publication_events
 WHEN NEW.promotion_lease_id IS NOT NULL
 BEGIN
-    SELECT CASE WHEN NEW.channel <> 'production' OR NOT EXISTS (
+    -- Keep CASE parenthesized for Wrangler's remote D1 migration parser.
+    SELECT (CASE WHEN NEW.channel <> 'production' OR NOT EXISTS (
         SELECT 1
           FROM promotion_leases lease
           JOIN artifacts source ON source.id = lease.source_artifact_id
@@ -53,5 +54,5 @@ BEGIN
            AND source.object_key = lease.source_object_key
            AND source.byte_count = lease.source_byte_count
            AND source.sha256 = lease.source_sha256
-    ) THEN RAISE(ABORT, 'promotion lease is not active') END;
+    ) THEN RAISE(ABORT, 'promotion lease is not active') END);
 END;
