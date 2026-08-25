@@ -8,6 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .artifacts import create_artifact_store_from_environment
+from .catalog import CatalogClient, publish_ready_job, retry_ready_publications
 from .generation_profiles import (
     configured_deployment_channel,
     load_generation_profile_policy,
@@ -232,6 +233,7 @@ def _perform_maintenance(
     building_cache_max_bytes: int = DEFAULT_BUILDING_BLOCK_CACHE_MAX_BYTES,
     building_task_store: BuildingTaskStore | None = None,
     building_task_retention_days: int = DEFAULT_BUILDING_TASK_RETENTION_DAYS,
+    catalog_client: CatalogClient | None = None,
 ) -> dict[str, object]:
     result: dict[str, object] = {
         "maintenance": True,
@@ -264,6 +266,14 @@ def _perform_maintenance(
         )
 
     tasks = (
+        (
+            "catalogPublications",
+            lambda: retry_ready_publications(
+                store,
+                catalog_client,
+                maximum_jobs=max_gc_items,
+            ),
+        ),
         (
             "expired",
             lambda: expire_ready_jobs(
@@ -453,6 +463,11 @@ def main() -> int:
     expire.add_argument("--older-than-days", type=int, default=30)
 
     subparsers.add_parser("cleanup-work")
+    promote_catalog = subparsers.add_parser(
+        "promote-catalog-map",
+        help="validate and production-sign one development catalog map",
+    )
+    promote_catalog.add_argument("map_entry_id")
     build_plan = subparsers.add_parser(
         "build-plan",
         help="inspect durable internal building chunk plans",
@@ -706,6 +721,35 @@ def main() -> int:
         **generation_controls,
     )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
+    catalog_client = CatalogClient.from_environment()
+
+    if args.command == "promote-catalog-map":
+        from .catalog_promotion import promote_catalog_map
+        from .map_signing import load_map_artifact_signer_from_environment
+
+        if catalog_client is None:
+            raise SystemExit("MAP_PLATFORM_CATALOG_URL is required")
+        signer = load_map_artifact_signer_from_environment()
+        if signer is None:
+            raise SystemExit("production map stream signing is not enabled")
+        producer_build_sha256, producer_image_digest = _pipeline_producer_identity(
+            repo_root,
+            os.environ.get("MAP_PLATFORM_WORKER_IMAGE_REFERENCE", "").strip(),
+            required=True,
+        )
+        assert producer_build_sha256 is not None
+        assert producer_image_digest is not None
+        result = promote_catalog_map(
+            args.map_entry_id,
+            catalog_client=catalog_client,
+            artifact_store=create_artifact_store_from_environment(data_root),
+            signer=signer,
+            producer_build_sha256=producer_build_sha256,
+            producer_image_digest=producer_image_digest,
+            work_root=data_root / "promotions",
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
 
     def create_pipeline() -> MapBuildPipeline:
         from .map_signing import load_map_artifact_signer_from_environment
@@ -755,15 +799,21 @@ def main() -> int:
         return 0
     if args.command == "run-job":
         pipeline = create_pipeline()
+        completed = run_job(
+            store,
+            pipeline,
+            args.job_id,
+            monitoring_store=monitoring_store,
+            estimate_coordinator=estimate_coordinator,
+        )
+        completed = publish_ready_job(
+            store,
+            catalog_client,
+            completed.job_id,
+        )
         print(
             json.dumps(
-                run_job(
-                    store,
-                    pipeline,
-                    args.job_id,
-                    monitoring_store=monitoring_store,
-                    estimate_coordinator=estimate_coordinator,
-                ).to_dict(),
+                completed.to_dict(),
                 indent=2,
                 sort_keys=True,
             )
@@ -786,6 +836,7 @@ def main() -> int:
             pipeline,
             monitoring_store=monitoring_store,
             estimate_coordinator=estimate_coordinator,
+            catalog_client=catalog_client,
         ).run_next()
         print(
             json.dumps(
@@ -807,6 +858,7 @@ def main() -> int:
             pipeline,
             monitoring_store=monitoring_store,
             estimate_coordinator=estimate_coordinator,
+            catalog_client=catalog_client,
         ).run_until_empty(max_jobs=args.max_jobs)
         print(
             json.dumps(
@@ -839,6 +891,7 @@ def main() -> int:
             on_heartbeat=write_worker_heartbeat,
             monitoring_store=monitoring_store,
             estimate_coordinator=estimate_coordinator,
+            catalog_client=catalog_client,
         )
         processed = 0
         while args.max_jobs is None or processed < args.max_jobs:
@@ -877,6 +930,7 @@ def main() -> int:
                     building_cache_max_bytes=args.building_cache_max_bytes,
                     building_task_store=building_task_store,
                     building_task_retention_days=args.building_task_retention_days,
+                    catalog_client=catalog_client,
                 )
             except MaintenanceIterationError as exc:
                 maintenance_result = exc.result

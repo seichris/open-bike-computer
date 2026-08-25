@@ -1353,6 +1353,12 @@ nonisolated struct SavedMapArtifactMetadata: Codable, Equatable {
     var lastTransferOutcome: String?
     var userDefinedDisplayName: Bool? = nil
     var downloadReceiptID: String? = nil
+    var catalogMapEntryID: String? = nil
+    var catalogLibraryID: String? = nil
+    var originChannel: String? = nil
+    var catalogAliasRevision: Int? = nil
+    var sourceShareID: String? = nil
+    var catalogSyncState: String? = nil
 }
 
 nonisolated enum SavedMapRendererCompatibilityPolicy {
@@ -1549,6 +1555,7 @@ nonisolated struct SavedMapLocalRecord: Equatable, Sendable {
     let mapID: String
     let acceptedSessionIDs: Set<String>
     let displayName: String
+    let catalogMapEntryID: String?
 }
 
 nonisolated struct SavedMapListItem: Identifiable, Equatable, Sendable {
@@ -1556,10 +1563,12 @@ nonisolated struct SavedMapListItem: Identifiable, Equatable, Sendable {
     let localRecord: SavedMapLocalRecord?
     let deviceMap: DeviceActiveMapDescriptor?
     let displayName: String
+    let catalogMap: OfflineMapCatalogMap?
 
     var packURL: URL? { localRecord?.packURL }
     var isOnIPhone: Bool { localRecord != nil }
     var isActiveOnDevice: Bool { deviceMap != nil }
+    var isAvailableInLibrary: Bool { catalogMap != nil }
 }
 
 @MainActor
@@ -1603,6 +1612,9 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var activationProgress: MapActivationProgressPresentation?
     @Published private(set) var lastTransferMapId: String
     @Published private(set) var lastTransferOutcome: String
+    @Published private(set) var catalogMaps: [OfflineMapCatalogMap] = []
+    @Published private(set) var pendingSharePreview: OfflineMapSharePreview?
+    @Published private(set) var createdShareURL: URL?
 
     weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
 
@@ -1650,6 +1662,8 @@ final class OfflineMapManager: ObservableObject {
     private let installationCredentialStore: OfflineMapInstallationCredentialStore
     private let legacyBearerTokenStore: OfflineMapLegacyBearerTokenStore
     private let mapStreamTrustStore: BikeMapStreamTrustStore
+    private let catalogCredentialStore: OfflineMapCatalogCredentialStore
+    private let catalogClient: OfflineMapCatalogClient?
     private let legacyClientInstallationId: String
     private(set) var clientInstallationId: String
     private(set) var clientInstallationToken: String?
@@ -1658,6 +1672,8 @@ final class OfflineMapManager: ObservableObject {
     private var mapJobTask: Task<Void, Never>?
     private var mapJobTaskID: UUID?
     private var inventorySyncTask: Task<Void, Never>?
+    private var catalogSyncTask: Task<Void, Never>?
+    private var pendingShareToken: String?
     private var activationReconciliationTask: Task<Void, Never>?
     private var backgroundUploadObserver: AnyCancellable?
     private var activityCounter = OfflineMapActivityCounter()
@@ -1674,6 +1690,7 @@ final class OfflineMapManager: ObservableObject {
         mapPlatformSession: URLSession = .shared,
         cacheDirectory: URL? = nil,
         mapStreamTrustStore: BikeMapStreamTrustStore = .production,
+        catalogClient: OfflineMapCatalogClient? = nil,
         packDownload: @escaping PackDownloadOperation = { url, constraints, onProgress, onByteProgress in
             try await OfflineMapPackDownloader.download(
                 from: url,
@@ -1719,6 +1736,14 @@ final class OfflineMapManager: ObservableObject {
         )
         self.legacyBearerTokenStore = legacyBearerTokenStore
         self.mapStreamTrustStore = mapStreamTrustStore
+        self.catalogCredentialStore = OfflineMapCatalogCredentialStore(defaults: defaults)
+#if HOST_TESTING
+        self.catalogClient = catalogClient
+#else
+        self.catalogClient = catalogClient ?? (try? OfflineMapCatalogClient(
+            session: mapPlatformSession
+        ))
+#endif
         let resolvedServerURL = Self.resolvedServerURL(defaults: defaults)
         let installationCredential = installationCredentialStore.load(
             serverURLString: resolvedServerURL
@@ -1887,6 +1912,7 @@ final class OfflineMapManager: ObservableObject {
 
     func resumePendingMapJobIfNeeded(bleManager: BLEManager? = nil) {
         syncDownloadedMapInventoryIfNeeded()
+        syncCatalogLibraryIfNeeded()
         guard mapJobTask == nil, !isBusy else {
             return
         }
@@ -2140,7 +2166,29 @@ final class OfflineMapManager: ObservableObject {
         activeDeviceMap: DeviceActiveMapDescriptor?
     ) -> [SavedMapListItem] {
         var remainingRecords = cachedMapRecords
+        var remainingCatalogMaps = catalogMaps
         var items: [SavedMapListItem] = []
+
+        func takeCatalogMap(for record: SavedMapLocalRecord) -> OfflineMapCatalogMap? {
+            let index = remainingCatalogMaps.firstIndex { map in
+                record.catalogMapEntryID.map { $0 == map.mapEntryId } ??
+                    (record.mapID == map.mapId)
+            }
+            guard let index else { return nil }
+            return remainingCatalogMaps.remove(at: index)
+        }
+
+        func reconciledDisplayName(
+            for record: SavedMapLocalRecord,
+            catalogMap: OfflineMapCatalogMap?
+        ) -> String {
+            if SavedMapArtifactMetadataStore.load(
+                for: record.packURL
+            )?.catalogSyncState == "pending" {
+                return record.displayName
+            }
+            return catalogMap?.alias ?? record.displayName
+        }
 
         if let activeDeviceMap {
             let matchingIndex = activeDeviceMap.sessionID.flatMap { sessionID in
@@ -2151,12 +2199,17 @@ final class OfflineMapManager: ObservableObject {
             }
             if let matchingIndex {
                 let record = remainingRecords.remove(at: matchingIndex)
+                let catalogMap = takeCatalogMap(for: record)
                 items.append(
                     SavedMapListItem(
                         id: "local:\(record.packURL.standardizedFileURL.path)",
                         localRecord: record,
                         deviceMap: activeDeviceMap,
-                        displayName: record.displayName
+                        displayName: reconciledDisplayName(
+                            for: record,
+                            catalogMap: catalogMap
+                        ),
+                        catalogMap: catalogMap
                     )
                 )
             } else {
@@ -2169,18 +2222,33 @@ final class OfflineMapManager: ObservableObject {
                             artifactDisplayName: activeDeviceMap.displayName,
                             sourceRegionName: nil,
                             mapID: activeDeviceMap.mapID
-                        )
+                        ),
+                        catalogMap: nil
                     )
                 )
             }
         }
 
         items.append(contentsOf: remainingRecords.map { record in
-            SavedMapListItem(
+            let catalogMap = takeCatalogMap(for: record)
+            return SavedMapListItem(
                 id: "local:\(record.packURL.standardizedFileURL.path)",
                 localRecord: record,
                 deviceMap: nil,
-                displayName: record.displayName
+                displayName: reconciledDisplayName(
+                    for: record,
+                    catalogMap: catalogMap
+                ),
+                catalogMap: catalogMap
+            )
+        })
+        items.append(contentsOf: remainingCatalogMaps.map { map in
+            SavedMapListItem(
+                id: "catalog:\(map.mapEntryId)",
+                localRecord: nil,
+                deviceMap: nil,
+                displayName: map.alias,
+                catalogMap: map
             )
         })
         return items
@@ -2423,15 +2491,291 @@ final class OfflineMapManager: ObservableObject {
             return self.displayName(forCachedPack: packURL)
         }
         packDisplayNames[packURL.lastPathComponent] = displayName
+        var catalogTarget: (String, Int)?
         if var metadata = SavedMapArtifactMetadataStore.load(for: packURL) {
             metadata.displayName = displayName
             metadata.userDefinedDisplayName = true
+            if let mapEntryID = metadata.catalogMapEntryID,
+               let revision = metadata.catalogAliasRevision {
+                catalogTarget = (mapEntryID, revision)
+                metadata.catalogSyncState = "pending"
+            }
             try? SavedMapArtifactMetadataStore.save(metadata, for: packURL)
         }
         persistPackDisplayNames()
         syncSavedMapInventory(packURL)
         refreshCachedPacks()
+        if let catalogTarget {
+            updateCatalogAlias(
+                mapEntryID: catalogTarget.0,
+                alias: displayName,
+                expectedRevision: catalogTarget.1,
+                packURL: packURL
+            )
+        }
         return displayName
+    }
+
+    @discardableResult
+    func renameCatalogMap(
+        _ map: OfflineMapCatalogMap,
+        to proposedName: String
+    ) -> String {
+        let alias = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !alias.isEmpty else { return map.alias }
+        updateCatalogAlias(
+            mapEntryID: map.mapEntryId,
+            alias: alias,
+            expectedRevision: map.aliasRevision,
+            packURL: nil
+        )
+        return alias
+    }
+
+    private func updateCatalogAlias(
+        mapEntryID: String,
+        alias: String,
+        expectedRevision: Int,
+        packURL: URL?
+    ) {
+        Task { [weak self] in
+            guard let self,
+                  let client = self.catalogClient else { return }
+            do {
+                guard let credential = try await self.ensureCatalogCredential() else { return }
+                let updated = try await client.updateAlias(
+                    mapEntryId: mapEntryID,
+                    alias: alias,
+                    expectedRevision: expectedRevision,
+                    credential: credential.credential
+                )
+                if let index = self.catalogMaps.firstIndex(where: {
+                    $0.mapEntryId == mapEntryID
+                }) {
+                    self.catalogMaps[index] = updated
+                } else {
+                    self.catalogMaps.append(updated)
+                }
+                if let packURL,
+                   var metadata = SavedMapArtifactMetadataStore.load(for: packURL) {
+                    metadata.catalogAliasRevision = updated.aliasRevision
+                    metadata.catalogSyncState = "synced"
+                    try? SavedMapArtifactMetadataStore.save(metadata, for: packURL)
+                }
+                self.refreshCachedPacks()
+            } catch {
+                // The local alias remains visible and a later library refresh
+                // resolves revision conflicts without changing map bytes.
+            }
+        }
+    }
+
+    func createShare(for item: SavedMapListItem) {
+        guard let mapEntryID = item.catalogMap?.mapEntryId ?? item.localRecord.flatMap({ record in
+            SavedMapArtifactMetadataStore.load(for: record.packURL)?.catalogMapEntryID
+        }) else {
+            errorMessage = "This map is still syncing to the shared library."
+            syncDownloadedMapInventoryIfNeeded()
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.runBusy {
+                guard let client = self.catalogClient,
+                      let credential = try await self.ensureCatalogCredential() else {
+                    throw OfflineMapCatalogError.invalidConfiguration
+                }
+                let share = try await client.createShare(
+                    mapEntryId: mapEntryID,
+                    credential: credential.credential
+                )
+                self.createdShareURL = share.url
+                self.statusMessage = "share link ready"
+            }
+        }
+    }
+
+    func clearCreatedShareURL() {
+        createdShareURL = nil
+    }
+
+    func handleShareURL(_ url: URL) {
+        guard let token = OfflineMapShareLink.token(from: url) else {
+            errorMessage = "That is not a valid Bicino map share link."
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.runBusy {
+                guard let client = self.catalogClient else {
+                    throw OfflineMapCatalogError.invalidConfiguration
+                }
+                let preview = try await client.previewShare(token: token)
+                self.pendingShareToken = token
+                self.pendingSharePreview = preview
+                self.statusMessage = "shared map preview ready"
+            }
+        }
+    }
+
+    func dismissPendingShare() {
+        pendingShareToken = nil
+        pendingSharePreview = nil
+    }
+
+    func claimPendingShare() {
+        guard let token = pendingShareToken,
+              let preview = pendingSharePreview else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.runBusy {
+                guard let client = self.catalogClient,
+                      let credential = try await self.ensureCatalogCredential() else {
+                    throw OfflineMapCatalogError.invalidConfiguration
+                }
+                let map = try await client.claimShare(
+                    token: token,
+                    credential: credential.credential
+                )
+                self.pendingShareToken = nil
+                self.pendingSharePreview = nil
+                try await self.downloadCatalogMap(
+                    map,
+                    sourceShareID: preview.shareId,
+                    client: client,
+                    credential: credential
+                )
+            }
+        }
+    }
+
+    func downloadCatalogMap(_ map: OfflineMapCatalogMap) {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.runBusy {
+                guard let client = self.catalogClient,
+                      let credential = try await self.ensureCatalogCredential() else {
+                    throw OfflineMapCatalogError.invalidConfiguration
+                }
+                try await self.downloadCatalogMap(
+                    map,
+                    sourceShareID: nil,
+                    client: client,
+                    credential: credential
+                )
+            }
+        }
+    }
+
+    private func downloadCatalogMap(
+        _ map: OfflineMapCatalogMap,
+        sourceShareID: String?,
+        client: OfflineMapCatalogClient,
+        credential: OfflineMapCatalogCredential
+    ) async throws {
+        let grant = try await client.downloadGrant(
+            mapEntryId: map.mapEntryId,
+            channel: OfflineMapCatalogConfig.channel(
+                generationServerURLString: serverURLString
+            ),
+            trustStore: mapStreamTrustStore,
+            appIdentity: .current,
+            credential: credential.credential
+        )
+        let artifact = grant.artifact.platformArtifact
+        guard artifact.isBikeMapStream else {
+            throw OfflineMapCatalogError.missingCompatibleArtifact
+        }
+        downloadURL = grant.downloadURL
+        statusMessage = "downloading shared map"
+        downloadProgress = 0
+        downloadByteProgress = nil
+        guard let r2DownloadHost = OfflineMapCatalogConfig.r2DownloadHost else {
+            throw OfflineMapCatalogError.invalidConfiguration
+        }
+        let constraints = try OfflineMapDownloadConstraints.catalogArtifact(
+            artifact,
+            catalogHost: OfflineMapCatalogConfig.productionHost,
+            r2DownloadHost: r2DownloadHost
+        )
+        let temporaryURL = try await packDownload(
+            grant.downloadURL,
+            constraints,
+            { [weak self] progress in self?.downloadProgress = progress },
+            { [weak self] byteProgress in self?.downloadByteProgress = byteProgress }
+        )
+        do {
+            let trustStore = mapStreamTrustStore
+            let mapID = map.mapId
+            _ = try await Task.detached(priority: .userInitiated) {
+                try BikeMapStreamArtifactValidator.validate(
+                    url: temporaryURL,
+                    artifact: artifact,
+                    expectedMapID: mapID,
+                    trustStore: trustStore
+                )
+            }.value
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            downloadURL = nil
+            throw error
+        }
+        let destination = try cachedPackURL(mapId: map.mapId, fileExtension: "bmap")
+        let metadata = SavedMapArtifactMetadata(
+            schemaVersion: SavedMapArtifactMetadata.currentSchemaVersion,
+            mapID: map.mapId,
+            displayName: map.alias,
+            localArtifactFilename: destination.lastPathComponent,
+            streamFormatVersion: 1,
+            rendererFormatVersion: map.rendererFormatVersion,
+            jobID: nil,
+            serverURLString: nil,
+            clientInstallationID: nil,
+            primaryArtifact: artifact,
+            legacyArtifact: nil,
+            lastTransferProtocol: nil,
+            lastTransferStreamFormat: nil,
+            lastTransferSessionID: nil,
+            lastBackgroundTaskID: nil,
+            lastDeviceSequence: nil,
+            lastDeviceState: nil,
+            lastDeviceStep: nil,
+            lastDeviceStepCount: nil,
+            lastDeviceProgress: nil,
+            expectedActiveMapID: map.mapId,
+            expectedActiveSessionID: nil,
+            lastTransferOutcome: nil,
+            userDefinedDisplayName: map.aliasSource == "user",
+            downloadReceiptID: nil,
+            catalogMapEntryID: map.mapEntryId,
+            catalogLibraryID: credential.libraryId,
+            originChannel: map.originChannel,
+            catalogAliasRevision: map.aliasRevision,
+            sourceShareID: sourceShareID,
+            catalogSyncState: "synced"
+        )
+        try replaceDownloadedArtifact(
+            at: temporaryURL,
+            destination: destination,
+            metadata: metadata,
+            mapID: map.mapId,
+            fileExtension: "bmap"
+        )
+        if let index = catalogMaps.firstIndex(where: { $0.mapEntryId == map.mapEntryId }) {
+            catalogMaps[index] = map
+        } else {
+            catalogMaps.append(map)
+        }
+        packDisplayNames[destination.lastPathComponent] = map.alias
+        persistPackDisplayNames()
+        downloadedPackURL = destination
+        refreshCachedPacks()
+#if canImport(UIKit)
+        loadPreviewIfNeeded(forCachedPack: destination)
+#endif
+        downloadProgress = 1
+        downloadByteProgress = nil
+        statusMessage = "shared map downloaded"
     }
 
     func isCachedPackInstalled(_ packURL: URL,
@@ -2758,6 +3102,7 @@ final class OfflineMapManager: ObservableObject {
             guard let self else { return }
             defer { self.inventorySyncTask = nil }
             do {
+                let catalogCredential = try await self.ensureCatalogCredential()
                 let client = try self.makeClient()
                 guard client.clientInstallationToken?.isEmpty == false else { return }
                 let jobs = try await client.jobs()
@@ -2765,7 +3110,8 @@ final class OfflineMapManager: ObservableObject {
                     await self.syncSavedMapInventory(
                         packURL,
                         client: client,
-                        jobs: jobs
+                        jobs: jobs,
+                        catalogCredential: catalogCredential
                     )
                 }
             } catch {
@@ -2779,13 +3125,15 @@ final class OfflineMapManager: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
+                let catalogCredential = try await self.ensureCatalogCredential()
                 let client = try self.makeClient()
                 guard client.clientInstallationToken?.isEmpty == false else { return }
                 let jobs = try await client.jobs()
                 await self.syncSavedMapInventory(
                     packURL,
                     client: client,
-                    jobs: jobs
+                    jobs: jobs,
+                    catalogCredential: catalogCredential
                 )
             } catch {
                 // The app remains the local source of truth until the next
@@ -2797,7 +3145,8 @@ final class OfflineMapManager: ObservableObject {
     private func syncSavedMapInventory(
         _ packURL: URL,
         client: OfflineMapPlatformClient,
-        jobs: [OfflineMapJob]
+        jobs: [OfflineMapJob],
+        catalogCredential: OfflineMapCatalogCredential?
     ) async {
         guard var metadata = SavedMapArtifactMetadataStore.load(for: packURL),
               let jobID = metadata.jobID,
@@ -2834,6 +3183,27 @@ final class OfflineMapManager: ObservableObject {
         }
         try? SavedMapArtifactMetadataStore.save(metadata, for: packURL)
 
+        if let catalogCredential,
+           metadata.catalogMapEntryID == nil || metadata.catalogSyncState != "synced" {
+            do {
+                let attachment = try await client.attachCatalogLibrary(
+                    jobId: jobID,
+                    libraryCredential: catalogCredential.credential
+                )
+                metadata.catalogMapEntryID = attachment.catalogMapEntryId
+                metadata.catalogLibraryID = catalogCredential.libraryId
+                metadata.originChannel = OfflineMapCatalogConfig.channel(
+                    generationServerURLString: savedServerURL
+                )
+                metadata.catalogAliasRevision = attachment.aliasRevision
+                metadata.catalogSyncState = "synced"
+                try SavedMapArtifactMetadataStore.save(metadata, for: packURL)
+            } catch {
+                metadata.catalogSyncState = "pending"
+                try? SavedMapArtifactMetadataStore.save(metadata, for: packURL)
+            }
+        }
+
         let artifact = metadata.primaryArtifact ?? job.artifacts?.first(where: { value in
             if packURL.pathExtension.lowercased() == "bmap" {
                 return value.isBikeMapStream
@@ -2867,6 +3237,82 @@ final class OfflineMapManager: ObservableObject {
         } catch {
             // Preserve the stable local receipt for a later retry.
         }
+    }
+
+    private func ensureCatalogCredential() async throws -> OfflineMapCatalogCredential? {
+        guard let catalogClient else { return nil }
+        let existing = catalogCredentialStore.load()
+        let credential = try await catalogClient.bootstrap(
+            existingCredential: existing?.credential
+        )
+        try catalogCredentialStore.save(credential)
+        return credential
+    }
+
+    private func syncCatalogLibraryIfNeeded() {
+        guard catalogSyncTask == nil else { return }
+        catalogSyncTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.catalogSyncTask = nil }
+            do {
+                guard let credential = try await self.ensureCatalogCredential(),
+                      let catalogClient = self.catalogClient else { return }
+                var maps = try await catalogClient.maps(
+                    credential: credential.credential
+                )
+                maps = await self.pushPendingCatalogAliases(
+                    into: maps,
+                    client: catalogClient,
+                    credential: credential
+                )
+                self.catalogMaps = maps
+                self.refreshCachedPacks()
+            } catch {
+                // Keep local maps available and retry the shared library on the
+                // next activation.
+            }
+        }
+    }
+
+    private func pushPendingCatalogAliases(
+        into maps: [OfflineMapCatalogMap],
+        client: OfflineMapCatalogClient,
+        credential: OfflineMapCatalogCredential
+    ) async -> [OfflineMapCatalogMap] {
+        var reconciled = maps
+        for record in cachedMapRecords {
+            guard var metadata = SavedMapArtifactMetadataStore.load(
+                for: record.packURL
+            ),
+            metadata.catalogSyncState == "pending",
+            metadata.userDefinedDisplayName == true,
+            let pendingAlias = metadata.displayName,
+            let mapEntryID = metadata.catalogMapEntryID,
+            let remoteIndex = reconciled.firstIndex(where: {
+                $0.mapEntryId == mapEntryID
+            }) else {
+                continue
+            }
+            do {
+                let updated = try await client.updateAlias(
+                    mapEntryId: mapEntryID,
+                    alias: pendingAlias,
+                    expectedRevision: reconciled[remoteIndex].aliasRevision,
+                    credential: credential.credential
+                )
+                reconciled[remoteIndex] = updated
+                metadata.catalogAliasRevision = updated.aliasRevision
+                metadata.catalogSyncState = "synced"
+                try SavedMapArtifactMetadataStore.save(
+                    metadata,
+                    for: record.packURL
+                )
+            } catch {
+                // Preserve the local pending alias and retry after the next
+                // authoritative catalog refresh.
+            }
+        }
+        return reconciled
     }
 
     private func makeClient(
@@ -4914,7 +5360,10 @@ final class OfflineMapManager: ObservableObject {
                 for: packURL,
                 mapID: mapID
             ),
-            displayName: displayName(forCachedPack: packURL)
+            displayName: displayName(forCachedPack: packURL),
+            catalogMapEntryID: SavedMapArtifactMetadataStore.load(
+                for: packURL
+            )?.catalogMapEntryID
         )
     }
 
@@ -5016,10 +5465,22 @@ struct OfflineMapByteProgress: Equatable {
 nonisolated struct OfflineMapDownloadConstraints: Equatable {
     let exactBytes: Int64?
     let maximumBytes: Int64
+    let allowedDownloadHosts: Set<String>?
+
+    init(
+        exactBytes: Int64?,
+        maximumBytes: Int64,
+        allowedDownloadHosts: Set<String>? = nil
+    ) {
+        self.exactBytes = exactBytes
+        self.maximumBytes = maximumBytes
+        self.allowedDownloadHosts = allowedDownloadHosts
+    }
 
     static let defaultMap = Self(
         exactBytes: nil,
-        maximumBytes: BikeMapStreamFormat.maximumArtifactBytes
+        maximumBytes: BikeMapStreamFormat.maximumArtifactBytes,
+        allowedDownloadHosts: nil
     )
 
     static func mapArtifact(_ artifact: OfflineMapArtifact?) throws -> Self {
@@ -5035,7 +5496,27 @@ nonisolated struct OfflineMapDownloadConstraints: Equatable {
                 "artifact exceeds the supported map size"
             )
         }
-        return Self(exactBytes: exactBytes, maximumBytes: maximumBytes)
+        return Self(
+            exactBytes: exactBytes,
+            maximumBytes: maximumBytes,
+            allowedDownloadHosts: nil
+        )
+    }
+
+    static func catalogArtifact(
+        _ artifact: OfflineMapArtifact,
+        catalogHost: String,
+        r2DownloadHost: String
+    ) throws -> Self {
+        let base = try mapArtifact(artifact)
+        guard !catalogHost.isEmpty, !r2DownloadHost.isEmpty else {
+            throw OfflineMapCatalogError.invalidConfiguration
+        }
+        return Self(
+            exactBytes: base.exactBytes,
+            maximumBytes: base.maximumBytes,
+            allowedDownloadHosts: [catalogHost.lowercased(), r2DownloadHost.lowercased()]
+        )
     }
 }
 
@@ -5127,10 +5608,41 @@ final class OfflineMapPackDownloader: NSObject, URLSessionDownloadDelegate {
 
     func urlSession(
         _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let allowedHosts = constraints.allowedDownloadHosts else {
+            completionHandler(request)
+            return
+        }
+        guard let url = request.url,
+              url.scheme?.lowercased() == "https",
+              url.port == nil,
+              let host = url.host?.lowercased(),
+              allowedHosts.contains(host) else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+
+    func urlSession(
+        _ session: URLSession,
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {
         do {
+            if let allowedHosts = constraints.allowedDownloadHosts {
+                guard let finalURL = downloadTask.response?.url,
+                      finalURL.scheme?.lowercased() == "https",
+                      finalURL.port == nil,
+                      let finalHost = finalURL.host?.lowercased(),
+                      allowedHosts.contains(finalHost) else {
+                    throw OfflineMapCatalogError.invalidResponse
+                }
+            }
             let values = try location.resourceValues(forKeys: [.fileSizeKey])
             guard let fileSize = values.fileSize else {
                 throw BikeMapStreamFormatError.invalidArtifactMetadata(

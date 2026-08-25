@@ -321,6 +321,11 @@ class MaintenanceTests(unittest.TestCase):
                 "expired": 1,
                 "removedWorkDirs": 2,
                 "removedRateLimits": 3,
+                "catalogPublications": {
+                    "attempted": 0,
+                    "finalized": 0,
+                    "failed": 0,
+                },
                 "buildingBlockCache": {
                     "removedNamespaces": 1,
                     "removedBytes": 200,

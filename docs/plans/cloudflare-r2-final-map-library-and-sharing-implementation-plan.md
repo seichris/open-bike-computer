@@ -2,15 +2,24 @@
 
 ## Status and baseline
 
+Implementation status (2026-08-25): the repository-side Worker/D1 catalog,
+R2 adapter and mirror mode, backend publication and promotion path, iOS shared
+library/alias/share flow, CI, ADR, compatibility spike, and staging-first
+runbook are implemented on this branch. Live Cloudflare provisioning, Coolify
+configuration, bucket migration, distribution-profile proof, staged recovery
+drills, and physical-device acceptance remain deployment gates and were not
+performed by this code change.
+
 This is the implementation and rollout plan for moving final processed offline
 maps from environment-local Coolify volumes into Cloudflare R2, making maps
 created by either the development or production service available to both app
 channels, persisting rider-chosen map names, and adding revocable map-sharing
 links.
 
-The plan was prepared from freshly fetched GitHub main at commit
-d5f49fc2ceb17495a66c80c8230311bca6427d49 on 2026-08-25. The existing dirty
-checkout was not used as the branch base.
+The plan was originally prepared from freshly fetched GitHub main at commit
+d5f49fc2ceb17495a66c80c8230311bca6427d49 on 2026-08-25 and the implementation
+branch is rebased onto current GitHub main before publication. The existing
+dirty checkout was not used as the branch base.
 
 The implementation must preserve the current final map formats and their
 contents:

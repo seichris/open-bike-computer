@@ -347,7 +347,9 @@ Useful production environment variables:
 - `MAP_PLATFORM_WORKER_HEALTH_MAX_AGE_SECONDS`: maximum age of the real worker
   heartbeat, default `120`. Idle polls and the active job-lease thread refresh
   it, so queue-lock stalls become unhealthy without misclassifying long builds.
-- `MAP_PLATFORM_ARTIFACT_STORE`: `filesystem` (default) or `s3`. Filesystem
+- `MAP_PLATFORM_ARTIFACT_STORE`: `filesystem` (default), `mirror`, or `s3`.
+  `mirror` keeps the filesystem as the read/download primary while writing and
+  deleting both stores, which supports a measured R2 migration. Filesystem
   objects live on the persistent data volume and are written immutably by
   content key. Use `s3` for multi-host production durability.
 - `MAP_PLATFORM_ARTIFACT_ROOT`: filesystem object root, default
@@ -356,6 +358,10 @@ Useful production environment variables:
   `MAP_PLATFORM_S3_ENDPOINT_URL`: S3-compatible storage destination. Standard
   `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION` configure the
   client. Grant only object read/write/delete within the configured prefix.
+- `MAP_PLATFORM_S3_CHECKSUM_MODE`: `sha256` (default), `md5`, or
+  `metadata-only`. Prove the selected R2 mode with
+  `tools/check_r2_compatibility.py` before rollout; prefer SHA-256 and use MD5
+  only when the endpoint rejects SDK SHA-256 checksum headers.
 - `MAP_PLATFORM_S3_API_ACCESS_KEY_ID`,
   `MAP_PLATFORM_S3_API_SECRET_ACCESS_KEY`, and optional
   `MAP_PLATFORM_S3_API_SESSION_TOKEN`: separate short-lived API credentials
@@ -364,6 +370,15 @@ Useful production environment variables:
   deployments may instead set
   `MAP_PLATFORM_S3_API_USE_DEFAULT_CREDENTIAL_CHAIN=1`; API S3 startup otherwise
   fails closed rather than silently inheriting worker credentials.
+- `MAP_PLATFORM_CATALOG_URL`, `MAP_PLATFORM_CATALOG_CHANNEL`,
+  `MAP_PLATFORM_CATALOG_SERVICE_KEY_ID`, and
+  `MAP_PLATFORM_CATALOG_SERVICE_SECRET`: opt into authenticated publication of
+  verified READY artifacts to the shared Cloudflare map catalog. Catalog
+  failure is recorded but never demotes a locally READY map.
+- `MAP_PLATFORM_CATALOG_REQUIRED_IOS_*` and optional complete
+  `MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_*` tuples bind a catalog stream to an
+  exact reviewed consumer identity. Production catalog downloads fail closed
+  when the exact iOS tuple is absent.
 - `MAP_PLATFORM_DYNAMIC_SOURCE_DISCOVERY`: enable Geofabrik catalog fallback,
   default `1`.
 - `MAP_PLATFORM_GEOFABRIK_INDEX_URL`: provider catalog URL, default

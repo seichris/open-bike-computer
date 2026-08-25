@@ -328,6 +328,14 @@ struct OfflineMapJob: Decodable, Equatable {
     }
 }
 
+nonisolated struct OfflineMapCatalogAttachment: Decodable, Equatable {
+    let jobId: String
+    let catalogPublicationId: String
+    let catalogMapEntryId: String
+    let alias: String
+    let aliasRevision: Int
+}
+
 /// Durable whole-job progress from the chunk coordinator.
 ///
 /// `progress` remains the phase-local detail shown below the overall bar. The
@@ -3016,6 +3024,28 @@ struct OfflineMapPlatformClient {
         guard response.jobId == jobId else {
             throw OfflineMapPlatformError.invalidResponse
         }
+    }
+
+    func attachCatalogLibrary(
+        jobId: String,
+        libraryCredential: String
+    ) async throws -> OfflineMapCatalogAttachment {
+        var request = try Self.makeInstallationScopedURLRequest(
+            baseURL: baseURL,
+            path: "/v1/map-jobs/\(jobId)/catalog-library",
+            method: "POST",
+            clientInstallationId: clientInstallationId
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder.offlineMap.encode(
+            ["libraryCredential": libraryCredential]
+        )
+        authorizeInstallation(&request)
+        let response: OfflineMapCatalogAttachment = try await send(request: request)
+        guard response.jobId == jobId else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        return response
     }
 
     func recordDownload(

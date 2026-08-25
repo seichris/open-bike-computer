@@ -722,6 +722,8 @@ struct NavigationProtocolTests {
         testNavigationEngineReplacesRouteWithoutResettingTelemetry()
         testOfflineMapCustomBBoxRequest()
         testOfflineMapServiceConfigChannels()
+        testOfflineMapShareLinkValidation()
+        testOfflineMapCatalogR2HostValidation()
         await testOfflineMapCapabilitiesContract()
         await testOfflineMapClientRejectsUnsupportedRendererWithoutDowngrade()
         testStreetLabelMapContract()
@@ -5205,6 +5207,55 @@ struct NavigationProtocolTests {
             ),
             "https://invalid.invalid",
             "an unexpected managed host fails closed"
+        )
+    }
+
+    static func testOfflineMapShareLinkValidation() {
+        let token = String(repeating: "A", count: 43)
+        assertEqual(
+            OfflineMapShareLink.token(
+                from: URL(string: "https://maps-share.8o.vc/s/\(token)")!
+            ),
+            token,
+            "production share links resolve an opaque token"
+        )
+        assertEqual(
+            OfflineMapShareLink.token(
+                from: URL(string: "https://maps-share.8o.vc/dev/s/\(token)")!
+            ),
+            token,
+            "development share links resolve the same opaque token"
+        )
+        assert(
+            OfflineMapShareLink.token(
+                from: URL(string: "https://attacker.example/s/\(token)")!
+            ) == nil,
+            "share links reject substituted hosts"
+        )
+        assert(
+            OfflineMapShareLink.token(
+                from: URL(string: "https://maps-share.8o.vc/s/short?download=1")!
+            ) == nil,
+            "share links reject malformed tokens and query parameters"
+        )
+    }
+
+    static func testOfflineMapCatalogR2HostValidation() {
+        let accountHost = String(repeating: "a", count: 32) +
+            ".r2.cloudflarestorage.com"
+        assertEqual(
+            OfflineMapCatalogConfig.r2DownloadHost(infoDictionary: [
+                OfflineMapCatalogConfig.r2DownloadHostInfoKey: accountHost.uppercased()
+            ]),
+            accountHost,
+            "catalog downloads accept only the exact R2 S3 account host shape"
+        )
+        assert(
+            OfflineMapCatalogConfig.r2DownloadHost(infoDictionary: [
+                OfflineMapCatalogConfig.r2DownloadHostInfoKey:
+                    "maps.example.com"
+            ]) == nil,
+            "catalog downloads reject arbitrary configured hosts"
         )
     }
 

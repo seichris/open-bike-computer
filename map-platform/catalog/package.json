@@ -1,0 +1,29 @@
+{
+  "name": "@bicino/map-catalog",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "check": "pnpm run format:check && pnpm run typecheck && pnpm test && pnpm run deploy:dry-run",
+    "deploy:dry-run": "wrangler deploy --dry-run --env=\"\" --outdir dist/staging && wrangler deploy --dry-run --env production --outdir dist/production",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.879.0",
+    "@aws-sdk/s3-request-presigner": "^3.879.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.0.0",
+    "@cloudflare/workers-types": "^5.20260820.1",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.32.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

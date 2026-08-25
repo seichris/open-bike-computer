@@ -169,6 +169,12 @@ class MapJob:
     artifacts: list[ArtifactRecord] = field(default_factory=list)
     artifact_metrics: dict[str, Any] | None = None
     user_label: str | None = None
+    catalog_publication_id: str | None = None
+    catalog_map_entry_id: str | None = None
+    catalog_publication_state: str | None = None
+    catalog_publication_error: str | None = None
+    catalog_publication_attempts: int = 0
+    catalog_publication_updated_at: str | None = None
     build_cache_key: str | None = None
     build_cache_aliases: list[str] = field(default_factory=list)
     build_identity_derivation: dict[str, Any] | None = None
@@ -228,6 +234,9 @@ class MapJob:
             "artifacts": [artifact.to_dict() for artifact in self.artifacts],
             "artifactMetrics": self.artifact_metrics,
             "userLabel": self.user_label,
+            "catalogPublicationId": self.catalog_publication_id,
+            "catalogMapEntryId": self.catalog_map_entry_id,
+            "catalogPublicationState": self.catalog_publication_state,
             "reuseStrategy": self.reuse_strategy,
             "downloadCount": len(self.download_receipts),
             "firstDownloadedAt": (
@@ -270,6 +279,9 @@ class MapJob:
             result["pendingArtifactKeys"] = self.pending_artifact_keys
             result["artifactGcKeys"] = self.artifact_gc_keys
             result["schedulerYielded"] = self.scheduler_yielded
+            result["catalogPublicationError"] = self.catalog_publication_error
+            result["catalogPublicationAttempts"] = self.catalog_publication_attempts
+            result["catalogPublicationUpdatedAt"] = self.catalog_publication_updated_at
         return result
 
     @classmethod
@@ -303,6 +315,18 @@ class MapJob:
             artifacts=[ArtifactRecord.from_dict(value) for value in data.get("artifacts", [])],
             artifact_metrics=dict(data["artifactMetrics"]) if data.get("artifactMetrics") else None,
             user_label=data.get("userLabel"),
+            catalog_publication_id=data.get("catalogPublicationId"),
+            catalog_map_entry_id=data.get("catalogMapEntryId"),
+            catalog_publication_state=_catalog_publication_state(
+                data.get("catalogPublicationState")
+            ),
+            catalog_publication_error=data.get("catalogPublicationError"),
+            catalog_publication_attempts=int(
+                data.get("catalogPublicationAttempts", 0)
+            ),
+            catalog_publication_updated_at=data.get(
+                "catalogPublicationUpdatedAt"
+            ),
             build_cache_key=data.get("buildCacheKey"),
             build_cache_aliases=_build_cache_aliases(data.get("buildCacheAliases", [])),
             build_identity_derivation=(
@@ -592,3 +616,11 @@ def _duration_seconds(started_at: str | None, finished_at: str | None) -> float 
     if start is None or finish is None:
         return None
     return max((finish - start).total_seconds(), 0)
+
+
+def _catalog_publication_state(value: Any) -> str | None:
+    if value is None:
+        return None
+    if value not in {"pending", "finalized", "failed", "quarantined"}:
+        raise ValueError("catalog publication state is invalid")
+    return str(value)

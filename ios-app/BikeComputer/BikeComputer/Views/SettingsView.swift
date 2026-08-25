@@ -874,6 +874,34 @@ private struct SavedMapsSettingsSection: View {
         .onChange(of: bleManager.mapTransferActivationProgress) { _ in
             manager.reconcileLastTransfer(bleManager: bleManager)
         }
+        .sheet(
+            isPresented: Binding(
+                get: { manager.createdShareURL != nil },
+                set: { if !$0 { manager.clearCreatedShareURL() } }
+            )
+        ) {
+            if let url = manager.createdShareURL {
+                NavigationView {
+                    VStack(spacing: 20) {
+                        Image(systemName: "link.circle.fill")
+                            .font(.system(size: 52))
+                            .foregroundColor(.accentColor)
+                        Text("Your friend can open this link in Bicino, preview the map, and choose whether to add it.")
+                            .multilineTextAlignment(.center)
+                            .foregroundColor(.secondary)
+                        ShareLink(item: url) {
+                            Label("Share Map Link", systemImage: "square.and.arrow.up")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .padding(24)
+                    .navigationTitle("Share Map")
+                    .navigationBarTitleDisplayMode(.inline)
+                }
+                .presentationDetents([.medium])
+            }
+        }
     }
 
     private func scheduleRenameCommitIfNeeded(focusedFilename: String?) {
@@ -909,6 +937,8 @@ private struct SavedMapRow: View {
     @State private var isShowingInstalledConfirmation = false
     @State private var isShowingDeleteConfirmation = false
     @State private var presentedPreview: SavedMapPreviewPresentation?
+    @State private var isShowingCatalogRename = false
+    @State private var catalogRenameDraft = ""
 
     var body: some View {
         let displayName = item.displayName
@@ -983,10 +1013,17 @@ private struct SavedMapRow: View {
                 .accessibilityHint("Edits this saved map name")
                 .layoutPriority(1)
             } else {
-                Text(displayName)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .layoutPriority(1)
+                Button {
+                    catalogRenameDraft = displayName
+                    isShowingCatalogRename = true
+                } label: {
+                    Text(displayName)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Rename \(displayName)")
+                .layoutPriority(1)
             }
 
             Spacer()
@@ -1039,6 +1076,32 @@ private struct SavedMapRow: View {
                         ? "Resume transferring \(displayName) to device"
                         : "Transfer \(displayName) to device"
                 )
+            } else if let catalogMap = item.catalogMap {
+                Button {
+                    finishRenaming()
+                    focusedPackFilename = nil
+                    manager.downloadCatalogMap(catalogMap)
+                } label: {
+                    Image(systemName: "arrow.down.circle")
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.borderless)
+                .disabled(manager.isBusy)
+                .accessibilityLabel("Download \(displayName) to this iPhone")
+            }
+
+            if item.isAvailableInLibrary {
+                Button {
+                    finishRenaming()
+                    focusedPackFilename = nil
+                    manager.createShare(for: item)
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.borderless)
+                .disabled(manager.isBusy)
+                .accessibilityLabel("Share \(displayName)")
             }
 
             if packURL != nil {
@@ -1063,6 +1126,17 @@ private struct SavedMapRow: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text("This map is already installed on the device.")
+        }
+        .alert("Rename Map", isPresented: $isShowingCatalogRename) {
+            TextField("Map name", text: $catalogRenameDraft)
+            Button("Save") {
+                if let map = item.catalogMap {
+                    _ = manager.renameCatalogMap(map, to: catalogRenameDraft)
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This private name is shared between Bicino and Bicino Dev.")
         }
         .confirmationDialog(
             "Delete Saved Map?",

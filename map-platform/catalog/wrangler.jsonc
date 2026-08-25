@@ -1,0 +1,65 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "bicino-map-catalog-staging",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-25",
+  "workers_dev": true,
+  "preview_urls": true,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1,
+  },
+  "vars": {
+    "ENVIRONMENT": "staging",
+    "PUBLIC_BASE_URL": "https://maps-share-staging.8o.vc",
+    "R2_ACCOUNT_ID": "replace-with-cloudflare-account-id",
+    "R2_DEVELOPMENT_BUCKET": "bicino-final-maps-dev-staging",
+    "R2_PRODUCTION_BUCKET": "bicino-final-maps-prod-staging",
+    "R2_OBJECT_PREFIX": "map-artifacts",
+    "APPLE_TEAM_ID": "replace-with-apple-team-id",
+    "PRODUCTION_BUNDLE_ID": "LetItRide.BikeComputer",
+    "DEVELOPMENT_BUNDLE_ID": "LetItRide.BikeComputer.dev",
+    "APP_STORE_URL": "https://apps.apple.com/app/id0000000000",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "bicino-map-catalog-staging",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "env": {
+    "production": {
+      "name": "bicino-map-catalog",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [
+        {
+          "pattern": "maps-share.8o.vc/*",
+          "zone_name": "8o.vc",
+        },
+      ],
+      "vars": {
+        "ENVIRONMENT": "production",
+        "PUBLIC_BASE_URL": "https://maps-share.8o.vc",
+        "R2_ACCOUNT_ID": "replace-with-cloudflare-account-id",
+        "R2_DEVELOPMENT_BUCKET": "bicino-final-maps-dev",
+        "R2_PRODUCTION_BUCKET": "bicino-final-maps-prod",
+        "R2_OBJECT_PREFIX": "map-artifacts",
+        "APPLE_TEAM_ID": "replace-with-apple-team-id",
+        "PRODUCTION_BUNDLE_ID": "LetItRide.BikeComputer",
+        "DEVELOPMENT_BUNDLE_ID": "LetItRide.BikeComputer.dev",
+        "APP_STORE_URL": "https://apps.apple.com/app/id0000000000",
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "bicino-map-catalog",
+          "database_id": "00000000-0000-0000-0000-000000000000",
+          "migrations_dir": "migrations",
+        },
+      ],
+    },
+  },
+}
