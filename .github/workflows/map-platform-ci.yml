@@ -28,6 +28,28 @@ permissions:
   contents: read
 
 jobs:
+  catalog:
+    name: Cloudflare Map Catalog
+    if: inputs.run_backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: map-platform/catalog
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: map-platform/catalog/pnpm-lock.yaml
+      - name: Install catalog dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck, test, and dry-run both environments
+        run: pnpm check
+
   osm:
     name: OSM Pipeline
     if: inputs.run_osm
@@ -107,6 +129,7 @@ jobs:
           python -m py_compile
           map_platform/*.py
           tests/*.py
+          tools/check_r2_compatibility.py
           ../deploy/*.py
           ../deploy/tests/*.py
       - name: Generated map stream trust registry

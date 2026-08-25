@@ -65,6 +65,7 @@ nonisolated enum RideDiagnosticsFieldPolicy {
         "lastCriticalEvent", "lastGapMs", "lastMissingUptimeMs",
         "lastFailureStage", "lastFailureCompletedStage",
         "lastFailureResetReason",
+        "mapDetail", "mapPhase", "mapProgressMs",
         "storageErrorCount",
         "maximumGapMs", "messageBytes", "messageDigest", "kind", "mode",
         "networkTransport", "navigating",
@@ -74,9 +75,11 @@ nonisolated enum RideDiagnosticsFieldPolicy {
         "safeMode", "scope", "sequence", "sha256Prefix", "simulation",
         "sourceHealthMask", "speedAvailable", "state", "startMode", "storage",
         "connectionState", "pendingControl", "sessionPresent", "active",
-        "transition", "result", "origin", "expectedState", "decisionSequence",
+        "transition", "uiPhase", "uiProgressMs", "result", "origin",
+        "expectedState", "decisionSequence",
         "fallback",
-        "viewingMap", "workoutActive",
+        "viewingMap", "watchdogCoreMask", "watchdogUptimeMs", "workoutActive",
+        "writerDetail", "writerPhase", "writerProgressMs",
     ]
     static let firmwareNumberKeys: Set<String> = [
         "accuracy", "activeStage", "ageMs", "alertMode", "bootSequence",
@@ -84,10 +87,12 @@ nonisolated enum RideDiagnosticsFieldPolicy {
         "decisionSequence", "droppedCount", "eventCount", "firmwareBuild",
         "firstMissingUptimeMs", "importedCount", "lastGapMs",
         "lastFailureStage", "lastFailureCompletedStage",
-        "lastFailureResetReason", "lastMissingUptimeMs", "maximumGapMs",
+        "lastFailureResetReason", "lastMissingUptimeMs", "mapDetail",
+        "mapProgressMs", "maximumGapMs",
         "messageBytes", "profileVersion", "resetReason", "rideGeneration",
         "runtimeBootSequence", "sampleCount", "sequence", "sourceHealthMask",
-        "storageErrorCount",
+        "storageErrorCount", "uiProgressMs", "watchdogCoreMask",
+        "watchdogUptimeMs", "writerDetail", "writerProgressMs",
     ]
     static let firmwareBooleanKeys: Set<String> = [
         "accuracyAvailable", "active", "autoPauseEnabled", "authorized",

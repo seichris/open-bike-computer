@@ -37,6 +37,25 @@ class DeploymentChannelComposeTests(unittest.TestCase):
         )
         self.assertIn("MAP_PLATFORM_WORKER_MEMORY_LIMIT_BYTES", worker_environment)
 
+    def test_catalog_maintenance_has_bounded_network_batches(self):
+        for filename in ("compose.yaml", "compose.hardware-validation.yaml"):
+            compose = (DEPLOY_DIR / filename).read_text(encoding="utf-8")
+            maintenance = compose.split("  map-platform-maintenance:", 1)[1]
+            self.assertIn(
+                "MAP_PLATFORM_CATALOG_PUBLICATION_RETRY_BATCH: "
+                "${MAP_PLATFORM_CATALOG_PUBLICATION_RETRY_BATCH:-4}",
+                maintenance,
+            )
+            self.assertIn(
+                "MAP_PLATFORM_CATALOG_RETENTION_BATCH: "
+                "${MAP_PLATFORM_CATALOG_RETENTION_BATCH:-5}",
+                maintenance,
+            )
+        self.assertNotIn(
+            "MAP_PLATFORM_CATALOG_REQUIRED_IOS_",
+            (DEPLOY_DIR / "compose.yaml").read_text(encoding="utf-8"),
+        )
+
 
 class PreparationEstimateComposeTests(unittest.TestCase):
     _SERVICES = (

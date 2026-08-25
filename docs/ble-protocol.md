@@ -1430,12 +1430,40 @@ the existing bearer token. The read-only API is:
 Every route requires the authenticated transfer token and an active
 `diagnostics` mode. The device never accepts an arbitrary filesystem path or a
 remote-delete request. Before enabling the HTTP session, the firmware writer
-drains all earlier queue entries and seals its current chunk; short, normal
-rides are therefore included without exposing a mutable tail. Chunk GET resolves
-one strict canonical path and never re-hashes the complete index. iOS downloads
-one bounded chunk at a time, rejects oversized responses while streaming,
-verifies length, SHA-256, JSONL schema/source, per-field types, and sequence
-ordering within and across chunks, then atomically
+performs a fresh directory and write/flush/close/remove probe, drains all
+earlier queue entries, and seals its current chunk; short, normal rides are
+therefore included without exposing a mutable tail. The recorder root is stable
+for the complete boot. When removable SD was mounted at boot, diagnostics uses
+that mount without unmounting it beneath map/font readers. When the boot is
+already using the bounded internal FFat fallback, diagnostics exports FFat and
+does not switch to a newly inserted removable card while recorder or map file
+handles may still be open; adopting removable storage requires a reboot.
+
+The diagnostics-entry `DSTS.lastError` codes are stable and stage-specific:
+
+| Code | Failed stage |
+| --- | --- |
+| `diagnostics_mount_failed` | Diagnostics storage was not mounted as a directory. |
+| `diagnostics_card_missing` | A mounted removable backend no longer reported a card. |
+| `diagnostics_writable_probe_failed` | The fresh write/flush/close/remove probe failed. |
+| `diagnostics_flush_failed` | Flushing the sealed active chunk failed. |
+| `diagnostics_close_failed` | Closing the sealed active chunk failed. |
+| `diagnostics_seal_timeout` | The recorder did not drain to the requested cutoff before the bounded deadline. |
+| `diagnostics_seal_failed` | Recorder initialization or another seal invariant failed. |
+
+iOS treats a fresh rejection as authoritative during every handshake polling
+iteration, surfaces the code immediately, and records entry failures even when
+no HTTP session was opened. Chunk GET resolves one strict canonical path and
+never re-hashes the complete index. Zero-byte closed files are ignored as empty
+crash artifacts. A non-empty file that cannot be stated, bounded, opened, read,
+or hashed makes the index fail closed with HTTP error code
+`diagnostics_index_unreadable`; it is never silently omitted. A non-empty
+checksum-verified chunk with one truncated final JSON record remains evidence:
+iOS imports its original bytes, ignores only the incomplete tail while
+validating records, and rejects any later non-empty chunk for the same boot.
+iOS downloads one bounded chunk at a time, rejects oversized responses while
+streaming, verifies length, SHA-256, JSONL schema/source, per-field types, and
+sequence ordering within and across chunks, then atomically
 retains it under its local diagnostics root. Repeating a download skips an
 already-imported chunk with the same hash.
 Creating the index starts a bounded transfer snapshot lease. Retention pruning

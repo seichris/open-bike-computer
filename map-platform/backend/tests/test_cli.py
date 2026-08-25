@@ -6,7 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from map_platform.cli import (
     MaintenanceIterationError,
@@ -321,6 +321,17 @@ class MaintenanceTests(unittest.TestCase):
                 "expired": 1,
                 "removedWorkDirs": 2,
                 "removedRateLimits": 3,
+                "catalogMutationCallBudget": 15,
+                "catalogPublications": {
+                    "attempted": 0,
+                    "finalized": 0,
+                    "failed": 0,
+                },
+                "catalogRetention": {
+                    "authorized": 0,
+                    "deleted": 0,
+                    "deferred": 0,
+                },
                 "buildingBlockCache": {
                     "removedNamespaces": 1,
                     "removedBytes": 200,
@@ -345,6 +356,68 @@ class MaintenanceTests(unittest.TestCase):
             max_bytes=20 * 1024 * 1024 * 1024,
             max_items=100,
         )
+
+    @patch(
+        "map_platform.cli.delete_catalog_retention_artifacts",
+        return_value={"authorized": 0, "deleted": 0, "deferred": 0},
+    )
+    @patch(
+        "map_platform.cli.retry_ready_publications",
+        return_value={"attempted": 0, "finalized": 0, "failed": 0},
+    )
+    def test_catalog_batches_are_independent_of_local_gc_and_share_a_safe_budget(
+        self,
+        retry_ready_publications,
+        delete_catalog_retention_artifacts,
+    ):
+        client = Mock()
+        with patch("map_platform.cli.expire_ready_jobs", return_value=0), patch(
+            "map_platform.cli.cleanup_work_dirs", return_value=0
+        ), patch(
+            "map_platform.cli.purge_expired_rate_limits", return_value=0
+        ), patch(
+            "map_platform.cli.prune_building_block_cache", return_value={}
+        ):
+            result = _perform_maintenance(
+                Mock(),
+                Path("/data"),
+                retention_days=30,
+                artifact_store=Mock(),
+                max_gc_items=100,
+                catalog_client=client,
+            )
+        self.assertEqual(result["catalogMutationCallBudget"], 15)
+        retry_ready_publications.assert_called_once_with(
+            ANY,
+            client,
+            artifact_store=ANY,
+            maximum_jobs=4,
+        )
+        delete_catalog_retention_artifacts.assert_called_once_with(
+            ANY,
+            client,
+            ANY,
+            maximum_artifacts=5,
+        )
+
+        with self.assertRaisesRegex(ValueError, "publication retry batch"):
+            _perform_maintenance(
+                Mock(),
+                Path("/data"),
+                retention_days=30,
+                artifact_store=Mock(),
+                max_gc_items=100,
+                catalog_publication_retry_batch=5,
+            )
+        with self.assertRaisesRegex(ValueError, "retention batch"):
+            _perform_maintenance(
+                Mock(),
+                Path("/data"),
+                retention_days=30,
+                artifact_store=Mock(),
+                max_gc_items=100,
+                catalog_retention_batch=6,
+            )
 
     @patch("map_platform.cli.purge_expired_rate_limits", return_value=3)
     @patch("map_platform.cli.cleanup_work_dirs", return_value=2)

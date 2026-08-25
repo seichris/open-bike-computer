@@ -1,8 +1,13 @@
 import hashlib
+import json
+import os
 import tempfile
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
+from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -18,6 +23,15 @@ from map_platform.source_cache import (
 
 
 class SourceCacheTests(unittest.TestCase):
+    def test_invalid_revalidation_interval_fails_startup(self):
+        for value in ("invalid", "-1", "inf"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                with patch.dict(
+                    os.environ,
+                    {"MAP_PLATFORM_SOURCE_CACHE_REVALIDATE_SECONDS": value},
+                ), self.assertRaisesRegex(ValueError, "revalidation interval"):
+                    SourceCache(Path(tmp) / "repo")
+
     def test_cold_download_checks_disk_reserve_before_opening_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -284,6 +298,278 @@ class SourceCacheTests(unittest.TestCase):
             self.assertEqual(cached.path, root / "data" / "source-pbf" / "test.osm.pbf")
             self.assertEqual(cached.sha256, digest)
             self.assertEqual(cache.metadata()["sources"]["test-region"]["sha256"], digest)
+
+    def test_recent_mutable_snapshot_does_not_contact_upstream(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "data" / "source-pbf" / "test.osm.pbf"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"recent")
+            region = SourceRegion(
+                id="test-region",
+                provider="test",
+                name="Test",
+                url="https://example.invalid/test-latest.osm.pbf",
+                bounds=Bounds(0, 0, 1, 1),
+                local_path="map-platform/backend/data/source-pbf/test.osm.pbf",
+            )
+            cache = SourceCache(
+                root / "repo",
+                root / "cache.json",
+                data_root=root / "data",
+                revalidate_after_seconds=60,
+            )
+
+            with patch(
+                "map_platform.source_cache.urllib.request.urlopen"
+            ) as download:
+                cached = cache.ensure(region)
+
+            download.assert_not_called()
+            self.assertEqual(cached.sha256, hashlib.sha256(b"recent").hexdigest())
+            metadata = cache.metadata()["sources"]["test-region"]
+            self.assertEqual(metadata["downloadedAt"], metadata["cachedAt"])
+            self.assertIsNone(metadata["validatedAt"])
+
+    def test_stale_mutable_snapshot_is_replaced_and_records_http_provenance(self):
+        class Response:
+            headers = {
+                "Content-Length": "5",
+                "ETag": '"fresh-etag"',
+                "Last-Modified": "Tue, 25 Aug 2026 00:00:00 GMT",
+            }
+
+            def __init__(self):
+                self.done = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                if self.done:
+                    return b""
+                self.done = True
+                return b"fresh"
+
+            def geturl(self):
+                return "https://example.invalid/test-20260825.osm.pbf"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "data" / "source-pbf" / "test.osm.pbf"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"stale")
+            os.utime(target, (1, 1))
+            stale_digest = hashlib.sha256(b"stale").hexdigest()
+            region = SourceRegion(
+                id="test-region",
+                provider="test",
+                name="Test",
+                url="https://example.invalid/test-latest.osm.pbf",
+                bounds=Bounds(0, 0, 1, 1),
+                local_path="map-platform/backend/data/source-pbf/test.osm.pbf",
+            )
+            metadata_path = root / "cache.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "sources": {},
+                        "snapshots": {
+                            region.id: {
+                                stale_digest: {
+                                    "sha256": stale_digest,
+                                    "resolvedUrl": (
+                                        "https://example.invalid/"
+                                        "test-20260824.osm.pbf"
+                                    ),
+                                }
+                            }
+                        },
+                    }
+                )
+            )
+            cache = SourceCache(
+                root / "repo",
+                metadata_path,
+                data_root=root / "data",
+                revalidate_after_seconds=60,
+            )
+
+            with patch(
+                "map_platform.source_cache.urllib.request.urlopen",
+                return_value=Response(),
+            ) as download:
+                cached = cache.ensure(region)
+
+            download.assert_called_once_with(region.url, timeout=60)
+            self.assertEqual(target.read_bytes(), b"fresh")
+            self.assertEqual(cached.etag, '"fresh-etag"')
+            metadata = cache.metadata()["sources"]["test-region"]
+            self.assertEqual(metadata["sourceUrl"], region.url)
+            self.assertEqual(
+                metadata["resolvedUrl"],
+                "https://example.invalid/test-20260825.osm.pbf",
+            )
+            self.assertEqual(metadata["etag"], '"fresh-etag"')
+            self.assertEqual(
+                metadata["lastModified"],
+                "Tue, 25 Aug 2026 00:00:00 GMT",
+            )
+            self.assertEqual(metadata["downloadedAt"], metadata["validatedAt"])
+            snapshot = cache.metadata()["snapshots"][region.id][cached.sha256]
+            self.assertEqual(snapshot["resolvedUrl"], metadata["resolvedUrl"])
+            self.assertEqual(snapshot["downloadedAt"], metadata["downloadedAt"])
+            self.assertEqual(
+                cache.metadata()["snapshots"][region.id][stale_digest]["sha256"],
+                stale_digest,
+            )
+
+    def test_stale_mutable_snapshot_uses_validators_and_preserves_304_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "data" / "source-pbf" / "test.osm.pbf"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"stable")
+            digest = hashlib.sha256(b"stable").hexdigest()
+            region = SourceRegion(
+                id="test-region",
+                provider="test",
+                name="Test",
+                url="https://example.invalid/test-latest.osm.pbf",
+                bounds=Bounds(0, 0, 1, 1),
+                local_path="map-platform/backend/data/source-pbf/test.osm.pbf",
+            )
+            downloaded_at = "2026-08-20T00:00:00.000000Z"
+            metadata_path = root / "cache.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "sources": {
+                            region.id: {
+                                "path": str(target),
+                                "bytes": target.stat().st_size,
+                                "sha256": digest,
+                                "cachedAt": downloaded_at,
+                                "sourceUrl": region.url,
+                                "resolvedUrl": "https://example.invalid/test-20260820.osm.pbf",
+                                "etag": '"stable-etag"',
+                                "lastModified": "Thu, 20 Aug 2026 00:00:00 GMT",
+                                "downloadedAt": downloaded_at,
+                                "validatedAt": downloaded_at,
+                                "sourcePublishedAt": None,
+                            }
+                        },
+                    }
+                )
+            )
+            cache = SourceCache(
+                root / "repo",
+                metadata_path,
+                data_root=root / "data",
+                revalidate_after_seconds=0,
+            )
+            headers = Message()
+            headers["ETag"] = '"stable-etag"'
+            not_modified = urllib.error.HTTPError(
+                region.url,
+                304,
+                "Not Modified",
+                headers,
+                None,
+            )
+
+            with patch(
+                "map_platform.source_cache.urllib.request.urlopen",
+                side_effect=not_modified,
+            ) as download:
+                cached = cache.ensure(region)
+
+            request = download.call_args.args[0]
+            self.assertIsInstance(request, urllib.request.Request)
+            self.assertEqual(request.get_header("If-none-match"), '"stable-etag"')
+            self.assertEqual(
+                request.get_header("If-modified-since"),
+                "Thu, 20 Aug 2026 00:00:00 GMT",
+            )
+            self.assertEqual(target.read_bytes(), b"stable")
+            self.assertEqual(cached.downloaded_at, downloaded_at)
+            self.assertNotEqual(cached.validated_at, downloaded_at)
+            recorded = cache.metadata()["sources"][region.id]
+            self.assertEqual(recorded["downloadedAt"], downloaded_at)
+            self.assertEqual(recorded["sha256"], digest)
+
+    def test_checksum_failure_does_not_conditionally_reuse_invalid_bytes(self):
+        class Response:
+            headers = {"Content-Length": "5"}
+
+            def __init__(self):
+                self.done = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                if self.done:
+                    return b""
+                self.done = True
+                return b"fresh"
+
+            def geturl(self):
+                return "https://example.invalid/test-20260825.osm.pbf"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "data" / "source-pbf" / "test.osm.pbf"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"stale")
+            stale_digest = hashlib.sha256(b"stale").hexdigest()
+            fresh_digest = hashlib.sha256(b"fresh").hexdigest()
+            region = SourceRegion(
+                id="test-region",
+                provider="test",
+                name="Test",
+                url="https://example.invalid/test-latest.osm.pbf",
+                bounds=Bounds(0, 0, 1, 1),
+                local_path="map-platform/backend/data/source-pbf/test.osm.pbf",
+                checksum=fresh_digest,
+            )
+            metadata_path = root / "cache.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "sources": {
+                            region.id: {
+                                "sha256": stale_digest,
+                                "sourceUrl": region.url,
+                                "etag": '"stale-etag"',
+                            }
+                        }
+                    }
+                )
+            )
+            cache = SourceCache(
+                root / "repo",
+                metadata_path,
+                data_root=root / "data",
+            )
+
+            with patch(
+                "map_platform.source_cache.urllib.request.urlopen",
+                return_value=Response(),
+            ) as download:
+                cached = cache.ensure(region)
+
+            self.assertEqual(download.call_args.args[0], region.url)
+            self.assertEqual(cached.sha256, fresh_digest)
+            self.assertEqual(target.read_bytes(), b"fresh")
 
     def test_rejects_checksum_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:

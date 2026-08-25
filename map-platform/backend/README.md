@@ -126,6 +126,16 @@ Static sources are stored in the source index; other areas are resolved from
 the cached Geofabrik catalog at job creation time and persisted with the job
 before the worker downloads the matching PBF.
 
+Checksum-pinned sources are immutable. Mutable sources without a checksum are
+revalidated at most once per `MAP_PLATFORM_SOURCE_CACHE_REVALIDATE_SECONDS`
+using their HTTP `ETag` and `Last-Modified` validators. The cache records the
+requested and resolved URLs, validators, download/validation timestamps, byte
+count, and exact SHA-256 in `source-cache.json`, retaining provenance by region
+and snapshot SHA after a newer PBF replaces the active file. An existing file
+without that provenance falls back to its modification time and is replaced
+atomically once it becomes due. Jobs continue to bind their work to the
+verified file SHA-256.
+
 ## Coolify
 
 Use `map-platform/deploy/compose.yaml` for Coolify production. It independently
@@ -334,10 +344,18 @@ Useful production environment variables:
   default `3600`.
 - `MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS`: maximum content objects attempted
   per maintenance cycle, default `100`.
+- `MAP_PLATFORM_CATALOG_PUBLICATION_RETRY_BATCH`: maximum catalog publication
+  retries per maintenance cycle, default and hard maximum `4`.
+- `MAP_PLATFORM_CATALOG_RETENTION_BATCH`: maximum catalog retention objects per
+  maintenance cycle, default and hard maximum `5`. Together the defaults use
+  at most 15 catalog mutation calls per channel and leave half of the
+  30/minute service limiter available for immediate publication and promotion.
 - `MAP_PLATFORM_WORKER_HEALTH_MAX_AGE_SECONDS`: maximum age of the real worker
   heartbeat, default `120`. Idle polls and the active job-lease thread refresh
   it, so queue-lock stalls become unhealthy without misclassifying long builds.
-- `MAP_PLATFORM_ARTIFACT_STORE`: `filesystem` (default) or `s3`. Filesystem
+- `MAP_PLATFORM_ARTIFACT_STORE`: `filesystem` (default), `mirror`, or `s3`.
+  `mirror` keeps the filesystem as the read/download primary while writing and
+  deleting both stores, which supports a measured R2 migration. Filesystem
   objects live on the persistent data volume and are written immutably by
   content key. Use `s3` for multi-host production durability.
 - `MAP_PLATFORM_ARTIFACT_ROOT`: filesystem object root, default
@@ -346,6 +364,10 @@ Useful production environment variables:
   `MAP_PLATFORM_S3_ENDPOINT_URL`: S3-compatible storage destination. Standard
   `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION` configure the
   client. Grant only object read/write/delete within the configured prefix.
+- `MAP_PLATFORM_S3_CHECKSUM_MODE`: `sha256` (default), `md5`, or
+  `metadata-only`. Prove the selected R2 mode with
+  `tools/check_r2_compatibility.py` before rollout; prefer SHA-256 and use MD5
+  only when the endpoint rejects SDK SHA-256 checksum headers.
 - `MAP_PLATFORM_S3_API_ACCESS_KEY_ID`,
   `MAP_PLATFORM_S3_API_SECRET_ACCESS_KEY`, and optional
   `MAP_PLATFORM_S3_API_SESSION_TOKEN`: separate short-lived API credentials
@@ -354,6 +376,17 @@ Useful production environment variables:
   deployments may instead set
   `MAP_PLATFORM_S3_API_USE_DEFAULT_CREDENTIAL_CHAIN=1`; API S3 startup otherwise
   fails closed rather than silently inheriting worker credentials.
+- `MAP_PLATFORM_CATALOG_URL`, `MAP_PLATFORM_CATALOG_CHANNEL`,
+  `MAP_PLATFORM_CATALOG_SERVICE_KEY_ID`, and
+  `MAP_PLATFORM_CATALOG_SERVICE_SECRET`: opt into authenticated publication of
+  verified READY artifacts to the shared Cloudflare map catalog. Catalog
+  failure is recorded but never demotes a locally READY map.
+- Optional complete `MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_*` tuples bind a
+  catalog stream to an exact reviewed firmware identity. iOS compatibility is
+  instead an immutable `readerRequirements` contract (stream and manifest
+  schema, renderer format, and required features) matched against the app's
+  discrete `readerCapabilities`; app build identity remains audit context and
+  never expires otherwise compatible map bytes.
 - `MAP_PLATFORM_DYNAMIC_SOURCE_DISCOVERY`: enable Geofabrik catalog fallback,
   default `1`.
 - `MAP_PLATFORM_GEOFABRIK_INDEX_URL`: provider catalog URL, default
@@ -364,6 +397,9 @@ Useful production environment variables:
   `86400`.
 - `MAP_PLATFORM_GEOFABRIK_FAILURE_COOLDOWN_SECONDS`: fail-fast interval shared
   by concurrent catalog callers after an upstream failure, default `30`.
+- `MAP_PLATFORM_SOURCE_CACHE_REVALIDATE_SECONDS`: maximum age of upstream
+  validation for checksum-less source PBFs, default `86400` (24 hours). `0`
+  revalidates on every cache use; invalid or negative values fail startup.
 
 Completed jobs expose an `artifacts` array. A client refreshes the immutable
 stream URL with:

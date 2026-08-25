@@ -36,6 +36,7 @@ enum DeviceDiagnosticsTransferError: LocalizedError {
     case deviceIdentityUnavailable
     case invalidIndex
     case requestFailed(Int)
+    case deviceRejected(code: String, message: String)
     case oversizedChunk
     case hashMismatch
     case malformedChunk
@@ -48,6 +49,11 @@ enum DeviceDiagnosticsTransferError: LocalizedError {
             return "The device returned an invalid diagnostics index."
         case .requestFailed(let status):
             return "The device diagnostics request failed (HTTP \(status))."
+        case .deviceRejected(let code, let message):
+            return DeviceDiagnosticsRejectionPolicy.message(
+                code: code,
+                fallback: message
+            )
         case .oversizedChunk:
             return "The device diagnostics chunk exceeded the safety limit."
         case .hashMismatch:
@@ -63,6 +69,16 @@ enum DeviceDiagnosticsTransferError: LocalizedError {
 /// recorder pull can contain tens of millions of bytes and must not monopolize
 /// UI scheduling while enforcing the streaming byte limit.
 nonisolated private enum DeviceDiagnosticsHTTPClient {
+    private struct ErrorEnvelope: Decodable {
+        struct Detail: Decodable {
+            let code: String
+            let message: String
+        }
+
+        let ok: Bool
+        let error: Detail
+    }
+
     static func request(
         _ request: URLRequest,
         configuration: URLSessionConfiguration,
@@ -71,12 +87,7 @@ nonisolated private enum DeviceDiagnosticsHTTPClient {
         let urlSession = URLSession(configuration: configuration)
         defer { urlSession.invalidateAndCancel() }
         let (bytes, response) = try await urlSession.bytes(for: request)
-        guard let status = (response as? HTTPURLResponse)?.statusCode,
-              200..<300 ~= status else {
-            throw DeviceDiagnosticsTransferError.requestFailed(
-                (response as? HTTPURLResponse)?.statusCode ?? -1
-            )
-        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         let expectedLength = response.expectedContentLength
         guard expectedLength < 0 || expectedLength <= Int64(maximumBytes) else {
             throw DeviceDiagnosticsTransferError.oversizedChunk
@@ -90,6 +101,18 @@ nonisolated private enum DeviceDiagnosticsHTTPClient {
                 throw DeviceDiagnosticsTransferError.oversizedChunk
             }
             data.append(byte)
+        }
+        guard 200..<300 ~= status else {
+            if let envelope = try? JSONDecoder().decode(
+                ErrorEnvelope.self,
+                from: data
+            ), !envelope.ok, !envelope.error.code.isEmpty {
+                throw DeviceDiagnosticsTransferError.deviceRejected(
+                    code: envelope.error.code,
+                    message: envelope.error.message
+                )
+            }
+            throw DeviceDiagnosticsTransferError.requestFailed(status)
         }
         return data
     }
@@ -155,11 +178,13 @@ final class DeviceDiagnosticsTransferManager {
             event: "diagnostics_download_started",
             fields: ["mode": DeviceTransferSession.Mode.diagnostics.rawValue]
         )
-        let session = try await transferManager.enterDiagnostics(
-            bleManager: bleManager,
-            status: status
-        )
+        var openedSession: DeviceTransferSession?
         do {
+            let session = try await transferManager.enterDiagnostics(
+                bleManager: bleManager,
+                status: status
+            )
+            openedSession = session
             status("reading device diagnostics index")
             let indexData = try await request(
                 session: session,
@@ -277,19 +302,55 @@ final class DeviceDiagnosticsTransferManager {
             // unstructured MainActor task (which does not inherit cancellation)
             // and await it so network restoration and device revocation get a
             // deterministic bounded cleanup attempt before we rethrow.
-            let cleanup = Task { @MainActor [weak self] in
-                guard let self else { return }
-                try? await self.closeSession(session, bleManager: bleManager)
+            if let openedSession {
+                let cleanup = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    try? await self.closeSession(
+                        openedSession,
+                        bleManager: bleManager
+                    )
+                }
+                await cleanup.value
             }
-            await cleanup.value
+            let failure = Self.failureFields(
+                error,
+                enteredSession: openedSession != nil
+            )
             recorder.record(
                 level: .warning,
                 category: .transfer,
                 event: "diagnostics_download_failed",
-                fields: ["reason": "transfer_failed"]
+                fields: failure
             )
             throw error
         }
+    }
+
+    private static func failureFields(
+        _ error: Error,
+        enteredSession: Bool
+    ) -> [String: String] {
+        var code = "unknown"
+        if let rejection = error as? RemoteDeviceDebugError {
+            code = rejection.diagnosticCode
+        } else if let transfer = error as? DeviceDiagnosticsTransferError {
+            switch transfer {
+            case .deviceIdentityUnavailable: code = "device_identity_unavailable"
+            case .invalidIndex: code = "invalid_index"
+            case .requestFailed(let status): code = "http_\(status)"
+            case .deviceRejected(let rejectedCode, _): code = rejectedCode
+            case .oversizedChunk: code = "oversized_chunk"
+            case .hashMismatch: code = "hash_mismatch"
+            case .malformedChunk: code = "malformed_chunk"
+            }
+        } else if error is CancellationError {
+            code = "cancelled"
+        }
+        return [
+            "reason": enteredSession ? "transfer_failed" : "entry_failed",
+            "code": code,
+            "mode": DeviceTransferSession.Mode.diagnostics.rawValue,
+        ]
     }
 
     private func closeSession(

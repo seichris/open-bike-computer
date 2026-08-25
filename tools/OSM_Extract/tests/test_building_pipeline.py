@@ -1,5 +1,7 @@
+import json
 import pathlib
 import sys
+import tempfile
 import unittest
 from dataclasses import replace
 from unittest.mock import patch
@@ -14,6 +16,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from building_height import HeightProvenance, HeightRules
+from building_calibration_cache import CalibrationCacheError
 from building_pipeline import (
     BUILDING_FLAG_FLAT_BASE,
     OutlineSpatialIndex,
@@ -21,8 +24,10 @@ from building_pipeline import (
     _calibration_cell,
     clip_buildings,
     collect_building_features,
+    load_relation_index,
     prepare_buildings,
     projected_selection_geometry,
+    source_object_key,
 )
 from map_format import MAX_BUILDING_RINGS, _building_section
 
@@ -44,6 +49,38 @@ class BuildingPipelineTests(unittest.TestCase):
     def setUpClass(cls):
         raw = yaml.safe_load((ROOT / "conf" / "building_height_rules.yaml").read_text())
         cls.rules = HeightRules.from_mapping(raw)
+
+    def test_load_relation_index_accepts_multi_outline_candidates(self):
+        value = {
+            "schemaVersion": 1,
+            "partParents": {},
+            "partParentCandidates": {"w30": ["w10", "w20"]},
+            "parentGeometrySources": {"w10": "r190"},
+            "parentTags": {},
+            "relations": 1,
+            "ambiguousParts": 0,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "relations.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+
+            self.assertEqual(load_relation_index(path), value)
+
+    def test_load_relation_index_rejects_overlapping_parent_encodings(self):
+        value = {
+            "schemaVersion": 1,
+            "partParents": {"w30": "w10"},
+            "partParentCandidates": {"w30": ["w10", "w20"]},
+            "parentTags": {},
+            "relations": 1,
+            "ambiguousParts": 0,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "relations.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "relation index is invalid"):
+                load_relation_index(path)
 
     def test_legacy_calibration_keeps_representative_point_anchor(self):
         geometry = Polygon(
@@ -119,6 +156,202 @@ class BuildingPipelineTests(unittest.TestCase):
         self.assertEqual(report["partCount"], 1)
         self.assertEqual(report["relationAssociationCount"], 1)
 
+    def test_restores_suppressed_outline_from_multipolygon_geometry(self):
+        provider = feature(
+            190,
+            box(0, 0, 100, 100),
+            '"building"=>"commercial"',
+            relation=True,
+        )
+        part = feature(
+            30,
+            box(10, 10, 90, 90),
+            '"building:part"=>"yes","height"=>"15"',
+            building=None,
+        )
+        relation_index = {
+            "partParents": {"w30": "w10"},
+            "parentGeometrySources": {"w10": "r190"},
+            "parentTags": {"w10": {"building": "office", "height": "40"}},
+        }
+
+        collected = collect_building_features(
+            [provider, part],
+            [],
+            relation_index,
+        )
+        buildings, report, _flat = prepare_buildings(
+            collected,
+            self.rules,
+            relation_index,
+            strict_relations=True,
+        )
+
+        by_key = {building.object_key: building for building in buildings}
+        self.assertEqual(set(by_key), {"w10", "w30"})
+        self.assertEqual(by_key["w30"].parent_key, "w10")
+        self.assertEqual(by_key["w30"].resolved.height_dm, 150)
+        self.assertEqual(report["relationAssociationCount"], 1)
+
+    def test_retains_geometry_provider_when_it_is_also_a_relation_part(self):
+        provider_part = feature(
+            190,
+            box(0, 0, 100, 100),
+            '"building:part"=>"yes","height"=>"30"',
+            building=None,
+            relation=True,
+        )
+        second_part = feature(
+            30,
+            box(10, 10, 30, 30),
+            '"building:part"=>"yes","height"=>"15"',
+            building=None,
+        )
+        relation_index = {
+            "partParents": {"r190": "w10", "w30": "w10"},
+            "parentGeometrySources": {"w10": "r190"},
+            "parentTags": {"w10": {"building": "office", "height": "40"}},
+        }
+
+        collected = collect_building_features(
+            [provider_part, second_part],
+            [],
+            relation_index,
+        )
+        buildings, report, _flat = prepare_buildings(
+            collected,
+            self.rules,
+            relation_index,
+            strict_relations=True,
+        )
+
+        by_key = {building.object_key: building for building in buildings}
+        self.assertEqual(set(by_key), {"r190", "w10", "w30"})
+        self.assertEqual(by_key["r190"].parent_key, "w10")
+        self.assertEqual(by_key["w30"].parent_key, "w10")
+        self.assertEqual(report["relationAssociationCount"], 2)
+
+    def test_suppresses_unused_provider_when_outline_is_already_converted(self):
+        outline = feature(10, box(0, 0, 100, 100), '"building"=>"office"')
+        provider = feature(
+            190,
+            box(0, 0, 100, 100),
+            '"building"=>"commercial"',
+            relation=True,
+        )
+        part = feature(
+            30,
+            box(10, 10, 90, 90),
+            '"building:part"=>"yes"',
+            building=None,
+        )
+        relation_index = {
+            "partParents": {"w30": "w10"},
+            "parentGeometrySources": {"w10": "r190"},
+        }
+
+        collected = collect_building_features(
+            [outline, provider, part],
+            [],
+            relation_index,
+        )
+
+        keys = {
+            source_object_key(feature["properties"])
+            for feature in collected
+        }
+        self.assertEqual(keys, {"w10", "w30"})
+
+    def test_multi_outline_relation_uses_only_declared_containment_candidates(self):
+        unrelated = feature(
+            1,
+            box(205, 5, 225, 25),
+            '"building"=>"yes","height"=>"5"',
+        )
+        first_outline = feature(
+            10,
+            box(0, 0, 100, 100),
+            '"building"=>"retail","height"=>"20"',
+        )
+        second_outline = feature(
+            20,
+            box(200, 0, 300, 100),
+            '"building"=>"office","height"=>"40"',
+        )
+        part = feature(
+            30,
+            box(210, 10, 220, 20),
+            '"building:part"=>"yes","height"=>"15"',
+            building=None,
+        )
+
+        buildings, report, _flat = prepare_buildings(
+            [unrelated, first_outline, second_outline, part],
+            self.rules,
+            {"partParentCandidates": {"w30": ["w10", "w20"]}},
+            strict_relations=True,
+        )
+
+        selected_part = next(
+            building for building in buildings if building.object_key == "w30"
+        )
+        self.assertEqual(selected_part.parent_key, "w20")
+        self.assertEqual(selected_part.association, "relation")
+        self.assertEqual(report["relationAssociationCount"], 1)
+        self.assertEqual(report["containmentAssociationCount"], 0)
+
+    def test_multi_outline_relation_fails_when_no_candidate_contains_part(self):
+        first_outline = feature(10, box(0, 0, 100, 100), '"building"=>"yes"')
+        second_outline = feature(
+            20,
+            box(200, 0, 300, 100),
+            '"building"=>"yes"',
+        )
+        part = feature(
+            30,
+            box(400, 10, 410, 20),
+            '"building:part"=>"yes"',
+            building=None,
+        )
+
+        with self.assertRaisesRegex(
+            CalibrationCacheError,
+            "not contained by any declared parent candidate",
+        ):
+            prepare_buildings(
+                [first_outline, second_outline, part],
+                self.rules,
+                {"partParentCandidates": {"w30": ["w10", "w20"]}},
+                strict_relations=True,
+            )
+
+    def test_multi_outline_relation_allows_small_declared_boundary_drift(self):
+        outline = feature(10, box(0, 0, 100, 100), '"building"=>"yes"')
+        other_outline = feature(
+            20,
+            box(200, 0, 300, 100),
+            '"building"=>"yes"',
+        )
+        part = feature(
+            30,
+            box(-0.2, 10, 20, 20),
+            '"building:part"=>"yes"',
+            building=None,
+        )
+
+        buildings, _report, _flat = prepare_buildings(
+            [outline, other_outline, part],
+            self.rules,
+            {"partParentCandidates": {"w30": ["w10", "w20"]}},
+            strict_relations=True,
+        )
+
+        selected_part = next(
+            building for building in buildings if building.object_key == "w30"
+        )
+        self.assertEqual(selected_part.parent_key, "w10")
+        self.assertEqual(selected_part.association, "relation")
+
     def test_retains_a_safe_single_part_relation_without_containment(self):
         standalone = feature(
             2,
@@ -140,6 +373,43 @@ class BuildingPipelineTests(unittest.TestCase):
         self.assertEqual(buildings[0].association, "standalone")
         self.assertEqual(report["standaloneRelationPartCount"], 1)
         self.assertEqual(report["containmentAssociationCount"], 0)
+
+    def test_singapore_relation_parts_emit_five_target3_buildings(self):
+        members = [
+            feature(
+                1_077_928_781 + index,
+                box(100 + index * 40, 100, 130 + index * 40, 130),
+                '"building:part"=>"yes","building:levels"=>"5"',
+                building=None,
+            )
+            for index in range(5)
+        ]
+        standalone_keys = [
+            f"w{1_077_928_781 + index}" for index in range(5)
+        ]
+
+        buildings, report, _flat = prepare_buildings(
+            members,
+            self.rules,
+            {"standalonePartKeys": standalone_keys},
+            strict_relations=True,
+        )
+        records, stats = clip_buildings(
+            buildings,
+            box(0, 0, 400, 400),
+            0,
+            0,
+        )
+        section, metadata = _building_section(records)
+
+        self.assertEqual(len(buildings), 5)
+        self.assertEqual(report["standaloneRelationPartCount"], 5)
+        self.assertEqual(len(records), 5)
+        self.assertEqual(metadata["buildings"], 5)
+        self.assertGreater(metadata["buildingPoints"], 0)
+        self.assertGreater(metadata["buildingBytes"], 16)
+        self.assertEqual(metadata["buildingBytes"], len(section))
+        self.assertGreater(stats["emittedWallCount"], 0)
 
     def test_complexity_snapshot_precedes_containment_and_is_bounded(self):
         outline = feature(1, box(0, 0, 100, 100), '"building"=>"yes"')

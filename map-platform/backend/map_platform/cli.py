@@ -8,6 +8,13 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .artifacts import create_artifact_store_from_environment
+from .catalog import (
+    CatalogClient,
+    backfill_ready_job_artifacts,
+    delete_catalog_retention_artifacts,
+    publish_ready_job,
+    retry_ready_publications,
+)
 from .generation_profiles import (
     configured_deployment_channel,
     load_generation_profile_policy,
@@ -58,6 +65,11 @@ class MaintenanceIterationError(RuntimeError):
     def __init__(self, result: dict[str, object]):
         super().__init__("one or more maintenance tasks failed")
         self.result = result
+
+
+MAX_CATALOG_PUBLICATION_RETRY_BATCH = 4
+MAX_CATALOG_RETENTION_BATCH = 5
+MAX_CATALOG_MAINTENANCE_CALLS = 15
 
 
 def _safe_error_summary(exc: Exception) -> dict[str, object]:
@@ -226,19 +238,32 @@ def _perform_maintenance(
     retention_days: int,
     artifact_store,
     max_gc_items: int,
+    catalog_publication_retry_batch: int = MAX_CATALOG_PUBLICATION_RETRY_BATCH,
+    catalog_retention_batch: int = MAX_CATALOG_RETENTION_BATCH,
     monitoring_store: MapMonitoringStore | None = None,
     monitoring_retention_days: int | None = None,
     building_cache_retention_days: int = DEFAULT_BUILDING_BLOCK_CACHE_RETENTION_DAYS,
     building_cache_max_bytes: int = DEFAULT_BUILDING_BLOCK_CACHE_MAX_BYTES,
     building_task_store: BuildingTaskStore | None = None,
     building_task_retention_days: int = DEFAULT_BUILDING_TASK_RETENTION_DAYS,
+    catalog_client: CatalogClient | None = None,
 ) -> dict[str, object]:
+    if not 1 <= catalog_publication_retry_batch <= MAX_CATALOG_PUBLICATION_RETRY_BATCH:
+        raise ValueError("catalog publication retry batch is invalid")
+    if not 1 <= catalog_retention_batch <= MAX_CATALOG_RETENTION_BATCH:
+        raise ValueError("catalog retention batch is invalid")
+    catalog_call_budget = (
+        catalog_publication_retry_batch + 1 + 2 * catalog_retention_batch
+    )
+    if catalog_call_budget > MAX_CATALOG_MAINTENANCE_CALLS:
+        raise ValueError("catalog maintenance call budget is invalid")
     result: dict[str, object] = {
         "maintenance": True,
         "expired": 0,
         "removedWorkDirs": 0,
         "removedRateLimits": 0,
         "buildingBlockCache": {},
+        "catalogMutationCallBudget": catalog_call_budget,
     }
     failures: dict[str, object] = {}
 
@@ -265,12 +290,30 @@ def _perform_maintenance(
 
     tasks = (
         (
+            "catalogPublications",
+            lambda: retry_ready_publications(
+                store,
+                catalog_client,
+                artifact_store=artifact_store,
+                maximum_jobs=catalog_publication_retry_batch,
+            ),
+        ),
+        (
             "expired",
             lambda: expire_ready_jobs(
                 store,
                 older_than_days=retention_days,
                 artifact_store=artifact_store,
                 max_gc_items=max_gc_items,
+            ),
+        ),
+        (
+            "catalogRetention",
+            lambda: delete_catalog_retention_artifacts(
+                store,
+                catalog_client,
+                artifact_store,
+                maximum_artifacts=min(max_gc_items, catalog_retention_batch),
             ),
         ),
         (
@@ -372,6 +415,12 @@ def main() -> int:
     run = subparsers.add_parser("run-job")
     run.add_argument("job_id")
 
+    backfill_catalog = subparsers.add_parser(
+        "backfill-catalog-job",
+        help="explicitly verify and copy one filesystem-era READY job into shared storage",
+    )
+    backfill_catalog.add_argument("job_id")
+
     monitoring_summary = subparsers.add_parser("monitoring-summary")
     monitoring_summary.add_argument("--window-hours", type=int, default=168)
 
@@ -406,6 +455,26 @@ def main() -> int:
         "--max-gc-items",
         type=int,
         default=int(os.environ.get("MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS", "100")),
+    )
+    maintenance_loop.add_argument(
+        "--catalog-publication-retry-batch",
+        type=int,
+        default=int(
+            os.environ.get(
+                "MAP_PLATFORM_CATALOG_PUBLICATION_RETRY_BATCH",
+                str(MAX_CATALOG_PUBLICATION_RETRY_BATCH),
+            )
+        ),
+    )
+    maintenance_loop.add_argument(
+        "--catalog-retention-batch",
+        type=int,
+        default=int(
+            os.environ.get(
+                "MAP_PLATFORM_CATALOG_RETENTION_BATCH",
+                str(MAX_CATALOG_RETENTION_BATCH),
+            )
+        ),
     )
     maintenance_loop.add_argument(
         "--building-cache-retention-days",
@@ -453,6 +522,11 @@ def main() -> int:
     expire.add_argument("--older-than-days", type=int, default=30)
 
     subparsers.add_parser("cleanup-work")
+    promote_catalog = subparsers.add_parser(
+        "promote-catalog-map",
+        help="validate and production-sign one development catalog map",
+    )
+    promote_catalog.add_argument("map_entry_id")
     build_plan = subparsers.add_parser(
         "build-plan",
         help="inspect durable internal building chunk plans",
@@ -706,6 +780,72 @@ def main() -> int:
         **generation_controls,
     )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
+    catalog_client = CatalogClient.from_environment()
+
+    if args.command == "backfill-catalog-job":
+        if catalog_client is None:
+            raise SystemExit("MAP_PLATFORM_CATALOG_URL is required")
+        artifact_store = create_artifact_store_from_environment(data_root)
+        backfill = backfill_ready_job_artifacts(
+            store,
+            artifact_store,
+            args.job_id,
+        )
+        job = publish_ready_job(
+            store,
+            catalog_client,
+            args.job_id,
+            artifact_store=artifact_store,
+        )
+        print(
+            json.dumps(
+                {
+                    "jobId": job.job_id,
+                    "publicationState": job.catalog_publication_state,
+                    "backfill": backfill,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    if args.command == "promote-catalog-map":
+        from .catalog_promotion import (
+            already_production_result,
+            promote_catalog_map,
+        )
+        from .map_signing import load_map_artifact_signer_from_environment
+
+        if catalog_client is None:
+            raise SystemExit("MAP_PLATFORM_CATALOG_URL is required")
+        grant = catalog_client.promotion_grant(args.map_entry_id)
+        existing = already_production_result(args.map_entry_id, grant)
+        if existing is not None:
+            print(json.dumps(existing, indent=2, sort_keys=True))
+            return 0
+        signer = load_map_artifact_signer_from_environment()
+        if signer is None:
+            raise SystemExit("production map stream signing is not enabled")
+        producer_build_sha256, producer_image_digest = _pipeline_producer_identity(
+            repo_root,
+            os.environ.get("MAP_PLATFORM_WORKER_IMAGE_REFERENCE", "").strip(),
+            required=True,
+        )
+        assert producer_build_sha256 is not None
+        assert producer_image_digest is not None
+        result = promote_catalog_map(
+            args.map_entry_id,
+            catalog_client=catalog_client,
+            artifact_store=create_artifact_store_from_environment(data_root),
+            signer=signer,
+            producer_build_sha256=producer_build_sha256,
+            producer_image_digest=producer_image_digest,
+            work_root=data_root / "promotions",
+            grant=grant,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
 
     def create_pipeline() -> MapBuildPipeline:
         from .map_signing import load_map_artifact_signer_from_environment
@@ -755,15 +895,22 @@ def main() -> int:
         return 0
     if args.command == "run-job":
         pipeline = create_pipeline()
+        completed = run_job(
+            store,
+            pipeline,
+            args.job_id,
+            monitoring_store=monitoring_store,
+            estimate_coordinator=estimate_coordinator,
+        )
+        completed = publish_ready_job(
+            store,
+            catalog_client,
+            completed.job_id,
+            artifact_store=pipeline.artifact_store,
+        )
         print(
             json.dumps(
-                run_job(
-                    store,
-                    pipeline,
-                    args.job_id,
-                    monitoring_store=monitoring_store,
-                    estimate_coordinator=estimate_coordinator,
-                ).to_dict(),
+                completed.to_dict(),
                 indent=2,
                 sort_keys=True,
             )
@@ -786,6 +933,7 @@ def main() -> int:
             pipeline,
             monitoring_store=monitoring_store,
             estimate_coordinator=estimate_coordinator,
+            catalog_client=catalog_client,
         ).run_next()
         print(
             json.dumps(
@@ -807,6 +955,7 @@ def main() -> int:
             pipeline,
             monitoring_store=monitoring_store,
             estimate_coordinator=estimate_coordinator,
+            catalog_client=catalog_client,
         ).run_until_empty(max_jobs=args.max_jobs)
         print(
             json.dumps(
@@ -839,6 +988,7 @@ def main() -> int:
             on_heartbeat=write_worker_heartbeat,
             monitoring_store=monitoring_store,
             estimate_coordinator=estimate_coordinator,
+            catalog_client=catalog_client,
         )
         processed = 0
         while args.max_jobs is None or processed < args.max_jobs:
@@ -869,6 +1019,10 @@ def main() -> int:
                     retention_days=args.retention_days,
                     artifact_store=artifact_store,
                     max_gc_items=args.max_gc_items,
+                    catalog_publication_retry_batch=(
+                        args.catalog_publication_retry_batch
+                    ),
+                    catalog_retention_batch=args.catalog_retention_batch,
                     monitoring_store=monitoring_store,
                     monitoring_retention_days=monitoring_retention_days,
                     building_cache_retention_days=(
@@ -877,6 +1031,7 @@ def main() -> int:
                     building_cache_max_bytes=args.building_cache_max_bytes,
                     building_task_store=building_task_store,
                     building_task_retention_days=args.building_task_retention_days,
+                    catalog_client=catalog_client,
                 )
             except MaintenanceIterationError as exc:
                 maintenance_result = exc.result
@@ -902,6 +1057,13 @@ def main() -> int:
                     "bytes": cached.bytes,
                     "sha256": cached.sha256,
                     "cachedAt": cached.cached_at,
+                    "sourceUrl": cached.source_url,
+                    "resolvedUrl": cached.resolved_url,
+                    "etag": cached.etag,
+                    "lastModified": cached.last_modified,
+                    "downloadedAt": cached.downloaded_at,
+                    "validatedAt": cached.validated_at,
+                    "sourcePublishedAt": cached.source_published_at,
                 },
                 indent=2,
                 sort_keys=True,

@@ -10,11 +10,13 @@ RECORDER = (ROOT / "lib/ride_diagnostics/ride_diagnostics.cpp").read_text(
 
 
 class RideDiagnosticsStorageContractTests(unittest.TestCase):
-    def test_alternate_mount_requires_probe_and_tears_down_unhealthy_mount(self):
+    def test_transfer_preparation_probes_the_stable_recorder_backend(self):
         self.assertIn("writableProbeSucceeded", STORAGE)
-        self.assertIn("storage_mount_policy::diagnosticsMountReady", STORAGE)
-        self.assertIn("if (!ready) {\n      SD.end();", STORAGE)
-        self.assertIn("diagnosticsSdMountedAtAlternateRoot = false", STORAGE)
+        self.assertIn("prepareDiagnosticsStorage", STORAGE)
+        self.assertIn("StoragePreparation::CardMissing", STORAGE)
+        self.assertIn("StoragePreparation::WritableProbeFailed", STORAGE)
+        self.assertIn("StoragePreparation::ReadyInternalFallback", STORAGE)
+        self.assertNotIn("SD.begin(\n        SD_CS, hspi, WAVESHARE_SD_SPI_FREQ_HZ,\n        kDiagnosticsAlternateRoot)", STORAGE)
 
     def test_ffat_fallback_is_a_valid_diagnostics_backend(self):
         self.assertIn("internalFallbackMounted.load()", STORAGE)

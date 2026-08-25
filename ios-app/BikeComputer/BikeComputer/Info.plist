@@ -4,6 +4,14 @@
 <dict>
 	<key>BicinoMapServiceHost</key>
 	<string>$(BICINO_MAP_SERVICE_HOST)</string>
+	<key>BicinoMapCatalogHost</key>
+	<string>$(BICINO_MAP_CATALOG_HOST)</string>
+	<key>BicinoMapR2DownloadHost</key>
+	<string>$(BICINO_MAP_R2_DOWNLOAD_HOST)</string>
+	<key>BicinoMapDevelopmentSigningKeyID</key>
+	<string>$(BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID)</string>
+	<key>BicinoMapDevelopmentSigningPublicKeyX963Hex</key>
+	<string>$(BICINO_MAP_DEVELOPMENT_SIGNING_PUBLIC_KEY_X963_HEX)</string>
 	<key>CFBundleDisplayName</key>
 	<string>$(BICINO_APP_DISPLAY_NAME)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>

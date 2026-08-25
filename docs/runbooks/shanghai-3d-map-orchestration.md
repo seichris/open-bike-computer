@@ -202,10 +202,25 @@ parts but no outline (for example, `source relation r11258294 ...`). Preserve
 that detail from the public job error and preserve it with the immutable source
 snapshot identity. Do not silently drop
 the relation or promote a higher closure limit. The exact full-bbox job may
-proceed under the identity-versioned narrow policy only when the relation has
-one direct way member whose source way is explicitly tagged `building=yes`.
-All ambiguous, multi-part, or untagged relations still require corrected
-source data or an explicit product-policy review.
+proceed under the identity-versioned narrow policy when every direct relation
+member is a way explicitly tagged `building=yes` or
+`building:part=yes`, each member belongs only to that incomplete relation, and
+none is already associated with another building relation. Those ways are
+retained as standalone target-3 parts. Ambiguous, nested, shared, or untagged
+relations still require corrected source data or an explicit product-policy
+review.
+
+Multiple explicit `outline` members within one otherwise complete
+`type=building` relation are handled separately from cross-relation ambiguity.
+The extractor preserves the declared outline set and the geometry stage must
+select a containing parent from that set. It fails closed if a declared
+candidate is missing, none contains the part within the relation-only 25 cm
+boundary tolerance, or the part belongs to more than one building relation.
+When GDAL suppresses a sole outer way in favor of its building multipolygon,
+the relation index restores the relation geometry under the declared outline
+way identity; missing or non-unique providers remain errors. Error details for
+shared parts name the actual part, candidate outlines, and relation IDs; do not
+infer the culprit from an unrelated outline-less relation in the same closure.
 
 ## Completion checks
 

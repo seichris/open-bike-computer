@@ -126,7 +126,7 @@ struct OfflineMapsView: View {
                 Button(action: { manager.transferDownloadedPack(bleManager: bleManager) }) {
                     Label("Upload to Device", systemImage: "sdcard")
                 }
-                .disabled(manager.isBusy || !bleManager.isNavigationReady || manager.downloadedPackURL == nil)
+                .disabled(!canTransferDownloadedPack)
 
                 if manager.transferProgress > 0 && manager.transferProgress < 1 {
                     ProgressView(value: manager.transferProgress)
@@ -148,6 +148,16 @@ struct OfflineMapsView: View {
         }
         .navigationTitle("Offline Maps")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var canTransferDownloadedPack: Bool {
+        guard let packURL = manager.downloadedPackURL else { return false }
+        return SavedMapDeviceTransferPolicy.canStart(
+            isDeviceTransferBusy: manager.isDeviceTransferBusy,
+            hasActiveBackgroundUpload: manager.hasActiveBackgroundUpload,
+            isPausedUpload: manager.isPausedMapUpload(packURL),
+            isNavigationReady: bleManager.isNavigationReady
+        )
     }
 
     private static func byteText(_ bytes: Int64) -> String {

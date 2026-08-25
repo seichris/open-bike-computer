@@ -347,10 +347,11 @@ jobs:
       - name: Firmware manifest tests
         run: python3 -m unittest discover -s tools/tests
         working-directory: ${{ github.workspace }}
-      - name: Ride diagnostics format host tests
+      - name: Ride diagnostics and watchdog host tests
         run: |
           for test in \
             test_ride_diagnostics_format \
+            test_runtime_watchdog_policy \
             test_ride_diagnostics_queue_policy \
             test_ride_diagnostics_control \
             test_ride_diagnostics_http_policy \
@@ -359,6 +360,7 @@ jobs:
               "tools/tests/${test}.cpp" -o "/tmp/${test}"
             "/tmp/${test}"
           done
+          python3 tools/tests/test_watchdog_scheduler_contract.py
       - name: Verify generated pre-connection assets
         run: |
           python -m pip install -r tools/preconnection-assets-requirements.txt

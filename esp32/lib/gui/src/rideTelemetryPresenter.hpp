@@ -27,6 +27,8 @@ struct ViewModel {
   uint8_t sourceFlags = 0;
 
   workout_telemetry::OptionalMetric<uint32_t> speedTenthsKmh{};
+  workout_telemetry::OptionalMetric<uint32_t> averageSpeedTenthsKmh{};
+  workout_telemetry::OptionalMetric<uint32_t> maximumSpeedTenthsKmh{};
   workout_telemetry::OptionalMetric<uint16_t> currentHeartRateBpm{};
   workout_telemetry::OptionalMetric<uint16_t> averageHeartRateBpm{};
   workout_telemetry::OptionalMetric<uint8_t> currentHeartRateZone{};
@@ -50,12 +52,40 @@ enum class BottomMetric : uint8_t {
   RouteRemaining,
   Power,
   Cadence,
+  MaximumSpeed,
+  Energy,
 };
 
 struct BottomMetricSelection {
   BottomMetric left = BottomMetric::Altitude;
   BottomMetric right = BottomMetric::RouteRemaining;
 };
+
+inline workout_telemetry::OptionalMetric<uint32_t> averageSpeed(
+    const workout_telemetry::OptionalMetric<uint32_t> &distance,
+    const workout_telemetry::OptionalMetric<uint32_t> &elapsed) {
+  if (!distance.available || !elapsed.available || elapsed.value == 0) {
+    return {};
+  }
+
+  // m * 36 / s is km/h in tenths. Keep the multiplication wide so a valid
+  // but large workout cannot wrap before the division.
+  const uint64_t scaledDistance =
+      static_cast<uint64_t>(distance.value) * 36ULL;
+  const uint64_t rounded =
+      (scaledDistance + static_cast<uint64_t>(elapsed.value) / 2ULL) /
+      static_cast<uint64_t>(elapsed.value);
+  return {true, rounded > UINT32_MAX ? UINT32_MAX
+                                      : static_cast<uint32_t>(rounded)};
+}
+
+inline workout_telemetry::OptionalMetric<uint32_t> speedTenths(
+    const workout_telemetry::OptionalMetric<uint16_t> &speed) {
+  if (!speed.available) {
+    return {};
+  }
+  return {true, (static_cast<uint32_t>(speed.value) * 36U + 50U) / 100U};
+}
 
 inline ViewModel makeViewModel(
     const workout_telemetry::Snapshot &workout,
@@ -73,12 +103,8 @@ inline ViewModel makeViewModel(
     model.stale = workout.stale;
     model.sessionState = state.sessionState;
     model.sourceFlags = state.sourceFlags;
-    if (state.speedCentimetersPerSecond.available && !workout.stale) {
-      model.speedTenthsKmh = {
-          true,
-          (static_cast<uint32_t>(state.speedCentimetersPerSecond.value) * 36U +
-           50U) /
-              100U};
+    if (!workout.stale) {
+      model.speedTenthsKmh = speedTenths(state.speedCentimetersPerSecond);
     }
     model.currentHeartRateBpm = state.currentHeartRateBpm;
     model.averageHeartRateBpm = state.averageHeartRateBpm;
@@ -86,6 +112,10 @@ inline ViewModel makeViewModel(
     model.heartRateZoneCount = state.heartRateZoneCount;
     model.distanceMeters = state.distanceMeters;
     model.elapsedSeconds = state.elapsedSeconds;
+    model.averageSpeedTenthsKmh =
+        averageSpeed(model.distanceMeters, model.elapsedSeconds);
+    model.maximumSpeedTenthsKmh =
+        speedTenths(state.maximumSpeedCentimetersPerSecond);
     if (state.originReceived) {
       model.wallElapsedSeconds = state.wallElapsedSeconds;
       model.pauseOrigin = state.pauseOrigin;
@@ -124,6 +154,24 @@ inline void formatSpeed(const ViewModel &model, char *buffer,
     return;
   }
   formatTenths(model.speedTenthsKmh.value, buffer, size);
+}
+
+inline void formatAverageSpeed(const ViewModel &model, char *buffer,
+                               std::size_t size) {
+  if (!model.averageSpeedTenthsKmh.available) {
+    unavailable(buffer, size);
+    return;
+  }
+  formatTenths(model.averageSpeedTenthsKmh.value, buffer, size);
+}
+
+inline void formatMaximumSpeed(const ViewModel &model, char *buffer,
+                               std::size_t size) {
+  if (!model.maximumSpeedTenthsKmh.available) {
+    unavailable(buffer, size);
+    return;
+  }
+  formatTenths(model.maximumSpeedTenthsKmh.value, buffer, size);
 }
 
 template <typename T>
@@ -212,6 +260,10 @@ inline void formatCadence(const ViewModel &model, char *buffer,
 }
 
 inline BottomMetricSelection selectBottomMetrics(const ViewModel &model) {
+  if (model.usesWorkout && model.sessionState == SessionState::Ended) {
+    return {BottomMetric::MaximumSpeed, BottomMetric::Energy};
+  }
+
   const bool hasPower = model.cyclingPowerWatts.available;
   const bool hasCadence = model.cyclingCadenceTenthsRpm.available;
   if (model.usesWorkout && model.wallElapsedSeconds.available) {
@@ -249,6 +301,10 @@ inline const char *bottomMetricTitle(BottomMetric metric) {
     return "Power W";
   case BottomMetric::Cadence:
     return "Cadence rpm";
+  case BottomMetric::MaximumSpeed:
+    return "Max speed";
+  case BottomMetric::Energy:
+    return "Calories";
   }
   return "--";
 }
@@ -270,6 +326,12 @@ inline void formatBottomMetric(BottomMetric metric, const ViewModel &model,
     return;
   case BottomMetric::Cadence:
     formatCadence(model, buffer, size);
+    return;
+  case BottomMetric::MaximumSpeed:
+    formatMaximumSpeed(model, buffer, size);
+    return;
+  case BottomMetric::Energy:
+    formatEnergy(model, buffer, size);
     return;
   }
   unavailable(buffer, size);

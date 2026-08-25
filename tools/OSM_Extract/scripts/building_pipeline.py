@@ -48,6 +48,7 @@ from map_format import MAX_BUILDING_RINGS
 BUILDING_PROFILE_VERSION = 1
 BUILDING_FLAG_PART = 1 << 0
 BUILDING_FLAG_FLAT_BASE = 1 << 1
+RELATION_PARENT_TOLERANCE_METERS = 0.25
 RING_FLAG_HOLE = 1 << 0
 EARTH_RADIUS_METERS = 6_378_137
 MAX_BUILDING_COMPLEXITY_PRODUCT = 9_000_000_000_000_000
@@ -74,8 +75,11 @@ class OutlineSpatialIndex:
     STRtree only removes outlines whose envelopes cannot possibly contain a
     part. The exact legacy predicates and tie-breaking remain authoritative,
     so replacing the previous all-outlines scan cannot change associations.
-    Prepared 5 cm buffers are materialized only for envelope candidates and
-    retained for the rest of the request.
+    Prepared buffers are materialized only for envelope candidates and
+    retained for the rest of the request. Ordinary inferred containment keeps
+    the legacy exact envelope predicate and 5 cm geometry buffer; explicit
+    relation candidates allow 25 cm of envelope and geometry tolerance for
+    small source-boundary drift.
     """
 
     def __init__(self, outlines: Iterable[SourceBuilding]):
@@ -88,7 +92,7 @@ class OutlineSpatialIndex:
         self._indices_by_geometry_wkb: dict[bytes, list[int]] = defaultdict(list)
         for index, geometry in enumerate(self.envelopes):
             self._indices_by_geometry_wkb[geometry.wkb].append(index)
-        self._prepared: dict[int, Any] = {}
+        self._prepared: dict[tuple[int, float], Any] = {}
         self.query_count = 0
         self.spatial_candidate_count = 0
         self.envelope_candidate_count = 0
@@ -116,21 +120,43 @@ class OutlineSpatialIndex:
             indices.update(self._indices_by_geometry_wkb.get(candidate.wkb, ()))
         return sorted(indices)
 
-    def containment_parent(self, part: SourceBuilding) -> str | None:
+    def containment_parent(
+        self,
+        part: SourceBuilding,
+        *,
+        allowed_keys: set[str] | None = None,
+        tolerance_meters: float = 0.05,
+        envelope_tolerance_meters: float = 0.0,
+    ) -> str | None:
         self.query_count += 1
         part_envelope = part.geometry.envelope
-        indices = self._query_indices(part_envelope)
+        query_envelope = (
+            part_envelope.buffer(envelope_tolerance_meters)
+            if envelope_tolerance_meters
+            else part_envelope
+        )
+        indices = self._query_indices(query_envelope)
         self.spatial_candidate_count += len(indices)
         candidates: list[SourceBuilding] = []
         for index in indices:
             outline = self.outlines[index]
-            if not self.envelopes[index].covers(part_envelope):
+            if allowed_keys is not None and outline.object_key not in allowed_keys:
+                continue
+            min_x, min_y, max_x, max_y = self.envelopes[index].bounds
+            part_min_x, part_min_y, part_max_x, part_max_y = part_envelope.bounds
+            if (
+                part_min_x < min_x - envelope_tolerance_meters
+                or part_min_y < min_y - envelope_tolerance_meters
+                or part_max_x > max_x + envelope_tolerance_meters
+                or part_max_y > max_y + envelope_tolerance_meters
+            ):
                 continue
             self.envelope_candidate_count += 1
-            prepared = self._prepared.get(index)
+            prepared_key = (index, tolerance_meters)
+            prepared = self._prepared.get(prepared_key)
             if prepared is None:
-                prepared = prep(outline.geometry.buffer(0.05))
-                self._prepared[index] = prepared
+                prepared = prep(outline.geometry.buffer(tolerance_meters))
+                self._prepared[prepared_key] = prepared
             if prepared.covers(part.geometry):
                 candidates.append(outline)
         if not candidates:
@@ -145,7 +171,9 @@ class OutlineSpatialIndex:
             "containmentQueryCount": self.query_count,
             "containmentSpatialCandidateCount": self.spatial_candidate_count,
             "containmentEnvelopeCandidateCount": self.envelope_candidate_count,
-            "containmentPreparedOutlineCount": len(self._prepared),
+            "containmentPreparedOutlineCount": len(
+                {index for index, _tolerance in self._prepared}
+            ),
         }
 
 
@@ -174,6 +202,8 @@ def load_relation_index(
         }
     value = json.loads(path.read_text(encoding="utf-8"))
     standalone_part_keys = value.get("standalonePartKeys", [])
+    part_parent_candidates = value.get("partParentCandidates", {})
+    parent_geometry_sources = value.get("parentGeometrySources", {})
     closure = value.get("closureAudit")
     closure_count_fields = {
         "closureRelationCount",
@@ -207,6 +237,8 @@ def load_relation_index(
         not isinstance(value, dict)
         or value.get("schemaVersion") != 1
         or not isinstance(value.get("partParents"), dict)
+        or not isinstance(part_parent_candidates, dict)
+        or not isinstance(parent_geometry_sources, dict)
         or not isinstance(standalone_part_keys, list)
         or any(
             not isinstance(key, str)
@@ -221,6 +253,38 @@ def load_relation_index(
             or not parent.startswith(("w", "r"))
             for child, parent in value.get("partParents", {}).items()
         )
+        or any(
+            not isinstance(child, str)
+            or not child.startswith(("w", "r"))
+            or child in value.get("partParents", {})
+            or child in standalone_part_keys
+            or not isinstance(parents, list)
+            or len(parents) < 2
+            or parents != sorted(set(parents))
+            or any(
+                not isinstance(parent, str)
+                or not parent.startswith(("w", "r"))
+                for parent in parents
+            )
+            for child, parents in part_parent_candidates.items()
+        )
+        or any(
+            not isinstance(parent, str)
+            or not parent.startswith("w")
+            or parent not in {
+                *value.get("partParents", {}).values(),
+                *(
+                    candidate
+                    for candidates in part_parent_candidates.values()
+                    for candidate in candidates
+                ),
+            }
+            or not isinstance(source, str)
+            or not source.startswith("r")
+            for parent, source in parent_geometry_sources.items()
+        )
+        or len(set(parent_geometry_sources.values()))
+        != len(parent_geometry_sources)
         or not isinstance(value.get("parentTags", {}), dict)
         or any(
             not isinstance(parent, str)
@@ -260,6 +324,12 @@ def collect_building_features(
     """
     collected = list(polygon_features)
     part_parents = dict((relation_index or {}).get("partParents", {}))
+    part_parent_candidates = dict(
+        (relation_index or {}).get("partParentCandidates", {})
+    )
+    parent_geometry_sources = dict(
+        (relation_index or {}).get("parentGeometrySources", {})
+    )
     standalone_part_keys = set(
         (relation_index or {}).get("standalonePartKeys", ())
     )
@@ -268,6 +338,12 @@ def collect_building_features(
         for key in {
             *part_parents,
             *part_parents.values(),
+            *part_parent_candidates,
+            *(
+                parent
+                for parents in part_parent_candidates.values()
+                for parent in parents
+            ),
             *standalone_part_keys,
         }
         if key.startswith("w")
@@ -325,6 +401,53 @@ def collect_building_features(
             }
         )
         known_keys.add(object_key)
+
+    features_by_key = {
+        source_object_key(properties): feature
+        for feature in collected
+        if isinstance((properties := feature.get("properties")), Mapping)
+    }
+    required_relationship_keys = {
+        *part_parents,
+        *part_parents.values(),
+        *part_parent_candidates,
+        *(
+            parent
+            for parents in part_parent_candidates.values()
+            for parent in parents
+        ),
+        *standalone_part_keys,
+    }
+    replaced_geometry_sources: set[str] = set()
+    for parent, geometry_source in sorted(parent_geometry_sources.items()):
+        if geometry_source not in features_by_key:
+            continue
+        if parent in features_by_key:
+            if geometry_source not in required_relationship_keys:
+                replaced_geometry_sources.add(geometry_source)
+            continue
+        source_feature = features_by_key[geometry_source]
+        cloned = {
+            **source_feature,
+            # Use only the restored way identity. The extractor supplies the
+            # target outline's exact tags via parentTags; retaining the
+            # multipolygon provider's tags could incorrectly turn the clone
+            # into a building part.
+            "properties": {"osm_way_id": parent[1:]},
+        }
+        collected.append(cloned)
+        features_by_key[parent] = cloned
+        if geometry_source not in required_relationship_keys:
+            replaced_geometry_sources.add(geometry_source)
+    if replaced_geometry_sources:
+        collected = [
+            feature
+            for feature in collected
+            if not (
+                isinstance((properties := feature.get("properties")), Mapping)
+                and source_object_key(properties) in replaced_geometry_sources
+            )
+        ]
     return collected
 
 
@@ -354,11 +477,21 @@ def prepare_buildings(
         )
     diagnostics: dict[str, int] = {}
     part_parents = dict((relation_index or {}).get("partParents", {}))
+    part_parent_candidates = {
+        child: tuple(parents)
+        for child, parents in (relation_index or {})
+        .get("partParentCandidates", {})
+        .items()
+    }
     standalone_part_keys = set(
         (relation_index or {}).get("standalonePartKeys", ())
     )
     parent_tags = dict((relation_index or {}).get("parentTags", {}))
-    explicit_parent_keys = set(part_parents.values())
+    explicit_parent_keys = set(part_parents.values()) | {
+        parent
+        for parents in part_parent_candidates.values()
+        for parent in parents
+    }
     sources: list[SourceBuilding] = []
     for feature in features:
         properties = feature.get("properties")
@@ -373,6 +506,7 @@ def prepare_buildings(
             diagnostics,
             explicit_part=(
                 object_key in part_parents
+                or object_key in part_parent_candidates
                 or object_key in standalone_part_keys
             ),
             explicit_parent=object_key in explicit_parent_keys,
@@ -419,26 +553,55 @@ def prepare_buildings(
             continue
         parent_key = part_parents.get(source.object_key)
         association = "relation" if parent_key in by_key else "none"
+        used_containment = False
         if parent_key is not None and association == "none" and strict_relations:
             raise CalibrationCacheError(
                 "building_relation_incomplete",
                 "an explicit building parent is missing from converted geometry",
             )
-        if parent_key is None:
+        candidate_keys = part_parent_candidates.get(source.object_key)
+        if candidate_keys is not None:
+            available_candidates = {
+                key
+                for key in candidate_keys
+                if key in by_key and not by_key[key].is_part
+            }
+            if strict_relations and len(available_candidates) != len(candidate_keys):
+                raise CalibrationCacheError(
+                    "building_relation_incomplete",
+                    "a declared building parent candidate is missing from converted geometry",
+                )
+            parent_key = containment_index.containment_parent(
+                source,
+                allowed_keys=available_candidates,
+                tolerance_meters=RELATION_PARENT_TOLERANCE_METERS,
+                envelope_tolerance_meters=RELATION_PARENT_TOLERANCE_METERS,
+            )
+            association = "relation" if parent_key is not None else "none"
+            if strict_relations and parent_key is None:
+                raise CalibrationCacheError(
+                    "building_relation_incomplete",
+                    "a building part is not contained by any declared parent candidate",
+                )
+            associated_unresolved_parts += 1
+            used_containment = True
+        elif parent_key is None:
             parent_key = containment_index.containment_parent(source)
             association = "containment" if parent_key is not None else "none"
             associated_unresolved_parts += 1
-            if (
-                on_association_progress is not None
-                and (
-                    associated_unresolved_parts == unresolved_parts
-                    or associated_unresolved_parts % progress_interval == 0
-                )
-            ):
-                on_association_progress(
-                    associated_unresolved_parts,
-                    unresolved_parts,
-                )
+            used_containment = True
+        if (
+            used_containment
+            and on_association_progress is not None
+            and (
+                associated_unresolved_parts == unresolved_parts
+                or associated_unresolved_parts % progress_interval == 0
+            )
+        ):
+            on_association_progress(
+                associated_unresolved_parts,
+                unresolved_parts,
+            )
         associated.append(replace(source, parent_key=parent_key, association=association))
     sources = associated
     by_key = {source.object_key: source for source in sources}

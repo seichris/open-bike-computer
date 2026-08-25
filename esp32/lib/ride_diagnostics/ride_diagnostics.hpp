@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ride_diagnostics_transfer_policy.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -131,6 +133,8 @@ DetailedCaptureLease detailedCaptureLease();
 bool clearCaptureIfMatches(const DetailedCaptureLease &lease);
 const char *captureId();
 bool detailedCaptureEnabled();
+transfer_policy::SealPreparation
+sealActiveChunkForTransfer(uint32_t timeoutMs = 5000);
 bool sealActiveChunk(uint32_t timeoutMs = 2000);
 // Pause the writer after sealing its current cutoff so a caller can remount
 // storage without a recorder FILE reopening between seal and unmount.

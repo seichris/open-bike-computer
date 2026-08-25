@@ -1,0 +1,197 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "bicino-map-catalog-staging",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-25",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "maps-share-staging.8o.vc",
+      "custom_domain": true,
+    },
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1,
+  },
+  "ratelimits": [
+    {
+      "name": "LIBRARY_BOOTSTRAP_CLIENT_RATE_LIMITER",
+      "namespace_id": "2026082501",
+      "simple": { "limit": 6, "period": 60 },
+    },
+    {
+      "name": "LIBRARY_BOOTSTRAP_GLOBAL_RATE_LIMITER",
+      "namespace_id": "2026082502",
+      "simple": { "limit": 12, "period": 60 },
+    },
+    {
+      "name": "SHARE_CREATE_RATE_LIMITER",
+      "namespace_id": "2026082503",
+      "simple": { "limit": 20, "period": 60 },
+    },
+    {
+      "name": "SHARE_PREVIEW_RATE_LIMITER",
+      "namespace_id": "2026082504",
+      "simple": { "limit": 120, "period": 60 },
+    },
+    {
+      "name": "SHARE_LANDING_RATE_LIMITER",
+      "namespace_id": "2026082505",
+      "simple": { "limit": 60, "period": 60 },
+    },
+    {
+      "name": "SHARE_CLAIM_RATE_LIMITER",
+      "namespace_id": "2026082506",
+      "simple": { "limit": 20, "period": 60 },
+    },
+    {
+      "name": "LINK_CODE_CREATE_RATE_LIMITER",
+      "namespace_id": "2026082507",
+      "simple": { "limit": 6, "period": 60 },
+    },
+    {
+      "name": "LINK_CODE_CLAIM_RATE_LIMITER",
+      "namespace_id": "2026082508",
+      "simple": { "limit": 12, "period": 60 },
+    },
+    {
+      "name": "PROMOTION_RATE_LIMITER",
+      "namespace_id": "2026082509",
+      "simple": { "limit": 6, "period": 60 },
+    },
+    {
+      "name": "PUBLIC_MUTATION_GLOBAL_RATE_LIMITER",
+      "namespace_id": "2026082521",
+      "simple": { "limit": 20, "period": 60 },
+    },
+    {
+      "name": "LIBRARY_MUTATION_RATE_LIMITER",
+      "namespace_id": "2026082522",
+      "simple": { "limit": 6, "period": 60 },
+    },
+    {
+      "name": "SERVICE_MUTATION_RATE_LIMITER",
+      "namespace_id": "2026082523",
+      "simple": { "limit": 30, "period": 60 },
+    },
+  ],
+  "vars": {
+    "ENVIRONMENT": "staging",
+    "PUBLIC_BASE_URL": "https://maps-share-staging.8o.vc",
+    "R2_ACCOUNT_ID": "5834cd65d5f197557149dbc10074d37f",
+    "R2_DEVELOPMENT_BUCKET": "bicino-final-maps-dev-staging",
+    "R2_PRODUCTION_BUCKET": "bicino-final-maps-prod-staging",
+    "R2_OBJECT_PREFIX": "map-artifacts",
+    "RETENTION_GRACE_DAYS": "30",
+    "APPLE_TEAM_ID": "4H5PK8686H",
+    "PRODUCTION_BUNDLE_ID": "LetItRide.BikeComputer",
+    "DEVELOPMENT_BUNDLE_ID": "LetItRide.BikeComputer.dev",
+    "APP_STORE_URL": "https://apps.apple.com/app/id6788977349",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "bicino-map-catalog-staging",
+      "database_id": "8ece9c3b-1a73-4af6-92ba-f6c44dbe7408",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "env": {
+    "production": {
+      "name": "bicino-map-catalog",
+      "workers_dev": false,
+      "preview_urls": false,
+      "ratelimits": [
+        {
+          "name": "LIBRARY_BOOTSTRAP_CLIENT_RATE_LIMITER",
+          "namespace_id": "2026082511",
+          "simple": { "limit": 6, "period": 60 },
+        },
+        {
+          "name": "LIBRARY_BOOTSTRAP_GLOBAL_RATE_LIMITER",
+          "namespace_id": "2026082512",
+          "simple": { "limit": 12, "period": 60 },
+        },
+        {
+          "name": "SHARE_CREATE_RATE_LIMITER",
+          "namespace_id": "2026082513",
+          "simple": { "limit": 20, "period": 60 },
+        },
+        {
+          "name": "SHARE_PREVIEW_RATE_LIMITER",
+          "namespace_id": "2026082514",
+          "simple": { "limit": 120, "period": 60 },
+        },
+        {
+          "name": "SHARE_LANDING_RATE_LIMITER",
+          "namespace_id": "2026082515",
+          "simple": { "limit": 60, "period": 60 },
+        },
+        {
+          "name": "SHARE_CLAIM_RATE_LIMITER",
+          "namespace_id": "2026082516",
+          "simple": { "limit": 20, "period": 60 },
+        },
+        {
+          "name": "LINK_CODE_CREATE_RATE_LIMITER",
+          "namespace_id": "2026082517",
+          "simple": { "limit": 6, "period": 60 },
+        },
+        {
+          "name": "LINK_CODE_CLAIM_RATE_LIMITER",
+          "namespace_id": "2026082518",
+          "simple": { "limit": 12, "period": 60 },
+        },
+        {
+          "name": "PROMOTION_RATE_LIMITER",
+          "namespace_id": "2026082519",
+          "simple": { "limit": 6, "period": 60 },
+        },
+        {
+          "name": "PUBLIC_MUTATION_GLOBAL_RATE_LIMITER",
+          "namespace_id": "2026082531",
+          "simple": { "limit": 20, "period": 60 },
+        },
+        {
+          "name": "LIBRARY_MUTATION_RATE_LIMITER",
+          "namespace_id": "2026082532",
+          "simple": { "limit": 6, "period": 60 },
+        },
+        {
+          "name": "SERVICE_MUTATION_RATE_LIMITER",
+          "namespace_id": "2026082533",
+          "simple": { "limit": 30, "period": 60 },
+        },
+      ],
+      "routes": [
+        {
+          "pattern": "maps-share.8o.vc",
+          "custom_domain": true,
+        },
+      ],
+      "vars": {
+        "ENVIRONMENT": "production",
+        "PUBLIC_BASE_URL": "https://maps-share.8o.vc",
+        "R2_ACCOUNT_ID": "5834cd65d5f197557149dbc10074d37f",
+        "R2_DEVELOPMENT_BUCKET": "bicino-final-maps-dev",
+        "R2_PRODUCTION_BUCKET": "bicino-final-maps-prod",
+        "R2_OBJECT_PREFIX": "map-artifacts",
+        "RETENTION_GRACE_DAYS": "30",
+        "APPLE_TEAM_ID": "4H5PK8686H",
+        "PRODUCTION_BUNDLE_ID": "LetItRide.BikeComputer",
+        "DEVELOPMENT_BUNDLE_ID": "LetItRide.BikeComputer.dev",
+        "APP_STORE_URL": "https://apps.apple.com/app/id6788977349",
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "bicino-map-catalog",
+          "database_id": "00000000-0000-0000-0000-000000000000",
+          "migrations_dir": "migrations",
+        },
+      ],
+    },
+  },
+}

@@ -87,6 +87,16 @@ nonisolated struct BikeMapStreamTrustStore: Equatable {
         return capabilities.isEmpty ? nil : capabilities.joined(separator: ",")
     }
 
+    func including(keyID: String, publicKeyX963: Data) -> Self? {
+        if let existing = publicKeysByID[keyID], existing != publicKeyX963 {
+            return nil
+        }
+        var keys = publicKeysByID
+        keys[keyID] = publicKeyX963
+        let combined = Self(publicKeysByID: keys)
+        return combined.contains(keyID: keyID) ? combined : nil
+    }
+
     var isEmpty: Bool { publicKeysByID.isEmpty }
 
 }
@@ -109,6 +119,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
     let requiredFirmwareVersion: String?
     let requiredFirmwareBuild: UInt32?
     let requiredFirmwareGitSHA: String?
+    let readerRequirements: OfflineMapReaderRequirements?
     let fileCount: Int
     let payloadBytes: Int64
     let rendererFormatVersion: Int
@@ -131,6 +142,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         requiredFirmwareVersion: String?,
         requiredFirmwareBuild: UInt32?,
         requiredFirmwareGitSHA: String?,
+        readerRequirements: OfflineMapReaderRequirements?,
         fileCount: Int,
         payloadBytes: Int64,
         rendererFormatVersion: Int
@@ -152,6 +164,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         self.requiredFirmwareVersion = requiredFirmwareVersion
         self.requiredFirmwareBuild = requiredFirmwareBuild
         self.requiredFirmwareGitSHA = requiredFirmwareGitSHA
+        self.readerRequirements = readerRequirements
         self.fileCount = fileCount
         self.payloadBytes = payloadBytes
         self.rendererFormatVersion = rendererFormatVersion
@@ -397,7 +410,8 @@ nonisolated enum BikeMapStreamArtifactValidator {
         url: URL,
         artifact: OfflineMapArtifact,
         expectedMapID: String,
-        trustStore: BikeMapStreamTrustStore
+        trustStore: BikeMapStreamTrustStore,
+        readerRequirements: OfflineMapReaderRequirements? = nil
     ) throws -> VerifiedBikeMapArtifact {
         guard artifact.isBikeMapStream else {
             throw BikeMapStreamFormatError.invalidArtifactMetadata("unexpected artifact format")
@@ -443,21 +457,32 @@ nonisolated enum BikeMapStreamArtifactValidator {
                 "producer image identity is invalid"
             )
         }
-        guard let iosBuild = artifact.requiredIosBuild,
-              iosBuild.range(
-                  of: "^[0-9]{1,18}(?:\\.[0-9]{1,18}){0,2}$",
-                  options: .regularExpression
-              ) != nil,
-              let iosGitSHA = artifact.requiredIosGitSha,
-              iosGitSHA.range(
-                  of: "^[0-9a-f]{40}$",
-                  options: .regularExpression
-              ) != nil,
-              let iosBuildSHA256 = artifact.requiredIosBuildSha256,
-              isLowercaseSHA256(iosBuildSHA256) else {
-            throw BikeMapStreamFormatError.invalidArtifactMetadata(
-                "required app identity is incomplete"
-            )
+        let iosRequirements = (
+            artifact.requiredIosBuild,
+            artifact.requiredIosGitSha,
+            artifact.requiredIosBuildSha256
+        )
+        if readerRequirements == nil {
+            guard isValidAppIdentity(iosRequirements) else {
+                throw BikeMapStreamFormatError.invalidArtifactMetadata(
+                    "required app identity is incomplete"
+                )
+            }
+        } else {
+            let hasAnyAppIdentity = iosRequirements.0 != nil ||
+                iosRequirements.1 != nil || iosRequirements.2 != nil
+            guard !hasAnyAppIdentity || isValidAppIdentity(iosRequirements) else {
+                throw BikeMapStreamFormatError.invalidArtifactMetadata(
+                    "optional app identity is incomplete"
+                )
+            }
+            guard let readerRequirements,
+                  readerRequirements.streamFormat == artifact.format,
+                  OfflineMapReaderCompatibilityPolicy.supports(readerRequirements) else {
+                throw BikeMapStreamFormatError.invalidArtifactMetadata(
+                    "reader requirements are unsupported"
+                )
+            }
         }
         let firmwareRequirements = (
             artifact.requiredFirmwareVersion,
@@ -567,6 +592,28 @@ nonisolated enum BikeMapStreamArtifactValidator {
                 "producer identity does not match artifact metadata"
             )
         }
+        if let readerRequirements {
+            let manifestFeatures: Set<String>
+            switch manifest.target.formatVersion {
+            case 1:
+                manifestFeatures = []
+            case 2:
+                manifestFeatures = ["street-labels"]
+            case 3:
+                manifestFeatures = ["3d-buildings", "street-labels"]
+            default:
+                manifestFeatures = []
+            }
+            guard readerRequirements.manifestSchemaVersion == manifest.schemaVersion,
+                  readerRequirements.renderer == manifest.target.renderer,
+                  readerRequirements.rendererFormatVersion ==
+                    manifest.target.formatVersion,
+                  Set(readerRequirements.requiredFeatures) == manifestFeatures else {
+                throw BikeMapStreamFormatError.invalidArtifactMetadata(
+                    "reader requirements do not match the signed manifest"
+                )
+            }
+        }
         for file in manifest.files {
             var fileHasher = SHA256()
             var remaining = file.bytes
@@ -617,10 +664,31 @@ nonisolated enum BikeMapStreamArtifactValidator {
             requiredFirmwareVersion: artifact.requiredFirmwareVersion,
             requiredFirmwareBuild: artifact.requiredFirmwareBuild,
             requiredFirmwareGitSHA: artifact.requiredFirmwareGitSha,
+            readerRequirements: readerRequirements,
             fileCount: manifest.files.count,
             payloadBytes: Int64(header.payloadBytes),
             rendererFormatVersion: manifest.target.formatVersion
         )
+    }
+
+    private static func isValidAppIdentity(
+        _ identity: (String?, String?, String?)
+    ) -> Bool {
+        guard let build = identity.0,
+              build.range(
+                  of: "^[0-9]{1,18}(?:\\.[0-9]{1,18}){0,2}$",
+                  options: .regularExpression
+              ) != nil,
+              let gitSHA = identity.1,
+              gitSHA.range(
+                  of: "^[0-9a-f]{40}$",
+                  options: .regularExpression
+              ) != nil,
+              let buildSHA256 = identity.2,
+              isLowercaseSHA256(buildSHA256) else {
+            return false
+        }
+        return true
     }
 
     static func decodeAndValidateManifest(

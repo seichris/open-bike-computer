@@ -81,7 +81,7 @@ struct SettingsView: View {
         )
         self.onStartTestNavigation = onStartTestNavigation
     }
-    
+
     var body: some View {
         NavigationView {
             Form {
@@ -120,6 +120,18 @@ struct SettingsView: View {
                     manager: offlineMapManager,
                     focusedPackFilename: $focusedSavedMapFilename
                 )
+                Section {
+                    NavigationLink {
+                        MapLibrarySettingsView(manager: offlineMapManager)
+                    } label: {
+                        Label("Map Library", systemImage: "map.circle")
+                    }
+                } footer: {
+                    Text(
+                        "Manage shared map links or link Bicino and Bicino Dev " +
+                            "when shared Keychain access is unavailable."
+                    )
+                }
                 if OfflineMapDownloadingSectionPresentation.isVisible(
                     isBusy: offlineMapManager.isBusy,
                     hasPendingJob: offlineMapManager.hasPendingMapJob,
@@ -671,7 +683,14 @@ private struct DownloadingMapsSettingsSection: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(manager.isBusy || !bleManager.isNavigationReady)
+                .disabled(
+                    !SavedMapDeviceTransferPolicy.canStart(
+                        isDeviceTransferBusy: manager.isDeviceTransferBusy,
+                        hasActiveBackgroundUpload: manager.hasActiveBackgroundUpload,
+                        isPausedUpload: true,
+                        isNavigationReady: bleManager.isNavigationReady
+                    )
+                )
                 .accessibilityLabel("Resume map upload")
                 .accessibilityHint("Reconnects to the device Wi-Fi and resumes the saved map")
             } else if let activationProgress = manager.activationProgress {
@@ -764,7 +783,7 @@ private struct DownloadingMapsSettingsSection: View {
                     .foregroundColor(.red)
             }
 
-            if manager.isBusy, manager.hasPendingMapJob {
+            if manager.isMapJobProcessing, manager.hasPendingMapJob {
                 Button(role: .destructive) {
                     manager.pausePendingMapJob()
                 } label: {
@@ -807,6 +826,136 @@ private struct DownloadingMapsSettingsSection: View {
     private var overallGenerationProgress: OfflineMapBuildingProgress? {
         guard manager.currentJob?.status == "converting_features" else { return nil }
         return manager.currentJob?.buildingProgress
+    }
+}
+
+private struct MapLibrarySettingsView: View {
+    @ObservedObject var manager: OfflineMapManager
+    @State private var linkCodeDraft = ""
+    @State private var pendingRevocation: OfflineMapCatalogShare?
+
+    var body: some View {
+        Form {
+            Section {
+                if let code = manager.libraryLinkCode {
+                    LabeledContent("One-time code") {
+                        Text(code.code)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                    Button {
+                        UIPasteboard.general.string = code.code
+                    } label: {
+                        Label("Copy Code", systemImage: "doc.on.doc")
+                    }
+                }
+
+                Button {
+                    manager.createLibraryLinkCode()
+                } label: {
+                    Label("Create Link Code", systemImage: "link.badge.plus")
+                }
+                .disabled(manager.isBusy)
+
+                TextField("ABCD-EFGH", text: $linkCodeDraft)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .font(.system(.body, design: .monospaced))
+
+                Button {
+                    manager.claimLibraryLinkCode(linkCodeDraft)
+                    linkCodeDraft = ""
+                } label: {
+                    Label("Link This App", systemImage: "link")
+                }
+                .disabled(manager.isBusy || !isValidLinkCode)
+            } header: {
+                Text("Link Bicino Apps")
+            } footer: {
+                Text(
+                    "Normally both apps share the same private Keychain library. " +
+                        "If they do not, create a code in the app whose library " +
+                        "you want to keep, then enter it in the other app within 10 minutes."
+                )
+            }
+
+            Section {
+                if manager.catalogShares.isEmpty {
+                    Text("No map links have been shared yet.")
+                        .foregroundColor(.secondary)
+                } else {
+                    ForEach(manager.catalogShares) { share in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(share.title)
+                                Spacer()
+                                Text(share.isActive ? "Active" : "Revoked")
+                                    .font(.caption)
+                                    .foregroundColor(
+                                        share.isActive ? .green : .secondary
+                                    )
+                            }
+                            Text(
+                                share.claimCount == 1
+                                    ? "Added by 1 library"
+                                    : "Added by \(share.claimCount) libraries"
+                            )
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            if share.isActive {
+                                Button("Revoke Link", role: .destructive) {
+                                    pendingRevocation = share
+                                }
+                                .disabled(manager.isBusy)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            } header: {
+                Text("Shared Links")
+            } footer: {
+                Text(
+                    "Revoking prevents new previews and additions. Friends who " +
+                        "already added the map keep their copy."
+                )
+            }
+
+            if let error = manager.errorMessage, !error.isEmpty {
+                Section {
+                    Text(error)
+                        .foregroundColor(.red)
+                }
+            }
+        }
+        .navigationTitle("Map Library")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            manager.refreshCatalogShares()
+        }
+        .alert(item: $pendingRevocation) { share in
+            Alert(
+                title: Text("Revoke Map Link?"),
+                message: Text(
+                    "People who have not already added \(share.title) will no " +
+                        "longer be able to use this link."
+                ),
+                primaryButton: .destructive(Text("Revoke")) {
+                    manager.revokeCatalogShare(share)
+                },
+                secondaryButton: .cancel()
+            )
+        }
+    }
+
+    private var isValidLinkCode: Bool {
+        linkCodeDraft
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+            .range(
+                of: "^[A-Z0-9_-]{4}-[A-Z0-9_-]{4}$",
+                options: .regularExpression
+            ) != nil
     }
 }
 
@@ -884,6 +1033,34 @@ private struct SavedMapsSettingsSection: View {
         .onChange(of: bleManager.mapTransferActivationProgress) { _ in
             manager.reconcileLastTransfer(bleManager: bleManager)
         }
+        .sheet(
+            isPresented: Binding(
+                get: { manager.createdShareURL != nil },
+                set: { if !$0 { manager.clearCreatedShareURL() } }
+            )
+        ) {
+            if let url = manager.createdShareURL {
+                NavigationView {
+                    VStack(spacing: 20) {
+                        Image(systemName: "link.circle.fill")
+                            .font(.system(size: 52))
+                            .foregroundColor(.accentColor)
+                        Text("Your friend can open this link in Bicino, preview the map, and choose whether to add it.")
+                            .multilineTextAlignment(.center)
+                            .foregroundColor(.secondary)
+                        ShareLink(item: url) {
+                            Label("Share Map Link", systemImage: "square.and.arrow.up")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .padding(24)
+                    .navigationTitle("Share Map")
+                    .navigationBarTitleDisplayMode(.inline)
+                }
+                .presentationDetents([.medium])
+            }
+        }
     }
 
     private func scheduleRenameCommitIfNeeded(focusedFilename: String?) {
@@ -918,158 +1095,245 @@ private struct SavedMapRow: View {
     let onCommitRename: (SavedMapRenameCommit) -> Void
     @State private var isShowingInstalledConfirmation = false
     @State private var isShowingDeleteConfirmation = false
+    @State private var isShowingLibraryRemovalConfirmation = false
     @State private var presentedPreview: SavedMapPreviewPresentation?
+    @State private var isShowingCatalogRename = false
+    @State private var catalogRenameDraft = ""
 
     var body: some View {
         let displayName = item.displayName
         let packURL = item.packURL
         let isPausedUpload = packURL.map(manager.isPausedMapUpload) ?? false
         let previewImage = manager.previewImage(for: item)
+        let catalogAvailability = item.catalogMap.map(manager.catalogAvailability(for:))
 
-        HStack(spacing: 12) {
-            Button {
-                guard let previewImage else { return }
-                finishRenaming()
-                focusedPackFilename = nil
-                presentedPreview = SavedMapPreviewPresentation(
-                    displayName: displayName,
-                    image: previewImage
-                )
-            } label: {
-                SavedMapThumbnail(image: previewImage)
-            }
-            .buttonStyle(.plain)
-            .disabled(previewImage == nil)
-            .accessibilityLabel("Show preview for \(displayName)")
-            .accessibilityHint(
-                previewImage == nil
-                    ? "Preview is loading"
-                    : "Opens the map preview"
-            )
-            .task(id: item.id) {
-                manager.loadPreviewIfNeeded(for: item)
-            }
-
-            if let packURL,
-               renameInteraction.editingFilename == packURL.lastPathComponent {
-                TextField(
-                    "Map name",
-                    text: Binding(
-                        get: { renameInteraction.draftName },
-                        set: { renameInteraction.updateDraft($0) }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Button {
+                    guard let previewImage else { return }
+                    finishRenaming()
+                    focusedPackFilename = nil
+                    presentedPreview = SavedMapPreviewPresentation(
+                        displayName: displayName,
+                        image: previewImage
                     )
+                } label: {
+                    SavedMapThumbnail(image: previewImage)
+                }
+                .buttonStyle(.plain)
+                .disabled(previewImage == nil)
+                .accessibilityLabel("Show preview for \(displayName)")
+                .accessibilityHint(
+                    previewImage == nil
+                        ? "Preview is loading"
+                        : "Opens the map preview"
                 )
-                    .focused($focusedPackFilename, equals: packURL.lastPathComponent)
-                    .submitLabel(.done)
-                    .onSubmit {
-                        focusedPackFilename = nil
-                    }
-                    .simultaneousGesture(TapGesture().onEnded {
+                .task(id: item.id) {
+                    manager.loadPreviewIfNeeded(for: item)
+                }
+
+                if let packURL,
+                   renameInteraction.editingFilename == packURL.lastPathComponent {
+                    TextField(
+                        "Map name",
+                        text: Binding(
+                            get: { renameInteraction.draftName },
+                            set: { renameInteraction.updateDraft($0) }
+                        )
+                    )
+                        .focused($focusedPackFilename, equals: packURL.lastPathComponent)
+                        .submitLabel(.done)
+                        .onSubmit {
+                            focusedPackFilename = nil
+                        }
+                        .simultaneousGesture(TapGesture().onEnded {
+                            DispatchQueue.main.async {
+                                focusedPackFilename = packURL.lastPathComponent
+                            }
+                        })
+                        .accessibilityLabel("Map name")
+                        .layoutPriority(1)
+                } else if let packURL {
+                    Button {
+                        if let commit = renameInteraction.begin(
+                            filename: packURL.lastPathComponent,
+                            currentName: displayName
+                        ) {
+                            onCommitRename(commit)
+                        }
                         DispatchQueue.main.async {
                             focusedPackFilename = packURL.lastPathComponent
                         }
-                    })
-                    .accessibilityLabel("Map name")
-                    .layoutPriority(1)
-            } else if let packURL {
-                Button {
-                    if let commit = renameInteraction.begin(
-                        filename: packURL.lastPathComponent,
-                        currentName: displayName
-                    ) {
-                        onCommitRename(commit)
+                    } label: {
+                        Text(displayName)
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
                     }
-                    DispatchQueue.main.async {
-                        focusedPackFilename = packURL.lastPathComponent
-                    }
-                } label: {
-                    Text(displayName)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Rename \(displayName)")
-                .accessibilityHint("Edits this saved map name")
-                .layoutPriority(1)
-            } else {
-                Text(displayName)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Rename \(displayName)")
+                    .accessibilityHint("Edits this saved map name")
                     .layoutPriority(1)
-            }
-
-            Spacer()
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    focusedPackFilename = nil
+                } else {
+                    Button {
+                        catalogRenameDraft = displayName
+                        isShowingCatalogRename = true
+                    } label: {
+                        Text(displayName)
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Rename \(displayName)")
+                    .layoutPriority(1)
                 }
 
-            if item.isActiveOnDevice {
-                Button {
-                    finishRenaming()
-                    focusedPackFilename = nil
-                    isShowingInstalledConfirmation = true
-                } label: {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                        .frame(width: 32, height: 32)
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("\(displayName) is active on the Bike Computer")
-                .accessibilityHint(
-                    item.isOnIPhone
-                        ? "Shows the installed map status"
-                        : "This map is not saved on this iPhone"
-                )
-            } else if let packURL {
-                Button {
-                    finishRenaming()
-                    focusedPackFilename = nil
-                    manager.transferCachedPack(at: packURL, bleManager: bleManager)
-                } label: {
-                    Image(
-                        systemName: isPausedUpload
-                            ? "arrow.clockwise.circle"
-                            : "arrow.up.circle"
+                Spacer()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        focusedPackFilename = nil
+                    }
+
+                if item.isActiveOnDevice {
+                    Button {
+                        finishRenaming()
+                        focusedPackFilename = nil
+                        isShowingInstalledConfirmation = true
+                    } label: {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("\(displayName) is active on the Bike Computer")
+                    .accessibilityHint(
+                        item.isOnIPhone
+                            ? "Shows the installed map status"
+                            : "This map is not saved on this iPhone"
                     )
-                        .frame(width: 32, height: 32)
+                } else if let packURL {
+                    Button {
+                        finishRenaming()
+                        focusedPackFilename = nil
+                        manager.transferCachedPack(at: packURL, bleManager: bleManager)
+                    } label: {
+                        Image(
+                            systemName: isPausedUpload
+                                ? "arrow.clockwise.circle"
+                                : "arrow.up.circle"
+                        )
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(
+                        !SavedMapDeviceTransferPolicy.canStart(
+                            isDeviceTransferBusy: manager.isDeviceTransferBusy,
+                            hasActiveBackgroundUpload: manager.hasActiveBackgroundUpload,
+                            isPausedUpload: isPausedUpload,
+                            isNavigationReady: bleManager.isNavigationReady
+                        )
+                    )
+                    .accessibilityLabel(
+                        isPausedUpload
+                            ? "Resume transferring \(displayName) to device"
+                            : "Transfer \(displayName) to device"
+                    )
+                } else if let catalogMap = item.catalogMap {
+                    Button {
+                        finishRenaming()
+                        focusedPackFilename = nil
+                        manager.downloadCatalogMap(catalogMap)
+                    } label: {
+                        Image(
+                            systemName: catalogAvailability?.canDownload == true
+                                ? "arrow.down.circle"
+                                : "clock.badge.exclamationmark"
+                        )
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(
+                        manager.isBusy || catalogAvailability?.canDownload != true
+                    )
+                    .accessibilityLabel("Download \(displayName) to this iPhone")
+                    .accessibilityHint(
+                        catalogAvailability?.statusText ?? "Downloads this saved map"
+                    )
                 }
-                .buttonStyle(.borderless)
-                .disabled(
-                    manager.isBusy ||
-                        (!isPausedUpload && manager.hasActiveBackgroundUpload) ||
-                        !bleManager.isNavigationReady
-                )
-                .accessibilityLabel(
-                    isPausedUpload
-                        ? "Resume transferring \(displayName) to device"
-                        : "Transfer \(displayName) to device"
-                )
+
+                if item.isAvailableInLibrary {
+                    Button {
+                        finishRenaming()
+                        focusedPackFilename = nil
+                        manager.createShare(for: item)
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(manager.isBusy)
+                    .accessibilityLabel("Share \(displayName)")
+                }
+
+                if packURL != nil {
+                    Button(role: .destructive) {
+                        finishRenaming()
+                        focusedPackFilename = nil
+                        isShowingDeleteConfirmation = true
+                    } label: {
+                        Image(systemName: "trash")
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(manager.isBusy || manager.hasActiveBackgroundUpload)
+                    .accessibilityLabel("Delete \(displayName)")
+                } else {
+                    Color.clear
+                        .frame(width: 32, height: 32)
+                        .accessibilityHidden(true)
+                }
             }
 
-            if packURL != nil {
-                Button(role: .destructive) {
+            if let status = catalogAvailability?.statusText {
+                Label(status, systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .accessibilityLabel("\(displayName): \(status)")
+            }
+
+            if let mapEntryID = item.catalogMap?.mapEntryId,
+               let aliasStatus = manager.catalogAliasStatus(for: mapEntryID) {
+                Label(aliasStatus, systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .accessibilityLabel("\(displayName): \(aliasStatus)")
+            }
+
+            if item.canRemoveFromMapLibrary {
+                Button("Remove from Map Library", role: .destructive) {
                     finishRenaming()
                     focusedPackFilename = nil
-                    isShowingDeleteConfirmation = true
-                } label: {
-                    Image(systemName: "trash")
-                        .frame(width: 32, height: 32)
+                    isShowingLibraryRemovalConfirmation = true
                 }
-                .buttonStyle(.borderless)
-                .disabled(manager.isBusy || manager.hasActiveBackgroundUpload)
-                .accessibilityLabel("Delete \(displayName)")
-            } else {
-                Color.clear
-                    .frame(width: 32, height: 32)
-                    .accessibilityHidden(true)
+                .disabled(manager.isBusy)
+                .accessibilityHint("Removes only this app library's cloud reference")
             }
         }
         .alert("Already on Device", isPresented: $isShowingInstalledConfirmation) {
             Button("OK", role: .cancel) {}
         } message: {
             Text("This map is already installed on the device.")
+        }
+        .alert("Rename Map", isPresented: $isShowingCatalogRename) {
+            TextField("Map name", text: $catalogRenameDraft)
+            Button("Save") {
+                if let map = item.catalogMap {
+                    _ = manager.renameCatalogMap(map, to: catalogRenameDraft)
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This private name is shared between Bicino and Bicino Dev.")
         }
         .confirmationDialog(
             "Delete Saved Map?",
@@ -1084,8 +1348,28 @@ private struct SavedMapRow: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text(
-                "This removes \(displayName) from Saved Maps on this iPhone. " +
-                    "A copy already installed on the Bike Computer remains there."
+                SavedMapRemovalPolicy.localDeletionMessage(
+                    displayName: displayName,
+                    libraryCopyRemains: item.hasKnownMapLibraryCopy
+                )
+            )
+        }
+        .confirmationDialog(
+            "Remove from Map Library?",
+            isPresented: $isShowingLibraryRemovalConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Remove from Map Library", role: .destructive) {
+                if let map = item.catalogMap {
+                    manager.removeCatalogMapFromLibrary(map)
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text(
+                SavedMapRemovalPolicy.libraryRemovalMessage(
+                    displayName: displayName
+                )
             )
         }
         .sheet(item: $presentedPreview) { preview in
@@ -2435,12 +2719,14 @@ private struct RemoteDeviceDebugSettingsSection: View {
                         password: lanPassword
                     ) else {
                         throw RemoteDeviceDebugError.rejected(
-                            lanValidationMessage ?? "Invalid local Wi-Fi credentials."
+                            code: "invalid_lan_credentials",
+                            message: lanValidationMessage ?? "Invalid local Wi-Fi credentials."
                         )
                     }
                     guard credentialStore.save(validated) else {
                         throw RemoteDeviceDebugError.rejected(
-                            "The local Wi-Fi credentials could not be saved to Keychain."
+                            code: "lan_credentials_not_saved",
+                            message: "The local Wi-Fi credentials could not be saved to Keychain."
                         )
                     }
                     credentials = validated

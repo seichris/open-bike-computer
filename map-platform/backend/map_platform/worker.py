@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .catalog import CatalogClient, publish_ready_job
 from .jobs import (
     ArtifactGarbageCollectionError,
     JobRecordEnumerationError,
@@ -126,6 +127,7 @@ class MapWorker:
         on_heartbeat=None,
         monitoring_store: MapMonitoringStore | None = None,
         estimate_coordinator=None,
+        catalog_client: CatalogClient | None = None,
     ):
         self.store = store
         self.pipeline = pipeline
@@ -135,6 +137,7 @@ class MapWorker:
         self.on_heartbeat = on_heartbeat
         self.monitoring_store = monitoring_store
         self.estimate_coordinator = estimate_coordinator
+        self.catalog_client = catalog_client
 
     def run_next(self) -> WorkerResult:
         self.store.requeue_retryable_failures(
@@ -367,6 +370,7 @@ class MapWorker:
                             )
                             if finished is not None:
                                 self._reconcile_public_ready(job.job_id)
+                                finished = self._publish_catalog_ready(job.job_id)
                                 monitoring_event = self._monitoring_event(
                                     finished,
                                     attempt_started_at,
@@ -480,6 +484,7 @@ class MapWorker:
                 reuse_source_job_id=reuse_source_job_id,
             )
             self._reconcile_public_ready(job.job_id)
+            finished = self._publish_catalog_ready(job.job_id)
             monitoring_event = self._monitoring_event(
                 finished,
                 attempt_started_at,
@@ -624,6 +629,20 @@ class MapWorker:
             # Public completion is authoritative. Maintenance retries this
             # additive cross-store coordinator marker and reports any failure.
             pass
+
+    def _publish_catalog_ready(self, job_id: str) -> MapJob:
+        try:
+            return publish_ready_job(
+                self.store,
+                self.catalog_client,
+                job_id,
+                artifact_store=getattr(self.pipeline, "artifact_store", None),
+            )
+        except Exception:
+            # Catalog publication is additive. A READY map remains available
+            # through the existing same-environment API and maintenance can
+            # retry publication without rebuilding the map.
+            return self.store.get(job_id)
 
     def _monitoring_event(
         self,

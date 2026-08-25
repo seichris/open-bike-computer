@@ -2320,9 +2320,16 @@ static void cancelDiagnosticsSessionStart() {
 static void diagnosticsSessionStartTask(void *context) {
   const uint32_t generation = static_cast<uint32_t>(
       reinterpret_cast<uintptr_t>(context));
-  bool ready = storage.ensureDiagnosticsSdMounted();
-  if (ready)
-    ready = ride_diagnostics::sealActiveChunk();
+  const ride_diagnostics::transfer_policy::StoragePreparation storageResult =
+      storage.prepareDiagnosticsStorage();
+  const bool storageReady =
+      ride_diagnostics::transfer_policy::storageReady(storageResult);
+  const ride_diagnostics::transfer_policy::SealPreparation sealResult =
+      storageReady ? ride_diagnostics::sealActiveChunkForTransfer()
+                   : ride_diagnostics::transfer_policy::SealPreparation::
+                         StorageUnavailable;
+  const bool ready = storageReady &&
+                     ride_diagnostics::transfer_policy::sealReady(sealResult);
 
   bool stillCurrent = false;
   if (diagnosticsSessionMutex != nullptr &&
@@ -2343,23 +2350,33 @@ static void diagnosticsSessionStartTask(void *context) {
           enabled ? ride_diagnostics::Level::Info
                   : ride_diagnostics::Level::Warning,
           "transfer", "diagnostics_transfer_entered",
-          enabled ? "{\"active\":true,\"mode\":\"diagnostics\"}"
-                  : "{\"active\":false,\"mode\":\"diagnostics\"}");
+          enabled
+              ? (ride_diagnostics::transfer_policy::usingInternalFallback(
+                     storageResult)
+                     ? "{\"active\":true,\"mode\":\"diagnostics\",\"storage\":\"internal_ffat\"}"
+                     : "{\"active\":true,\"mode\":\"diagnostics\",\"storage\":\"removable_sd\"}")
+              : "{\"active\":false,\"mode\":\"diagnostics\",\"code\":\"diagnostics_start_failed\"}");
       Serial.printf(
           "BLE Device Transfer: diagnostics async enter applied, enabled=%d\n",
           enabled);
     } else if (stillCurrent) {
+      const ride_diagnostics::transfer_policy::Failure failure =
+          storageReady
+              ? ride_diagnostics::transfer_policy::sealFailure(sealResult)
+              : ride_diagnostics::transfer_policy::storageFailure(
+                    storageResult);
       deviceTransferHttp.setLastError(
-          "diagnostics_storage_unavailable",
-          ready ? "another transfer mode became active"
-                : "device diagnostics could not mount removable storage and "
-                  "seal a readable checkpoint");
+          ready ? "transfer_busy" : failure.code,
+          ready ? "another transfer mode became active" : failure.message);
       Serial.println(
           "BLE Device Transfer: diagnostics async enter failed");
+      char fields[192] = {};
+      snprintf(fields, sizeof(fields),
+               "{\"active\":false,\"mode\":\"diagnostics\",\"code\":\"%s\"}",
+               ready ? "transfer_busy" : failure.code);
       (void)ride_diagnostics::record(
           ride_diagnostics::Level::Warning, "transfer",
-          "diagnostics_transfer_entered",
-          "{\"active\":false,\"mode\":\"diagnostics\"}");
+          "diagnostics_transfer_entered", fields);
     }
     xSemaphoreGive(diagnosticsSessionMutex);
   }
@@ -2557,7 +2574,7 @@ static void processPendingTransferControl() {
       Serial.println("BLE Device Transfer: diagnostics enter already applied");
     } else if (!startDiagnosticsSessionAsync()) {
       deviceTransferHttp.setLastError(
-          "diagnostics_storage_unavailable",
+          "diagnostics_seal_failed",
           "device diagnostics could not start the storage checkpoint task");
       Serial.println(
           "BLE Device Transfer: diagnostics enter rejected, task unavailable");

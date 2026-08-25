@@ -38,6 +38,11 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         self.building_relations: set[str] = set()
         self.way_tags: dict[str, dict[str, str]] = {}
         self.part_parent_candidates: dict[str, set[str]] = {}
+        self.part_parent_relations: dict[str, set[str]] = {}
+        self.deferred_part_parent_candidates: dict[str, tuple[str, ...]] = {}
+        self.parent_geometry_source_candidates: dict[str, set[str]] = {}
+        self.parent_geometry_sources: dict[str, str] = {}
+        self._ambiguous_parent_keys: set[str] = set()
         self.parts_without_outline: set[str] = set()
         # Keep the relation identity alongside the legacy part set. The set is
         # used for closure intersection; this detail map makes a fail-closed
@@ -77,6 +82,26 @@ class BuildingRelationHandler(osmium.SimpleHandler):
             ]
             if is_building_relation(relation_tags):
                 self.building_relations.add(relation_key)
+            outer_members = [
+                member_key(member)
+                for member in relation.members
+                if member.role == "outer" and member.type == "w"
+            ]
+            # GDAL emits a building multipolygon as the relation geometry and
+            # can suppress its sole closed outer way even with
+            # report_all_ways=yes. Remember that exact one-ring geometry
+            # provider so an explicit type=building outline can be restored
+            # under its own way identity after conversion. Multi-outer
+            # relations remain fail-closed because no one relation geometry
+            # can safely stand in for an individual outer member.
+            if (
+                relation_tags.get("type") == "multipolygon"
+                and is_building_relation(relation_tags)
+                and len(outer_members) == 1
+            ):
+                self.parent_geometry_source_candidates.setdefault(
+                    outer_members[0], set()
+                ).add(relation_key)
         if relation.tags.get("type") != "building":
             return
         outlines = sorted(
@@ -108,35 +133,75 @@ class BuildingRelationHandler(osmium.SimpleHandler):
                 self.incomplete_relation_parts[relation_key] = tuple(parts)
             return
         self.relations += 1
-        parent = outlines[0]
-        existing_parent_tags = self.parent_tags.get(parent)
         canonical_parent_tags = dict(sorted(relation_tags.items()))
-        if (
-            existing_parent_tags is not None
-            and existing_parent_tags != canonical_parent_tags
-        ):
-            self.ambiguous_parts += 1
-        else:
-            self.parent_tags[parent] = canonical_parent_tags
+        for parent in outlines:
+            existing_parent_tags = self.parent_tags.get(parent)
+            if (
+                existing_parent_tags is not None
+                and existing_parent_tags != canonical_parent_tags
+            ):
+                self._ambiguous_parent_keys.add(parent)
+            else:
+                self.parent_tags[parent] = canonical_parent_tags
         for part in parts:
             if self.audit_enabled:
                 self.part_parent_candidates.setdefault(part, set()).update(outlines)
-            existing = self.part_parents.get(part)
-            if existing is not None and existing != parent:
-                self.ambiguous_parts += 1
-                self.part_parents[part] = min(existing, parent)
-            else:
-                self.part_parents[part] = parent
+                self.part_parent_relations.setdefault(part, set()).add(
+                    relation_key
+                )
+            if len(outlines) == 1 or not self.audit_enabled:
+                parent = outlines[0]
+                existing = self.part_parents.get(part)
+                if existing is not None and existing != parent:
+                    self.ambiguous_parts += 1
+                self.part_parents[part] = (
+                    min(existing, parent) if existing is not None else parent
+                )
 
     def finalize(self) -> None:
         """Apply the narrow standalone-part normalization after all ways arrive.
 
         OSM objects are normally delivered ways before relations, but the
-        policy must not depend on callback order. Only a single direct way
-        member with an explicit ``building`` tag qualifies. Any part shared
-        with another malformed relation remains fail-closed rather than being
+        policy must not depend on callback order. Every direct member must be
+        a way with an explicit ``building`` or ``building:part`` tag. Parts
+        shared with another incomplete relation, or already associated with a
+        different building relation, remain fail-closed rather than being
         silently reinterpreted.
         """
+
+        if self.audit_enabled:
+            self.part_parents = {
+                part: next(iter(parents))
+                for part, parents in self.part_parent_candidates.items()
+                if len(parents) == 1
+                and len(self.part_parent_relations.get(part, ())) == 1
+            }
+            self.deferred_part_parent_candidates = {
+                part: tuple(sorted(parents))
+                for part, parents in self.part_parent_candidates.items()
+                if len(parents) > 1
+                and len(self.part_parent_relations.get(part, ())) == 1
+            }
+            for parent, tags in self.parent_tags.items():
+                if parent.startswith("w"):
+                    self.parent_tags[parent] = {
+                        **tags,
+                        **self.way_tags.get(parent, {}),
+                    }
+            self.parent_geometry_sources = {
+                parent: next(iter(sources))
+                for parent, sources in self.parent_geometry_source_candidates.items()
+                if parent in self.parent_tags and len(sources) == 1
+            }
+            self._ambiguous_parent_keys.update(
+                parent
+                for parent, sources in self.parent_geometry_source_candidates.items()
+                if parent in self.parent_tags and len(sources) != 1
+            )
+            self.ambiguous_parts = len(self._ambiguous_parent_keys) + sum(
+                len(relations) != 1
+                for relations in self.part_parent_relations.values()
+            )
 
         qualified_relations = {
             relation_key
@@ -166,7 +231,9 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         unsafe_parts.update(
             part
             for part, count in relation_part_counts.items()
-            if count != 1 or part in self.part_parents
+            if count != 1
+            or part in self.part_parent_candidates
+            or part in self.parent_tags
         )
         safe_relations = {
             relation_key
@@ -283,18 +350,19 @@ def audit_closure(
         required_nodes = set(expected["requiredNodeKeys"])
         ambiguous_parts = {
             part
-            for part, parents in handler.part_parent_candidates.items()
-            if len(parents) != 1 and part in required_ways | required_relations
+            for part, relations in handler.part_parent_relations.items()
+            if len(relations) != 1 and part in required_ways | required_relations
         }
         missing_parent_parts = handler.parts_without_outline.intersection(
             required_ways | required_relations
         )
         if ambiguous_parts or missing_parent_parts:
+            offending_parts = ambiguous_parts | missing_parent_parts
             incomplete_relations = [
                 (relation_key, handler.incomplete_relation_parts[relation_key])
                 for relation_key in sorted(handler.incomplete_relation_parts)
                 if set(handler.incomplete_relation_parts[relation_key])
-                & (required_ways | required_relations)
+                & offending_parts
             ]
             if incomplete_relations:
                 relation_key, parts = incomplete_relations[0]
@@ -306,9 +374,29 @@ def audit_closure(
                     if len(parts) > 8:
                         detail += ",..."
                     detail += ")"
+                    detail += "; " + _incomplete_part_diagnostics(
+                        handler,
+                        connection,
+                        parts,
+                    )
                 raise BuildingSourceIndexError(
                     "building_relation_incomplete",
                     detail,
+                )
+            if ambiguous_parts:
+                values = []
+                for part in sorted(ambiguous_parts)[:8]:
+                    parents = sorted(handler.part_parent_candidates.get(part, ()))
+                    relations = sorted(handler.part_parent_relations.get(part, ()))
+                    values.append(
+                        f"{part}[parents={','.join(parents)};"
+                        f"relations={','.join(relations)}]"
+                    )
+                suffix = ",..." if len(ambiguous_parts) > 8 else ""
+                raise BuildingSourceIndexError(
+                    "building_relation_incomplete",
+                    "output building parts belong to multiple building relations "
+                    f"({','.join(values)}{suffix})",
                 )
             raise BuildingSourceIndexError(
                 "building_relation_incomplete",
@@ -379,9 +467,10 @@ def _closure_rows(
 ):
     """Yield closure rows using bounded ``IN`` queries instead of N+1 reads."""
 
-    if table not in {"relations", "ways"} or value_column not in {
-        "members_json",
-        "nodes_json",
+    if (table, value_column) not in {
+        ("relations", "members_json"),
+        ("ways", "nodes_json"),
+        ("ways", "tags_json"),
     }:
         raise ValueError("invalid closure row selector")
     ordered_keys = tuple(sorted(keys))
@@ -396,6 +485,57 @@ def _closure_rows(
         values = {row[0]: row[1] for row in rows}
         for key in batch:
             yield key, values.get(key)
+
+
+def _incomplete_part_diagnostics(
+    handler: BuildingRelationHandler,
+    connection: sqlite3.Connection,
+    parts: tuple[str, ...],
+) -> str:
+    """Compare bounded source-index and runtime tag evidence for failed parts."""
+
+    source_tags = {}
+    for part, tags_json in _closure_rows(
+        connection,
+        table="ways",
+        value_column="tags_json",
+        keys={part for part in parts[:8] if part.startswith("w")},
+    ):
+        source_tags[part] = json.loads(tags_json) if tags_json is not None else None
+    incomplete_parent_counts: dict[str, int] = {}
+    for relation_parts in handler.incomplete_relation_parts.values():
+        for part in relation_parts:
+            incomplete_parent_counts[part] = (
+                incomplete_parent_counts.get(part, 0) + 1
+            )
+    values = []
+    for part in parts[:8]:
+        runtime = handler.way_tags.get(part)
+        source = source_tags.get(part)
+        values.append(
+            f"{part}[r={int(runtime is not None)},"
+            f"b={_building_tag_state(runtime, 'building')},"
+            f"bp={_building_tag_state(runtime, 'building:part')};"
+            f"s={int(source is not None)},"
+            f"b={_building_tag_state(source, 'building')},"
+            f"bp={_building_tag_state(source, 'building:part')};"
+            f"inc={incomplete_parent_counts.get(part, 0)},"
+            f"parents={len(handler.part_parent_candidates.get(part, ()))},"
+            f"outline={int(part in handler.parent_tags)}]"
+        )
+    suffix = ",..." if len(parts) > 8 else ""
+    return (
+        "partDiagnostics(r/s=runtime/source loaded; "
+        "b/bp -=missing,0=empty-or-no,1=explicit):"
+        + ",".join(values)
+        + suffix
+    )
+
+
+def _building_tag_state(tags: dict[str, str] | None, key: str) -> str:
+    if tags is None or key not in tags:
+        return "-"
+    return "0" if tags.get(key) in (None, "", "no") else "1"
 
 
 def is_building_relation(tags: dict[str, str]) -> bool:
@@ -472,6 +612,14 @@ def main() -> None:
     }
     if handler.standalone_part_keys:
         result["standalonePartKeys"] = sorted(handler.standalone_part_keys)
+    if handler.deferred_part_parent_candidates:
+        result["partParentCandidates"] = dict(
+            sorted(handler.deferred_part_parent_candidates.items())
+        )
+    if handler.parent_geometry_sources:
+        result["parentGeometrySources"] = dict(
+            sorted(handler.parent_geometry_sources.items())
+        )
     if closure_audit is not None:
         result["closureAudit"] = closure_audit
     Path(args.output).write_text(

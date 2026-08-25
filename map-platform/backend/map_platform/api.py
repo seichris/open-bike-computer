@@ -19,6 +19,12 @@ else:
 
 from .admin_inventory import map_inventory
 from .artifacts import BIKE_MAP_STREAM_FORMAT, create_artifact_store_from_environment
+from .catalog import (
+    CatalogClient,
+    CatalogPublicationError,
+    catalog_status_from_environment,
+    publish_ready_job,
+)
 from .building_tasks import BuildingTaskStore
 from .building_operations import building_plan_alerts
 from .downloads import DownloadSigner, DownloadTokenError
@@ -153,6 +159,7 @@ def create_app():
         data_root,
         credential_scope="api",
     )
+    catalog_client = CatalogClient.from_environment()
     monitoring_retention_days = int(
         os.environ.get(
             "MAP_PLATFORM_MONITORING_RETENTION_DAYS",
@@ -302,6 +309,7 @@ def create_app():
     app.state.preparation_estimate_mode = estimate_coordinator.mode.value
     app.state.map_stream_rollout = map_stream_rollout
     app.state.rate_limiter = rate_limiter
+    app.state.catalog_client = catalog_client
 
     def client_ip(request: Request) -> str:
         return client_address_resolver.resolve(
@@ -478,6 +486,7 @@ def create_app():
             "generationProfilePolicySha256": generation_profile_policy.sha256,
             "mapStreamRollout": map_stream_rollout.public_summary(),
             "preparationEstimates": estimate_coordinator.mode.value,
+            "catalog": catalog_status_from_environment(),
         }
 
     @app.get("/v1/capabilities")
@@ -819,6 +828,83 @@ def create_app():
             "downloadCount": len(job.download_receipts),
         }
 
+    @app.post("/v1/map-jobs/{job_id}/catalog-library")
+    def attach_map_catalog_library(
+        job_id: str,
+        payload: dict[str, Any],
+        clientInstallationId: str | None = None,
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> dict[str, Any]:
+        if clientInstallationId is None:
+            raise HTTPException(
+                status_code=400,
+                detail="clientInstallationId is required",
+            )
+        if set(payload) != {"libraryCredential"} or not isinstance(
+            payload.get("libraryCredential"),
+            str,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="catalog-library request has invalid fields",
+            )
+        library_credential = payload["libraryCredential"]
+        if not 32 <= len(library_credential) <= 128:
+            raise HTTPException(
+                status_code=400,
+                detail="library credential is invalid",
+            )
+        if catalog_client is None:
+            raise HTTPException(status_code=503, detail="map catalog is disabled")
+        try:
+            verify_registered_installation(
+                clientInstallationId,
+                x_installation_token,
+                required=True,
+            )
+            job = service.get_job_for_installation(
+                job_id,
+                clientInstallationId,
+            )
+            if job.status != JobStatus.READY:
+                raise HTTPException(status_code=409, detail="map is not ready")
+            if job.catalog_publication_state != "finalized":
+                job = publish_ready_job(
+                    service.store,
+                    catalog_client,
+                    job_id,
+                    artifact_store=artifact_store,
+                )
+            if (
+                job.catalog_publication_state != "finalized"
+                or not job.catalog_publication_id
+            ):
+                raise HTTPException(
+                    status_code=503,
+                    detail="map catalog publication is pending",
+                )
+            result = catalog_client.attach_library(
+                publication_id_value=job.catalog_publication_id,
+                library_credential=library_credential,
+                alias=job.user_label,
+            )
+        except CatalogPublicationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="job not found") from exc
+        return {
+            "jobId": job.job_id,
+            "catalogPublicationId": job.catalog_publication_id,
+            "catalogMapEntryId": result.get("mapEntryId"),
+            "alias": result.get("alias"),
+            "aliasRevision": result.get("aliasRevision"),
+        }
+
     @app.post("/v1/map-jobs/{job_id}/downloads")
     def record_map_download(
         job_id: str,
@@ -873,13 +959,21 @@ def create_app():
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
         try:
-            return run_job(
+            completed = run_job(
                 service.store,
                 pipeline,
                 job_id,
                 monitoring_store=monitoring_store,
                 estimate_coordinator=estimate_coordinator,
-            ).to_dict()
+            )
+            if completed.status == JobStatus.READY:
+                completed = publish_ready_job(
+                    service.store,
+                    catalog_client,
+                    job_id,
+                    artifact_store=artifact_store,
+                )
+            return completed.to_dict()
         except JobClaimError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -939,6 +1033,7 @@ def create_app():
             pipeline,
             monitoring_store=monitoring_store,
             estimate_coordinator=estimate_coordinator,
+            catalog_client=catalog_client,
         ).run_next()
         return {
             "workerId": result.worker_id,
@@ -962,6 +1057,13 @@ def create_app():
             "bytes": cached.bytes,
             "sha256": cached.sha256,
             "cachedAt": cached.cached_at,
+            "sourceUrl": cached.source_url,
+            "resolvedUrl": cached.resolved_url,
+            "etag": cached.etag,
+            "lastModified": cached.last_modified,
+            "downloadedAt": cached.downloaded_at,
+            "validatedAt": cached.validated_at,
+            "sourcePublishedAt": cached.source_published_at,
         }
 
     @app.post("/v1/maintenance/expire", dependencies=[Depends(require_admin_token)])

@@ -164,11 +164,38 @@ struct RemoteDebugLANCredentialStore {
     }
 }
 
+enum DeviceDiagnosticsRejectionPolicy {
+    static func message(code: String, fallback: String?) -> String {
+        let explanation: String
+        switch code {
+        case "diagnostics_mount_failed":
+            explanation = "The bike computer could not mount diagnostics storage."
+        case "diagnostics_card_missing":
+            explanation = "The bike computer did not detect the removable card."
+        case "diagnostics_writable_probe_failed":
+            explanation = "Diagnostics storage mounted, but its writable probe failed."
+        case "diagnostics_flush_failed":
+            explanation = "The bike computer could not flush the active diagnostics checkpoint."
+        case "diagnostics_close_failed":
+            explanation = "The bike computer could not close the active diagnostics checkpoint."
+        case "diagnostics_seal_timeout":
+            explanation = "The bike computer timed out while draining diagnostics records."
+        case "diagnostics_seal_failed":
+            explanation = "The bike computer could not seal a readable diagnostics checkpoint."
+        case "diagnostics_index_unreadable":
+            explanation = "The bike computer found a non-empty diagnostics chunk that could not be read safely."
+        default:
+            explanation = fallback.flatMap { $0.isEmpty ? nil : $0 } ?? code
+        }
+        return "\(explanation) [\(code)]"
+    }
+}
+
 enum RemoteDeviceDebugError: LocalizedError, Equatable {
     case deviceNotReady
     case unsupportedFirmware
     case transferCommandNotSent
-    case rejected(String)
+    case rejected(code: String, message: String)
     case missingSession
 
     var errorDescription: String? {
@@ -179,10 +206,20 @@ enum RemoteDeviceDebugError: LocalizedError, Equatable {
             return "The connected firmware does not support remote device debugging."
         case .transferCommandNotSent:
             return "The remote-debug request could not be sent."
-        case .rejected(let message):
+        case .rejected(_, let message):
             return message
         case .missingSession:
             return "The device did not return a fresh remote-debug session."
+        }
+    }
+
+    var diagnosticCode: String {
+        switch self {
+        case .deviceNotReady: return "device_not_ready"
+        case .unsupportedFirmware: return "unsupported_firmware"
+        case .transferCommandNotSent: return "transfer_command_not_sent"
+        case .rejected(let code, _): return code
+        case .missingSession: return "missing_session"
         }
     }
 }
@@ -596,11 +633,23 @@ final class DeviceTransferManager {
             )
             return session
         } catch {
-            if enterWasQueued {
+            let rejectedBeforeSession: Bool
+            if let remoteError = error as? RemoteDeviceDebugError,
+               case .rejected = remoteError {
+                rejectedBeforeSession =
+                    bleManager.deviceTransferMode !=
+                    DeviceTransferSession.Mode.diagnostics.rawValue
+            } else {
+                rejectedBeforeSession = false
+            }
+            if enterWasQueued && !rejectedBeforeSession {
                 // An unstructured task does not inherit cancellation from the
                 // failed entry attempt. Await its bounded exit handshake so a
                 // cancel during status/LAN/hotspot setup cannot strand the
                 // device in diagnostics mode or leave the joined AP behind.
+                // A fresh firmware rejection while no diagnostics session is
+                // active needs no cleanup; returning it immediately preserves
+                // the fail-fast contract and its original error code.
                 let cleanup = Task { @MainActor [weak self] in
                     guard let self else { return }
                     try? await self.exitDiagnostics(bleManager: bleManager)
@@ -634,6 +683,22 @@ final class DeviceTransferManager {
                     hotspotFallbackReason: bleManager.deviceTransferHotspotFallbackReason
                 )
             }
+            // A fresh firmware rejection is authoritative. Do not spend the
+            // remainder of the LAN/hotspot readiness window polling after the
+            // device has already classified storage or seal preparation.
+            if bleManager.deviceTransferStatusRevision != initialRevision,
+               let code = bleManager.deviceTransferLastErrorCode,
+               !code.isEmpty {
+                let fallback = bleManager.deviceTransferLastErrorMessage
+                    .flatMap { $0.isEmpty ? nil : $0 }
+                throw RemoteDeviceDebugError.rejected(
+                    code: code,
+                    message: DeviceDiagnosticsRejectionPolicy.message(
+                        code: code,
+                        fallback: fallback
+                    )
+                )
+            }
             if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
                 _ = bleManager.requestDeviceTransferStatus()
             }
@@ -644,12 +709,32 @@ final class DeviceTransferManager {
         if bleManager.deviceTransferStatusRevision != initialRevision,
            let code = bleManager.deviceTransferLastErrorCode,
            !code.isEmpty {
-            let message = bleManager.deviceTransferLastErrorMessage
-                .flatMap { $0.isEmpty ? nil : $0 } ?? code
-            throw RemoteDeviceDebugError.rejected(message)
+            let fallback = bleManager.deviceTransferLastErrorMessage
+                .flatMap { $0.isEmpty ? nil : $0 }
+            throw RemoteDeviceDebugError.rejected(
+                code: code,
+                message: DeviceDiagnosticsRejectionPolicy.message(
+                    code: code,
+                    fallback: fallback
+                )
+            )
         }
         throw RemoteDeviceDebugError.missingSession
     }
+
+#if HOST_TESTING
+    func waitForDiagnosticsSessionForTesting(
+        bleManager: BLEManager,
+        afterRevision initialRevision: UInt64,
+        attemptCount: Int
+    ) async throws -> DeviceTransferSession {
+        try await waitForDiagnosticsSession(
+            bleManager: bleManager,
+            afterRevision: initialRevision,
+            attemptCount: attemptCount
+        )
+    }
+#endif
 
     private func stopDiagnostics(bleManager: BLEManager) async throws {
         let initialRevision = bleManager.deviceTransferStatusRevision
@@ -671,7 +756,8 @@ final class DeviceTransferManager {
             )
         }
         throw RemoteDeviceDebugError.rejected(
-            "The device did not confirm that the diagnostics session ended."
+            code: "diagnostics_exit_unconfirmed",
+            message: "The device did not confirm that the diagnostics session ended."
         )
     }
 
@@ -786,7 +872,10 @@ final class DeviceTransferManager {
            !code.isEmpty {
             let message = bleManager.deviceTransferLastErrorMessage
                 .flatMap { $0.isEmpty ? nil : $0 } ?? code
-            throw RemoteDeviceDebugError.rejected(message)
+            throw RemoteDeviceDebugError.rejected(
+                code: code,
+                message: message
+            )
         }
         throw RemoteDeviceDebugError.missingSession
     }
@@ -811,7 +900,8 @@ final class DeviceTransferManager {
             )
         }
         throw RemoteDeviceDebugError.rejected(
-            "The device did not confirm that the debug session ended."
+            code: "debug_exit_unconfirmed",
+            message: "The device did not confirm that the debug session ended."
         )
     }
 
