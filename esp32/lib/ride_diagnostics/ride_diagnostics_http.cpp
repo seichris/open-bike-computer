@@ -3,6 +3,7 @@
 #include "../storage/storage.hpp"
 #include "ride_diagnostics.hpp"
 #include "ride_diagnostics_http_policy.hpp"
+#include "ride_diagnostics_index_policy.hpp"
 
 #include <Arduino.h>
 #include <dirent.h>
@@ -32,6 +33,11 @@ struct Chunk {
   uint32_t bytes = 0;
   std::string path;
   std::string sha256;
+};
+
+struct ChunkIndex {
+  std::vector<Chunk> chunks;
+  bool readable = true;
 };
 
 bool chunkOlder(const Chunk &left, const Chunk &right) {
@@ -130,22 +136,26 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
   return true;
 }
 
-std::vector<Chunk> listChunks(
+ChunkIndex listChunks(
     device_transfer::HttpTransferServer *server,
     const device_transfer::HttpRequest &request) {
-  std::vector<Chunk> chunks;
+  ChunkIndex index;
+  std::vector<Chunk> &chunks = index.chunks;
   chunks.reserve(kMaximumChunks);
   char bootsRoot[192] = {};
   snprintf(bootsRoot, sizeof(bootsRoot),
            "%s/BICINO/DIAGNOSTICS/v1/boots",
            storage.diagnosticsRootPath());
   DIR *boots = opendir(bootsRoot);
-  if (boots == nullptr)
-    return chunks;
+  if (boots == nullptr) {
+    index.readable = false;
+    return index;
+  }
   while (struct dirent *bootEntry = readdir(boots)) {
     if (!requestStillAuthorized(server, request)) {
       closedir(boots);
-      return {};
+      index.readable = false;
+      return index;
     }
     uint32_t boot = 0;
     if (!parseUnsigned(bootEntry->d_name, boot))
@@ -154,13 +164,16 @@ std::vector<Chunk> listChunks(
     snprintf(directory, sizeof(directory), "%s/%s", bootsRoot,
              bootEntry->d_name);
     DIR *dir = opendir(directory);
-    if (dir == nullptr)
+    if (dir == nullptr) {
+      index.readable = false;
       continue;
+    }
     while (struct dirent *entry = readdir(dir)) {
       if (!requestStillAuthorized(server, request)) {
         closedir(dir);
         closedir(boots);
-        return {};
+        index.readable = false;
+        return index;
       }
       const std::string name(entry->d_name);
       if (name.size() < 14 || name.rfind("events-", 0) != 0 ||
@@ -174,9 +187,20 @@ std::vector<Chunk> listChunks(
       char path[220] = {};
       snprintf(path, sizeof(path), "%s/%s", directory, name.c_str());
       struct stat metadata = {};
-      if (::stat(path, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
-          metadata.st_size <= 0 ||
-          static_cast<uint64_t>(metadata.st_size) > kChunkBytes) {
+      if (::stat(path, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
+        index.readable = false;
+        continue;
+      }
+      const index_policy::CandidateDisposition disposition =
+          index_policy::classifyCandidate(metadata.st_size, kChunkBytes);
+      // FAT can retain a zero-byte crash artifact when power is lost between
+      // create and the first complete JSONL write. It contains no evidence and
+      // is deliberately omitted. Non-empty invalid candidates fail the index
+      // instead of being silently hidden from the phone.
+      if (disposition == index_policy::CandidateDisposition::IgnoreEmpty)
+        continue;
+      if (disposition == index_policy::CandidateDisposition::Reject) {
+        index.readable = false;
         continue;
       }
       Chunk candidate = {boot, chunkNumber,
@@ -199,6 +223,7 @@ std::vector<Chunk> listChunks(
     if (!sha256File(chunk->path.c_str(), digest, bytes, server, request) ||
         bytes == 0 ||
         bytes != chunk->bytes || bytes > kChunkBytes) {
+      index.readable = false;
       chunk = chunks.erase(chunk);
       continue;
     }
@@ -206,7 +231,7 @@ std::vector<Chunk> listChunks(
     chunk->sha256 = std::move(digest);
     ++chunk;
   }
-  return chunks;
+  return index;
 }
 
 bool sendBody(WiFiClient &client, const std::string &body,
@@ -341,12 +366,19 @@ bool RideDiagnosticsHttp::handleRequest(
   }
   if (route.kind == http_policy::RouteKind::Index) {
     beginTransferSnapshotLease();
-    const std::vector<Chunk> chunks = listChunks(server_, request);
+    const ChunkIndex index = listChunks(server_, request);
     if (!requestStillAuthorized(server_, request)) {
       endTransferSnapshotLease();
       client.stop();
       return false;
     }
+    if (!index.readable) {
+      endTransferSnapshotLease();
+      return device_transfer::sendHttpError(
+          client, 500, "diagnostics_index_unreadable",
+          "one or more non-empty diagnostic chunks could not be read safely");
+    }
+    const std::vector<Chunk> &chunks = index.chunks;
     const Stats snapshot = stats();
     std::string body = "{\"schema\":1,\"source\":\"firmware\",\"bootSequence\":" +
                        std::to_string(currentBootSequence()) +

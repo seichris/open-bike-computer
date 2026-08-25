@@ -37,10 +37,31 @@ namespace {
 #define WAVESHARE_SD_SPI_FREQ_HZ 4000000
 #endif
 
-constexpr char kDiagnosticsAlternateRoot[] = "/diag-sd";
-static_assert(storage_mount_policy::validEspVfsMountPathLength(
-                  sizeof(kDiagnosticsAlternateRoot) - 1),
-              "diagnostics SD VFS root exceeds ESP_VFS_PATH_MAX");
+using ride_diagnostics::transfer_policy::StoragePreparation;
+
+bool mountedDirectoryAvailable(const char *root) {
+  struct stat mounted = {};
+  return root != nullptr && ::stat(root, &mounted) == 0 &&
+         S_ISDIR(mounted.st_mode);
+}
+
+bool writableProbeSucceeded(const char *root) {
+  char probePath[128] = {};
+  snprintf(probePath, sizeof(probePath), "%s/.bicino-diag-probe", root);
+  FILE *probe = fopen(probePath, "wb");
+  if (probe == nullptr)
+    return false;
+  const uint8_t marker = 1;
+  const bool wrote =
+      fwrite(&marker, 1, sizeof(marker), probe) == sizeof(marker);
+  const bool flushed = wrote && fflush(probe) == 0;
+  // fclose() closes the stream even when its implicit flush reports failure,
+  // so remove the probe in every opened-file path. A failed remove is itself
+  // evidence that the backend cannot complete the export lifecycle safely.
+  const bool closed = fclose(probe) == 0;
+  const bool removed = unlink(probePath) == 0;
+  return wrote && flushed && closed && removed;
+}
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 SPIClass &waveshareSdBus() {
@@ -111,7 +132,6 @@ bool Storage::ensureSdMounted(bool allowInternalFallback) {
             allowInternalFallback, internalFallbackMounted.load());
     FFat.end();
     SD.end();
-    diagnosticsSdMountedAtAlternateRoot = false;
     delay(25);
 #endif
     ready = initSD() == ESP_OK;
@@ -152,97 +172,55 @@ uint64_t Storage::removableSdFreeBytes() const {
 #endif
 }
 
-bool Storage::ensureDiagnosticsSdMounted() {
+StoragePreparation Storage::prepareDiagnosticsStorage() {
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   if (mountMutex == nullptr)
     mountMutex = xSemaphoreCreateMutex();
-  if (mountMutex == nullptr)
-    return false;
+  if (mountMutex == nullptr) {
+    lastDiagnosticsMountResult = StoragePreparation::MountFailed;
+    return StoragePreparation::MountFailed;
+  }
   xSemaphoreTake(mountMutex, portMAX_DELAY);
 
-  const auto writableProbeSucceeded = [](const char *root) {
-    char probePath[128] = {};
-    snprintf(probePath, sizeof(probePath), "%s/.bicino-diag-probe", root);
-    FILE *probe = fopen(probePath, "wb");
-    const uint8_t marker = 1;
-    bool ready = false;
-    if (probe != nullptr) {
-      const bool wrote =
-          fwrite(&marker, 1, sizeof(marker), probe) == sizeof(marker);
-      const bool flushed = wrote && fflush(probe) == 0;
-      const bool closed = fclose(probe) == 0;
-      ready = wrote && flushed && closed;
-    }
-    if (ready)
-      unlink(probePath);
-    return ready;
-  };
-
   const bool mainMounted = isSdLoaded.load();
-  const bool alternateMounted =
-      diagnosticsSdMountedAtAlternateRoot.load();
-  if ((mainMounted || alternateMounted) && diagnosticsSdHealthy.load()) {
-    xSemaphoreGive(mountMutex);
-    return true;
-  }
-
-  // First recover a transient recorder-only fault without changing the VFS
-  // mount generation. Other subsystems keep long-lived map/font FILE handles
-  // on /sdcard, and the HTTP transfer may be reading the alternate mount.
-  if (mainMounted || alternateMounted) {
-    const char *root = alternateMounted ? kDiagnosticsAlternateRoot
-                                        : "/sdcard";
-    const bool ready = writableProbeSucceeded(root);
-    if (ready) {
-      diagnosticsSdHealthy = true;
-      xSemaphoreGive(mountMutex);
-      return true;
+  const bool internalMounted = internalFallbackMounted.load();
+  constexpr const char *root = "/sdcard";
+  if (mainMounted || internalMounted) {
+    StoragePreparation result = StoragePreparation::ReadyRemovable;
+    if (!mountedDirectoryAvailable(root)) {
+      result = StoragePreparation::MountFailed;
     }
-    // Never remount the application's primary /sdcard at runtime. Preserve
-    // its readers and require reboot/manual lifecycle recovery instead.
-    if (mainMounted) {
-      xSemaphoreGive(mountMutex);
-      return false;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
+    defined(SPI_SHARED)
+    else if (!internalMounted && SD.cardType() == CARD_NONE) {
+      result = StoragePreparation::CardMissing;
     }
-  }
-
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  if (diagnosticsSdMountedAtAlternateRoot.load()) {
-    // The mount was already marked unhealthy and failed a writable probe.
-    // Directory metadata/cardType can remain visible for a removed or full
-    // card, so accepting them here would report success while recorder health
-    // remains false and would prevent the only remount/recovery path.
-    SD.end();
-    diagnosticsSdMountedAtAlternateRoot = false;
-  }
-
-  if (internalFallbackMounted.load()) {
-    pinMode(SD_CS, OUTPUT);
-    digitalWrite(SD_CS, HIGH);
-    SPIClass &hspi = waveshareSdBus();
-    hspi.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
-    const bool mounted = SD.begin(
-        SD_CS, hspi, WAVESHARE_SD_SPI_FREQ_HZ,
-        kDiagnosticsAlternateRoot);
-    const bool ready = storage_mount_policy::diagnosticsMountReady(
-        mounted, mounted && SD.cardType() != CARD_NONE,
-        mounted && writableProbeSucceeded(kDiagnosticsAlternateRoot));
-    if (!ready) {
-      SD.end();
-      diagnosticsSdMountedAtAlternateRoot = false;
-      xSemaphoreGive(mountMutex);
-      return false;
-    }
-    diagnosticsSdMountedAtAlternateRoot = true;
-    diagnosticsSdHealthy = true;
-    xSemaphoreGive(mountMutex);
-    return true;
-  }
 #endif
+    else if (!writableProbeSucceeded(root)) {
+      result = StoragePreparation::WritableProbeFailed;
+    } else if (internalMounted) {
+      // The diagnostics backend remains stable for the complete boot. This
+      // intentionally exports the bounded FFat recorder instead of mounting a
+      // newly inserted card at another root while an FFat FILE may be open.
+      result = StoragePreparation::ReadyInternalFallback;
+    }
+    diagnosticsSdHealthy =
+        ride_diagnostics::transfer_policy::storageReady(result);
+    lastDiagnosticsMountResult = result;
+    xSemaphoreGive(mountMutex);
+    return result;
+  }
 
   xSemaphoreGive(mountMutex);
-  return ensureSdMounted(false);
+  if (!ensureSdMounted(false))
+    return lastDiagnosticsMountResult.load();
+  return prepareDiagnosticsStorage();
+}
+
+bool Storage::ensureDiagnosticsSdMounted() {
+  return ride_diagnostics::transfer_policy::storageReady(
+      prepareDiagnosticsStorage());
 }
 
 void Storage::markDiagnosticsSdUnavailable() {
@@ -251,16 +229,14 @@ void Storage::markDiagnosticsSdUnavailable() {
 
 bool Storage::getDiagnosticsSdLoaded() const {
   return diagnosticsSdHealthy.load() &&
-         (isSdLoaded.load() || diagnosticsSdMountedAtAlternateRoot.load() ||
-          internalFallbackMounted.load());
+         (isSdLoaded.load() || internalFallbackMounted.load());
 }
 
 bool Storage::canRetryDiagnosticsSd() const {
   if (!diagnosticsSdHealthy.load())
     return true;
   return storage_mount_policy::shouldAttemptDiagnosticsRemovableRetry(
-      isSdLoaded.load(), diagnosticsSdMountedAtAlternateRoot.load(),
-      internalFallbackMounted.load());
+      isSdLoaded.load(), internalFallbackMounted.load());
 }
 
 uint64_t Storage::diagnosticsSdFreeBytes() const {
@@ -270,8 +246,7 @@ uint64_t Storage::diagnosticsSdFreeBytes() const {
     return 0;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
     defined(SPI_SHARED)
-  if (internalFallbackMounted.load() &&
-      !diagnosticsSdMountedAtAlternateRoot.load()) {
+  if (internalFallbackMounted.load()) {
     const uint64_t total = FFat.totalBytes();
     const uint64_t used = FFat.usedBytes();
     return total > used ? total - used : 0;
@@ -285,9 +260,7 @@ uint64_t Storage::diagnosticsSdFreeBytes() const {
 }
 
 const char *Storage::diagnosticsRootPath() const {
-  return diagnosticsSdMountedAtAlternateRoot.load()
-             ? kDiagnosticsAlternateRoot
-             : "/sdcard";
+  return "/sdcard";
 }
 
 /**
@@ -322,6 +295,7 @@ esp_err_t Storage::initSD() {
                   (unsigned long)(millis() - mountStartMs),
                   (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ);
     isSdLoaded = false;
+    lastDiagnosticsMountResult = StoragePreparation::MountFailed;
     return ESP_FAIL;
   }
 
@@ -332,6 +306,7 @@ esp_err_t Storage::initSD() {
                   (unsigned long)(millis() - mountStartMs),
                   (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ);
     isSdLoaded = false;
+    lastDiagnosticsMountResult = StoragePreparation::CardMissing;
     return ESP_FAIL;
   }
 
@@ -369,8 +344,8 @@ esp_err_t Storage::initSD() {
 
   isSdLoaded = true;
   internalFallbackMounted = false;
-  diagnosticsSdMountedAtAlternateRoot = false;
   diagnosticsSdHealthy = true;
+  lastDiagnosticsMountResult = StoragePreparation::ReadyRemovable;
   return ESP_OK;
 
 #elif defined(SPI_SHARED)
@@ -382,12 +357,14 @@ esp_err_t Storage::initSD() {
   if (!SD.begin(SD_CS, SPI, 4000000, "/sdcard")) {
     ESP_LOGE(TAG, "SD Card Mount Failed");
     isSdLoaded = false;
+    lastDiagnosticsMountResult = StoragePreparation::MountFailed;
     return ESP_FAIL;
   } else {
     ESP_LOGI(TAG, "SD Card Mounted");
     isSdLoaded = true;
     internalFallbackMounted = false;
     diagnosticsSdHealthy = true;
+    lastDiagnosticsMountResult = StoragePreparation::ReadyRemovable;
     return ESP_OK;
   }
 
@@ -437,6 +414,7 @@ esp_err_t Storage::initSD() {
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to initialize SPI bus: %s (0x%x)",
              esp_err_to_name(ret), ret);
+    lastDiagnosticsMountResult = StoragePreparation::MountFailed;
     return ret;
   }
 
@@ -456,6 +434,7 @@ esp_err_t Storage::initSD() {
       ESP_LOGE(TAG, "Failed to initialize the card (%s).",
                esp_err_to_name(ret));
     }
+    lastDiagnosticsMountResult = StoragePreparation::MountFailed;
     return ret;
   } else {
     ESP_LOGI(TAG, "SD card initialized successfully");
@@ -463,6 +442,7 @@ esp_err_t Storage::initSD() {
     isSdLoaded = true;
     internalFallbackMounted = false;
     diagnosticsSdHealthy = true;
+    lastDiagnosticsMountResult = StoragePreparation::ReadyRemovable;
     return ESP_OK;
   }
 #endif
@@ -496,7 +476,6 @@ esp_err_t Storage::initSPIFFS() {
   size_t used = FFat.usedBytes();
   ESP_LOGI(TAG, "FFat Mounted at /sdcard. Total: %d, Used: %d", total, used);
   internalFallbackMounted = true;
-  diagnosticsSdMountedAtAlternateRoot = false;
   diagnosticsSdHealthy = true;
 
 #ifdef WAVESHARE_SD_LIST_ROOT

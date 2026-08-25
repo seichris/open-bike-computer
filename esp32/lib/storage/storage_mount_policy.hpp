@@ -1,19 +1,6 @@
 #pragma once
 
-#include <cstddef>
-
 namespace storage_mount_policy {
-
-constexpr std::size_t kMaximumEspVfsMountPathBytes = 15;
-
-constexpr bool validEspVfsMountPathLength(std::size_t length) {
-  return length > 1 && length <= kMaximumEspVfsMountPathBytes;
-}
-
-constexpr bool diagnosticsMountReady(bool mounted, bool cardPresent,
-                                     bool writableProbeSucceeded) {
-  return mounted && cardPresent && writableProbeSucceeded;
-}
 
 inline bool shouldAttemptAutomaticRemovableRetry(bool removableMounted,
                                                  bool fallbackMounted) {
@@ -25,11 +12,12 @@ inline bool shouldRestoreFallbackAfterFailedRetry(bool callerAllowsFallback,
   return callerAllowsFallback || fallbackWasMounted;
 }
 
-inline bool shouldAttemptDiagnosticsRemovableRetry(
-    bool removableMounted, bool diagnosticsAlternateMounted,
-    bool fallbackMounted) {
-  (void)fallbackMounted;
-  return !removableMounted && !diagnosticsAlternateMounted;
+inline bool shouldAttemptDiagnosticsRemovableRetry(bool removableMounted,
+                                                   bool fallbackMounted) {
+  // A recorder that started on FFat must keep one stable root for the whole
+  // boot. Switching it to an alternate removable mount can split one boot's
+  // chunks across two filesystems while an FFat FILE is still open.
+  return !removableMounted && !fallbackMounted;
 }
 
 } // namespace storage_mount_policy
