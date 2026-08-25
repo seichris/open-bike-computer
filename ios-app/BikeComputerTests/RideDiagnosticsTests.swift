@@ -43,6 +43,10 @@ final class RideDiagnosticsTests: XCTestCase {
             .filter { $0 }
             .sink { _ in published.fulfill() }
         recorder.beginDetailedTrace()
+        // Wait for the recorder queue to complete the transition before the
+        // timed wait. This also guarantees that the main-thread publication
+        // has been enqueued, even when a hosted simulator starves utility QoS.
+        XCTAssertTrue(recorder.health.detailedTraceEnabled)
         wait(for: [published], timeout: 2)
         XCTAssertTrue(recorder.isDetailedTraceEnabled)
         XCTAssertTrue(recorder.detailedTraceEnabled)
