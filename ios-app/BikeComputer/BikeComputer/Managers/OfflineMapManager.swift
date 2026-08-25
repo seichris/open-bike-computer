@@ -3697,10 +3697,17 @@ final class OfflineMapManager: ObservableObject {
     ) async -> [OfflineMapCatalogMap] {
         var reconciled = maps
         for mapEntryID in pendingCatalogAliases.keys.sorted() {
-            guard let pending = pendingCatalogAliases[mapEntryID],
-                  let remoteIndex = reconciled.firstIndex(where: {
+            guard let pending = pendingCatalogAliases[mapEntryID] else {
+                continue
+            }
+            guard let remoteIndex = reconciled.firstIndex(where: {
                     $0.mapEntryId == mapEntryID
                   }) else {
+                // A complete successful library listing is authoritative. The
+                // map may have been detached by the other app, or this app may
+                // have lost the response after a successful DELETE. In either
+                // case the old alias must not survive and replay on reclaim.
+                removePendingCatalogAlias(mapEntryID: mapEntryID)
                 continue
             }
             let remote = reconciled[remoteIndex]

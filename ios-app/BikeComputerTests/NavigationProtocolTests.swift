@@ -6153,7 +6153,9 @@ struct NavigationProtocolTests {
             case ("POST", "/v1/libraries/bootstrap"):
                 return (200, Data(#"{"libraryId":"library-alias","created":false}"#.utf8))
             case ("DELETE", "/v1/library/maps/\(mapEntryID)"):
-                return (204, Data())
+                // Model a DELETE that committed remotely but whose successful
+                // response was lost. The next complete list is authoritative.
+                return (500, Data(#"{"error":"response lost"}"#.utf8))
             case ("GET", "/v1/library/maps"):
                 return (200, Data(#"{"maps":[],"nextCursor":null}"#.utf8))
             case ("GET", "/v1/library/shares"):
@@ -6164,13 +6166,21 @@ struct NavigationProtocolTests {
             }
         }
         conflictManager.removeCatalogMapFromLibrary(newerServerMap)
+        let deleteAttempted = await waitUntil {
+            OfflineMapTestURLProtocol.requests().contains {
+                $0.httpMethod == "DELETE" &&
+                    $0.url?.path == "/v1/library/maps/\(mapEntryID)"
+            }
+        }
+        assert(deleteAttempted, "the response-loss scenario attempts detach")
+        conflictManager.syncCatalogLibraryForTesting()
         let detached = await waitUntil {
             conflictManager.catalogMaps.isEmpty &&
                 conflictManager.catalogAliasStatus(for: mapEntryID) == nil
         }
         assert(
             detached,
-            "successful detach clears the durable pending alias and visible status"
+            "an authoritative absent row clears pending alias after a lost DELETE response"
         )
 
         let reclaimedMap = map(alias: "Shared original", revision: 0)
