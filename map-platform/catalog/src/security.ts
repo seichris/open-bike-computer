@@ -214,12 +214,14 @@ export function requireToken(value: string): string {
 export function normalizeAlias(value: unknown): string {
   if (typeof value !== "string")
     throw new HttpError(400, "alias must be a string");
+  if (/\p{Cc}/u.test(value)) {
+    throw new HttpError(400, "alias is invalid");
+  }
   const normalized = value.normalize("NFC").trim();
   if (
-    normalized.length === 0 ||
-    normalized.length > 80 ||
-    encoder.encode(normalized).length > 240 ||
-    /[\u0000-\u001f\u007f]/u.test(normalized)
+    Array.from(normalized).length === 0 ||
+    Array.from(normalized).length > 80 ||
+    encoder.encode(normalized).length > 240
   ) {
     throw new HttpError(400, "alias is invalid");
   }

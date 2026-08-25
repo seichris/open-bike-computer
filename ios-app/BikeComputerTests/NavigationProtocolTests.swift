@@ -758,6 +758,7 @@ struct NavigationProtocolTests {
         testOfflineMapCatalogAvailabilityPolicy()
         testSavedMapRemovalPolicy()
         await testOfflineMapCatalogCredentialBootstrapCoalescesConcurrentCallers()
+        await testOfflineMapCatalogCredentialBootstrapFirstWriterWinsAcrossCoordinators()
         await testOfflineMapCatalogPendingAliasPersistenceAndConflictPolicy()
         await testOfflineMapCatalogInventorySyncSurvivesCatalogFailure()
         await testOfflineMapCatalogClaimRetainsRetryState()
@@ -5681,6 +5682,60 @@ struct NavigationProtocolTests {
     }
 
     static func testOfflineMapCatalogAliasAttachmentPolicy() {
+        let emoji40 = String(repeating: "\u{1F6B2}", count: 40)
+        let emoji41 = String(repeating: "\u{1F6B2}", count: 41)
+        let emoji60 = String(repeating: "\u{1F6B2}", count: 60)
+        let emoji61 = String(repeating: "\u{1F6B2}", count: 61)
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.normalizedAlias("  e\u{301}  "),
+            "\u{E9}",
+            "catalog aliases are NFC-normalized after whitespace trimming"
+        )
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.normalizedAlias("\u{FEFF}Ride name\u{FEFF}"),
+            "Ride name",
+            "catalog aliases mirror JavaScript trimming of byte-order marks"
+        )
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.normalizedAlias(emoji40),
+            emoji40,
+            "40 supplementary emoji count as 40 Unicode code points"
+        )
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.normalizedAlias(emoji41),
+            emoji41,
+            "41 supplementary emoji remain below both catalog limits"
+        )
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.normalizedAlias(emoji60),
+            emoji60,
+            "60 four-byte emoji exactly meet the UTF-8 byte limit"
+        )
+        assert(
+            OfflineMapCatalogAliasPolicy.normalizedAlias(emoji61) == nil,
+            "61 four-byte emoji exceed the UTF-8 byte limit"
+        )
+        assert(
+            OfflineMapCatalogAliasPolicy.normalizedAlias(
+                String(repeating: "a", count: 81)
+            ) == nil,
+            "catalog aliases reject more than 80 Unicode code points"
+        )
+        assert(
+            OfflineMapCatalogAliasPolicy.normalizedAlias("\tTrimmed control") == nil &&
+                OfflineMapCatalogAliasPolicy.normalizedAlias("embedded\u{7F}control") == nil,
+            "general-category control scalars are rejected before trimming"
+        )
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.normalizedAlias("A\u{200D}B"),
+            "A\u{200D}B",
+            "format scalars are not misclassified as general-category controls"
+        )
+        assertEqual(
+            OfflineMapCatalogAliasPolicy.normalizedAlias("\u{200B}Ride name\u{200B}"),
+            "\u{200B}Ride name\u{200B}",
+            "catalog aliases preserve U+200B exactly like JavaScript trim"
+        )
         assertEqual(
             OfflineMapCatalogAliasPolicy.aliasToApplyAfterAttachment(
                 localDisplayName: "  Favorite climb  ",
@@ -5731,7 +5786,10 @@ struct NavigationProtocolTests {
             try! await coordinator.credential(
                 loadExisting: load,
                 bootstrap: recorder.bootstrap,
-                save: save
+                persistAnonymousBootstrap: { credential in
+                    save(credential)
+                    return credential
+                }
             )
         }
         let firstRequestDeadline = Date().addingTimeInterval(2)
@@ -5742,7 +5800,10 @@ struct NavigationProtocolTests {
             try! await coordinator.credential(
                 loadExisting: load,
                 bootstrap: recorder.bootstrap,
-                save: save
+                persistAnonymousBootstrap: { credential in
+                    save(credential)
+                    return credential
+                }
             )
         }
         try? await Task.sleep(nanoseconds: 50_000_000)
@@ -5769,6 +5830,108 @@ struct NavigationProtocolTests {
             savedCredentials,
             [expected],
             "coalescing persists exactly one library identity regardless of completion order"
+        )
+    }
+
+    @MainActor
+    static func testOfflineMapCatalogCredentialBootstrapFirstWriterWinsAcrossCoordinators() async {
+        let suite = "OfflineMapCatalogCredentialRace-\(UUID().uuidString)"
+        let firstDefaults = UserDefaults(suiteName: suite)!
+        let secondDefaults = UserDefaults(suiteName: suite)!
+        defer { firstDefaults.removePersistentDomain(forName: suite) }
+        let firstStore = OfflineMapCatalogCredentialStore(
+            defaults: firstDefaults,
+            catalogHost: OfflineMapCatalogConfig.productionHost
+        )
+        let secondStore = OfflineMapCatalogCredentialStore(
+            defaults: secondDefaults,
+            catalogHost: OfflineMapCatalogConfig.productionHost
+        )
+        let firstCandidate = OfflineMapCatalogCredential(
+            libraryId: "library-first-candidate",
+            credential: "credential-first-candidate"
+        )
+        let secondCandidate = OfflineMapCatalogCredential(
+            libraryId: "library-second-winner",
+            credential: "credential-second-winner"
+        )
+        let firstRecorder = CatalogCredentialBootstrapRecorder(
+            credential: firstCandidate
+        )
+        let secondRecorder = CatalogCredentialBootstrapRecorder(
+            credential: secondCandidate
+        )
+        let firstCoordinator = OfflineMapCatalogCredentialCoordinator()
+        let secondCoordinator = OfflineMapCatalogCredentialCoordinator()
+
+        let first = Task { @MainActor in
+            try! await firstCoordinator.credential(
+                loadExisting: firstStore.load,
+                bootstrap: firstRecorder.bootstrap,
+                persistAnonymousBootstrap: firstStore.saveAnonymousBootstrapIfAbsent
+            )
+        }
+        let second = Task { @MainActor in
+            try! await secondCoordinator.credential(
+                loadExisting: secondStore.load,
+                bootstrap: secondRecorder.bootstrap,
+                persistAnonymousBootstrap: secondStore.saveAnonymousBootstrapIfAbsent
+            )
+        }
+        let bothStartedDeadline = Date().addingTimeInterval(2)
+        while Date() < bothStartedDeadline {
+            let firstCount = await firstRecorder.invocationCount()
+            let secondCount = await secondRecorder.invocationCount()
+            if firstCount > 0 && secondCount > 0 {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assertEqual(
+            await firstRecorder.invocationCount(),
+            1,
+            "the first independent coordinator reaches anonymous bootstrap"
+        )
+        assertEqual(
+            await secondRecorder.invocationCount(),
+            1,
+            "the second independent coordinator reads before either bootstrap persists"
+        )
+
+        await secondRecorder.release()
+        let secondResult = await second.value
+        await firstRecorder.release()
+        let firstResult = await first.value
+        assertEqual(
+            firstResult,
+            secondCandidate,
+            "a later bootstrap response returns the credential already persisted by the winner"
+        )
+        assertEqual(
+            secondResult,
+            secondCandidate,
+            "the first persistence winner returns its own credential"
+        )
+        assertEqual(
+            firstStore.load(),
+            secondCandidate,
+            "the first writer remains the shared persisted library identity"
+        )
+        assertEqual(
+            secondStore.load(),
+            secondCandidate,
+            "independent stores converge on the same library identity"
+        )
+
+        let linked = OfflineMapCatalogCredential(
+            libraryId: "library-linked",
+            credential: secondCandidate.credential
+        )
+        try! firstStore.save(linked)
+        assertEqual(
+            secondStore.load(),
+            linked,
+            "an intentional link-code claim can still replace the library association"
         )
     }
 
@@ -5853,6 +6016,16 @@ struct NavigationProtocolTests {
             mapPlatformSession: session,
             catalogHost: OfflineMapCatalogConfig.productionHost,
             catalogClient: client
+        )
+        assertEqual(
+            manager.renameCatalogMap(originalMap, to: "\tImpossible alias"),
+            originalMap.alias,
+            "an alias the server must reject never becomes optimistic local state"
+        )
+        assert(
+            manager.catalogAliasStatus(for: mapEntryID) == nil &&
+                OfflineMapTestURLProtocol.requests().isEmpty,
+            "an impossible alias creates neither durable retry state nor a network request"
         )
         assertEqual(
             manager.renameCatalogMap(originalMap, to: "  Weekend climb  "),
@@ -5973,6 +6146,65 @@ struct NavigationProtocolTests {
         assert(
             !OfflineMapTestURLProtocol.requests().contains { $0.httpMethod == "PATCH" },
             "conflict reconciliation does not issue a stale compare-and-swap"
+        )
+
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (200, Data(#"{"libraryId":"library-alias","created":false}"#.utf8))
+            case ("DELETE", "/v1/library/maps/\(mapEntryID)"):
+                return (204, Data())
+            case ("GET", "/v1/library/maps"):
+                return (200, Data(#"{"maps":[],"nextCursor":null}"#.utf8))
+            case ("GET", "/v1/library/shares"):
+                return (200, Data(#"{"shares":[],"nextCursor":null}"#.utf8))
+            default:
+                assert(false, "unexpected alias-detach request \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+        conflictManager.removeCatalogMapFromLibrary(newerServerMap)
+        let detached = await waitUntil {
+            conflictManager.catalogMaps.isEmpty &&
+                conflictManager.catalogAliasStatus(for: mapEntryID) == nil
+        }
+        assert(
+            detached,
+            "successful detach clears the durable pending alias and visible status"
+        )
+
+        let reclaimedMap = map(alias: "Shared original", revision: 0)
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/libraries/bootstrap"):
+                return (200, Data(#"{"libraryId":"library-alias","created":false}"#.utf8))
+            case ("GET", "/v1/library/maps"):
+                return (200, mapsPage(reclaimedMap))
+            case ("PATCH", "/v1/library/maps/\(mapEntryID)"):
+                assert(false, "a detached pending alias must not replay after reclaim")
+                return (409, Data())
+            default:
+                assert(false, "unexpected alias-reclaim request \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+        let reclaimedManager = OfflineMapManager(
+            defaults: defaults,
+            mapPlatformSession: session,
+            catalogHost: OfflineMapCatalogConfig.productionHost,
+            catalogClient: client
+        )
+        reclaimedManager.syncCatalogLibraryForTesting()
+        let reclaimLoaded = await waitUntil {
+            reclaimedManager.catalogMaps.first?.alias == "Shared original"
+        }
+        assert(
+            reclaimLoaded && reclaimedManager.catalogAliasStatus(for: mapEntryID) == nil,
+            "reclaim keeps the server alias without resurrecting detached pending state"
+        )
+        assert(
+            !OfflineMapTestURLProtocol.requests().contains { $0.httpMethod == "PATCH" },
+            "reclaim does not issue a stale alias update"
         )
     }
 

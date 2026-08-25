@@ -618,14 +618,14 @@ export async function finalizePublication(
   ) {
     throw new HttpError(400, "publication artifact generations are duplicated");
   }
-  const liveGenerationClasses = await env.DB.prepare(
+  const retainedGenerationClasses = await env.DB.prepare(
     `SELECT DISTINCT generation_class FROM artifacts
-      WHERE map_entry_id = ? AND generation_head = 1 AND state = 'live'`,
+      WHERE map_entry_id = ? AND state <> 'deleted'`,
   )
     .bind(publication.mapEntryId)
     .all<{ generation_class: string }>();
   const resultingGenerationClasses = new Set(
-    liveGenerationClasses.results.map((row) => row.generation_class),
+    retainedGenerationClasses.results.map((row) => row.generation_class),
   );
   for (const artifact of proposedArtifacts) {
     resultingGenerationClasses.add(artifact.generation_class);
@@ -2096,6 +2096,10 @@ function deletionEligibilityPredicates(
 ): string {
   return `(
             (
+              ${artifactAlias}.state = 'quarantined'
+              AND ${artifactAlias}.verified_at <= ?
+              AND ${noActiveArtifactUsePredicates(artifactAlias)}
+            ) OR (
               ${artifactAlias}.superseded_at IS NOT NULL
               AND ${liveGenerationReplacementPredicate(artifactAlias)}
               AND ${noActiveArtifactUsePredicates(artifactAlias)}
@@ -2202,7 +2206,7 @@ export async function prepareRetentionAuthorizations(
   const matured = await env.DB.prepare(
     `SELECT a.*, me.updated_at AS map_updated_at
        FROM artifacts a JOIN map_entries me ON me.id = a.map_entry_id
-      WHERE a.bucket_slot = ? AND a.state = 'tombstoned'
+      WHERE a.bucket_slot = ? AND a.state IN ('tombstoned', 'quarantined')
         AND a.verified_at <= ?
         AND ${deletionEligibilityPredicates("a", "me")}
         AND NOT EXISTS (
@@ -2211,7 +2215,20 @@ export async function prepareRetentionAuthorizations(
         )
       ORDER BY a.verified_at ASC, a.id ASC LIMIT ?`,
   )
-    .bind(serviceChannel, cutoff, now, now, cutoff, now, now, now, limit)
+    .bind(
+      serviceChannel,
+      cutoff,
+      cutoff,
+      now,
+      now,
+      now,
+      now,
+      cutoff,
+      now,
+      now,
+      now,
+      limit,
+    )
     .all<RetentionCandidate>();
   const authorizationExpiresAt = new Date(
     clock.getTime() + RETENTION_AUTHORIZATION_MILLISECONDS,
@@ -2305,8 +2322,8 @@ export async function claimRetentionDeletion(
     serviceChannel,
     identity,
   );
-  if (artifact.state !== "tombstoned") {
-    throw new HttpError(409, "retention artifact is not tombstoned");
+  if (artifact.state !== "tombstoned" && artifact.state !== "quarantined") {
+    throw new HttpError(409, "retention artifact is not eligible");
   }
   const now = clock.toISOString();
   const shareCutoff = new Date(
@@ -2329,7 +2346,8 @@ export async function claimRetentionDeletion(
                 'claimed', ?, ?
            FROM artifacts a JOIN map_entries me ON me.id = a.map_entry_id
           WHERE a.id = ? AND a.bucket_slot = ? AND a.object_key = ?
-            AND a.byte_count = ? AND a.sha256 = ? AND a.state = 'tombstoned'
+            AND a.byte_count = ? AND a.sha256 = ?
+            AND a.state IN ('tombstoned', 'quarantined')
             AND NOT EXISTS (
               SELECT 1 FROM artifact_deletion_leases lease
                WHERE lease.artifact_id = a.id AND lease.expires_at > ?
@@ -2345,6 +2363,9 @@ export async function claimRetentionDeletion(
       identity.objectKey,
       identity.bytes,
       identity.sha256,
+      now,
+      shareCutoff,
+      now,
       now,
       now,
       now,
@@ -2406,8 +2427,8 @@ export async function confirmRetentionDeletion(
   if (artifact.state === "deleted") {
     return { artifactId: artifactID, state: "deleted" };
   }
-  if (artifact.state !== "tombstoned") {
-    throw new HttpError(409, "retention artifact is not tombstoned");
+  if (artifact.state !== "tombstoned" && artifact.state !== "quarantined") {
+    throw new HttpError(409, "retention artifact is not eligible");
   }
   const now = clock.toISOString();
   const shareCutoff = new Date(
@@ -2415,9 +2436,11 @@ export async function confirmRetentionDeletion(
   ).toISOString();
   const results = await env.DB.batch([
     env.DB.prepare(
-      `UPDATE artifacts AS a SET state = 'deleted', verified_at = ?
+      `UPDATE artifacts AS a
+          SET state = 'deleted', generation_head = 0, verified_at = ?
         WHERE a.id = ? AND a.bucket_slot = ? AND a.object_key = ?
-          AND a.byte_count = ? AND a.sha256 = ? AND a.state = 'tombstoned'
+           AND a.byte_count = ? AND a.sha256 = ?
+           AND a.state IN ('tombstoned', 'quarantined')
           AND EXISTS (
             SELECT 1 FROM artifact_deletion_leases lease
              WHERE lease.artifact_id = a.id AND lease.id = ?
@@ -2440,6 +2463,9 @@ export async function confirmRetentionDeletion(
       identity.leaseId,
       serviceChannel,
       now,
+      shareCutoff,
+      now,
+      now,
       now,
       now,
       shareCutoff,
@@ -2459,11 +2485,19 @@ export async function confirmRetentionDeletion(
           SET delivery_state = 'tombstoned', updated_at = ?
         WHERE me.id = ?
           AND NOT EXISTS (
+            SELECT 1 FROM library_maps lm WHERE lm.map_entry_id = me.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM shares s
+             WHERE s.map_entry_id = me.id AND s.revoked_at IS NULL
+               AND (s.expires_at IS NULL OR s.expires_at > ?)
+          )
+          AND NOT EXISTS (
             SELECT 1 FROM artifacts a
              WHERE a.map_entry_id = me.id
                AND a.state IN ('live', 'quarantined', 'tombstoned')
           )`,
-    ).bind(now, artifact.map_entry_id),
+    ).bind(now, artifact.map_entry_id, shareCutoff),
   ]);
   if (results[0]?.meta.changes !== 1) {
     throw new HttpError(409, "retention artifact gained a live reference");

@@ -2789,6 +2789,7 @@ final class OfflineMapManager: ObservableObject {
                     mapEntryId: map.mapEntryId,
                     credential: credential.credential
                 )
+                self.removePendingCatalogAlias(mapEntryID: map.mapEntryId)
                 self.catalogMaps.removeAll { $0.mapEntryId == map.mapEntryId }
                 self.refreshCachedPacks()
                 self.catalogMaps = try await client.maps(
@@ -3606,8 +3607,8 @@ final class OfflineMapManager: ObservableObject {
                     existingCredential: existingCredential
                 )
             },
-            save: { [catalogCredentialStore] credential in
-                try catalogCredentialStore.save(credential)
+            persistAnonymousBootstrap: { [catalogCredentialStore] credential in
+                try catalogCredentialStore.saveAnonymousBootstrapIfAbsent(credential)
             }
         )
     }

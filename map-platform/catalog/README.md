@@ -100,12 +100,15 @@ production step in
   deletion-lease eligible after `RETENTION_GRACE_DAYS` even while the map stays
   in a library, provided a live same-class replacement still exists at
   authorization, claim, and confirmation.
-- A map may have at most 16 distinct live compatibility classes. The D1 trigger
-  enforces the limit atomically under concurrent publication and the 0008
-  migration refuses an already-over-limit database. Adding a seventeenth class
-  fails closed; never evict a different signer or reader contract implicitly.
-  Retire an obsolete class through a separately reviewed quarantine/retirement
-  operation before publishing its replacement capability set.
+- A map may have at most 16 distinct retained compatibility classes. Live,
+  quarantined, and tombstoned generations all consume capacity; only confirmed
+  deletion of the last retained artifact in a class frees its slot. The D1
+  trigger enforces the limit atomically under concurrent publication and the
+  0009 migration refuses an already-over-limit database. Quarantined artifacts
+  remain unavailable to clients, retain active download/promotion protection,
+  and become deletion-lease eligible after `RETENTION_GRACE_DAYS` even while the
+  map remains referenced. Adding a seventeenth class fails closed; never evict
+  a different signer or reader contract implicitly.
 
 Schema changes belong in numbered files under `migrations/` and must be applied
 to staging before production.

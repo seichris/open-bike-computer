@@ -456,6 +456,50 @@ nonisolated final class OfflineMapCatalogCredentialStore: @unchecked Sendable {
 #endif
     }
 
+    func saveAnonymousBootstrapIfAbsent(
+        _ credential: OfflineMapCatalogCredential
+    ) throws -> OfflineMapCatalogCredential {
+        let data = try JSONEncoder().encode(credential)
+#if os(iOS)
+        let sharedStatus = addToKeychain(
+            data,
+            accessGroup: OfflineMapCatalogConfig.sharedKeychainAccessGroup
+        )
+        switch sharedStatus {
+        case errSecSuccess:
+            return credential
+        case errSecDuplicateItem:
+            guard let winner = loadFromKeychain(
+                accessGroup: OfflineMapCatalogConfig.sharedKeychainAccessGroup
+            ).credential else {
+                throw OfflineMapCatalogError.invalidResponse
+            }
+            return winner
+        case Self.missingEntitlementStatus:
+            let localStatus = addToKeychain(data, accessGroup: nil)
+            switch localStatus {
+            case errSecSuccess:
+                return credential
+            case errSecDuplicateItem:
+                guard let winner = loadFromKeychain(accessGroup: nil).credential else {
+                    throw OfflineMapCatalogError.invalidResponse
+                }
+                return winner
+            default:
+                throw OfflineMapCatalogError.keychain(localStatus)
+            }
+        default:
+            throw OfflineMapCatalogError.keychain(sharedStatus)
+        }
+#else
+        if let winner = load() {
+            return winner
+        }
+        defaults.set(data, forKey: fallbackDefaultsKey)
+        return load() ?? credential
+#endif
+    }
+
 #if os(iOS)
     private func keychainIdentity(accessGroup: String?) -> [String: Any] {
         var identity: [String: Any] = [
@@ -513,6 +557,17 @@ nonisolated final class OfflineMapCatalogCredentialStore: @unchecked Sendable {
             )
         }
         return addStatus
+    }
+
+    private func addToKeychain(
+        _ data: Data,
+        accessGroup: String?
+    ) -> OSStatus {
+        var item = keychainIdentity(accessGroup: accessGroup)
+        item[kSecValueData as String] = data
+        item[kSecAttrAccessible as String] =
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(item as CFDictionary, nil)
     }
 #endif
 }
@@ -642,13 +697,27 @@ nonisolated struct OfflineMapCatalogDownloadGrant: Codable, Equatable, Sendable 
 
 nonisolated enum OfflineMapCatalogAliasPolicy {
     static func normalizedAlias(_ value: String) -> String? {
+        guard !value.unicodeScalars.contains(where: {
+            $0.properties.generalCategory == .control
+        }) else {
+            return nil
+        }
+        // Match ECMAScript String.prototype.trim exactly after rejecting Cc.
+        // Foundation's whitespace set also contains U+200B, which JavaScript
+        // deliberately preserves, so using it would split the client/server
+        // alias contract for invisible format scalars.
+        let catalogTrimCharacters = CharacterSet(
+            charactersIn:
+                "\u{0020}\u{00A0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}" +
+                "\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}" +
+                "\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}"
+        )
         let alias = value
             .precomposedStringWithCanonicalMapping
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: catalogTrimCharacters)
         guard !alias.isEmpty,
-              alias.count <= 80,
-              alias.utf8.count <= 240,
-              alias.rangeOfCharacter(from: .controlCharacters) == nil else {
+              alias.unicodeScalars.count <= 80,
+              alias.utf8.count <= 240 else {
             return nil
         }
         return alias
@@ -759,7 +828,9 @@ final class OfflineMapCatalogCredentialCoordinator {
     func credential(
         loadExisting: @escaping @MainActor () -> OfflineMapCatalogCredential?,
         bootstrap: @escaping @MainActor (String?) async throws -> OfflineMapCatalogCredential,
-        save: @escaping @MainActor (OfflineMapCatalogCredential) throws -> Void
+        persistAnonymousBootstrap: @escaping @MainActor (
+            OfflineMapCatalogCredential
+        ) throws -> OfflineMapCatalogCredential
     ) async throws -> OfflineMapCatalogCredential {
         if let inFlight {
             return try await inFlight.task.value
@@ -769,8 +840,7 @@ final class OfflineMapCatalogCredentialCoordinator {
         let task = Task { @MainActor in
             let existing = loadExisting()
             let credential = try await bootstrap(existing?.credential)
-            try save(credential)
-            return credential
+            return try persistAnonymousBootstrap(credential)
         }
         inFlight = (id, task)
         do {

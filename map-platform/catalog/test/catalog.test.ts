@@ -1498,10 +1498,12 @@ describe("bounded artifact generations", () => {
       new Date(afterGrace.getTime() + 60_000),
     );
     expect(
-      await env.DB.prepare("SELECT state FROM artifacts WHERE id = ?")
+      await env.DB.prepare(
+        "SELECT state, generation_head FROM artifacts WHERE id = ?",
+      )
         .bind(source.artifacts[0].artifactId)
-        .first<{ state: string }>(),
-    ).toMatchObject({ state: "deleted" });
+        .first<{ state: string; generation_head: number }>(),
+    ).toMatchObject({ state: "deleted", generation_head: 0 });
   });
 
   it("keeps an active promotion source live until its lease expires", async () => {
@@ -1561,7 +1563,7 @@ describe("bounded artifact generations", () => {
     ).toMatchObject({ state: "live" });
   });
 
-  it("atomically caps each map at sixteen live compatibility classes", async () => {
+  it("atomically caps each map at sixteen retained compatibility classes", async () => {
     const initial = uniquePublication("generation-class-boundary");
     await finalizePublication(
       env,
@@ -1621,7 +1623,7 @@ describe("bounded artifact generations", () => {
     expect(
       await env.DB.prepare(
         `SELECT COUNT(DISTINCT generation_class) AS count
-           FROM artifacts WHERE map_entry_id = ? AND state = 'live'`,
+           FROM artifacts WHERE map_entry_id = ? AND state <> 'deleted'`,
       )
         .bind(initial.mapEntryId)
         .first<{ count: number }>(),
@@ -1637,12 +1639,351 @@ describe("bounded artifact generations", () => {
     );
     expect(attached.artifacts).toHaveLength(16);
   });
+
+  it("does not free quarantined class capacity until deletion is confirmed", async () => {
+    const initial = uniquePublication("quarantined-class-boundary");
+    await finalizePublication(
+      env,
+      initial,
+      "quarantined-class-boundary-0",
+      await sha256Hex(JSON.stringify(initial)),
+      null,
+      verifyTestArtifact,
+    );
+    const library = await bootstrapLibrary(env);
+    await attachLibrary(
+      env,
+      initial.publicationId,
+      library.libraryId,
+      undefined,
+      "production",
+    );
+
+    const classPublication = (index: number) => {
+      const candidate = structuredClone(initial);
+      const classIdentity = index.toString(16).padStart(2, "0").repeat(32);
+      candidate.publicationId = `job-quarantined-class-boundary-${index}`;
+      candidate.artifacts[0].artifactId = fixtureID("artifact");
+      candidate.artifacts[0].objectKey += `.quarantined-class-${index}`;
+      candidate.artifacts[0].sha256 = classIdentity;
+      candidate.artifacts[0].signedManifestReceipt = classIdentity;
+      candidate.artifacts[0].signatureKeyId = `quarantined-class-${index}`;
+      candidate.artifacts[0].signatureKeySha256 = classIdentity;
+      return candidate;
+    };
+    for (let index = 1; index < 16; index += 1) {
+      const candidate = classPublication(index);
+      await finalizePublication(
+        env,
+        candidate,
+        `quarantined-class-boundary-${index}`,
+        await sha256Hex(JSON.stringify(candidate)),
+        null,
+        verifyTestArtifact,
+      );
+    }
+
+    await quarantinePublication(env, initial.publicationId, "production");
+    const seventeenth = classPublication(16);
+    const seventeenthBodyHash = await sha256Hex(JSON.stringify(seventeenth));
+    await expect(
+      finalizePublication(
+        env,
+        seventeenth,
+        "quarantined-class-boundary-16",
+        seventeenthBodyHash,
+        null,
+        verifyTestArtifact,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    const updateBypassArtifactID = fixtureID("artifact");
+    await env.DB.prepare(
+      `INSERT INTO artifacts(
+         id, map_entry_id, bucket_slot, object_key, format, media_type,
+         filename, byte_count, sha256, manifest_receipt, signed_manifest_receipt,
+         signature_key_id, signature_key_sha256, producer_build_sha256,
+         producer_image_digest, reader_requirements_json, generation_class,
+         superseded_at, generation_head, required_ios_build,
+         required_ios_git_sha, required_ios_build_sha256,
+         required_firmware_version, required_firmware_build,
+         required_firmware_git_sha, delivery_tier, state, created_at, verified_at
+       ) SELECT ?, map_entry_id, bucket_slot, ?, format, media_type, filename,
+                byte_count, sha256, manifest_receipt, signed_manifest_receipt,
+                signature_key_id, signature_key_sha256, producer_build_sha256,
+                producer_image_digest, reader_requirements_json, ?, NULL, 0,
+                required_ios_build, required_ios_git_sha,
+                required_ios_build_sha256, required_firmware_version,
+                required_firmware_build, required_firmware_git_sha,
+                delivery_tier, 'deleted', created_at, verified_at
+           FROM artifacts WHERE id = ?`,
+    )
+      .bind(
+        updateBypassArtifactID,
+        `${initial.artifacts[0].objectKey}.deleted-class`,
+        "deleted-class-update-bypass",
+        initial.artifacts[0].artifactId,
+      )
+      .run();
+    await expect(
+      env.DB.prepare("UPDATE artifacts SET state = 'quarantined' WHERE id = ?")
+        .bind(updateBypassArtifactID)
+        .run(),
+    ).rejects.toThrow(/artifact generation class limit/);
+    expect(
+      await env.DB.prepare(
+        `SELECT COUNT(DISTINCT generation_class) AS count
+           FROM artifacts WHERE map_entry_id = ? AND state <> 'deleted'`,
+      )
+        .bind(initial.mapEntryId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 16 });
+
+    const afterGrace = new Date(Date.now() + 31 * 24 * 60 * 60 * 1000);
+    const authorization = (
+      await prepareRetentionAuthorizations(env, "production", 10, afterGrace)
+    ).artifacts[0];
+    expect(authorization).toBeDefined();
+    const claim = await claimRetentionDeletion(
+      env,
+      authorization.artifactId,
+      "production",
+      authorization,
+      afterGrace,
+    );
+    await expect(
+      finalizePublication(
+        env,
+        seventeenth,
+        "quarantined-class-boundary-16",
+        seventeenthBodyHash,
+        null,
+        verifyTestArtifact,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+
+    await confirmRetentionDeletion(
+      env,
+      authorization.artifactId,
+      "production",
+      { ...claim, confirmedAbsent: true },
+      new Date(afterGrace.getTime() + 60_000),
+    );
+    await expect(
+      finalizePublication(
+        env,
+        seventeenth,
+        "quarantined-class-boundary-16",
+        seventeenthBodyHash,
+        null,
+        verifyTestArtifact,
+      ),
+    ).resolves.toMatchObject({ state: "finalized", replayed: false });
+    expect(
+      await env.DB.prepare(
+        `SELECT COUNT(DISTINCT generation_class) AS count
+           FROM artifacts WHERE map_entry_id = ? AND state <> 'deleted'`,
+      )
+        .bind(initial.mapEntryId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 16 });
+    await env.DB.prepare("DELETE FROM artifacts WHERE map_entry_id = ?")
+      .bind(initial.mapEntryId)
+      .run();
+  });
+
+  it("retains a referenced quarantined artifact until active grants expire", async () => {
+    const source = uniquePublication("quarantined-active-grant");
+    await finalizePublication(
+      env,
+      source,
+      "quarantined-active-grant",
+      await sha256Hex(JSON.stringify(source)),
+      null,
+      verifyTestArtifact,
+    );
+    const library = await bootstrapLibrary(env);
+    await attachLibrary(
+      env,
+      source.publicationId,
+      library.libraryId,
+      undefined,
+      "production",
+    );
+    await createLibraryDownloadGrant(
+      env,
+      library.libraryId,
+      source.mapEntryId,
+      "production",
+      [{ keyId: "prod", keySha256: signerSha }],
+      appIdentity,
+      readerCapabilities,
+    );
+    await quarantinePublication(env, source.publicationId, "production");
+
+    const afterGrace = new Date(Date.now() + 31 * 24 * 60 * 60 * 1000);
+    await env.DB.prepare(
+      "UPDATE download_grants SET expires_at = ? WHERE artifact_id = ?",
+    )
+      .bind(
+        new Date(afterGrace.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+        source.artifacts[0].artifactId,
+      )
+      .run();
+    expect(
+      (
+        await prepareRetentionAuthorizations(env, "production", 10, afterGrace)
+      ).artifacts.find(
+        (artifact) => artifact.artifactId === source.artifacts[0].artifactId,
+      ),
+    ).toBeUndefined();
+
+    await env.DB.prepare(
+      "UPDATE download_grants SET expires_at = ? WHERE artifact_id = ?",
+    )
+      .bind(
+        new Date(afterGrace.getTime() - 60_000).toISOString(),
+        source.artifacts[0].artifactId,
+      )
+      .run();
+    const authorization = (
+      await prepareRetentionAuthorizations(env, "production", 10, afterGrace)
+    ).artifacts.find(
+      (artifact) => artifact.artifactId === source.artifacts[0].artifactId,
+    );
+    expect(authorization).toBeDefined();
+    const claim = await claimRetentionDeletion(
+      env,
+      source.artifacts[0].artifactId,
+      "production",
+      authorization!,
+      afterGrace,
+    );
+    await confirmRetentionDeletion(
+      env,
+      source.artifacts[0].artifactId,
+      "production",
+      { ...claim, confirmedAbsent: true },
+      new Date(afterGrace.getTime() + 60_000),
+    );
+    expect(
+      await env.DB.prepare(
+        "SELECT state, generation_head FROM artifacts WHERE id = ?",
+      )
+        .bind(source.artifacts[0].artifactId)
+        .first<{ state: string; generation_head: number }>(),
+    ).toMatchObject({ state: "deleted", generation_head: 0 });
+
+    const republished = structuredClone(source);
+    republished.publicationId = "job-quarantined-active-grant-republished";
+    republished.artifacts[0].artifactId = fixtureID("artifact");
+    republished.artifacts[0].objectKey += ".republished";
+    republished.artifacts[0].sha256 = "3".repeat(64);
+    republished.artifacts[0].signedManifestReceipt = "2".repeat(64);
+    republished.artifacts[0].producerBuildSha256 = "1".repeat(64);
+    republished.artifacts[0].producerImageDigest = `sha256:${"0".repeat(64)}`;
+    await expect(
+      finalizePublication(
+        env,
+        republished,
+        "quarantined-active-grant-republished",
+        await sha256Hex(JSON.stringify(republished)),
+        null,
+        verifyTestArtifact,
+      ),
+    ).resolves.toMatchObject({ state: "finalized" });
+  });
+
+  it("retains a referenced quarantined artifact until its promotion lease expires", async () => {
+    const source = developmentPublication("quarantined-active-promotion");
+    await finalizePublication(
+      env,
+      source,
+      "quarantined-active-promotion",
+      await sha256Hex(JSON.stringify(source)),
+      null,
+      verifyTestArtifact,
+    );
+    const library = await bootstrapLibrary(env);
+    await attachLibrary(
+      env,
+      source.publicationId,
+      library.libraryId,
+      undefined,
+      "development",
+    );
+    const clock = new Date();
+    await createPromotionGrant(env, source.mapEntryId, clock);
+    await quarantinePublication(env, source.publicationId, "development");
+
+    const afterGrace = new Date(clock.getTime() + 31 * 24 * 60 * 60 * 1000);
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE download_grants SET expires_at = ? WHERE artifact_id = ?",
+      ).bind(
+        new Date(afterGrace.getTime() - 60_000).toISOString(),
+        source.artifacts[0].artifactId,
+      ),
+      env.DB.prepare(
+        "UPDATE promotion_leases SET expires_at = ? WHERE source_artifact_id = ?",
+      ).bind(
+        new Date(afterGrace.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+        source.artifacts[0].artifactId,
+      ),
+    ]);
+    expect(
+      (
+        await prepareRetentionAuthorizations(env, "development", 10, afterGrace)
+      ).artifacts.find(
+        (artifact) => artifact.artifactId === source.artifacts[0].artifactId,
+      ),
+    ).toBeUndefined();
+
+    await env.DB.prepare(
+      "UPDATE promotion_leases SET expires_at = ? WHERE source_artifact_id = ?",
+    )
+      .bind(
+        new Date(afterGrace.getTime() - 60_000).toISOString(),
+        source.artifacts[0].artifactId,
+      )
+      .run();
+    const authorization = (
+      await prepareRetentionAuthorizations(env, "development", 10, afterGrace)
+    ).artifacts.find(
+      (artifact) => artifact.artifactId === source.artifacts[0].artifactId,
+    );
+    expect(authorization).toBeDefined();
+    const claim = await claimRetentionDeletion(
+      env,
+      source.artifacts[0].artifactId,
+      "development",
+      authorization!,
+      afterGrace,
+    );
+    await confirmRetentionDeletion(
+      env,
+      source.artifacts[0].artifactId,
+      "development",
+      { ...claim, confirmedAbsent: true },
+      new Date(afterGrace.getTime() + 60_000),
+    );
+  });
 });
 
 describe("validation", () => {
-  it("normalizes names and rejects control characters", () => {
+  it("normalizes aliases using the cross-platform Unicode contract", () => {
     expect(normalizeAlias("  Cafe\u0301 route  ")).toBe("Café route");
+    expect(normalizeAlias("\uFEFFMap name\uFEFF")).toBe("Map name");
+    expect(normalizeAlias("A\u200DB")).toBe("A\u200DB");
+    expect(normalizeAlias("\u200BMap name\u200B")).toBe("\u200BMap name\u200B");
+    expect(normalizeAlias("😀".repeat(40))).toBe("😀".repeat(40));
+    expect(normalizeAlias("😀".repeat(41))).toBe("😀".repeat(41));
+    expect(normalizeAlias("😀".repeat(60))).toBe("😀".repeat(60));
+    expect(normalizeAlias("é".repeat(80))).toBe("é".repeat(80));
+    expect(() => normalizeAlias("😀".repeat(61))).toThrow(HttpError);
+    expect(() => normalizeAlias("a".repeat(81))).toThrow(HttpError);
     expect(() => normalizeAlias("bad\nname")).toThrow(HttpError);
+    expect(() => normalizeAlias("\ttrimmed control")).toThrow(HttpError);
+    expect(() => normalizeAlias("bad\u0085name")).toThrow(HttpError);
   });
 
   it("rejects an idempotency replay with different bytes", async () => {
