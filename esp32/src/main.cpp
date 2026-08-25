@@ -86,6 +86,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "boot_diagnostics.hpp"
 #include "display_inactivity_policy.hpp"
 #include "display_power.hpp"
+#include "runtime_watchdog_diagnostics.hpp"
 #endif
 #include "disconnected_shutdown_policy.hpp"
 #include "ownership_button_policy.hpp"
@@ -1336,6 +1337,14 @@ void setup() {
 #endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   boot_diagnostics::begin();
+  const boot_diagnostics::Snapshot initialBoot =
+      boot_diagnostics::snapshot();
+  runtime_watchdog_diagnostics::begin(
+      initialBoot.bootSequence, initialBoot.firmwareFingerprint,
+      initialBoot.resetReason == static_cast<uint32_t>(ESP_RST_TASK_WDT));
+  runtime_watchdog_diagnostics::registerCurrentTask(
+      runtime_watchdog_diagnostics::Role::Ui,
+      runtime_watchdog_diagnostics::Phase::Setup);
   if (boot_diagnostics::safeModeActive()) {
     // setup() returns into a deliberately inert loop. No I2C, PMIC, display,
     // storage, speaker, radio, or charging-control initialization is attempted.
@@ -1542,6 +1551,13 @@ void setup() {
       diagnosticBoot.diagnosticHold ? "true" : "false");
   ride_diagnostics::record(ride_diagnostics::Level::Info, "boot",
                            "boot_snapshot", diagnosticBootFields);
+  char previousWatchdogFields[320] = {};
+  if (runtime_watchdog_diagnostics::formatPreviousTaskWatchdogFields(
+          previousWatchdogFields, sizeof(previousWatchdogFields))) {
+    ride_diagnostics::record(ride_diagnostics::Level::Warning, "boot",
+                             "task_watchdog_context",
+                             previousWatchdogFields);
+  }
 #else
   ride_diagnostics::begin(storage, 1, 1);
 #endif
@@ -1731,6 +1747,8 @@ void setup() {
  */
 void loop() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  runtime_watchdog_diagnostics::heartbeat(
+      runtime_watchdog_diagnostics::Role::Ui);
   if (boot_diagnostics::safeModeActive()) {
     delay(1000);
     return;

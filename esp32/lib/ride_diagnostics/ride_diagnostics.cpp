@@ -17,6 +17,7 @@
 
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../storage/storage.hpp"
+#include "../runtime_watchdog_diagnostics/runtime_watchdog_diagnostics.hpp"
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "../boot_diagnostics/boot_diagnostics.hpp"
@@ -451,10 +452,22 @@ enum class ActiveFileCloseResult : uint8_t {
 ActiveFileCloseResult closeActiveFile() {
   if (activeFile == nullptr)
     return ActiveFileCloseResult::Ready;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  runtime_watchdog_diagnostics::notePhase(
+      runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
+      runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
+      nextSequence.load(std::memory_order_relaxed));
+#endif
   const int flushResult =
       storage != nullptr ? storage->flush(activeFile) : fflush(activeFile);
   const int closeResult =
       storage != nullptr ? storage->close(activeFile) : fclose(activeFile);
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  runtime_watchdog_diagnostics::notePhase(
+      runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
+      runtime_watchdog_diagnostics::Phase::Waiting,
+      nextSequence.load(std::memory_order_relaxed));
+#endif
   activeFile = nullptr;
   if (flushResult != 0)
     return ActiveFileCloseResult::FlushFailed;
@@ -694,6 +707,12 @@ bool prepareChunkWriteReserve() {
 }
 
 bool writeQueuedEvent(const QueuedEvent &event) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  runtime_watchdog_diagnostics::notePhase(
+      runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
+      runtime_watchdog_diagnostics::Phase::DiagnosticsWrite,
+      event.sequence);
+#endif
   if (storage == nullptr || !storage->getDiagnosticsSdLoaded()) {
     abandonActiveChunkAfterUncertainWrite();
     storageErrors.fetch_add(1);
@@ -755,6 +774,12 @@ bool writeQueuedEvent(const QueuedEvent &event) {
   activeFileBytes += static_cast<uint32_t>(result);
   const uint32_t nowMs = millis();
   if (event.critical || static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+    runtime_watchdog_diagnostics::notePhase(
+        runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
+        runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
+        event.sequence);
+#endif
     if (storage->flush(activeFile) != 0) {
       abandonActiveChunkAfterUncertainWrite();
       storage->markDiagnosticsSdUnavailable();
@@ -910,6 +935,11 @@ bool completeSealIfReady() {
 }
 
 void writerTask(void *) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  runtime_watchdog_diagnostics::registerCurrentTask(
+      runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
+      runtime_watchdog_diagnostics::Phase::Waiting);
+#endif
   uint32_t lastMountAttemptMs = 0;
   lastStorageAvailable.store(
       storage != nullptr && storage->getDiagnosticsSdLoaded(),
@@ -943,7 +973,17 @@ void writerTask(void *) {
     }
     if (dequeued) {
       writeQueuedEvent(event);
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+      runtime_watchdog_diagnostics::notePhase(
+          runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
+          runtime_watchdog_diagnostics::Phase::Waiting,
+          event.sequence);
+#endif
     } else if (!hasNext || transitionPaused) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+      runtime_watchdog_diagnostics::heartbeat(
+          runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter);
+#endif
       vTaskDelay(pdMS_TO_TICKS(50));
     }
 
@@ -961,6 +1001,12 @@ void writerTask(void *) {
     if (activeFile != nullptr &&
         (checkpointRequested.exchange(false) ||
          static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U)) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+      runtime_watchdog_diagnostics::notePhase(
+          runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
+          runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
+          nextSequence.load(std::memory_order_relaxed));
+#endif
       if (storage->flush(activeFile) == 0) {
         lastCheckpointMs = nowMs;
       } else {
@@ -969,13 +1015,31 @@ void writerTask(void *) {
         storageErrors.fetch_add(1);
         updateFaultCapsule(Level::Error, "storage", "flush_failed", true);
       }
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+      runtime_watchdog_diagnostics::notePhase(
+          runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
+          runtime_watchdog_diagnostics::Phase::Waiting,
+          nextSequence.load(std::memory_order_relaxed));
+#endif
     }
     const bool recoveryAllowed = storageRecoveryAllowedProbe == nullptr ||
                                  storageRecoveryAllowedProbe();
     if (recoveryAllowed && storage->canRetryDiagnosticsSd() &&
         static_cast<uint32_t>(nowMs - lastMountAttemptMs) >= 5000U) {
       lastMountAttemptMs = nowMs;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+      runtime_watchdog_diagnostics::notePhase(
+          runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
+          runtime_watchdog_diagnostics::Phase::DiagnosticsRecovery,
+          nextSequence.load(std::memory_order_relaxed));
+#endif
       storage->ensureDiagnosticsSdMounted();
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+      runtime_watchdog_diagnostics::notePhase(
+          runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
+          runtime_watchdog_diagnostics::Phase::Waiting,
+          nextSequence.load(std::memory_order_relaxed));
+#endif
     }
     const bool available = storage->getDiagnosticsSdLoaded();
     const bool wasAvailable =
