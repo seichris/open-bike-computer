@@ -126,6 +126,16 @@ Static sources are stored in the source index; other areas are resolved from
 the cached Geofabrik catalog at job creation time and persisted with the job
 before the worker downloads the matching PBF.
 
+Checksum-pinned sources are immutable. Mutable sources without a checksum are
+revalidated at most once per `MAP_PLATFORM_SOURCE_CACHE_REVALIDATE_SECONDS`
+using their HTTP `ETag` and `Last-Modified` validators. The cache records the
+requested and resolved URLs, validators, download/validation timestamps, byte
+count, and exact SHA-256 in `source-cache.json`, retaining provenance by region
+and snapshot SHA after a newer PBF replaces the active file. An existing file
+without that provenance falls back to its modification time and is replaced
+atomically once it becomes due. Jobs continue to bind their work to the
+verified file SHA-256.
+
 ## Coolify
 
 Use `map-platform/deploy/compose.yaml` for Coolify production. It independently
@@ -364,6 +374,9 @@ Useful production environment variables:
   `86400`.
 - `MAP_PLATFORM_GEOFABRIK_FAILURE_COOLDOWN_SECONDS`: fail-fast interval shared
   by concurrent catalog callers after an upstream failure, default `30`.
+- `MAP_PLATFORM_SOURCE_CACHE_REVALIDATE_SECONDS`: maximum age of upstream
+  validation for checksum-less source PBFs, default `86400` (24 hours). `0`
+  revalidates on every cache use; invalid or negative values fail startup.
 
 Completed jobs expose an `artifacts` array. A client refreshes the immutable
 stream URL with:

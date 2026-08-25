@@ -491,6 +491,42 @@ class BuildingRelationIngressTests(unittest.TestCase):
             )
             self.assertEqual(malformed.returncode, 2, malformed.stdout + malformed.stderr)
             self.assertIn("source relation r106 has part members but no outline", malformed.stdout)
+            self.assertIn(
+                "w20[r=1,b=-,bp=1;s=1,b=-,bp=1;inc=1,parents=1,outline=0]",
+                malformed.stdout,
+            )
+
+            runtime_untagged_source = root / "runtime-untagged.osm"
+            runtime_untagged_source.write_text(
+                re.sub(
+                    r'(<way id="20".*?)(\s*<tag k="building:part" v="yes" />)',
+                    r"\1",
+                    malformed_source.read_text(),
+                    count=1,
+                    flags=re.DOTALL,
+                )
+            )
+            runtime_untagged = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(runtime_untagged_source),
+                    str(root / "runtime-untagged.json"),
+                    "--source-index-manifest", str(malformed_index.manifest_path),
+                    "--scope-plan", str(scope_path),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(
+                runtime_untagged.returncode,
+                2,
+                runtime_untagged.stdout + runtime_untagged.stderr,
+            )
+            self.assertIn(
+                "w20[r=1,b=-,bp=-;s=1,b=-,bp=1;inc=1,parents=1,outline=0]",
+                runtime_untagged.stdout,
+            )
 
             incomplete_fixture = root / "incomplete.osm"
             incomplete_fixture.write_text(

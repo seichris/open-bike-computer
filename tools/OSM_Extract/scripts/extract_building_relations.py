@@ -307,6 +307,11 @@ def audit_closure(
                     if len(parts) > 8:
                         detail += ",..."
                     detail += ")"
+                    detail += "; " + _incomplete_part_diagnostics(
+                        handler,
+                        connection,
+                        parts,
+                    )
                 raise BuildingSourceIndexError(
                     "building_relation_incomplete",
                     detail,
@@ -380,9 +385,10 @@ def _closure_rows(
 ):
     """Yield closure rows using bounded ``IN`` queries instead of N+1 reads."""
 
-    if table not in {"relations", "ways"} or value_column not in {
-        "members_json",
-        "nodes_json",
+    if (table, value_column) not in {
+        ("relations", "members_json"),
+        ("ways", "nodes_json"),
+        ("ways", "tags_json"),
     }:
         raise ValueError("invalid closure row selector")
     ordered_keys = tuple(sorted(keys))
@@ -397,6 +403,57 @@ def _closure_rows(
         values = {row[0]: row[1] for row in rows}
         for key in batch:
             yield key, values.get(key)
+
+
+def _incomplete_part_diagnostics(
+    handler: BuildingRelationHandler,
+    connection: sqlite3.Connection,
+    parts: tuple[str, ...],
+) -> str:
+    """Compare bounded source-index and runtime tag evidence for failed parts."""
+
+    source_tags = {}
+    for part, tags_json in _closure_rows(
+        connection,
+        table="ways",
+        value_column="tags_json",
+        keys={part for part in parts[:8] if part.startswith("w")},
+    ):
+        source_tags[part] = json.loads(tags_json) if tags_json is not None else None
+    incomplete_parent_counts: dict[str, int] = {}
+    for relation_parts in handler.incomplete_relation_parts.values():
+        for part in relation_parts:
+            incomplete_parent_counts[part] = (
+                incomplete_parent_counts.get(part, 0) + 1
+            )
+    values = []
+    for part in parts[:8]:
+        runtime = handler.way_tags.get(part)
+        source = source_tags.get(part)
+        values.append(
+            f"{part}[r={int(runtime is not None)},"
+            f"b={_building_tag_state(runtime, 'building')},"
+            f"bp={_building_tag_state(runtime, 'building:part')};"
+            f"s={int(source is not None)},"
+            f"b={_building_tag_state(source, 'building')},"
+            f"bp={_building_tag_state(source, 'building:part')};"
+            f"inc={incomplete_parent_counts.get(part, 0)},"
+            f"parents={len(handler.part_parent_candidates.get(part, ()))},"
+            f"outline={int(part in handler.parent_tags)}]"
+        )
+    suffix = ",..." if len(parts) > 8 else ""
+    return (
+        "partDiagnostics(r/s=runtime/source loaded; "
+        "b/bp -=missing,0=empty-or-no,1=explicit):"
+        + ",".join(values)
+        + suffix
+    )
+
+
+def _building_tag_state(tags: dict[str, str] | None, key: str) -> str:
+    if tags is None or key not in tags:
+        return "-"
+    return "0" if tags.get(key) in (None, "", "no") else "1"
 
 
 def is_building_relation(tags: dict[str, str]) -> bool:
