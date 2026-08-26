@@ -37,10 +37,16 @@ all four critical sections:
 The section starts with:
 
 ```text
-buildingCount               u16, maximum 8,192
+buildingCount               u16, maximum 12,288
 reserved                    u16 = 0
 declaredPointCount          u32, maximum 131,072
 ```
+
+The producer, backend validator, and firmware stream validator enforce the
+12,288-record ceiling together. The point-count and 2 MiB block-size ceilings
+remain independent hard limits. Exceeding any limit fails the target-3 build
+with a typed error; the producer never truncates or silently downgrades the
+building table.
 
 Every building fragment has one fixed 18-byte record followed by its rings:
 

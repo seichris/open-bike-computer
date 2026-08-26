@@ -20,7 +20,7 @@ constexpr uint32_t kMaximumRoadLabels = 8192;
 constexpr uint32_t kMaximumLabelCandidates = 16384;
 constexpr uint8_t kMaximumLabelVariants = 8;
 constexpr uint8_t kMaximumGlyphsPerRun = 192;
-constexpr uint32_t kMaximumBuildings = 8192;
+constexpr uint32_t kMaximumBuildings = 12288;
 constexpr uint32_t kMaximumBuildingRings = 32;
 constexpr uint32_t kMaximumBuildingPoints = 131072;
 
