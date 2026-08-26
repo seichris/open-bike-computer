@@ -40,9 +40,15 @@ class BLENotificationDispatchTests(unittest.TestCase):
         self.assertIn("deferredNotificationEventScheduled", schedule)
         self.assertIn("compare_exchange_strong", schedule)
 
-        send = function_body(BLE_SOURCE, "static bool sendWireNotification")
+        send = function_body(
+            BLE_SOURCE,
+            "sendWireNotification(NimBLECharacteristic *characteristic",
+        )
         self.assertIn("server->getPeerMTU", send)
-        self.assertIn("characteristic->notify()", send)
+        self.assertIn("ble_gatts_notify_custom", send)
+        self.assertIn("BLE_HS_ENOMEM", send)
+        self.assertIn("TransportResult::Retry", send)
+        self.assertNotIn("characteristic->notify()", send)
 
         for producer in (
             function_body(BLE_SOURCE, "static void notifyMapTransferStatus"),
@@ -54,6 +60,14 @@ class BLENotificationDispatchTests(unittest.TestCase):
             self.assertIn("activePeerMtu.load", producer)
 
     def test_arduino_loop_does_not_drain_deferred_transport(self):
+        drain = function_body(
+            BLE_SOURCE, "static void processDeferredNotifications() {"
+        )
+        self.assertNotIn("while (true)", drain)
+        self.assertIn("decideAfterAttempt", drain)
+        self.assertIn("decision.consumeHead", drain)
+        self.assertIn("deferredNotificationEventPending.store(true", drain)
+
         process = function_body(BLE_SOURCE, "void BLENavigationServer::process()")
         self.assertNotIn("processDeferredNotifications()", process)
         self.assertIn("scheduleDeferredNotificationEvent()", process)
@@ -66,6 +80,7 @@ class BLENotificationDispatchTests(unittest.TestCase):
             "deferredNotificationEventScheduled.store(false",
             event_handler,
         )
+        self.assertIn("deferredNotificationEventPending.load", event_handler)
         self.assertLess(
             event_handler.index("deferredNotificationEventPending.store(false"),
             event_handler.index("processDeferredNotifications()"),

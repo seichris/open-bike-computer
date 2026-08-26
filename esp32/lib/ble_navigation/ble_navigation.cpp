@@ -21,6 +21,7 @@
 #include "map_setting_redraw_policy.hpp"
 #include "map_profile_persistence.hpp"
 #include "device_capabilities_protocol.hpp"
+#include "deferred_notification_dispatch_policy.hpp"
 #include "scoped_watch_payload_policy.hpp"
 #include "map_transfer_status_chunk_session.hpp"
 #include "renderer_diagnostics_ble_protocol.hpp"
@@ -67,6 +68,9 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <host/ble_hs_id.h>
+#include <host/ble_gatt.h>
+#include <host/ble_hs.h>
+#include <host/ble_hs_mbuf.h>
 #include <nimble/porting/nimble/include/nimble/nimble_port.h>
 #include <mbedtls/md.h>
 #include <WiFi.h>
@@ -1174,20 +1178,24 @@ static void scheduleDeferredNotificationEvent() {
                      &deferredNotificationEvent);
 }
 
-static bool sendWireNotification(NimBLECharacteristic *characteristic,
-                                 uint16_t connectionHandle,
-                                 const uint8_t *data, size_t length,
-                                 const char *label) {
+static ble_notification_dispatch_policy::TransportResult
+sendWireNotification(NimBLECharacteristic *characteristic,
+                     uint16_t connectionHandle, const uint8_t *data,
+                     size_t length, const char *label) {
+  using ble_notification_dispatch_policy::TransportResult;
   if (characteristic == nullptr || data == nullptr || length == 0 ||
-      notificationTransportMutex == nullptr ||
-      xSemaphoreTake(notificationTransportMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-    return false;
+      notificationTransportMutex == nullptr) {
+    return TransportResult::Drop;
+  }
+  if (xSemaphoreTake(notificationTransportMutex, pdMS_TO_TICKS(100)) !=
+      pdTRUE) {
+    return TransportResult::Retry;
   }
   if (connectionHandle == BLE_HS_CONN_HANDLE_NONE ||
       activeConnHandle != connectionHandle ||
       characteristic->getSubscribedCount() == 0) {
     xSemaphoreGive(notificationTransportMutex);
-    return false;
+    return TransportResult::Drop;
   }
   uint16_t peerMtu = 23;
   NimBLEService *service = characteristic->getService();
@@ -1200,12 +1208,33 @@ static bool sendWireNotification(NimBLECharacteristic *characteristic,
                   label == nullptr ? "wire" : label,
                   static_cast<unsigned>(length + 3), peerMtu);
     xSemaphoreGive(notificationTransportMutex);
-    return false;
+    return TransportResult::Drop;
   }
+
+  os_mbuf *payload =
+      ble_hs_mbuf_from_flat(data, static_cast<uint16_t>(length));
+  if (payload == nullptr) {
+    xSemaphoreGive(notificationTransportMutex);
+    return TransportResult::Retry;
+  }
+
   characteristic->setValue(data, length);
-  characteristic->notify();
+  // NimBLE-Arduino 1.4's characteristic notify() API returns void and drops
+  // the host result. Use the underlying free-form server notification so a
+  // finite ATT/L2CAP buffer condition can preserve and retry this exact frame.
+  const int result = ble_gatts_notify_custom(
+      connectionHandle, characteristic->getHandle(), payload);
   xSemaphoreGive(notificationTransportMutex);
-  return true;
+  if (result == 0) {
+    return TransportResult::Sent;
+  }
+  if (result == BLE_HS_EAGAIN || result == BLE_HS_ENOMEM ||
+      result == BLE_HS_EBUSY || result == BLE_HS_ENOMEM_EVT) {
+    return TransportResult::Retry;
+  }
+  Serial.printf("BLE: %s notification dropped by host rc=%d\n",
+                label == nullptr ? "wire" : label, result);
+  return TransportResult::Drop;
 }
 
 static bool isNimbleCallbackContext() {
@@ -1214,30 +1243,44 @@ static bool isNimbleCallbackContext() {
 }
 
 static void processDeferredNotifications() {
+  using ble_notification_dispatch_policy::TransportResult;
   const uint32_t dropped =
       deferredNotificationDrops.exchange(0, std::memory_order_acq_rel);
   if (dropped != 0) {
     Serial.printf("BLE: Deferred notification queue dropped=%lu\n",
                   static_cast<unsigned long>(dropped));
   }
-  while (true) {
-    DeferredNotification pending;
-    bool available = false;
-    portENTER_CRITICAL(&deferredNotificationMux);
-    if (deferredNotificationCount > 0) {
-      pending = deferredNotifications[deferredNotificationHead];
-      deferredNotificationHead = static_cast<uint8_t>(
-          (deferredNotificationHead + 1) % kDeferredNotificationCapacity);
-      deferredNotificationCount--;
-      available = true;
-    }
-    portEXIT_CRITICAL(&deferredNotificationMux);
-    if (!available) {
-      return;
-    }
-    (void)sendWireNotification(pending.characteristic,
-                               pending.connectionHandle, pending.payload,
-                               pending.length, "deferred");
+  DeferredNotification pending;
+  uint8_t queuedBefore = 0;
+  portENTER_CRITICAL(&deferredNotificationMux);
+  queuedBefore = deferredNotificationCount;
+  if (queuedBefore > 0) {
+    pending = deferredNotifications[deferredNotificationHead];
+  }
+  portEXIT_CRITICAL(&deferredNotificationMux);
+  if (queuedBefore == 0) {
+    return;
+  }
+
+  const TransportResult result = sendWireNotification(
+      pending.characteristic, pending.connectionHandle, pending.payload,
+      pending.length, "deferred");
+  const auto decision =
+      ble_notification_dispatch_policy::decideAfterAttempt(result,
+                                                            queuedBefore);
+
+  bool continueLater = decision.continueLater;
+  portENTER_CRITICAL(&deferredNotificationMux);
+  if (decision.consumeHead && deferredNotificationCount > 0) {
+    deferredNotificationHead = static_cast<uint8_t>(
+        (deferredNotificationHead + 1) % kDeferredNotificationCapacity);
+    deferredNotificationCount--;
+  }
+  continueLater = continueLater || deferredNotificationCount > 0;
+  portEXIT_CRITICAL(&deferredNotificationMux);
+
+  if (continueLater) {
+    deferredNotificationEventPending.store(true, std::memory_order_release);
   }
 }
 
@@ -1253,7 +1296,8 @@ static void deferredNotificationEventHandler(struct ble_npl_event *event) {
   // returned.
   processDeferredNotifications();
   deferredNotificationEventScheduled.store(false, std::memory_order_release);
-  if (pendingMapTransferStatusContinuation.load(std::memory_order_acquire)) {
+  if (deferredNotificationEventPending.load(std::memory_order_acquire) ||
+      pendingMapTransferStatusContinuation.load(std::memory_order_acquire)) {
     ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
   }
 }

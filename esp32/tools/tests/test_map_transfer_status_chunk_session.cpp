@@ -1,9 +1,62 @@
 #include "../../lib/ble_navigation/map_transfer_status_chunk_session.hpp"
+#include "../../lib/ble_navigation/deferred_notification_dispatch_policy.hpp"
 
 #include <cassert>
 #include <iostream>
+#include <vector>
 
 int main() {
+  using ble_notification_dispatch_policy::TransportResult;
+
+  auto dispatch =
+      ble_notification_dispatch_policy::decideAfterAttempt(
+          TransportResult::Sent, 1);
+  assert(dispatch.consumeHead);
+  assert(!dispatch.continueLater);
+  dispatch = ble_notification_dispatch_policy::decideAfterAttempt(
+      TransportResult::Sent, 3);
+  assert(dispatch.consumeHead);
+  assert(dispatch.continueLater);
+  dispatch = ble_notification_dispatch_policy::decideAfterAttempt(
+      TransportResult::Retry, 1);
+  assert(!dispatch.consumeHead);
+  assert(dispatch.continueLater);
+  dispatch = ble_notification_dispatch_policy::decideAfterAttempt(
+      TransportResult::Drop, 2);
+  assert(dispatch.consumeHead);
+  assert(dispatch.continueLater);
+  dispatch = ble_notification_dispatch_policy::decideAfterAttempt(
+      TransportResult::Drop, 1);
+  assert(dispatch.consumeHead);
+  assert(!dispatch.continueLater);
+  dispatch = ble_notification_dispatch_policy::decideAfterAttempt(
+      TransportResult::Retry, 0);
+  assert(!dispatch.consumeHead);
+  assert(!dispatch.continueLater);
+
+  const std::vector<int> protectedFrames = {41, 42, 43};
+  const std::vector<TransportResult> transportResults = {
+      TransportResult::Retry, TransportResult::Sent, TransportResult::Sent,
+      TransportResult::Sent};
+  std::vector<int> attemptedFrames;
+  size_t queueHead = 0;
+  size_t queuedFrames = protectedFrames.size();
+  for (const TransportResult transportResult : transportResults) {
+    assert(queuedFrames > 0);
+    attemptedFrames.push_back(protectedFrames[queueHead]);
+    const auto attemptDecision =
+        ble_notification_dispatch_policy::decideAfterAttempt(transportResult,
+                                                              queuedFrames);
+    if (attemptDecision.consumeHead) {
+      ++queueHead;
+      --queuedFrames;
+    }
+    assert(attemptDecision.continueLater == (queuedFrames > 0));
+  }
+  assert((attemptedFrames == std::vector<int>{41, 41, 42, 43}));
+  assert(queueHead == protectedFrames.size());
+  assert(queuedFrames == 0);
+
   std::string statusBody = "{\"status\":\"idle\"";
   map_transfer_status_protocol::ActiveMapPresentation presentation;
   presentation.displayName = "Chris's \"Bike\"";
