@@ -82,6 +82,77 @@ int main() {
   assert(installed != activating);
   assert(session.transferIdFor("{\"status\":\"installed\"}") == installed);
 
+  map_transfer_status_protocol::ChunkTransmission transmission;
+  assert(!transmission.begin("", initial, 8));
+  assert(!transmission.begin("status", initial, 0));
+  assert(!transmission.active());
+
+  const std::string chunkBody = "abcdefghijklmnopqrstuvwxyz";
+  assert(transmission.begin(chunkBody, installed, 8));
+  assert(transmission.active());
+  assert(transmission.bodySize() == chunkBody.size());
+  assert(transmission.chunkCount() == 4);
+  assert(transmission.nextIndex() == 0);
+  assert(transmission.matches(chunkBody, installed, 8));
+  assert(!transmission.matches(chunkBody + "!", installed, 8));
+
+  std::string frame = transmission.nextFrame();
+  assert(frame.size() == 15);
+  assert(frame.substr(0, 4) == "MSTC");
+  assert(static_cast<uint8_t>(frame[4]) == installed);
+  assert(static_cast<uint8_t>(frame[5]) == 0);
+  assert(static_cast<uint8_t>(frame[6]) == 4);
+  assert(frame.substr(7) == "abcdefgh");
+
+  transmission.advance();
+  frame = transmission.nextFrame();
+  assert(static_cast<uint8_t>(frame[5]) == 1);
+  assert(frame.substr(7) == "ijklmnop");
+  transmission.advance();
+  frame = transmission.nextFrame();
+  assert(static_cast<uint8_t>(frame[5]) == 2);
+  assert(frame.substr(7) == "qrstuvwx");
+  transmission.advance();
+  frame = transmission.nextFrame();
+  assert(static_cast<uint8_t>(frame[5]) == 3);
+  assert(frame.substr(7) == "yz");
+  transmission.advance();
+  assert(!transmission.active());
+  assert(transmission.nextFrame().empty());
+
+  const std::string oversizedQueueBody = "0123456789ABCDEFGHIJ";
+  assert(transmission.begin(oversizedQueueBody, activating, 1));
+  for (size_t slot = 0; slot < 8; ++slot) {
+    assert(transmission.active());
+    assert(transmission.nextIndex() == slot);
+    transmission.advance();
+  }
+  assert(transmission.active());
+  assert(transmission.nextIndex() == 8);
+  for (size_t slot = 0; slot < 8; ++slot) {
+    assert(transmission.active());
+    assert(transmission.nextIndex() == slot + 8);
+    transmission.advance();
+  }
+  assert(transmission.active());
+  assert(transmission.nextIndex() == 16);
+  for (size_t slot = 0; slot < 4; ++slot) {
+    assert(transmission.active());
+    assert(transmission.nextIndex() == slot + 16);
+    transmission.advance();
+  }
+  assert(!transmission.active());
+  assert(transmission.nextIndex() == oversizedQueueBody.size());
+
+  transmission.reset();
+  assert(!transmission.active());
+  assert(transmission.bodySize() == 0);
+  assert(transmission.chunkCount() == 0);
+  assert(transmission.nextIndex() == 0);
+
+  assert(!transmission.begin(std::string(256, 'x'), initial, 1));
+  assert(!transmission.active());
+
   std::cout << "map transfer status chunk session tests passed\n";
   return 0;
 }
