@@ -1,7 +1,11 @@
 #!/usr/bin/env python
 from funcs import process_features, clip_lines, clip_polygons, style_features, render_map, lat2y, lon2x
 from feature_types import get_type_id
-from map_format import encode_building_section, write_fmb
+from map_format import (
+    MapFormatError,
+    encode_building_section,
+    write_fmb,
+)
 from font_asset import FontPackBuilder
 from label_pipeline import join_named_roads, normalize_preferred_languages, prepare_road_labels
 from block_progress import BlockProgressReporter
@@ -97,6 +101,7 @@ def fail_building_preprocess(code, message):
         flush=True,
     )
     raise SystemExit(2)
+
 
 conf = yaml.safe_load( open( CONF_FEATURES, "r"))
 styles = yaml.safe_load( open(CONF_STYLES, "r"))
@@ -545,8 +550,17 @@ if args.renderer_format == 3:
             building_cache_generation_seconds = (
                 time.perf_counter() - cache_generation_started
             )
-    except (CalibrationCacheError, BuildingBlockCacheError, OSError) as exc:
-        code = getattr(exc, "code", "building_block_cache_unavailable")
+    except (
+        CalibrationCacheError,
+        BuildingBlockCacheError,
+        MapFormatError,
+        OSError,
+    ) as exc:
+        code = getattr(
+            exc,
+            "code",
+            "building_block_cache_unavailable",
+        )
         print(
             "BUILDING_PREPROCESS_FAILURE:"
             + json.dumps(
@@ -745,14 +759,19 @@ for init_x, init_y in progress.track(block_positions):
             )
         elif args.renderer_format == 3:
             fmb_kwargs["building_records"] = clipped_buildings
-        block_metadata = write_fmb(
-            f"{file_name}.fmb",
-            clipped_polygons,
-            clipped_lines,
-            min_x,
-            min_y,
-            **fmb_kwargs,
-        )
+        try:
+            block_metadata = write_fmb(
+                f"{file_name}.fmb",
+                clipped_polygons,
+                clipped_lines,
+                min_x,
+                min_y,
+                **fmb_kwargs,
+            )
+        except MapFormatError as exc:
+            if args.renderer_format != 3:
+                raise
+            fail_building_preprocess(exc.code, exc)
         fmb_writing_seconds += time.perf_counter() - block_write_started
         if font_builder is not None:
             label_totals["blocks"] += 1

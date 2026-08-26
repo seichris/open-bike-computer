@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from map_platform.map_artifact_validation import (
+    MAX_BUILDINGS,
     validate_fma1,
     validate_fmb3,
     validate_fmb4,
@@ -17,6 +18,9 @@ from tests.map_label_fixtures import (
 
 
 class MapArtifactValidationTests(unittest.TestCase):
+    def test_dense_building_record_ceiling_matches_fmb_v4_contract(self):
+        self.assertEqual(MAX_BUILDINGS, 12288)
+
     def test_shared_legacy_fmb_golden_blocks_remain_target_one_compatible(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

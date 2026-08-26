@@ -106,6 +106,7 @@ static void refreshSectionCrc(std::vector<uint8_t> &data,
 }
 
 int main() {
+  static_assert(map_block_format::kMaximumBuildings == 12288);
   const auto golden = loadGoldenBlocks();
   assert(golden.size() == 4);
   const std::vector<uint8_t> &validV1 = golden.at("fmb_v1");

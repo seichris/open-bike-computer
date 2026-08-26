@@ -10,7 +10,13 @@ import zlib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from map_format import MapFormatError, encode_building_section, write_fmb
+from map_format import (
+    MAX_BLOCK_BUILDINGS,
+    MapFormatError,
+    MapFormatLimitError,
+    encode_building_section,
+    write_fmb,
+)
 from font_asset import FontFaceSpec, FontPackBuilder
 
 
@@ -425,6 +431,25 @@ class BinaryMapFormatTests(unittest.TestCase):
                     font_builder=EmptyBuilder(),
                     building_records=[building],
                 )
+
+    def test_fmb_v4_admits_measured_dense_singapore_record_pressure(self):
+        _polygon, _road, building = golden_features()
+        measured_record_count = 9265
+
+        self.assertEqual(MAX_BLOCK_BUILDINGS, 12288)
+        section, metadata = encode_building_section(
+            [building] * measured_record_count
+        )
+
+        self.assertGreater(len(section), 0)
+        self.assertEqual(metadata["buildings"], measured_record_count)
+        self.assertEqual(metadata["buildingPoints"], measured_record_count * 4)
+        with self.assertRaisesRegex(
+            MapFormatLimitError,
+            "building record count exceeds FMB v4 limits",
+        ) as raised:
+            encode_building_section([building] * (MAX_BLOCK_BUILDINGS + 1))
+        self.assertEqual(raised.exception.code, "building_artifact_too_large")
 
 
 if __name__ == "__main__":

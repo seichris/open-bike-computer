@@ -34,7 +34,7 @@ def identity():
         "relationRetryBufferMeters": 512,
         "maxGeometryBufferMeters": 2048,
         "normalizationAlgorithmVersion": 2,
-        "blockEncodingAlgorithmVersion": 1,
+        "blockEncodingAlgorithmVersion": 2,
         "geometryEngine": {"name": "shapely", "version": "2.0.7"},
         "sourceIndex": {"schemaVersion": 1, "algorithmVersion": 2},
         "closureAlgorithmVersion": 1,

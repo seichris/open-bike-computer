@@ -16,7 +16,7 @@ MAX_BLOCK_RUNS = 12288
 MAX_BLOCK_LABELS = 8192
 MAX_BLOCK_CANDIDATES = 16384
 MAX_LABEL_VARIANTS = 8
-MAX_BLOCK_BUILDINGS = 8192
+MAX_BLOCK_BUILDINGS = 12288
 MAX_BUILDING_RINGS = 32
 MAX_BUILDING_POINTS = 131072
 
@@ -39,7 +39,11 @@ _VARIANT_KIND = {
 
 
 class MapFormatError(ValueError):
-    pass
+    code = "building_artifact_validation_failed"
+
+
+class MapFormatLimitError(MapFormatError):
+    code = "building_artifact_too_large"
 
 
 def _append_polygon(file, feature, min_x, min_y):
@@ -286,7 +290,7 @@ def _label_sections(polylines, min_x, min_y, font_builder):
 
 def encode_building_section(records):
     if len(records) > MAX_BLOCK_BUILDINGS:
-        raise MapFormatError("building record count exceeds FMB v4 limits")
+        raise MapFormatLimitError("building record count exceeds FMB v4 limits")
     total_points = 0
     section = bytearray(_BUILDING_SECTION_HEADER.pack(len(records), 0, 0))
     for record in records:
@@ -338,7 +342,7 @@ def encode_building_section(records):
                 raise MapFormatError("building ring is invalid")
             total_points += len(points)
             if total_points > MAX_BUILDING_POINTS:
-                raise MapFormatError("building point count exceeds FMB v4 limits")
+                raise MapFormatLimitError("building point count exceeds FMB v4 limits")
             section.extend(_BUILDING_RING.pack(len(points), flags, 0))
             for x, y in points:
                 section.extend(struct.pack("<hh", x, y))
@@ -475,7 +479,7 @@ def write_fmb(
             _append_directory(data, b"EXT3", sections)
 
     if len(data) > 2 * 1024 * 1024:
-        raise MapFormatError("FMB block exceeds the 2 MiB renderer limit")
+        raise MapFormatLimitError("FMB block exceeds the 2 MiB renderer limit")
     with open(path, "wb") as file:
         file.write(data)
     return {"bytes": len(data), "version": version, **metadata}
