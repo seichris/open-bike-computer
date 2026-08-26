@@ -5639,6 +5639,10 @@ struct NavigationProtocolTests {
             development.contains(keyID: "map-prod-2026-07"),
             "Bicino Dev continues to trust production-promoted maps"
         )
+        assert(
+            development.contains(keyID: "map-prod-2026-08"),
+            "Bicino Dev trusts the additive production signer rotation"
+        )
 
         let production = OfflineMapCatalogConfig.mapStreamTrustStore(
             infoDictionary: configuredValues.merging([
@@ -5651,7 +5655,11 @@ struct NavigationProtocolTests {
         )
         assert(
             production.contains(keyID: "map-prod-2026-07"),
-            "Bicino production retains only its commissioned production trust"
+            "Bicino production retains the previous production signer during rotation"
+        )
+        assert(
+            production.contains(keyID: "map-prod-2026-08"),
+            "Bicino production trusts the replacement production signer"
         )
 
         let malformed = OfflineMapCatalogConfig.mapStreamTrustStore(

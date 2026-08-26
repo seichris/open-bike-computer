@@ -7,6 +7,13 @@
       "state": "trusted",
       "createdAt": "2026-07-13",
       "retireAfter": "2027-07-13"
+    },
+    {
+      "keyId": "map-prod-2026-08",
+      "publicKeyX963Hex": "04aa35b82bea0893eef76eb7538325b46bdfefdb72f259d8498b8ad6f26c7bffde4cf5f760b40b106afac6e9e234cb732f7fe0ef1056b3ccadf48ac9b17aa73b91",
+      "state": "trusted",
+      "createdAt": "2026-08-26",
+      "retireAfter": "2027-08-26"
     }
   ]
 }
