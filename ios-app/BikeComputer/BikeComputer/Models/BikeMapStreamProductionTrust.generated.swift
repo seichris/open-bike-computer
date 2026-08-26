@@ -5,5 +5,6 @@ import Foundation
 extension BikeMapStreamTrustStore {
     nonisolated static let production = BikeMapStreamTrustStore(publicKeysByID: [
         "map-prod-2026-07": Data(mapStreamHexLiteral: "04fbcec2e900466d1442da6a80e33793ca08a7f21aebbe8f5be9115d8b0cb31eb6e17510bb2c912521a65dfc731c428091981b3c97cb62378085c0c92d836b0d01"),
+        "map-prod-2026-08": Data(mapStreamHexLiteral: "04aa35b82bea0893eef76eb7538325b46bdfefdb72f259d8498b8ad6f26c7bffde4cf5f760b40b106afac6e9e234cb732f7fe0ef1056b3ccadf48ac9b17aa73b91"),
     ])
 }
