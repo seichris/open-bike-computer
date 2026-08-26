@@ -2326,6 +2326,27 @@ struct NavigationProtocolTests {
                 lastTransferOutcome: "unconfirmed",
                 lastTransferMapID: "map-a",
                 candidateMapID: "map-a",
+                lastDeviceState: "idle",
+                backgroundUploadSucceeded: true,
+                statusMessage: "Map upload paused. Tap Upload to resume."
+            ),
+            "a completed stream upload waits for activation reconciliation instead of rewriting"
+        )
+        assert(
+            PausedMapUploadResumePolicy.isAvailable(
+                lastTransferOutcome: "unconfirmed",
+                lastTransferMapID: "map-a",
+                candidateMapID: "map-a",
+                lastDeviceState: "paused",
+                backgroundUploadSucceeded: true
+            ),
+            "an explicit device pause remains resumable after a completed transport"
+        )
+        assert(
+            !PausedMapUploadResumePolicy.isAvailable(
+                lastTransferOutcome: "unconfirmed",
+                lastTransferMapID: "map-a",
+                candidateMapID: "map-a",
                 lastDeviceState: "receiving"
             ),
             "a receiving transfer remains owned by its active background task"
@@ -10399,6 +10420,13 @@ struct NavigationProtocolTests {
             "tapping installed status explains that the map is already on the device"
         )
         assert(
+            source.contains("manager.isAwaitingMapActivationConfirmation") &&
+                source.contains("clock.arrow.circlepath") &&
+                source.contains("Waiting for the Bike Computer to confirm") &&
+                source.contains("bleManager.requestMapTransferStatus()"),
+            "ambiguous activation waits for authenticated status instead of offering another upload"
+        )
+        assert(
             source.contains("isShowingDeleteConfirmation = true") &&
                 source.contains("\"Delete Saved Map?\"") &&
                 source.contains("Button(\"Delete\", role: .destructive)"),
@@ -12035,8 +12063,9 @@ struct NavigationProtocolTests {
         FirmwareRequestCaptureProtocol.handler = { request, _ in
             statusRequests += 1
             let state = statusRequests == 1 ? "activating" : "installed"
+            let activeSession = statusRequests == 1 ? "old-session" : "session-1"
             let body = Data("""
-            {"activeMapId":"map-1","activation":{"status":"\(state)","sequence":8,"sessionId":"session-1","mapId":"map-1"}}
+            {"activeMapId":"map-1","activeSessionId":"\(activeSession)","activeManifestReceipt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","activeMapDisplayName":"Singapore new","activeMapBoundsE7":[1038375134,12767316,1038683621,13075725],"activation":{"status":"\(state)","sequence":8,"sessionId":"session-1","mapId":"map-1","step":3,"steps":3,"progress":100}}
             """.utf8)
             let response = HTTPURLResponse(
                 url: request.url!, statusCode: 200, httpVersion: nil,
@@ -12062,6 +12091,19 @@ struct NavigationProtocolTests {
         assertEqual(confirmation, .installed, "HTTP polling confirms installation")
         assertEqual(statusRequests, 2,
                     "confirmation polls from activating through installed")
+        assertEqual(bleManager.activeDeviceMap?.mapID, "map-1",
+                    "authenticated HTTP status refreshes the active map row")
+        assertEqual(bleManager.activeDeviceMap?.sessionID, "session-1",
+                    "the active row keeps the exact installed stream session")
+        assertEqual(bleManager.activeDeviceMap?.manifestReceipt,
+                    String(repeating: "a", count: 64),
+                    "the active row keeps the authenticated manifest receipt")
+        assertEqual(bleManager.activeDeviceMap?.displayName, "Singapore new",
+                    "the active row uses the device-confirmed map name")
+        assertEqual(bleManager.mapTransferActivationStep, 3,
+                    "HTTP reconciliation projects terminal activation progress")
+        assertEqual(bleManager.mapTransferActivationProgress, 100,
+                    "HTTP reconciliation projects terminal activation completion")
 
         statusRequests = 0
         FirmwareRequestCaptureProtocol.handler = { request, _ in
@@ -12141,6 +12183,20 @@ struct NavigationProtocolTests {
         assertEqual(status.activeMapBoundsE7,
                     [1_037_500_000, 12_400_000, 1_039_300_000, 13_700_000],
                     "HTTP status exposes normalized preview bounds")
+
+        let bleManager = BLEManager()
+        bleManager.applyAuthenticatedMapTransferStatus(status)
+        assertEqual(bleManager.activeDeviceMap?.mapID, "old-map",
+                    "authenticated HTTP status updates the active-device model")
+        assertEqual(bleManager.activeDeviceMap?.sessionID, "old-map-session",
+                    "authenticated HTTP status preserves the active session")
+        assertEqual(bleManager.mapTransferActivationStatus, "failed",
+                    "authenticated HTTP status projects activation state")
+        assertEqual(
+            bleManager.mapTransferActivationError,
+            "file_sha256: sha mismatch for VECTMAP/new-map/1.fmb",
+            "authenticated HTTP status projects the device activation error"
+        )
     }
 
     static func testFirmwareManifestDecodingAndHash() {

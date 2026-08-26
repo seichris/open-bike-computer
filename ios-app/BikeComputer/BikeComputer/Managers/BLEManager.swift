@@ -8415,6 +8415,54 @@ extension BLEManager: CBPeripheralDelegate {
         return applyMapTransferStatusBody(body)
     }
 
+    func applyAuthenticatedMapTransferStatus(_ status: MapTransferDeviceStatus) {
+        if let enabled = status.enabled {
+            mapTransferModeEnabled = enabled
+        }
+        mapTransferActiveMapId = status.activeMapId ?? ""
+        mapTransferActiveSessionId = status.activeSessionId ?? ""
+        activeMapManifestReceipt = status.activeManifestReceipt ?? ""
+        if let mapID = status.activeMapId {
+            activeDeviceMap = DeviceActiveMapDescriptor(
+                mapID: mapID,
+                sessionID: status.activeSessionId,
+                manifestReceipt: status.activeManifestReceipt,
+                displayName: status.activeMapDisplayName,
+                boundsE7: status.activeMapBoundsE7
+            )
+        } else {
+            activeDeviceMap = nil
+        }
+
+        if let activation = status.activation {
+            mapTransferActivationStatus = activation.status ?? "idle"
+            mapTransferActivationSequence = activation.sequence
+            mapTransferActivationSessionId = activation.sessionId ?? ""
+            mapTransferActivationMapId = activation.mapId ?? ""
+            mapTransferActivationStep = activation.step
+            mapTransferActivationStepCount = activation.steps
+            mapTransferActivationProgress = activation.progress
+            if let error = activation.error {
+                let code = error.code ?? "activation_error"
+                let message = error.message ?? ""
+                mapTransferActivationError = message.isEmpty
+                    ? code
+                    : "\(code): \(message)"
+            } else {
+                mapTransferActivationError = nil
+            }
+        } else {
+            mapTransferActivationStatus = "idle"
+            mapTransferActivationSequence = nil
+            mapTransferActivationSessionId = ""
+            mapTransferActivationMapId = ""
+            mapTransferActivationStep = nil
+            mapTransferActivationStepCount = nil
+            mapTransferActivationProgress = nil
+            mapTransferActivationError = nil
+        }
+    }
+
     private func applyMapTransferStatusBody(_ body: Data) -> Bool {
         guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             mapTransferStatusDescription = "invalid status"

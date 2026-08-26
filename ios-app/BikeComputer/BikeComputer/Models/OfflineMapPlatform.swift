@@ -748,6 +748,7 @@ nonisolated enum PausedMapUploadResumePolicy {
         lastTransferArtifactFilename: String? = nil,
         candidateArtifactFilename: String? = nil,
         lastDeviceState: String?,
+        backgroundUploadSucceeded: Bool? = nil,
         statusMessage: String = ""
     ) -> Bool {
         guard lastTransferOutcome == "unconfirmed",
@@ -760,6 +761,13 @@ nonisolated enum PausedMapUploadResumePolicy {
                   lastTransferArtifactFilename == candidateArtifactFilename else {
                 return false
             }
+        }
+        if backgroundUploadSucceeded == true {
+            // A successful protocol-2 upload may close the accessory HTTP
+            // server before iOS receives the terminal activation response.
+            // Wait for authenticated device reconciliation instead of
+            // offering a second payload write from a stale local message.
+            return lastDeviceState == "paused"
         }
         return lastDeviceState == "paused" ||
             lastDeviceState == "idle" ||

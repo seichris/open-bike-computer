@@ -1011,6 +1011,14 @@ private struct SavedMapsSettingsSection: View {
         .onAppear {
             manager.updateActiveDeviceMap(bleManager.activeDeviceMap)
             manager.reconcileLastTransfer(bleManager: bleManager)
+            if bleManager.isNavigationReady {
+                bleManager.requestMapTransferStatus()
+            }
+        }
+        .onChange(of: bleManager.isNavigationReady) { isReady in
+            if isReady {
+                bleManager.requestMapTransferStatus()
+            }
         }
         .onChange(of: bleManager.activeDeviceMap) { descriptor in
             manager.updateActiveDeviceMap(descriptor)
@@ -1104,6 +1112,9 @@ private struct SavedMapRow: View {
         let displayName = item.displayName
         let packURL = item.packURL
         let isPausedUpload = packURL.map(manager.isPausedMapUpload) ?? false
+        let isAwaitingActivation = packURL.map(
+            manager.isAwaitingMapActivationConfirmation
+        ) ?? false
         let previewImage = manager.previewImage(for: item)
         let catalogAvailability = item.catalogMap.map(manager.catalogAvailability(for:))
 
@@ -1211,6 +1222,13 @@ private struct SavedMapRow: View {
                             ? "Shows the installed map status"
                             : "This map is not saved on this iPhone"
                     )
+                } else if isAwaitingActivation {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .foregroundColor(.secondary)
+                        .frame(width: 32, height: 32)
+                        .accessibilityLabel(
+                            "Waiting for the Bike Computer to confirm \(displayName)"
+                        )
                 } else if let packURL {
                     Button {
                         finishRenaming()

@@ -2146,17 +2146,51 @@ final class OfflineMapManager: ObservableObject {
 
     func isPausedMapUpload(_ packURL: URL) -> Bool {
         let metadata = SavedMapArtifactMetadataStore.load(for: packURL)
+        let candidateMapID = savedMapID(for: packURL)
+        let sessionID = metadata?.lastTransferSessionID ?? defaults.string(
+            forKey: OfflineMapDefaults.lastTransferSessionIdKey
+        )
+        let backgroundUploadSucceeded = sessionID.flatMap { sessionID in
+            BackgroundMapUploadStateStore.latest(
+                mapID: candidateMapID,
+                sessionID: sessionID,
+                defaults: defaults
+            )?.succeeded
+        }
         return PausedMapUploadResumePolicy.isAvailable(
             lastTransferOutcome: lastTransferOutcome,
             lastTransferMapID: lastTransferMapId,
-            candidateMapID: savedMapID(for: packURL),
+            candidateMapID: candidateMapID,
             lastTransferArtifactFilename: defaults.string(
                 forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey
             ),
             candidateArtifactFilename: packURL.lastPathComponent,
             lastDeviceState: metadata?.lastDeviceState,
+            backgroundUploadSucceeded: backgroundUploadSucceeded,
             statusMessage: statusMessage
         )
+    }
+
+    func isAwaitingMapActivationConfirmation(_ packURL: URL) -> Bool {
+        let candidateMapID = savedMapID(for: packURL)
+        guard lastTransferOutcome == "unconfirmed",
+              lastTransferMapId == candidateMapID,
+              defaults.string(
+                  forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey
+              ) == packURL.lastPathComponent,
+              let sessionID = defaults.string(
+                  forKey: OfflineMapDefaults.lastTransferSessionIdKey
+              ),
+              !sessionID.isEmpty else {
+            return false
+        }
+        let metadata = SavedMapArtifactMetadataStore.load(for: packURL)
+        guard metadata?.lastDeviceState != "paused" else { return false }
+        return BackgroundMapUploadStateStore.latest(
+            mapID: candidateMapID,
+            sessionID: sessionID,
+            defaults: defaults
+        )?.succeeded == true
     }
 
     func mapUploadProgress(for packURL: URL) -> Double? {
@@ -4675,6 +4709,7 @@ final class OfflineMapManager: ObservableObject {
                     sessionToken: transferSession.sessionToken
                 )
                 let initialDeviceStatus = try await client.status()
+                bleManager.applyAuthenticatedMapTransferStatus(initialDeviceStatus)
                 if case .stream = prepared,
                    let activation = initialDeviceStatus.activation,
                    activation.sessionId == sessionId,
@@ -4924,7 +4959,14 @@ final class OfflineMapManager: ObservableObject {
             )
             updateLastTransferOutcome(outcome)
             if outcome == "unconfirmed" {
-                statusMessage = "Map upload paused. Tap Upload to resume."
+                let uploadSucceeded = BackgroundMapUploadStateStore.latest(
+                    mapID: expectedMapId,
+                    sessionID: sessionId,
+                    defaults: defaults
+                )?.succeeded == true
+                statusMessage = uploadSucceeded
+                    ? "Activation confirmation delayed. Reconnecting to device…"
+                    : "Map upload paused. Tap Upload to resume."
                 errorMessage = nil
                 startActivationReconciliationMonitor(bleManager: bleManager)
                 return
@@ -5118,6 +5160,9 @@ final class OfflineMapManager: ObservableObject {
         activationMayBeInFlight: inout Bool
     ) async throws {
         let statusBeforeActivation = try? await client.status()
+        if let statusBeforeActivation {
+            bleManager.applyAuthenticatedMapTransferStatus(statusBeforeActivation)
+        }
         let activationAlreadyStarted = statusBeforeActivation?.activation?.sessionId == sessionID
         let previousMapID = statusBeforeActivation?.activeMapId ??
             initialDeviceStatus.activeMapId ?? bleManager.mapTransferActiveMapId
@@ -5179,6 +5224,9 @@ final class OfflineMapManager: ObservableObject {
         artifactURL: URL
     ) async throws {
         let statusAfterUpload = try? await client.status()
+        if let statusAfterUpload {
+            bleManager.applyAuthenticatedMapTransferStatus(statusAfterUpload)
+        }
         let previousMapID = initialDeviceStatus.activeMapId ?? bleManager.mapTransferActiveMapId
         let previousSessionID = initialDeviceStatus.activeSessionId ??
             bleManager.mapTransferActiveSessionId
@@ -5284,6 +5332,7 @@ final class OfflineMapManager: ObservableObject {
             do {
                 let status = try await client.status()
                 receivedHTTPStatus = true
+                bleManager.applyAuthenticatedMapTransferStatus(status)
                 let activation = status.activation
                 updateActivationProgress(
                     status: activation?.status,
