@@ -593,6 +593,27 @@ struct OfflineMapJobProgress: Decodable, Equatable {
     let total: Int?
     let indeterminate: Bool?
 
+    private enum CodingKeys: String, CodingKey {
+        case completedBlocks
+        case totalBlocks
+        case phase
+        case unit
+        case completed
+        case total
+        case indeterminate
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        completedBlocks = try container.decodeIfPresent(Int.self, forKey: .completedBlocks) ?? 0
+        totalBlocks = try container.decodeIfPresent(Int.self, forKey: .totalBlocks) ?? 0
+        phase = try container.decodeIfPresent(String.self, forKey: .phase)
+        unit = try container.decodeIfPresent(String.self, forKey: .unit)
+        completed = try container.decodeIfPresent(Int.self, forKey: .completed)
+        total = try container.decodeIfPresent(Int.self, forKey: .total)
+        indeterminate = try container.decodeIfPresent(Bool.self, forKey: .indeterminate)
+    }
+
     var fraction: Double {
         guard totalBlocks > 0 else { return 0 }
         return min(max(Double(completedBlocks) / Double(totalBlocks), 0), 1)
