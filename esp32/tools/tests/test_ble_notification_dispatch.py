@@ -79,6 +79,34 @@ class BLENotificationDispatchTests(unittest.TestCase):
         )
         self.assertIn("deferredNotificationEventScheduled.store(false", init)
 
+    def test_chunked_map_status_resumes_after_each_host_drain(self):
+        notify = function_body(
+            BLE_SOURCE, "static void notifyMapTransferStatus"
+        )
+        self.assertIn("pendingMapTransferStatusChunks.begin", notify)
+        self.assertIn("pumpPendingMapTransferStatusChunks()", notify)
+
+        pump = function_body(
+            BLE_SOURCE, "static void pumpPendingMapTransferStatusChunks() {"
+        )
+        self.assertIn("deferredNotificationAvailableCapacity()", pump)
+        self.assertIn("notifyAuthenticatedNavigation", pump)
+        self.assertIn("pendingMapTransferStatusChunks.advance()", pump)
+        self.assertLess(
+            pump.index("notifyAuthenticatedNavigation"),
+            pump.index("pendingMapTransferStatusChunks.advance()"),
+        )
+
+        event_handler = function_body(
+            BLE_SOURCE,
+            "static void deferredNotificationEventHandler(struct ble_npl_event *event) {",
+        )
+        self.assertIn("pendingMapTransferStatusContinuation.load", event_handler)
+        self.assertIn("ui_scheduler::notify(ui_scheduler::WakeReason::Ble)", event_handler)
+
+        process = function_body(BLE_SOURCE, "void BLENavigationServer::process()")
+        self.assertIn("pumpPendingMapTransferStatusChunks()", process)
+
 
 if __name__ == "__main__":
     unittest.main()

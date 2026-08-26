@@ -131,6 +131,9 @@ static constexpr uint8_t CAPABILITY_BATTERY_STATUS_SCREEN = 1 << 5;
 static char pendingAuthNonce[33] = "";
 static NimBLECharacteristic *authCharacteristic = nullptr;
 static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
+static map_transfer_status_protocol::ChunkTransmission
+    pendingMapTransferStatusChunks;
+static std::atomic<bool> pendingMapTransferStatusContinuation{false};
 static BLEDebugStats bleDebugStats;
 static gps_input_freshness::State gpsFreshnessState;
 static_assert(BLE_HS_CONN_HANDLE_NONE == ble_connection_policy::noConnection,
@@ -237,6 +240,7 @@ static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
 static void processDeferredNotifications();
 static void scheduleDeferredNotificationEvent();
 static void deferredNotificationEventHandler(struct ble_npl_event *event);
+static void pumpPendingMapTransferStatusChunks();
 
 static void clearRendererWindowRequest() {
   portENTER_CRITICAL(&rendererWindowRequestMux);
@@ -1143,6 +1147,15 @@ static bool enqueueDeferredNotification(NimBLECharacteristic *characteristic,
   return queued;
 }
 
+static uint8_t deferredNotificationAvailableCapacity() {
+  uint8_t available = 0;
+  portENTER_CRITICAL(&deferredNotificationMux);
+  available = static_cast<uint8_t>(kDeferredNotificationCapacity -
+                                   deferredNotificationCount);
+  portEXIT_CRITICAL(&deferredNotificationMux);
+  return available;
+}
+
 static void scheduleDeferredNotificationEvent() {
   if (!deferredNotificationEventReady.load(std::memory_order_acquire) ||
       !deferredNotificationEventPending.load(std::memory_order_acquire)) {
@@ -1240,6 +1253,9 @@ static void deferredNotificationEventHandler(struct ble_npl_event *event) {
   // returned.
   processDeferredNotifications();
   deferredNotificationEventScheduled.store(false, std::memory_order_release);
+  if (pendingMapTransferStatusContinuation.load(std::memory_order_acquire)) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+  }
 }
 
 static void notifyAuthResponse(const std::string &response) {
@@ -2038,6 +2054,10 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
   if (pChar == nullptr) {
     return;
   }
+  if (pendingMapTransferStatusChunks.active()) {
+    pumpPendingMapTransferStatusChunks();
+    return;
+  }
 
   static map_transfer_status_protocol::ChunkSession chunkSession;
   const std::string body = mapTransferStatusJson();
@@ -2066,24 +2086,49 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
     return;
   }
   const uint8_t transferId = chunkSession.transferIdFor(body);
-  for (size_t index = 0; index < chunkCount; index++) {
-    const size_t offset = index * chunkBytes;
-    const size_t length = std::min(chunkBytes, body.size() - offset);
-    std::string frame = "MSTC";
-    frame.push_back(static_cast<char>(transferId));
-    frame.push_back(static_cast<char>(index));
-    frame.push_back(static_cast<char>(chunkCount));
-    frame.append(body.data() + offset, length);
-    if (!notifyAuthenticatedNavigation(
-            pChar, reinterpret_cast<const uint8_t *>(frame.data()),
-            frame.size())) {
-      Serial.println("BLE Map Transfer: protected status chunk failed");
+  if (!pendingMapTransferStatusChunks.begin(body, transferId, chunkBytes)) {
+    Serial.printf("BLE Map Transfer: status too large (%u bytes)\n",
+                  (unsigned)body.size());
+    return;
+  }
+  pendingMapTransferStatusContinuation.store(true,
+                                             std::memory_order_release);
+  pumpPendingMapTransferStatusChunks();
+}
+
+static void pumpPendingMapTransferStatusChunks() {
+  if (!pendingMapTransferStatusChunks.active()) {
+    pendingMapTransferStatusContinuation.store(false,
+                                               std::memory_order_release);
+    return;
+  }
+  if (!bleSessionAuthenticated ||
+      activeConnHandle == BLE_HS_CONN_HANDLE_NONE ||
+      mapTransferStatusCharacteristic == nullptr) {
+    pendingMapTransferStatusChunks.reset();
+    pendingMapTransferStatusContinuation.store(false,
+                                               std::memory_order_release);
+    return;
+  }
+
+  const uint8_t available = deferredNotificationAvailableCapacity();
+  for (uint8_t slot = 0;
+       slot < available && pendingMapTransferStatusChunks.active(); ++slot) {
+    const std::string frame = pendingMapTransferStatusChunks.nextFrame();
+    if (frame.empty() ||
+        !notifyAuthenticatedNavigation(
+            mapTransferStatusCharacteristic,
+            reinterpret_cast<const uint8_t *>(frame.data()), frame.size())) {
       return;
     }
-    delay(2);
+    pendingMapTransferStatusChunks.advance();
   }
-  Serial.printf("BLE Map Transfer: status notified (%u bytes, %u chunks)\n",
-                (unsigned)body.size(), (unsigned)chunkCount);
+
+  if (!pendingMapTransferStatusChunks.active()) {
+    pendingMapTransferStatusChunks.reset();
+    pendingMapTransferStatusContinuation.store(false,
+                                               std::memory_order_release);
+  }
 }
 
 static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
@@ -4839,6 +4884,8 @@ void BLENavigationServer::process() {
     ESP.restart();
   }
   processPendingTransferControl();
+  pumpPendingMapTransferStatusChunks();
+  scheduleDeferredNotificationEvent();
   const uint32_t nowMs = millis();
 #if BLE_RADIO_CHARACTERIZATION
   processRadioCharacterization(nowMs, pServer);

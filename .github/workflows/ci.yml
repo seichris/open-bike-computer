@@ -724,6 +724,7 @@ jobs:
           /tmp/test_map_stream_install
       - name: Transfer control dispatch host tests
         run: |
+          python -m unittest tools.tests.test_ble_notification_dispatch
           g++ -std=c++17 \
             tools/tests/test_transfer_control_dispatch.cpp \
             -o /tmp/test_transfer_control_dispatch

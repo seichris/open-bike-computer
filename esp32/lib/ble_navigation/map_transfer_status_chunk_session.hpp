@@ -105,4 +105,85 @@ private:
   bool hasBody_ = false;
 };
 
+// A map-status response can exceed the fixed deferred-notification queue even
+// after it is split for the negotiated ATT MTU. Keep the plaintext chunk
+// stream on the Arduino owner task and advance it only after each protected
+// frame is accepted by that queue. The NimBLE host task can then drain one
+// bounded batch before the owner task pumps the next one.
+class ChunkTransmission {
+public:
+  bool begin(const std::string &body, uint8_t transferId,
+             size_t chunkPayloadBytes) {
+    reset();
+    if (body.empty() || chunkPayloadBytes == 0) {
+      return false;
+    }
+    const size_t count =
+        (body.size() + chunkPayloadBytes - 1) / chunkPayloadBytes;
+    if (count == 0 || count > 255) {
+      return false;
+    }
+    body_ = body;
+    transferId_ = transferId;
+    chunkPayloadBytes_ = chunkPayloadBytes;
+    chunkCount_ = count;
+    active_ = true;
+    return true;
+  }
+
+  bool matches(const std::string &body, uint8_t transferId,
+               size_t chunkPayloadBytes) const {
+    return active_ && body_ == body && transferId_ == transferId &&
+           chunkPayloadBytes_ == chunkPayloadBytes;
+  }
+
+  bool active() const { return active_; }
+  size_t bodySize() const { return body_.size(); }
+  size_t chunkCount() const { return chunkCount_; }
+  size_t nextIndex() const { return nextIndex_; }
+
+  std::string nextFrame() const {
+    if (!active_ || nextIndex_ >= chunkCount_) {
+      return {};
+    }
+    const size_t offset = nextIndex_ * chunkPayloadBytes_;
+    const size_t remaining = body_.size() - offset;
+    const size_t length =
+        remaining < chunkPayloadBytes_ ? remaining : chunkPayloadBytes_;
+    std::string frame = "MSTC";
+    frame.push_back(static_cast<char>(transferId_));
+    frame.push_back(static_cast<char>(nextIndex_));
+    frame.push_back(static_cast<char>(chunkCount_));
+    frame.append(body_.data() + offset, length);
+    return frame;
+  }
+
+  void advance() {
+    if (!active_) {
+      return;
+    }
+    ++nextIndex_;
+    if (nextIndex_ >= chunkCount_) {
+      active_ = false;
+    }
+  }
+
+  void reset() {
+    body_.clear();
+    transferId_ = 0;
+    chunkPayloadBytes_ = 0;
+    chunkCount_ = 0;
+    nextIndex_ = 0;
+    active_ = false;
+  }
+
+private:
+  std::string body_;
+  uint8_t transferId_ = 0;
+  size_t chunkPayloadBytes_ = 0;
+  size_t chunkCount_ = 0;
+  size_t nextIndex_ = 0;
+  bool active_ = false;
+};
+
 } // namespace map_transfer_status_protocol
