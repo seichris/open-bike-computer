@@ -797,6 +797,7 @@ struct NavigationProtocolTests {
         await testOfflineMapInstallationCredentialClient()
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
+        testOfflineMapJobPhaseOnlyProgressDecoding()
         testOfflineMapJobProgressAbsentFallback()
         testOfflineMapProgressPresentation()
         testOfflineMapByteProgressPresentation()
@@ -7712,6 +7713,38 @@ struct NavigationProtocolTests {
             "231 of 266 map blocks · 7 of 8 chunks ready · 1 active",
             "aggregate progress explains block and chunk completion"
         )
+    }
+
+    static func testOfflineMapJobPhaseOnlyProgressDecoding() {
+        let payload = Data(
+            """
+            {
+              "jobId": "phase-only-progress",
+              "status": "converting_features",
+              "progress": {
+                "phase": "building_preprocessing",
+                "unit": "building_part_association",
+                "completed": 4772,
+                "total": 4772,
+                "fraction": 1.0,
+                "indeterminate": false
+              }
+            }
+            """.utf8
+        )
+        guard let job = try? JSONDecoder().decode(OfflineMapJob.self, from: payload),
+              let progress = job.progress else {
+            assert(false, "phase-only map progress should decode without block counts")
+            return
+        }
+
+        assertEqual(progress.completedBlocks, 0, "missing completed block count defaults to zero")
+        assertEqual(progress.totalBlocks, 0, "missing total block count defaults to zero")
+        assertEqual(progress.phase, "building_preprocessing", "phase-only progress decodes phase")
+        assertEqual(progress.unit, "building_part_association", "phase-only progress decodes unit")
+        assertEqual(progress.percentage, 100, "phase-only progress uses completed units")
+        assert(abs(progress.fraction) < 0.000001, "phase-only progress has no block fraction")
+        assertEqual(progress.detail, "Preparing 3D buildings", "phase-only progress explains preprocessing")
     }
 
     static func testOfflineMapJobProgressAbsentFallback() {
