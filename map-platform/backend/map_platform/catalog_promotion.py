@@ -267,6 +267,8 @@ def promote_catalog_map(
 
     if catalog_client.channel != "production":
         raise CatalogPromotionError("catalog promotion requires the production channel")
+    if not bool(getattr(artifact_store, "catalog_delivery_backed", False)):
+        raise CatalogPromotionError("promotion requires shared artifact storage")
     if grant is None:
         grant = catalog_client.promotion_grant(entry_id)
     existing = already_production_result(entry_id, grant)
@@ -431,10 +433,6 @@ def promote_catalog_map(
             producer_build_sha256=producer_build_sha256,
             producer_image_digest=producer_image_digest,
         )
-        if not bool(getattr(artifact_store, "catalog_delivery_backed", False)):
-            raise CatalogPromotionError(
-                "promotion requires shared artifact storage"
-            )
         if not artifact_store.verify(
             stream_record.object_key,
             sha256=stream_record.sha256,

@@ -303,12 +303,28 @@ class CatalogPromotionIdentityTests(unittest.TestCase):
             return promote_catalog_map(
                 grant["map"]["mapEntryId"],
                 catalog_client=FakePromotionCatalog(grant),
-                artifact_store=object(),
+                artifact_store=SimpleNamespace(catalog_delivery_backed=True),
                 signer=object(),
                 producer_build_sha256="2" * 64,
                 producer_image_digest="sha256:" + "3" * 64,
                 work_root=Path(temporary),
             )
+
+    def test_promotion_rejects_unshared_storage_before_acquiring_a_grant(self):
+        catalog = Mock(channel="production")
+
+        with self.assertRaisesRegex(CatalogPromotionError, "shared artifact storage"):
+            promote_catalog_map(
+                "map_v1_" + "M" * 43,
+                catalog_client=catalog,
+                artifact_store=SimpleNamespace(catalog_delivery_backed=False),
+                signer=object(),
+                producer_build_sha256="2" * 64,
+                producer_image_digest="sha256:" + "3" * 64,
+                work_root=Path("/path/that/must/not/be/created"),
+            )
+
+        catalog.promotion_grant.assert_not_called()
 
     def test_already_production_short_circuits_all_local_work(self):
         entry_id = "map_v1_" + "M" * 43
