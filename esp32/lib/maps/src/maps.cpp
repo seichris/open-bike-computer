@@ -4641,6 +4641,13 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
   publishedMapFound = result.mapFound;
   publishedMapFrame = true;
   framePublicationPending = true;
+  if (!mapAvailabilityKnown || mapAvailabilityAvailable != result.mapFound) {
+    mapAvailabilityKnown = true;
+    mapAvailabilityAvailable = result.mapFound;
+    mapAvailabilityTransition =
+        {result.mapFound, result.durationMs, result.blocksMs};
+    mapAvailabilityTransitionPending = true;
+  }
 
   totalBounds.lat_min = mercatorY2lat(result.viewport.bbox.min.y);
   totalBounds.lat_max = mercatorY2lat(result.viewport.bbox.max.y);
@@ -4997,6 +5004,15 @@ bool Maps::takeRenderFailure() {
   return pending;
 }
 
+bool Maps::takeMapAvailabilityTransition(
+    MapAvailabilityTransition &transition) {
+  if (!mapAvailabilityTransitionPending)
+    return false;
+  transition = mapAvailabilityTransition;
+  mapAvailabilityTransitionPending = false;
+  return true;
+}
+
 void Maps::getPosition(double lat, double lon) {
   Coord pos;
   pos.lat = lat;
@@ -5348,6 +5364,8 @@ void Maps::finalizeVectorMapFolderSwitchOnUi() {
   invalidateRollingRasterWindow();
   publishedMapFound = false;
   publishedMapFrame = false;
+  mapAvailabilityKnown = false;
+  mapAvailabilityTransitionPending = false;
   isPosMoved = true;
   redrawMap = true;
   oldMapTile = {};
@@ -5364,29 +5382,44 @@ bool Maps::takeStreetLabelRuntimeFailure(std::string &code) {
 }
 
 bool Maps::probeVectorMapFolder(const std::string &folder) {
+  return probeVectorMapFolderDetailed(folder).loaded();
+}
+
+map_probe_diagnostics::Result
+Maps::probeVectorMapFolderDetailed(const std::string &folder) {
+  const uint32_t startedMs = millis();
   const bool restartWorker = renderWorkerTaskHandle != nullptr;
   if (restartWorker && !stopRenderWorker()) {
     ESP_LOGE(TAG, "Vector map probe deferred: render worker is busy");
-    return false;
+    return {map_probe_diagnostics::Code::WorkerStopFailed,
+            millis() - startedMs};
   }
 
-  const bool loaded = probeVectorMapFolderOnStorageOwner(folder);
+  map_probe_diagnostics::Result result =
+      probeVectorMapFolderOnStorageOwner(folder);
 
   if (restartWorker && !startRenderWorker()) {
     ESP_LOGE(TAG, "Vector map probe completed but worker restart failed");
-    return false;
+    result.code = map_probe_diagnostics::Code::WorkerRestartFailed;
   }
-  return loaded;
+  result.elapsedMs = millis() - startedMs;
+  return result;
 }
 
-bool Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
+map_probe_diagnostics::Result
+Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
+  const uint32_t startedMs = millis();
+  map_probe_diagnostics::Result result;
   std::string normalized = folder;
   while (normalized.size() > 1 && normalized.back() == '/')
     normalized.pop_back();
   struct stat storageMetadata = {};
   if (::stat(normalized.c_str(), &storageMetadata) != 0 ||
-      !S_ISDIR(storageMetadata.st_mode))
-    return false;
+      !S_ISDIR(storageMetadata.st_mode)) {
+    result.code = map_probe_diagnostics::Code::RootUnavailable;
+    result.elapsedMs = millis() - startedMs;
+    return result;
+  }
 
   bool loaded = false;
   power_management::ScopedLock powerLock(
@@ -5395,30 +5428,52 @@ bool Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
   std::string blockBase;
   if (!findMapBlock(normalized, blockBase, visited, 0)) {
     ESP_LOGE(TAG, "No map block found under %s", normalized.c_str());
-    return false;
+    result.code = map_probe_diagnostics::Code::BlockNotFound;
+    result.elapsedMs = millis() - startedMs;
+    result.visitedEntries = static_cast<uint32_t>(visited);
+    return result;
   }
+  result.visitedEntries = static_cast<uint32_t>(visited);
 
   const bool previousMapFound = isMapFound.load();
   isMapFound = false;
   MapBlock *block = readMapBlock(String(blockBase.c_str()));
   loaded = block != nullptr && isMapFound.load();
+  if (!loaded)
+    result.code = map_probe_diagnostics::Code::BlockInvalid;
   if (loaded && block->formatVersion >= 3) {
+    result.formatVersion = block->formatVersion;
     map_font_asset::Asset candidateFont;
     const std::string fontPath = normalized + "/assets/street-labels.fma";
-    loaded = candidateFont.open(fontPath) &&
-             candidateFont.profileFingerprint() ==
-                 block->labelData.profileFingerprint &&
-             block->labelData.referencesResolve(candidateFont.glyphCount(),
-                                                candidateFont.languageCount());
-    if (!loaded)
+    if (!candidateFont.open(fontPath)) {
+      loaded = false;
+      result.code = map_probe_diagnostics::Code::FontOpenFailed;
+    } else if (candidateFont.profileFingerprint() !=
+               block->labelData.profileFingerprint) {
+      loaded = false;
+      result.code = map_probe_diagnostics::Code::FontProfileMismatch;
+    } else if (!block->labelData.referencesResolve(
+                   candidateFont.glyphCount(),
+                   candidateFont.languageCount())) {
+      loaded = false;
+      result.code = map_probe_diagnostics::Code::FontReferencesInvalid;
+    }
+    if (!loaded) {
       ESP_LOGE(TAG, "Street-label block/font contract failed under %s",
                normalized.c_str());
+    }
+  } else if (loaded) {
+    result.formatVersion = block->formatVersion;
   }
   delete block;
   isMapFound = previousMapFound;
-  ESP_LOGI(TAG, "Vector map probe root=%s block=%s loaded=%d",
-           normalized.c_str(), blockBase.c_str(), loaded);
-  return loaded;
+  if (loaded)
+    result.code = map_probe_diagnostics::Code::Ok;
+  result.elapsedMs = millis() - startedMs;
+  ESP_LOGI(TAG, "Vector map probe root=%s block=%s loaded=%d code=%s",
+           normalized.c_str(), blockBase.c_str(), loaded,
+           map_probe_diagnostics::name(result.code));
+  return result;
 }
 
 bool Maps::requestVectorMapFolderActivation(const std::string &folder) {
@@ -5489,8 +5544,13 @@ bool Maps::processPendingVectorMapActivation() {
         runtime_watchdog_diagnostics::Phase::MapActivation,
         request.sequence);
   }
-  const bool loaded = probeVectorMapFolderOnStorageOwner(request.folder) &&
-                      switchVectorMapFolderOnStorageOwner(request.folder);
+  map_probe_diagnostics::Result probe =
+      probeVectorMapFolderOnStorageOwner(request.folder);
+  bool loaded = probe.loaded();
+  if (loaded && !switchVectorMapFolderOnStorageOwner(request.folder)) {
+    loaded = false;
+    probe.code = map_probe_diagnostics::Code::RootSwitchFailed;
+  }
   gMapRenderControlOperation.store(false, std::memory_order_release);
   if (onMapRenderWorkerTask()) {
     runtime_watchdog_diagnostics::notePhase(
@@ -5502,7 +5562,7 @@ bool Maps::processPendingVectorMapActivation() {
   if (renderStateMutex != nullptr &&
       xSemaphoreTake(renderStateMutex, portMAX_DELAY) == pdTRUE) {
     completedVectorMapActivation =
-        {request.sequence, request.folder, loaded};
+        {request.sequence, request.folder, loaded, probe};
     completedVectorMapActivationValid = true;
     latestRenderRequestValid = false;
     xSemaphoreGive(renderStateMutex);
@@ -5525,6 +5585,7 @@ bool Maps::takeVectorMapFolderActivationResult(
   }
   result.folder = completedVectorMapActivation.folder;
   result.loaded = completedVectorMapActivation.loaded;
+  result.probe = completedVectorMapActivation.probe;
   completedVectorMapActivation = {};
   completedVectorMapActivationValid = false;
   xSemaphoreGive(renderStateMutex);

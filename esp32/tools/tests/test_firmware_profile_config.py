@@ -91,6 +91,10 @@ for environment, (base, board_define) in diagnostic_profiles.items():
     assert "-DRIDE_AUTOMATION_SHADOW=1" in flags
     assert "-DRIDE_AUTOMATION_INTERNAL_CONTROL=1" in flags
     assert "-DRIDE_AUTOMATION_AUTOMATIC_START=1" not in flags
+    assert (
+        inherited_option(environment, "board_build.partitions")
+        == "partitions_remote_debug.csv"
+    )
 
 assert "-DWAVESHARE_206_FORCE_AXP_DISPLAY=1" in config.get(
     "waveshare_amoled_206_base", "build_flags"
@@ -124,6 +128,10 @@ for environment, target in expected_targets.items():
     assert "${waveshare_amoled_common.build_unflags}" in unflags
     assert "-DDEBUG=1" not in unflags
     assert "-DDEVICE_REMOTE_DEBUG=1" not in flags
+    assert (
+        inherited_option(environment, "board_build.partitions")
+        == "partitions.csv"
+    )
 
 remote_debug_profiles = {
     "env:WAVESHARE_AMOLED_175_REMOTE_DEBUG": (

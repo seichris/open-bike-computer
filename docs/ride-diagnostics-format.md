@@ -74,6 +74,32 @@ The detailed ride trace may use the normalized fields already allowed by
 `docs/ride-automation-traces.md`; it still contains no coordinates or raw
 health/sensor stream.
 
+## Map recovery evidence
+
+Firmware records map-selection and renderer-probe decisions as structured
+`map` events so a missing map can be diagnosed from the SD card without a live
+serial connection. Boot records cover the recovery check, selected map,
+renderer probe, any rollback, and the final selection. Runtime activation and
+rollback use the same probe codes. Map-availability transitions use `ok`,
+`map_data_not_found`, or `active_map_unavailable`.
+
+Renderer probe codes are `not_run`, `ok`, `worker_stop_failed`,
+`root_unavailable`, `block_not_found`, `block_invalid`, `font_open_failed`,
+`font_profile_mismatch`, `font_references_invalid`, `root_switch_failed`, and
+`worker_restart_failed`.
+
+Map records may include the validated map ID, a 16-character content-receipt
+prefix, whether an authenticated transfer session supplied the activation, the
+probe `durationMs`, `visitedEntries`, and detected `formatVersion`. Runtime
+availability transitions include total `durationMs` and `blockLoadMs`.
+They never include map geometry, coordinates, transfer credentials, or a full
+content receipt. Availability is recorded only initially and when it changes,
+not once per render loop.
+
+The firmware also emits `logger.health` at lifecycle readiness and controlled
+shutdown. Its enqueue/write/drop/storage-error counters and current/maximum
+queue depth make missing diagnostics distinguishable from a healthy empty log.
+
 ## Bundle
 
 An exported stored-ZIP contains `manifest.json`, `checksums.sha256`, `app/`,
