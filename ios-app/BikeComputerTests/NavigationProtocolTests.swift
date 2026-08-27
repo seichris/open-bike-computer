@@ -10609,10 +10609,20 @@ struct NavigationProtocolTests {
         assert(
             source.contains("presentedPreview = SavedMapPreviewPresentation(") &&
                 source.contains(".sheet(item: $presentedPreview)") &&
-                source.contains("SavedMapPreviewSheet(preview: preview)") &&
+                source.contains("SavedMapPreviewSheet(manager: manager, preview: preview)") &&
                 source.contains(".accessibilityLabel(\"Show preview for \\(displayName)\")") &&
                 source.contains("Button(\"Close\")"),
             "tapping an available saved-map thumbnail opens an accessible preview modal"
+        )
+        assert(
+            source.contains("manager.detailPreviewImage(for: preview.item)") &&
+                source.contains("Loading high-resolution preview") &&
+                source.contains(".interpolation(.high)") &&
+                source.contains(".task(id: preview.id)") &&
+                source.contains(
+                    "await manager.loadDetailPreviewIfNeeded(for: preview.item)"
+                ),
+            "the preview modal upgrades its thumbnail through cancellable Retina loading"
         )
         assert(
             source.contains("manager.savedMapListItems(") &&
@@ -10633,6 +10643,15 @@ struct NavigationProtocolTests {
                 managerSource.contains("OfflineMapFallbackPreviewRenderer.image") &&
                 !managerSource.contains("packURLs.forEach(cachePreviewIfAvailable)"),
             "saved-map previews load lazily and render bounds when an old pack has no image"
+        )
+        assert(
+            managerSource.contains("size: CGSize(width: 400, height: 240)") &&
+                managerSource.contains("scale: 3") &&
+                managerSource.contains("detail-preview-v\\(cacheVersion).png") &&
+                managerSource.contains("minimumLongestEdge: UInt32 = 600") &&
+                managerSource.contains("SavedMapSnapshotPreviewStore.save(") &&
+                managerSource.contains("SavedMapDetailPreviewStore.save("),
+            "thumbnail and versioned Retina detail previews use independent cache policies"
         )
         assert(
             managerSource.contains(

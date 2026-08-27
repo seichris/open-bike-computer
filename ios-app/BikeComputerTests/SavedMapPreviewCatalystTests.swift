@@ -150,20 +150,32 @@ private func cropFixtureImage() -> UIImage {
     }
 }
 
-private func variedSnapshotPNG() -> Data {
+private func variedSnapshotPNG(
+    size: CGSize = CGSize(width: 160, height: 96)
+) -> Data {
     let format = UIGraphicsImageRendererFormat()
     format.scale = 1
     format.opaque = true
     let image = UIGraphicsImageRenderer(
-        size: CGSize(width: 160, height: 96),
+        size: size,
         format: format
     ).image { context in
         UIColor(red: 0.88, green: 0.86, blue: 0.75, alpha: 1).setFill()
-        context.cgContext.fill(CGRect(x: 0, y: 0, width: 160, height: 96))
+        context.cgContext.fill(CGRect(origin: .zero, size: size))
         UIColor(red: 0.28, green: 0.66, blue: 0.78, alpha: 1).setFill()
-        context.cgContext.fill(CGRect(x: 70, y: 0, width: 18, height: 96))
+        context.cgContext.fill(CGRect(
+            x: size.width * 0.4375,
+            y: 0,
+            width: size.width * 0.1125,
+            height: size.height
+        ))
         UIColor(red: 0.45, green: 0.43, blue: 0.40, alpha: 1).setFill()
-        context.cgContext.fill(CGRect(x: 0, y: 38, width: 160, height: 7))
+        context.cgContext.fill(CGRect(
+            x: 0,
+            y: size.height * 0.3958,
+            width: size.width,
+            height: size.height * 0.0729
+        ))
     }
     guard let data = image.pngData() else {
         fail("varied test snapshot should encode as PNG")
@@ -277,6 +289,13 @@ struct SavedMapPreviewCatalystTests {
 
         let outlinePNG = solidPNG(color: .systemBlue)
         let snapshotPNG = variedSnapshotPNG()
+        let detailSnapshotPNG = variedSnapshotPNG(
+            size: CGSize(width: 1_200, height: 720)
+        )
+        guard SavedMapDetailPreviewStore.isValidPNG(detailSnapshotPNG),
+              !SavedMapDetailPreviewStore.isValidPNG(snapshotPNG) else {
+            fail("detail cache should accept Retina output and reject thumbnail resolution")
+        }
         let snapshotMapID = "custom-map-snapshot"
         let snapshotPackURL = cacheDirectory
             .appendingPathComponent("\(snapshotMapID).zip")
@@ -657,9 +676,78 @@ struct SavedMapPreviewCatalystTests {
         guard restoredGenerationCount == 0 else {
             fail("persisted map snapshot should avoid an unnecessary MapKit request")
         }
+
+        do {
+            try SavedMapDetailPreviewStore.save(snapshotPNG, for: snapshotPackURL)
+            fail("thumbnail-resolution data must not enter the detail cache")
+        } catch {
+            // Expected: the versioned detail cache enforces a Retina-size floor.
+        }
+        var detailGenerationCount = 0
+        var detailGeneratedBounds: OfflineMapPreviewBounds?
+        let detailManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { _ in nil },
+            detailMapSnapshot: { bounds in
+                detailGenerationCount += 1
+                detailGeneratedBounds = bounds
+                return detailSnapshotPNG
+            }
+        )
+        guard let detailItem = detailManager.savedMapListItems(
+            activeDeviceMap: nil
+        ).first(where: {
+            $0.packURL?.lastPathComponent == snapshotPackURL.lastPathComponent
+        }) else {
+            fail("saved-map detail fixture should appear in the local inventory")
+        }
+        await detailManager.loadDetailPreviewIfNeeded(for: detailItem)
+        guard detailGenerationCount == 1,
+              detailGeneratedBounds == expectedBounds,
+              imageMatchesPNG(
+                  detailManager.detailPreviewImage(for: detailItem),
+                  data: detailSnapshotPNG
+              ),
+              SavedMapDetailPreviewStore.imageData(for: snapshotPackURL) ==
+                  detailSnapshotPNG,
+              SavedMapSnapshotPreviewStore.imageData(for: snapshotPackURL) ==
+                  snapshotPNG,
+              SavedMapDetailPreviewStore.imageURL(for: snapshotPackURL)
+                  .lastPathComponent.contains("detail-preview-v1") else {
+            fail("opening a saved map should generate an independent versioned Retina preview")
+        }
+
+        var restoredDetailGenerationCount = 0
+        let restoredDetailManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { _ in nil },
+            detailMapSnapshot: { _ in
+                restoredDetailGenerationCount += 1
+                return nil
+            }
+        )
+        guard let restoredDetailItem = restoredDetailManager.savedMapListItems(
+            activeDeviceMap: nil
+        ).first(where: {
+            $0.packURL?.lastPathComponent == snapshotPackURL.lastPathComponent
+        }) else {
+            fail("restored saved-map detail fixture should remain in the inventory")
+        }
+        await restoredDetailManager.loadDetailPreviewIfNeeded(for: restoredDetailItem)
+        guard restoredDetailGenerationCount == 0,
+              imageMatchesPNG(
+                  restoredDetailManager.detailPreviewImage(for: restoredDetailItem),
+                  data: detailSnapshotPNG
+              ) else {
+            fail("the versioned Retina preview should survive relaunch without regeneration")
+        }
+
         restoredManager.deleteCachedPack(at: snapshotPackURL)
-        guard SavedMapSnapshotPreviewStore.imageData(for: snapshotPackURL) == nil else {
-            fail("deleting a saved map should delete its persisted snapshot")
+        guard SavedMapSnapshotPreviewStore.imageData(for: snapshotPackURL) == nil,
+              SavedMapDetailPreviewStore.imageData(for: snapshotPackURL) == nil else {
+            fail("deleting a saved map should delete thumbnail and detail preview caches")
         }
 
         let cancellationMapID = "custom-map-cancel"
@@ -681,6 +769,58 @@ struct SavedMapPreviewCatalystTests {
         } catch {
             fail("cancellation test pack should write: \(error)")
         }
+        var detailSnapshotStarted = false
+        var detailSnapshotCancelled = false
+        let detailCancellationManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { _ in nil },
+            detailMapSnapshot: { _ in
+                detailSnapshotStarted = true
+                do {
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                    return detailSnapshotPNG
+                } catch is CancellationError {
+                    detailSnapshotCancelled = true
+                    throw CancellationError()
+                }
+            }
+        )
+        guard let detailCancellationItem = detailCancellationManager.savedMapListItems(
+            activeDeviceMap: nil
+        ).first(where: {
+            $0.packURL?.lastPathComponent == cancellationPackURL.lastPathComponent
+        }) else {
+            fail("detail cancellation fixture should appear in the local inventory")
+        }
+        let detailCancellationTask = Task { @MainActor in
+            await detailCancellationManager.loadDetailPreviewIfNeeded(
+                for: detailCancellationItem
+            )
+        }
+        let detailStartedDeadline = Date().addingTimeInterval(3)
+        while !detailSnapshotStarted && Date() < detailStartedDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard detailSnapshotStarted,
+              detailCancellationManager.isDetailPreviewLoading(
+                  for: detailCancellationItem
+              ) else {
+            fail("the sheet-owned detail request should enter its loading state")
+        }
+        detailCancellationTask.cancel()
+        await detailCancellationTask.value
+        guard detailSnapshotCancelled,
+              !detailCancellationManager.isDetailPreviewLoading(
+                  for: detailCancellationItem
+              ),
+              detailCancellationManager.detailPreviewImage(
+                  for: detailCancellationItem
+              ) == nil,
+              SavedMapDetailPreviewStore.imageData(for: cancellationPackURL) == nil else {
+            fail("cancelling the sheet task must stop and discard detail generation")
+        }
+
         var snapshotStarted = false
         var snapshotCancelled = false
         let cancellationManager = OfflineMapManager(
@@ -785,6 +925,7 @@ struct SavedMapPreviewCatalystTests {
             boundsE7: [1_209_000_000, 307_000_000, 1_219_500_000, 315_500_000]
         )!
         var deviceSnapshotGenerationCount = 0
+        var deviceDetailGenerationCount = 0
         let devicePreviewManager = OfflineMapManager(
             defaults: defaults,
             cacheDirectory: cacheDirectory,
@@ -794,6 +935,13 @@ struct SavedMapPreviewCatalystTests {
                 }
                 deviceSnapshotGenerationCount += 1
                 return snapshotPNG
+            },
+            detailMapSnapshot: { bounds in
+                guard bounds == expectedBounds else {
+                    fail("device-only detail preview should use its reported bounds")
+                }
+                deviceDetailGenerationCount += 1
+                return detailSnapshotPNG
             }
         )
         devicePreviewManager.updateActiveDeviceMap(deviceDescriptor)
@@ -821,16 +969,33 @@ struct SavedMapPreviewCatalystTests {
               DeviceMapSnapshotPreviewStore.imageData(
                   for: deviceDescriptor,
                   in: cacheDirectory
-              ) == snapshotPNG else {
+        ) == snapshotPNG else {
             fail("device-only map should generate and persist its MapKit preview")
+        }
+        await devicePreviewManager.loadDetailPreviewIfNeeded(for: deviceItem)
+        guard deviceDetailGenerationCount == 1,
+              imageMatchesPNG(
+                  devicePreviewManager.detailPreviewImage(for: deviceItem),
+                  data: detailSnapshotPNG
+              ),
+              DeviceMapDetailPreviewStore.imageData(
+                  for: deviceDescriptor,
+                  in: cacheDirectory
+              ) == detailSnapshotPNG else {
+            fail("device-only map should generate and persist a Retina detail preview")
         }
 
         var restoredDeviceGenerationCount = 0
+        var restoredDeviceDetailGenerationCount = 0
         let restoredDevicePreviewManager = OfflineMapManager(
             defaults: defaults,
             cacheDirectory: cacheDirectory,
             mapSnapshot: { _ in
                 restoredDeviceGenerationCount += 1
+                return nil
+            },
+            detailMapSnapshot: { _ in
+                restoredDeviceDetailGenerationCount += 1
                 return nil
             }
         )
@@ -852,12 +1017,27 @@ struct SavedMapPreviewCatalystTests {
               imageMatchesPNG(
                   restoredDevicePreviewManager.previewImage(for: restoredDeviceItem),
                   data: snapshotPNG
-              ) else {
+        ) else {
             fail("device preview cache should survive relaunch without another snapshot")
         }
+        await restoredDevicePreviewManager.loadDetailPreviewIfNeeded(
+            for: restoredDeviceItem
+        )
+        guard restoredDeviceDetailGenerationCount == 0,
+              imageMatchesPNG(
+                  restoredDevicePreviewManager.detailPreviewImage(
+                      for: restoredDeviceItem
+                  ),
+                  data: detailSnapshotPNG
+              ) else {
+            fail("device Retina preview cache should survive relaunch")
+        }
         restoredDevicePreviewManager.updateActiveDeviceMap(nil)
-        guard restoredDevicePreviewManager.previewImage(for: restoredDeviceItem) == nil else {
-            fail("disconnect should clear live device-only preview state")
+        guard restoredDevicePreviewManager.previewImage(for: restoredDeviceItem) == nil,
+              restoredDevicePreviewManager.detailPreviewImage(
+                  for: restoredDeviceItem
+              ) == nil else {
+            fail("disconnect should clear live device-only thumbnail and detail state")
         }
 
         let sessionlessDescriptorA = DeviceActiveMapDescriptor(
@@ -1015,6 +1195,57 @@ struct SavedMapPreviewCatalystTests {
         }
         guard OfflineMapSnapshotPreviewRenderer.hasMeaningfulVisualVariation(croppedFixture) else {
             fail("production renderer output should contain varied map content")
+        }
+
+        guard let detailSource = UIImage(data: detailSnapshotPNG)?.cgImage else {
+            fail("detail renderer fixture should decode")
+        }
+        let scaledDetailSource = UIImage(
+            cgImage: detailSource,
+            scale: 3,
+            orientation: .up
+        )
+        var capturedDetailSize: CGSize?
+        var capturedDetailScale: CGFloat?
+        let deterministicDetailData: Data
+        do {
+            guard let data = try await OfflineMapSnapshotPreviewRenderer.pngData(
+                for: expectedBounds,
+                configuration: .detail,
+                snapshot: { options in
+                    capturedDetailSize = options.size
+                    capturedDetailScale = options.scale
+                    return OfflineMapSnapshotPreviewRenderer.SnapshotResult(
+                        image: scaledDetailSource,
+                        pointForCoordinate: { coordinate in
+                            coordinatesMatch(coordinate, northWestCoordinate)
+                                ? .zero
+                                : CGPoint(x: 400, y: 240)
+                        }
+                    )
+                }
+            ) else {
+                fail("detail renderer should process a deterministic snapshot fixture")
+            }
+            deterministicDetailData = data
+        } catch {
+            fail("deterministic detail renderer should complete: \(error)")
+        }
+        guard capturedDetailSize == CGSize(width: 400, height: 240),
+              (capturedDetailScale ?? 0) >= 2,
+              let deterministicDetailImage = UIImage(data: deterministicDetailData),
+              deterministicDetailImage.cgImage?.width == 1_200,
+              deterministicDetailImage.cgImage?.height == 720,
+              SavedMapDetailPreviewStore.isValidPNG(deterministicDetailData) else {
+            fail(
+                "detail renderer should produce a cacheable 1200x720 Retina PNG " +
+                    "(request: \(String(describing: capturedDetailSize)) @ " +
+                    "\(String(describing: capturedDetailScale)), pixels: " +
+                    "\(String(describing: UIImage(data: deterministicDetailData)?.cgImage?.width))x" +
+                    "\(String(describing: UIImage(data: deterministicDetailData)?.cgImage?.height)), " +
+                    "bytes: \(deterministicDetailData.count), valid: " +
+                    "\(SavedMapDetailPreviewStore.isValidPNG(deterministicDetailData)))"
+            )
         }
 
         do {

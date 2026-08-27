@@ -1130,8 +1130,9 @@ private struct SavedMapRow: View {
                     finishRenaming()
                     focusedPackFilename = nil
                     presentedPreview = SavedMapPreviewPresentation(
+                        item: item,
                         displayName: displayName,
-                        image: previewImage
+                        fallbackImage: previewImage
                     )
                 } label: {
                     SavedMapThumbnail(image: previewImage)
@@ -1423,7 +1424,7 @@ private struct SavedMapRow: View {
             )
         }
         .sheet(item: $presentedPreview) { preview in
-            SavedMapPreviewSheet(preview: preview)
+            SavedMapPreviewSheet(manager: manager, preview: preview)
                 .presentationDetents([.large])
         }
     }
@@ -1436,32 +1437,54 @@ private struct SavedMapRow: View {
 }
 
 private struct SavedMapPreviewPresentation: Identifiable {
-    let id = UUID()
+    let item: SavedMapListItem
     let displayName: String
-    let image: UIImage
+    let fallbackImage: UIImage
+
+    var id: String { item.id }
 }
 
 private struct SavedMapPreviewSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject var manager: OfflineMapManager
     let preview: SavedMapPreviewPresentation
 
     var body: some View {
+        let image = manager.detailPreviewImage(for: preview.item) ??
+            preview.fallbackImage
+
         NavigationView {
-            Image(uiImage: preview.image)
-                .resizable()
-                .scaledToFit()
-                .padding()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(uiColor: .systemBackground))
-                .navigationTitle(preview.displayName)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Close") {
-                            dismiss()
-                        }
+            ZStack(alignment: .bottom) {
+                Image(uiImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityLabel("\(preview.displayName) map preview")
+
+                if manager.isDetailPreviewLoading(for: preview.item) {
+                    Label("Loading high-resolution preview", systemImage: "sparkles")
+                        .font(.caption)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(.thinMaterial, in: Capsule())
+                        .padding(.bottom, 12)
+                }
+            }
+            .background(Color(uiColor: .systemBackground))
+            .navigationTitle(preview.displayName)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        dismiss()
                     }
                 }
+            }
+        }
+        .task(id: preview.id) {
+            await manager.loadDetailPreviewIfNeeded(for: preview.item)
         }
     }
 }
