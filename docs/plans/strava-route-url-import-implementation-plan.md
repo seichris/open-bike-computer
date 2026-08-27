@@ -1,7 +1,7 @@
 # Strava route URL import implementation plan
 
 Prepared on 2026-08-27 from freshly fetched GitHub `origin/main` at
-`29be0efcd34fd7a9a9d685df3d311a2ca679d9b3` on branch
+`fdfc2be1cc96170690548b04e7aef67756ad7322` on branch
 `plan/strava-route-import`.
 
 This is a planning-only branch. It does not contain the Strava integration,
@@ -32,6 +32,9 @@ Routes section. The complete rider flow is:
 6. Bicino identifies the route as Strava-sourced, shows its expiry, and removes
    it from iPhone and Apple Watch according to the enforced retention policy or
    when the rider disconnects Strava.
+7. A reload button on every Strava route fetches the same route again without
+   another paste, replaces its geometry, and starts a new seven-day cache
+   window. After geometry expires, a minimal reload row remains available.
 
 No firmware or BLE protocol change is required. Strava supplies route geometry;
 it does not become a second navigation runtime.
@@ -73,21 +76,31 @@ return the route to the connected athlete, Bicino reports that it is unavailable
 
 ### Retention decision
 
-Strava's current policy permits at most a seven-day cache and requires user
-deletions to be reflected within 48 hours. For the first release:
+Strava's current policy permits at most a seven-day cache and separately
+requires user deletions to be reflected within 48 hours. For the first release:
 
-- set Strava route archive lifetime to 48 hours from the backend fetch time;
+- set Strava route archive lifetime to the full seven days from backend fetch;
 - encode the deletion deadline into the existing `deleteAfter` archive field;
 - reject any Strava archive without an expiry or with an expiry beyond the
   code-level seven-day maximum;
-- remove the route on both iPhone and Watch at expiry; and
+- remove all route geometry and API-derived metadata on both iPhone and Watch
+  at expiry;
+- retain only the route ID/canonical URL originally pasted by the rider, its
+  Bicino-local alias, and local route identity so a reload button can remain;
 - purge all Strava routes and connection data when the rider disconnects.
 
-The 48-hour default provides a deterministic deletion bound without depending
-on a route webhook that Strava does not expose. A later change may extend the
-cache only after a current policy review and a concrete deletion-reconciliation
-mechanism. The seven-day maximum remains compiled into the provider policy so
-an environment variable cannot silently exceed it.
+The separate 48-hour deletion rule is an early-deletion path, not the normal
+cache lifetime. While connected and online, iPhone revalidates cached route
+ownership/availability when the previous successful validation is more than 24
+hours old and purges immediately when Strava authoritatively reports the route
+unavailable. Disconnect, revocation, and an explicit Bicino delete also purge
+immediately. Transient network or Strava failures do not destroy an otherwise
+unexpired offline route.
+
+Because an offline Watch cannot independently poll Strava, confirm this
+seven-day cache plus connected-device revalidation model against the then-
+current policy before release. The seven-day maximum remains compiled into the
+provider policy so configuration cannot silently exceed it.
 
 This plan treats route geometry as a temporary Strava-backed cache, not as a
 permanent user-owned GPX export. The existing **Import GPX** path remains the
@@ -221,7 +234,7 @@ providerID: strava.route
 attribution: Strava
 storageScope: durable, but expiry required
 maximum retention: 7 days
-initial archive lifetime: 48 hours
+initial archive lifetime: 7 days
 ```
 
 Do not label the downloaded bytes `User-provided GPX`. Refactor the GPX parser
@@ -236,23 +249,50 @@ to take a closed import-source descriptor so only known callers can choose:
 Local file import keeps its existing durable, unexpired
 `user.imported-gpx` policy and behavior.
 
-### 7. Re-import updates one saved route
+### 7. Reload is one tap and preserves one saved route
 
 Store a validated optional source reference in the route archive containing the
 provider ID, canonical external route ID, and canonical source URL. Add backward-
 compatible decoding so existing version-1 archives without this optional field
 remain valid.
 
-If the same Strava route is imported again before or after expiry:
+Every current or expired Strava route row has a reload button. With a live
+connection, one tap fetches the current GPX immediately. If OAuth must be
+renewed, that same tap starts OAuth and automatically resumes the reload after
+authorization; the rider never pastes the URL again.
 
-- reuse its Bicino route UUID when an unexpired matching record exists;
+If the same Strava route is imported or reloaded before or after expiry:
+
+- reuse its Bicino route UUID from the active archive or retained reload
+  bookmark;
 - increment the route revision;
-- replace the geometry and reset the 48-hour expiry;
+- replace the geometry and reset the full seven-day expiry;
 - preserve the rider's local display-name override; and
 - use the existing exact-revision Watch replacement flow.
 
-If no matching record remains, create a new route UUID. Never derive a stable
-cross-user identity from an athlete ID or expose that ID in the route archive.
+At expiry, delete the archive, API-derived route name, endpoints, distance,
+geometry, steps, and Watch copy. Keep a separate local
+`StravaRouteReloadBookmarkV1` containing only:
+
+- the canonical route ID and URL parsed from the rider's pasted input;
+- the Bicino-generated route UUID and last revision;
+- an optional Bicino-local alias entered by the rider; and
+- non-sensitive reload/error timestamps.
+
+Create this bookmark only from the rider's pasted input and Bicino-local
+fields; never backfill or enrich it from Strava API/GPX data. It may remain
+until the rider deletes the row or disconnects because it is the rider's input
+and Bicino-local state, not retained route content.
+
+Render an expired bookmark as the local alias or **Strava route**, with
+**Expired** and the reload button. Do not retain or display the Strava-provided
+route name, endpoints, distance, preview, or geometry after expiry. Deleting
+the row or choosing **Disconnect Strava and Delete Data** deletes the bookmark
+too.
+
+If no archive or bookmark matches, create a new route UUID. Never derive a
+stable cross-user identity from an athlete ID or expose that ID in the route
+archive.
 
 ### 8. Existing Watch and Bicino paths remain authoritative
 
@@ -266,7 +306,8 @@ a deadline wake-up while a Strava route is selectable or active. Do not allow a
 new ride to start when the archive cannot remain valid for the configured
 maximum expected ride window. If the clock crosses `deleteAfter` while a route
 is active, end that navigation route cleanly, retain workout recording, remove
-the cached archive, and explain that the route expired and can be re-imported.
+the cached archive, and explain that the route expired and can be reloaded from
+its Saved Routes row.
 
 No route geometry is added to firmware persistence and no new BLE
 characteristic is allocated.
@@ -282,6 +323,7 @@ flowchart LR
     ROUTES["Strava route API"]
     GPX["Existing bounded<br/>GPX importer"]
     LIB["iPhone expiring<br/>route archive"]
+    BOOKMARK["Minimal local<br/>reload bookmark"]
     WATCH["Watch validated<br/>route archive"]
     DEVICE["Existing Bicino<br/>navigation BLE"]
 
@@ -290,6 +332,9 @@ flowchart LR
     API -->|"owned route metadata + GPX"| ROUTES
     API -->|"bounded GPX; no server cache"| GPX
     GPX --> LIB --> WATCH --> DEVICE
+    UI --> BOOKMARK
+    BOOKMARK -->|"one-tap reload"| AUTH
+    LIB -->|"expiry removes API data"| BOOKMARK
 ```
 
 ### OAuth sequence
@@ -437,9 +482,9 @@ pending-revocation record and let maintenance retry with a strict deadline.
 The endpoint remains available when new OAuth/import is feature-disabled.
 
 The successful response instructs the iPhone to execute a provider purge. The
-iPhone removes local Strava archives immediately and durably queues exact Watch
-deletions. Watch also enforces each archive's absolute expiry in case it remains
-unreachable during disconnect.
+iPhone removes local Strava archives and reload bookmarks immediately and
+durably queues exact Watch deletions. Watch also enforces each archive's
+absolute expiry in case it remains unreachable during disconnect.
 
 ### Fetch owned route GPX
 
@@ -455,13 +500,38 @@ Cache-Control: private, no-store
 X-Bicino-Route-Provider: strava.route
 X-Bicino-External-Route-ID: 3009840108578231836
 X-Bicino-Fetched-At: 2026-08-27T12:34:56Z
-X-Bicino-Delete-After: 2026-08-29T12:34:56Z
+X-Bicino-Delete-After: 2026-09-03T12:34:56Z
 ```
 
 The GPX body remains byte-for-byte as returned by Strava. The existing parser
 selects the longest usable route or track and reads its embedded name. Use the
 route ID as the fallback name; do not place arbitrary Unicode metadata in
 custom headers.
+
+### Revalidate an imported route
+
+`POST /v1/integrations/strava/routes/{routeId}/validate`
+
+Require installation authentication, a live Strava connection, and the same
+strict route-ID and ownership/type checks as GPX fetch. The endpoint takes no
+request body, performs only the route metadata lookup, and returns
+`Cache-Control: private, no-store`:
+
+```json
+{
+  "available": true,
+  "checkedAt": "2026-08-28T12:34:56Z"
+}
+```
+
+While connected and online, iPhone calls this endpoint when a Strava archive's
+last successful validation is more than 24 hours old. A definitive
+`strava_route_unavailable` or `strava_route_not_importable` response triggers
+immediate phone/Watch geometry purge while preserving the user-supplied reload
+bookmark. A token 401 enters the existing reconnect path. Rate limits,
+timeouts, and upstream 5xx responses retain an otherwise unexpired offline
+archive and retry at a later foreground opportunity. Reload uses the GPX
+endpoint, not this validation endpoint, and starts a new seven-day window.
 
 ### Typed failures
 
@@ -573,12 +643,13 @@ Extend the existing persistent limiter with separately configurable, bounded
 policies for:
 
 - OAuth session creation per IP and per installation;
-- route import per IP and per installation; and
+- route import and availability validation per IP and per installation; and
 - disconnect attempts.
 
-One import currently costs two Strava read requests, plus an occasional token
-refresh. Budget the Bicino limits below the application's Strava read quota and
-surface the upstream reset rather than retrying a 429 loop.
+One import or reload currently costs two Strava read requests, an availability
+validation costs one, and either may require a token refresh. Budget the Bicino
+limits below the application's Strava read quota and surface the upstream reset
+rather than retrying a 429 loop.
 
 ## iOS architecture
 
@@ -607,9 +678,12 @@ Add portable, non-UI types for:
 - `StravaRouteURLV1`, which implements the exact grammar and canonical ID;
 - connection status and OAuth-session responses;
 - typed backend errors and retry information;
-- exact validation of provider/route/time response headers; and
+- exact validation of provider/route/time response headers;
 - `StravaRouteImportReceiptV1`, containing external ID, canonical URL,
-  fetched time, and deletion deadline.
+  fetched time, deletion deadline, and validation time; and
+- `StravaRouteReloadBookmarkV1`, containing only the user-supplied reference,
+  Bicino route identity/revision, optional local alias, and local operation
+  timestamps.
 
 Reject a response when the requested route ID, provider header, dates, content
 type, byte limit, or cache lifetime is inconsistent. The app never trusts an
@@ -624,9 +698,9 @@ root. It manages:
 - one in-flight OAuth session;
 - `ASWebAuthenticationSession` and its presentation anchor;
 - native Strava app handoff using the official `strava://` URL when installed;
-- the pending validated route URL;
+- the pending validated route URL and whether it is a first import or reload;
 - callback and foreground status reconciliation; and
-- cancel-safe import tasks and typed UI state.
+- cancel-safe import/reload/revalidation tasks and typed UI state.
 
 Register the existing build-channel URL scheme on the iPhone target, add
 `BicinoURLScheme` to its Info.plist, and add `strava` to
@@ -639,7 +713,7 @@ bounded opaque session ID, and known result values. It still asks the backend
 for authoritative connection status; a deep link alone never establishes a
 connection.
 
-### Import and archive creation
+### Import, reload, and archive creation
 
 Refactor `GPXRouteImporterV1` around a closed source descriptor while preserving
 the local-import convenience API. The Strava path supplies:
@@ -651,9 +725,17 @@ the local-import convenience API. The Strava path supplies:
 - Strava-specific generic step text.
 
 The parser remains responsible for XML and geometry. The provider policy and
-archive remain responsible for retention. `PhoneRouteLibrary` gets a narrow
-`importStravaGPX(_:receipt:)` entry point and a `purge(providerID:)` compliance
-operation; the view never constructs provider metadata itself.
+archive remain responsible for retention. `PhoneRouteLibrary` gets narrow
+`importStravaGPX(_:receipt:)`, `reloadStravaGPX(_:receipt:bookmark:)`,
+`expireStravaRoute(id:)`, and `purge(providerID:)` operations; the view never
+constructs provider metadata itself.
+
+Persist the reload bookmark atomically with a successful first import. A reload
+must write the replacement archive and updated bookmark as one logical
+transaction: reuse the bookmark UUID, increment its revision, preserve its
+local alias, replace the old geometry only after full validation, and set a new
+seven-day `deleteAfter`. Failure leaves the prior unexpired archive or expired
+bookmark intact.
 
 ### UI behavior
 
@@ -677,17 +759,34 @@ The import sheet contains:
 Do not read `UIPasteboard` automatically on appearance. Standard text-field
 paste or a system `PasteButton` keeps the action explicit.
 
-For saved Strava routes, show **Powered by Strava**, a **View on Strava** link
-using the canonical URL, and an absolute/localized expiry. Keep Strava text no
-more prominent than the Bicino UI and follow the current brand guidelines.
-After successful import, dismiss the sheet, reload Saved Routes, and make the
-new or updated row visible.
+For an unexpired saved Strava route, show **Powered by Strava**, a **View on
+Strava** link using the canonical URL, an absolute/localized expiry, and a
+trailing reload button using `arrow.clockwise`. Give the button an accessible
+label such as **Reload [route name] from Strava**, show an in-row spinner while
+it is working, and suppress concurrent reload taps for that identity. Keep
+Strava text no more prominent than the Bicino UI and follow the current brand
+guidelines.
 
-Read the authenticated Strava capability before enabling the button. Hide it
-for installations that have never connected when the backend capability is
-disabled. If a connection or cached Strava route already exists, keep a
-management row visible so **Disconnect Strava and Delete Data** remains
-reachable even while new imports are disabled.
+At expiry, replace that row with the minimal bookmark row: local alias or
+**Strava route**, **Expired**, optional **View on Strava** based only on the
+originally pasted URL, and the same reload button. Do not show the prior Strava
+name, endpoints, distance, preview, or expiry geometry. Tapping reload fetches
+immediately when connected; if connection is absent or stale, that tap starts
+OAuth and automatically resumes the fetch. A failed reload leaves the row and
+its retry control available with an actionable inline error. The rider never
+needs to paste the URL again.
+
+After successful first import, dismiss the sheet, refresh Saved Routes, and
+make the new row visible. After reload, update that same row in place with the
+new revision and seven-day expiry. Deleting the row deletes both archive and
+bookmark and queues the exact Watch deletion when needed.
+
+Read the authenticated Strava capability before enabling **Import from Strava**
+or a reload control. When the capability is disabled, keep existing routes and
+expired bookmarks visible but disable reload with an unavailable explanation.
+Hide the import entry for installations that have never connected. If a
+connection, cached Strava route, or bookmark already exists, keep a management
+row visible so **Disconnect Strava and Delete Data** remains reachable.
 
 ## Provider retention and deletion changes
 
@@ -705,7 +804,7 @@ Strava route
   durable cache only
   deleteAfter required
   deleteAfter <= createdAt + 7 days
-  first-release deleteAfter = fetchedAt + 48 hours
+  first-release deleteAfter = fetchedAt + 7 days
 
 Unknown provider
   active use only unless explicitly reviewed later
@@ -713,7 +812,7 @@ Unknown provider
 
 Add distinct archive validation errors for missing required expiry and excessive
 retention. Test exact-boundary behavior, sub-millisecond normalization, clock
-skew, re-import revision, existing archive compatibility, and forged provider
+skew, reload revision, existing archive compatibility, and forged provider
 metadata.
 
 ### iPhone purge
@@ -727,9 +826,11 @@ metadata.
 5. send deletions immediately when Watch is reachable; and
 6. retry on later reachability without restoring route bytes.
 
-Normal expiry reconciliation also removes display-name overrides, sync
-receipts, and stale pending-install state for the pruned identities; it must not
-leave invisible per-route metadata behind.
+Normal Strava expiry deletes the archive and every API-derived field, clears
+ready/install receipts and stale pending-install state, and queues the exact
+Watch deletion. It preserves only `StravaRouteReloadBookmarkV1`, including any
+Bicino-local alias, so the expired row can reload the same route identity.
+Explicit row deletion and provider disconnect delete that bookmark as well.
 
 This compliance path is intentionally different from an ordinary user delete,
 which currently keeps the iPhone record until Watch acknowledges deletion.
@@ -748,7 +849,9 @@ Watch must:
 - acknowledge deletion so iPhone can retire its tombstone.
 
 No route can become permanent because the phone is offline, the Watch is
-unreachable, or the rider deletes the Bicino app.
+unreachable, or the rider deletes the Bicino app. Reload is an iPhone Saved
+Routes control; Watch stores no bookmark and receives a fresh exact-revision
+archive only after iPhone reload succeeds.
 
 ## Backend implementation slices
 
@@ -787,6 +890,8 @@ Completion:
 - all endpoints enforce the contract above;
 - callback state cannot be replayed or moved between installations/channels;
 - route ownership and cycling type are checked before GPX export;
+- availability validation applies the same identity checks without returning
+  route metadata or geometry;
 - response reads stop at the shared byte bound; and
 - TestClient coverage uses a fake injected Strava transport, never live tokens.
 
@@ -840,7 +945,9 @@ Files:
 - update `RouteProviderContract.swift` for the reviewed Strava policy;
 - update `NavigationRouteArchive.swift` for expiry requirements;
 - update `GPXRouteImporter.swift` for closed source descriptors;
-- update `NavigationRouteFileStore.swift` only for deadline scheduling hooks;
+- add `StravaRouteReloadBookmark.swift` and its atomic local store;
+- update `NavigationRouteFileStore.swift` for deadline scheduling and atomic
+  archive/bookmark replacement hooks;
 - update `PhoneRouteLibrary.swift`; and
 - extend `ios-app/BikeComputerTests/RideSharedTests.swift`.
 
@@ -848,7 +955,9 @@ Completion:
 
 - local GPX behavior is byte/semantics compatible;
 - Strava archives require a valid bounded expiry;
-- duplicate import produces a new revision rather than an unrelated row;
+- duplicate import/reload produces a new revision rather than an unrelated row;
+- normal expiry removes API data but leaves only the user/local reload bookmark;
+- explicit row deletion or disconnect removes the bookmark too;
 - old archives decode; and
 - phone and Watch stores remove the route at the same deadline.
 
@@ -861,7 +970,8 @@ Files:
 - add `StravaIntegrationCoordinator.swift`;
 - update `BikeComputer/Info.plist` and build-container verification scripts;
 - update `ContentView.onOpenURL`; and
-- add request, parser, callback-routing, cancellation, and error-mapping tests.
+- add request, parser, callback-routing, cancellation, revalidation, reload, and
+  error-mapping tests.
 
 The Xcode project uses file-system-synchronized groups, so normal files under
 the existing iPhone source root should join the target automatically. Add
@@ -884,8 +994,11 @@ Completion:
 
 - the new button is directly below **Import GPX**;
 - paste-connect-import resumes across the supported OAuth handoffs;
-- cancellation leaves no partial route or stuck busy state;
-- saved Strava routes display attribution and expiry;
+- cancellation leaves no partial route, lost prior archive, or stuck busy state;
+- unexpired Strava rows display attribution, expiry, and reload;
+- expired rows display only the local bookmark, **Expired**, and reload;
+- one reload tap reuses the route identity, preserves its alias, increments the
+  revision, and begins a new seven-day window without another paste;
 - disconnect performs the provider purge; and
 - GPX import, renaming, Watch transfer, and deletion retain their current UI.
 
@@ -918,10 +1031,10 @@ MAP_PLATFORM_STRAVA_REDIRECT_URI
 MAP_PLATFORM_STRAVA_TOKEN_KEY_ID
 MAP_PLATFORM_STRAVA_TOKEN_KEY_BASE64
 MAP_PLATFORM_STRAVA_PREVIOUS_TOKEN_KEYS
-MAP_PLATFORM_STRAVA_ROUTE_CACHE_TTL_SECONDS
 MAP_PLATFORM_STRAVA_CONNECTION_IDLE_TTL_DAYS
 MAP_PLATFORM_STRAVA_OAUTH_START_LIMIT_PER_HOUR
 MAP_PLATFORM_STRAVA_ROUTE_IMPORT_LIMIT_PER_HOUR
+MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR
 ```
 
 Validation rules:
@@ -931,8 +1044,8 @@ Validation rules:
 - redirect URI is exact HTTPS, has no query/fragment, and matches the
   deployment's fixed host/path;
 - encryption keys decode to exactly 32 random bytes and have unique IDs;
-- cache TTL is positive, defaults to 172,800 seconds, and can never exceed
-  604,800 seconds;
+- route cache TTL is not operator-configurable; both backend and clients own
+  the reviewed constant of 604,800 seconds and reject any later deadline;
 - connection idle TTL defaults to 30 days and cannot be configured above the
   code-owned orphan-credential maximum; and
 - Production cannot use Development callback host, client ID, return scheme,
@@ -958,8 +1071,10 @@ Before TestFlight outside the developer account:
 2. Confirm that sending a temporary route archive to the rider's paired Watch
    and using it to drive the rider's Bicino display fits the current registered
    application purpose and Strava terms.
-3. Confirm the 48-hour route cache and provider purge with the then-current API
-   policy. Treat any desired seven-day extension as a separate reviewed change.
+3. Confirm the full seven-day route cache, 24-hour connected revalidation
+   cadence, immediate authoritative-unavailable purge, and provider purge with
+   the then-current API policy. Confirm how the policy's separate 48-hour
+   deletion requirement applies to an offline iPhone or Watch.
 4. Verify Strava application access tier and rate limits for the intended
    cohort.
 5. Use current approved Connect/attribution assets and wording. Do not imply
@@ -986,11 +1101,16 @@ portable executable test for:
 - response-body 0-byte, 4 MiB, and 4 MiB + 1 boundaries;
 - existing user GPX import unchanged;
 - Strava provider attribution and generic steps;
-- required expiry, 48-hour default, exact seven-day maximum, and excessive
-  retention rejection;
+- required expiry, seven-day default/exact maximum, and excessive retention
+  rejection;
 - backward decoding of existing archives without source reference;
-- same-route revision replacement and display-name preservation;
-- provider purge tombstone persistence; and
+- reload bookmark encoding contains only the user-supplied reference and
+  Bicino-local identity/alias fields, never API-derived route data;
+- exact expiry removes archive/API data while preserving the reload bookmark;
+- same-route reload preserves UUID/local alias, increments revision, replaces
+  geometry atomically, and starts a new seven-day deadline;
+- failed reload preserves the previous unexpired archive or expired bookmark;
+- provider purge removes archive and bookmark and persists its tombstone; and
 - phone/Watch expiry at the exact deadline.
 
 Run:
@@ -1008,8 +1128,12 @@ Add deterministic injected-session tests for:
 - OAuth start, denial, success, timeout, replay, and app termination;
 - native Strava app and `ASWebAuthenticationSession` callback routing;
 - callback scheme/host/path confusion attempts;
-- resume of the pending validated URL after OAuth;
-- import cancellation and concurrent-tap suppression;
+- resume of a pending first import or reload after OAuth;
+- import/reload cancellation and per-route concurrent-tap suppression;
+- active and expired row reload-button state, accessible label, and spinner;
+- connected one-tap reload and OAuth-resumed reload without another paste;
+- foreground revalidation cadence and authoritative-unavailable purge;
+- transient revalidation failure retaining an unexpired offline route;
 - typed 401/403/404/413/429/5xx presentation;
 - disconnect and local provider purge; and
 - Debug/Release URL scheme and service-host isolation.
@@ -1044,6 +1168,8 @@ Test with an injected fake Strava transport:
 - route ID and athlete ownership equality using 64-bit-safe values;
 - rejection of another athlete, run routes, missing fields, wrong IDs, and
   malformed upstream JSON;
+- validation endpoint ownership/type checks, metadata-free success response,
+  definitive-unavailable response, and transient-failure mapping;
 - exact fixed-host requests and redirect refusal;
 - GPX content type, empty body, byte limit, timeout, and upstream fault mapping;
 - installation/IP rate limits and upstream quota headers;
@@ -1081,12 +1207,17 @@ Use a Development Strava application and Bicino Dev:
 | Expired access token | Exactly one serialized refresh, then import succeeds |
 | App killed during OAuth | Foreground/status reconciliation completes or safely expires |
 | GPX malformed/oversized | Existing importer/size error; no partial archive |
-| Same route imported twice | One saved route, incremented revision and refreshed expiry |
+| Same route imported twice | One saved route, incremented revision and fresh seven-day expiry |
+| Reload unexpired row | One tap replaces geometry in place and starts a fresh seven-day expiry |
+| Reload expired row | No URL paste; same UUID/local alias returns with an incremented revision |
+| Reload while disconnected | Same tap completes OAuth, resumes reload, and does not ask for the URL |
+| Reload fails | Existing unexpired route or expired reload row remains usable/retryable |
 | Watch reachable | Exact archive installs and reports Ready |
 | Watch offline | Transfer queues; archive still expires independently |
-| 48-hour deadline in accelerated test | Route disappears on phone and Watch; active navigation ends, workout continues |
+| Seven-day deadline in accelerated test | Geometry/API metadata disappear on phone and Watch; minimal iPhone reload row remains; active navigation ends and workout continues |
+| Strava route becomes unavailable | Next eligible online revalidation immediately purges phone/Watch geometry; reload bookmark remains |
 | Disconnect while Watch offline | Phone purges immediately; Watch tombstone queues; hard expiry remains |
-| Backend feature disabled | New import unavailable; disconnect/delete still works |
+| Backend feature disabled | New import/reload unavailable; rows remain visible; disconnect/delete still works |
 
 For physical validation, separately record:
 
@@ -1111,6 +1242,8 @@ Emit structured, low-cardinality events such as:
 - `strava_oauth_failed` with bounded error code;
 - `strava_route_import_completed` with response byte bucket and duration;
 - `strava_route_import_failed` with bounded stage/code;
+- `strava_route_reload_completed/failed` with bounded stage/code;
+- `strava_route_revalidation_completed/failed` with availability/result code;
 - `strava_token_refreshed`;
 - `strava_connection_revoked`;
 - `strava_connection_idle_revoked`;
@@ -1153,25 +1286,27 @@ must not make a live athlete-authenticated Strava request.
    larger than the live capacity.
 10. Configure Production secrets, deploy backend first, verify callback and
     disconnect endpoints, then release the client UI.
-11. Expand only while rate limits, refresh failures, pending revocations, and
-    expiry/purge acknowledgements remain healthy.
+11. Expand only while rate limits, refresh failures, reload/revalidation
+    outcomes, pending revocations, and expiry/purge acknowledgements remain
+    healthy.
 12. Before 2027-01-04, validate the announced Strava API base migration and land
     a separately reviewed host cutover.
 
 Expose Strava support through the authenticated `/v1/capabilities` response so
 the client does not guess from app version or a failed import. The server may
-disable new OAuth and imports immediately while leaving status,
-disconnect/delete, local expiry, and Watch purge operational.
+disable new OAuth, imports, and reloads immediately while leaving status,
+disconnect/delete, local expiry, expired bookmark rows, and Watch purge
+operational.
 
 ## Rollback
 
 Backend rollback must preserve encrypted-store schema compatibility and the
 disconnect/delete endpoint. If import must stop:
 
-- disable the advertised capability and new OAuth/import endpoints;
+- disable the advertised capability and new OAuth/GPX/validation endpoints;
 - allow in-flight callbacks to finish safely or expire;
 - keep token revocation and deletion available;
-- let existing 48-hour archives expire normally unless policy or an incident
+- let existing seven-day archives expire normally unless policy or an incident
   requires an immediate provider purge; and
 - never roll back to a client/server combination that treats Strava archives as
   unbounded durable GPX.
@@ -1192,7 +1327,9 @@ remain in Coolify or backups beyond the documented deletion window.
 - Any owned cycling route visible under the rider's granted scopes imports into
   the existing Saved Routes library.
 - Another athlete's route, a segment URL, and a run route do not import.
-- Re-import updates one route and preserves its local name.
+- Every active or expired Strava row has a reload button.
+- One reload tap updates that route in place, preserves its local alias, and
+  starts a fresh seven-day window without another URL paste.
 - The existing GPX import flow is unchanged.
 
 ### Security
@@ -1212,7 +1349,12 @@ remain in Coolify or backups beyond the documented deletion window.
 
 - A Strava archive always has `deleteAfter` and cannot exceed the compiled
   seven-day maximum.
-- First-release archives expire after 48 hours on iPhone and Watch.
+- First-release archives expire after seven days on iPhone and Watch.
+- Expiry removes all API-derived route data and Watch geometry while retaining
+  only the user/local reload bookmark on iPhone.
+- Connected iPhone revalidates when the last successful check is older than 24
+  hours and purges geometry immediately on a definitive unavailable response.
+- Explicit row deletion or disconnect removes the reload bookmark too.
 - Disconnect immediately disables the backend connection and purges the phone;
   exact Watch deletion is retried until acknowledged or absolute expiry.
 - An orphaned backend connection is revoked after the bounded inactivity
@@ -1234,8 +1376,8 @@ remain in Coolify or backups beyond the documented deletion window.
 
 - The live Strava athlete capacity covers the enabled cohort.
 - Privacy and branding gates are complete.
-- Quota, refresh, revoke, import, expiry, and purge metrics are observable
-  without Strava data.
+- Quota, refresh, revoke, import, reload, revalidation, expiry, and purge
+  metrics are observable without Strava data.
 - Backend feature disable and full provider purge have been rehearsed in
   Development.
 
