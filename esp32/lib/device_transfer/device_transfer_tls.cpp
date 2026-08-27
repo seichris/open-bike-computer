@@ -10,8 +10,8 @@
 #include <mbedtls/sha256.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
-#include <poll.h>
 #include <sys/socket.h>
+#include <sys/poll.h>
 #include <sys/time.h>
 #include <unistd.h>
 
