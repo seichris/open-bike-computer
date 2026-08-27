@@ -202,6 +202,26 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
         }
+        .sheet(item: createdSharePresentation) { presentation in
+            SavedMapShareSheet(url: presentation.url)
+                .presentationDetents([.medium])
+        }
+    }
+
+    private var createdSharePresentation:
+        Binding<SavedMapSharePresentation?> {
+        Binding(
+            get: {
+                offlineMapManager.createdShareURL.map {
+                    SavedMapSharePresentation(url: $0)
+                }
+            },
+            set: { presentation in
+                if presentation == nil {
+                    offlineMapManager.clearCreatedShareURL()
+                }
+            }
+        )
     }
 
     private var shouldPromoteBikeComputerSettings: Bool {
@@ -1030,34 +1050,6 @@ private struct SavedMapsSettingsSection: View {
         .onChange(of: bleManager.mapTransferActivationProgress) { _ in
             manager.reconcileLastTransfer(bleManager: bleManager)
         }
-        .sheet(
-            isPresented: Binding(
-                get: { manager.createdShareURL != nil },
-                set: { if !$0 { manager.clearCreatedShareURL() } }
-            )
-        ) {
-            if let url = manager.createdShareURL {
-                NavigationView {
-                    VStack(spacing: 20) {
-                        Image(systemName: "link.circle.fill")
-                            .font(.system(size: 52))
-                            .foregroundColor(.accentColor)
-                        Text("Your friend can open this link in Bicino, preview the map, and choose whether to add it.")
-                            .multilineTextAlignment(.center)
-                            .foregroundColor(.secondary)
-                        ShareLink(item: url) {
-                            Label("Share Map Link", systemImage: "square.and.arrow.up")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                    .padding(24)
-                    .navigationTitle("Share Map")
-                    .navigationBarTitleDisplayMode(.inline)
-                }
-                .presentationDetents([.medium])
-            }
-        }
     }
 
     private func scheduleRenameCommitIfNeeded(focusedFilename: String?) {
@@ -1080,6 +1072,40 @@ private struct SavedMapsSettingsSection: View {
             return
         }
         manager.renameCachedPack(at: packURL, to: commit.proposedName)
+    }
+}
+
+private struct SavedMapSharePresentation: Identifiable {
+    let url: URL
+
+    var id: URL { url }
+}
+
+private struct SavedMapShareSheet: View {
+    let url: URL
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                Image(systemName: "link.circle.fill")
+                    .font(.system(size: 52))
+                    .foregroundColor(.accentColor)
+                Text(
+                    "Your friend can open this link in Bicino, preview the map, " +
+                        "and choose whether to add it."
+                )
+                .multilineTextAlignment(.center)
+                .foregroundColor(.secondary)
+                ShareLink(item: url) {
+                    Label("Share Map Link", systemImage: "square.and.arrow.up")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(24)
+            .navigationTitle("Share Map")
+            .navigationBarTitleDisplayMode(.inline)
+        }
     }
 }
 
