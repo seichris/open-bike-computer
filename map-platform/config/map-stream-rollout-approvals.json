@@ -78,6 +78,32 @@
           "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
         }
       ]
+    },
+    {
+      "promotionId": "msr-20260827-promotion-rollout-safety",
+      "candidateGitSha": "305864442616f12205c4908d2e24bf93441aa4ae",
+      "producerBuildSha256": "b918ba05d8bb770a355385842cea7ef55d0bb41f08a074bc9b4f259d99bdd177",
+      "workerImageDigest": "sha256:d9a531d88aaf272a9c2ff676c0e284692bb73677600de1b6e55a2b7b64ee129e",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 93,
+      "firmwareGitSha": "7c35d08232a736a9ee05d2c103d82b357e991c59",
+      "iosBuild": "15",
+      "iosGitSha": "7c35d08232a736a9ee05d2c103d82b357e991c59",
+      "iosBuildSha256": "1e756b1d387ffd407f92ab3c0f2d962c75b3a0bb99a9f3c630daee086b8f320c",
+      "reportSha256": "c9c292de22e8dbab1f04c49075157201ecbe7262a713c6b0b97611947c3ba1ee",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-08-27T08:00:35Z",
+      "approvedBy": "seichris",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
     }
   ]
 }
