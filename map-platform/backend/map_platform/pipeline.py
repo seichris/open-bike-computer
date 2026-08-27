@@ -1002,6 +1002,11 @@ _BUILDING_SCOPE_PREFIX = "BUILDING_SCOPE:"
 _BUILDING_COMPLEXITY_PREFIX = "BUILDING_COMPLEXITY:"
 _BUILDING_BLOCK_CACHE_PREFIX = "BUILDING_BLOCK_CACHE:"
 _BUILDING_FAILURE_PREFIX = "BUILDING_PREPROCESS_FAILURE:"
+_GENERIC_GEOMETRY_FAILURE_PREFIX = "GENERIC_GEOMETRY_FAILURE:"
+_PIPELINE_FAILURE_PREFIXES = (
+    _BUILDING_FAILURE_PREFIX,
+    _GENERIC_GEOMETRY_FAILURE_PREFIX,
+)
 _BUILDING_PREPROCESS_PROGRESS_PREFIX = "BUILDING_PREPROCESS_PROGRESS:"
 _BUILDING_FAILURE_CODES = {
     "building_scope_exceeded",
@@ -1023,6 +1028,8 @@ _BUILDING_FAILURE_CODES = {
     "building_artifact_too_large",
     "building_artifact_admission",
     "building_artifact_validation_failed",
+    "generic_geometry_invalid",
+    "generic_geometry_amplification_limit",
 }
 _BUILDING_FAILURE_MESSAGES = {
     "building_scope_exceeded": "selected building scope exceeds policy",
@@ -1054,6 +1061,10 @@ _BUILDING_FAILURE_MESSAGES = {
         "selected building artifact exceeds pre-execution admission"
     ),
     "building_artifact_validation_failed": "selected building artifact failed final validation",
+    "generic_geometry_invalid": "selected map geometry failed validation",
+    "generic_geometry_amplification_limit": (
+        "selected map geometry exceeds the decomposition limit"
+    ),
 }
 _CHUNK_SPLIT_FAILURE_CODES = frozenset(
     {
@@ -1463,23 +1474,24 @@ def parse_building_complexity(line: str) -> dict[str, int] | None:
 
 def parse_building_failure(output: str) -> dict[str, str] | None:
     for line in output.splitlines():
-        marker = line.find(_BUILDING_FAILURE_PREFIX)
-        if marker < 0:
-            continue
-        payload = line[marker + len(_BUILDING_FAILURE_PREFIX):].strip()
-        if not payload or len(payload) > 16 * 1024:
-            continue
-        try:
-            value = json.loads(payload)
-        except (TypeError, ValueError):
-            continue
-        if (
-            isinstance(value, dict)
-            and value.get("code") in _BUILDING_FAILURE_CODES
-            and isinstance(value.get("message"), str)
-            and 0 < len(value["message"]) <= 1_024
-        ):
-            return {"code": value["code"], "message": value["message"]}
+        for prefix in _PIPELINE_FAILURE_PREFIXES:
+            marker = line.find(prefix)
+            if marker < 0:
+                continue
+            payload = line[marker + len(prefix):].strip()
+            if not payload or len(payload) > 16 * 1024:
+                continue
+            try:
+                value = json.loads(payload)
+            except (TypeError, ValueError):
+                continue
+            if (
+                isinstance(value, dict)
+                and value.get("code") in _BUILDING_FAILURE_CODES
+                and isinstance(value.get("message"), str)
+                and 0 < len(value["message"]) <= 1_024
+            ):
+                return {"code": value["code"], "message": value["message"]}
     return None
 
 

@@ -1112,27 +1112,35 @@ class PipelineProgressTests(unittest.TestCase):
                     },
                 }
             )
-            pipeline = MapBuildPipeline(
-                PipelinePaths(root, root / "work", root / "packs"),
-                runner=FailingBuildingStreamingRunner(
+            cases = (
+                (
                     'BUILDING_PREPROCESS_FAILURE:{"code":"building_calibration_unavailable",'
-                    '"message":"scope plan calibration inputs are incomplete"}\n'
+                    '"message":"scope plan calibration inputs are incomplete"}\n',
+                    "building_calibration_unavailable",
+                    "scope plan calibration inputs are incomplete",
+                ),
+                (
+                    'GENERIC_GEOMETRY_FAILURE:{"code":"generic_geometry_amplification_limit",'
+                    '"message":"polygon produced too many pieces"}\n',
+                    "generic_geometry_amplification_limit",
+                    "polygon produced too many pieces",
                 ),
             )
-            with self.assertRaises(BuildingScopeError) as context:
-                pipeline._extract_features(
-                    job,
-                    root / "features",
-                    root / "raw-map",
-                    on_progress=lambda *_progress: None,
-                )
-            self.assertEqual(
-                context.exception.code, "building_calibration_unavailable"
-            )
-            self.assertEqual(
-                str(context.exception),
-                "scope plan calibration inputs are incomplete",
-            )
+            for output, expected_code, expected_message in cases:
+                with self.subTest(code=expected_code):
+                    pipeline = MapBuildPipeline(
+                        PipelinePaths(root, root / "work", root / "packs"),
+                        runner=FailingBuildingStreamingRunner(output),
+                    )
+                    with self.assertRaises(BuildingScopeError) as context:
+                        pipeline._extract_features(
+                            job,
+                            root / "features",
+                            root / "raw-map",
+                            on_progress=lambda *_progress: None,
+                        )
+                    self.assertEqual(context.exception.code, expected_code)
+                    self.assertEqual(str(context.exception), expected_message)
 
     def test_unpinned_legacy_target_does_not_emit_building_cache_progress(self):
         source = SourceRegion(
