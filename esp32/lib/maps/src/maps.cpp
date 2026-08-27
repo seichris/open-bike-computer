@@ -9,6 +9,7 @@
 
 #include "maps.hpp"
 #include "mapBlockFormat.hpp"
+#include "mapByteOrder.hpp"
 #include "mapBuildingRenderer.hpp"
 #include "mapBuildingAdmission.hpp"
 #include "mapBuildingWorkspace.hpp"
@@ -1603,7 +1604,8 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
     offset += 4;
 
   // Polygons
-  uint16_t polyCount = *(uint16_t *)(file + offset);
+  const auto *bytes = reinterpret_cast<const uint8_t *>(file);
+  uint16_t polyCount = map_byte_order::readLe16(bytes + offset);
   offset += 2;
   mblock->polygons.reserve(polyCount);
 
@@ -1614,7 +1616,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
       return new MapBlock();
     }
     Polygon poly;
-    poly.color = *(uint16_t *)(file + offset);
+    poly.color = map_byte_order::readLe16(bytes + offset);
     offset += 2;
     poly.maxZoom = *(uint8_t *)(file + offset);
     offset += 1;
@@ -1627,16 +1629,16 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
       poly.typeId = 0; // Unknown for legacy maps
     }
 
-    poly.bbox.min.x = *(int16_t *)(file + offset);
+    poly.bbox.min.x = map_byte_order::readLeI16(bytes + offset);
     offset += 2;
-    poly.bbox.min.y = *(int16_t *)(file + offset);
+    poly.bbox.min.y = map_byte_order::readLeI16(bytes + offset);
     offset += 2;
-    poly.bbox.max.x = *(int16_t *)(file + offset);
+    poly.bbox.max.x = map_byte_order::readLeI16(bytes + offset);
     offset += 2;
-    poly.bbox.max.y = *(int16_t *)(file + offset);
+    poly.bbox.max.y = map_byte_order::readLeI16(bytes + offset);
     offset += 2;
 
-    uint16_t pointCount = *(uint16_t *)(file + offset);
+    uint16_t pointCount = map_byte_order::readLe16(bytes + offset);
     offset += 2;
     poly.points.resize(pointCount);
     memcpy(poly.points.data(), file + offset, pointCount * 4);
@@ -1645,7 +1647,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   }
 
   // Polylines
-  uint16_t lineCount = *(uint16_t *)(file + offset);
+  uint16_t lineCount = map_byte_order::readLe16(bytes + offset);
   offset += 2;
   mblock->polylines.reserve(lineCount);
 
@@ -1656,7 +1658,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
       return new MapBlock();
     }
     Polyline line;
-    line.color = *(uint16_t *)(file + offset);
+    line.color = map_byte_order::readLe16(bytes + offset);
     offset += 2;
     line.width = *(uint8_t *)(file + offset);
     offset += 1;
@@ -1671,16 +1673,16 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
       line.typeId = 0; // Unknown for legacy maps
     }
 
-    line.bbox.min.x = *(int16_t *)(file + offset);
+    line.bbox.min.x = map_byte_order::readLeI16(bytes + offset);
     offset += 2;
-    line.bbox.min.y = *(int16_t *)(file + offset);
+    line.bbox.min.y = map_byte_order::readLeI16(bytes + offset);
     offset += 2;
-    line.bbox.max.x = *(int16_t *)(file + offset);
+    line.bbox.max.x = map_byte_order::readLeI16(bytes + offset);
     offset += 2;
-    line.bbox.max.y = *(int16_t *)(file + offset);
+    line.bbox.max.y = map_byte_order::readLeI16(bytes + offset);
     offset += 2;
 
-    uint16_t pointCount = *(uint16_t *)(file + offset);
+    uint16_t pointCount = map_byte_order::readLe16(bytes + offset);
     offset += 2;
     line.points.resize(pointCount);
     memcpy(line.points.data(), file + offset, pointCount * 4);
