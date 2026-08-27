@@ -1426,6 +1426,19 @@ nonisolated struct OfflineMapInstallationCredentialStore {
         defaults.set(data, forKey: Self.fallbackKeyPrefix + account)
 #endif
     }
+
+    func delete(serverURLString: String) {
+        let account = OfflineMapServerIdentity.normalized(serverURLString)
+#if os(iOS)
+        _ = SecItemDelete([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecAttrAccount as String: account,
+        ] as CFDictionary)
+#else
+        defaults.removeObject(forKey: Self.fallbackKeyPrefix + account)
+#endif
+    }
 }
 
 nonisolated struct OfflineMapLegacyBearerTokenStore {

@@ -474,6 +474,17 @@ nonisolated struct OfflineMapArtifactDownloadURL: Decodable, Equatable {
 nonisolated struct OfflineMapInstallationCredential: Codable, Equatable {
     let clientInstallationId: String
     let clientInstallationToken: String
+    let appAttestKeyId: String?
+
+    init(
+        clientInstallationId: String,
+        clientInstallationToken: String,
+        appAttestKeyId: String? = nil
+    ) {
+        self.clientInstallationId = clientInstallationId
+        self.clientInstallationToken = clientInstallationToken
+        self.appAttestKeyId = appAttestKeyId
+    }
 }
 
 nonisolated struct OfflineMapDisplayNameRequest: Encodable, Equatable {
@@ -3029,8 +3040,10 @@ struct OfflineMapPlatformClient {
     let legacyBearerToken: String?
     let clientInstallationId: String
     let clientInstallationToken: String?
+    let clientAppAttestKeyId: String?
     let mapStreamTrustCapabilities: String?
     let mapStreamAppBuildIdentity: MapStreamAppBuildIdentity?
+    let managedAppAttestClient: ManagedOfflineMapAppAttestClient?
     var session: URLSession = .shared
 
     init(
@@ -3038,16 +3051,20 @@ struct OfflineMapPlatformClient {
         legacyBearerToken: String? = nil,
         clientInstallationId: String,
         clientInstallationToken: String? = nil,
+        clientAppAttestKeyId: String? = nil,
         mapStreamTrustCapabilities: String? = BikeMapStreamTrustStore.production.capabilityHeaderValue,
         mapStreamAppBuildIdentity: MapStreamAppBuildIdentity? = .current,
+        managedAppAttestClient: ManagedOfflineMapAppAttestClient? = nil,
         session: URLSession = .shared
     ) {
         self.baseURL = baseURL
         self.legacyBearerToken = legacyBearerToken?.isEmpty == true ? nil : legacyBearerToken
         self.clientInstallationId = clientInstallationId
         self.clientInstallationToken = clientInstallationToken
+        self.clientAppAttestKeyId = clientAppAttestKeyId
         self.mapStreamTrustCapabilities = mapStreamTrustCapabilities
         self.mapStreamAppBuildIdentity = mapStreamAppBuildIdentity
+        self.managedAppAttestClient = managedAppAttestClient
         self.session = session
     }
 
@@ -3062,14 +3079,61 @@ struct OfflineMapPlatformClient {
     }
 
     private func createJobOnce(
-        _ jobRequest: OfflineMapJobRequest
+        _ jobRequest: OfflineMapJobRequest,
+        retryingAppAttestFailure: Bool = false
     ) async throws -> OfflineMapJob {
         var request = try Self.makeCreateJobURLRequest(
             baseURL: baseURL,
             jobRequest: jobRequest
         )
         authorizeInstallation(&request)
-        return try await send(request: request)
+        if let managedAppAttestClient {
+            guard let token = clientInstallationToken,
+                  let keyID = clientAppAttestKeyId else {
+                throw OfflineMapPlatformError.invalidResponse
+            }
+            let credential = OfflineMapInstallationCredential(
+                clientInstallationId: clientInstallationId,
+                clientInstallationToken: token,
+                appAttestKeyId: keyID
+            )
+            request = try await managedAppAttestClient.authorizeMapCreate(
+                request: request,
+                jobRequest: jobRequest,
+                credential: credential,
+                baseURL: baseURL
+            )
+        }
+        do {
+            return try await send(request: request)
+        } catch let error as OfflineMapPlatformError {
+            if managedAppAttestClient != nil,
+               case .serverStatus(let status, let body) = error,
+               status == 401,
+               let data = body.data(using: .utf8),
+               let envelope = try? JSONDecoder().decode(
+                   OfflineMapAPIErrorEnvelope.self,
+                   from: data
+               ) {
+                if !retryingAppAttestFailure,
+                   Self.appAttestRetryableCodes.contains(
+                       envelope.detail.code
+                   ) {
+                    return try await createJobOnce(
+                        jobRequest,
+                        retryingAppAttestFailure: true
+                    )
+                }
+                if Self.appAttestInvalidationCodes.contains(
+                    envelope.detail.code
+                ) {
+                    await managedAppAttestClient?.invalidate(
+                        serverURLString: baseURL.absoluteString
+                    )
+                }
+            }
+            throw error
+        }
     }
 
     func registerInstallation() async throws -> OfflineMapInstallationCredential {
@@ -3099,6 +3163,9 @@ struct OfflineMapPlatformClient {
         request.httpMethod = "POST"
         authorizeInstallation(&request)
         let credential: OfflineMapInstallationCredential = try await send(request: request)
+        let appAttestKeyIsValid = credential.appAttestKeyId.map(
+            OfflineMapAppAttestKeyStore.isValidKeyID
+        ) ?? true
         guard credential.clientInstallationId.range(
             of: "^inst_v2_[0-9a-f]{32}$",
             options: .regularExpression
@@ -3106,7 +3173,9 @@ struct OfflineMapPlatformClient {
         credential.clientInstallationToken.range(
             of: "^v1\\.[A-Za-z0-9_-]{43}$",
             options: .regularExpression
-        ) != nil else {
+        ) != nil,
+        appAttestKeyIsValid,
+        (managedAppAttestClient == nil || credential.appAttestKeyId != nil) else {
             throw OfflineMapPlatformError.invalidResponse
         }
         return credential
@@ -3386,7 +3455,7 @@ struct OfflineMapPlatformClient {
         return try JSONDecoder().decode(Response.self, from: data)
     }
 
-    private static func platformError(
+    static func platformError(
         statusCode: Int,
         data: Data
     ) -> OfflineMapPlatformError {
@@ -3424,6 +3493,17 @@ struct OfflineMapPlatformClient {
             String(data: data, encoding: .utf8) ?? ""
         )
     }
+
+    private static let appAttestInvalidationCodes = [
+        "installation_attestation_required",
+        "app_attest_key_mismatch",
+        "app_attest_invalid_key",
+    ]
+
+    private static let appAttestRetryableCodes = [
+        "app_attest_invalid_challenge",
+        "app_attest_counter_replay",
+    ]
 
     private func authorizeInstallation(_ request: inout URLRequest) {
         if let legacyBearerToken {
