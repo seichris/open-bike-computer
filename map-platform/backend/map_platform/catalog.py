@@ -519,6 +519,7 @@ class CatalogClient:
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
+                "User-Agent": "BicinoMapPlatform/1.0",
                 "X-Catalog-Key-Id": self.service_key_id,
                 "X-Catalog-Timestamp": timestamp,
                 "X-Catalog-Idempotency-Key": idempotency_key,
