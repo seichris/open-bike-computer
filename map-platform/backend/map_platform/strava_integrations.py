@@ -1012,7 +1012,7 @@ class StravaIntegrationService:
         route_id = validate_strava_route_id(route_id)
         record = self._usable_connection(installation_id)
         metadata = self._route_metadata(client, record, route_id)
-        self._validate_owned_cycling_route(metadata, record)
+        self._validate_cycling_route(metadata)
         try:
             gpx = client.export_gpx(route_id, record.bundle.access_token)
         except StravaClientError as exc:
@@ -1035,7 +1035,7 @@ class StravaIntegrationService:
         route_id = validate_strava_route_id(route_id)
         record = self._usable_connection(installation_id)
         metadata = self._route_metadata(client, record, route_id)
-        self._validate_owned_cycling_route(metadata, record)
+        self._validate_cycling_route(metadata)
         checked_at = self._clock()
         self.store.touch_connection(installation_id, now=checked_at)
         return StravaRouteValidation(
@@ -1197,11 +1197,8 @@ class StravaIntegrationService:
             raise self._map_client_error(exc, record.installation_id) from exc
 
     @staticmethod
-    def _validate_owned_cycling_route(
-        metadata: StravaRouteMetadata,
-        record: StravaConnectionRecord,
-    ) -> None:
-        if metadata.athlete_id != record.bundle.athlete_id or metadata.route_type != 1:
+    def _validate_cycling_route(metadata: StravaRouteMetadata) -> None:
+        if metadata.route_type != 1:
             raise StravaIntegrationError(
                 "strava_route_not_importable",
                 status_code=403,

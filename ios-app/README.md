@@ -227,8 +227,8 @@ When the configured Bicino service advertises Strava support, open **Settings >
 Saved Routes** and choose **Import from Strava** directly below **Import GPX**.
 Paste a URL in the form `https://www.strava.com/routes/123`; query parameters
 and fragments are discarded. The first import opens Strava's app or web OAuth
-flow. Bicino can import a cycling route only when it belongs to the connected
-Strava athlete and is visible under the granted `read` or `read_all` scope.
+flow. Bicino can import any cycling route that Strava makes visible to the
+connected account under the granted `read` or `read_all` scope.
 
 A successful import uses the existing validated route archive and Watch
 transfer path. Its iPhone and Watch copies expire exactly seven days after the

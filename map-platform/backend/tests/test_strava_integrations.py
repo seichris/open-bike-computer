@@ -359,8 +359,13 @@ class StravaIntegrationServiceTests(unittest.TestCase):
         )
         self.assertEqual(replay.result, "invalid")
 
-    def test_fetch_and_validation_enforce_owner_type_and_seven_day_deadline(self):
+    def test_fetch_and_validation_allow_other_athletes_cycling_route(self):
         self.connect()
+        self.client.metadata = StravaRouteMetadata(
+            route_id=ROUTE_ID,
+            athlete_id="45",
+            route_type=1,
+        )
         download = self.service.fetch_route(INSTALLATION_ID, ROUTE_ID)
         validation = self.service.validate_route(INSTALLATION_ID, ROUTE_ID)
 
@@ -371,18 +376,11 @@ class StravaIntegrationServiceTests(unittest.TestCase):
         )
         self.assertEqual(validation.route_id, ROUTE_ID)
 
+    def test_fetch_and_validation_reject_non_cycling_route(self):
+        self.connect()
         self.client.metadata = StravaRouteMetadata(
             route_id=ROUTE_ID,
             athlete_id="45",
-            route_type=1,
-        )
-        with self.assertRaises(StravaIntegrationError) as owner_error:
-            self.service.validate_route(INSTALLATION_ID, ROUTE_ID)
-        self.assertEqual(owner_error.exception.code, "strava_route_not_importable")
-
-        self.client.metadata = StravaRouteMetadata(
-            route_id=ROUTE_ID,
-            athlete_id="44",
             route_type=2,
         )
         with self.assertRaises(StravaIntegrationError) as type_error:
