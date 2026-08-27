@@ -40,6 +40,13 @@ Production keeps native USB hardware support (`ARDUINO_USB_MODE=1`) but sets
 CDC cost, while the ESP32-S3 ROM download mode remains available for recovery:
 hold BOOT (GPIO0) while reconnecting USB, then flash the correct board target.
 
+Developer and diagnostic profiles use one 6 MiB application partition because
+their renderer, automation, and instrumentation code is not constrained by the
+release OTA slot. Production keeps two 3 MiB OTA application partitions. Both
+layouts keep FFat at `0x610000`, so USB-flashing a diagnostic image does not
+relocate or format fallback map and diagnostics data. OTA release artifacts
+continue to use only the production layout.
+
 Each production profile keeps the canonical hardware target in firmware
 metadata (`WAVESHARE_AMOLED_175` or `WAVESHARE_AMOLED_206`). The profile suffix
 is intentionally not exposed over BLE, so released manifests and future OTA
