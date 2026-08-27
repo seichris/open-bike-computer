@@ -812,18 +812,12 @@ def main() -> int:
 
     if args.command == "promote-catalog-map":
         from .catalog_promotion import (
-            already_production_result,
             promote_catalog_map,
         )
         from .map_signing import load_map_artifact_signer_from_environment
 
         if catalog_client is None:
             raise SystemExit("MAP_PLATFORM_CATALOG_URL is required")
-        grant = catalog_client.promotion_grant(args.map_entry_id)
-        existing = already_production_result(args.map_entry_id, grant)
-        if existing is not None:
-            print(json.dumps(existing, indent=2, sort_keys=True))
-            return 0
         signer = load_map_artifact_signer_from_environment()
         if signer is None:
             raise SystemExit("production map stream signing is not enabled")
@@ -834,15 +828,15 @@ def main() -> int:
         )
         assert producer_build_sha256 is not None
         assert producer_image_digest is not None
+        artifact_store = create_artifact_store_from_environment(data_root)
         result = promote_catalog_map(
             args.map_entry_id,
             catalog_client=catalog_client,
-            artifact_store=create_artifact_store_from_environment(data_root),
+            artifact_store=artifact_store,
             signer=signer,
             producer_build_sha256=producer_build_sha256,
             producer_image_digest=producer_image_digest,
             work_root=data_root / "promotions",
-            grant=grant,
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0

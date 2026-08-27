@@ -331,6 +331,27 @@ class CatalogTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least 32 bytes"):
             CatalogClient("https://maps.invalid", "development", "dev", "short")
 
+    def test_catalog_client_sends_an_explicit_service_user_agent(self):
+        response = Mock()
+        response.read.return_value = b"{}"
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=None)
+        client = CatalogClient(
+            "https://maps.invalid",
+            "development",
+            "dev",
+            "x" * 32,
+        )
+
+        with patch("map_platform.catalog.urlopen", return_value=response) as open_url:
+            self.assertEqual(
+                client._request("/v1/internal/test", {}, idempotency_key="test"),
+                {},
+            )
+
+        request = open_url.call_args.args[0]
+        self.assertEqual(request.get_header("User-agent"), "BicinoMapPlatform/1.0")
+
     def test_catalog_delivery_identity_only_accepts_complete_firmware_tuple(self):
         with patch.dict(
             os.environ,

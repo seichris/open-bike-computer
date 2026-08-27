@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import tempfile
 import threading
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -13,6 +16,7 @@ from map_platform.catalog_promotion import (
     CatalogPromotionError,
     _PromotionLeaseHeartbeat,
     _download_exact_zip,
+    _extract_validated_archive,
     promote_catalog_map,
 )
 from map_platform.map_stream import canonical_stream_manifest_bytes, manifest_receipt
@@ -61,6 +65,51 @@ class FakePromotionCatalog:
 
 
 class CatalogPromotionDownloadTests(unittest.TestCase):
+    def test_extract_restores_the_verified_archive_preview_identity(self):
+        preview_bytes = b"verified-preview-png"
+        manifest = {
+            "preview": {
+                "path": "preview.png",
+                "bytes": len(preview_bytes),
+                "sha256": hashlib.sha256(preview_bytes).hexdigest(),
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "source.zip"
+            extract_root = root / "extract"
+            extract_root.mkdir()
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                archive.writestr("manifest.json", json.dumps(manifest))
+                archive.writestr("preview.png", preview_bytes)
+
+            extracted = _extract_validated_archive(archive_path, extract_root)
+
+        self.assertEqual(
+            extracted["preview"]["dataBase64"],
+            base64.b64encode(preview_bytes).decode("ascii"),
+        )
+
+    def test_extract_rejects_a_preview_that_does_not_match_its_identity(self):
+        manifest = {
+            "preview": {
+                "path": "preview.png",
+                "bytes": 8,
+                "sha256": hashlib.sha256(b"expected").hexdigest(),
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "source.zip"
+            extract_root = root / "extract"
+            extract_root.mkdir()
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                archive.writestr("manifest.json", json.dumps(manifest))
+                archive.writestr("preview.png", b"tampered")
+
+            with self.assertRaisesRegex(CatalogPromotionError, "preview identity"):
+                _extract_validated_archive(archive_path, extract_root)
+
     def test_download_streams_exact_receipt_from_configured_r2_host(self):
         body = b"validated final ZIP bytes"
         with tempfile.TemporaryDirectory() as temporary:
@@ -71,7 +120,7 @@ class CatalogPromotionDownloadTests(unittest.TestCase):
                     body,
                     "https://a" + "1" * 31 + ".r2.cloudflarestorage.com/map-artifacts/source.zip",
                 ),
-            ):
+            ) as open_url:
                 _download_exact_zip(
                     "https://maps-share.8o.vc/v1/internal/promotions/downloads/token",
                     destination,
@@ -82,6 +131,8 @@ class CatalogPromotionDownloadTests(unittest.TestCase):
                     timeout_seconds=10,
                 )
             self.assertEqual(destination.read_bytes(), body)
+            request = open_url.call_args.args[0]
+            self.assertEqual(request.get_header("User-agent"), "BicinoMapPlatform/1.0")
 
     def test_download_rejects_redirect_away_from_configured_r2_host(self):
         body = b"untrusted"
@@ -252,12 +303,28 @@ class CatalogPromotionIdentityTests(unittest.TestCase):
             return promote_catalog_map(
                 grant["map"]["mapEntryId"],
                 catalog_client=FakePromotionCatalog(grant),
-                artifact_store=object(),
+                artifact_store=SimpleNamespace(catalog_delivery_backed=True),
                 signer=object(),
                 producer_build_sha256="2" * 64,
                 producer_image_digest="sha256:" + "3" * 64,
                 work_root=Path(temporary),
             )
+
+    def test_promotion_rejects_unshared_storage_before_acquiring_a_grant(self):
+        catalog = Mock(channel="production")
+
+        with self.assertRaisesRegex(CatalogPromotionError, "shared artifact storage"):
+            promote_catalog_map(
+                "map_v1_" + "M" * 43,
+                catalog_client=catalog,
+                artifact_store=SimpleNamespace(catalog_delivery_backed=False),
+                signer=object(),
+                producer_build_sha256="2" * 64,
+                producer_image_digest="sha256:" + "3" * 64,
+                work_root=Path("/path/that/must/not/be/created"),
+            )
+
+        catalog.promotion_grant.assert_not_called()
 
     def test_already_production_short_circuits_all_local_work(self):
         entry_id = "map_v1_" + "M" * 43

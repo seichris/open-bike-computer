@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -169,7 +170,13 @@ def _download_exact_zip(
         raise CatalogPromotionError("promotion download endpoint is invalid")
     digest = hashlib.sha256()
     written = 0
-    request = Request(url, headers={"Accept": ZIP_MEDIA_TYPE})
+    request = Request(
+        url,
+        headers={
+            "Accept": ZIP_MEDIA_TYPE,
+            "User-Agent": "BicinoMapPlatform/1.0",
+        },
+    )
     try:
         with urlopen(request, timeout=timeout_seconds) as response:
             final = urlparse(response.geturl())
@@ -210,6 +217,38 @@ def _extract_validated_archive(archive_path: Path, root: Path) -> dict[str, Any]
                     shutil.copyfileobj(source, output, length=1024 * 1024)
     except (OSError, ValueError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
         raise CatalogPromotionError("promotion ZIP extraction failed") from exc
+    preview = manifest.get("preview")
+    if preview is not None:
+        if not isinstance(preview, dict):
+            raise CatalogPromotionError("promotion ZIP preview metadata is invalid")
+        relative = preview.get("path")
+        expected_bytes = preview.get("bytes")
+        expected_sha256 = preview.get("sha256")
+        if (
+            not isinstance(relative, str)
+            or not relative
+            or Path(relative).is_absolute()
+            or ".." in Path(relative).parts
+            or type(expected_bytes) is not int
+            or expected_bytes <= 0
+            or not isinstance(expected_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+        ):
+            raise CatalogPromotionError("promotion ZIP preview metadata is invalid")
+        try:
+            preview_bytes = root.joinpath(*Path(relative).parts).read_bytes()
+        except OSError as exc:
+            raise CatalogPromotionError(
+                "promotion ZIP preview is unavailable"
+            ) from exc
+        if (
+            len(preview_bytes) != expected_bytes
+            or hashlib.sha256(preview_bytes).hexdigest() != expected_sha256
+        ):
+            raise CatalogPromotionError("promotion ZIP preview identity is invalid")
+        # ZIP manifests omit this redundant copy, while the canonical stream
+        # identity includes it. Rebuild it only from the verified preview bytes.
+        preview["dataBase64"] = base64.b64encode(preview_bytes).decode("ascii")
     return manifest
 
 
@@ -228,6 +267,8 @@ def promote_catalog_map(
 
     if catalog_client.channel != "production":
         raise CatalogPromotionError("catalog promotion requires the production channel")
+    if not bool(getattr(artifact_store, "catalog_delivery_backed", False)):
+        raise CatalogPromotionError("promotion requires shared artifact storage")
     if grant is None:
         grant = catalog_client.promotion_grant(entry_id)
     existing = already_production_result(entry_id, grant)
@@ -392,10 +433,6 @@ def promote_catalog_map(
             producer_build_sha256=producer_build_sha256,
             producer_image_digest=producer_image_digest,
         )
-        if not bool(getattr(artifact_store, "catalog_delivery_backed", False)):
-            raise CatalogPromotionError(
-                "promotion requires shared artifact storage"
-            )
         if not artifact_store.verify(
             stream_record.object_key,
             sha256=stream_record.sha256,
