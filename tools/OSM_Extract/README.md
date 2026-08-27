@@ -95,6 +95,11 @@ The script takes 6 arguments:
 
 These files will contain the feature types defined in */conf/conf_extract.yaml* of your area, with the visual styles defined in */conf/conf_styles.yaml*
 
+Block preview images are disabled by default. For a bounded diagnostic run,
+pass both `--debug-image-dir <directory>` and `--debug-image-limit <count>`.
+The image directory must be outside the map output folder so previews cannot
+be included in a packaged map.
+
 ## Renderer formats and OSM 3D buildings
 
 `extract_features.py --renderer-format` selects the durable binary output:

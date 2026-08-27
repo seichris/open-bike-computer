@@ -1,5 +1,14 @@
 #!/usr/bin/env python
-from funcs import process_features, clip_lines, clip_polygons, style_features, render_map, lat2y, lon2x
+from funcs import (
+    GenericGeometryError,
+    clip_lines,
+    clip_polygons,
+    lat2y,
+    lon2x,
+    process_features,
+    render_map,
+    style_features,
+)
 from feature_types import get_type_id
 from map_format import (
     MapFormatError,
@@ -29,6 +38,7 @@ from shapely import box
 from shapely.geometry import shape
 import argparse, hashlib, json, yaml
 import os, sys, time
+from pathlib import Path
 
 parser = argparse.ArgumentParser()
 parser.add_argument("min_lon")
@@ -50,6 +60,15 @@ parser.add_argument("--building-block-cache-root")
 parser.add_argument("--building-block-cache-identity")
 parser.add_argument("--building-block-workers", type=int, default=4)
 parser.add_argument(
+    "--debug-image-dir",
+    help="write explicitly requested block preview PNGs outside the map output",
+)
+parser.add_argument(
+    "--debug-image-limit",
+    type=int,
+    help="maximum number of explicit block preview PNGs",
+)
+parser.add_argument(
     "--building-cache-only",
     action="store_true",
     help="fail on any cache miss instead of normalizing buildings",
@@ -64,12 +83,29 @@ if (args.building_block_cache_root is None) != (
     parser.error("building block cache root and identity must be supplied together")
 if args.building_cache_only and args.building_block_cache_identity is None:
     parser.error("cache-only assembly requires the building block cache")
+if (args.debug_image_dir is None) != (args.debug_image_limit is None):
+    parser.error("debug image directory and limit must be supplied together")
+if args.debug_image_limit is not None and not 1 <= args.debug_image_limit <= 10000:
+    parser.error("--debug-image-limit must be between 1 and 10000")
 
 LINES_INPUT_FILE = "{}_lines.geojson".format(args.geojson_prefix)
 POLYGONS_INPUT_FILE = "{}_polygons.geojson".format(args.geojson_prefix)
 CONF_FEATURES = '../conf/conf_extract.yaml'
 CONF_STYLES = '../conf/conf_styles.yaml'
 MAP_FOLDER = args.map_folder
+MAP_ROOT = Path(MAP_FOLDER).resolve(strict=False)
+DEBUG_IMAGE_ROOT = (
+    Path(args.debug_image_dir).resolve(strict=False)
+    if args.debug_image_dir is not None
+    else None
+)
+if DEBUG_IMAGE_ROOT is not None:
+    try:
+        DEBUG_IMAGE_ROOT.relative_to(MAP_ROOT)
+    except ValueError:
+        pass
+    else:
+        parser.error("--debug-image-dir must be outside the map output")
 
 MAPBLOCK_SIZE_BITS = 12     # 4096 x 4096 coords (~meters) per block  
 MAPFOLDER_SIZE_BITS = 4     # 16 x 16 map blocks per folder
@@ -94,6 +130,22 @@ def fail_building_preprocess(code, message):
             {
                 "code": code,
                 "message": str(message)[:1024],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+    raise SystemExit(2)
+
+
+def fail_generic_geometry(error):
+    print(
+        "GENERIC_GEOMETRY_FAILURE:"
+        + json.dumps(
+            {
+                "code": getattr(error, "code", "generic_geometry_invalid"),
+                "message": str(error)[:1024],
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -576,6 +628,7 @@ if args.renderer_format == 3:
 # extract relevant features
 print("Extracting features")
 label_diagnostics = {}
+geometry_diagnostics = {}
 normalization_started = time.perf_counter()
 lines = process_features(
     selected_features(lines['features']),
@@ -583,8 +636,18 @@ lines = process_features(
     label_diagnostics=label_diagnostics,
 ) # extracted_lines
 polygons = process_features(
-    selected_features(polygons['features']), conf['polygons']
+    selected_features(polygons['features']),
+    conf['polygons'],
+    geometry_diagnostics=geometry_diagnostics,
 ) # extracted_polygons
+print(
+    "GEOMETRY_DIAGNOSTICS:"
+    + json.dumps(
+        geometry_diagnostics,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+)
 normalization_seconds = time.perf_counter() - normalization_started
 print("Applying styles")
 # apply styles
@@ -652,6 +715,7 @@ building_totals = {
 building_block_encoding_started = (
     time.perf_counter() if args.renderer_format == 3 else None
 )
+debug_images_rendered = 0
 for init_x, init_y in progress.track(block_positions):
         # print("--------------------")
         # print("init_x, init_y", init_x, init_y)
@@ -666,7 +730,10 @@ for init_x, init_y in progress.track(block_positions):
             mapblock_bbox,
             label_diagnostics=label_diagnostics if font_builder is not None else None,
         )
-        clipped_polygons = clip_polygons( polygons, mapblock_bbox)
+        try:
+            clipped_polygons = clip_polygons(polygons, mapblock_bbox)
+        except GenericGeometryError as exc:
+            fail_generic_geometry(exc)
         clipped_buildings = []
         building_block_stats = {}
         cached_building_block = None
@@ -707,11 +774,21 @@ for init_x, init_y in progress.track(block_positions):
         os.makedirs( folder_name, exist_ok=True)
         # print(f"File: {file_name}.fmp")
 
-        # export a png image of the block, for testing # TODO: make optional
-        os.makedirs(f"{MAP_FOLDER}/test_imgs", exist_ok=True)
-        render_map( features = clipped_polygons + clipped_lines, 
-                file_name=f"{MAP_FOLDER}/test_imgs/block_{folder_name_x}_{folder_name_y}-{block_x}_{block_y}.png", 
-                min_x=min_x, min_y=min_y)
+        if (
+            DEBUG_IMAGE_ROOT is not None
+            and debug_images_rendered < args.debug_image_limit
+        ):
+            DEBUG_IMAGE_ROOT.mkdir(parents=True, exist_ok=True)
+            render_map(
+                features=clipped_polygons + clipped_lines,
+                file_name=(
+                    DEBUG_IMAGE_ROOT
+                    / f"block_{folder_name_x}_{folder_name_y}-{block_x}_{block_y}.png"
+                ),
+                min_x=min_x,
+                min_y=min_y,
+            )
+            debug_images_rendered += 1
 
         # TODO: order features by z_order, first the ones to be drawn below the others
         
