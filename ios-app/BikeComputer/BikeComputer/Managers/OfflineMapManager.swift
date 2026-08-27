@@ -2108,17 +2108,12 @@ final class OfflineMapManager: ObservableObject {
 
         startMapJobTask { manager in
             var client = try manager.makeClient()
-            if client.clientInstallationToken?.isEmpty == false {
-                client = try await manager.ensureRegisteredInstallation(client: client)
-            }
+            client = try await manager.ensureRegisteredInstallation(client: client)
             if try await manager.recoverOwnedServerJobIfAvailable(
                 client: client,
                 bleManager: bleManager
             ) {
                 return
-            }
-            if client.clientInstallationToken?.isEmpty != false {
-                client = try await manager.ensureRegisteredInstallation(client: client)
             }
             let request = OfflineMapJobRequest
                 .customBBox(bounds)
@@ -2176,9 +2171,9 @@ final class OfflineMapManager: ObservableObject {
                 persistedServerURL: persistedServerURL
             )
             var client = try manager.makeClient(serverURLString: recoveryServerURL)
-            if client.clientInstallationToken?.isEmpty == false {
-                client = try await manager.ensureRegisteredInstallation(client: client)
-            }
+            client = try await manager.ensureRegisteredInstallationWithRetry(
+                client: client
+            )
             var jobId = persistedJobId
             var shouldInstallOnDevice = persistedInstallIntent
 
@@ -2252,7 +2247,9 @@ final class OfflineMapManager: ObservableObject {
         guard let jobId = currentJob?.jobId else { return }
         Task {
             await runBusy {
-                let client = try self.makeClient()
+                let client = try await self.ensureRegisteredInstallation(
+                    client: self.makeClient()
+                )
                 self.currentJob = try await client.job(id: jobId)
                 self.statusMessage = self.currentJob?.status ?? ""
                 if self.currentJob?.mapId == nil {
@@ -2274,7 +2271,9 @@ final class OfflineMapManager: ObservableObject {
         }
         Task {
             await runBusy {
-                let client = try self.makeClient()
+                let client = try await self.ensureRegisteredInstallation(
+                    client: self.makeClient()
+                )
                 self.downloadURL = try await client.downloadURL(mapId: mapId, jobId: jobId)
                 self.statusMessage = "download ready"
             }
@@ -2284,7 +2283,10 @@ final class OfflineMapManager: ObservableObject {
     func downloadPack() {
         Task {
             await runBusy {
-                try await self.downloadReadyPack(client: self.makeClient())
+                let client = try await self.ensureRegisteredInstallation(
+                    client: self.makeClient()
+                )
+                try await self.downloadReadyPack(client: client)
             }
         }
     }
@@ -3668,17 +3670,12 @@ final class OfflineMapManager: ObservableObject {
         guard canStartNewMapJob() else { return }
         startMapJobTask { manager in
             var client = try manager.makeClient()
-            if client.clientInstallationToken?.isEmpty == false {
-                client = try await manager.ensureRegisteredInstallation(client: client)
-            }
+            client = try await manager.ensureRegisteredInstallation(client: client)
             if try await manager.recoverOwnedServerJobIfAvailable(
                 client: client,
                 bleManager: nil
             ) {
                 return
-            }
-            if client.clientInstallationToken?.isEmpty != false {
-                client = try await manager.ensureRegisteredInstallation(client: client)
             }
             manager.currentJob = nil
             manager.downloadURL = nil
@@ -3776,6 +3773,29 @@ final class OfflineMapManager: ObservableObject {
                 return try await client.jobs()
             } catch {
                 guard OfflineMapPollingRetryPolicy.shouldRetry(error) else { throw error }
+                failureCount += 1
+                statusMessage = "reconnecting to map server"
+                try await Task.sleep(
+                    nanoseconds: OfflineMapPollingRetryPolicy.delayNanoseconds(
+                        failureCount: failureCount
+                    )
+                )
+            }
+        }
+        throw CancellationError()
+    }
+
+    private func ensureRegisteredInstallationWithRetry(
+        client: OfflineMapPlatformClient
+    ) async throws -> OfflineMapPlatformClient {
+        var failureCount = 0
+        while !Task.isCancelled {
+            do {
+                return try await ensureRegisteredInstallation(client: client)
+            } catch {
+                guard OfflineMapPollingRetryPolicy.shouldRetry(error) else {
+                    throw error
+                }
                 failureCount += 1
                 statusMessage = "reconnecting to map server"
                 try await Task.sleep(

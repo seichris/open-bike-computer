@@ -9,9 +9,10 @@ contract and operating procedure.
 
 - `POST /v1/map-jobs` for curated, custom bbox, custom polygon, and route
   corridor requests, with installation-scoped idempotency metadata.
-- Installation-scoped job, list, map-pack, and download-URL reads. The client
-  installation ID is required for reads; legacy jobs without an owner remain
-  recoverable by ID.
+- Installation-authenticated creation, job/list reads, map-pack reads, and
+  download-URL issuance. Every public installation-owned request requires the
+  server-issued installation ID and matching `X-Installation-Token`; legacy
+  unowned jobs are available only through admin operations.
 - Source-region resolution from `map-platform/backend/config/source-regions.json`,
   with a cached Geofabrik catalog fallback for any requested area covered by
   Geofabrik.
