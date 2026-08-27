@@ -337,6 +337,13 @@ static void testTargetThreeBuildingContractValidation() {
   assert(installer.readActiveMap(active).ok);
   assert(active.target.formatVersion == 3);
   assert(active.target.buildingProfileVersion == 1);
+  assert(active.manifestReceipt.empty());
+  ActiveMapSelection identified;
+  std::string contentReceipt;
+  assert(installer.readActiveMapContentReceipt(identified, contentReceipt).ok);
+  assert(identified.mapId == active.mapId);
+  assert(contentReceipt ==
+         readFile(root + active.root + "/.verified.sha256"));
 }
 
 static void testActivationStateTracksAttemptsAndCompactStatus() {

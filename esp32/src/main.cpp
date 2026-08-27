@@ -534,9 +534,10 @@ bool stopActiveDeviceTransfer() {
 
 #if FIRMWARE_DIAGNOSTICS
 static bool readActiveRendererMap(
-    map_transfer::ActiveMapSelection &active) {
+    map_transfer::ActiveMapSelection &active, std::string &contentReceipt) {
   map_transfer::MapTransferInstaller installer("/sdcard");
-  const map_transfer::InstallStatus status = installer.readActiveMap(active);
+  const map_transfer::InstallStatus status =
+      installer.readActiveMapContentReceipt(active, contentReceipt);
   if (!status.ok) {
     Serial.printf(
         "RENDERER_DIAGNOSTICS: rejected map fixture active_status=%s\n",
@@ -550,7 +551,8 @@ static bool populateOrdinaryRendererIdentity(
     const renderer_diagnostics_ble_protocol::WindowRequest &request,
     renderer_diagnostics::RunIdentity &identity) {
   map_transfer::ActiveMapSelection active;
-  if (!readActiveRendererMap(active) || active.manifestReceipt.empty())
+  std::string contentReceipt;
+  if (!readActiveRendererMap(active, contentReceipt) || contentReceipt.empty())
     return false;
   char runId[renderer_diagnostics::kIdentityTextBytes] = {};
   std::snprintf(runId, sizeof(runId), "ble-%016llx",
@@ -566,7 +568,7 @@ static bool populateOrdinaryRendererIdentity(
   const bool copied = identity.runId.assign(runId) &&
                       identity.mapFixtureId.assign(active.mapId.c_str()) &&
                       identity.mapFixtureSha256.assign(
-                          active.manifestReceipt.c_str()) &&
+                          contentReceipt.c_str()) &&
                       identity.routeFixtureId.assign(request.routeFixtureId) &&
                       identity.routeFixtureSha256.assign(routeHash) &&
                       identity.routeMode.assign("ordinary-ble-1hz");
@@ -583,19 +585,20 @@ static bool populateOrdinaryRendererIdentity(
 static bool rendererRequestMatchesActiveMap(
     const renderer_diagnostics::RunIdentity &identity) {
   map_transfer::ActiveMapSelection active;
-  if (!readActiveRendererMap(active))
+  std::string contentReceipt;
+  if (!readActiveRendererMap(active, contentReceipt))
     return false;
   const bool matches =
       active.mapId == identity.mapFixtureId.c_str() &&
-      !active.manifestReceipt.empty() &&
-      active.manifestReceipt == identity.mapFixtureSha256.c_str();
+      !contentReceipt.empty() &&
+      contentReceipt == identity.mapFixtureSha256.c_str();
   if (!matches) {
     Serial.printf(
         "RENDERER_DIAGNOSTICS: rejected map fixture requested=%s/%.*s "
         "active=%s/%.*s\n",
         identity.mapFixtureId.c_str(), 12,
         identity.mapFixtureSha256.c_str(), active.mapId.c_str(), 12,
-        active.manifestReceipt.c_str());
+        contentReceipt.c_str());
   }
   return matches;
 }

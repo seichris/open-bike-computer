@@ -2589,6 +2589,30 @@ MapTransferInstaller::readActiveManifest(MapManifest &manifest) const {
   return readInstalledManifest(selection.root, manifest);
 }
 
+InstallStatus MapTransferInstaller::readActiveMapContentReceipt(
+    ActiveMapSelection &selection, std::string &receipt) const {
+  receipt.clear();
+  const InstallStatus active = readActiveMap(selection);
+  if (!active.ok)
+    return active;
+  if (!selection.manifestReceipt.empty()) {
+    receipt = selection.manifestReceipt;
+    return {true, "ok", ""};
+  }
+
+  MapManifest manifest;
+  const InstallStatus installed =
+      readInstalledManifest(selection.root, manifest);
+  if (!installed.ok)
+    return installed;
+  if (manifest.mapId != selection.mapId) {
+    return fail("active_manifest_identity",
+                "installed map manifest does not match active map ID");
+  }
+  receipt = manifestReceipt(manifest);
+  return {true, "ok", ""};
+}
+
 InstallStatus MapTransferInstaller::readActiveMapPresentation(
     ActiveMapSelection &selection,
     MapPresentationMetadata &presentation) const {

@@ -117,6 +117,11 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         )
 
     def test_renderer_windows_bind_the_active_map_before_profile_change(self):
+        active_identity = MAIN[
+            MAIN.index("static bool readActiveRendererMap") :
+            MAIN.index("void appRemoteDebugPointerActivity")
+        ]
+        self.assertIn("readActiveMapContentReceipt", active_identity)
         renderer_loop = MAIN[
             MAIN.index("device_debug::RendererRunRequest rendererRunRequest") :
             MAIN.index("constexpr uint32_t kStaticHousekeepingPeriodMs")

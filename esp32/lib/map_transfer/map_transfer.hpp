@@ -182,6 +182,11 @@ public:
       const ActivationProgressCallback &onProgress = {}) const;
   bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;
+  // Signed streams persist their manifest receipt in the active pointer.
+  // Legacy archives predate that pointer field, so derive the same stable
+  // content identity from their installed manifest instead.
+  InstallStatus readActiveMapContentReceipt(ActiveMapSelection &selection,
+                                            std::string &receipt) const;
   InstallStatus readActiveManifest(MapManifest &manifest) const;
   InstallStatus readActiveMapPresentation(
       ActiveMapSelection &selection,
