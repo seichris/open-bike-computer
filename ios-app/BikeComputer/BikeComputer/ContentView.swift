@@ -986,34 +986,9 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder
     private var mapControlRail: some View {
-        if #available(iOS 26.0, *) {
-            mapControlRailContent
-                .glassEffect(
-                    .regular.interactive(),
-                    in: .rect(cornerRadius: 26)
-                )
-        } else {
-            mapControlRailContent
-                .background(
-                    .ultraThinMaterial,
-                    in: RoundedRectangle(
-                        cornerRadius: 26,
-                        style: .continuous
-                    )
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 26, style: .continuous)
-                        .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
-                }
-                .shadow(
-                    color: .black.opacity(0.14),
-                    radius: 7,
-                    x: 0,
-                    y: 3
-                )
-        }
+        mapControlRailContent
+            .mapOverlayGlassSurface(cornerRadius: 26)
     }
 
     private var mapControlRailContent: some View {

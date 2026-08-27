@@ -81,8 +81,7 @@ struct RouteSearchPanel: View {
                 collapsedSearchButton
             }
         }
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 8)
+        .mapOverlayGlassSurface(cornerRadius: 24)
         .frame(maxHeight: isExpanded ? maxExpandedHeight : nil, alignment: .bottom)
         .onAppear {
             updateSearchRegions()

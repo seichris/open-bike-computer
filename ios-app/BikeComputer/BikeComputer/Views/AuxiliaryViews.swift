@@ -7,6 +7,40 @@
 
 import SwiftUI
 
+extension View {
+    @ViewBuilder
+    func mapOverlayGlassSurface(cornerRadius: CGFloat) -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(
+                .regular.interactive(),
+                in: .rect(cornerRadius: cornerRadius)
+            )
+        } else {
+            self
+                .background(
+                    .ultraThinMaterial,
+                    in: RoundedRectangle(
+                        cornerRadius: cornerRadius,
+                        style: .continuous
+                    )
+                )
+                .overlay {
+                    RoundedRectangle(
+                        cornerRadius: cornerRadius,
+                        style: .continuous
+                    )
+                    .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
+                }
+                .shadow(
+                    color: .black.opacity(0.14),
+                    radius: 7,
+                    x: 0,
+                    y: 3
+                )
+        }
+    }
+}
+
 // MARK: - Connection Status View
 
 struct ConnectionStatusView: View {
