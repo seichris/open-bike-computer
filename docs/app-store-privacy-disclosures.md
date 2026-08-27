@@ -1,6 +1,6 @@
 # App Store privacy disclosures
 
-Prepared for the Watch workout and navigation release on August 8, 2026.
+Prepared for the Strava route-import release on August 27, 2026.
 
 This file is the source-of-truth answer sheet for App Store Connect. It does not
 publish or change App Store Connect. Reconfirm the production configuration and
@@ -29,19 +29,22 @@ submitting the build.
 
 Select **Yes, we collect data from this app** because the optional offline-map
 service stores map request geometry, an installation identifier, map-job and
-download history, and any custom saved-map name the rider chooses to sync.
+download history, and any custom saved-map name the rider chooses to sync. If
+the rider connects Strava, the service also stores an encrypted Strava athlete
+ID and token bundle linked to that installation.
 
 | Data type | Collected | Purpose | Linked to identity | Tracking | Reason |
 | --- | --- | --- | --- | --- | --- |
 | Precise Location | Yes | App Functionality | Yes | No | An offline-map bounds, polygon, or route-corridor request contains precise coordinates and is stored with the requesting app installation ID so the service can build, recover, and deliver the map. |
 | Device ID | Yes | App Functionality | Yes | No | The app creates a random installation ID used to authenticate and scope map jobs. It is not an advertising ID or hardware identifier. |
+| User ID | Yes | App Functionality | Yes | No | When the rider optionally connects Strava, Bicino stores the Strava athlete ID and OAuth token bundle encrypted at rest and bound to the random app-installation ID so it can import that rider's routes. |
 | Other User Content | Yes | App Functionality | Yes | No | A custom saved-map display name is free-form text that can be synced to the map job so the rider sees the same name when the app recovers that job. |
-| Product Interaction | Yes | App Functionality | Yes | No | The service retains installation-linked map-job state, request/status timestamps, and download receipts so the app can list, recover, retry, and explain offline-map requests. |
+| Product Interaction | Yes | App Functionality | Yes | No | The service retains installation-linked map-job state, request/status timestamps, and download receipts so the app can list, recover, retry, and explain offline-map requests. Strava may also monitor API usage for a connected athlete under its API Policy. |
 | Health | No | — | — | — | HealthKit values and workout routes remain within HealthKit and the rider's paired Watch/iPhone workflow. They are not uploaded to a developer or third-party server. |
 | Fitness | No | — | — | — | Cycling workout and sensor values follow the same local-only path. Relaying them to the rider's authenticated bike computer does not make them accessible to the developer. |
 | Crash Data / Performance Data | No | — | — | — | The app contains no developer or third-party crash-reporting or performance SDK. Apple-operated diagnostics are not developer collection unless exported to the developer. |
 
-For all four selected types, choose **App Functionality**, **Data Linked to the
+For all five selected types, choose **App Functionality**, **Data Linked to the
 User**, and **Not Used for Tracking**. Apple treats linkage through a device or
 other identifier as linked even when the app has no account or real-world name.
 
@@ -57,6 +60,27 @@ other identifier as linked even when the app has no account or real-world name.
 - Confirm paired-device coordinate favorites and offline route archives remain
   inside WatchConnectivity/local device storage, and that expired archives and
   rider-requested deletions follow the documented retention behavior.
+- Confirm Strava route GPX and metadata are relayed with `Cache-Control:
+  private, no-store`, are not persisted by the backend, and are cached on
+  iPhone and Watch for no more than seven days from each successful import or
+  reload.
+- Confirm expiry deletes every API-derived Strava route field and Watch copy,
+  leaving only the user/local reload bookmark on iPhone, and that its one-tap
+  reload starts a fresh seven-day window.
+- Confirm connected iPhones revalidate eligible Strava routes after 24 hours,
+  authoritative unavailability purges route data immediately, and transient
+  failures preserve an otherwise unexpired offline route.
+- Confirm individual deletion removes the matching route and reload bookmark;
+  disconnect disables the backend connection immediately, purges every local
+  Strava route/bookmark, requests token revocation, and completes exact Watch
+  deletion through its durable paired-device acknowledgement path.
+- Confirm inactive Strava connections are revoked and deleted after at most 30
+  days without an authenticated integration request, and pending revocations
+  retain encrypted credentials only for retry and are deleted after success or
+  no later than 30 days after disconnection.
+- Confirm the backend uses Strava's current Basic-authenticated `/oauth/revoke`
+  flow with the encrypted refresh token and does not regress to the legacy
+  deauthorization endpoint before its announced retirement.
 - Reconfirm that the approved route provider permits every shipped persistence,
   attribution, and non-Apple accessory-display use; do not ship a MapKit export
   path without explicit approval under the current Apple terms.
@@ -86,8 +110,8 @@ other identifier as linked even when the app has no account or real-world name.
 ## Bundled privacy manifests
 
 `BikeComputer/PrivacyInfo.xcprivacy` declares the precise-location, device-ID,
-other-user-content, and product-interaction collection above, no tracking, and
-the iOS app's required-reason API use.
+user-ID, other-user-content, and product-interaction collection above, no
+tracking, and the iOS app's required-reason API use.
 `BikeComputerWatch/PrivacyInfo.xcprivacy` declares no developer collection or
 tracking. HealthKit access itself remains controlled by the entitlement,
 permission strings, and system authorization rather than being misrepresented

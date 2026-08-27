@@ -64,6 +64,7 @@ class WorkoutPlatformScriptTests(unittest.TestCase):
                 "PATH": f"{bin_dir}:{environment['PATH']}",
                 "TMPDIR": f"{temp_root}/",
                 "XCODEBUILD_ARGS_LOG": str(args_log),
+                "XCODEBUILD_PATH": str(xcodebuild),
             }
         )
         if shared is None:

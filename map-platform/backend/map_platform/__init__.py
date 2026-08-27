@@ -22,5 +22,7 @@ __all__ = [
     "source_cache",
     "sources",
     "strict_json",
+    "strava_client",
+    "strava_integrations",
     "worker",
 ]

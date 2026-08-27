@@ -131,12 +131,19 @@ nonisolated struct RouteProviderMetadataV1: Codable, Equatable {
     let storageScope: RouteStorageScopeV1
 }
 
+nonisolated struct RouteSourceReferenceV1: Codable, Equatable, Sendable {
+    let providerID: String
+    let externalRouteID: String
+    let canonicalURL: String
+}
+
 nonisolated struct NavigationRouteV1: Codable, Equatable, Identifiable {
     static let schemaVersion: UInt16 = 1
 
     let id: UUID
     let revision: UInt32
     let provider: RouteProviderMetadataV1
+    let sourceReference: RouteSourceReferenceV1?
     let localeIdentifier: String
     let transportType: RouteTransportTypeV1
     let source: RouteEndpointV1
@@ -150,6 +157,40 @@ nonisolated struct NavigationRouteV1: Codable, Equatable, Identifiable {
     let normalizationVersion: UInt16
 
     var routeID: UUID { id }
+
+    init(
+        id: UUID,
+        revision: UInt32,
+        provider: RouteProviderMetadataV1,
+        sourceReference: RouteSourceReferenceV1? = nil,
+        localeIdentifier: String,
+        transportType: RouteTransportTypeV1,
+        source: RouteEndpointV1,
+        destination: RouteEndpointV1,
+        bounds: RouteBoundsV1,
+        distanceMeters: Double,
+        expectedTravelTimeSeconds: Double?,
+        name: String?,
+        points: [RouteCoordinateV1],
+        steps: [NavigationRouteStepV1],
+        normalizationVersion: UInt16
+    ) {
+        self.id = id
+        self.revision = revision
+        self.provider = provider
+        self.sourceReference = sourceReference
+        self.localeIdentifier = localeIdentifier
+        self.transportType = transportType
+        self.source = source
+        self.destination = destination
+        self.bounds = bounds
+        self.distanceMeters = distanceMeters
+        self.expectedTravelTimeSeconds = expectedTravelTimeSeconds
+        self.name = name
+        self.points = points
+        self.steps = steps
+        self.normalizationVersion = normalizationVersion
+    }
 }
 
 nonisolated struct NavigationRouteLimitsV1: Equatable {
@@ -168,6 +209,7 @@ nonisolated enum NavigationRouteValidationError: Error, Equatable, CustomStringC
     case invalidRouteID
     case invalidRevision
     case invalidProvider
+    case invalidSourceReference
     case invalidLocale
     case invalidEndpoint
     case invalidBounds
@@ -195,6 +237,7 @@ nonisolated enum NavigationRouteValidationError: Error, Equatable, CustomStringC
         case .invalidRouteID: "Invalid route ID"
         case .invalidRevision: "Invalid route revision"
         case .invalidProvider: "Invalid route provider metadata"
+        case .invalidSourceReference: "Invalid route source reference"
         case .invalidLocale: "Invalid route locale"
         case .invalidEndpoint: "Invalid route endpoint"
         case .invalidBounds: "Invalid route bounds"
@@ -232,6 +275,12 @@ nonisolated extension NavigationRouteV1 {
               provider.attribution.utf8.count <= 512,
               RouteProviderPolicyV1.hasConsistentKnownPolicy(provider) else {
             throw NavigationRouteValidationError.invalidProvider
+        }
+        guard RouteProviderPolicyV1.hasConsistentSourceReference(
+            sourceReference,
+            for: provider
+        ) else {
+            throw NavigationRouteValidationError.invalidSourceReference
         }
         guard !localeIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               localeIdentifier.utf8.count <= 128 else {

@@ -111,6 +111,52 @@ isolated. Signing-key separation remains governed by the existing map-stream
 trust and hardware-promotion contract; do not introduce an untrusted development
 key outside that flow.
 
+## Strava route import configuration
+
+Leave `MAP_PLATFORM_STRAVA_ENABLED=0` until the matching Strava developer app,
+privacy/branding review, and intended athlete capacity are ready. Enabling it
+requires all of the following in that Coolify application's secrets/runtime
+variables:
+
+```text
+MAP_PLATFORM_STRAVA_CLIENT_ID
+MAP_PLATFORM_STRAVA_CLIENT_SECRET
+MAP_PLATFORM_STRAVA_REDIRECT_URI
+MAP_PLATFORM_STRAVA_TOKEN_KEY_ID
+MAP_PLATFORM_STRAVA_TOKEN_KEY_BASE64
+MAP_PLATFORM_STRAVA_PREVIOUS_TOKEN_KEYS
+MAP_PLATFORM_STRAVA_CONNECTION_IDLE_TTL_DAYS
+```
+
+Use `https://maps-dev.8o.vc/v1/integrations/strava/oauth/callback` only with
+the Development channel and `https://maps.8o.vc/v1/integrations/strava/oauth/callback`
+only with Production. Startup fails closed if an enabled or partially supplied
+configuration is invalid, including a callback/channel mismatch or an
+encryption key that does not decode to exactly 32 bytes.
+
+API and maintenance must share the same Strava client and encryption settings
+because both can revoke athlete tokens. The worker must never receive them.
+The persistent `map-platform-data` volume contains the encrypted
+`strava-integrations.sqlite3`; it contains no plaintext token columns. Rotate
+token-encryption keys by placing retained `key-id=base64-key` entries (or a
+JSON object mapping IDs to keys) in
+`MAP_PLATFORM_STRAVA_PREVIOUS_TOKEN_KEYS`, deploying the new current key to API
+and maintenance together, and keeping old keys available until their rows have
+been lazily re-encrypted or retired.
+
+The optional quota variables are
+`MAP_PLATFORM_STRAVA_OAUTH_START_LIMIT_PER_HOUR`,
+`MAP_PLATFORM_STRAVA_ROUTE_IMPORT_LIMIT_PER_HOUR`,
+`MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR`, and
+`MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR`. The route archive lifetime is
+always 604,800 seconds and is intentionally not configurable.
+
+Promote the backend image through the normal immutable digest workflow below;
+do not edit the live Coolify Compose or image digest as an untracked enablement
+step. Verify `/healthz` reports `stravaIntegration: enabled`, then verify the
+authenticated capabilities response before allowing the iOS feature to start
+OAuth.
+
 ## Promotion flow
 
 The `Map Platform Image` workflow builds and attests candidate images. After a

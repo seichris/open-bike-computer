@@ -9,7 +9,9 @@ nonisolated enum NavigationRouteArchivePurposeV1: Equatable {
 
 nonisolated enum NavigationRouteArchiveError: Error, Equatable, CustomStringConvertible {
     case durableStorageNotAllowed(providerID: String)
+    case deletionDateRequired(providerID: String)
     case invalidDeletionDate
+    case retentionExceeded(providerID: String)
     case expired
     case encodedSizeExceeded
     case invalidSchemaVersion(UInt16)
@@ -20,8 +22,12 @@ nonisolated enum NavigationRouteArchiveError: Error, Equatable, CustomStringConv
         switch self {
         case .durableStorageNotAllowed(let providerID):
             "Provider \(providerID) does not allow durable route storage"
+        case .deletionDateRequired(let providerID):
+            "Provider \(providerID) requires a route deletion date"
         case .invalidDeletionDate:
             "Route deletion date must be after its creation date"
+        case .retentionExceeded(let providerID):
+            "Provider \(providerID) route retention exceeds its maximum"
         case .expired:
             "Route archive has expired"
         case .encodedSizeExceeded:
@@ -152,6 +158,31 @@ nonisolated struct NavigationRouteArchiveV1: Codable, Equatable {
         return archive
     }
 
+    /// Fully verifies an archive while allowing its retention deadline to be
+    /// inspected after expiry. Callers must never use the returned geometry for
+    /// navigation; this exists so stores can delete the exact expired identity.
+    static func decodeForRetentionInspection(
+        _ data: Data,
+        purpose: NavigationRouteArchivePurposeV1,
+        limits: NavigationRouteLimitsV1 = .production
+    ) throws -> NavigationRouteArchiveV1 {
+        guard data.count <= limits.maximumEncodedBytes else {
+            throw NavigationRouteArchiveError.encodedSizeExceeded
+        }
+        let archive: NavigationRouteArchiveV1
+        do {
+            archive = try decoder().decode(NavigationRouteArchiveV1.self, from: data)
+        } catch {
+            throw NavigationRouteArchiveError.invalidEncoding
+        }
+        try archive.validate(
+            purpose: purpose,
+            now: archive.createdAt,
+            limits: limits
+        )
+        return archive
+    }
+
     private static func validateRetention(
         route: NavigationRouteV1,
         createdAt: Date,
@@ -171,6 +202,20 @@ nonisolated struct NavigationRouteArchiveV1: Codable, Equatable {
             guard now < deleteAfter else {
                 throw NavigationRouteArchiveError.expired
             }
+        }
+        if RouteProviderPolicyV1.requiresExpiry(route.provider),
+           deleteAfter == nil {
+            throw NavigationRouteArchiveError.deletionDateRequired(
+                providerID: route.provider.providerID
+            )
+        }
+        if let maximumRetention = RouteProviderPolicyV1.maximumRetentionSeconds(
+            for: route.provider
+        ), let deleteAfter,
+           deleteAfter.timeIntervalSince(createdAt) > maximumRetention {
+            throw NavigationRouteArchiveError.retentionExceeded(
+                providerID: route.provider.providerID
+            )
         }
         if purpose != .activeUse,
            !RouteProviderPolicyV1.allowsDurableStorage(route.provider) {
@@ -216,6 +261,7 @@ struct PlannedRouteSummaryV1: Codable, Equatable, Identifiable {
     let revision: UInt32
     let contentHash: String
     let providerID: String
+    let sourceReference: RouteSourceReferenceV1?
     let name: String
     let source: RouteEndpointV1
     let destination: RouteEndpointV1
@@ -229,6 +275,7 @@ struct PlannedRouteSummaryV1: Codable, Equatable, Identifiable {
         revision = archive.revision
         contentHash = archive.contentHash
         providerID = archive.route.provider.providerID
+        sourceReference = archive.route.sourceReference
         name = archive.route.name ?? archive.route.destination.label
         source = archive.route.source
         destination = archive.route.destination

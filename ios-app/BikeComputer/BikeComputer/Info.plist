@@ -4,6 +4,23 @@
 <dict>
 	<key>BicinoMapServiceHost</key>
 	<string>$(BICINO_MAP_SERVICE_HOST)</string>
+	<key>BicinoURLScheme</key>
+	<string>$(BICINO_URL_SCHEME)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>org.openbikecomputer.strava-oauth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>$(BICINO_URL_SCHEME)</string>
+			</array>
+		</dict>
+	</array>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>strava</string>
+	</array>
 	<key>BicinoMapCatalogHost</key>
 	<string>$(BICINO_MAP_CATALOG_HOST)</string>
 	<key>BicinoMapR2DownloadHost</key>

@@ -157,6 +157,10 @@ final class WatchNavigationManager: ObservableObject {
         self.networkMonitor = networkMonitor
         self.now = now
 
+        routeLibrary.onRouteExpired = { [weak self] identity in
+            self?.routeDidExpire(identity)
+        }
+
         settingsStore.$policy
             .dropFirst()
             .sink { [weak self] policy in
@@ -180,7 +184,10 @@ final class WatchNavigationManager: ObservableObject {
                 routeLibrary.applyPendingDeletionIfInactive()
                 return
             }
-            let record = try routeLibrary.activate(journal.identity)
+            let record = try routeLibrary.activate(
+                journal.identity,
+                requiringStartWindow: false
+            )
             activatedIdentity = journal.identity
             let recoveredLocation = journal.lastLocation?.sample
             let mode: NavigationModeV1 = if settingsStore.policy == .offlineOnly {
@@ -340,6 +347,39 @@ final class WatchNavigationManager: ObservableObject {
         return true
     }
 
+    private func routeDidExpire(_ identity: WatchRouteIdentityV1) {
+        let activeMatches = activeRecord.map {
+            WatchRouteIdentityV1(archive: $0.archive) == identity
+        } ?? false
+        let pendingMatches = pendingRecord.map {
+            WatchRouteIdentityV1(archive: $0.archive) == identity
+        } ?? false
+        guard activeMatches || pendingMatches else { return }
+
+        cancelRequest()
+        try? journalStore.clear()
+        runtime.stop()
+        snapshot = nil
+        lastLocation = nil
+        pendingRecord = nil
+        pendingAcceptsFarStart = false
+        pendingFavorite = nil
+        activeRecord = nil
+        activeDestination = nil
+        routeAttribution = nil
+        startedAt = nil
+        lastJournalStepIndex = nil
+        requestOrigin = nil
+        rerouteCooldown.reset()
+        locationService.setNavigationConsumer(active: false, handler: nil)
+        deviceLink.endNavigationDemandAfterClearing()
+        if activeMatches { routeLibrary.deactivate(identity) }
+        onlineStatus = .idle
+        recoveryError = "This Strava route expired. Reload it in Bicino on iPhone."
+        state = .unavailable("Route expired — reload on iPhone")
+        advanceLifecycleGeneration()
+    }
+
     private func startInstalledRoute(
         routeID: UUID,
         allowsOnlineRerouting: Bool,
@@ -371,6 +411,8 @@ final class WatchNavigationManager: ObservableObject {
             if let location = locationService.latestLocation {
                 receive([location])
             }
+        } catch WatchRouteLibraryError.nearExpiry {
+            state = .unavailable("Route expires soon — reload on iPhone")
         } catch {
             state = .unavailable("Route not installed on this Watch")
         }
@@ -507,6 +549,10 @@ final class WatchNavigationManager: ObservableObject {
                 location: initialLocation,
                 forceJournal: true
             )
+        } catch WatchRouteLibraryError.nearExpiry {
+            if didActivate { routeLibrary.deactivate(identity) }
+            pendingAcceptsFarStart = false
+            state = .unavailable("Route expires soon — reload on iPhone")
         } catch {
             if didActivate { routeLibrary.deactivate(identity) }
             pendingAcceptsFarStart = false

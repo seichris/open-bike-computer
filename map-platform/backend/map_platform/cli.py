@@ -52,6 +52,7 @@ from .rate_limits import purge_expired_rate_limits
 from .resource_report import worker_resource_report
 from .source_cache import SourceCache, default_backend_data_root
 from .sources import SourceIndex
+from .strava_integrations import StravaIntegrationService
 from .worker import (
     ExpiredArtifactCleanupError,
     MapWorker,
@@ -247,6 +248,7 @@ def _perform_maintenance(
     building_task_store: BuildingTaskStore | None = None,
     building_task_retention_days: int = DEFAULT_BUILDING_TASK_RETENTION_DAYS,
     catalog_client: CatalogClient | None = None,
+    strava_integration: StravaIntegrationService | None = None,
 ) -> dict[str, object]:
     if not 1 <= catalog_publication_retry_batch <= MAX_CATALOG_PUBLICATION_RETRY_BATCH:
         raise ValueError("catalog publication retry batch is invalid")
@@ -373,6 +375,14 @@ def _perform_maintenance(
             (
                 "monitoring",
                 lambda: monitoring_store.reconcile_jobs(store.list()),
+            ),
+        )
+    if strava_integration is not None:
+        result["stravaIntegrations"] = {}
+        tasks += (
+            (
+                "stravaIntegrations",
+                strava_integration.maintenance,
             ),
         )
     for field, task in tasks:
@@ -1002,6 +1012,10 @@ def main() -> int:
         return 0
     if args.command == "maintenance-loop":
         artifact_store = create_artifact_store_from_environment(data_root)
+        strava_integration = StravaIntegrationService.from_environment(
+            data_root=data_root,
+            deployment_channel=configured_deployment_channel(),
+        )
         heartbeat_path = Path(args.heartbeat_path)
         heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
         while True:
@@ -1026,6 +1040,7 @@ def main() -> int:
                     building_task_store=building_task_store,
                     building_task_retention_days=args.building_task_retention_days,
                     catalog_client=catalog_client,
+                    strava_integration=strava_integration,
                 )
             except MaintenanceIterationError as exc:
                 maintenance_result = exc.result

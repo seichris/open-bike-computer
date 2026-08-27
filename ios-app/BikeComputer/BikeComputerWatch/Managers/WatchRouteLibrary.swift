@@ -8,11 +8,16 @@ struct WatchRouteInstallResultV1 {
 
 @MainActor
 final class WatchRouteLibrary: ObservableObject {
+    static let minimumRemainingValidityForNewNavigation: TimeInterval =
+        24 * 60 * 60
+
     @Published private(set) var routes: [PlannedRouteSummaryV1] = []
     @Published private(set) var lastSyncError: String?
     @Published private(set) var activeIdentity: WatchRouteIdentityV1?
     @Published private(set) var pendingDeletionIdentity:
         WatchRouteIdentityV1?
+
+    var onRouteExpired: ((WatchRouteIdentityV1) -> Void)?
 
     private let store: NavigationRouteFileStoreV1
     private let now: () -> Date
@@ -23,6 +28,7 @@ final class WatchRouteLibrary: ObservableObject {
         "watchRouteLibrary.displayNames.v1"
     private var displayNamesEnvelope:
         WatchRouteDisplayNamesEnvelopeV1?
+    private var expiryTask: Task<Void, Never>?
 
     convenience init() {
         let base = FileManager.default.urls(
@@ -168,14 +174,17 @@ final class WatchRouteLibrary: ObservableObject {
         }) else {
             throw NavigationRouteFileStoreError.notFound
         }
+        try validateStartWindow(record)
         return record
     }
 
     @discardableResult
     func activate(
-        _ identity: WatchRouteIdentityV1
+        _ identity: WatchRouteIdentityV1,
+        requiringStartWindow: Bool = true
     ) throws -> InstalledNavigationRouteV1 {
         let record = try store.record(matching: identity, now: now())
+        if requiringStartWindow { try validateStartWindow(record) }
         activeIdentity = identity
         return record
     }
@@ -218,8 +227,25 @@ final class WatchRouteLibrary: ObservableObject {
     }
 
     func reload() {
-        _ = store.pruneInvalidAndExpired(now: now())
-        routes = store.records(now: now()).map(\.summary)
+        let timestamp = now()
+        let expiredRecords = store.expiredRecords(now: timestamp)
+        var callbacks: [WatchRouteIdentityV1] = []
+        for record in expiredRecords {
+            let identity = WatchRouteIdentityV1(archive: record.archive)
+            callbacks.append(identity)
+            if activeIdentity == identity {
+                pendingDeletionIdentity = identity
+                persistPendingDeletion()
+            }
+        }
+        let protected = Set([activeIdentity].compactMap { $0 })
+        _ = store.pruneInvalidAndExpired(
+            now: timestamp,
+            protecting: protected
+        )
+        routes = store.records(now: timestamp).map(\.summary)
+        scheduleNextExpiry()
+        for identity in callbacks { onRouteExpired?(identity) }
     }
 
     func reportSyncError(_ code: String) {
@@ -237,6 +263,42 @@ final class WatchRouteLibrary: ObservableObject {
         )
     }
 
+    private func validateStartWindow(
+        _ record: InstalledNavigationRouteV1
+    ) throws {
+        guard record.archive.providerID ==
+                RouteProviderPolicyV1.strava.providerID,
+              let deleteAfter = record.archive.deleteAfter else {
+            return
+        }
+        guard deleteAfter.timeIntervalSince(now()) >=
+                Self.minimumRemainingValidityForNewNavigation else {
+            throw WatchRouteLibraryError.nearExpiry
+        }
+    }
+
+    private func scheduleNextExpiry() {
+        expiryTask?.cancel()
+        guard let deadline = routes.compactMap(\.deleteAfter).min() else {
+            expiryTask = nil
+            return
+        }
+        let delay = max(deadline.timeIntervalSince(now()), 0)
+        let nanoseconds = UInt64(min(
+            delay * 1_000_000_000,
+            Double(UInt64.max)
+        ))
+        expiryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            self?.reload()
+        }
+    }
+
     private static func decodeIdentity(_ data: Data?) -> WatchRouteIdentityV1? {
         guard let data else { return nil }
         return try? PropertyListDecoder().decode(
@@ -249,4 +311,5 @@ final class WatchRouteLibrary: ObservableObject {
 enum WatchRouteLibraryError: Error, Equatable {
     case metadataMismatch
     case activeRoutePinned
+    case nearExpiry
 }

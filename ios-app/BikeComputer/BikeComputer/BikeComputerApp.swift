@@ -30,6 +30,9 @@ struct BikeComputerApp: App {
                     appDelegate.rideAutomationCoordinator,
                 watchAvailability: appDelegate.watchAvailability,
                 routeLibrary: appDelegate.routeLibrary,
+                bicinoServiceSession: appDelegate.bicinoServiceSession,
+                stravaIntegrationCoordinator:
+                    appDelegate.stravaIntegrationCoordinator,
                 liveActivityDiagnostics:
                     appDelegate.workoutLiveActivityDiagnostics,
                 rideDiagnosticsRecorder: appDelegate.rideDiagnosticsRecorder,
@@ -53,6 +56,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     let watchConnectivityCoordinator: PhoneWatchConnectivityCoordinator
     let watchAvailability: WorkoutWatchAvailabilityMonitor
     let routeLibrary: PhoneRouteLibrary
+    let bicinoServiceSession: BicinoServiceSession
+    let stravaIntegrationCoordinator: StravaIntegrationCoordinator
     let destinationStore: SavedDestinationStore
     let locationManager = CurrentLocationManager()
     let rideDiagnosticsRecorder: RideDiagnosticsRecorder
@@ -87,6 +92,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             PhoneWatchConnectivityCoordinator()
         let destinationStore = SavedDestinationStore()
         let rideDiagnosticsRecorder = RideDiagnosticsRecorder()
+        let bicinoServiceSession = BicinoServiceSession()
         let watchAvailability = WorkoutWatchAvailabilityMonitor(
             heartRateZoneDefaults: .standard,
             connectivityCoordinator: watchConnectivityCoordinator,
@@ -101,8 +107,19 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         self.destinationStore = destinationStore
         self.rideDiagnosticsRecorder = rideDiagnosticsRecorder
         self.watchAvailability = watchAvailability
-        routeLibrary = PhoneRouteLibrary(
+        let routeLibrary = PhoneRouteLibrary(
             connectivity: watchConnectivityCoordinator
+        )
+        self.routeLibrary = routeLibrary
+        self.bicinoServiceSession = bicinoServiceSession
+        let callbackScheme = BicinoURLSchemeConfig.current
+        stravaIntegrationCoordinator = StravaIntegrationCoordinator(
+            client: StravaIntegrationClient(
+                serviceSession: bicinoServiceSession,
+                expectedCallbackScheme: callbackScheme
+            ),
+            routeLibrary: routeLibrary,
+            callbackScheme: callbackScheme
         )
         super.init()
         destinationStore.$favoriteDestinations

@@ -3,14 +3,17 @@ import UniformTypeIdentifiers
 
 struct SavedRoutesSettingsSection: View {
     @ObservedObject var routeLibrary: PhoneRouteLibrary
+    @ObservedObject var stravaCoordinator: StravaIntegrationCoordinator
     @FocusState private var focusedRouteID: UUID?
     @State private var renameInteraction = SavedRouteRenameInteraction()
     @State private var errorMessage: String?
     @State private var isImportingGPX = false
+    @State private var isImportingStrava = false
 
     var body: some View {
         Section {
-            if routeLibrary.routes.isEmpty {
+            if routeLibrary.routes.isEmpty &&
+                routeLibrary.expiredStravaBookmarks.isEmpty {
                 Label(
                     "No Saved Routes",
                     systemImage:
@@ -21,6 +24,9 @@ struct SavedRoutesSettingsSection: View {
                 ForEach(routeLibrary.routes) { route in
                     routeRow(route)
                 }
+                ForEach(routeLibrary.expiredStravaBookmarks) { bookmark in
+                    expiredStravaRow(bookmark)
+                }
             }
 
             Button {
@@ -29,6 +35,27 @@ struct SavedRoutesSettingsSection: View {
                 isImportingGPX = true
             } label: {
                 Label("Import GPX", systemImage: "square.and.arrow.down")
+            }
+
+            if stravaCoordinator.shouldShowManagement {
+                Button {
+                    finishRenaming()
+                    focusedRouteID = nil
+                    stravaCoordinator.clearError()
+                    isImportingStrava = true
+                } label: {
+                    Label(
+                        "Import from Strava",
+                        systemImage: "point.topleft.down.to.point.bottomright.curvepath"
+                    )
+                }
+            }
+
+            if let error = stravaCoordinator.errorMessage,
+               !isImportingStrava {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
             }
         } header: {
             Text("Saved Routes")
@@ -61,6 +88,11 @@ struct SavedRoutesSettingsSection: View {
             allowsMultipleSelection: false
         ) { result in
             importGPX(result)
+        }
+        .sheet(isPresented: $isImportingStrava) {
+            StravaRouteImportView(
+                coordinator: stravaCoordinator
+            )
         }
     }
 
@@ -109,6 +141,16 @@ struct SavedRoutesSettingsSection: View {
                     displayName: displayName
                 )
 
+                if route.providerID ==
+                    RouteProviderPolicyV1.strava.providerID {
+                    stravaReloadButton(
+                        routeID: route.id,
+                        displayName: displayName
+                    ) {
+                        stravaCoordinator.reload(route)
+                    }
+                }
+
                 Button(role: .destructive) {
                     finishRenaming()
                     focusedRouteID = nil
@@ -132,6 +174,13 @@ struct SavedRoutesSettingsSection: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
 
+            if route.providerID == RouteProviderPolicyV1.strava.providerID {
+                stravaAttribution(
+                    sourceReference: route.sourceReference,
+                    deleteAfter: route.deleteAfter
+                )
+            }
+
             if let transientStatus = transientStatus(status) {
                 Label(transientStatus.label, systemImage: transientStatus.icon)
                     .font(.caption)
@@ -139,6 +188,102 @@ struct SavedRoutesSettingsSection: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private func expiredStravaRow(
+        _ bookmark: StravaRouteReloadBookmarkV1
+    ) -> some View {
+        let displayName = bookmark.localAlias ?? "Strava route"
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                Text(displayName)
+                    .font(.headline)
+                    .lineLimit(2)
+
+                Spacer()
+
+                stravaReloadButton(
+                    routeID: bookmark.routeID,
+                    displayName: displayName
+                ) {
+                    stravaCoordinator.reload(bookmark)
+                }
+
+                Button(role: .destructive) {
+                    do {
+                        try routeLibrary.deleteExpiredStravaBookmark(bookmark)
+                    } catch {
+                        errorMessage =
+                            "The expired route reference could not be deleted safely."
+                    }
+                } label: {
+                    Image(systemName: "trash")
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Delete \(displayName)")
+            }
+
+            Label("Expired", systemImage: "clock.badge.exclamationmark")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                Text("Powered by Strava")
+                if let url = URL(string: bookmark.canonicalURL) {
+                    Link("View on Strava", destination: url)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func stravaAttribution(
+        sourceReference: RouteSourceReferenceV1?,
+        deleteAfter: Date?
+    ) -> some View {
+        HStack(spacing: 10) {
+            Text("Powered by Strava")
+            if let sourceReference,
+               let url = URL(string: sourceReference.canonicalURL) {
+                Link("View on Strava", destination: url)
+            }
+            if let deleteAfter {
+                Text(
+                    "Expires \(deleteAfter.formatted(date: .abbreviated, time: .shortened))"
+                )
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder
+    private func stravaReloadButton(
+        routeID: UUID,
+        displayName: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        if stravaCoordinator.isReloading(routeID: routeID) {
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 32, height: 32)
+                .accessibilityLabel("Reloading \(displayName) from Strava")
+        } else {
+            Button(action: action) {
+                Image(systemName: "arrow.clockwise")
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.borderless)
+            .disabled(
+                !stravaCoordinator.isImportAvailable ||
+                    stravaCoordinator.activity.isBusy
+            )
+            .accessibilityLabel("Reload \(displayName) from Strava")
+        }
     }
 
     @ViewBuilder

@@ -17,6 +17,8 @@ struct SettingsView: View {
     @ObservedObject private var offlineMapManager: OfflineMapManager
     @ObservedObject private var firmwareUpdateManager: FirmwareUpdateManager
     @ObservedObject private var routeLibrary: PhoneRouteLibrary
+    @ObservedObject private var stravaIntegrationCoordinator:
+        StravaIntegrationCoordinator
     @ObservedObject private var watchAvailability:
         WorkoutWatchAvailabilityMonitor
     @ObservedObject private var cyclingSensorStore:
@@ -43,6 +45,7 @@ struct SettingsView: View {
         offlineMapManager: OfflineMapManager,
         firmwareUpdateManager: FirmwareUpdateManager,
         routeLibrary: PhoneRouteLibrary,
+        stravaIntegrationCoordinator: StravaIntegrationCoordinator? = nil,
         watchAvailability: WorkoutWatchAvailabilityMonitor,
         cyclingSensorStore: CyclingSensorStore? = nil,
         cyclingSensorDetectionCoordinator:
@@ -62,6 +65,15 @@ struct SettingsView: View {
         self.offlineMapManager = offlineMapManager
         self.firmwareUpdateManager = firmwareUpdateManager
         self.routeLibrary = routeLibrary
+        self.stravaIntegrationCoordinator =
+            stravaIntegrationCoordinator ?? StravaIntegrationCoordinator(
+                client: StravaIntegrationClient(
+                    serviceSession: BicinoServiceSession(),
+                    expectedCallbackScheme: BicinoURLSchemeConfig.current
+                ),
+                routeLibrary: routeLibrary,
+                callbackScheme: BicinoURLSchemeConfig.current
+            )
         self.watchAvailability = watchAvailability
         _cyclingSensorStore = ObservedObject(
             wrappedValue: cyclingSensorStore
@@ -132,7 +144,10 @@ struct SettingsView: View {
                     DownloadingMapsSettingsSection(manager: offlineMapManager)
                 }
 
-                SavedRoutesSettingsSection(routeLibrary: routeLibrary)
+                SavedRoutesSettingsSection(
+                    routeLibrary: routeLibrary,
+                    stravaCoordinator: stravaIntegrationCoordinator
+                )
 
                 Section {
                     if !shouldPromoteBikeComputerSettings {

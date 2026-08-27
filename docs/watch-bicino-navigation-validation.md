@@ -346,3 +346,33 @@ privacy manifests, and identifiers. The reproducible three-pass
 capability, ride-lease, scoped-payload, and destination-picker host tests pass.
 The complete exact-head GitHub matrix was green at the review base; a new matrix
 is required after these convergence fixes are published.
+
+### Phase 8 Strava route import retention
+
+The iPhone implementation adds **Import from Strava** directly below
+**Import GPX** and reuses the existing validated archive, Watch transfer,
+offline-navigation, and Bicino BLE paths. Strava geometry is assigned an exact
+seven-day `deleteAfter` deadline by the backend. iPhone and Watch both reject
+an invalid or overlong deadline, schedule local expiry, remove the route at the
+boundary, and retain no Strava reload reference on Watch. iPhone retains only
+the rider-facing local bookmark needed for the expired row's reload button; a
+successful one-tap reload replaces the same route identity at a new revision
+and starts a fresh seven-day window.
+
+The shared route suite covers canonical Strava URLs, exact seven-day response
+validation, forged provider metadata, atomic archive/bookmark replacement,
+reload revision and failure bookkeeping, hard expiry, provider purge, and
+legacy GPX compatibility. The Watch offline suite covers install rejection,
+near-expiry start rejection, active-navigation expiry, deferred deletion, and
+the invariant that route expiry stops navigation without stopping the active
+workout. Backend tests cover OAuth state, encrypted token storage and rotation,
+owned cycling-route enforcement, GPX relay bounds, quotas, refresh races,
+revalidation, current token revocation, and bounded cleanup. Fresh unsigned
+Debug and Release app containers, embedded Watch app, complication, Live
+Activity, URL schemes, and privacy manifests build and verify successfully.
+
+No Strava application credentials were configured, no backend was deployed,
+and no live OAuth or route download was attempted. No paired iPhone/Watch
+install-expire-reload cycle or physical Bicino navigation run has been
+performed. Those live-service and physical gates remain open; the software
+evidence does not substitute for them.
