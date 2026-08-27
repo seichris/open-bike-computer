@@ -52,6 +52,32 @@
           "publicKeySha256": "ac8a2852fd7b608219d9c477f16aef3afecada504abbc5dedbe3c9c0e0b35c8b"
         }
       ]
+    },
+    {
+      "promotionId": "msr-20260827-target3-map-prod-2026-08",
+      "candidateGitSha": "fddd70a4d1555eb21b7996d8696d48274bc13ce7",
+      "producerBuildSha256": "0976b00e203f63bc1f99864aac2db17585363b0d12eeccd7dee9ceeca6c4bb2f",
+      "workerImageDigest": "sha256:8b49c737f4d6c77c0612b2247694153f4ef87231eac7f0796f7d970d1d0c0681",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 93,
+      "firmwareGitSha": "7c35d08232a736a9ee05d2c103d82b357e991c59",
+      "iosBuild": "15",
+      "iosGitSha": "7c35d08232a736a9ee05d2c103d82b357e991c59",
+      "iosBuildSha256": "1e756b1d387ffd407f92ab3c0f2d962c75b3a0bb99a9f3c630daee086b8f320c",
+      "reportSha256": "4be1b3b9d1fed89cc862727a1c1d0b8f797769024b627179532f12fb73b553ee",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-08-27T02:45:42Z",
+      "approvedBy": "seichris",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
     }
   ]
 }
