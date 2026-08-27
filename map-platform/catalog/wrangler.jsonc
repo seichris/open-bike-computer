@@ -188,7 +188,7 @@
         {
           "binding": "DB",
           "database_name": "bicino-map-catalog",
-          "database_id": "00000000-0000-0000-0000-000000000000",
+          "database_id": "5461c9bf-cbc6-478b-88bf-3da4e1b24b0f",
           "migrations_dir": "migrations",
         },
       ],
