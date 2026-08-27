@@ -17,6 +17,12 @@ using HttpTransferStatus = device_transfer::HttpTransferStatus;
 
 class MapTransferHttpServer : private device_transfer::HttpRequestHandler {
 public:
+  struct ActivatedMapRoot {
+    std::string root;
+    std::string mapId;
+    bool sessionPresent = false;
+  };
+
   void configure(std::string storageRoot = "/sdcard", uint16_t port = 8080,
                  device_transfer::HttpTransferServer *sharedServer = nullptr);
   void setStreamTrustStore(MapStreamTrustStore trustStore);
@@ -31,7 +37,7 @@ public:
   MapActivationSnapshot activationSnapshot() const;
   std::string activationStatusJson(bool compact = false) const;
   bool activationHasError() const;
-  bool takeActivatedMapRoot(std::string &root);
+  bool takeActivatedMapRoot(ActivatedMapRoot &activated);
   void acknowledgeActivatedMapRoot(const std::string &root, bool loaded);
   bool takeAutomaticExitRequest();
   void resumePendingActivations();

@@ -45,6 +45,28 @@ class RideDiagnosticsStorageContractTests(unittest.TestCase):
         )
         self.assertNotIn("SPI.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS)", open_body)
 
+    def test_logger_health_captures_queue_and_storage_state_before_shutdown(self):
+        health = RECORDER.split("bool recordHealth", 1)[1].split(
+            "bool recordClockAnchor", 1
+        )[0]
+        for field in (
+            "enqueuedCount",
+            "writtenCount",
+            "droppedCount",
+            "storageErrorCount",
+            "queueDepth",
+            "maxQueueDepth",
+            "available",
+        ):
+            self.assertIn(field, health)
+        shutdown = RECORDER.split("bool prepareForShutdown", 1)[1].split(
+            "bool beginStorageTransition", 1
+        )[0]
+        self.assertLess(
+            shutdown.index('recordHealth("shutdown")'),
+            shutdown.index('"controlled_shutdown"'),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

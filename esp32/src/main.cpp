@@ -402,6 +402,17 @@ enum class PendingMapRendererActivationSource : uint8_t {
   Transfer,
   LabelRollback,
 };
+struct RendererMapDiagnosticIdentity {
+  std::string mapId;
+  std::string receiptPrefix;
+  bool sessionPresent = false;
+};
+enum class MapDiagnosticMetrics : uint8_t {
+  None,
+  Duration,
+  Probe,
+  Render,
+};
 struct PendingMapRendererActivation {
   PendingMapRendererActivationSource source =
       PendingMapRendererActivationSource::None;
@@ -409,11 +420,94 @@ struct PendingMapRendererActivation {
   std::string transferRoot;
   std::string labelFailure;
   std::string rollbackCode;
+  RendererMapDiagnosticIdentity identity;
   bool rendererQueued = false;
   uint32_t queueAttemptStartedMs = 0;
 };
 static PendingMapRendererActivation pendingMapRendererActivation;
 static constexpr uint32_t kMapRendererActivationQueueTimeoutMs = 10000U;
+static RendererMapDiagnosticIdentity rendererMapDiagnosticIdentity;
+
+static RendererMapDiagnosticIdentity mapDiagnosticIdentity(
+    const map_transfer::ActiveMapSelection &selection,
+    const std::string &contentReceipt = {}) {
+  RendererMapDiagnosticIdentity identity;
+  identity.mapId = selection.mapId;
+  identity.sessionPresent = !selection.sessionId.empty();
+  if (!contentReceipt.empty())
+    identity.receiptPrefix = contentReceipt.substr(0, 16);
+  else if (!selection.manifestReceipt.empty())
+    identity.receiptPrefix = selection.manifestReceipt.substr(0, 16);
+  return identity;
+}
+
+static void recordMapDiagnostic(
+    ride_diagnostics::Level level, const char *event, const char *phase,
+    const char *result, const char *code,
+    const RendererMapDiagnosticIdentity *identity = nullptr,
+    bool fallback = false, uint32_t durationMs = 0,
+    uint32_t detail = 0, uint8_t formatVersion = 0,
+    MapDiagnosticMetrics metrics = MapDiagnosticMetrics::None) {
+  const char *mapId = identity != nullptr && !identity->mapId.empty()
+                          ? identity->mapId.c_str()
+                          : "none";
+  const char *receipt =
+      identity != nullptr && !identity->receiptPrefix.empty()
+          ? identity->receiptPrefix.c_str()
+          : "none";
+  const bool sessionPresent =
+      identity != nullptr && identity->sessionPresent;
+  char fields[320] = {};
+  const int prefixLength = snprintf(
+      fields, sizeof(fields),
+      "{\"mapPhase\":\"%s\",\"result\":\"%s\",\"code\":\"%s\","
+      "\"mapId\":\"%s\",\"sha256Prefix\":\"%s\","
+      "\"sessionPresent\":%s,\"fallback\":%s",
+      phase, result, code, mapId, receipt,
+      sessionPresent ? "true" : "false", fallback ? "true" : "false");
+  int suffixLength = -1;
+  if (prefixLength >= 0 &&
+      static_cast<size_t>(prefixLength) < sizeof(fields)) {
+    const size_t remaining = sizeof(fields) - prefixLength;
+    switch (metrics) {
+    case MapDiagnosticMetrics::None:
+      suffixLength = snprintf(fields + prefixLength, remaining, "}");
+      break;
+    case MapDiagnosticMetrics::Duration:
+      suffixLength = snprintf(
+          fields + prefixLength, remaining, ",\"durationMs\":%lu}",
+          static_cast<unsigned long>(durationMs));
+      break;
+    case MapDiagnosticMetrics::Probe:
+      suffixLength = snprintf(
+          fields + prefixLength, remaining,
+          ",\"durationMs\":%lu,\"visitedEntries\":%lu,"
+          "\"formatVersion\":%u}",
+          static_cast<unsigned long>(durationMs),
+          static_cast<unsigned long>(detail),
+          static_cast<unsigned>(formatVersion));
+      break;
+    case MapDiagnosticMetrics::Render:
+      suffixLength = snprintf(
+          fields + prefixLength, remaining,
+          ",\"durationMs\":%lu,\"blockLoadMs\":%lu}",
+          static_cast<unsigned long>(durationMs),
+          static_cast<unsigned long>(detail));
+      break;
+    }
+  }
+  if (prefixLength < 0 || suffixLength < 0 ||
+      static_cast<size_t>(prefixLength) >= sizeof(fields) ||
+      static_cast<size_t>(suffixLength) >=
+          sizeof(fields) - static_cast<size_t>(prefixLength)) {
+    (void)ride_diagnostics::record(
+        ride_diagnostics::Level::Error, "map", event,
+        "{\"mapPhase\":\"logging\",\"result\":\"failed\","
+        "\"code\":\"diagnostic_fields_too_large\"}");
+    return;
+  }
+  (void)ride_diagnostics::record(level, "map", event, fields);
+}
 #if FIRMWARE_DIAGNOSTICS
 static bool ordinaryRendererSessionActive = false;
 static uint32_t ordinaryRendererWindowSequence = 0;
@@ -1577,6 +1671,14 @@ void setup() {
     map_transfer::MapTransferInstaller mapInstaller("/sdcard");
     map_transfer::InstallStatus recoveryStatus =
         mapInstaller.recoverInterruptedActivation();
+    recordMapDiagnostic(
+        recoveryStatus.ok ? ride_diagnostics::Level::Info
+                          : ride_diagnostics::Level::Warning,
+        "recovery_checked", "activation_recovery",
+        recoveryStatus.ok
+            ? (recoveryStatus.code == "ok" ? "ok" : "recovered")
+            : "failed",
+        recoveryStatus.code.c_str());
     if (!recoveryStatus.ok) {
       Serial.printf("MAP_TRANSFER: recovery failed code=%s message=%s\n",
                     recoveryStatus.code.c_str(), recoveryStatus.message.c_str());
@@ -1586,14 +1688,63 @@ void setup() {
     map_transfer::ActiveMapSelection activeMap;
     map_transfer::InstallStatus activeStatus =
         mapInstaller.readActiveMap(activeMap);
+    struct MapLoadAttempt {
+      bool loaded = false;
+      map_probe_diagnostics::Result probe;
+    };
+    const auto identifySelection =
+        [&](const map_transfer::ActiveMapSelection &selection) {
+          map_transfer::ActiveMapSelection identified;
+          std::string contentReceipt;
+          const map_transfer::InstallStatus receiptStatus =
+              mapInstaller.readActiveMapContentReceipt(identified,
+                                                       contentReceipt);
+          if (!receiptStatus.ok || identified.mapId != selection.mapId ||
+              identified.sessionId != selection.sessionId ||
+              identified.root != selection.root) {
+            contentReceipt.clear();
+          }
+          return mapDiagnosticIdentity(selection, contentReceipt);
+        };
+    const auto loadSelection =
+        [&](const map_transfer::ActiveMapSelection &selection) {
+          const uint32_t startedMs = millis();
+          const std::string root = std::string("/sdcard") + selection.root;
+          MapLoadAttempt attempt;
+          attempt.probe = mapView.probeVectorMapFolderDetailed(root);
+          attempt.loaded = attempt.probe.loaded();
+          if (attempt.loaded && !mapView.setVectorMapFolder(root)) {
+            attempt.loaded = false;
+            attempt.probe.code =
+                map_probe_diagnostics::Code::RootSwitchFailed;
+          }
+          attempt.probe.elapsedMs = millis() - startedMs;
+          return attempt;
+        };
+
+    RendererMapDiagnosticIdentity finalIdentity;
+    std::string finalCode = activeStatus.code;
+    bool finalLoaded = false;
     if (activeStatus.ok) {
-      const auto loadSelection =
-          [&](const map_transfer::ActiveMapSelection &selection) {
-            const std::string root = std::string("/sdcard") + selection.root;
-            return mapView.probeVectorMapFolder(root) &&
-                   mapView.setVectorMapFolder(root);
-          };
-      if (loadSelection(activeMap)) {
+      const RendererMapDiagnosticIdentity activeIdentity =
+          identifySelection(activeMap);
+      recordMapDiagnostic(ride_diagnostics::Level::Info, "active_selection",
+                          "selection", "available", activeStatus.code.c_str(),
+                          &activeIdentity);
+      const MapLoadAttempt activeAttempt = loadSelection(activeMap);
+      recordMapDiagnostic(
+          activeAttempt.loaded ? ride_diagnostics::Level::Info
+                               : ride_diagnostics::Level::Warning,
+          "renderer_probe", "probe",
+          activeAttempt.loaded ? "loaded" : "failed",
+          map_probe_diagnostics::name(activeAttempt.probe.code),
+          &activeIdentity, false, activeAttempt.probe.elapsedMs,
+          activeAttempt.probe.visitedEntries,
+          activeAttempt.probe.formatVersion, MapDiagnosticMetrics::Probe);
+      if (activeAttempt.loaded) {
+        finalIdentity = activeIdentity;
+        finalCode = map_probe_diagnostics::name(activeAttempt.probe.code);
+        finalLoaded = true;
         Serial.printf("MAP_TRANSFER: activeMapId=%s root=%s\n",
                       activeMap.mapId.c_str(), activeMap.root.c_str());
       } else if (!activeMap.sessionId.empty()) {
@@ -1602,20 +1753,81 @@ void setup() {
         map_transfer::ActiveMapSelection restored;
         const map_transfer::InstallStatus restoredStatus =
             mapInstaller.readActiveMap(restored);
-        const bool restoredLoaded =
-            rollback.ok && restoredStatus.ok && loadSelection(restored);
+        const RendererMapDiagnosticIdentity restoredIdentity =
+            restoredStatus.ok ? identifySelection(restored) : activeIdentity;
+        MapLoadAttempt restoredAttempt;
+        if (rollback.ok && restoredStatus.ok) {
+          restoredAttempt = loadSelection(restored);
+          recordMapDiagnostic(
+              restoredAttempt.loaded ? ride_diagnostics::Level::Info
+                                     : ride_diagnostics::Level::Warning,
+              "renderer_probe", "probe",
+              restoredAttempt.loaded ? "loaded" : "failed",
+              map_probe_diagnostics::name(restoredAttempt.probe.code),
+              &restoredIdentity, true, restoredAttempt.probe.elapsedMs,
+              restoredAttempt.probe.visitedEntries,
+              restoredAttempt.probe.formatVersion,
+              MapDiagnosticMetrics::Probe);
+        }
+        const bool restoredLoaded = rollback.ok && restoredStatus.ok &&
+                                    restoredAttempt.loaded;
+        const std::string rollbackResultCode =
+            !rollback.ok
+                ? rollback.code
+                : (!restoredStatus.ok
+                       ? restoredStatus.code
+                       : (restoredLoaded
+                              ? rollback.code
+                              : map_probe_diagnostics::name(
+                                    restoredAttempt.probe.code)));
+        recordMapDiagnostic(
+            restoredLoaded ? ride_diagnostics::Level::Info
+                           : ride_diagnostics::Level::Warning,
+            "rollback_completed", "rollback",
+            restoredLoaded ? "restored" : "failed",
+            rollbackResultCode.c_str(), &restoredIdentity, true,
+            restoredAttempt.probe.elapsedMs,
+            restoredAttempt.probe.visitedEntries,
+            restoredAttempt.probe.formatVersion,
+            rollback.ok && restoredStatus.ok ? MapDiagnosticMetrics::Probe
+                                             : MapDiagnosticMetrics::None);
+        if (restoredLoaded) {
+          finalIdentity = restoredIdentity;
+          finalCode = map_probe_diagnostics::name(restoredAttempt.probe.code);
+          finalLoaded = true;
+        } else {
+          finalIdentity = activeIdentity;
+          finalCode = rollbackResultCode;
+        }
         Serial.printf("MAP_TRANSFER: boot renderer probe failed session=%s "
                       "rollback=%s restored=%d\n",
                       activeMap.sessionId.c_str(), rollback.code.c_str(),
                       restoredLoaded);
       } else {
+        finalIdentity = activeIdentity;
+        finalCode = map_probe_diagnostics::name(activeAttempt.probe.code);
         Serial.printf("MAP_TRANSFER: legacy renderer probe failed root=%s\n",
                       activeMap.root.c_str());
       }
     } else {
+      recordMapDiagnostic(
+          activeStatus.code == "active_missing"
+              ? ride_diagnostics::Level::Info
+              : ride_diagnostics::Level::Warning,
+          "active_selection", "selection", "unavailable",
+          activeStatus.code.c_str());
       Serial.printf("MAP_TRANSFER: activeMap unavailable code=%s message=%s\n",
                     activeStatus.code.c_str(), activeStatus.message.c_str());
     }
+    rendererMapDiagnosticIdentity =
+        finalLoaded ? finalIdentity : RendererMapDiagnosticIdentity{};
+    recordMapDiagnostic(
+        finalLoaded || activeStatus.code == "active_missing"
+            ? ride_diagnostics::Level::Info
+            : ride_diagnostics::Level::Warning,
+        "boot_selection_final", "boot_selection",
+        finalLoaded ? "loaded" : "unavailable", finalCode.c_str(),
+        finalLoaded ? &rendererMapDiagnosticIdentity : nullptr);
   }
   // Map recovery owns the SD card during this phase. Start the diagnostics
   // writer only after recovery has released it; boot events remain queued.
@@ -1735,6 +1947,7 @@ void setup() {
   log_i("Setup Complete");
   ride_diagnostics::record(ride_diagnostics::Level::Info, "lifecycle",
                            "ready", "{}");
+  (void)ride_diagnostics::recordHealth("ready");
   firmwareUpdateHttp.markRunningAppValid();
   mapTransferHttp.resumePendingActivations();
   power_management::completeStartup();
@@ -1851,12 +2064,35 @@ void loop() {
           pendingMapRendererActivation.rendererQueued &&
           rendererResult.folder == pendingMapRendererActivation.rendererRoot;
       const bool loaded = matchesPending && rendererResult.loaded;
-      if (pendingMapRendererActivation.source ==
-          PendingMapRendererActivationSource::Transfer) {
+      const bool transferActivation =
+          pendingMapRendererActivation.source ==
+          PendingMapRendererActivationSource::Transfer;
+      const bool labelRollback =
+          pendingMapRendererActivation.source ==
+          PendingMapRendererActivationSource::LabelRollback;
+      const char *activationCode =
+          matchesPending
+              ? map_probe_diagnostics::name(rendererResult.probe.code)
+              : "activation_result_mismatch";
+      recordMapDiagnostic(
+          loaded ? ride_diagnostics::Level::Info
+                 : ride_diagnostics::Level::Warning,
+          labelRollback ? "runtime_rollback_completed"
+                        : "runtime_activation_completed",
+          labelRollback ? "runtime_rollback" : "runtime_activation",
+          loaded ? "loaded" : "failed", activationCode,
+          &pendingMapRendererActivation.identity, labelRollback,
+          rendererResult.probe.elapsedMs,
+          rendererResult.probe.visitedEntries,
+          rendererResult.probe.formatVersion, MapDiagnosticMetrics::Probe);
+      if (loaded)
+        rendererMapDiagnosticIdentity = pendingMapRendererActivation.identity;
+      else if (labelRollback)
+        rendererMapDiagnosticIdentity = {};
+      if (transferActivation) {
         mapTransferHttp.acknowledgeActivatedMapRoot(
             pendingMapRendererActivation.transferRoot, loaded);
-      } else if (pendingMapRendererActivation.source ==
-                 PendingMapRendererActivationSource::LabelRollback) {
+      } else if (labelRollback) {
         Serial.printf("MAP_TRANSFER: runtime label failure=%s rollback=%s "
                       "restored=%d\n",
                       pendingMapRendererActivation.labelFailure.c_str(),
@@ -1872,13 +2108,16 @@ void loop() {
 
     if (pendingMapRendererActivation.source ==
         PendingMapRendererActivationSource::None) {
-      std::string activatedMapRoot;
-      if (mapTransferHttp.takeActivatedMapRoot(activatedMapRoot)) {
+      map_transfer::MapTransferHttpServer::ActivatedMapRoot activated;
+      if (mapTransferHttp.takeActivatedMapRoot(activated)) {
         const std::string rendererRoot =
-            std::string("/sdcard") + activatedMapRoot;
+            std::string("/sdcard") + activated.root;
+        RendererMapDiagnosticIdentity identity;
+        identity.mapId = activated.mapId;
+        identity.sessionPresent = activated.sessionPresent;
         pendingMapRendererActivation = {
             PendingMapRendererActivationSource::Transfer, rendererRoot,
-            activatedMapRoot, {}, {}, false, now};
+            activated.root, {}, {}, identity, false, now};
       }
     }
 
@@ -1904,10 +2143,18 @@ void loop() {
           pendingMapRendererActivation = {
               PendingMapRendererActivationSource::LabelRollback,
               restoredRoot, {}, labelRuntimeFailure, rollbackStatus.code,
-              false, now};
+              mapDiagnosticIdentity(restored), false, now};
         }
       }
       if (!restorationAvailable) {
+        rendererMapDiagnosticIdentity = {};
+        const RendererMapDiagnosticIdentity failedIdentity =
+            activeStatus.ok ? mapDiagnosticIdentity(failedSelection)
+                            : RendererMapDiagnosticIdentity{};
+        recordMapDiagnostic(ride_diagnostics::Level::Warning,
+                            "runtime_rollback_completed", "runtime_rollback",
+                            "failed", rollbackStatus.code.c_str(),
+                            &failedIdentity, true);
         Serial.printf("MAP_TRANSFER: runtime label failure=%s rollback=%s "
                       "restored=0\n",
                       labelRuntimeFailure.c_str(), rollbackStatus.code.c_str());
@@ -1937,6 +2184,18 @@ void loop() {
                         pendingMapRendererActivation.labelFailure.c_str(),
                         pendingMapRendererActivation.rollbackCode.c_str());
         }
+        recordMapDiagnostic(
+            ride_diagnostics::Level::Warning,
+            pendingMapRendererActivation.source ==
+                    PendingMapRendererActivationSource::LabelRollback
+                ? "runtime_rollback_completed"
+                : "runtime_activation_completed",
+            "activation_queue", "failed", "activation_queue_timeout",
+            &pendingMapRendererActivation.identity,
+            pendingMapRendererActivation.source ==
+                PendingMapRendererActivationSource::LabelRollback,
+            now - pendingMapRendererActivation.queueAttemptStartedMs, 0, 0,
+            MapDiagnosticMetrics::Duration);
         pendingMapRendererActivation = {};
       }
     }
@@ -2158,6 +2417,25 @@ void loop() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
     armOwnershipPairingAfterRenderedComparison();
 #endif
+  }
+
+  Maps::MapAvailabilityTransition mapAvailability;
+  if (mapView.takeMapAvailabilityTransition(mapAvailability)) {
+    const bool hasActiveIdentity =
+        !rendererMapDiagnosticIdentity.mapId.empty();
+    recordMapDiagnostic(
+        mapAvailability.available ? ride_diagnostics::Level::Info
+                                  : ride_diagnostics::Level::Warning,
+        mapAvailability.available ? "runtime_map_available"
+                                  : "runtime_map_unavailable",
+        "render", mapAvailability.available ? "available" : "unavailable",
+        mapAvailability.available
+            ? "ok"
+            : (hasActiveIdentity ? "map_data_not_found"
+                                 : "active_map_unavailable"),
+        hasActiveIdentity ? &rendererMapDiagnosticIdentity : nullptr, false,
+        mapAvailability.renderDurationMs, mapAvailability.blockLoadMs, 0,
+        MapDiagnosticMetrics::Render);
   }
 
 #if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)) &&       \
