@@ -10507,6 +10507,34 @@ struct NavigationProtocolTests {
             source.contains("focusedPackFilename: $focusedSavedMapFilename"),
             "settings form passes its focus binding into Saved Maps"
         )
+        guard let savedMapsSectionStart = source.range(
+            of: "private struct SavedMapsSettingsSection"
+        )?.lowerBound,
+        let savedMapRowStart = source.range(
+            of: "private struct SavedMapRow",
+            range: savedMapsSectionStart..<source.endIndex
+        )?.lowerBound else {
+            assert(false, "saved-map view source boundaries should be present")
+            return
+        }
+        let settingsRootSource = String(source[..<savedMapsSectionStart])
+        let savedMapsSectionSource = String(
+            source[savedMapsSectionStart..<savedMapRowStart]
+        )
+        assert(
+            settingsRootSource.contains(
+                ".sheet(item: createdSharePresentation) { presentation in"
+            ) &&
+                settingsRootSource.contains(
+                    "SavedMapShareSheet(url: presentation.url)"
+                ) &&
+                settingsRootSource.contains(
+                    "offlineMapManager.createdShareURL.map"
+                ) &&
+                !savedMapsSectionSource.contains("createdShareURL") &&
+                !savedMapsSectionSource.contains(".sheet("),
+            "share-map presentation is item-driven from the stable Settings root"
+        )
         assert(
             source.contains("Spacer()\n                    .contentShape(Rectangle())\n                    .onTapGesture {\n                        focusedPackFilename = nil\n                    }"),
             "tapping outside the saved-map name clears focus without covering form controls"
