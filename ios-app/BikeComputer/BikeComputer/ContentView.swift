@@ -1059,7 +1059,7 @@ struct ContentView: View {
 
     private func mapControlIcon(_ systemName: String) -> some View {
         Image(systemName: systemName)
-            .font(.system(size: 20, weight: .semibold))
+            .font(.system(size: 16, weight: .semibold))
             .foregroundStyle(.primary)
             .frame(width: 52, height: 50)
             .contentShape(Rectangle())
