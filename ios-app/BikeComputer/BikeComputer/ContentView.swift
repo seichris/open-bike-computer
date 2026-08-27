@@ -266,7 +266,7 @@ struct ContentView: View {
                         Spacer()
                         mapControlCluster
                     }
-                    .padding(.trailing, 18)
+                    .padding(.trailing, 12)
                     .padding(.bottom, 12)
                     .zIndex(10)
 
