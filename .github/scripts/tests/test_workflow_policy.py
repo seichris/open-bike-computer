@@ -29,18 +29,6 @@ DIAGNOSTIC_FIRMWARE_TARGETS = {
     "WAVESHARE_AMOLED_206_POWER_METRICS",
     "WAVESHARE_AMOLED_206_LIGHT_SLEEP",
 }
-SHARED_CONTRACT_PATHS = {
-    "docs/app-store-privacy-disclosures.md",
-    "docs/device-ownership-test-vectors.json",
-    "docs/firmware-battery-life-hardware-validation.md",
-    "docs/firmware-build-provenance.md",
-    "docs/firmware-factory-release.md",
-    "docs/firmware-map-memory-diagnostics.md",
-    "docs/firmware-map-render-scheduler.md",
-    "docs/firmware-map-rendering-psram.md",
-    "docs/firmware-runtime-maintenance.md",
-    "docs/releases/watchos-workout-companion.md",
-}
 JOB_KEY_PATTERN = re.compile(
     r'(?:"(?P<double>[A-Za-z_][A-Za-z0-9_-]*)"|'
     r"'(?P<single>[A-Za-z_][A-Za-z0-9_-]*)'|"
@@ -321,12 +309,82 @@ class WorkflowPolicyTests(unittest.TestCase):
             general_ci,
         )
 
-    def test_feature_branch_pushes_do_not_duplicate_pull_request_ci(self) -> None:
+    def test_ios_workout_suite_does_not_repeat_ride_diagnostics_xctest(self) -> None:
         general_ci = workflow_source("ci.yml")
 
-        self.assertIn("  push:\n    branches:\n      - main\n", general_ci)
+        self.assertNotIn("Run ride diagnostics XCTest target", general_ci)
+        self.assertNotIn("run-ride-diagnostics-xctest.sh", general_ci)
+        self.assertIn("Run workout contract tests on iOS", general_ci)
+        self.assertIn("./scripts/run-workout-platform-tests.sh ios", general_ci)
+
+    def test_release_container_owns_watch_build_validation(self) -> None:
+        general_ci = workflow_source("ci.yml")
+
+        self.assertNotIn("Build watch app", general_ci)
+        self.assertNotIn("-target BikeComputerWatch", general_ci)
+        self.assertIn("Build Release app container", general_ci)
+        self.assertIn("Validate Release app container", general_ci)
+        self.assertIn("./scripts/verify-release-container.sh", general_ci)
+
+    def test_ios_platform_tests_share_only_job_scoped_derived_data(self) -> None:
+        general_ci = workflow_source("ci.yml")
+        ios = mapping_block(general_ci, "ios", indent=2)
+
+        self.assertIn(
+            'CI_DERIVED_DATA_PATH=$RUNNER_TEMP/BikeComputerDerivedData',
+            ios,
+        )
+        self.assertIn('>> "$GITHUB_ENV"', ios)
+        self.assertNotIn("actions/cache", ios)
+
+    def test_general_ci_does_not_repeat_after_merge(self) -> None:
+        general_ci = workflow_source("ci.yml")
+
+        self.assertNotRegex(general_ci, r"(?m)^  push:")
         self.assertIn("  pull_request:\n", general_ci)
+        self.assertIn("  workflow_call:\n", general_ci)
+        self.assertIn("  workflow_dispatch:\n", general_ci)
         self.assertIn("  cancel-in-progress: true\n", general_ci)
+
+    def test_ready_prs_and_merge_groups_restore_full_ci(self) -> None:
+        general_ci = workflow_source("ci.yml")
+        pull_request = mapping_block(general_ci, "pull_request", indent=2)
+        merge_group = mapping_block(general_ci, "merge_group", indent=2)
+        changes = mapping_block(general_ci, "changes", indent=2)
+
+        for event_type in ("opened", "synchronize", "reopened", "ready_for_review"):
+            with self.subTest(event_type=event_type):
+                self.assertIn(f"      - {event_type}", pull_request)
+        self.assertIn("      - checks_requested", merge_group)
+        self.assertIn("heavy_ci: ${{ steps.policy.outputs.heavy_ci }}", changes)
+        self.assertIn("PULL_REQUEST_DRAFT", changes)
+        self.assertIn("github.event.merge_group.base_sha", changes)
+        self.assertIn("github.event.merge_group.head_sha", changes)
+
+    def test_draft_prs_keep_fast_checks_and_skip_heavy_jobs(self) -> None:
+        general_ci = workflow_source("ci.yml")
+        esp32 = mapping_block(general_ci, "esp32", indent=2)
+        ios_fast = mapping_block(general_ci, "ios-fast", indent=2)
+        ios = mapping_block(general_ci, "ios", indent=2)
+        host = mapping_block(general_ci, "esp32-host", indent=2)
+        gate = mapping_block(general_ci, "gate", indent=2)
+
+        self.assertIn("needs.changes.outputs.heavy_ci == 'true'", esp32)
+        self.assertIn("if: needs.changes.outputs.ios == 'true'", ios_fast)
+        self.assertNotIn("needs.changes.outputs.heavy_ci", ios_fast)
+        self.assertIn("needs.changes.outputs.heavy_ci == 'true'", ios)
+        self.assertNotIn("needs.changes.outputs.heavy_ci", host)
+        self.assertIn("- ios-fast", gate)
+        self.assertIn("HEAVY_CI", gate)
+        self.assertIn("IOS_FAST_RESULT", gate)
+        self.assertIn(
+            'test "$FIRMWARE_BUILD_CHANGED" = true && test "$HEAVY_CI" = true',
+            gate,
+        )
+        self.assertIn(
+            'test "$IOS_CHANGED" = true && test "$HEAVY_CI" = true',
+            gate,
+        )
 
     def test_concurrency_separates_events_and_manual_scopes(self) -> None:
         general_ci = workflow_source("ci.yml")
@@ -354,10 +412,8 @@ class WorkflowPolicyTests(unittest.TestCase):
             "firmware_targets: ${{ steps.components.outputs.firmware_targets }}",
             changes,
         )
-        self.assertIn(
-            "if: needs.changes.outputs.firmware_build == 'true'",
-            esp32,
-        )
+        self.assertIn("needs.changes.outputs.firmware_build == 'true'", esp32)
+        self.assertIn("needs.changes.outputs.heavy_ci == 'true'", esp32)
         self.assertIn(
             "if: needs.changes.outputs.firmware_host == 'true'",
             host,
@@ -482,19 +538,6 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("tools/package_factory_firmware.py", general_ci)
         self.assertIn("tar -xzf", general_ci)
         self.assertIn("sha256sum --check SHA256SUMS", general_ci)
-
-    def test_main_push_filter_includes_shared_contract_inputs(self) -> None:
-        general_ci = workflow_source("ci.yml")
-
-        for path in SHARED_CONTRACT_PATHS:
-            with self.subTest(path=path):
-                self.assertIn(f'      - "{path}"', general_ci)
-        self.assertIn('      - ".github/actions/**"', general_ci)
-        self.assertIn('      - "test-fixtures/fmb/**"', general_ci)
-        self.assertIn('      - "tools/firmware_manifest.py"', general_ci)
-        self.assertIn('      - "tools/firmware-signing-requirements.txt"', general_ci)
-        self.assertIn('      - "tools/verify_github_release_assets.py"', general_ci)
-        self.assertIn('      - "tools/tests/**"', general_ci)
 
     def test_promotion_contract_requires_the_aggregate_gate(self) -> None:
         agent_instructions = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")

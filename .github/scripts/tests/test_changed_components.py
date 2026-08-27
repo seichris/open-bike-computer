@@ -305,6 +305,23 @@ class ChangedComponentsTests(unittest.TestCase):
             changed_components.git_diff_command("pull_request", base, head),
         )
 
+    def test_merge_group_uses_exact_queue_diff(self) -> None:
+        base = "a" * 40
+        head = "b" * 40
+
+        self.assertEqual(
+            (
+                "git",
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                f"{base}..{head}",
+                "--",
+            ),
+            changed_components.git_diff_command("merge_group", base, head),
+        )
+
     def test_new_ref_push_uses_root_diff(self) -> None:
         head = "b" * 40
 

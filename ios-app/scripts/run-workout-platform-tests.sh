@@ -23,14 +23,31 @@ esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_APP_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DERIVED_DATA="$(mktemp -d "${TMPDIR:-/tmp}/open-bike-${SCHEME}.XXXXXX")"
+OWNS_DERIVED_DATA=0
+if [[ -n "${CI_DERIVED_DATA_PATH:-}" ]]; then
+  if [[ "${CI_DERIVED_DATA_PATH}" != /* || "${CI_DERIVED_DATA_PATH}" == "/" ]]; then
+    echo "CI_DERIVED_DATA_PATH must be a non-root absolute path" >&2
+    exit 64
+  fi
+  DERIVED_DATA="${CI_DERIVED_DATA_PATH}"
+  if [[ -L "${DERIVED_DATA}" ]]; then
+    echo "CI_DERIVED_DATA_PATH must not be a symlink" >&2
+    exit 64
+  fi
+  mkdir -p "${DERIVED_DATA}"
+else
+  DERIVED_DATA="$(mktemp -d "${TMPDIR:-/tmp}/open-bike-${SCHEME}.XXXXXX")"
+  OWNS_DERIVED_DATA=1
+fi
 SIMULATOR_BOOTED_BY_SCRIPT=0
 
 cleanup() {
   if [[ "${SIMULATOR_BOOTED_BY_SCRIPT}" -eq 1 && -n "${SIMULATOR_UDID:-}" ]]; then
     xcrun simctl shutdown "${SIMULATOR_UDID}" 2>/dev/null || true
   fi
-  rm -rf "${DERIVED_DATA}"
+  if [[ "${OWNS_DERIVED_DATA}" -eq 1 ]]; then
+    rm -rf "${DERIVED_DATA}"
+  fi
 }
 trap cleanup EXIT
 
