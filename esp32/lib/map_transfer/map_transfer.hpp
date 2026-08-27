@@ -214,6 +214,11 @@ protected:
 private:
   std::string storageRoot_;
 
+  InstallStatus validateManifestTextUnchecked(
+      const std::string &manifestText, MapManifest &manifest) const;
+  InstallStatus prepareStagedArchiveUnchecked(
+      const std::string &sessionId,
+      const ActivationProgressCallback &onProgress) const;
   InstallStatus fail(const std::string &code, const std::string &message) const;
   bool safeId(const std::string &value) const;
   bool safeMapId(const std::string &value) const;

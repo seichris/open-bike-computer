@@ -15,7 +15,9 @@
 #include <fcntl.h>
 #include <fstream>
 #include <limits>
+#include <new>
 #include <sstream>
+#include <string_view>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -42,6 +44,16 @@ constexpr const char *kRendererValidationReceiptPrefix = "renderer-v1:";
 // is currently about 1 MB for 5,500 entries. Keep a firm upper bound while
 // allowing those production packs to validate in PSRAM-backed builds.
 constexpr size_t kMaxManifestBytes = 2 * 1024 * 1024;
+constexpr size_t kMaxManifestFiles = 8192;
+constexpr size_t kMaxManifestPathBytes = 240;
+constexpr uint64_t kMaxManifestPayloadBytes = 512ULL * 1024ULL * 1024ULL;
+constexpr size_t kMaxManifestJsonDepth = 8;
+constexpr size_t kMaxManifestObjectKeys = 64;
+constexpr size_t kMaxManifestKeyBytes = 64;
+constexpr size_t kMaxArchiveEntries = kMaxManifestFiles + 65;
+constexpr size_t kMaxArchiveExtraBytes = 4096;
+constexpr size_t kMaxArchiveCommentBytes = 1024;
+constexpr uint64_t kMaxArchiveMetadataBytes = 4ULL * 1024ULL * 1024ULL;
 constexpr uint32_t kZipLocalHeaderSignature = 0x04034b50;
 constexpr uint32_t kZipCentralHeaderSignature = 0x02014b50;
 constexpr uint32_t kZipEndSignature = 0x06054b50;
@@ -61,6 +73,34 @@ static uint32_t readLe32(const uint8_t *data) {
          (static_cast<uint32_t>(data[1]) << 8) |
          (static_cast<uint32_t>(data[2]) << 16) |
          (static_cast<uint32_t>(data[3]) << 24);
+}
+
+static void shaUpdateLe16(Sha256Hasher &sha, uint16_t value) {
+  const uint8_t bytes[] = {static_cast<uint8_t>(value),
+                           static_cast<uint8_t>(value >> 8)};
+  sha.update(bytes, sizeof(bytes));
+}
+
+static void shaUpdateLe32(Sha256Hasher &sha, uint32_t value) {
+  const uint8_t bytes[] = {
+      static_cast<uint8_t>(value), static_cast<uint8_t>(value >> 8),
+      static_cast<uint8_t>(value >> 16), static_cast<uint8_t>(value >> 24)};
+  sha.update(bytes, sizeof(bytes));
+}
+
+static void updateZipEntryDigest(Sha256Hasher &sha, uint32_t localOffset,
+                                 uint16_t flags, uint16_t compression,
+                                 uint32_t crc, uint32_t compressedBytes,
+                                 uint32_t uncompressedBytes,
+                                 std::string_view path) {
+  shaUpdateLe32(sha, localOffset);
+  shaUpdateLe16(sha, flags);
+  shaUpdateLe16(sha, compression);
+  shaUpdateLe32(sha, crc);
+  shaUpdateLe32(sha, compressedBytes);
+  shaUpdateLe32(sha, uncompressedBytes);
+  shaUpdateLe16(sha, static_cast<uint16_t>(path.size()));
+  sha.update(reinterpret_cast<const uint8_t *>(path.data()), path.size());
 }
 
 static std::string joinPath(const std::string &a, const std::string &b) {
@@ -220,7 +260,7 @@ static bool validUtf8(const std::string &value) {
   return true;
 }
 
-static bool readUnicodeEscape(const std::string &json, size_t &cursor,
+static bool readUnicodeEscape(std::string_view json, size_t &cursor,
                               uint16_t &value) {
   if (cursor + 4 > json.size())
     return false;
@@ -636,58 +676,896 @@ static std::string targetMetadataJson(const MapTargetMetadata &target,
   return json;
 }
 
-static std::vector<std::string> fileObjects(const std::string &json) {
-  std::vector<std::string> objects;
-  size_t filesPos = json.find("\"files\"");
-  if (filesPos == std::string::npos)
-    return objects;
-  size_t arrayStart = json.find('[', filesPos);
-  if (arrayStart == std::string::npos)
-    return objects;
+struct ZipCentralDirectoryValidation {
+  bool ok = false;
+  const char *code = "archive_central_directory";
+  const char *message = "map archive central directory is invalid";
+};
 
-  int arrayDepth = 0;
-  int objectDepth = 0;
-  bool inString = false;
-  bool escaped = false;
-  size_t objectStart = std::string::npos;
+static ZipCentralDirectoryValidation validateZipCentralDirectory(
+    std::ifstream &input, uint64_t archiveBytes, uint64_t centralOffset,
+    size_t expectedEntries, const std::string &expectedDigest) {
+  if (centralOffset > UINT32_MAX || expectedEntries > UINT16_MAX)
+    return {};
+  input.clear();
+  input.seekg(static_cast<std::streamoff>(centralOffset), std::ios::beg);
+  if (!input)
+    return {};
 
-  for (size_t i = arrayStart; i < json.size(); i++) {
-    char c = json[i];
-    if (escaped) {
-      escaped = false;
-      continue;
+  uint64_t cursor = centralOffset;
+  Sha256Hasher centralDigest;
+  for (size_t entryIndex = 0; entryIndex < expectedEntries; ++entryIndex) {
+    if (cursor + 46 > archiveBytes)
+      return {false, "archive_truncated",
+              "map archive central directory is truncated"};
+    uint8_t signatureBytes[4] = {};
+    input.read(reinterpret_cast<char *>(signatureBytes),
+               sizeof(signatureBytes));
+    if (input.gcount() != static_cast<std::streamsize>(sizeof(signatureBytes)) ||
+        readLe32(signatureBytes) != kZipCentralHeaderSignature) {
+      return {};
     }
-    if (c == '\\' && inString) {
-      escaped = true;
-      continue;
+    uint8_t header[42] = {};
+    input.read(reinterpret_cast<char *>(header), sizeof(header));
+    if (input.gcount() != static_cast<std::streamsize>(sizeof(header)))
+      return {false, "archive_truncated",
+              "map archive central directory is truncated"};
+    const uint16_t flags = readLe16(header + 4);
+    const uint16_t compression = readLe16(header + 6);
+    const uint32_t crc = readLe32(header + 12);
+    const uint32_t compressedBytes = readLe32(header + 16);
+    const uint32_t uncompressedBytes = readLe32(header + 20);
+    const uint16_t nameBytes = readLe16(header + 24);
+    const uint16_t extraBytes = readLe16(header + 26);
+    const uint16_t commentBytes = readLe16(header + 28);
+    const uint16_t diskStart = readLe16(header + 30);
+    const uint32_t localOffset = readLe32(header + 38);
+    if ((flags & static_cast<uint16_t>(~0x0800U)) != 0 || compression != 0 ||
+        compressedBytes != uncompressedBytes || nameBytes == 0 ||
+        nameBytes > kMaxManifestPathBytes ||
+        extraBytes > kMaxArchiveExtraBytes ||
+        commentBytes > kMaxArchiveCommentBytes || diskStart != 0 ||
+        localOffset >= centralOffset) {
+      return {};
     }
-    if (c == '"') {
-      inString = !inString;
-      continue;
+    const uint64_t variableBytes = static_cast<uint64_t>(nameBytes) +
+                                   extraBytes + commentBytes;
+    if (cursor + 46 > archiveBytes ||
+        variableBytes > archiveBytes - (cursor + 46)) {
+      return {false, "archive_truncated",
+              "map archive central directory is truncated"};
     }
-    if (inString)
-      continue;
-    if (c == '[')
-      arrayDepth++;
-    else if (c == ']') {
-      arrayDepth--;
-      if (arrayDepth == 0)
+    std::string path(nameBytes, '\0');
+    input.read(path.data(), static_cast<std::streamsize>(nameBytes));
+    if (input.gcount() != static_cast<std::streamsize>(nameBytes) ||
+        path.find('\0') != std::string::npos) {
+      return {};
+    }
+    updateZipEntryDigest(centralDigest, localOffset, flags, compression, crc,
+                         compressedBytes, uncompressedBytes, path);
+    input.seekg(static_cast<std::streamoff>(extraBytes) + commentBytes,
+                std::ios::cur);
+    if (!input)
+      return {false, "archive_truncated",
+              "map archive central directory is truncated"};
+    cursor += 46 + variableBytes;
+  }
+
+  const uint64_t endOffset = cursor;
+  if (endOffset + 22 > archiveBytes)
+    return {false, "archive_truncated", "map archive end record is missing"};
+  uint8_t signatureBytes[4] = {};
+  input.read(reinterpret_cast<char *>(signatureBytes), sizeof(signatureBytes));
+  if (input.gcount() != static_cast<std::streamsize>(sizeof(signatureBytes)) ||
+      readLe32(signatureBytes) != kZipEndSignature) {
+    return {};
+  }
+  uint8_t end[18] = {};
+  input.read(reinterpret_cast<char *>(end), sizeof(end));
+  if (input.gcount() != static_cast<std::streamsize>(sizeof(end)))
+    return {false, "archive_truncated", "map archive end record is truncated"};
+  const uint16_t diskNumber = readLe16(end);
+  const uint16_t centralDisk = readLe16(end + 2);
+  const uint16_t entriesOnDisk = readLe16(end + 4);
+  const uint16_t totalEntries = readLe16(end + 6);
+  const uint32_t centralBytes = readLe32(end + 8);
+  const uint32_t declaredCentralOffset = readLe32(end + 12);
+  const uint16_t archiveCommentBytes = readLe16(end + 16);
+  if (diskNumber != 0 || centralDisk != 0 ||
+      entriesOnDisk != expectedEntries || totalEntries != expectedEntries ||
+      declaredCentralOffset != centralOffset ||
+      centralBytes != endOffset - centralOffset ||
+      archiveCommentBytes > kMaxArchiveCommentBytes ||
+      endOffset + 22 + archiveCommentBytes != archiveBytes ||
+      centralDigest.finalHex() != expectedDigest) {
+    return {};
+  }
+  return {true, "ok", ""};
+}
+
+class LegacyManifestJsonReader {
+public:
+  explicit LegacyManifestJsonReader(std::string_view text) : text_(text) {}
+
+  bool parse(MapManifest &manifest) {
+    manifest = MapManifest();
+    skipWhitespace();
+    if (!consume('{'))
+      return fail("manifest_json");
+    skipWhitespace();
+    if (consume('}'))
+      return fail("manifest_json");
+
+    std::vector<std::string> seenKeys;
+    while (true) {
+      std::string key;
+      if (!parseUniqueKey(seenKeys, key) || !consumeAfterWhitespace(':'))
+        return false;
+      if (key == "schemaVersion") {
+        uint64_t schemaVersion = 0;
+        if (haveSchema_ || !parseUnsigned(schemaVersion) ||
+            schemaVersion > UINT32_MAX)
+          return fail(haveSchema_ ? "manifest_duplicate_key"
+                                  : "manifest_integer");
+        manifest.schemaVersion = static_cast<uint32_t>(schemaVersion);
+        haveSchema_ = true;
+      } else if (key == "mapId") {
+        if (haveMapId_ ||
+            !parseRequiredString(manifest.mapId, 64, "manifest_map_id"))
+          return fail(haveMapId_ ? "manifest_duplicate_key" : errorCode_);
+        haveMapId_ = true;
+      } else if (key == "displayName") {
+        if (haveDisplayName_)
+          return fail("manifest_duplicate_key");
+        if (!parsePresentationString(manifest.displayName))
+          return false;
+        haveDisplayName_ = true;
+      } else if (key == "boundsE7") {
+        if (haveBoundsE7_)
+          return fail("manifest_duplicate_key");
+        if (!parseOptionalNumberArray(boundsE7Values_, boundsE7ArrayValid_))
+          return false;
+        haveBoundsE7_ = true;
+      } else if (key == "bounds") {
+        if (haveBounds_)
+          return fail("manifest_duplicate_key");
+        if (!parseOptionalNumberArray(boundsValues_, boundsArrayValid_))
+          return false;
+        haveBounds_ = true;
+      } else if (key == "files") {
+        if (haveFiles_ || !parseFiles(manifest))
+          return fail(haveFiles_ ? "manifest_duplicate_key" : errorCode_);
+        haveFiles_ = true;
+      } else if (key == "target") {
+        if (haveTarget_ || !parseTarget(manifest))
+          return fail(haveTarget_ ? "manifest_duplicate_key" : errorCode_);
+        haveTarget_ = true;
+      } else if (key == "buildings") {
+        if (haveBuildings_ || !parseBuildings(manifest))
+          return fail(haveBuildings_ ? "manifest_duplicate_key" : errorCode_);
+        haveBuildings_ = true;
+      } else if (key == "renderer") {
+        if (!parseRenderer(manifest))
+          return false;
+      } else if (key == "formatVersion") {
+        if (!parseUint32Field(manifest.formatVersion, haveFormatVersion_))
+          return false;
+      } else if (key == "labelProfileVersion") {
+        if (!parseUint32Field(manifest.labelProfileVersion,
+                              haveLabelProfileVersion_))
+          return false;
+      } else if (key == "labelLanguages") {
+        if (!parseLabelLanguages(manifest))
+          return false;
+      } else if (key == "internationalFallback") {
+        if (!parseInternationalFallback(manifest))
+          return false;
+      } else if (key == "buildingProfileVersion") {
+        if (!parseUint32Field(manifest.buildingProfileVersion,
+                              haveBuildingProfileVersion_))
+          return false;
+      } else if (key == "recordCount") {
+        if (!parseUint32Field(manifest.buildingRecordCount,
+                              haveBuildingCounts_[5]))
+          return false;
+      } else if (key == "explicitHeightCount") {
+        if (!parseUint32Field(manifest.buildingProvenanceCounts[0],
+                              haveBuildingCounts_[0]))
+          return false;
+      } else if (key == "levelsHeightCount") {
+        if (!parseUint32Field(manifest.buildingProvenanceCounts[1],
+                              haveBuildingCounts_[1]))
+          return false;
+      } else if (key == "inheritedHeightCount") {
+        if (!parseUint32Field(manifest.buildingProvenanceCounts[2],
+                              haveBuildingCounts_[2]))
+          return false;
+      } else if (key == "localMedianHeightCount") {
+        if (!parseUint32Field(manifest.buildingProvenanceCounts[3],
+                              haveBuildingCounts_[3]))
+          return false;
+      } else if (key == "classDefaultHeightCount") {
+        if (!parseUint32Field(manifest.buildingProvenanceCounts[4],
+                              haveBuildingCounts_[4]))
+          return false;
+      } else if (key == "minFirmwareVersion") {
+        if (!parseMinimumFirmwareVersion(manifest))
+          return false;
+      } else if (!skipValue(1)) {
+        return false;
+      }
+
+      skipWhitespace();
+      if (consume('}'))
         break;
-    } else if (c == '{') {
-      if (arrayDepth == 1 && objectDepth == 0)
-        objectStart = i;
-      objectDepth++;
-    } else if (c == '}') {
-      objectDepth--;
-      if (arrayDepth == 1 && objectDepth == 0 &&
-          objectStart != std::string::npos) {
-        objects.push_back(json.substr(objectStart, i - objectStart + 1));
-        objectStart = std::string::npos;
+      if (!consume(','))
+        return fail("manifest_json");
+      skipWhitespace();
+    }
+    skipWhitespace();
+    if (position_ != text_.size() || !haveSchema_ || !haveMapId_ ||
+        !haveFiles_)
+      return fail("manifest_json");
+    applyPresentationBounds(manifest);
+    return true;
+  }
+
+  const char *errorCode() const { return errorCode_; }
+  bool labelLanguagesValid() const { return labelLanguagesValid_; }
+
+private:
+  std::string_view text_;
+  size_t position_ = 0;
+  const char *errorCode_ = "manifest_json";
+  bool haveSchema_ = false;
+  bool haveMapId_ = false;
+  bool haveDisplayName_ = false;
+  bool haveBoundsE7_ = false;
+  bool haveBounds_ = false;
+  bool haveFiles_ = false;
+  bool haveTarget_ = false;
+  bool haveBuildings_ = false;
+  bool haveRenderer_ = false;
+  bool haveFormatVersion_ = false;
+  bool haveLabelProfileVersion_ = false;
+  bool haveLabelLanguages_ = false;
+  bool labelLanguagesValid_ = false;
+  bool haveInternationalFallback_ = false;
+  bool haveBuildingProfileVersion_ = false;
+  bool haveMinimumFirmwareVersion_ = false;
+  bool haveBuildingCounts_[6] = {false, false, false,
+                                 false, false, false};
+  bool boundsE7ArrayValid_ = false;
+  bool boundsArrayValid_ = false;
+  std::array<double, 4> boundsE7Values_ = {};
+  std::array<double, 4> boundsValues_ = {};
+  uint64_t totalPayloadBytes_ = 0;
+
+  bool fail(const char *code) {
+    errorCode_ = code;
+    return false;
+  }
+
+  void skipWhitespace() {
+    while (position_ < text_.size() &&
+           (text_[position_] == ' ' || text_[position_] == '\n' ||
+            text_[position_] == '\r' || text_[position_] == '\t'))
+      position_++;
+  }
+
+  bool consume(char expected) {
+    if (position_ >= text_.size() || text_[position_] != expected)
+      return false;
+    position_++;
+    return true;
+  }
+
+  bool consumeAfterWhitespace(char expected) {
+    skipWhitespace();
+    if (!consume(expected))
+      return fail("manifest_json");
+    skipWhitespace();
+    return true;
+  }
+
+  bool appendDecoded(std::string &output, std::string_view bytes,
+                     size_t maximumBytes, bool &overLimit) {
+    if (bytes.size() > maximumBytes ||
+        output.size() > maximumBytes - bytes.size()) {
+      overLimit = true;
+      return true;
+    }
+    if (!overLimit)
+      output.append(bytes.data(), bytes.size());
+    return true;
+  }
+
+  bool parseStringLimited(std::string &output, size_t maximumBytes,
+                          bool &overLimit) {
+    skipWhitespace();
+    if (!consume('"'))
+      return fail("manifest_json");
+    output.clear();
+    overLimit = false;
+    while (position_ < text_.size()) {
+      const unsigned char character =
+          static_cast<unsigned char>(text_[position_++]);
+      if (character == '"')
+        return true;
+      if (character < 0x20)
+        return fail("manifest_json");
+      if (character != '\\') {
+        const char byte = static_cast<char>(character);
+        if (!appendDecoded(output, std::string_view(&byte, 1), maximumBytes,
+                           overLimit))
+          return false;
+        continue;
+      }
+      if (position_ >= text_.size())
+        return fail("manifest_json");
+      const char escaped = text_[position_++];
+      char decoded = '\0';
+      switch (escaped) {
+      case '"':
+      case '\\':
+      case '/':
+        decoded = escaped;
+        break;
+      case 'b':
+        decoded = '\b';
+        break;
+      case 'f':
+        decoded = '\f';
+        break;
+      case 'n':
+        decoded = '\n';
+        break;
+      case 'r':
+        decoded = '\r';
+        break;
+      case 't':
+        decoded = '\t';
+        break;
+      case 'u': {
+        uint16_t first = 0;
+        if (!readUnicodeEscape(text_, position_, first))
+          return fail("manifest_json");
+        uint32_t codePoint = first;
+        if (first >= 0xd800 && first <= 0xdbff) {
+          if (position_ + 2 > text_.size() || text_[position_] != '\\' ||
+              text_[position_ + 1] != 'u')
+            return fail("manifest_json");
+          position_ += 2;
+          uint16_t second = 0;
+          if (!readUnicodeEscape(text_, position_, second) ||
+              second < 0xdc00 || second > 0xdfff)
+            return fail("manifest_json");
+          codePoint = 0x10000u +
+                      ((static_cast<uint32_t>(first) - 0xd800u) << 10) +
+                      (static_cast<uint32_t>(second) - 0xdc00u);
+        } else if (first >= 0xdc00 && first <= 0xdfff) {
+          return fail("manifest_json");
+        }
+        std::string utf8;
+        if (!appendUtf8(codePoint, utf8) ||
+            !appendDecoded(output, utf8, maximumBytes, overLimit))
+          return fail("manifest_json");
+        continue;
+      }
+      default:
+        return fail("manifest_json");
+      }
+      if (!appendDecoded(output, std::string_view(&decoded, 1), maximumBytes,
+                         overLimit))
+        return false;
+    }
+    return fail("manifest_json");
+  }
+
+  bool parseRequiredString(std::string &output, size_t maximumBytes,
+                           const char *limitCode) {
+    bool overLimit = false;
+    if (!parseStringLimited(output, maximumBytes, overLimit))
+      return false;
+    return !overLimit || fail(limitCode);
+  }
+
+  bool skipString() {
+    std::string ignored;
+    bool overLimit = false;
+    return parseStringLimited(ignored, 0, overLimit);
+  }
+
+  bool parseUniqueKey(std::vector<std::string> &seen,
+                      std::string &key) {
+    bool overLimit = false;
+    if (!parseStringLimited(key, kMaxManifestKeyBytes, overLimit))
+      return false;
+    if (overLimit || seen.size() >= kMaxManifestObjectKeys)
+      return fail("manifest_limit_exceeded");
+    if (std::find(seen.begin(), seen.end(), key) != seen.end())
+      return fail("manifest_duplicate_key");
+    seen.push_back(key);
+    return true;
+  }
+
+  bool parseUnsigned(uint64_t &value) {
+    skipWhitespace();
+    if (position_ >= text_.size() || text_[position_] < '0' ||
+        text_[position_] > '9')
+      return fail("manifest_integer");
+    const size_t start = position_;
+    value = 0;
+    while (position_ < text_.size() && text_[position_] >= '0' &&
+           text_[position_] <= '9') {
+      const uint64_t digit = static_cast<uint64_t>(text_[position_] - '0');
+      if (value > (UINT64_MAX - digit) / 10)
+        return fail("manifest_integer");
+      value = value * 10 + digit;
+      position_++;
+    }
+    if (position_ - start > 1 && text_[start] == '0')
+      return fail("manifest_integer");
+    return true;
+  }
+
+  bool parseUint32Field(uint32_t &field, bool &assigned) {
+    uint64_t value = 0;
+    if (assigned)
+      return fail("manifest_duplicate_key");
+    if (!parseUnsigned(value) || value > UINT32_MAX)
+      return fail("manifest_integer");
+    field = static_cast<uint32_t>(value);
+    assigned = true;
+    return true;
+  }
+
+  bool parseRenderer(MapManifest &manifest) {
+    if (haveRenderer_)
+      return fail("manifest_duplicate_key");
+    if (!parseRequiredString(manifest.renderer, 32, "manifest_limit_exceeded"))
+      return false;
+    haveRenderer_ = true;
+    return true;
+  }
+
+  bool parseLabelLanguages(MapManifest &manifest) {
+    if (haveLabelLanguages_)
+      return fail("manifest_duplicate_key");
+    skipWhitespace();
+    if (!consume('['))
+      return fail("manifest_json");
+    manifest.labelLanguages.clear();
+    skipWhitespace();
+    if (consume(']')) {
+      haveLabelLanguages_ = true;
+      labelLanguagesValid_ = true;
+      return true;
+    }
+    while (true) {
+      if (manifest.labelLanguages.size() >= 3)
+        return fail("manifest_limit_exceeded");
+      std::string language;
+      if (!parseRequiredString(language, 35, "manifest_limit_exceeded"))
+        return false;
+      manifest.labelLanguages.push_back(std::move(language));
+      skipWhitespace();
+      if (consume(']'))
+        break;
+      if (!consume(','))
+        return fail("manifest_json");
+      skipWhitespace();
+    }
+    haveLabelLanguages_ = true;
+    labelLanguagesValid_ = true;
+    return true;
+  }
+
+  bool parseInternationalFallback(MapManifest &manifest) {
+    if (haveInternationalFallback_)
+      return fail("manifest_duplicate_key");
+    if (!parseRequiredString(manifest.internationalFallback, 35,
+                             "manifest_limit_exceeded"))
+      return false;
+    haveInternationalFallback_ = true;
+    return true;
+  }
+
+  bool parseMinimumFirmwareVersion(MapManifest &manifest) {
+    if (haveMinimumFirmwareVersion_)
+      return fail("manifest_duplicate_key");
+    if (!parseRequiredString(manifest.minimumFirmwareVersion, 32,
+                             "manifest_limit_exceeded"))
+      return false;
+    haveMinimumFirmwareVersion_ = true;
+    return true;
+  }
+
+  bool parsePresentationString(std::string &output) {
+    skipWhitespace();
+    if (position_ >= text_.size())
+      return fail("manifest_json");
+    if (text_[position_] != '"') {
+      output.clear();
+      return skipValue(1);
+    }
+    bool overLimit = false;
+    if (!parseStringLimited(output, 240, overLimit))
+      return false;
+    bool control = false;
+    for (size_t index = 0; index < output.size(); ++index) {
+      const uint8_t value = static_cast<uint8_t>(output[index]);
+      if (value < 0x20 || value == 0x7f ||
+          (value == 0xc2 && index + 1 < output.size() &&
+           static_cast<uint8_t>(output[index + 1]) >= 0x80 &&
+           static_cast<uint8_t>(output[index + 1]) <= 0x9f)) {
+        control = true;
+        break;
       }
     }
+    if (overLimit || control)
+      output.clear();
+    return true;
   }
-  return objects;
-}
+
+  bool scanJsonNumber(double &value) {
+    const size_t original = position_;
+    if (position_ < text_.size() && text_[position_] == '-')
+      position_++;
+    if (position_ >= text_.size()) {
+      position_ = original;
+      return false;
+    }
+    if (text_[position_] == '0') {
+      position_++;
+      if (position_ < text_.size() && text_[position_] >= '0' &&
+          text_[position_] <= '9') {
+        position_ = original;
+        return false;
+      }
+    } else {
+      if (text_[position_] < '1' || text_[position_] > '9') {
+        position_ = original;
+        return false;
+      }
+      while (position_ < text_.size() && text_[position_] >= '0' &&
+             text_[position_] <= '9')
+        position_++;
+    }
+    if (position_ < text_.size() && text_[position_] == '.') {
+      position_++;
+      const size_t fractionStart = position_;
+      while (position_ < text_.size() && text_[position_] >= '0' &&
+             text_[position_] <= '9')
+        position_++;
+      if (position_ == fractionStart) {
+        position_ = original;
+        return false;
+      }
+    }
+    if (position_ < text_.size() &&
+        (text_[position_] == 'e' || text_[position_] == 'E')) {
+      position_++;
+      if (position_ < text_.size() &&
+          (text_[position_] == '+' || text_[position_] == '-'))
+        position_++;
+      const size_t exponentStart = position_;
+      while (position_ < text_.size() && text_[position_] >= '0' &&
+             text_[position_] <= '9')
+        position_++;
+      if (position_ == exponentStart) {
+        position_ = original;
+        return false;
+      }
+    }
+    if (position_ - original > 64) {
+      position_ = original;
+      return false;
+    }
+    const std::string token(text_.substr(original, position_ - original));
+    errno = 0;
+    char *end = nullptr;
+    value = std::strtod(token.c_str(), &end);
+    if (end != token.c_str() + token.size() || errno == ERANGE ||
+        !std::isfinite(value)) {
+      position_ = original;
+      return false;
+    }
+    return true;
+  }
+
+  bool parseOptionalNumberArray(std::array<double, 4> &values, bool &valid) {
+    const size_t original = position_;
+    valid = false;
+    skipWhitespace();
+    if (consume('[')) {
+      bool parsed = true;
+      for (size_t index = 0; index < values.size(); ++index) {
+        skipWhitespace();
+        if (!scanJsonNumber(values[index])) {
+          parsed = false;
+          break;
+        }
+        skipWhitespace();
+        const char expected = index + 1 == values.size() ? ']' : ',';
+        if (!consume(expected)) {
+          parsed = false;
+          break;
+        }
+      }
+      if (parsed) {
+        valid = true;
+        return true;
+      }
+    }
+    position_ = original;
+    return skipValue(1);
+  }
+
+  void applyPresentationBounds(MapManifest &manifest) const {
+    if (haveBoundsE7_) {
+      if (!boundsE7ArrayValid_)
+        return;
+      std::array<int32_t, 4> candidate = {};
+      for (size_t index = 0; index < candidate.size(); ++index) {
+        if (boundsE7Values_[index] != std::trunc(boundsE7Values_[index]) ||
+            boundsE7Values_[index] < std::numeric_limits<int32_t>::min() ||
+            boundsE7Values_[index] > std::numeric_limits<int32_t>::max())
+          return;
+        candidate[index] = static_cast<int32_t>(boundsE7Values_[index]);
+      }
+      if (boundsE7Valid(candidate)) {
+        manifest.boundsE7 = candidate;
+        manifest.hasBoundsE7 = true;
+      }
+      return;
+    }
+    if (!haveBounds_ || !boundsArrayValid_)
+      return;
+    std::array<int32_t, 4> candidate = {};
+    for (size_t index = 0; index < candidate.size(); ++index) {
+      const double scaled = boundsValues_[index] * 10000000.0;
+      if (!std::isfinite(scaled) ||
+          scaled < std::numeric_limits<int32_t>::min() ||
+          scaled > std::numeric_limits<int32_t>::max())
+        return;
+      candidate[index] = static_cast<int32_t>(std::llround(scaled));
+    }
+    if (boundsE7Valid(candidate)) {
+      manifest.boundsE7 = candidate;
+      manifest.hasBoundsE7 = true;
+    }
+  }
+
+  bool parseFiles(MapManifest &manifest) {
+    skipWhitespace();
+    if (!consume('['))
+      return fail("manifest_json");
+    skipWhitespace();
+    if (consume(']'))
+      return true;
+    while (true) {
+      if (manifest.files.size() >= kMaxManifestFiles)
+        return fail("manifest_limit_exceeded");
+      ManifestFile file;
+      if (!parseFile(file))
+        return false;
+      if (file.bytes > kMaxManifestPayloadBytes - totalPayloadBytes_)
+        return fail("manifest_limit_exceeded");
+      totalPayloadBytes_ += file.bytes;
+      manifest.files.push_back(std::move(file));
+      skipWhitespace();
+      if (consume(']'))
+        return true;
+      if (!consume(','))
+        return fail("manifest_json");
+      skipWhitespace();
+    }
+  }
+
+  bool parseFile(ManifestFile &file) {
+    skipWhitespace();
+    if (!consume('{'))
+      return fail("manifest_json");
+    skipWhitespace();
+    if (consume('}'))
+      return fail("manifest_json");
+    bool havePath = false;
+    bool haveBytes = false;
+    bool haveSha = false;
+    std::vector<std::string> seenKeys;
+    while (true) {
+      std::string key;
+      if (!parseUniqueKey(seenKeys, key) || !consumeAfterWhitespace(':'))
+        return false;
+      if (key == "path") {
+        if (havePath ||
+            !parseRequiredString(file.path, kMaxManifestPathBytes,
+                                 "manifest_limit_exceeded"))
+          return fail(havePath ? "manifest_duplicate_key" : errorCode_);
+        havePath = true;
+      } else if (key == "bytes") {
+        if (haveBytes || !parseUnsigned(file.bytes))
+          return fail(haveBytes ? "manifest_duplicate_key" : errorCode_);
+        haveBytes = true;
+      } else if (key == "sha256") {
+        if (haveSha ||
+            !parseRequiredString(file.sha256, 64,
+                                 "manifest_limit_exceeded"))
+          return fail(haveSha ? "manifest_duplicate_key" : errorCode_);
+        haveSha = true;
+      } else if (!skipValue(2)) {
+        return false;
+      }
+      skipWhitespace();
+      if (consume('}'))
+        break;
+      if (!consume(','))
+        return fail("manifest_json");
+      skipWhitespace();
+    }
+    return (havePath && haveBytes && haveSha) || fail("manifest_json");
+  }
+
+  bool parseTarget(MapManifest &manifest) {
+    skipWhitespace();
+    if (!consume('{'))
+      return fail("manifest_json");
+    skipWhitespace();
+    if (consume('}'))
+      return true;
+    std::vector<std::string> seenKeys;
+    while (true) {
+      std::string key;
+      if (!parseUniqueKey(seenKeys, key) || !consumeAfterWhitespace(':'))
+        return false;
+      if (key == "renderer") {
+        if (!parseRenderer(manifest))
+          return false;
+      } else if (key == "formatVersion") {
+        if (!parseUint32Field(manifest.formatVersion, haveFormatVersion_))
+          return false;
+      } else if (key == "labelProfileVersion") {
+        if (!parseUint32Field(manifest.labelProfileVersion,
+                              haveLabelProfileVersion_))
+          return false;
+      } else if (key == "labelLanguages") {
+        if (!parseLabelLanguages(manifest))
+          return false;
+      } else if (key == "internationalFallback") {
+        if (!parseInternationalFallback(manifest))
+          return false;
+      } else if (key == "buildingProfileVersion") {
+        if (!parseUint32Field(manifest.buildingProfileVersion,
+                              haveBuildingProfileVersion_))
+          return false;
+      } else if (key == "minFirmwareVersion") {
+        if (!parseMinimumFirmwareVersion(manifest))
+          return false;
+      } else if (!skipValue(2)) {
+        return false;
+      }
+      skipWhitespace();
+      if (consume('}'))
+        return true;
+      if (!consume(','))
+        return fail("manifest_json");
+      skipWhitespace();
+    }
+  }
+
+  bool parseBuildings(MapManifest &manifest) {
+    skipWhitespace();
+    if (!consume('{'))
+      return fail("manifest_json");
+    skipWhitespace();
+    if (consume('}'))
+      return true;
+    std::vector<std::string> seenKeys;
+    while (true) {
+      std::string key;
+      if (!parseUniqueKey(seenKeys, key) || !consumeAfterWhitespace(':'))
+        return false;
+      if (key == "recordCount") {
+        if (!parseUint32Field(manifest.buildingRecordCount,
+                              haveBuildingCounts_[5]))
+          return false;
+      } else if (key == "explicitHeightCount") {
+        if (!parseUint32Field(manifest.buildingProvenanceCounts[0],
+                              haveBuildingCounts_[0]))
+          return false;
+      } else if (key == "levelsHeightCount") {
+        if (!parseUint32Field(manifest.buildingProvenanceCounts[1],
+                              haveBuildingCounts_[1]))
+          return false;
+      } else if (key == "inheritedHeightCount") {
+        if (!parseUint32Field(manifest.buildingProvenanceCounts[2],
+                              haveBuildingCounts_[2]))
+          return false;
+      } else if (key == "localMedianHeightCount") {
+        if (!parseUint32Field(manifest.buildingProvenanceCounts[3],
+                              haveBuildingCounts_[3]))
+          return false;
+      } else if (key == "classDefaultHeightCount") {
+        if (!parseUint32Field(manifest.buildingProvenanceCounts[4],
+                              haveBuildingCounts_[4]))
+          return false;
+      } else if (!skipValue(2)) {
+        return false;
+      }
+      skipWhitespace();
+      if (consume('}'))
+        return true;
+      if (!consume(','))
+        return fail("manifest_json");
+      skipWhitespace();
+    }
+  }
+
+  bool skipValue(size_t depth) {
+    skipWhitespace();
+    if (position_ >= text_.size())
+      return fail("manifest_json");
+    if (text_[position_] == '"')
+      return skipString();
+    if (text_[position_] == '{') {
+      if (depth >= kMaxManifestJsonDepth)
+        return fail("manifest_limit_exceeded");
+      position_++;
+      skipWhitespace();
+      if (consume('}'))
+        return true;
+      std::vector<std::string> seenKeys;
+      while (true) {
+        std::string key;
+        if (!parseUniqueKey(seenKeys, key) || !consumeAfterWhitespace(':') ||
+            !skipValue(depth + 1))
+          return false;
+        skipWhitespace();
+        if (consume('}'))
+          return true;
+        if (!consume(','))
+          return fail("manifest_json");
+        skipWhitespace();
+      }
+    }
+    if (text_[position_] == '[') {
+      if (depth >= kMaxManifestJsonDepth)
+        return fail("manifest_limit_exceeded");
+      position_++;
+      skipWhitespace();
+      if (consume(']'))
+        return true;
+      while (true) {
+        if (!skipValue(depth + 1))
+          return false;
+        skipWhitespace();
+        if (consume(']'))
+          return true;
+        if (!consume(','))
+          return fail("manifest_json");
+        skipWhitespace();
+      }
+    }
+    for (const char *literal : {"true", "false", "null"}) {
+      const size_t length = std::strlen(literal);
+      if (text_.substr(position_, length) == literal) {
+        position_ += length;
+        return true;
+      }
+    }
+    return skipNumber();
+  }
+
+  bool skipNumber() {
+    const size_t original = position_;
+    double ignored = 0;
+    if (scanJsonNumber(ignored))
+      return true;
+    position_ = original;
+    return fail("manifest_json");
+  }
+};
 
 static std::string publishPathFor(const std::string &manifestPath,
                                   const std::string &mapId) {
@@ -917,42 +1795,27 @@ InstallStatus
 MapTransferInstaller::validateManifestText(const std::string &manifestText,
                                            MapManifest &manifest) const {
   manifest = MapManifest();
+  try {
+    return validateManifestTextUnchecked(manifestText, manifest);
+  } catch (const std::bad_alloc &) {
+    manifest = MapManifest();
+    return fail("manifest_allocation_failed",
+                "manifest validation ran out of memory");
+  }
+}
+
+InstallStatus MapTransferInstaller::validateManifestTextUnchecked(
+    const std::string &manifestText, MapManifest &manifest) const {
+  manifest = MapManifest();
   if (manifestText.empty() || manifestText.size() > kMaxManifestBytes)
     return fail("manifest_size", "manifest size is invalid");
+  if (!validUtf8(manifestText))
+    return fail("manifest_utf8", "manifest is not valid UTF-8");
 
-  manifest.schemaVersion =
-      static_cast<uint32_t>(jsonUintValue(manifestText, "schemaVersion"));
-  manifest.mapId = jsonStringValue(manifestText, "mapId");
-  manifest.displayName =
-      jsonPresentationStringValue(manifestText, "displayName");
-  manifest.hasBoundsE7 =
-      jsonPresentationBoundsE7(manifestText, manifest.boundsE7);
-  manifest.renderer = jsonStringValue(manifestText, "renderer");
-  manifest.formatVersion =
-      static_cast<uint32_t>(jsonUintValue(manifestText, "formatVersion"));
-  manifest.labelProfileVersion = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "labelProfileVersion"));
-  bool labelLanguagesValid = false;
-  manifest.labelLanguages =
-      jsonStringArrayValue(manifestText, "labelLanguages", &labelLanguagesValid);
-  manifest.internationalFallback =
-      jsonStringValue(manifestText, "internationalFallback");
-  manifest.buildingProfileVersion = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "buildingProfileVersion"));
-  manifest.buildingRecordCount = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "recordCount"));
-  manifest.buildingProvenanceCounts[0] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "explicitHeightCount"));
-  manifest.buildingProvenanceCounts[1] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "levelsHeightCount"));
-  manifest.buildingProvenanceCounts[2] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "inheritedHeightCount"));
-  manifest.buildingProvenanceCounts[3] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "localMedianHeightCount"));
-  manifest.buildingProvenanceCounts[4] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "classDefaultHeightCount"));
-  manifest.minimumFirmwareVersion =
-      jsonStringValue(manifestText, "minFirmwareVersion");
+  LegacyManifestJsonReader reader(manifestText);
+  if (!reader.parse(manifest))
+    return fail(reader.errorCode(), "manifest JSON is invalid or over limit");
+  const bool labelLanguagesValid = reader.labelLanguagesValid();
   if (manifest.renderer.empty() && manifest.formatVersion == 0) {
     manifest.renderer = "esp32-fmb";
     manifest.formatVersion = 1;
@@ -964,11 +1827,7 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
 
   uint32_t fontAssetCount = 0;
   uint32_t legacyTextBlockCount = 0;
-  for (const std::string &object : fileObjects(manifestText)) {
-    ManifestFile file;
-    file.path = jsonStringValue(object, "path");
-    file.sha256 = jsonStringValue(object, "sha256");
-    file.bytes = jsonUintValue(object, "bytes");
+  for (ManifestFile &file : manifest.files) {
     file.publishPath = publishPathFor(file.path, manifest.mapId);
     const std::string mapPrefix =
         std::string(kVectMapPrefix) + manifest.mapId + "/";
@@ -994,7 +1853,6 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
       return fail("manifest_bytes", "map file byte count is invalid");
     if (!isHexSha256(file.sha256))
       return fail("manifest_sha256", "map file sha256 is invalid");
-    manifest.files.push_back(file);
     if (isFontAsset)
       fontAssetCount++;
     if (file.path.rfind(".fmp") == file.path.size() - 4)
@@ -1002,6 +1860,18 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
   }
   if (manifest.files.empty())
     return fail("manifest_files", "manifest contains no map files");
+  std::vector<const std::string *> orderedPaths;
+  orderedPaths.reserve(manifest.files.size());
+  for (const ManifestFile &file : manifest.files)
+    orderedPaths.push_back(&file.path);
+  std::sort(orderedPaths.begin(), orderedPaths.end(),
+            [](const std::string *left, const std::string *right) {
+              return *left < *right;
+            });
+  for (size_t index = 1; index < orderedPaths.size(); ++index) {
+    if (*orderedPaths[index - 1] == *orderedPaths[index])
+      return fail("manifest_path", "manifest contains duplicate file paths");
+  }
   if (manifest.renderer != "esp32-fmb" ||
       (manifest.formatVersion != 1 && manifest.formatVersion != 2 &&
        manifest.formatVersion != 3))
@@ -1048,12 +1918,18 @@ MapTransferInstaller::readStagedManifest(const std::string &sessionId,
                                          MapManifest &manifest) const {
   if (!safeId(sessionId))
     return fail("session_id", "session id contains unsafe characters");
-  std::string manifestText;
-  if (!readTextFile(joinPath(stagingRoot(sessionId), "manifest.json"),
-                    manifestText, kMaxManifestBytes)) {
-    return fail("manifest_missing", "staged manifest is missing");
+  try {
+    std::string manifestText;
+    if (!readTextFile(joinPath(stagingRoot(sessionId), "manifest.json"),
+                      manifestText, kMaxManifestBytes)) {
+      return fail("manifest_missing", "staged manifest is missing");
+    }
+    return validateManifestText(manifestText, manifest);
+  } catch (const std::bad_alloc &) {
+    manifest = MapManifest();
+    return fail("manifest_allocation_failed",
+                "staged manifest could not be loaded into memory");
   }
-  return validateManifestText(manifestText, manifest);
 }
 
 InstallStatus MapTransferInstaller::validateStagedMap(
@@ -1129,6 +2005,23 @@ InstallStatus MapTransferInstaller::validateStagedMap(
 InstallStatus MapTransferInstaller::prepareStagedArchive(
     const std::string &sessionId,
     const ActivationProgressCallback &onProgress) const {
+  try {
+    return prepareStagedArchiveUnchecked(sessionId, onProgress);
+  } catch (const std::bad_alloc &) {
+    try {
+      removeTree(stagingRoot(sessionId));
+    } catch (...) {
+      // Keep the typed allocation error if best-effort cleanup also runs out
+      // of memory. A partial staging generation is never activated.
+    }
+    return fail("manifest_allocation_failed",
+                "archive validation ran out of memory");
+  }
+}
+
+InstallStatus MapTransferInstaller::prepareStagedArchiveUnchecked(
+    const std::string &sessionId,
+    const ActivationProgressCallback &onProgress) const {
   if (!safeId(sessionId))
     return fail("session_id", "session id contains unsafe characters");
   const std::string archivePath = stagedArchivePath(sessionId);
@@ -1152,6 +2045,13 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
   bool sawCentralDirectory = false;
   bool foundManifest = false;
   uint64_t offset = 0;
+  uint64_t centralOffset = 0;
+  size_t archiveEntryCount = 0;
+  size_t mapEntryCount = 0;
+  size_t metadataEntryCount = 0;
+  uint64_t metadataBytes = 0;
+  std::string previousArchivePath;
+  Sha256Hasher localEntryDigest;
   int lastScanPercent = -1;
   const auto reportScanProgress = [&](uint64_t completed, bool force = false) {
     if (!onProgress)
@@ -1174,9 +2074,9 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
     if (input.gcount() != static_cast<std::streamsize>(sizeof(signatureBytes)))
       break;
     const uint32_t signature = readLe32(signatureBytes);
-    if (signature == kZipCentralHeaderSignature ||
-        signature == kZipEndSignature) {
+    if (signature == kZipCentralHeaderSignature) {
       sawCentralDirectory = true;
+      centralOffset = offset;
       reportScanProgress(archiveBytes, true);
       break;
     }
@@ -1192,13 +2092,15 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
     }
     const uint16_t flags = readLe16(header + 2);
     const uint16_t compression = readLe16(header + 4);
-    const uint64_t compressedSize = readLe32(header + 14);
-    const uint64_t uncompressedSize = readLe32(header + 18);
+    const uint32_t crc = readLe32(header + 10);
+    const uint32_t compressedSize = readLe32(header + 14);
+    const uint32_t uncompressedSize = readLe32(header + 18);
     const uint16_t nameLength = readLe16(header + 22);
     const uint16_t extraLength = readLe16(header + 24);
-    if ((flags & 0x0009) != 0 || compression != 0 ||
+    if ((flags & static_cast<uint16_t>(~0x0800U)) != 0 || compression != 0 ||
         compressedSize != uncompressedSize || nameLength == 0 ||
-        nameLength > 240) {
+        nameLength > kMaxManifestPathBytes ||
+        extraLength > kMaxArchiveExtraBytes) {
       return fail("archive_format",
                   "map archive must use stored entries without descriptors");
     }
@@ -1206,9 +2108,11 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
     std::string path(nameLength, '\0');
     input.read(path.data(), static_cast<std::streamsize>(nameLength));
     if (input.gcount() != static_cast<std::streamsize>(nameLength) ||
-        path.find('\0') != std::string::npos) {
+        path.find('\0') != std::string::npos || !safeRelativePath(path) ||
+        (!previousArchivePath.empty() && path <= previousArchivePath)) {
       return fail("archive_path", "map archive contains an invalid path");
     }
+    previousArchivePath = path;
     const uint64_t dataOffset = offset + 30 + nameLength + extraLength;
     if (dataOffset > archiveBytes ||
         compressedSize > archiveBytes - dataOffset) {
@@ -1223,26 +2127,55 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
                                path.rfind(".fmp") == path.size() - 4)) ||
          map_renderer_format::isFontAssetPath(path));
     const bool isMetadata =
-        path == "ATTRIBUTION.txt" || startsWith(path, "LICENSES/");
-    if (!isManifest && !isMapFile && !isMetadata && path.back() != '/') {
+        path == "ATTRIBUTION.txt" || path == "preview.png" ||
+        startsWith(path, "LICENSES/");
+    if (!isManifest && !isMapFile && !isMetadata) {
       return fail("archive_path", "map archive contains an unexpected path");
+    }
+
+    archiveEntryCount++;
+    if (archiveEntryCount > kMaxArchiveEntries)
+      return fail("archive_limit_exceeded",
+                  "map archive contains too many entries");
+    if (isMapFile && ++mapEntryCount > kMaxManifestFiles)
+      return fail("archive_limit_exceeded",
+                  "map archive contains too many map files");
+    if (isMetadata) {
+      metadataEntryCount++;
+      if (metadataEntryCount > 64 ||
+          compressedSize > kMaxArchiveMetadataBytes - metadataBytes) {
+        return fail("archive_limit_exceeded",
+                    "map archive metadata exceeds its limit");
+      }
+      metadataBytes += compressedSize;
     }
 
     if (isManifest) {
       if (foundManifest)
         return fail("archive_path", "map archive contains multiple manifests");
-      if (compressedSize > kMaxManifestBytes)
+      if (compressedSize == 0 || compressedSize > kMaxManifestBytes)
         return fail("manifest_size", "manifest size is invalid");
       foundManifest = true;
       manifestOffset = dataOffset;
       manifestBytes = compressedSize;
     }
+    if (offset > UINT32_MAX)
+      return fail("archive_limit_exceeded", "map archive offset is too large");
+    updateZipEntryDigest(localEntryDigest, static_cast<uint32_t>(offset), flags,
+                         compression, crc, compressedSize, uncompressedSize,
+                         path);
     offset = dataOffset + compressedSize;
     reportScanProgress(offset);
   }
 
   if (!sawCentralDirectory || !foundManifest)
     return fail("archive_truncated", "map archive is incomplete");
+  const ZipCentralDirectoryValidation centralValidation =
+      validateZipCentralDirectory(input, archiveBytes, centralOffset,
+                                  archiveEntryCount,
+                                  localEntryDigest.finalHex());
+  if (!centralValidation.ok)
+    return fail(centralValidation.code, centralValidation.message);
 
   const std::string manifestPath = joinPath(root, "manifest.json");
   const std::string manifestTemp = manifestPath + ".part";
@@ -1284,6 +2217,9 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
   InstallStatus parsed = readStagedManifest(sessionId, manifest);
   if (!parsed.ok)
     return parsed;
+  if (manifest.files.size() != mapEntryCount)
+    return fail("archive_manifest",
+                "map archive file count does not match the manifest");
   uint64_t totalMapBytes = 0;
   for (const ManifestFile &file : manifest.files)
     totalMapBytes += file.bytes;
@@ -2856,10 +3792,19 @@ bool MapTransferInstaller::safeRelativePath(const std::string &path) const {
       path.find('\\') != std::string::npos ||
       path.find("//") != std::string::npos)
     return false;
+  for (const unsigned char character : path) {
+    if (!((character >= 'a' && character <= 'z') ||
+          (character >= 'A' && character <= 'Z') ||
+          (character >= '0' && character <= '9') || character == '/' ||
+          character == '+' || character == '.' || character == '_' ||
+          character == '-')) {
+      return false;
+    }
+  }
   std::stringstream stream(path);
   std::string part;
   while (std::getline(stream, part, '/')) {
-    if (part.empty() || part == "." || part == "..")
+    if (part.empty() || part.size() > 64 || part == "." || part == "..")
       return false;
   }
   return path.find("..") == std::string::npos;
@@ -3372,9 +4317,13 @@ bool MapTransferInstaller::readTextFile(const std::string &path,
   std::ifstream input(path, std::ios::binary);
   if (!input)
     return false;
-  text.assign((std::istreambuf_iterator<char>(input)),
-              std::istreambuf_iterator<char>());
-  return true;
+  text.resize(static_cast<size_t>(size));
+  if (size > 0) {
+    input.read(text.data(), static_cast<std::streamsize>(size));
+    if (input.gcount() != static_cast<std::streamsize>(size))
+      return false;
+  }
+  return input.peek() == std::char_traits<char>::eof();
 }
 
 } // namespace map_transfer

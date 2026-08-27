@@ -1,16 +1,39 @@
 #include "../../lib/map_transfer/map_transfer.hpp"
 #include "../../lib/maps/src/mapBlockFormat.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <new>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
+
+static bool failNextAllocation = false;
+
+void *operator new(std::size_t bytes) {
+  if (failNextAllocation) {
+    failNextAllocation = false;
+    throw std::bad_alloc();
+  }
+  if (void *memory = std::malloc(bytes == 0 ? 1 : bytes))
+    return memory;
+  throw std::bad_alloc();
+}
+
+void *operator new[](std::size_t bytes) { return ::operator new(bytes); }
+
+void operator delete(void *memory) noexcept { std::free(memory); }
+void operator delete[](void *memory) noexcept { std::free(memory); }
+void operator delete(void *memory, std::size_t) noexcept { std::free(memory); }
+void operator delete[](void *memory, std::size_t) noexcept {
+  std::free(memory);
+}
 
 using map_transfer::ActivationBeginResult;
 using map_transfer::ActiveMapSelection;
@@ -95,6 +118,16 @@ static uint32_t crc32(const std::vector<uint8_t> &data) {
   return crc ^ 0xFFFFFFFFU;
 }
 
+static uint32_t crc32(const std::string &data) {
+  uint32_t crc = 0xFFFFFFFFU;
+  for (const unsigned char byte : data) {
+    crc ^= byte;
+    for (uint8_t bit = 0; bit < 8; ++bit)
+      crc = (crc >> 1U) ^ (0xEDB88320U & (0U - (crc & 1U)));
+  }
+  return crc ^ 0xFFFFFFFFU;
+}
+
 static std::string emptyLabelFmb(uint32_t fingerprint, uint8_t version = 3) {
   std::vector<uint8_t> data = {
       'F', 'M', 'B', version, 0, 0, 0, 0, 'E', 'X', 'T',
@@ -157,16 +190,30 @@ static void
 writeStoredZip(const std::string &path,
                const std::vector<std::pair<std::string, std::string>> &entries,
                bool includeCentralDirectory = true) {
+  struct CentralEntry {
+    std::string path;
+    uint32_t crc = 0;
+    uint32_t bytes = 0;
+    uint32_t localOffset = 0;
+  };
+  std::vector<std::pair<std::string, std::string>> orderedEntries = entries;
+  std::sort(orderedEntries.begin(), orderedEntries.end(),
+            [](const auto &left, const auto &right) {
+              return left.first < right.first;
+            });
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   assert(out.good());
-  for (const auto &entry : entries) {
+  std::vector<CentralEntry> centralEntries;
+  for (const auto &entry : orderedEntries) {
+    const auto localOffset = static_cast<uint32_t>(out.tellp());
+    const uint32_t entryCrc = crc32(entry.second);
     writeLe32(out, 0x04034b50);
     writeLe16(out, 20);
     writeLe16(out, 0);
     writeLe16(out, 0);
     writeLe16(out, 0);
     writeLe16(out, 0);
-    writeLe32(out, 0);
+    writeLe32(out, entryCrc);
     writeLe32(out, static_cast<uint32_t>(entry.second.size()));
     writeLe32(out, static_cast<uint32_t>(entry.second.size()));
     writeLe16(out, static_cast<uint16_t>(entry.first.size()));
@@ -175,9 +222,43 @@ writeStoredZip(const std::string &path,
               static_cast<std::streamsize>(entry.first.size()));
     out.write(entry.second.data(),
               static_cast<std::streamsize>(entry.second.size()));
+    centralEntries.push_back({entry.first, entryCrc,
+                              static_cast<uint32_t>(entry.second.size()),
+                              localOffset});
   }
-  if (includeCentralDirectory)
-    writeLe32(out, 0x02014b50);
+  if (includeCentralDirectory) {
+    const auto centralOffset = static_cast<uint32_t>(out.tellp());
+    for (const CentralEntry &entry : centralEntries) {
+      writeLe32(out, 0x02014b50);
+      writeLe16(out, 0x0314);
+      writeLe16(out, 20);
+      writeLe16(out, 0);
+      writeLe16(out, 0);
+      writeLe16(out, 0);
+      writeLe16(out, 0);
+      writeLe32(out, entry.crc);
+      writeLe32(out, entry.bytes);
+      writeLe32(out, entry.bytes);
+      writeLe16(out, static_cast<uint16_t>(entry.path.size()));
+      writeLe16(out, 0);
+      writeLe16(out, 0);
+      writeLe16(out, 0);
+      writeLe16(out, 0);
+      writeLe32(out, 0);
+      writeLe32(out, entry.localOffset);
+      out.write(entry.path.data(),
+                static_cast<std::streamsize>(entry.path.size()));
+    }
+    const auto centralEnd = static_cast<uint32_t>(out.tellp());
+    writeLe32(out, 0x06054b50);
+    writeLe16(out, 0);
+    writeLe16(out, 0);
+    writeLe16(out, static_cast<uint16_t>(centralEntries.size()));
+    writeLe16(out, static_cast<uint16_t>(centralEntries.size()));
+    writeLe32(out, centralEnd - centralOffset);
+    writeLe32(out, centralOffset);
+    writeLe16(out, 0);
+  }
   out.close();
   assert(out.good());
 }
@@ -424,6 +505,179 @@ static void testRejectsUnsafeManifestPath() {
   auto status = installer.validateManifestText(manifestText, manifest);
   assert(!status.ok);
   assert(status.code == "manifest_path");
+}
+
+static std::string boundedManifest(size_t fileCount, uint64_t bytes = 1) {
+  std::string manifest =
+      "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"files\":[";
+  for (size_t index = 0; index < fileCount; ++index) {
+    if (index != 0)
+      manifest += ",";
+    manifest +=
+        "{\"path\":\"VECTMAP/map-1/tile/" + std::to_string(index) +
+        ".fmb\",\"bytes\":" + std::to_string(bytes) +
+        ",\"sha256\":\"" + std::string(64, '0') + "\"}";
+  }
+  manifest += "]}";
+  return manifest;
+}
+
+static std::string manifestWithPath(const std::string &path) {
+  return "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"files\":[{"
+         "\"path\":\"" +
+         path + "\",\"bytes\":1,\"sha256\":\"" + std::string(64, '0') +
+         "\"}]}";
+}
+
+static std::string pathAtLength(size_t length) {
+  std::string path = "VECTMAP/map-1/";
+  path += std::string(64, 'a') + "/";
+  path += std::string(64, 'b') + "/";
+  path += std::string(64, 'c') + "/";
+  assert(length >= path.size() + 4 && length - path.size() <= 64);
+  path += std::string(length - path.size() - 4, 'd') + ".fmb";
+  return path;
+}
+
+static std::string manifestWithUnknownNesting(size_t nestedArrays) {
+  std::string manifest =
+      "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"note\":";
+  manifest.append(nestedArrays, '[');
+  manifest += "null";
+  manifest.append(nestedArrays, ']');
+  manifest +=
+      ",\"files\":[{\"path\":\"VECTMAP/map-1/tile/1.fmb\","
+      "\"bytes\":1,\"sha256\":\"" +
+      std::string(64, '0') + "\"}]}";
+  return manifest;
+}
+
+static void testBoundsLegacyManifestResourcesAndGrammar() {
+  MapTransferInstaller installer("/tmp/root");
+  MapManifest manifest;
+
+  auto status = installer.validateManifestText(boundedManifest(0), manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_files");
+
+  status = installer.validateManifestText(boundedManifest(8192), manifest);
+  assert(status.ok);
+  assert(manifest.files.size() == 8192);
+
+  status = installer.validateManifestText(boundedManifest(8193), manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_limit_exceeded");
+
+  status = installer.validateManifestText(
+      boundedManifest(257, map_block_format::kMaximumBlockBytes), manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_limit_exceeded");
+
+  status = installer.validateManifestText(
+      manifestWithPath(pathAtLength(240)), manifest);
+  assert(status.ok);
+  status = installer.validateManifestText(
+      manifestWithPath(pathAtLength(241)), manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_limit_exceeded");
+
+  status = installer.validateManifestText(
+      manifestWithPath("VECTMAP/map-1/" + std::string(65, 'a') + ".fmb"),
+      manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_path");
+
+  status = installer.validateManifestText(manifestWithUnknownNesting(7),
+                                          manifest);
+  assert(status.ok);
+  status = installer.validateManifestText(manifestWithUnknownNesting(8),
+                                          manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_limit_exceeded");
+
+  constexpr size_t maximumManifestBytes = 2 * 1024 * 1024;
+  std::string maximumManifest = manifestWithPath(
+      "VECTMAP/map-1/tile/maximum-manifest.fmb");
+  maximumManifest.pop_back();
+  maximumManifest += ",\"padding\":\"";
+  assert(maximumManifest.size() + 2 < maximumManifestBytes);
+  maximumManifest.append(maximumManifestBytes - maximumManifest.size() - 2,
+                         'x');
+  maximumManifest += "\"}";
+  assert(maximumManifest.size() == maximumManifestBytes);
+  status = installer.validateManifestText(maximumManifest, manifest);
+  assert(status.ok);
+  maximumManifest.push_back(' ');
+  status = installer.validateManifestText(maximumManifest, manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_size");
+}
+
+static void testRejectsAmbiguousOrMalformedLegacyManifestJson() {
+  MapTransferInstaller installer("/tmp/root");
+  MapManifest manifest;
+  const std::string file =
+      "{\"path\":\"VECTMAP/map-1/tile/1.fmb\",\"bytes\":1,"
+      "\"sha256\":\"" +
+      std::string(64, '0') + "\"}";
+
+  auto status = installer.validateManifestText(
+      "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"mapId\":\"map-2\","
+      "\"files\":[" +
+          file + "]}",
+      manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_duplicate_key");
+
+  status = installer.validateManifestText(
+      "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"files\":[" + file +
+          "," + file + "]}",
+      manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_path");
+
+  status = installer.validateManifestText(
+      "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"files\":[{"
+      "\"path\":\"VECTMAP/map-1/tile/1.fmb\","
+      "\"bytes\":18446744073709551616,\"sha256\":\"" +
+          std::string(64, '0') + "\"}]}",
+      manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_integer");
+
+  status = installer.validateManifestText(
+      "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"wrapper\":{"
+      "\"files\":[" +
+          file + "]}}",
+      manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_json");
+
+  std::string invalidUtf8 =
+      "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"note\":\"";
+  invalidUtf8.push_back(static_cast<char>(0xff));
+  invalidUtf8 += "\",\"files\":[" + file + "]}";
+  status = installer.validateManifestText(invalidUtf8, manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_utf8");
+
+  status = installer.validateManifestText(
+      manifestWithPath("VECTMAP/map-1/tile/bad\\u0000name.fmb"), manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_path");
+}
+
+static void testLegacyManifestAllocationFailureIsTyped() {
+  MapTransferInstaller installer("/tmp/root");
+  MapManifest manifest;
+  const std::string input = manifestWithPath(
+      "VECTMAP/map-1/tile/allocation-failure.fmb");
+  failNextAllocation = true;
+  const auto status = installer.validateManifestText(input, manifest);
+  assert(!failNextAllocation);
+  assert(!status.ok);
+  assert(status.code == "manifest_allocation_failed");
+  assert(manifest.files.empty());
 }
 
 static std::string presentationManifest(const std::string &metadata) {
@@ -1305,7 +1559,8 @@ static void testStoredArchivePreparesAndActivatesInBackgroundTransferPath() {
   writeStoredZip(installer.stagedArchivePath(session),
                  {{"manifest.json", manifest},
                   {blockPath, blockData},
-                  {"ATTRIBUTION.txt", "OpenStreetMap"}});
+                  {"ATTRIBUTION.txt", "OpenStreetMap"},
+                  {"preview.png", "png"}});
 
   auto prepared = installer.prepareStagedArchive(session);
   assert(prepared.ok);
@@ -1392,6 +1647,80 @@ static void testStoredArchiveRejectsMissingCentralDirectory() {
   assert(!exists(installer.stagingRoot(session) + "/manifest.json"));
 }
 
+static void testStoredArchiveRejectsCentralDirectoryDisagreement() {
+  const std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string session = "session-central-mismatch";
+  assert(::system((std::string("mkdir -p ") + installer.stagingRoot(session))
+                      .c_str()) == 0);
+  writeStoredZip(installer.stagedArchivePath(session),
+                 {{"manifest.json", "{}"}});
+  std::string archive = readFile(installer.stagedArchivePath(session));
+  const std::string centralSignature("PK\x01\x02", 4);
+  const size_t central = archive.find(centralSignature);
+  assert(central != std::string::npos);
+  assert(central + 28 <= archive.size());
+  archive[central + 24] ^= 0x01;
+  writeFile(installer.stagedArchivePath(session), archive);
+
+  const auto prepared = installer.prepareStagedArchive(session);
+  assert(!prepared.ok);
+  assert(prepared.code == "archive_central_directory");
+  assert(!exists(installer.stagingRoot(session) + "/manifest.json"));
+}
+
+static void testStoredArchiveEnforcesEntryLimitsAndUniquePaths() {
+  {
+    const std::string root = tempRoot();
+    MapTransferInstaller installer(root);
+    const std::string session = "session-duplicate-entry";
+    assert(::system((std::string("mkdir -p ") + installer.stagingRoot(session))
+                        .c_str()) == 0);
+    writeStoredZip(installer.stagedArchivePath(session),
+                   {{"manifest.json", "{}"}, {"manifest.json", "{}"}});
+    const auto prepared = installer.prepareStagedArchive(session);
+    assert(!prepared.ok);
+    assert(prepared.code == "archive_path");
+  }
+
+  {
+    const std::string root = tempRoot();
+    MapTransferInstaller installer(root);
+    const std::string session = "session-metadata-limit";
+    assert(::system((std::string("mkdir -p ") + installer.stagingRoot(session))
+                        .c_str()) == 0);
+    std::vector<std::pair<std::string, std::string>> entries = {
+        {"manifest.json", "{}"}};
+    for (size_t index = 0; index < 65; ++index)
+      entries.push_back(
+          {"LICENSES/license-" + std::to_string(index) + ".txt", "x"});
+    writeStoredZip(installer.stagedArchivePath(session), entries);
+    const auto prepared = installer.prepareStagedArchive(session);
+    assert(!prepared.ok);
+    assert(prepared.code == "archive_limit_exceeded");
+  }
+
+  {
+    const std::string root = tempRoot();
+    MapTransferInstaller installer(root);
+    const std::string session = "session-map-entry-limit";
+    assert(::system((std::string("mkdir -p ") + installer.stagingRoot(session))
+                        .c_str()) == 0);
+    std::vector<std::pair<std::string, std::string>> entries = {
+        {"manifest.json", "{}"}};
+    entries.reserve(8194);
+    for (size_t index = 0; index < 8193; ++index) {
+      entries.push_back({"VECTMAP/map-1/tile/" + std::to_string(index) +
+                             ".fmb",
+                         ""});
+    }
+    writeStoredZip(installer.stagedArchivePath(session), entries);
+    const auto prepared = installer.prepareStagedArchive(session);
+    assert(!prepared.ok);
+    assert(prepared.code == "archive_limit_exceeded");
+  }
+}
+
 static void testPendingArchiveActivationSurvivesRestart() {
   const std::string root = tempRoot();
   MapTransferInstaller first(root);
@@ -1418,6 +1747,9 @@ int main() {
   testTargetThreeBuildingContractValidation();
   testActivationStateTracksAttemptsAndCompactStatus();
   testRejectsUnsafeManifestPath();
+  testBoundsLegacyManifestResourcesAndGrammar();
+  testRejectsAmbiguousOrMalformedLegacyManifestJson();
+  testLegacyManifestAllocationFailureIsTyped();
   testParsesOptionalActiveMapPresentationMetadata();
   testIgnoresInvalidOptionalActiveMapPresentationMetadata();
   testBindsActivePresentationToManifestReceipt();
@@ -1451,6 +1783,8 @@ int main() {
   testStoredArchivePreparesAndActivatesInBackgroundTransferPath();
   testStoredArchiveResumesVerifiedFileCheckpoints();
   testStoredArchiveRejectsMissingCentralDirectory();
+  testStoredArchiveRejectsCentralDirectoryDisagreement();
+  testStoredArchiveEnforcesEntryLimitsAndUniquePaths();
   testPendingArchiveActivationSurvivesRestart();
   std::cout << "map_transfer tests passed\n";
   return 0;
