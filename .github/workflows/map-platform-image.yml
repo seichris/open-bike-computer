@@ -423,3 +423,215 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --ref "$PROMOTION_BRANCH" \
             -f scope=map
+
+  propose-development:
+    name: Propose development image
+    needs: publish
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      attestations: read
+      contents: write
+      packages: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: docker/setup-buildx-action@v3
+
+      - id: base
+        name: Reconcile with the live default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          default_sha="$(git ls-remote origin "refs/heads/${DEFAULT_BRANCH}" | cut -f1)"
+          git fetch --no-tags origin "$default_sha"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "$default_sha"; then
+            echo "::error::The workflow source is not an ancestor of live ${DEFAULT_BRANCH}"
+            exit 1
+          fi
+          if test "$default_sha" != "$GITHUB_SHA"; then
+            superseded="$(python3 map-platform/deploy/detect_worker_change.py \
+              --before "$GITHUB_SHA" \
+              --after "$default_sha" \
+              --scope promotion)"
+            if test "$superseded" = "true"; then
+              echo "::notice::A newer main commit owns the development proposal"
+              echo "superseded=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          git switch --detach "$default_sha"
+          echo "sha=${default_sha}" >> "$GITHUB_OUTPUT"
+          echo "superseded=false" >> "$GITHUB_OUTPUT"
+
+      - id: pending
+        name: Load the exact repository-owned development promotion
+        if: steps.base.outputs.superseded == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTION_BRANCH: deploy/map-platform-development
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          promotion_branch_sha="$(git ls-remote --heads origin \
+            "refs/heads/${PROMOTION_BRANCH}" | cut -f1)"
+          echo "branch_sha=${promotion_branch_sha}" >> "$GITHUB_OUTPUT"
+
+          pending_rows="$(gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/pulls" \
+            -f state=open \
+            -f base="$DEFAULT_BRANCH" \
+            -f head="${GITHUB_REPOSITORY_OWNER}:${PROMOTION_BRANCH}" \
+            --jq '.[] | [.number, .head.sha, .head.repo.full_name, .head.ref] | @tsv')"
+          row_count="$(printf '%s\n' "$pending_rows" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if test "$row_count" -gt 1; then
+            echo "::error::Multiple repository-owned development promotions are open"
+            exit 1
+          fi
+          if test "$row_count" -eq 0; then
+            exit 0
+          fi
+          IFS=$'\t' read -r pending_number pending_sha pending_repository pending_ref \
+            <<< "$pending_rows"
+          if test "$pending_repository" != "$GITHUB_REPOSITORY" \
+            || test "$pending_ref" != "$PROMOTION_BRANCH"; then
+            echo "::error::Development promotion pull request head is not repository-owned"
+            exit 1
+          fi
+          if test "$pending_sha" != "$promotion_branch_sha"; then
+            echo "::error::Development promotion branch changed while its pull request was loaded"
+            exit 1
+          fi
+          echo "number=${pending_number}" >> "$GITHUB_OUTPUT"
+
+      - id: update
+        name: Update and validate development lock
+        if: steps.base.outputs.superseded == 'false'
+        env:
+          IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
+          MAP_PLATFORM_DOWNLOAD_SECRET: ci-download-secret
+          MAP_PLATFORM_INSTALLATION_SECRET: ci-installation-secret-32-bytes-minimum
+          MAP_PLATFORM_TRUSTED_PROXY_CIDRS: 172.16.0.0/12
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 map-platform/deploy/update_image.py \
+            map-platform/deploy/compose.development.yaml \
+            --control-plane-digest "$IMAGE_DIGEST" \
+            --worker-digest "$IMAGE_DIGEST" \
+            --source-commit "$GITHUB_SHA"
+          python3 map-platform/deploy/update_image.py \
+            map-platform/deploy/compose.development.yaml \
+            --check
+          docker compose -f map-platform/deploy/compose.development.yaml config >/dev/null
+          python3 map-platform/deploy/verify_registry_images.py \
+            map-platform/deploy/compose.development.yaml
+          git diff --check
+          if ! git diff --quiet -- \
+            . ':(exclude)map-platform/deploy/compose.development.yaml'; then
+            echo "::error::Development promotion changed a path outside its lock"
+            exit 1
+          fi
+          if git diff --quiet -- map-platform/deploy/compose.development.yaml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or refresh development promotion pull request
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
+          PROMOTION_BRANCH: deploy/map-platform-development
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PROPOSAL_BASE_SHA: ${{ steps.base.outputs.sha }}
+          EXPECTED_PROMOTION_SHA: ${{ steps.pending.outputs.branch_sha }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$PROMOTION_BRANCH"
+          git add map-platform/deploy/compose.development.yaml
+          short_sha="${GITHUB_SHA:0:12}"
+          git commit -m "Promote development map platform image ${short_sha}"
+
+          latest_default_sha="$(git ls-remote origin "refs/heads/${DEFAULT_BRANCH}" | cut -f1)"
+          if test "$latest_default_sha" != "$PROPOSAL_BASE_SHA"; then
+            git fetch --no-tags origin "$latest_default_sha"
+            if ! git merge-base --is-ancestor "$PROPOSAL_BASE_SHA" "$latest_default_sha"; then
+              echo "::error::Live ${DEFAULT_BRANCH} no longer descends from the proposal base"
+              exit 1
+            fi
+            superseded="$(python3 map-platform/deploy/detect_worker_change.py \
+              --before "$PROPOSAL_BASE_SHA" \
+              --after "$latest_default_sha" \
+              --scope promotion)"
+            if test "$superseded" = "true" \
+              || ! git diff --quiet "$PROPOSAL_BASE_SHA" "$latest_default_sha" \
+                -- map-platform/deploy/compose.development.yaml; then
+              echo "::error::Live ${DEFAULT_BRANCH} changed development inputs; re-run the workflow"
+              exit 1
+            fi
+            git rebase "$latest_default_sha"
+          fi
+
+          remote_sha="$(git ls-remote --heads origin "refs/heads/${PROMOTION_BRANCH}" | cut -f1)"
+          if test "$remote_sha" != "$EXPECTED_PROMOTION_SHA"; then
+            echo "::error::Development promotion branch changed during candidate validation"
+            exit 1
+          fi
+          if test -n "$EXPECTED_PROMOTION_SHA"; then
+            git push \
+              --force-with-lease="refs/heads/${PROMOTION_BRANCH}:${EXPECTED_PROMOTION_SHA}" \
+              origin "HEAD:refs/heads/${PROMOTION_BRANCH}"
+          else
+            git push origin "HEAD:refs/heads/${PROMOTION_BRANCH}"
+          fi
+
+          image_reference="ghcr.io/${GITHUB_REPOSITORY_OWNER}/open-bike-computer-map-platform@${IMAGE_DIGEST}"
+          title="Promote development map platform image ${short_sha}"
+          run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body="$(printf '%s\n' \
+            '## Development image' \
+            '' \
+            "- Source commit: \`${GITHUB_SHA}\`" \
+            "- API, maintenance, and worker image: \`${image_reference}\`" \
+            "- Build and attestation: ${run_url}" \
+            '' \
+            '## Deployment' \
+            '' \
+            'Merging this pull request updates only the digest-pinned development Compose consumed by the maps-dev Coolify application. It does not change the production lock or mutate Coolify environment variables.' \
+            '' \
+            'Review the development smoke tests before merging. Production remains independently hardware-gated.')"
+
+          pr_number="$(gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/pulls" \
+            -f state=open \
+            -f base="$DEFAULT_BRANCH" \
+            -f head="${GITHUB_REPOSITORY_OWNER}:${PROMOTION_BRANCH}" \
+            --jq '.[0].number // empty')"
+          if test -n "$pr_number"; then
+            gh api \
+              --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" \
+              -f title="$title" \
+              -f body="$body" >/dev/null
+          else
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$DEFAULT_BRANCH" \
+              --head "$PROMOTION_BRANCH" \
+              --title "$title" \
+              --body "$body"
+          fi
+
+          # The automation token does not start workflows for its own pushes.
+          # Dispatch the protected map-only gate for this exact development lock.
+          gh workflow run ci.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$PROMOTION_BRANCH" \
+            -f scope=map

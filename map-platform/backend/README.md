@@ -193,6 +193,9 @@ verified file SHA-256.
 Use `map-platform/deploy/compose.yaml` for Coolify production. It independently
 pins the API/maintenance control plane and the signed-map worker to immutable
 GHCR digests and is updated by a reviewed image-promotion pull request.
+Use `map-platform/deploy/compose.development.yaml` for the isolated development
+Coolify application. Its separate reviewed promotion advances API, maintenance,
+and worker together without changing the production lock.
 `map-platform/backend/docker-compose.yml` remains the local development and
 image-build shape. The service stores mutable state in the `map-platform-data`
 volume. The host needs enough CPU, RAM, and temporary disk for the largest
@@ -201,15 +204,15 @@ allowed PBF cut-out.
 The local compose shape defaults `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE` to
 `shadow` and passes the estimator settings to API, worker, and maintenance so
 local development records calibration revisions without exposing them to
-clients. The digest-pinned Coolify compose keeps the default `off`; set the
-variable explicitly on the isolated development Coolify application before
-starting shadow validation, and leave the production application `off`.
+clients. The digest-pinned development lock also defaults to `shadow`; the
+production lock defaults to `off`.
 
-Configure the existing Coolify resource with repository base directory `/`,
-Docker Compose location `/map-platform/deploy/compose.yaml`, and watch path
-`map-platform/deploy/compose.yaml`. Keep runtime secrets in Coolify, but do not
-set image-selection variables there; the production Compose is the deployment
-source of truth. See `map-platform/deploy/README.md` for promotion and rollback.
+Configure each Coolify resource with repository base directory `/` and only its
+own Compose location/watch path: `/map-platform/deploy/compose.yaml` for
+production, or `/map-platform/deploy/compose.development.yaml` for development.
+Keep runtime secrets in Coolify, but do not set image-selection variables there;
+the channel-specific Compose lock is the deployment source of truth. See
+`map-platform/deploy/README.md` for migration, promotion, and rollback.
 
 Required Coolify secrets:
 

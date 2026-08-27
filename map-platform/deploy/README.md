@@ -1,4 +1,4 @@
-# Map Platform Production Deployment
+# Map Platform Deployment
 
 `compose.yaml` is the production deployment lock for the map platform. It pins
 the API/maintenance control plane and the signed-map worker to immutable GHCR
@@ -6,6 +6,11 @@ digests and passes the worker digest into the producer identity. The two pins
 may match, but remain separate so an approval-only control-plane release can
 advance without replacing a hardware-tested worker. Coolify secrets remain
 outside Git.
+
+`compose.development.yaml` is an independent development lock. Its automated
+promotion advances API, maintenance, and worker together for development
+testing without modifying the production lock. It defaults to the development
+deployment/catalog channels, shadow preparation estimates, and disabled Strava.
 
 ## One-time GitHub configuration
 
@@ -33,7 +38,7 @@ backend, deployment, image, or OSM inputs changed. Backend image validation also
 runs for OSM changes because the production image copies the extractor. A
 manual `Map Platform CI` dispatch still runs both map jobs for targeted use.
 
-## One-time Coolify configuration
+## One-time production Coolify configuration
 
 Update the existing `open-bike-computer-map-platform` resource rather than
 creating a new resource, so its domain and `map-platform-data` volume remain
@@ -88,14 +93,25 @@ pins.
 
 ## Development channel
 
-Create a second Coolify Docker Compose application from the same immutable
-`compose.yaml` lock, with `MAP_PLATFORM_DEPLOYMENT_CHANNEL=development` and the
-hostname `maps-dev.8o.vc`. Give it independent installation/download/admin
+Create a second Coolify Docker Compose application using
+`compose.development.yaml` and the hostname `maps-dev.8o.vc`:
+
+- Build pack: `Docker Compose`
+- Base directory: `/`
+- Docker Compose location: `/map-platform/deploy/compose.development.yaml`
+- Branch: `main`
+- Auto deploy: enabled
+- Watch path: `map-platform/deploy/compose.development.yaml`
+
+Give it independent installation/download/admin
 secrets, an independent S3 prefix (for example `map-artifacts-dev`), independent
 quotas and monitoring retention, and its own Compose-managed data volume. Do not
 copy production installation credentials or the target-3 canary allowlist.
-For estimator calibration, set `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE=shadow`
-on this development application and keep the production application at `off`.
+The lock defaults `MAP_PLATFORM_DEPLOYMENT_CHANNEL` and
+`MAP_PLATFORM_CATALOG_CHANNEL` to `development`; an explicit Coolify value may
+remain as defense in depth. For estimator calibration, the development lock
+defaults `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE=shadow`, while production
+defaults to `off`.
 Shadow mode records bounded estimate revisions without returning them in public
 job responses; promote to `public` only after the documented sample and accuracy
 gates pass.
@@ -105,11 +121,17 @@ can generate formats 2 and 3. They become inert after the control-plane image
 promotion and can then be removed.
 
 This makes Bicino Dev a deployment channel rather than a production canary.
-Both channels still advance through the reviewed digest lock, while their
+Both channels advance through separate reviewed digest locks, while their
 credentials, queue state, storage namespace, and operational limits remain
 isolated. Signing-key separation remains governed by the existing map-stream
 trust and hardware-promotion contract; do not introduce an untrusted development
 key outside that flow.
+
+For the one-time migration from the shared lock, first merge the change that
+adds `compose.development.yaml`. Its initial image pins match `compose.yaml`, so
+switching only the development Coolify Compose location and watch path does not
+change the running image. Verify development health and that production still
+watches `compose.yaml`; then merge the separate development image promotion.
 
 ## Strava route import configuration
 
@@ -160,18 +182,29 @@ OAuth.
 ## Promotion flow
 
 The `Map Platform Image` workflow builds and attests candidate images. After a
-successful build from `main`, it opens or refreshes the automation-owned
-`deploy/map-platform-production` pull request with the new control-plane digest
-and source commit. When the Git range changes an input used by the signed worker
-identity, the same PR also advances the worker pin. Manual workflow dispatches
-from `main` conservatively propose both pins for explicit review; select the
-`main` branch in the dispatch form. A dispatch from another branch publishes a
-candidate image but cannot open a production promotion. `latest` tracks the
-most recent successful image-building commit on `main`; production never reads
-that mutable tag.
+successful build from `main`, it proposes the candidate through two independent
+automation-owned branches:
 
-The workflow refuses to guess when a control-only push arrives while the open
-promotion moves the worker pin. Re-run **Map Platform Image** manually on `main`
+- `deploy/map-platform-development` updates only
+  `compose.development.yaml` and advances the API, maintenance, and worker pins
+  together. It cannot modify `compose.yaml`.
+- `deploy/map-platform-production` updates only `compose.yaml`. It advances the
+  control-plane digest and source commit, and advances the signed worker only
+  when the production worker policy permits it. It cannot modify the
+  development lock.
+
+A dispatch from another branch publishes a candidate image but cannot open
+either deployment promotion. `latest` tracks the most recent successful
+image-building commit on `main`; neither deployment reads that mutable tag.
+
+The protected map-only CI dispatch recognizes only those exact automation
+branches and fails if a promotion changes anything beyond its own lock. Both
+promotion jobs also use repository-owned pull-request checks and exact branch
+leases so a concurrent or foreign branch update cannot be overwritten.
+
+The production workflow refuses to guess when a control-only push arrives while
+the open production promotion moves the worker pin. Re-run **Map Platform
+Image** manually on `main`
 and choose one of the explicit `pending_worker` policies:
 
 - `preserve-pending` carries the open PR's worker into the new control-plane
@@ -195,14 +228,15 @@ artifacts. Coolify/container stdout remains a live structured-log surface, not
 the durable monitoring store; use the admin monitoring endpoint or the CLI
 summary when inspecting history after a restart.
 
-The PR body reports worker movement from the final manifest diff, not merely
-the latest commit's path classification. The workflow never changes production
-directly.
+The production PR body reports worker movement from the final manifest diff,
+not merely the latest commit's path classification. Neither promotion job
+changes a deployment directly.
 
-Review and merge that promotion pull request when the candidate is ready. The
-merge changes `compose.yaml`, which matches the Coolify watch path and deploys
-the exact pinned image. A promotion-only merge does not start another image
-build, so the workflow cannot loop.
+Review and merge the relevant promotion pull request when its candidate is
+ready. A development promotion changes only `compose.development.yaml`; a
+production promotion changes only `compose.yaml`. Each matches only its own
+Coolify watch path and deploys the exact pinned image. Promotion-only merges do
+not start another image build, so the workflow cannot loop.
 
 GitHub suppresses workflow events caused by `GITHUB_TOKEN`, so the promotion
 job explicitly dispatches `ci.yml` with `scope=map` for the promotion commit
@@ -221,10 +255,22 @@ python3 map-platform/deploy/update_image.py \
 python3 map-platform/deploy/verify_registry_images.py \
   map-platform/deploy/compose.yaml
 
+python3 map-platform/deploy/update_image.py \
+  map-platform/deploy/compose.development.yaml \
+  --check
+
+python3 map-platform/deploy/verify_registry_images.py \
+  map-platform/deploy/compose.development.yaml
+
 MAP_PLATFORM_DOWNLOAD_SECRET=ci-download-secret \
 MAP_PLATFORM_INSTALLATION_SECRET=ci-installation-secret-32-bytes-minimum \
 MAP_PLATFORM_TRUSTED_PROXY_CIDRS=172.16.0.0/12 \
 docker compose -f map-platform/deploy/compose.yaml config
+
+MAP_PLATFORM_DOWNLOAD_SECRET=ci-download-secret \
+MAP_PLATFORM_INSTALLATION_SECRET=ci-installation-secret-32-bytes-minimum \
+MAP_PLATFORM_TRUSTED_PROXY_CIDRS=172.16.0.0/12 \
+docker compose -f map-platform/deploy/compose.development.yaml config
 ```
 
 The registry check requires Docker Buildx and an authenticated GitHub CLI. It
@@ -234,11 +280,11 @@ adjacent source commit.
 
 ## Rollback
 
-Revert the promotion commit or restore the complete previously known-good lock
-in a new promotion pull request: both image anchors and both adjacent source
-commit markers. Restoring a digest without its matching marker fails provenance
-verification. The safest manual rollback is to restore the historical
-`compose.yaml` as a unit. Git history records the exact source commit and image
-used by every deployment. Coolify's rollback remains available for incident
-response, but follow it with a Git revert so declared production state matches
-the running state.
+Revert the relevant promotion commit or restore that channel's complete
+previously known-good lock in a new pull request: both image anchors and both
+adjacent source commit markers. Restoring a digest without its matching marker
+fails provenance verification. Restore `compose.yaml` or
+`compose.development.yaml` as a unit; never copy one channel's lock over the
+other. Git history records the exact source commit and image used by every
+deployment. Coolify's rollback remains available for incident response, but
+follow it with a Git revert so declared state matches the running state.

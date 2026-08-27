@@ -37,8 +37,34 @@ class DeploymentChannelComposeTests(unittest.TestCase):
         )
         self.assertIn("MAP_PLATFORM_WORKER_MEMORY_LIMIT_BYTES", worker_environment)
 
+    def test_development_lock_defaults_to_the_development_channels(self):
+        compose = (DEPLOY_DIR / "compose.development.yaml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertEqual(
+            3,
+            compose.count(
+                "MAP_PLATFORM_DEPLOYMENT_CHANNEL: "
+                "${MAP_PLATFORM_DEPLOYMENT_CHANNEL:-development}"
+            ),
+        )
+        self.assertEqual(
+            3,
+            compose.count(
+                "MAP_PLATFORM_CATALOG_CHANNEL: "
+                "${MAP_PLATFORM_CATALOG_CHANNEL:-development}"
+            ),
+        )
+        self.assertNotIn("${MAP_PLATFORM_DEPLOYMENT_CHANNEL:-production}", compose)
+        self.assertNotIn("${MAP_PLATFORM_CATALOG_CHANNEL:-production}", compose)
+
     def test_catalog_maintenance_has_bounded_network_batches(self):
-        for filename in ("compose.yaml", "compose.hardware-validation.yaml"):
+        for filename in (
+            "compose.yaml",
+            "compose.development.yaml",
+            "compose.hardware-validation.yaml",
+        ):
             compose = (DEPLOY_DIR / filename).read_text(encoding="utf-8")
             maintenance = compose.split("  map-platform-maintenance:", 1)[1]
             self.assertIn(
@@ -87,6 +113,7 @@ class PreparationEstimateComposeTests(unittest.TestCase):
     def test_all_deployment_services_receive_estimator_configuration(self):
         for filename in (
             "compose.yaml",
+            "compose.development.yaml",
             "compose.hardware-validation.yaml",
         ):
             compose = (DEPLOY_DIR / filename).read_text(encoding="utf-8")
@@ -108,6 +135,18 @@ class PreparationEstimateComposeTests(unittest.TestCase):
                     "${MAP_PLATFORM_PREPARATION_ESTIMATES_MODE:-off}",
                     section,
                 )
+
+    def test_development_defaults_estimates_to_shadow(self):
+        compose = (DEPLOY_DIR / "compose.development.yaml").read_text(
+            encoding="utf-8"
+        )
+        for service in self._SERVICES:
+            section = self._service_section(compose, service)
+            self.assertIn(
+                "MAP_PLATFORM_PREPARATION_ESTIMATES_MODE: "
+                "${MAP_PLATFORM_PREPARATION_ESTIMATES_MODE:-shadow}",
+                section,
+            )
 
     def test_validation_api_defaults_to_development_channel(self):
         compose = (DEPLOY_DIR / "compose.hardware-validation.yaml").read_text(

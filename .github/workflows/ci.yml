@@ -86,19 +86,32 @@ jobs:
       - name: Validate the protected partial gate scope
         if: >-
           github.event_name == 'workflow_dispatch' && inputs.scope == 'map' &&
-          github.ref == 'refs/heads/deploy/map-platform-production'
+          (github.ref == 'refs/heads/deploy/map-platform-production' ||
+          github.ref == 'refs/heads/deploy/map-platform-development')
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
+          case "$GITHUB_REF" in
+            refs/heads/deploy/map-platform-production)
+              deployment_lock=map-platform/deploy/compose.yaml
+              ;;
+            refs/heads/deploy/map-platform-development)
+              deployment_lock=map-platform/deploy/compose.development.yaml
+              ;;
+            *)
+              echo "::error::Unsupported protected promotion branch"
+              exit 1
+              ;;
+          esac
           default_ref="origin/${DEFAULT_BRANCH}"
           if ! git diff --quiet "$default_ref...$GITHUB_SHA" -- \
-            . ':(exclude)map-platform/deploy/compose.yaml'; then
-            echo "::error::Protected map-only CI contains changes outside the production lock"
+            . ":(exclude)${deployment_lock}"; then
+            echo "::error::Protected map-only CI contains changes outside ${deployment_lock}"
             exit 1
           fi
           if git diff --quiet "$default_ref...$GITHUB_SHA" -- \
-            map-platform/deploy/compose.yaml; then
-            echo "::error::Protected map-only CI does not change the production lock"
+            "$deployment_lock"; then
+            echo "::error::Protected map-only CI does not change ${deployment_lock}"
             exit 1
           fi
       - id: components
@@ -767,8 +780,9 @@ jobs:
   gate:
     name: >-
       ${{ (github.event_name != 'workflow_dispatch' || inputs.scope == 'all' ||
-      (inputs.scope == 'map' && github.ref ==
-      'refs/heads/deploy/map-platform-production')) && 'CI Gate' ||
+      (inputs.scope == 'map' &&
+      (github.ref == 'refs/heads/deploy/map-platform-production' ||
+      github.ref == 'refs/heads/deploy/map-platform-development'))) && 'CI Gate' ||
       format('Manual CI Gate ({0})', inputs.scope) }}
     needs:
       - changes
