@@ -251,6 +251,15 @@ conservative and can be tuned with:
 - `MAP_PLATFORM_DOWNLOAD_URL_IP_LIMIT_PER_HOUR` (default `60` per IP)
 - `MAP_PLATFORM_MAX_REQUEST_BODY_BYTES` (default `2097152` for every non-GET request; large enough for the maximum supported route corridor)
 
+Every accepted map also receives a durable `map-cost-v1` reservation derived
+from its area, geometry complexity, source count, and renderer version. The API
+atomically enforces the per-installation rolling budget and global queued-cost
+ceiling with idempotent creation; workers independently enforce the running-cost
+ceiling before claiming work. Terminal and cancelled jobs release global
+capacity, while their recent cost remains in the installation window. Public
+work cannot consume the operator reserve. Admission-state corruption fails
+closed instead of silently undercounting work.
+
 Production Compose requires `MAP_PLATFORM_TRUSTED_PROXY_CIDRS` to contain the
 comma-separated CIDRs of the
 Coolify reverse proxies that overwrite or append `X-Forwarded-For`. Forwarded
@@ -368,6 +377,15 @@ Useful production environment variables:
   available.
 - `MAP_PLATFORM_MAX_ACTIVE_JOBS`: maximum queued/running jobs accepted by the
   API, default `25`.
+- `MAP_PLATFORM_MAX_QUEUED_COST` and `MAP_PLATFORM_MAX_RUNNING_COST`: global
+  durable cost ceilings, defaults `4000` and `800`.
+- `MAP_PLATFORM_OPERATOR_RESERVED_QUEUED_COST` and
+  `MAP_PLATFORM_OPERATOR_RESERVED_RUNNING_COST`: capacity unavailable to public
+  requests but usable by the local operator create command, defaults `400` and
+  `100`.
+- `MAP_PLATFORM_INSTALLATION_COST_LIMIT` and
+  `MAP_PLATFORM_INSTALLATION_COST_WINDOW_SECONDS`: rolling per-installation
+  cost budget and window, defaults `1200` units per `86400` seconds.
 - `MAP_PLATFORM_JOB_RETENTION_DAYS`: days to retain ready job artifacts from
   their immutable completion time, default `30`; later downloads and label
   changes do not extend it. Must be between `1` and `3650`.
