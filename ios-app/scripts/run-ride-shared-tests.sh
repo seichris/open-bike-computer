@@ -14,6 +14,7 @@ xcrun swiftc \
   BikeComputer/RideShared/RouteCoordinateNormalization.swift \
   BikeComputer/RideShared/SavedDestinationContract.swift \
   BikeComputer/RideShared/RouteProviderContract.swift \
+  BikeComputer/RideShared/StravaAthleteRoutes.swift \
   BikeComputer/RideShared/StravaRouteURL.swift \
   BikeComputer/RideShared/StravaRouteReloadBookmark.swift \
   BikeComputer/RideShared/NavigationRouteArchive.swift \

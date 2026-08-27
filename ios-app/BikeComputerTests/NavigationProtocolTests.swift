@@ -827,6 +827,7 @@ struct NavigationProtocolTests {
         testOfflineMapManagerRenamesCachedPack()
         testSavedMapRenameViewWiring()
         testSettingsSheetPresentationWiring()
+        testStravaRouteCatalogUIWiring()
         testDeviceScreenUISettingsWiring()
         testSavedRouteNamingAndViewWiring()
         testOfflineMapManagerRestoresLastTransferIdentity()
@@ -10748,6 +10749,71 @@ struct NavigationProtocolTests {
                 !routesSource.contains("isImportingStrava") &&
                 !routesSource.contains(".sheet("),
             "Saved Routes requests presentation without owning a transient sheet"
+        )
+    }
+
+    static func testStravaRouteCatalogUIWiring() {
+        let viewURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Views/StravaRouteImportView.swift"
+        )
+        let coordinatorURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Services/StravaIntegrationCoordinator.swift"
+        )
+        let clientURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Services/StravaIntegrationClient.swift"
+        )
+        guard let view = try? String(contentsOf: viewURL, encoding: .utf8),
+              let coordinator = try? String(
+                  contentsOf: coordinatorURL,
+                  encoding: .utf8
+              ),
+              let client = try? String(contentsOf: clientURL, encoding: .utf8)
+        else {
+            assert(false, "Strava route catalog sources should be available")
+            return
+        }
+
+        assert(
+            view.contains("if coordinator.isRouteCatalogAuthorized {") &&
+                view.contains(
+                    "routeCatalogSection\n                    routeURLSection"
+                ) &&
+                view.contains("} else {\n                    connectSection") &&
+                view.contains("coordinator.connect()") &&
+                view.contains("Text(\"Connect with Strava\")"),
+            "the disconnected sheet offers connection while catalog and URL import are authorization-gated"
+        )
+        assert(
+            view.contains("ForEach(coordinator.athleteRoutes)") &&
+                view.contains("Text(route.name)") &&
+                view.contains("distanceText(route.distanceMeters)") &&
+                view.contains("elevationText(route.elevationGainMeters)") &&
+                view.contains("route.type.displayName") &&
+                view.contains("coordinator.importRoute(route)") &&
+                view.contains("Text(\"Import\")"),
+            "authorized athlete routes show the required summary and import action"
+        )
+        assert(
+            view.contains("case .idle, .loading:") &&
+                view.contains("case .empty, .loaded:") &&
+                view.contains("case .loadingMore(let loadedRouteCount):") &&
+                view.contains("case .authorizationExpired:") &&
+                view.contains("case .failed(let message):") &&
+                view.contains("Button(\"Try Again\")"),
+            "the route catalog presents loading, empty, pagination, expired, and retryable error states"
+        )
+        assert(
+            coordinator.contains("while true {") &&
+                coordinator.contains("client.athleteRoutes(page: page)") &&
+                coordinator.contains("guard let nextPage = result.nextPage") &&
+                coordinator.contains("page = nextPage") &&
+                client.contains("/v1/integrations/strava/routes") &&
+                client.contains("URLQueryItem(name: \"page\"") &&
+                !view.contains("accessToken") &&
+                !view.contains("refreshToken") &&
+                !client.contains("accessToken") &&
+                !client.contains("refreshToken"),
+            "pagination stays behind the installation-authenticated client without exposing Strava tokens"
         )
     }
 

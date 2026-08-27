@@ -77,6 +77,12 @@ provider configuration is present. The iOS app keeps no Strava client secret or
 athlete token: it authenticates these endpoints with its existing Bicino
 installation credential, and the backend owns OAuth and provider traffic.
 
+`GET /v1/integrations/strava/routes?page=N` uses the encrypted connection's
+athlete ID and access token to request 200 routes at a time from Strava. Its
+private, no-store response exposes only route ID, name, distance, elevation,
+and ride/run type plus the next page number; neither the athlete ID nor any
+OAuth credential is returned to iOS.
+
 Register separate Strava applications for Development and Production. Their
 exact callbacks are:
 
@@ -105,6 +111,7 @@ key until every live row has been read or its connection has aged out.
 The API applies separate installation and IP quotas. Defaults can be tuned with
 `MAP_PLATFORM_STRAVA_OAUTH_START_LIMIT_PER_HOUR` (10),
 `MAP_PLATFORM_STRAVA_ROUTE_IMPORT_LIMIT_PER_HOUR` (30),
+`MAP_PLATFORM_STRAVA_ROUTE_LIST_LIMIT_PER_HOUR` (120),
 `MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR` (60), and
 `MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR` (30). Imported GPX responses
 always carry a backend-owned seven-day `deleteAfter`; that retention maximum is

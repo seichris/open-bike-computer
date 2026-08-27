@@ -10,10 +10,10 @@ from typing import Any, Mapping
 from urllib.parse import urlencode
 
 try:
-    from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+    from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 except ImportError as exc:  # pragma: no cover - exercised only without the API extra
-    Depends = FastAPI = Header = HTTPException = Request = Response = None  # type: ignore[assignment]
+    Depends = FastAPI = Header = HTTPException = Query = Request = Response = None  # type: ignore[assignment]
     FileResponse = HTMLResponse = JSONResponse = None  # type: ignore[assignment]
     _FASTAPI_IMPORT_ERROR: ImportError | None = exc
 else:
@@ -251,6 +251,16 @@ def create_app(
     strava_route_import_installation_policy = RateLimitPolicy(
         "strava-route-import-installation",
         int(os.environ.get("MAP_PLATFORM_STRAVA_ROUTE_IMPORT_LIMIT_PER_HOUR", "30")),
+        3_600,
+    )
+    strava_route_list_ip_policy = RateLimitPolicy(
+        "strava-route-list-ip",
+        int(os.environ.get("MAP_PLATFORM_STRAVA_ROUTE_LIST_LIMIT_PER_HOUR", "120")),
+        3_600,
+    )
+    strava_route_list_installation_policy = RateLimitPolicy(
+        "strava-route-list-installation",
+        int(os.environ.get("MAP_PLATFORM_STRAVA_ROUTE_LIST_LIMIT_PER_HOUR", "120")),
         3_600,
     )
     strava_route_validation_ip_policy = RateLimitPolicy(
@@ -833,6 +843,47 @@ def create_app(
         )
         response.headers["Cache-Control"] = "private, no-store"
         return strava_integration.disconnect(installation_id)
+
+    @app.get("/v1/integrations/strava/routes")
+    def list_strava_athlete_routes(
+        request: Request,
+        response: Response,
+        clientInstallationId: str,
+        page: int = Query(default=1, ge=1, le=100),
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> dict[str, object]:
+        installation_id = verify_registered_installation(
+            clientInstallationId,
+            x_installation_token,
+            required=True,
+        )
+        assert installation_id is not None
+        enforce_rate_limits(
+            (strava_route_list_ip_policy, client_ip(request)),
+            (strava_route_list_installation_policy, installation_id),
+        )
+        route_page = strava_integration.athlete_routes(
+            installation_id,
+            page=page,
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        return {
+            "page": route_page.page,
+            "nextPage": route_page.next_page,
+            "routes": [
+                {
+                    "routeId": route.route_id,
+                    "name": route.name,
+                    "distanceMeters": route.distance_meters,
+                    "elevationGainMeters": route.elevation_gain_meters,
+                    "type": route.route_kind,
+                }
+                for route in route_page.routes
+            ],
+        }
 
     @app.post("/v1/integrations/strava/routes/{route_id}/gpx")
     def fetch_strava_route_gpx(
