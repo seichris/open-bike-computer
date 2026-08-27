@@ -11,33 +11,52 @@ import SwiftUI
 
 struct ConnectionStatusView: View {
     let isConnected: Bool
+    let deviceName: String
     let hasRegisteredDevice: Bool
     let onReconnect: () -> Void
+
+    private var displayName: String {
+        guard isConnected else { return "Bicino" }
+        let trimmedName = deviceName.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return trimmedName.isEmpty ? "Bicino" : trimmedName
+    }
+
+    private var statusColor: Color {
+        isConnected ? .green : Color(uiColor: .systemGray3)
+    }
     
     var body: some View {
         Button(action: onReconnect) {
             HStack(spacing: 8) {
                 Image(systemName: "circle.fill")
                     .font(.caption)
-                    .foregroundColor(isConnected ? .green : .red)
+                    .foregroundColor(statusColor)
                     .shadow(
-                        color: isConnected ? .green.opacity(0.5) : .red.opacity(0.5),
+                        color: isConnected ? .green.opacity(0.5) : .clear,
                         radius: 4
                     )
 
-                Text("Bicino")
+                Text(displayName)
                     .font(.caption)
-                    .foregroundColor(.primary)
-                    .shadow(color: .white.opacity(0.8), radius: 2, x: 0, y: 1)
+                    .foregroundColor(isConnected ? .primary : statusColor)
+                    .shadow(
+                        color: isConnected
+                            ? .white.opacity(0.8)
+                            : .clear,
+                        radius: 2,
+                        x: 0,
+                        y: 1
+                    )
             }
             .frame(minHeight: 44)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityLabel(
             isConnected
-                ? "Bicino connected"
+                ? "\(displayName) connected"
                 : hasRegisteredDevice
                     ? "Reconnect Bicino"
                     : "Connect Bicino"

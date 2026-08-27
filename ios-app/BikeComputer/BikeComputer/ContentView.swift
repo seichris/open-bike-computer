@@ -951,14 +951,14 @@ struct ContentView: View {
     }
 
     private var topOverlay: some View {
-        HStack(alignment: .center) {
-            ConnectionStatusView(
-                isConnected: coordinator.isConnected,
-                hasRegisteredDevice:
-                    !coordinator.bleManager.knownDevices.isEmpty,
-                onReconnect: { coordinator.reconnect() }
-            )
-        }
+        ConnectionStatusView(
+            isConnected: coordinator.isConnected,
+            deviceName: coordinator.peripheralName,
+            hasRegisteredDevice:
+                !coordinator.bleManager.knownDevices.isEmpty,
+            onReconnect: { coordinator.reconnect() }
+        )
+        .frame(maxWidth: .infinity, alignment: .center)
         .padding(.horizontal, 18)
         .padding(.top, 8)
         .zIndex(10)
