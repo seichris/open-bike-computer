@@ -119,11 +119,26 @@ nonisolated enum OfflineMapSharedSecretMigration {
 
 @MainActor
 enum OfflineMapSnapshotPreviewRenderer {
+    nonisolated struct Configuration: Equatable, Sendable {
+        let size: CGSize
+        let scale: CGFloat
+
+        static let thumbnail = Configuration(
+            size: CGSize(width: 160, height: 96),
+            scale: 1
+        )
+        static let detail = Configuration(
+            size: CGSize(width: 400, height: 240),
+            scale: 3
+        )
+    }
+
 #if canImport(UIKit) && canImport(MapKit)
     struct Request {
         let options: MKMapSnapshotter.Options
         let northWestCoordinate: CLLocationCoordinate2D
         let southEastCoordinate: CLLocationCoordinate2D
+        let configuration: Configuration
     }
 
     struct SnapshotResult {
@@ -136,9 +151,12 @@ enum OfflineMapSnapshotPreviewRenderer {
     ) async throws -> SnapshotResult
 #endif
 
-    static func pngData(for bounds: OfflineMapPreviewBounds) async throws -> Data? {
+    static func pngData(
+        for bounds: OfflineMapPreviewBounds,
+        configuration: Configuration = .thumbnail
+    ) async throws -> Data? {
 #if canImport(UIKit) && canImport(MapKit)
-        try await pngData(for: bounds) { options in
+        try await pngData(for: bounds, configuration: configuration) { options in
             let snapshotter = MKMapSnapshotter(options: options)
             let snapshot = try await withTaskCancellationHandler {
                 try await snapshotter.start()
@@ -155,8 +173,19 @@ enum OfflineMapSnapshotPreviewRenderer {
 #endif
     }
 
+    static func detailPNGData(for bounds: OfflineMapPreviewBounds) async throws -> Data? {
 #if canImport(UIKit) && canImport(MapKit)
-    static func request(for bounds: OfflineMapPreviewBounds) -> Request {
+        try await pngData(for: bounds, configuration: .detail)
+#else
+        nil
+#endif
+    }
+
+#if canImport(UIKit) && canImport(MapKit)
+    static func request(
+        for bounds: OfflineMapPreviewBounds,
+        configuration: Configuration = .thumbnail
+    ) -> Request {
         let options = MKMapSnapshotter.Options()
         let northWestCoordinate = CLLocationCoordinate2D(
             latitude: bounds.maxLatitude,
@@ -174,8 +203,8 @@ enum OfflineMapSnapshotPreviewRenderer {
             width: abs(southEast.x - northWest.x),
             height: abs(southEast.y - northWest.y)
         )
-        options.size = CGSize(width: 160, height: 96)
-        options.scale = 1
+        options.size = configuration.size
+        options.scale = configuration.scale
         options.traitCollection = UITraitCollection(userInterfaceStyle: .light)
         if #available(iOS 17.0, macCatalyst 17.0, *) {
             options.preferredConfiguration = MKStandardMapConfiguration(elevationStyle: .flat)
@@ -185,15 +214,17 @@ enum OfflineMapSnapshotPreviewRenderer {
         return Request(
             options: options,
             northWestCoordinate: northWestCoordinate,
-            southEastCoordinate: southEastCoordinate
+            southEastCoordinate: southEastCoordinate,
+            configuration: configuration
         )
     }
 
     static func pngData(
         for bounds: OfflineMapPreviewBounds,
+        configuration: Configuration = .thumbnail,
         snapshot: SnapshotOperation
     ) async throws -> Data? {
-        let request = request(for: bounds)
+        let request = request(for: bounds, configuration: configuration)
         let result = try await snapshot(request.options)
         try Task.checkCancellation()
         guard let croppedImage = croppedImage(
@@ -214,14 +245,15 @@ enum OfflineMapSnapshotPreviewRenderer {
         croppedImage(
             from: image,
             northWestPoint: pointForCoordinate(request.northWestCoordinate),
-            southEastPoint: pointForCoordinate(request.southEastCoordinate)
+            southEastPoint: pointForCoordinate(request.southEastCoordinate),
+            configuration: request.configuration
         )
     }
 
     static func hasMeaningfulVisualVariation(_ image: UIImage) -> Bool {
         guard let source = image.cgImage else { return false }
-        let width = source.width
-        let height = source.height
+        let width = min(source.width, 64)
+        let height = min(source.height, 64)
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
         let rendered = pixels.withUnsafeMutableBytes { bytes -> Bool in
             guard let context = CGContext(
@@ -257,7 +289,8 @@ enum OfflineMapSnapshotPreviewRenderer {
     private static func croppedImage(
         from image: UIImage,
         northWestPoint: CGPoint,
-        southEastPoint: CGPoint
+        southEastPoint: CGPoint,
+        configuration: Configuration
     ) -> UIImage? {
         guard let source = image.cgImage else { return nil }
         let scale = image.scale
@@ -292,11 +325,17 @@ enum OfflineMapSnapshotPreviewRenderer {
             orientation: image.imageOrientation
         )
         let normalizedSize = CGSize(
-            width: min(160, max(1, floor(croppedImage.size.width))),
-            height: min(96, max(1, floor(croppedImage.size.height)))
+            width: min(
+                configuration.size.width,
+                max(1, floor(croppedImage.size.width))
+            ),
+            height: min(
+                configuration.size.height,
+                max(1, floor(croppedImage.size.height))
+            )
         )
         let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
+        format.scale = configuration.scale
         format.opaque = true
         return UIGraphicsImageRenderer(size: normalizedSize, format: format).image { _ in
             croppedImage.draw(in: CGRect(origin: .zero, size: normalizedSize))
@@ -319,9 +358,40 @@ typealias OfflineMapPreviewLoadOperation = @MainActor (
 ) async -> OfflineMapPreviewLoadResult
 
 #if canImport(UIKit)
+nonisolated private enum SavedMapPreviewPNGValidator {
+    private static let pngSignature = Data([
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+    ])
+
+    static func isValid(
+        _ data: Data,
+        maximumImageBytes: Int,
+        maximumPixelDimension: UInt32,
+        minimumLongestEdge: UInt32 = 1
+    ) -> Bool {
+        guard (33...maximumImageBytes).contains(data.count),
+              data.starts(with: pngSignature),
+              uint32BE(data, at: 8) == 13,
+              data.subdata(in: 12..<16) == Data("IHDR".utf8) else {
+            return false
+        }
+        let width = uint32BE(data, at: 16)
+        let height = uint32BE(data, at: 20)
+        return (1...maximumPixelDimension).contains(width) &&
+            (1...maximumPixelDimension).contains(height) &&
+            max(width, height) >= minimumLongestEdge
+    }
+
+    private static func uint32BE(_ data: Data, at offset: Int) -> UInt32 {
+        UInt32(data[offset]) << 24 |
+            UInt32(data[offset + 1]) << 16 |
+            UInt32(data[offset + 2]) << 8 |
+            UInt32(data[offset + 3])
+    }
+}
+
 nonisolated enum SavedMapSnapshotPreviewStore {
     static let maximumImageBytes = 1_048_576
-    private static let pngSignature = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
 
     static func imageURL(for artifactURL: URL) -> URL {
         artifactURL.appendingPathExtension("thumbnail.png")
@@ -355,28 +425,111 @@ nonisolated enum SavedMapSnapshotPreviewStore {
     }
 
     static func isValidPNG(_ data: Data) -> Bool {
-        guard (33...maximumImageBytes).contains(data.count),
-              data.starts(with: pngSignature),
-              uint32BE(data, at: 8) == 13,
-              data.subdata(in: 12..<16) == Data("IHDR".utf8) else {
-            return false
-        }
-        let width = uint32BE(data, at: 16)
-        let height = uint32BE(data, at: 20)
-        return (1...1_024).contains(width) && (1...1_024).contains(height)
+        SavedMapPreviewPNGValidator.isValid(
+            data,
+            maximumImageBytes: maximumImageBytes,
+            maximumPixelDimension: 1_024
+        )
+    }
+}
+
+nonisolated enum SavedMapDetailPreviewStore {
+    static let cacheVersion = 1
+    static let maximumImageBytes = 4_194_304
+    static let maximumPixelDimension: UInt32 = 1_200
+    static let minimumLongestEdge: UInt32 = 600
+
+    static func imageURL(for artifactURL: URL) -> URL {
+        artifactURL.appendingPathExtension("detail-preview-v\(cacheVersion).png")
     }
 
-    private static func uint32BE(_ data: Data, at offset: Int) -> UInt32 {
-        UInt32(data[offset]) << 24 |
-            UInt32(data[offset + 1]) << 16 |
-            UInt32(data[offset + 2]) << 8 |
-            UInt32(data[offset + 3])
+    static func imageData(for artifactURL: URL) -> Data? {
+        imageData(at: imageURL(for: artifactURL))
+    }
+
+    static func save(_ data: Data, for artifactURL: URL) throws {
+        guard isValidPNG(data) else {
+            throw OfflineMapPlatformError.invalidPack(
+                "map detail preview is not a high-resolution PNG"
+            )
+        }
+        try data.write(to: imageURL(for: artifactURL), options: .atomic)
+    }
+
+    static func delete(for artifactURL: URL) throws {
+        let url = imageURL(for: artifactURL)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
+    static func isValidPNG(_ data: Data) -> Bool {
+        SavedMapPreviewPNGValidator.isValid(
+            data,
+            maximumImageBytes: maximumImageBytes,
+            maximumPixelDimension: maximumPixelDimension,
+            minimumLongestEdge: minimumLongestEdge
+        )
+    }
+
+    static func imageData(at url: URL) -> Data? {
+        guard let values = try? url.resourceValues(
+            forKeys: [.fileSizeKey, .isRegularFileKey]
+        ),
+        values.isRegularFile == true,
+        let fileSize = values.fileSize,
+        (33...maximumImageBytes).contains(fileSize),
+        let data = try? Data(contentsOf: url),
+        isValidPNG(data) else {
+            return nil
+        }
+        return data
+    }
+}
+
+nonisolated private enum DeviceMapPreviewCachePolicy {
+    private static let maximumEntryCount = 16
+    private static let maximumEntryAge: TimeInterval = 30 * 24 * 60 * 60
+
+    static func prune(directory: URL, now: Date = Date()) {
+        guard var entries = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [
+                .contentModificationDateKey,
+                .isRegularFileKey,
+            ],
+            options: []
+        ) else {
+            return
+        }
+        entries = entries.filter { url in
+            let values = try? url.resourceValues(
+                forKeys: [.contentModificationDateKey, .isRegularFileKey]
+            )
+            return values?.isRegularFile == true &&
+                url.pathExtension.lowercased() == "png"
+        }
+        entries.sort { lhs, rhs in
+            let lhsDate = (try? lhs.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate) ?? .distantPast
+            let rhsDate = (try? rhs.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate) ?? .distantPast
+            return lhsDate > rhsDate
+        }
+        for (index, url) in entries.enumerated() {
+            let date = (try? url.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate) ?? .distantPast
+            if index >= maximumEntryCount || now.timeIntervalSince(date) > maximumEntryAge {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
     }
 }
 
 nonisolated enum DeviceMapSnapshotPreviewStore {
-    private static let maximumEntryCount = 16
-    private static let maximumEntryAge: TimeInterval = 30 * 24 * 60 * 60
 
     static func imageData(
         for descriptor: DeviceActiveMapDescriptor,
@@ -419,7 +572,7 @@ nonisolated enum DeviceMapSnapshotPreviewStore {
             to: imageURL(for: descriptor, in: cacheRoot),
             options: .atomic
         )
-        prune(directory: directory)
+        DeviceMapPreviewCachePolicy.prune(directory: directory)
     }
 
     static func imageURL(
@@ -433,42 +586,71 @@ nonisolated enum DeviceMapSnapshotPreviewStore {
     private static func previewDirectory(in cacheRoot: URL) -> URL {
         cacheRoot.appendingPathComponent("DeviceMapPreviews", isDirectory: true)
     }
+}
 
-    private static func prune(directory: URL, now: Date = Date()) {
-        guard var entries = try? FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: [
-                .contentModificationDateKey,
-                .isRegularFileKey,
-            ],
-            options: []
-        ) else {
-            return
+nonisolated enum DeviceMapDetailPreviewStore {
+    static func imageData(
+        for descriptor: DeviceActiveMapDescriptor,
+        in cacheRoot: URL
+    ) -> Data? {
+        let url = imageURL(for: descriptor, in: cacheRoot)
+        guard let data = SavedMapDetailPreviewStore.imageData(at: url) else {
+            return nil
         }
-        entries = entries.filter { url in
-            let values = try? url.resourceValues(
-                forKeys: [.contentModificationDateKey, .isRegularFileKey]
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date()],
+            ofItemAtPath: url.path
+        )
+        return data
+    }
+
+    static func save(
+        _ data: Data,
+        for descriptor: DeviceActiveMapDescriptor,
+        in cacheRoot: URL
+    ) throws {
+        guard SavedMapDetailPreviewStore.isValidPNG(data) else {
+            throw OfflineMapPlatformError.invalidPack(
+                "device map detail preview is not a high-resolution PNG"
             )
-            return values?.isRegularFile == true &&
-                url.pathExtension.lowercased() == "png"
         }
-        entries.sort { lhs, rhs in
-            let lhsDate = (try? lhs.resourceValues(
-                forKeys: [.contentModificationDateKey]
-            ).contentModificationDate) ?? .distantPast
-            let rhsDate = (try? rhs.resourceValues(
-                forKeys: [.contentModificationDateKey]
-            ).contentModificationDate) ?? .distantPast
-            return lhsDate > rhsDate
+        let directory = previewDirectory(in: cacheRoot)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        try data.write(
+            to: imageURL(for: descriptor, in: cacheRoot),
+            options: .atomic
+        )
+        DeviceMapPreviewCachePolicy.prune(directory: directory)
+    }
+
+    static func imageURL(
+        for descriptor: DeviceActiveMapDescriptor,
+        in cacheRoot: URL
+    ) -> URL {
+        previewDirectory(in: cacheRoot).appendingPathComponent(
+            descriptor.previewFilename + ".detail-v\(SavedMapDetailPreviewStore.cacheVersion).png",
+            isDirectory: false
+        )
+    }
+
+    static func delete(
+        for descriptor: DeviceActiveMapDescriptor,
+        in cacheRoot: URL
+    ) throws {
+        let url = imageURL(for: descriptor, in: cacheRoot)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
         }
-        for (index, url) in entries.enumerated() {
-            let date = (try? url.resourceValues(
-                forKeys: [.contentModificationDateKey]
-            ).contentModificationDate) ?? .distantPast
-            if index >= maximumEntryCount || now.timeIntervalSince(date) > maximumEntryAge {
-                try? FileManager.default.removeItem(at: url)
-            }
-        }
+    }
+
+    private static func previewDirectory(in cacheRoot: URL) -> URL {
+        cacheRoot.appendingPathComponent(
+            "DeviceMapDetailPreviews-v\(SavedMapDetailPreviewStore.cacheVersion)",
+            isDirectory: true
+        )
     }
 }
 
@@ -1611,6 +1793,8 @@ nonisolated enum SavedMapRemovalPolicy {
 
 @MainActor
 final class OfflineMapManager: ObservableObject {
+    private static let maximumInMemoryDetailPreviewCount = 3
+
     typealias PackDownloadOperation = (
         URL,
         OfflineMapDownloadConstraints,
@@ -1702,6 +1886,7 @@ final class OfflineMapManager: ObservableObject {
     private let packDownload: PackDownloadOperation
     private let previewLoad: OfflineMapPreviewLoadOperation
     private let mapSnapshot: OfflineMapSnapshotOperation
+    private let detailMapSnapshot: OfflineMapSnapshotOperation
     private let metadataSave: SavedMapArtifactMetadataSaveOperation
     private let cacheDirectoryOverride: URL?
     private let mapStreamTrustStore: BikeMapStreamTrustStore
@@ -1725,9 +1910,14 @@ final class OfflineMapManager: ObservableObject {
     private var activityCounter = OfflineMapActivityCounter()
 #if canImport(UIKit)
     @Published private var packPreviewImages: [String: UIImage] = [:]
+    @Published private var detailPreviewImages: [String: UIImage] = [:]
+    @Published private var detailPreviewLoadingKeys: Set<String> = []
+    private var detailPreviewAccessOrder: [String] = []
     private var unavailablePackPreviews: Set<String> = []
+    private var unavailableDetailPreviews: Set<String> = []
     private var previewLoadTasks: [String: Task<Void, Never>] = [:]
     private let previewLoadRegistry = OfflineMapPreviewLoadRegistry()
+    private let detailPreviewLoadRegistry = OfflineMapPreviewLoadRegistry()
     private var currentActiveDeviceMap: DeviceActiveMapDescriptor?
 #endif
 
@@ -1764,6 +1954,9 @@ final class OfflineMapManager: ObservableObject {
         mapSnapshot: @escaping OfflineMapSnapshotOperation = { bounds in
             try await OfflineMapSnapshotPreviewRenderer.pngData(for: bounds)
         },
+        detailMapSnapshot: @escaping OfflineMapSnapshotOperation = { bounds in
+            try await OfflineMapSnapshotPreviewRenderer.detailPNGData(for: bounds)
+        },
         metadataSave: @escaping SavedMapArtifactMetadataSaveOperation = { metadata, url in
             try SavedMapArtifactMetadataStore.save(metadata, for: url)
         },
@@ -1781,6 +1974,7 @@ final class OfflineMapManager: ObservableObject {
         self.packDownload = packDownload
         self.previewLoad = previewLoad
         self.mapSnapshot = mapSnapshot
+        self.detailMapSnapshot = detailMapSnapshot
         self.metadataSave = metadataSave
         self.cacheDirectoryOverride = cacheDirectory
         self.mapStreamTrustStore = mapStreamTrustStore ??
@@ -2378,6 +2572,10 @@ final class OfflineMapManager: ObservableObject {
             previewLoadTasks.removeValue(forKey: key)?.cancel()
             packPreviewImages.removeValue(forKey: key)
             unavailablePackPreviews.remove(key)
+            detailPreviewLoadRegistry.invalidate(key)
+            removeDetailPreviewImage(forKey: key)
+            detailPreviewLoadingKeys.remove(key)
+            unavailableDetailPreviews.remove(key)
         }
         currentActiveDeviceMap = descriptor
     }
@@ -2397,6 +2595,126 @@ final class OfflineMapManager: ObservableObject {
         }
         guard let descriptor = item.deviceMap else { return }
         loadDevicePreviewIfNeeded(for: descriptor)
+    }
+
+    func detailPreviewImage(for item: SavedMapListItem) -> UIImage? {
+        guard let key = detailPreviewCacheKey(for: item),
+              let image = detailPreviewImages[key] else {
+            return nil
+        }
+        recordDetailPreviewAccess(forKey: key)
+        return image
+    }
+
+    func isDetailPreviewLoading(for item: SavedMapListItem) -> Bool {
+        guard let key = detailPreviewCacheKey(for: item) else { return false }
+        return detailPreviewLoadingKeys.contains(key)
+    }
+
+    func loadDetailPreviewIfNeeded(for item: SavedMapListItem) async {
+        guard let key = detailPreviewCacheKey(for: item),
+              detailPreviewImages[key] == nil,
+              !unavailableDetailPreviews.contains(key) else {
+            return
+        }
+        let token = detailPreviewLoadRegistry.begin(for: key)
+        detailPreviewLoadingKeys.insert(key)
+        defer {
+            if detailPreviewLoadRegistry.finishIfCurrent(token, for: key) {
+                detailPreviewLoadingKeys.remove(key)
+            }
+        }
+
+        let storedData: Data?
+        let bounds: OfflineMapPreviewBounds?
+        let storedFileExists: Bool
+        let cacheRoot: URL?
+        if let packURL = item.packURL {
+            let loaded = await Task.detached(priority: .utility) {
+                let storedURL = SavedMapDetailPreviewStore.imageURL(for: packURL)
+                return (
+                    SavedMapDetailPreviewStore.imageData(for: packURL),
+                    OfflineMapPackPreviewReader.content(for: packURL)?.bounds,
+                    FileManager.default.fileExists(atPath: storedURL.path)
+                )
+            }.value
+            storedData = loaded.0
+            bounds = loaded.1
+            storedFileExists = loaded.2
+            cacheRoot = nil
+        } else if let descriptor = item.deviceMap,
+                  let root = try? cachedPackDirectory() {
+            let loaded = await Task.detached(priority: .utility) {
+                let storedURL = DeviceMapDetailPreviewStore.imageURL(
+                    for: descriptor,
+                    in: root
+                )
+                return (
+                    DeviceMapDetailPreviewStore.imageData(
+                        for: descriptor,
+                        in: root
+                    ),
+                    FileManager.default.fileExists(atPath: storedURL.path)
+                )
+            }.value
+            storedData = loaded.0
+            bounds = descriptor.bounds
+            storedFileExists = loaded.1
+            cacheRoot = root
+        } else {
+            unavailableDetailPreviews.insert(key)
+            return
+        }
+
+        guard detailPreviewLoadRegistry.isCurrent(token, for: key),
+              !Task.isCancelled,
+              isDetailPreviewTargetCurrent(item, key: key) else {
+            return
+        }
+        if let image = usableDetailPreviewImage(from: storedData) {
+            cacheDetailPreviewImage(image, forKey: key)
+            return
+        }
+        if storedFileExists {
+            if let packURL = item.packURL {
+                try? SavedMapDetailPreviewStore.delete(for: packURL)
+            } else if let descriptor = item.deviceMap, let cacheRoot {
+                try? DeviceMapDetailPreviewStore.delete(
+                    for: descriptor,
+                    in: cacheRoot
+                )
+            }
+        }
+        guard let bounds else {
+            unavailableDetailPreviews.insert(key)
+            return
+        }
+
+        let generatedData: Data?
+        do {
+            generatedData = try await detailMapSnapshot(bounds)
+        } catch is CancellationError {
+            return
+        } catch {
+            generatedData = nil
+        }
+        guard detailPreviewLoadRegistry.isCurrent(token, for: key),
+              !Task.isCancelled,
+              isDetailPreviewTargetCurrent(item, key: key),
+              let generatedData,
+              let image = usableDetailPreviewImage(from: generatedData) else {
+            return
+        }
+        if let packURL = item.packURL {
+            try? SavedMapDetailPreviewStore.save(generatedData, for: packURL)
+        } else if let descriptor = item.deviceMap, let cacheRoot {
+            try? DeviceMapDetailPreviewStore.save(
+                generatedData,
+                for: descriptor,
+                in: cacheRoot
+            )
+        }
+        cacheDetailPreviewImage(image, forKey: key)
     }
 
     func previewImage(forCachedPack packURL: URL) -> UIImage? {
@@ -2517,6 +2835,53 @@ final class OfflineMapManager: ObservableObject {
             return nil
         }
         return image
+    }
+
+    private func usableDetailPreviewImage(from data: Data?) -> UIImage? {
+        guard let data,
+              SavedMapDetailPreviewStore.isValidPNG(data),
+              let image = UIImage(data: data),
+              OfflineMapSnapshotPreviewRenderer.hasMeaningfulVisualVariation(image) else {
+            return nil
+        }
+        return image
+    }
+
+    private func cacheDetailPreviewImage(_ image: UIImage, forKey key: String) {
+        detailPreviewImages[key] = image
+        recordDetailPreviewAccess(forKey: key)
+        while detailPreviewAccessOrder.count > Self.maximumInMemoryDetailPreviewCount {
+            let evictedKey = detailPreviewAccessOrder.removeFirst()
+            detailPreviewImages.removeValue(forKey: evictedKey)
+        }
+    }
+
+    private func recordDetailPreviewAccess(forKey key: String) {
+        detailPreviewAccessOrder.removeAll { $0 == key }
+        detailPreviewAccessOrder.append(key)
+    }
+
+    private func removeDetailPreviewImage(forKey key: String) {
+        detailPreviewImages.removeValue(forKey: key)
+        detailPreviewAccessOrder.removeAll { $0 == key }
+    }
+
+    private func detailPreviewCacheKey(for item: SavedMapListItem) -> String? {
+        if let packURL = item.packURL {
+            return previewCacheKey(for: packURL)
+        }
+        guard let descriptor = item.deviceMap else { return nil }
+        return devicePreviewCacheKey(for: descriptor)
+    }
+
+    private func isDetailPreviewTargetCurrent(
+        _ item: SavedMapListItem,
+        key: String
+    ) -> Bool {
+        if item.packURL != nil {
+            return cachedPackURLs.contains { previewCacheKey(for: $0) == key }
+        }
+        return item.deviceMap == currentActiveDeviceMap
     }
 
     private func loadDevicePreviewIfNeeded(
@@ -5796,11 +6161,19 @@ final class OfflineMapManager: ObservableObject {
             for key in Array(packPreviewImages.keys) where !activePreviewKeys.contains(key) {
                 packPreviewImages.removeValue(forKey: key)
             }
+            for key in Array(detailPreviewImages.keys) where !activePreviewKeys.contains(key) {
+                removeDetailPreviewImage(forKey: key)
+            }
             for key in Array(previewLoadTasks.keys) where !activePreviewKeys.contains(key) {
                 previewLoadTasks.removeValue(forKey: key)?.cancel()
                 previewLoadRegistry.invalidate(key)
             }
+            for key in detailPreviewLoadingKeys where !activePreviewKeys.contains(key) {
+                detailPreviewLoadRegistry.invalidate(key)
+            }
+            detailPreviewLoadingKeys.formIntersection(activePreviewKeys)
             unavailablePackPreviews.formIntersection(activePreviewKeys)
+            unavailableDetailPreviews.formIntersection(activePreviewKeys)
 #endif
             cacheDefaultDisplayNames(for: packURLs)
             cachedMapRecords = packURLs.map(cachedMapRecord)
@@ -5813,7 +6186,12 @@ final class OfflineMapManager: ObservableObject {
             previewLoadTasks.removeAll()
             previewLoadRegistry.removeAll()
             packPreviewImages.removeAll()
+            detailPreviewLoadRegistry.removeAll()
+            detailPreviewImages.removeAll()
+            detailPreviewAccessOrder.removeAll()
+            detailPreviewLoadingKeys.removeAll()
             unavailablePackPreviews.removeAll()
+            unavailableDetailPreviews.removeAll()
 #endif
             cachedPackURLs = []
             cachedMapRecords = []
@@ -5837,7 +6215,12 @@ final class OfflineMapManager: ObservableObject {
         previewLoadTasks.removeValue(forKey: key)?.cancel()
         packPreviewImages.removeValue(forKey: key)
         unavailablePackPreviews.remove(key)
+        detailPreviewLoadRegistry.invalidate(key)
+        removeDetailPreviewImage(forKey: key)
+        detailPreviewLoadingKeys.remove(key)
+        unavailableDetailPreviews.remove(key)
         try? SavedMapSnapshotPreviewStore.delete(for: packURL)
+        try? SavedMapDetailPreviewStore.delete(for: packURL)
     }
 #else
     private func invalidateCachedPreview(for packURL: URL) {}
