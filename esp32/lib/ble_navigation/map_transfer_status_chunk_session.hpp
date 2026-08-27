@@ -71,17 +71,27 @@ inline void appendActiveMapPresentation(std::string &body,
 
 // ATT notifications reserve three bytes for the protocol header. Each
 // authenticated notification then adds a 22-byte envelope, and chunked map
-// status payloads carry a seven-byte MSTC header. Size the body portion from
-// the peer's negotiated MTU so modern centrals receive a status snapshot in as
-// few notifications as possible without exceeding the transport limit.
+// status payloads carry a seven-byte MSTC header. Keep the body portion at or
+// below the 128-byte size already used by the generic transfer-status path.
+// Some iOS/NimBLE links negotiate a larger ATT MTU but do not reliably deliver
+// notifications that consume that exact limit. The conservative ceiling keeps
+// headroom while the bounded continuation queue still supports larger status
+// snapshots without blocking the NimBLE host task.
 constexpr size_t chunkPayloadBytes(uint16_t peerMtu) {
   constexpr size_t kAttNotificationOverhead = 3;
   constexpr size_t kAuthenticatedEnvelopeOverhead = 22;
   constexpr size_t kChunkHeaderBytes = 7;
+  constexpr size_t kMaximumChunkPayloadBytes = 128;
   constexpr size_t kTotalOverhead = kAttNotificationOverhead +
                                     kAuthenticatedEnvelopeOverhead +
                                     kChunkHeaderBytes;
-  return peerMtu > kTotalOverhead ? peerMtu - kTotalOverhead : 0;
+  if (peerMtu <= kTotalOverhead) {
+    return 0;
+  }
+  const size_t mtuPayloadBytes = peerMtu - kTotalOverhead;
+  return mtuPayloadBytes < kMaximumChunkPayloadBytes
+             ? mtuPayloadBytes
+             : kMaximumChunkPayloadBytes;
 }
 
 // Repeated status requests must retransmit the same logical chunk stream.
