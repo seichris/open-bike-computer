@@ -10,6 +10,7 @@ class StravaComposeTests(unittest.TestCase):
     _COMPOSE_FILES = (
         REPO_ROOT / "map-platform" / "backend" / "docker-compose.yml",
         REPO_ROOT / "map-platform" / "deploy" / "compose.yaml",
+        REPO_ROOT / "map-platform" / "deploy" / "compose.development.yaml",
         REPO_ROOT / "map-platform" / "deploy" / "compose.hardware-validation.yaml",
     )
     _SHARED_VARIABLES = (

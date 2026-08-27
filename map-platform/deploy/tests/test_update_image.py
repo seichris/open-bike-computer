@@ -18,6 +18,9 @@ SPEC.loader.exec_module(update_image)
 class UpdateImageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.compose = MODULE_PATH.with_name("compose.yaml")
+        self.development_compose = MODULE_PATH.with_name(
+            "compose.development.yaml"
+        )
 
     def copy_compose(self, directory: str) -> Path:
         target = Path(directory) / "compose.yaml"
@@ -37,6 +40,21 @@ class UpdateImageTests(unittest.TestCase):
             deployment.worker_reference,
             r"^ghcr\.io/seichris/open-bike-computer-map-platform@sha256:[0-9a-f]{64}$",
         )
+
+    def test_committed_development_compose_is_independently_digest_pinned(self) -> None:
+        development = update_image.validate_manifest(self.development_compose)
+
+        self.assertRegex(development.control_plane_source_commit, r"^[0-9a-f]{40}$")
+        self.assertRegex(development.worker_source_commit, r"^[0-9a-f]{40}$")
+        self.assertRegex(
+            development.control_plane_reference,
+            r"^ghcr\.io/seichris/open-bike-computer-map-platform@sha256:[0-9a-f]{64}$",
+        )
+        self.assertRegex(
+            development.worker_reference,
+            r"^ghcr\.io/seichris/open-bike-computer-map-platform@sha256:[0-9a-f]{64}$",
+        )
+        self.assertNotEqual(self.compose, self.development_compose)
 
     def test_relocation_keeps_runtime_paths_compatible_with_existing_pins(self) -> None:
         compose = self.compose.read_text(encoding="utf-8")

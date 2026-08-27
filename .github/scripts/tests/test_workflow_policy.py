@@ -438,8 +438,17 @@ class WorkflowPolicyTests(unittest.TestCase):
 
         self.assertIn("Manual CI Gate", general_ci)
         self.assertIn("refs/heads/deploy/map-platform-production", general_ci)
+        self.assertIn("refs/heads/deploy/map-platform-development", general_ci)
         self.assertIn("Validate the protected partial gate scope", general_ci)
-        self.assertIn("':(exclude)map-platform/deploy/compose.yaml'", general_ci)
+        self.assertIn('":(exclude)${deployment_lock}"', general_ci)
+        self.assertIn(
+            "deployment_lock=map-platform/deploy/compose.yaml",
+            general_ci,
+        )
+        self.assertIn(
+            "deployment_lock=map-platform/deploy/compose.development.yaml",
+            general_ci,
+        )
 
     def test_release_tags_use_one_gated_validation_orchestrator(self) -> None:
         general_ci = workflow_source("ci.yml")

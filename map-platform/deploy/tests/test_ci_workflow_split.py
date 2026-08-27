@@ -53,9 +53,44 @@ class CIWorkflowSplitTests(unittest.TestCase):
             "python3 map-platform/deploy/export_pending_compose.py",
             image_workflow,
         )
-        self.assertIn("gh workflow run ci.yml", image_workflow)
-        self.assertIn("-f scope=map", image_workflow)
+        self.assertEqual(2, image_workflow.count("gh workflow run ci.yml"))
+        self.assertEqual(2, image_workflow.count("-f scope=map"))
         self.assertNotIn("gh workflow run map-platform-ci.yml", image_workflow)
+
+    def test_production_and_development_have_independent_promotion_locks(self) -> None:
+        general_ci = workflow_source("ci.yml")
+        image_workflow = workflow_source("map-platform-image.yml")
+        map_ci = workflow_source("map-platform-ci.yml")
+        production_job, development_job = image_workflow.split(
+            "  propose-development:\n", 1
+        )
+
+        self.assertIn("  propose-production:\n", image_workflow)
+        self.assertIn("  propose-development:\n", image_workflow)
+        self.assertIn("deploy/map-platform-production", image_workflow)
+        self.assertIn("deploy/map-platform-development", image_workflow)
+        self.assertIn("map-platform/deploy/compose.yaml", image_workflow)
+        self.assertIn("map-platform/deploy/compose.development.yaml", image_workflow)
+        self.assertIn("--worker-digest \"$IMAGE_DIGEST\"", image_workflow)
+        self.assertIn(
+            "updates only the digest-pinned development Compose",
+            image_workflow,
+        )
+        self.assertNotIn(
+            "map-platform/deploy/compose.development.yaml",
+            production_job,
+        )
+        self.assertNotIn(
+            "map-platform/deploy/compose.yaml",
+            development_job,
+        )
+        self.assertIn("deploy/map-platform-development", general_ci)
+        self.assertIn("deployment_lock=map-platform/deploy/compose.yaml", general_ci)
+        self.assertIn(
+            "deployment_lock=map-platform/deploy/compose.development.yaml",
+            general_ci,
+        )
+        self.assertIn("../deploy/compose.development.yaml", map_ci)
 
     def test_image_publishing_is_automatic_only_on_main(self) -> None:
         image_workflow = workflow_source("map-platform-image.yml")
