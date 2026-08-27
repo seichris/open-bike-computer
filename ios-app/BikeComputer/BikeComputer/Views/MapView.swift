@@ -44,7 +44,15 @@ class SimulatedPositionAnnotation: MKPointAnnotation {}
 
 // MARK: - Map View Container
 
+@MainActor
+protocol MapAppearanceConfigurationTarget: AnyObject {
+    var preferredConfiguration: MKMapConfiguration { get set }
+}
+
+extension MKMapView: MapAppearanceConfigurationTarget {}
+
 struct MapViewContainer: UIViewRepresentable {
+    let appearance: IPhoneMapAppearance
     let location: CLLocation?
     let route: MKRoute?
     let simulatedPosition: CLLocationCoordinate2D?
@@ -58,6 +66,14 @@ struct MapViewContainer: UIViewRepresentable {
     
     func makeUIView(context: Context) -> MKMapView {
         let mapView = MKMapView()
+        mapView.isPitchEnabled = true
+        if #available(iOS 17.0, macCatalyst 17.0, *) {
+            mapView.pitchButtonVisibility = .adaptive
+        }
+        context.coordinator.applyAppearanceIfNeeded(
+            appearance,
+            to: mapView
+        )
         mapView.delegate = context.coordinator
         mapView.showsUserLocation = isUserLocationAuthorized
         mapView.userTrackingMode = isUserLocationAuthorized ? .follow : .none
@@ -96,6 +112,10 @@ struct MapViewContainer: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: MKMapView, context: Context) {
+        context.coordinator.applyAppearanceIfNeeded(
+            appearance,
+            to: uiView
+        )
         let isOfflineMapSelectionActive = offlineMapSelectionFrame != nil
         let isFreePanActive = context.coordinator.isFreePanActive(
             mapView: uiView,
@@ -236,6 +256,7 @@ struct MapViewContainer: UIViewRepresentable {
         var isUserLocationAuthorized = false
         var simulatedPosition: CLLocationCoordinate2D?
         var hasSetInitialRegion = false
+        private(set) var lastAppliedAppearance: IPhoneMapAppearance?
         private var compassButton: MKCompassButton?
         private var trackingButton: MKUserTrackingButton?
         private var lastNavigationCoordinate: CLLocationCoordinate2D?
@@ -250,6 +271,16 @@ struct MapViewContainer: UIViewRepresentable {
         init(addressResolver: AddressResolver?) {
             self.addressResolver = addressResolver
             super.init()
+        }
+
+        func applyAppearanceIfNeeded(
+            _ appearance: IPhoneMapAppearance,
+            to target: any MapAppearanceConfigurationTarget
+        ) {
+            guard appearance != lastAppliedAppearance else { return }
+
+            target.preferredConfiguration = appearance.makeConfiguration()
+            lastAppliedAppearance = appearance
         }
 
         func installMapControls(on mapView: MKMapView) {

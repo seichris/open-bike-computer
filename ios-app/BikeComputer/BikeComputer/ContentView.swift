@@ -91,6 +91,12 @@ struct ContentView: View {
     private var hasCompletedFirstRunWelcome = false
     @AppStorage("offlineMapOnboarding.existingInstallMigrationCompleted.v1")
     private var hasMigratedExistingInstallOnboarding = false
+    @AppStorage(IPhoneMapAppearance.baseStyleDefaultsKey)
+    private var iPhoneMapBaseStyleRawValue =
+        IPhoneMapAppearance.defaultValue.baseStyle.rawValue
+    @AppStorage(IPhoneMapAppearance.realisticElevationDefaultsKey)
+    private var usesRealisticMapElevation =
+        IPhoneMapAppearance.defaultValue.usesRealisticElevation
     @State private var offlineMapSelectionWidth: CGFloat?
     @State private var offlineMapSelectionHeight: CGFloat?
     @State private var offlineMapSelectionCenterY: CGFloat?
@@ -941,6 +947,8 @@ struct ContentView: View {
                 onReconnect: { coordinator.reconnect() }
             )
 
+            mapAppearanceMenu
+
             Button(action: { presentedSheet = .settings }) {
                 Image(systemName: "gearshape.fill")
                     .font(.title3)
@@ -955,6 +963,57 @@ struct ContentView: View {
         .padding(.horizontal, 18)
         .padding(.top, 8)
         .zIndex(10)
+    }
+
+    private var mapAppearance: IPhoneMapAppearance {
+        IPhoneMapAppearance(
+            persistedBaseStyleRawValue: iPhoneMapBaseStyleRawValue,
+            usesRealisticElevation: usesRealisticMapElevation
+        )
+    }
+
+    private var mapBaseStyleBinding: Binding<IPhoneMapBaseStyle> {
+        Binding(
+            get: { mapAppearance.baseStyle },
+            set: { iPhoneMapBaseStyleRawValue = $0.rawValue }
+        )
+    }
+
+    private var mapAppearanceMenu: some View {
+        Menu {
+            Section("Base Map") {
+                Picker("Base Map", selection: mapBaseStyleBinding) {
+                    ForEach(IPhoneMapBaseStyle.allCases) { style in
+                        Label(style.title, systemImage: style.systemImage)
+                            .tag(style)
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            }
+
+            Section("Elevation") {
+                Toggle(isOn: $usesRealisticMapElevation) {
+                    Label("3D Terrain", systemImage: "mountain.2.fill")
+                }
+                .accessibilityHint(
+                    "Adds realistic elevation; tilt the map to see the terrain."
+                )
+            }
+        } label: {
+            Image(systemName: "square.3.layers.3d")
+                .font(.title3)
+                .foregroundColor(.primary)
+                .shadow(color: .white.opacity(0.8), radius: 2, x: 0, y: 1)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Map appearance")
+        .accessibilityValue(
+            "\(mapAppearance.baseStyle.title), " +
+            (usesRealisticMapElevation ? "3D Terrain on" : "3D Terrain off")
+        )
     }
 
     @ViewBuilder
@@ -1266,6 +1325,7 @@ struct ContentView: View {
         let canSelectDestination = !coordinator.isNavigating && !offlineMapManager.isMapAreaSelectionActive
 
         return MapViewContainer(
+            appearance: mapAppearance,
             location: coordinator.currentLocation,
             route: coordinator.currentRoute ?? coordinator.routePreview,
             simulatedPosition: coordinator.simulatedPosition,
