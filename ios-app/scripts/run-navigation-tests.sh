@@ -93,12 +93,33 @@ xcrun swiftc \
   -L "${IOS_SUPPORT}/usr/lib/swift" \
   -o "${CATALYST_OUT}" \
   ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
+  ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Views/MapView.swift \
   ios-app/BikeComputerTests/DestinationCalloutLayoutTests.swift
 
 "${CATALYST_OUT}"
+
+MAP_APPEARANCE_CATALYST_OUT="${TMPDIR:-/tmp}/open-bike-map-appearance-tests"
+
+xcrun swiftc \
+  -D HOST_TESTING \
+  -parse-as-library \
+  -target "$(uname -m)-apple-ios16.4-macabi" \
+  -sdk "${MACOS_SDK}" \
+  -F "${IOS_SUPPORT}/System/Library/Frameworks" \
+  -I "${IOS_SUPPORT}/usr/lib/swift" \
+  -L "${IOS_SUPPORT}/usr/lib/swift" \
+  -o "${MAP_APPEARANCE_CATALYST_OUT}" \
+  ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
+  ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
+  ios-app/BikeComputer/BikeComputer/Views/MapView.swift \
+  ios-app/BikeComputerTests/MapAppearanceTests.swift
+
+"${MAP_APPEARANCE_CATALYST_OUT}"
 
 PREVIEW_CATALYST_OUT="${TMPDIR:-/tmp}/open-bike-saved-map-preview-tests"
 

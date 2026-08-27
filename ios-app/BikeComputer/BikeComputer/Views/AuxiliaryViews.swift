@@ -7,37 +7,93 @@
 
 import SwiftUI
 
+extension View {
+    @ViewBuilder
+    func mapOverlayGlassSurface(cornerRadius: CGFloat) -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(
+                .regular.interactive(),
+                in: .rect(cornerRadius: cornerRadius)
+            )
+        } else {
+            self
+                .background(
+                    .ultraThinMaterial,
+                    in: RoundedRectangle(
+                        cornerRadius: cornerRadius,
+                        style: .continuous
+                    )
+                )
+                .overlay {
+                    RoundedRectangle(
+                        cornerRadius: cornerRadius,
+                        style: .continuous
+                    )
+                    .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
+                }
+                .shadow(
+                    color: .black.opacity(0.14),
+                    radius: 7,
+                    x: 0,
+                    y: 3
+                )
+        }
+    }
+}
+
 // MARK: - Connection Status View
 
 struct ConnectionStatusView: View {
     let isConnected: Bool
+    let deviceName: String
     let hasRegisteredDevice: Bool
     let onReconnect: () -> Void
+
+    private var displayName: String {
+        guard isConnected else { return "Bicino" }
+        let trimmedName = deviceName.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return trimmedName.isEmpty ? "Bicino" : trimmedName
+    }
+
+    private var statusSymbolName: String {
+        isConnected
+            ? "antenna.radiowaves.left.and.right"
+            : "antenna.radiowaves.left.and.right.slash"
+    }
+
+    private var statusSymbolColor: Color {
+        isConnected ? .black : Color(uiColor: .systemGray3)
+    }
     
     var body: some View {
         Button(action: onReconnect) {
             HStack(spacing: 8) {
-                Image(systemName: "circle.fill")
-                    .font(.caption)
-                    .foregroundColor(isConnected ? .green : .red)
-                    .shadow(
-                        color: isConnected ? .green.opacity(0.5) : .red.opacity(0.5),
-                        radius: 4
-                    )
+                Image(systemName: statusSymbolName)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(statusSymbolColor)
+                    .accessibilityHidden(true)
 
-                Text("Bicino")
-                    .font(.caption)
-                    .foregroundColor(.primary)
-                    .shadow(color: .white.opacity(0.8), radius: 2, x: 0, y: 1)
+                Text(displayName)
+                    .font(.footnote.weight(.medium))
+                    .foregroundColor(isConnected ? .primary : .black)
+                    .shadow(
+                        color: isConnected
+                            ? .white.opacity(0.8)
+                            : .clear,
+                        radius: 2,
+                        x: 0,
+                        y: 1
+                    )
             }
             .frame(minHeight: 44)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityLabel(
             isConnected
-                ? "Bicino connected"
+                ? "\(displayName) connected"
                 : hasRegisteredDevice
                     ? "Reconnect Bicino"
                     : "Connect Bicino"

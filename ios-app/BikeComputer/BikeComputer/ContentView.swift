@@ -51,6 +51,7 @@ struct ContentView: View {
     // MARK: - State
     
     @StateObject private var coordinator: BikeComputerCoordinator
+    @StateObject private var mapViewControlState: MapViewControlState
     @StateObject private var offlineMapManager: OfflineMapManager
     @StateObject private var watchAvailability: WorkoutWatchAvailabilityMonitor
     @ObservedObject private var routeLibrary: PhoneRouteLibrary
@@ -91,6 +92,12 @@ struct ContentView: View {
     private var hasCompletedFirstRunWelcome = false
     @AppStorage("offlineMapOnboarding.existingInstallMigrationCompleted.v1")
     private var hasMigratedExistingInstallOnboarding = false
+    @AppStorage(IPhoneMapAppearance.baseStyleDefaultsKey)
+    private var iPhoneMapBaseStyleRawValue =
+        IPhoneMapAppearance.defaultValue.baseStyle.rawValue
+    @AppStorage(IPhoneMapAppearance.realisticElevationDefaultsKey)
+    private var usesRealisticMapElevation =
+        IPhoneMapAppearance.defaultValue.usesRealisticElevation
     @State private var offlineMapSelectionWidth: CGFloat?
     @State private var offlineMapSelectionHeight: CGFloat?
     @State private var offlineMapSelectionCenterY: CGFloat?
@@ -182,6 +189,9 @@ struct ContentView: View {
         _coordinator = StateObject(
             wrappedValue: coordinator
         )
+        _mapViewControlState = StateObject(
+            wrappedValue: MapViewControlState()
+        )
         _offlineMapManager = StateObject(
             wrappedValue: OfflineMapManager(
                 diagnosticsRecorder: rideDiagnosticsRecorder
@@ -251,6 +261,14 @@ struct ContentView: View {
                     }
 
                     Spacer()
+
+                    HStack {
+                        Spacer()
+                        mapControlCluster
+                    }
+                    .padding(.trailing, 12)
+                    .padding(.bottom, 12)
+                    .zIndex(10)
 
                     bottomOverlay(
                         maxHeight: proxy.size.height * 0.68,
@@ -933,28 +951,129 @@ struct ContentView: View {
     }
 
     private var topOverlay: some View {
-        HStack(alignment: .center, spacing: 12) {
-            ConnectionStatusView(
-                isConnected: coordinator.isConnected,
-                hasRegisteredDevice:
-                    !coordinator.bleManager.knownDevices.isEmpty,
-                onReconnect: { coordinator.reconnect() }
-            )
+        ConnectionStatusView(
+            isConnected: coordinator.isConnected,
+            deviceName: coordinator.peripheralName,
+            hasRegisteredDevice:
+                !coordinator.bleManager.knownDevices.isEmpty,
+            onReconnect: { coordinator.reconnect() }
+        )
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.horizontal, 18)
+        .zIndex(10)
+    }
 
+    private var mapAppearance: IPhoneMapAppearance {
+        IPhoneMapAppearance(
+            persistedBaseStyleRawValue: iPhoneMapBaseStyleRawValue,
+            usesRealisticElevation: usesRealisticMapElevation
+        )
+    }
+
+    private var mapBaseStyleBinding: Binding<IPhoneMapBaseStyle> {
+        Binding(
+            get: { mapAppearance.baseStyle },
+            set: { iPhoneMapBaseStyleRawValue = $0.rawValue }
+        )
+    }
+
+    private var mapControlCluster: some View {
+        VStack(alignment: .center, spacing: 10) {
+            MapCompassControl(controlState: mapViewControlState)
+                .frame(width: 44, height: 44)
+
+            mapControlRail
+        }
+    }
+
+    private var mapControlRail: some View {
+        mapControlRailContent
+            .mapOverlayGlassSurface(cornerRadius: 26)
+    }
+
+    private var mapControlRailContent: some View {
+        VStack(spacing: 0) {
             Button(action: { presentedSheet = .settings }) {
-                Image(systemName: "gearshape.fill")
-                    .font(.title3)
-                    .foregroundColor(.primary)
-                    .shadow(color: .white.opacity(0.8), radius: 2, x: 0, y: 1)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
+                mapControlIcon("gearshape.fill")
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Settings")
+
+            mapControlDivider
+
+            Button(action: { mapViewControlState.togglePitch() }) {
+                mapControlIcon(
+                    mapViewControlState.isPitched ? "view.2d" : "view.3d"
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(coordinator.isNavigating)
+            .opacity(coordinator.isNavigating ? 0.45 : 1)
+            .accessibilityLabel(
+                mapViewControlState.isPitched
+                    ? "Show map in 2D"
+                    : "Show map in 3D"
+            )
+            .accessibilityValue(
+                mapViewControlState.isPitched ? "3D view" : "2D view"
+            )
+            .accessibilityHint(
+                coordinator.isNavigating
+                    ? "Available outside navigation."
+                    : "Changes the viewing angle. Realistic terrain is controlled in Layers."
+            )
+
+            mapControlDivider
+
+            mapLayersMenu
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 8)
-        .zIndex(10)
+        .frame(width: 52)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func mapControlIcon(_ systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(.primary)
+            .frame(width: 52, height: 50)
+            .contentShape(Rectangle())
+    }
+
+    private var mapControlDivider: some View {
+        Divider()
+            .padding(.horizontal, 11)
+    }
+
+    private var mapLayersMenu: some View {
+        Menu {
+            Section("Base Map") {
+                Picker("Base Map", selection: mapBaseStyleBinding) {
+                    ForEach(IPhoneMapBaseStyle.allCases) { style in
+                        Label(style.title, systemImage: style.systemImage)
+                            .tag(style)
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            }
+
+            Section {
+                Toggle(isOn: $usesRealisticMapElevation) {
+                    Label("3D Terrain", systemImage: "mountain.2.fill")
+                }
+                .accessibilityHint(
+                    "Adds realistic elevation; tilt the map to see the terrain."
+                )
+            }
+        } label: {
+            mapControlIcon("map.fill")
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Layers")
+        .accessibilityValue(
+            "\(mapAppearance.baseStyle.title), " +
+            (usesRealisticMapElevation ? "3D Terrain on" : "3D Terrain off")
+        )
     }
 
     @ViewBuilder
@@ -1266,6 +1385,8 @@ struct ContentView: View {
         let canSelectDestination = !coordinator.isNavigating && !offlineMapManager.isMapAreaSelectionActive
 
         return MapViewContainer(
+            appearance: mapAppearance,
+            controlState: mapViewControlState,
             location: coordinator.currentLocation,
             route: coordinator.currentRoute ?? coordinator.routePreview,
             simulatedPosition: coordinator.simulatedPosition,

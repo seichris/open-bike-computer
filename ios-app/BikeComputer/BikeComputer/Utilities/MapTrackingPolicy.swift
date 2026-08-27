@@ -16,4 +16,20 @@ enum MapTrackingPolicy {
               !isDestinationSelectionActive else { return .none }
         return isNavigating ? .followWithHeading : .follow
     }
+
+    static func shouldApplyDesiredMode(
+        currentMode: MapTrackingBehavior,
+        desiredMode: MapTrackingBehavior,
+        preservesStoppedTracking: Bool
+    ) -> Bool {
+        guard currentMode != desiredMode else { return false }
+
+        if preservesStoppedTracking,
+           currentMode == .none,
+           desiredMode != .none {
+            return false
+        }
+
+        return true
+    }
 }
