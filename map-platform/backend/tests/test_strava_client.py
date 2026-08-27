@@ -27,7 +27,7 @@ class FakeTransport:
 
 
 def response(url, body, *, status=200, content_type="application/json"):
-    if isinstance(body, dict):
+    if isinstance(body, (dict, list)):
         body = json.dumps(body).encode("utf-8")
     return StravaHTTPResponse(
         status_code=status,
@@ -158,6 +158,116 @@ class StravaClientTests(unittest.TestCase):
                 for item in transport.requests
             )
         )
+
+    def test_athlete_routes_are_paged_and_reduced_to_safe_fields(self):
+        url = f"{STRAVA_API_BASE}/athletes/44/routes?page=1&per_page=200"
+        transport = FakeTransport(
+            [
+                response(
+                    url,
+                    [
+                        {
+                            "id": 101,
+                            "name": "  Morning Ride  ",
+                            "distance": 42_195.5,
+                            "elevation_gain": 612.25,
+                            "type": 1,
+                            "description": "must not escape the backend",
+                        },
+                        {
+                            "id": 102,
+                            "name": "Trail Run",
+                            "distance": 10_000,
+                            "elevation_gain": 240,
+                            "type": 2,
+                        },
+                    ],
+                )
+            ]
+        )
+
+        page = self.client(transport).athlete_routes(
+            "44",
+            "access-token",
+            page=1,
+        )
+
+        self.assertEqual(page.page, 1)
+        self.assertIsNone(page.next_page)
+        self.assertEqual([route.route_id for route in page.routes], ["101", "102"])
+        self.assertEqual([route.route_kind for route in page.routes], ["ride", "run"])
+        self.assertEqual(page.routes[0].name, "Morning Ride")
+        self.assertEqual(page.routes[0].distance_meters, 42_195.5)
+        request = transport.requests[0]
+        self.assertEqual(request["url"], url)
+        self.assertEqual(request["headers"]["Authorization"], "Bearer access-token")
+
+    def test_full_athlete_route_page_advertises_the_next_page(self):
+        url = f"{STRAVA_API_BASE}/athletes/44/routes?page=7&per_page=200"
+        routes = [
+            {
+                "id": route_id,
+                "name": f"Ride {route_id}",
+                "distance": route_id * 100,
+                "elevation_gain": route_id,
+                "type": 1,
+            }
+            for route_id in range(1, 201)
+        ]
+        page = self.client(FakeTransport([response(url, routes)])).athlete_routes(
+            "44",
+            "token",
+            page=7,
+        )
+        self.assertEqual(len(page.routes), 200)
+        self.assertEqual(page.next_page, 8)
+
+    def test_invalid_athlete_route_page_fails_closed(self):
+        url = f"{STRAVA_API_BASE}/athletes/44/routes?page=1&per_page=200"
+        malformed = FakeTransport(
+            [
+                response(
+                    url,
+                    [
+                        {
+                            "id": 101,
+                            "name": "Unknown",
+                            "distance": 1,
+                            "elevation_gain": 1,
+                            "type": 9,
+                        }
+                    ],
+                )
+            ]
+        )
+        with self.assertRaises(StravaClientError) as raised:
+            self.client(malformed).athlete_routes("44", "token", page=1)
+        self.assertEqual(raised.exception.code, "strava_invalid_response")
+
+        overflow = FakeTransport(
+            [
+                response(
+                    url,
+                    [
+                        {
+                            "id": 101,
+                            "name": "Overflow",
+                            "distance": 10**400,
+                            "elevation_gain": 1,
+                            "type": 1,
+                        }
+                    ],
+                )
+            ]
+        )
+        with self.assertRaises(StravaClientError) as overflow_error:
+            self.client(overflow).athlete_routes("44", "token", page=1)
+        self.assertEqual(overflow_error.exception.code, "strava_invalid_response")
+
+        transport = FakeTransport([])
+        with self.assertRaises(StravaClientError):
+            self.client(transport).athlete_routes("44", "token", page=0)
+        self.assertEqual(transport.requests, [])
 
     def test_route_identity_mismatch_and_redirect_fail_closed(self):
         route_id = "3009840108578231836"
