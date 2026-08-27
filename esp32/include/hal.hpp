@@ -216,13 +216,9 @@ constexpr uint8_t TCH_I2C_INT = GPIO_NUM_21;
 constexpr uint8_t TCH_I2C_ADDR = 0x5A; // CST9217 Address (verified)
 #endif
 
-// SD Card (SPI) - verified from Waveshare schematics/examples.
-#ifdef WAVESHARE_AMOLED_206
-constexpr uint8_t SD_CS = GPIO_NUM_17;
-#else
-constexpr uint8_t SD_CS = GPIO_NUM_41;
-#endif
-constexpr uint8_t SD_MOSI = GPIO_NUM_1;
-constexpr uint8_t SD_MISO = GPIO_NUM_3;
-constexpr uint8_t SD_CLK = GPIO_NUM_2;
+// microSD in vendor-native one-bit SDMMC mode. Both Waveshare boards route
+// the same CLK/CMD/D0 pins; their SPI CS/D3 traces are unused in one-bit mode.
+constexpr uint8_t WAVESHARE_SDMMC_CLK = GPIO_NUM_2;
+constexpr uint8_t WAVESHARE_SDMMC_CMD = GPIO_NUM_1;
+constexpr uint8_t WAVESHARE_SDMMC_D0 = GPIO_NUM_3;
 #endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

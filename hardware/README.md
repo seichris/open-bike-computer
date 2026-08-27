@@ -100,7 +100,7 @@ Temporary reference clone used during bring-up:
 | IMU | QMI8658C | I2C | Schematic ties SDO/SAO low, so expected address is `0x6B` |
 | Audio Codec | ES8311 | I2C/I2S | Audio codec used by vendor `08_ES8311` demo |
 | Audio ADC / Mic Front End | ES7210 | I2S/TDM | Product page advertises dual digital microphone array; schematic includes ES7210 |
-| SD Card Slot | TF / microSD | SPI-style pins | Vendor pin macros use `CLK=2`, `CMD/MOSI=1`, `DATA/MISO=3`, `CS=17` |
+| SD Card Slot | TF / microSD | Native 1-bit SDMMC | Vendor path uses `CLK=2`, `CMD=1`, `D0=3`; the `CS`/D3 trace on GPIO17 is unused in one-bit mode |
 | Battery Header | MX1.25 3.7 V LiPo | PMU | Product page has battery-included and no-battery variants |
 | Buttons | PWR, BOOT | GPIO / PMU | BOOT is GPIO0; PWR drives PMU power key path |
 
@@ -182,24 +182,28 @@ Connected-device touch findings:
   `i2c[fail=0 recover=0]` over idle serial captures.
 - Map dragging works in the full bike firmware on the 2.06 board.
 
-### SD Card
+### SD Card (native one-bit SDMMC)
 
 | Signal | GPIO | Notes |
 |---|---:|---|
-| CS / `SDMMC_CS` / `SDCS` | GPIO 17 | Differs from 1.75" GPIO41 |
-| MOSI / `SDMMC_CMD` | GPIO 1 | Vendor macro calls this `SDMMC_CMD` |
-| MISO / `SDMMC_DATA` | GPIO 3 | Vendor macro calls this `SDMMC_DATA` |
-| SCK / `SDMMC_CLK` | GPIO 2 | Shared numbering with 1.75" SCK |
+| CLK / `SDMMC_CLK` | GPIO 2 | Native SDMMC clock |
+| CMD / `SDMMC_CMD` | GPIO 1 | Bidirectional command line |
+| D0 / `SDMMC_DATA` | GPIO 3 | Single data line in one-bit mode |
+| D3 / legacy SPI CS | GPIO 17 | Present on the board but unused by the one-bit firmware path |
 
-The vendor macro names look SDMMC-like, but the published Arduino examples use
-these as explicit card pins and the schematic labels the nets `MOSI`, `MISO`,
-`SCK`, and `SDCS`.
+Waveshare's Arduino
+[`07_LVGL_SD_Test`](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.06/blob/main/examples/arduino/07_LVGL_SD_Test/07_LVGL_SD_Test.ino)
+configures these three pins with `SD_MMC.setPins()` and mounts with
+`SD_MMC.begin("/sdcard", true)`. The schematic's SPI-compatible net labels do
+not require the firmware to use SPI; the slot is wired for the vendor's
+one-bit SDMMC path as well.
 
 Connected-device SD findings:
-- The full bike firmware reads the SD card on `CS=17, MOSI=1, MISO=3, SCK=2`
-  and renders the offline map on the 2.06 board.
-- Keep the SD bus isolated on HSPI, as on the 1.75 board, because the display
-  uses its own QSPI bus.
+- The former HSPI firmware read the card on `CS=17, MOSI=1, MISO=3, SCK=2`
+  and rendered the offline map on the 2.06 board.
+- Current firmware uses the native SDMMC controller on GPIO2/1/3 in one-bit
+  mode. This preserves isolation from display QSPI without owning an Arduino
+  SPI controller. Physical SDMMC acceptance on 2.06 remains pending.
 
 ### RTC And IMU
 
@@ -331,7 +335,7 @@ card, and factory firmware.
 | App display integration | Verified | Full app boots after display-first init, BLE advertises/connects, LVGL flushes normally |
 | Panel-specific UI | Implemented | 2.06 keeps the shared map path but uses board-specific GUI geometry and a lower map anchor to show more route ahead on the taller panel |
 | Touch | Verified | FT3168 direct reset/address confirmed; map dragging works; idle reads are interrupt-gated |
-| SD Card | Verified | SD map renders from `CS=17, MOSI=1, MISO=3, SCK=2` |
+| SD Card | Implemented / validation pending | Former HSPI map reads were verified; native one-bit SDMMC on GPIO2/1/3 requires the target-specific physical matrix |
 | RTC | Partially verified | PCF85063 found at `0x51`; retention behavior still needs battery-backed power-removal validation |
 | IMU | Partially verified | QMI8658 found at `0x6B` and reports motion; axis/sign tests still need validation on 2.06 |
 | Audio | Verified / implemented | ES8311 speaker plays generated and embedded 16 kHz PCM; app selects the sound and `0...100%` playback volume, defaulting to 70% |
@@ -344,7 +348,8 @@ card, and factory firmware.
 - Do not copy the 1.75" TCA9554/CST9217 reset path to the 2.06. Touch reset is
   direct GPIO9.
 - Do not copy 1.75" display CLK/RST pins. 2.06 uses CLK GPIO11 and reset GPIO8.
-- Do not use 1.75" SD CS GPIO41. 2.06 SD CS is GPIO17; GPIO41 is audio BCLK.
+- Do not drive the legacy 1.75-inch or 2.06-inch SD CS/D3 traces in one-bit
+  mode. GPIO41 is audio BCLK on 2.06; native SDMMC uses only GPIO2/1/3.
 - Use `esp_codec_dev` and the ES8311 driver with the audio pin assignments
   documented above.
 - If the display is black, first flash the standalone vendor-shaped HelloWorld
@@ -377,7 +382,7 @@ card, and factory firmware.
 | Speaker Amplifier | NS4150B | Analog | Driven by ES8311; PA enable on GPIO46 |
 | IMU | QMI8658 | I2C | 0x6B primary, 0x6A fallback |
 | Display Driver | CO5300 | QSPI | 466x466 active AMOLED window |
-| SD Card Slot | SD1 | SPI | Dedicated HSPI bus in firmware |
+| SD Card Slot | SD1 | Native 1-bit SDMMC | GPIO2 CLK, GPIO1 CMD, GPIO3 D0; GPIO41 D3/legacy CS is unused |
 
 ---
 
@@ -438,16 +443,17 @@ as closed.
 | QSPI D3 | GPIO 7 |
 | RST | GPIO 39 |
 
-### SD Card (SPI) - CONFIRMED FROM SCHEMATIC
+### SD Card (native one-bit SDMMC)
 
 | Signal | GPIO | Notes |
 |---|---|---|
-| CS | GPIO 41 | SPI Chip Select |
-| MOSI | GPIO 1 | SPI Data Out |
-| MISO | GPIO 3 | SPI Data In |
-| SCK | GPIO 2 | SPI Clock |
+| CLK | GPIO 2 | Native SDMMC clock |
+| CMD | GPIO 1 | Bidirectional command line |
+| D0 | GPIO 3 | Single data line in one-bit mode |
+| D3 / legacy SPI CS | GPIO 41 | Present on the board but unused by the one-bit firmware path |
 
-> **IMPORTANT:** There is NO pin conflict between SD Card (SPI) and Touch (I2C). They use completely separate GPIO sets.
+> **IMPORTANT:** There is no pin conflict between native SDMMC and touch I2C.
+> They use completely separate GPIO sets.
 
 ### GPS (UART Pads / Not Populated On This Model)
 
@@ -737,17 +743,33 @@ Observed axis signs:
 
 ### 8. SD Card / Map I/O
 
-The SD card uses a dedicated HSPI bus, not the display QSPI bus. Verified pins
-are `CS=41`, `MOSI=1`, `MISO=3`, `SCK=2`.
+Current Waveshare firmware follows the vendor examples and uses the ESP32-S3
+native SDMMC peripheral in one-bit mode on `CLK=2`, `CMD=1`, and `D0=3`.
+The 1.75-inch GPIO41 and 2.06-inch GPIO17 D3/legacy-CS traces are not driven.
+SDMMC and the display QSPI controller are independent peripherals.
+
+HSPI was introduced after the original global-FSPI implementation produced
+post-display card read failures. It was a valid isolation fix: the verified
+HSPI path avoided sharing the display's QSPI controller. Later 32 GB SDHC
+testing exposed warm-reset CMD0/CRC failures even with complete HSPI teardown,
+while Waveshare's maintained
+[1.75](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75/blob/main/examples/arduino/07_LVGL_SD_Test/07_LVGL_SD_Test.ino)
+and
+[2.06](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.06/blob/main/examples/arduino/07_LVGL_SD_Test/07_LVGL_SD_Test.ino)
+examples use native one-bit SDMMC. The migration changes the transport, not
+the isolation invariant.
 
 Firmware defaults:
-- `WAVESHARE_SD_SPI_FREQ_HZ` default: `4000000`
+- `WAVESHARE_SDMMC_FREQ_KHZ` default: `SDMMC_FREQ_DEFAULT` (20 MHz)
 - `WAVESHARE_SD_LIST_ROOT` disabled by default
 - `WAVESHARE_MAPIO_TIMING_LOG` disabled by default
 
-Bench measurements on the known-good 32 GB SDHC card showed faster SPI can
-improve map block read time, but source still keeps 4 MHz until more cards and
-cold boots are tested:
+The 20 MHz standard-speed default deliberately avoids combining the transport
+migration with the vendor library's 40 MHz high-speed ceiling. Any frequency
+change requires both-board, multi-card stability and throughput evidence.
+
+Historical HSPI bench measurements on the known-good 32 GB SDHC card are kept
+for comparison; they do not qualify the new SDMMC path:
 
 | SPI Frequency | Mount | Map Read | Block Load | First Generation |
 |---|---:|---:|---:|---:|
@@ -756,7 +778,10 @@ cold boots are tested:
 | 12 MHz | 17 ms | 159 ms | 237 ms | 265 ms |
 | 16 MHz | 16 ms | 123 ms | 200-209 ms | 229-237 ms |
 
-`SDIO:` mount timing is low volume and always visible. `MAPIO:` timing is
+`SDIO:` mount timing is low volume and always visible. Mounting is bounded to
+three attempts with full `SD_MMC.end()` teardown before each attempt and 50 ms
+then 150 ms recovery delays. Success still requires a card type and root-open
+health check; failure retains the existing FFat fallback. `MAPIO:` timing is
 verbose and must remain opt-in because redraw logging can add USB CDC pressure
 during normal app-driven map use.
 
@@ -783,7 +808,7 @@ When scanning the I2C bus, you should find:
 |---|---|---|
 | Display | ✅ Working | CO5300 QSPI via Arduino_GFX; vendor 466x466 + 6px X gap; 90-degree hardware rotation disabled |
 | Touch | ✅ Working | CST9217 @ 0x5A, TCA9554 P0 reset, GPIO21 hint + throttled fallback polling |
-| SD Card | ✅ Working | Pins verified: CS=41, MOSI=1, MISO=3, SCK=2; 32 GB SDHC tested; 4 MHz default |
+| SD Card | ⚠️ SDMMC validation pending | Former HSPI path and pins were verified; native one-bit SDMMC on GPIO2/1/3 requires cold/warm/reset, read/write, and representative-card acceptance |
 | RTC | ✅ Integrated | PCF85063 @ 0x51; invalid/voltage-low values rejected; BLE sync and warm-reset restore verified with battery present; full USB-removal retention still needs final battery retest |
 | IMU | ✅ Diagnostic | QMI8658 @ 0x6B primary / 0x6A fallback; low-rate diagnostic accel/gyro sampling only |
 | I/O Expander | ✅ Working | TCA9554 @ 0x20 controls touch reset; can be missed early but recovered by shared I2C retry/recovery |

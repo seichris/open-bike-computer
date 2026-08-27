@@ -16,12 +16,20 @@ coordination originally included in point 8 is no longer required. This
 implementation contains no playback-demo code, documentation, build, flash, or
 physical-validation work, and none is a completion gate below.
 
+Owner architecture amendment (2026-08-27): physical validation of the retained
+HSPI design found repeatable warm-reset CMD0/CRC failures with the known-good
+32 GB SDHC card even after full SPI teardown. Workstream C now uses the
+vendor-native ESP32-S3 one-bit `SD_MMC` path on GPIO2/1/3 for both Waveshare
+boards. HSPI-specific text below has been replaced; the bounded recovery,
+health-check, FFat fallback, diagnostics, and physical acceptance gates remain.
+
 The retained scope is deliberately limited to the earlier recommendations:
 
 1. replace ambient/global PlatformIO with a repository-owned, content-pinned
    host runtime;
 2. separate reusable custom-core identity from firmware source identity;
-3. make Waveshare SD initialization recover safely from warm-reset bus state;
+3. move Waveshare storage to native one-bit SDMMC and recover safely from
+   warm-reset card state;
 4. make speaker teardown idempotent and add a local device-name registry.
 
 The following recommendations are explicitly excluded and must not be smuggled
@@ -118,23 +126,16 @@ identities:
 
 ### Warm-reset SD behavior
 
-`Storage::initSD()` creates a static HSPI object, calls `hspi.begin()`, and
-makes one `SD.begin()` attempt at the configured 4 MHz operating frequency. A
-failure returns immediately. `ensureSdMounted()` calls `SD.end()` before a
-later retry but never calls `hspi.end()`.
+At the original plan baseline, `Storage::initSD()` created a static HSPI object
+and made one `SD.begin()` attempt at 4 MHz. The first Workstream C implementation
+added complete HSPI teardown and bounded retries. The known-good 32 GB SDHC card
+still failed inserted-card warm-reset acceptance with CMD0/CRC errors and could
+require full power removal.
 
-Arduino ESP32 core 3.3.4 already performs the required SD initialization
-sequence inside `ff_sd_initialize()`:
-
-- it starts at 400 kHz;
-- sends 160 idle clocks with CS high;
-- issues `GO_IDLE_STATE`/CMD0; and
-- only uses the requested operating frequency after initialization.
-
-The implementation must therefore fix lifecycle teardown and bounded recovery
-first. It must not add a second hand-written SD command implementation or claim
-that merely passing 400 kHz to `SD.begin()` fixes an initialization path that
-already uses 400 kHz.
+Waveshare's maintained Arduino examples for both supported boards use native
+one-bit `SD_MMC` on GPIO2 CLK, GPIO1 CMD, and GPIO3 D0. The accepted revision
+follows that path at the standard 20 MHz frequency, keeps bounded teardown and
+retries, and does not add a hand-written SD command implementation.
 
 ### Speaker cleanup
 
@@ -179,8 +180,8 @@ Main must not gain an orphan README or target for that retired workflow.
 7. **No symlink-based cache trust.** Cache validation and deletion reject
    symlinks, special files, traversal, unexpected ownership, and paths outside
    the exact content-addressed subtree.
-8. **No SD protocol fork.** Use the pinned Arduino SD implementation. Recovery
-   owns bus/resource lifecycle around it, not a parallel card driver.
+8. **No SD protocol fork.** Use the pinned Arduino `SD_MMC` implementation in
+   native one-bit mode. Recovery owns its lifecycle, not a parallel card driver.
 9. **Bounded boot latency.** SD retries have a fixed maximum attempt count and
    time budget, then retain the current FFat fallback.
 10. **No unsafe rail experiments.** Do not toggle an AXP2101 rail or change
@@ -606,65 +607,53 @@ application compile, link, and attestation. On the same host and target:
 The observed roughly five-minute cold rebuild versus roughly 50-second
 application rebuild is motivation, not a hardcoded universal timing claim.
 
-## Workstream C: bounded Waveshare SD warm-reset recovery
+## Workstream C: native Waveshare SDMMC with bounded warm-reset recovery
 
-### C1. Own the HSPI lifecycle
+### C1. Use the vendor-native peripheral and pins
 
-Move the Waveshare HSPI object and its begun/mounted state into a file-local
-controller owned by `storage.cpp` or an explicit private `Storage` member.
-Do not hide it as a function-local static with no teardown state.
+For both Waveshare profiles, configure Arduino `SD_MMC` with GPIO2 CLK, GPIO1
+CMD, and GPIO3 D0, then mount `/sdcard` in one-bit mode. Do not drive the
+1.75-inch GPIO41 or 2.06-inch GPIO17 D3/legacy-CS trace. The native SDMMC
+peripheral preserves the established isolation from display QSPI without
+owning HSPI or reconfiguring any SPI controller during file access.
 
-Implement one idempotent teardown operation:
-
-1. close/unmount the Arduino SD filesystem with `SD.end()`;
-2. end HSPI with `hspi.end()` only when begun;
-3. set CS to output/high;
-4. clear internal mounted/begun state; and
-5. wait the policy-selected settle interval before another attempt.
-
-Calling teardown before initialization, after partial initialization, after a
-successful mount, or twice must be safe.
+Use `SDMMC_FREQ_DEFAULT` (20 MHz) initially. Waveshare's examples default to
+the library's high-speed ceiling, but transport migration and peak-frequency
+tuning are separate acceptance decisions. A later frequency change requires
+both-board, representative-card stability and throughput evidence.
 
 ### C2. Mount retry state machine
 
 For Waveshare 1.75 and 2.06 profiles, implement a fixed three-attempt policy:
 
-| Attempt | Preparation | Operating frequency | Failure delay |
+| Attempt | Preparation | Operating frequency | Delay before attempt |
 | --- | --- | ---: | ---: |
-| 1 | clean stale Arduino/HSPI state, CS high | configured 4 MHz default | 50 ms |
-| 2 | full `SD.end()` + `hspi.end()`, recreate bus | configured 4 MHz default | 150 ms |
-| 3 | full teardown and final recreate | configured 4 MHz default | none |
-
-Arduino's pinned SD driver already initializes every attempt at 400 kHz and
-sends the required idle clocks/CMD0. Do not add a frequency ladder until logs
-show a post-initialization high-speed failure. If later evidence supports a
-lower operating-frequency fallback, make it a separate measured change and
-record the map and sequential-read throughput impact.
+| 1 | idempotent `SD_MMC.end()`, set native pins | 20 MHz default | none |
+| 2 | full `SD_MMC.end()`, set native pins again | 20 MHz default | 50 ms |
+| 3 | full `SD_MMC.end()`, final pin/mount attempt | 20 MHz default | 150 ms |
 
 Each attempt must:
 
 - acquire the existing storage power-management lock;
-- run under one mount single-flight/mutex;
-- call `hspi.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS)`;
-- call `SD.begin(..., WAVESHARE_SD_SPI_FREQ_HZ, "/sdcard")`;
+- run under the existing mount single-flight/mutex when invoked as a remount;
+- call `SD_MMC.setPins(WAVESHARE_SDMMC_CLK, WAVESHARE_SDMMC_CMD,
+  WAVESHARE_SDMMC_D0)`;
+- call `SD_MMC.begin("/sdcard", true, false, WAVESHARE_SDMMC_FREQ_KHZ, 5)`;
 - reject `CARD_NONE`;
 - open and close the filesystem root as a basic mount-health check; and
 - publish `isSdLoaded=true` only after all checks pass.
 
-After all attempts fail, retain the current FFat fallback. Do not loop forever
-or reboot automatically.
+After all attempts fail, end SDMMC once more and retain the current FFat
+fallback. Do not format removable media, loop forever, reboot automatically,
+or toggle a PMIC rail.
 
-### C3. Re-mount behavior
+### C3. Re-mount and stable-backend behavior
 
-`ensureSdMounted()` already serializes a health check and reinitialization.
-Refactor it to call one private `mountSdLocked()` operation so locks are not
-recursively acquired and boot-time and runtime recovery share the exact retry
-policy.
-
-Add a bounded retry cooldown after a complete failed sequence so a missing card
-cannot stall every map/storage call. A successful card insertion or explicit
-operator retry may clear the cooldown; there is no automatic hot-swap guarantee
-until physically validated.
+`ensureSdMounted()` serializes health checking and reinitialization. The later
+diagnostics implementation deliberately keeps one `/sdcard` backend for the
+complete boot: an automatic diagnostics retry does not evict an active FFat
+recorder, while an explicit map-transfer remount may quiesce users, unmount
+FFat, run the bounded SDMMC sequence, and restore FFat if it fails.
 
 Open files must never survive teardown. Callers that observe an I/O failure
 continue to close their file, mark SD unavailable, and retry from a higher-level
@@ -672,41 +661,32 @@ operation rather than having the storage layer silently replay a partial write.
 
 ### C4. Structured diagnostics
 
-Replace ambiguous single-result logging with:
+Replace ambiguous single-result logging with stable application phases:
 
 ```text
-SDIO: attempt=1/3 phase=begin bus=HSPI freq=4000000
-SDIO: attempt=1/3 phase=mount ok=0 elapsedMs=...
-SDIO: recovery action=full-bus-teardown delayMs=50
-SDIO: attempt=2/3 phase=mount ok=1 elapsedMs=... type=SDHC sizeMB=...
+SDIO: init bus=SDMMC mode=1bit freqKHz=20000 pins[clk=2 cmd=1 d0=3]
+SDIO: attempt=1/3 phase=begin bus=SDMMC mode=1bit freqKHz=20000
+SDIO: attempt=1/3 phase=mount pins=1 mounted=0 card=0 root=0 elapsedMs=...
+SDIO: recovery action=sdmmc-teardown delayMs=50
 SDIO: summary ok=1 attempts=2 totalElapsedMs=... fallback=none
 ```
 
-When all attempts fail, emit exactly one summary naming `fallback=ffat`.
+When all attempts fail, emit one summary naming FFat as the next backend.
 Retain the low-volume always-on `SDIO:` policy and keep verbose map I/O logs
-opt-in.
-
-Do not parse unstable ESP-IDF log text as application state. Record stable
-application phases around the boolean Arduino API while preserving underlying
-driver warnings for diagnosis.
+opt-in. Do not parse unstable ESP-IDF log text as application state; preserve
+underlying driver warnings only as supporting diagnosis.
 
 ### C5. SD policy tests
 
-Extract only the attempt/delay/result transition policy into a small
-hardware-independent header or source module and add a host test covering:
+Keep the attempt/delay/result transition policy in a small hardware-independent
+header and cover first-, second-, and third-attempt success, root-health-check
+failure, complete bounded failure, teardown before every attempt, and the exact
+50/150 ms delay sequence. Source-contract tests must also reject HSPI,
+`SD.begin()`, legacy CS ownership, and per-file bus reinitialization from the
+Waveshare branch while preserving the merged diagnostics/FFat backend rules.
 
-- first-attempt success;
-- second/third-attempt recovery;
-- complete failure and one FFat fallback;
-- teardown before/after every partial state;
-- idempotent repeated teardown;
-- root-health-check failure;
-- cooldown and retry after cooldown;
-- concurrent callers seeing one attempt sequence; and
-- no-card behavior staying bounded.
-
-Do not create a new repository-wide test runner. Add the test to the existing
-CI command list in `.github/workflows/ci.yml`.
+Do not create a new repository-wide test runner. Add the host policy test to
+the existing CI command list in `.github/workflows/ci.yml`.
 
 ### C6. Physical validation matrix
 
@@ -723,7 +703,7 @@ For both Waveshare board families, when hardware is available:
 | Intentional USB serial reset | 20 | mount succeeds without unplugging |
 | Runtime mark-unavailable/remount | 20 | one bounded sequence restores access |
 | No card inserted | 10 | bounded failure, one FFat fallback, no reboot loop |
-| Card restored after failure | 10 | later explicit/cooldown retry succeeds |
+| Card restored after failure | 10 | later explicit remount succeeds |
 
 Use at least three representative FAT32 cards, including the known-good 32 GB
 SDHC card and another vendor/capacity. For each successful mount, read a fixed
@@ -737,8 +717,8 @@ Acceptance requires:
 - no Guru Meditation, watchdog, or repeated boot;
 - no filesystem corruption or leaked file handles;
 - final-failure latency no greater than six seconds before FFat fallback; and
-- map-block and sequential-read performance at 4 MHz remaining within 5% of
-  baseline medians.
+- map-block and sequential-read performance at the 20 MHz SDMMC default not
+  regressing more than 5% from the recorded 4 MHz HSPI baseline medians.
 
 If the 2.06 board is unavailable, software may be reviewed but the workstream
 is not reported physically complete for that board.
@@ -862,8 +842,8 @@ rewrite:
 3. **Core/build manifest split:** core input key, local immutable cache,
    hydration, upload manifest separation, regression tests.
 4. **Cross-worktree core cache:** only after the relocatability gate passes.
-5. **SD lifecycle/retry:** storage refactor, host policy tests, structured logs,
-   both-board/card physical evidence.
+5. **SDMMC lifecycle/retry:** native one-bit storage refactor, host policy
+   tests, structured logs, both-board/card physical evidence.
 6. **Speaker lifecycle:** resource-state cleanup, failure tests, repeated
    physical playback.
 7. **Device registry:** schema/tool/build integration and documentation.
@@ -885,7 +865,7 @@ cache design that plans to retrofit runtime identity later.
 | `esp32/tools/firmware-runtime/*` | Tracked locks, refresh inputs, licenses, maintainer documentation |
 | `esp32/tools/device_registry.py` | Local nickname/board-family/serial registry |
 | `esp32/tools/resolve_upload_port.py` | Resolve registry result through existing stable-serial logic |
-| `esp32/lib/storage/storage.cpp/.hpp` | Owned HSPI lifecycle, bounded retries, cooldown, structured diagnostics |
+| `esp32/lib/storage/storage.cpp/.hpp` | Native one-bit SDMMC lifecycle, bounded retries, stable FFat fallback, structured diagnostics |
 | `esp32/lib/speaker/speaker.cpp/.hpp` | Explicit resource states and idempotent reverse-order cleanup |
 | `esp32/tools/tests/test_build_firmware.py` | Runtime/core/build/device integration and upload-ineligibility regressions |
 | `esp32/tools/tests/test_generated_sdkconfig.py` | Core/build manifest split and tamper cases |

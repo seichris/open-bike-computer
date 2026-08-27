@@ -348,6 +348,7 @@ jobs:
             test_ride_diagnostics_queue_policy \
             test_ride_diagnostics_control \
             test_ride_diagnostics_http_policy \
+            test_sd_mount_retry_policy \
             test_storage_mount_policy; do
             g++ -std=c++17 -Wall -Wextra -Werror \
               "tools/tests/${test}.cpp" -o "/tmp/${test}"
