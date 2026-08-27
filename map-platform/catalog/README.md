@@ -40,10 +40,10 @@ pnpm check
 `pnpm check` typechecks the Worker, runs the D1 integration tests, and performs
 staging and production Wrangler dry-runs. It does not deploy anything.
 
-The checked-in `wrangler.jsonc` contains the provisioned staging D1 binding and
-the repository owner's non-secret Cloudflare/Apple identifiers. The production
-D1 binding remains invalid until staging passes; replace it only during the
-production step in
+The checked-in `wrangler.jsonc` contains the provisioned staging and production
+D1 bindings plus the repository owner's non-secret Cloudflare/Apple
+identifiers. Provision or replace the production binding only after staging
+passes, following
 [`../../docs/runbooks/cloudflare-r2-final-map-library.md`](../../docs/runbooks/cloudflare-r2-final-map-library.md).
 
 ## Security boundaries
