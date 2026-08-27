@@ -300,7 +300,8 @@ struct MapViewContainer: UIViewRepresentable {
                 context.coordinator.updateUserTrackingMode(
                     mapView: uiView,
                     isNavigating: isNavigating,
-                    isOfflineMapSelectionActive: isOfflineMapSelectionActive
+                    isOfflineMapSelectionActive: isOfflineMapSelectionActive,
+                    preservesStoppedTracking: true
                 )
             } else {
                 if uiView.showsUserLocation {
@@ -395,6 +396,7 @@ struct MapViewContainer: UIViewRepresentable {
             mapView: MKMapView,
             isNavigating: Bool,
             isOfflineMapSelectionActive: Bool,
+            preservesStoppedTracking: Bool = false,
             animated: Bool = true
         ) {
             let isDestinationSelectionActive = mapView.selectedAnnotations.contains {
@@ -415,9 +417,26 @@ struct MapViewContainer: UIViewRepresentable {
             case .followWithHeading:
                 desiredTrackingMode = .followWithHeading
             }
-            if mapView.userTrackingMode != desiredTrackingMode {
-                mapView.setUserTrackingMode(desiredTrackingMode, animated: animated)
+
+            let currentTrackingBehavior: MapTrackingBehavior
+            switch mapView.userTrackingMode {
+            case .none:
+                currentTrackingBehavior = .none
+            case .follow:
+                currentTrackingBehavior = .follow
+            case .followWithHeading:
+                currentTrackingBehavior = .followWithHeading
+            @unknown default:
+                currentTrackingBehavior = .none
             }
+
+            guard MapTrackingPolicy.shouldApplyDesiredMode(
+                currentMode: currentTrackingBehavior,
+                desiredMode: desiredTrackingBehavior,
+                preservesStoppedTracking: preservesStoppedTracking
+            ) else { return }
+
+            mapView.setUserTrackingMode(desiredTrackingMode, animated: animated)
         }
 
         func isFreePanActive(

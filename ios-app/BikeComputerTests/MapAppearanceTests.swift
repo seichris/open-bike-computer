@@ -35,6 +35,7 @@ struct MapAppearanceTests {
         testAppearanceEquality()
         testIdempotentApplication()
         testMapPitchControlTargets()
+        testStoppedTrackingPreservesCamera()
 
         print("MapAppearanceTests passed")
     }
@@ -175,6 +176,44 @@ struct MapAppearanceTests {
         )
         precondition(
             MapViewControlState.targetPitch(isCurrentlyPitched: true) == 0
+        )
+    }
+
+    private static func testStoppedTrackingPreservesCamera() {
+        precondition(
+            !MapTrackingPolicy.shouldApplyDesiredMode(
+                currentMode: .none,
+                desiredMode: .follow,
+                preservesStoppedTracking: true
+            )
+        )
+        precondition(
+            !MapTrackingPolicy.shouldApplyDesiredMode(
+                currentMode: .none,
+                desiredMode: .followWithHeading,
+                preservesStoppedTracking: true
+            )
+        )
+        precondition(
+            MapTrackingPolicy.shouldApplyDesiredMode(
+                currentMode: .follow,
+                desiredMode: .none,
+                preservesStoppedTracking: true
+            )
+        )
+        precondition(
+            MapTrackingPolicy.shouldApplyDesiredMode(
+                currentMode: .follow,
+                desiredMode: .followWithHeading,
+                preservesStoppedTracking: true
+            )
+        )
+        precondition(
+            MapTrackingPolicy.shouldApplyDesiredMode(
+                currentMode: .none,
+                desiredMode: .follow,
+                preservesStoppedTracking: false
+            )
         )
     }
 }
