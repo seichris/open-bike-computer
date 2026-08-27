@@ -826,6 +826,7 @@ struct NavigationProtocolTests {
         testOfflineMapManagerRepairsGeneratedPackDefaults()
         testOfflineMapManagerRenamesCachedPack()
         testSavedMapRenameViewWiring()
+        testSettingsSheetPresentationWiring()
         testDeviceScreenUISettingsWiring()
         testSavedRouteNamingAndViewWiring()
         testOfflineMapManagerRestoresLastTransferIdentity()
@@ -10523,13 +10524,16 @@ struct NavigationProtocolTests {
         )
         assert(
             settingsRootSource.contains(
-                ".sheet(item: createdSharePresentation) { presentation in"
+                "item: settingsSheetPresentation,"
             ) &&
                 settingsRootSource.contains(
-                    "SavedMapShareSheet(url: presentation.url)"
+                    "case .savedMapShare(let url):"
                 ) &&
                 settingsRootSource.contains(
-                    "offlineMapManager.createdShareURL.map"
+                    "SavedMapShareSheet(url: url)"
+                ) &&
+                settingsRootSource.contains(
+                    "presentCreatedShareIfNeeded"
                 ) &&
                 !savedMapsSectionSource.contains("createdShareURL") &&
                 !savedMapsSectionSource.contains(".sheet("),
@@ -10697,6 +10701,53 @@ struct NavigationProtocolTests {
                 managerSource.contains("catch is CancellationError") &&
                 managerSource.contains("OfflineMapPackCompatibilityArchive.remove("),
             "preview ZIPs retain resumable background upload through a sanitized archive"
+        )
+    }
+
+    static func testSettingsSheetPresentationWiring() {
+        let settingsURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift"
+        )
+        let routesURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Views/PlannedRoutesView.swift"
+        )
+        guard let settingsSource = try? String(
+            contentsOf: settingsURL,
+            encoding: .utf8
+        ), let routesSource = try? String(
+            contentsOf: routesURL,
+            encoding: .utf8
+        ) else {
+            assert(
+                false,
+                "settings and saved-routes sources should be available to the integration test"
+            )
+            return
+        }
+
+        assert(
+            settingsSource.contains(
+                "private enum SettingsSheetDestination: Identifiable, Equatable"
+            ) &&
+                settingsSource.contains(
+                    "@State private var presentedSheet: SettingsSheetDestination?"
+                ) &&
+                settingsSource.contains(
+                    "item: settingsSheetPresentation,"
+                ) &&
+                settingsSource.contains(
+                    "presentedSheet = .stravaRouteImport"
+                ) &&
+                settingsSource.contains("case .stravaRouteImport:") &&
+                settingsSource.contains("StravaRouteImportView("),
+            "Strava import is item-driven from the stable Settings root"
+        )
+        assert(
+            routesSource.contains("let onImportFromStrava: () -> Void") &&
+                routesSource.contains("onImportFromStrava()") &&
+                !routesSource.contains("isImportingStrava") &&
+                !routesSource.contains(".sheet("),
+            "Saved Routes requests presentation without owning a transient sheet"
         )
     }
 

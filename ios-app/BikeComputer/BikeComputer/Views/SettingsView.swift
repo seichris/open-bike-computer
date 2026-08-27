@@ -10,6 +10,20 @@ import UIKit
 import CoreLocation
 import MapKit
 
+private enum SettingsSheetDestination: Identifiable, Equatable {
+    case stravaRouteImport
+    case savedMapShare(URL)
+
+    var id: String {
+        switch self {
+        case .stravaRouteImport:
+            return "strava-route-import"
+        case .savedMapShare(let url):
+            return "saved-map-share:\(url.absoluteString)"
+        }
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject var bleManager: BLEManager
     @Environment(\.dismiss) private var dismiss
@@ -30,6 +44,7 @@ struct SettingsView: View {
     @ObservedObject private var rideDiagnosticsRecorder:
         RideDiagnosticsRecorder
     @FocusState private var focusedSavedMapFilename: String?
+    @State private var presentedSheet: SettingsSheetDestination?
     let locationAuthorizationStatus: CLAuthorizationStatus
     let locationAccuracyAuthorization: CLAccuracyAuthorization
     let currentLocation: CLLocation?
@@ -146,7 +161,10 @@ struct SettingsView: View {
 
                 SavedRoutesSettingsSection(
                     routeLibrary: routeLibrary,
-                    stravaCoordinator: stravaIntegrationCoordinator
+                    stravaCoordinator: stravaIntegrationCoordinator,
+                    onImportFromStrava: {
+                        presentedSheet = .stravaRouteImport
+                    }
                 )
 
                 Section {
@@ -217,26 +235,55 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
         }
-        .sheet(item: createdSharePresentation) { presentation in
-            SavedMapShareSheet(url: presentation.url)
-                .presentationDetents([.medium])
+        .sheet(
+            item: settingsSheetPresentation,
+            onDismiss: presentCreatedShareIfNeeded
+        ) { destination in
+            settingsSheetContent(for: destination)
+        }
+        .onAppear(perform: presentCreatedShareIfNeeded)
+        .onChange(of: offlineMapManager.createdShareURL) { _ in
+            presentCreatedShareIfNeeded()
         }
     }
 
-    private var createdSharePresentation:
-        Binding<SavedMapSharePresentation?> {
+    private var settingsSheetPresentation:
+        Binding<SettingsSheetDestination?> {
         Binding(
-            get: {
-                offlineMapManager.createdShareURL.map {
-                    SavedMapSharePresentation(url: $0)
-                }
-            },
-            set: { presentation in
-                if presentation == nil {
+            get: { presentedSheet },
+            set: { nextDestination in
+                let previousDestination = presentedSheet
+                presentedSheet = nextDestination
+                if nextDestination == nil,
+                   case .some(.savedMapShare) = previousDestination {
                     offlineMapManager.clearCreatedShareURL()
                 }
             }
         )
+    }
+
+    @ViewBuilder
+    private func settingsSheetContent(
+        for destination: SettingsSheetDestination
+    ) -> some View {
+        switch destination {
+        case .stravaRouteImport:
+            StravaRouteImportView(
+                coordinator: stravaIntegrationCoordinator
+            )
+        case .savedMapShare(let url):
+            SavedMapShareSheet(url: url)
+                .presentationDetents([.medium])
+        }
+    }
+
+    private func presentCreatedShareIfNeeded() {
+        if let url = offlineMapManager.createdShareURL {
+            guard presentedSheet == nil else { return }
+            presentedSheet = .savedMapShare(url)
+        } else if case .some(.savedMapShare) = presentedSheet {
+            presentedSheet = nil
+        }
     }
 
     private var shouldPromoteBikeComputerSettings: Bool {
@@ -1088,12 +1135,6 @@ private struct SavedMapsSettingsSection: View {
         }
         manager.renameCachedPack(at: packURL, to: commit.proposedName)
     }
-}
-
-private struct SavedMapSharePresentation: Identifiable {
-    let url: URL
-
-    var id: URL { url }
 }
 
 private struct SavedMapShareSheet: View {
