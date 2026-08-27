@@ -35,6 +35,8 @@ STRAVA_OAUTH_SESSION_SECONDS = 10 * 60
 STRAVA_REFRESH_LEASE_SECONDS = 20
 STRAVA_TOKEN_REFRESH_MARGIN_SECONDS = 5 * 60
 STRAVA_CONNECTION_IDLE_DAYS = 30
+STRAVA_PENDING_REVOCATION_SECONDS = 30 * 24 * 60 * 60
+STRAVA_STORAGE_SCHEMA_VERSION = 2
 STRAVA_KEY_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
 STRAVA_SESSION_ID_PATTERN = re.compile(r"oauth_[A-Za-z0-9_-]{24,128}")
 STRAVA_STATE_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,256}")
@@ -430,8 +432,8 @@ class StravaIntegrationStore:
                     installation_id, key_id, nonce, ciphertext,
                     token_revision, connected_at, last_used_at,
                     state, refresh_lease_id, refresh_lease_expires_at,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, 1, ?, ?, 'active', NULL, NULL, ?)
+                    updated_at, revocation_started_at
+                ) VALUES (?, ?, ?, ?, 1, ?, ?, 'active', NULL, NULL, ?, NULL)
                 ON CONFLICT(installation_id) DO UPDATE SET
                     key_id = excluded.key_id,
                     nonce = excluded.nonce,
@@ -442,7 +444,8 @@ class StravaIntegrationStore:
                     state = 'active',
                     refresh_lease_id = NULL,
                     refresh_lease_expires_at = NULL,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    revocation_started_at = NULL
                 """,
                 (
                     installation_id,
@@ -593,7 +596,14 @@ class StravaIntegrationStore:
                 (self._clock(), installation_id, lease_id),
             )
 
-    def mark_pending_revocation(self, installation_id: str) -> bool:
+    def mark_pending_revocation(
+        self,
+        installation_id: str,
+        *,
+        started_at: float | None = None,
+    ) -> bool:
+        now = self._clock()
+        revocation_started_at = now if started_at is None else started_at
         with self._transaction() as connection:
             cursor = connection.execute(
                 """
@@ -601,10 +611,14 @@ class StravaIntegrationStore:
                 SET state = 'pending_revocation',
                     refresh_lease_id = NULL,
                     refresh_lease_expires_at = NULL,
+                    revocation_started_at = CASE
+                        WHEN state = 'active' OR revocation_started_at IS NULL THEN ?
+                        ELSE revocation_started_at
+                    END,
                     updated_at = ?
                 WHERE installation_id = ?
                 """,
-                (self._clock(), installation_id),
+                (revocation_started_at, now, installation_id),
             )
             return cursor.rowcount == 1
 
@@ -623,10 +637,37 @@ class StravaIntegrationStore:
                 SELECT installation_id
                 FROM connections
                 WHERE state = 'pending_revocation'
-                ORDER BY updated_at, installation_id
+                ORDER BY COALESCE(revocation_started_at, updated_at), installation_id
                 """
             ).fetchall()
         return tuple(str(row[0]) for row in rows)
+
+    def expired_pending_revocation_ids(self, *, cutoff: float) -> tuple[str, ...]:
+        with self._transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT installation_id
+                FROM connections
+                WHERE state = 'pending_revocation'
+                  AND COALESCE(revocation_started_at, updated_at) <= ?
+                ORDER BY COALESCE(revocation_started_at, updated_at), installation_id
+                """,
+                (cutoff,),
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
+    def delete_connections(self, installation_ids: tuple[str, ...]) -> int:
+        if not installation_ids:
+            return 0
+        with self._transaction() as connection:
+            deleted = 0
+            for installation_id in installation_ids:
+                cursor = connection.execute(
+                    "DELETE FROM connections WHERE installation_id = ?",
+                    (installation_id,),
+                )
+                deleted += max(cursor.rowcount, 0)
+            return deleted
 
     def idle_connection_ids(self, *, cutoff: float) -> tuple[str, ...]:
         with self._transaction() as connection:
@@ -660,7 +701,11 @@ class StravaIntegrationStore:
                 version = connection.execute(
                     "SELECT schema_version FROM strava_schema WHERE singleton = 1"
                 ).fetchone()
-                if version is None or int(version[0]) != 1:
+                if (
+                    version is None
+                    or int(version[0]) < 1
+                    or int(version[0]) > STRAVA_STORAGE_SCHEMA_VERSION
+                ):
                     raise ValueError("unsupported Strava integration database schema")
                 connection.execute(
                     """
@@ -698,6 +743,26 @@ class StravaIntegrationStore:
                 )
                 connection.execute(
                     "CREATE INDEX IF NOT EXISTS connections_maintenance ON connections(state, last_used_at)"
+                )
+                if int(version[0]) == 1:
+                    connection.execute(
+                        "ALTER TABLE connections ADD COLUMN revocation_started_at REAL"
+                    )
+                    connection.execute(
+                        "UPDATE strava_schema SET schema_version = ? WHERE singleton = 1",
+                        (STRAVA_STORAGE_SCHEMA_VERSION,),
+                    )
+                columns = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(connections)").fetchall()
+                }
+                if "revocation_started_at" not in columns:
+                    raise ValueError("Strava integration database schema is incomplete")
+                connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS connections_revocation_expiry
+                    ON connections(state, revocation_started_at)
+                    """
                 )
                 connection.commit()
             finally:
@@ -933,7 +998,7 @@ class StravaIntegrationService:
             return {"disconnected": True, "revocationPending": False}
         self.store.mark_pending_revocation(installation_id)
         try:
-            self.client.revoke(record.bundle.access_token)
+            self.client.revoke(record.bundle.refresh_token)
         except StravaClientError as exc:
             if exc.code == "strava_temporarily_unavailable" or exc.code == "strava_rate_limited":
                 return {"disconnected": True, "revocationPending": True}
@@ -982,35 +1047,62 @@ class StravaIntegrationService:
         if not 1 <= maximum_revocations <= 1_000:
             raise ValueError("Strava maintenance batch is invalid")
         removed_sessions = self.store.prune_oauth_sessions()
+        now = self._clock()
+        revocation_cutoff = now - STRAVA_PENDING_REVOCATION_SECONDS
+        expired_ids = self.store.expired_pending_revocation_ids(
+            cutoff=revocation_cutoff
+        )
         if self.client is None or self.config.key_ring is None:
+            expired = self.store.delete_connections(expired_ids)
             return {
                 "removedOAuthSessions": removed_sessions,
                 "markedIdleConnections": 0,
                 "completedRevocations": 0,
+                "expiredPendingRevocations": expired,
                 "pendingRevocations": len(self.store.pending_revocation_ids()),
             }
-        cutoff = self._clock() - self.config.connection_idle_days * 24 * 60 * 60
+        cutoff = now - self.config.connection_idle_days * 24 * 60 * 60
         idle_ids = self.store.idle_connection_ids(cutoff=cutoff)
         for installation_id in idle_ids[:maximum_revocations]:
-            self.store.mark_pending_revocation(installation_id)
+            # The connection has already reached its 30-day idle retention
+            # limit. Give Strava one revocation attempt in this pass, but make
+            # the encrypted credential eligible for deletion even if that
+            # attempt cannot reach Strava.
+            self.store.mark_pending_revocation(
+                installation_id,
+                started_at=cutoff,
+            )
         completed = 0
+        expired = 0
         pending = self.store.pending_revocation_ids()
         for installation_id in pending[:maximum_revocations]:
-            record = self.store.connection(installation_id, include_pending=True)
+            try:
+                record = self.store.connection(installation_id, include_pending=True)
+            except StravaIntegrationError:
+                self.store.delete_connection(installation_id)
+                completed += 1
+                continue
             if record is None:
                 self.store.delete_connection(installation_id)
                 continue
             try:
-                self.client.revoke(record.bundle.access_token)
+                self.client.revoke(record.bundle.refresh_token)
             except StravaClientError as exc:
                 if exc.code in {"strava_temporarily_unavailable", "strava_rate_limited"}:
+                    if installation_id in expired_ids:
+                        expired += int(self.store.delete_connection(installation_id))
                     continue
             self.store.delete_connection(installation_id)
             completed += 1
+        remaining_expired_ids = self.store.expired_pending_revocation_ids(
+            cutoff=revocation_cutoff
+        )
+        expired += self.store.delete_connections(remaining_expired_ids)
         return {
             "removedOAuthSessions": removed_sessions,
             "markedIdleConnections": min(len(idle_ids), maximum_revocations),
             "completedRevocations": completed,
+            "expiredPendingRevocations": expired,
             "pendingRevocations": len(self.store.pending_revocation_ids()),
         }
 

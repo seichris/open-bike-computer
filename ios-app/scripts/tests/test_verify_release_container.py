@@ -49,6 +49,11 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
                     "CFBundleIcons": {
                         "CFBundlePrimaryIcon": {"CFBundleIconName": "AppIcon"}
                     },
+                    "BicinoURLScheme": "bikecomputer",
+                    "CFBundleURLTypes": [
+                        {"CFBundleURLSchemes": ["bikecomputer"]}
+                    ],
+                    "LSApplicationQueriesSchemes": ["strava"],
                     "NSSupportsLiveActivities": True,
                 },
                 handle,
@@ -119,6 +124,11 @@ class ReleaseContainerVerifierTests(unittest.TestCase):
                             "CFBundleIconName": "AppIconDev"
                         }
                     },
+                    "BicinoURLScheme": "bikecomputer-dev",
+                    "CFBundleURLTypes": [
+                        {"CFBundleURLSchemes": ["bikecomputer-dev"]}
+                    ],
+                    "LSApplicationQueriesSchemes": ["strava"],
                     "NSSupportsLiveActivities": True,
                 },
             ),

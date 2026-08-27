@@ -16,6 +16,7 @@ from map_platform.strava_client import (
     StravaTokenResponse,
 )
 from map_platform.strava_integrations import (
+    STRAVA_PENDING_REVOCATION_SECONDS,
     STRAVA_ROUTE_CACHE_SECONDS,
     StravaConnectionRecord,
     StravaIntegrationConfig,
@@ -288,6 +289,23 @@ class StravaIntegrationStoreTests(unittest.TestCase):
         with self.assertRaises(StravaIntegrationError):
             self.store.consume_oauth_session(expired_state)
 
+    def test_repeated_pending_mark_does_not_extend_revocation_deadline(self):
+        self.store.put_connection(
+            INSTALLATION_ID,
+            bundle(),
+            connected_at=self.clock(),
+        )
+        self.store.mark_pending_revocation(INSTALLATION_ID)
+        self.clock.value += 10 * 24 * 60 * 60
+        self.store.mark_pending_revocation(INSTALLATION_ID)
+        self.clock.value += 20 * 24 * 60 * 60
+
+        expired = self.store.expired_pending_revocation_ids(
+            cutoff=self.clock() - STRAVA_PENDING_REVOCATION_SECONDS
+        )
+
+        self.assertEqual(expired, (INSTALLATION_ID,))
+
 
 class StravaIntegrationServiceTests(unittest.TestCase):
     def setUp(self):
@@ -417,6 +435,39 @@ class StravaIntegrationServiceTests(unittest.TestCase):
         self.client.revoke_error = None
         maintenance = self.service.maintenance()
         self.assertEqual(maintenance["completedRevocations"], 1)
+        self.assertEqual(maintenance["expiredPendingRevocations"], 0)
+        self.assertFalse(self.store.connection_exists(INSTALLATION_ID))
+
+    def test_failed_revocation_credential_is_deleted_at_thirty_day_limit(self):
+        self.connect()
+        self.client.revoke_error = StravaClientError(
+            "strava_temporarily_unavailable",
+            status_code=503,
+        )
+        self.service.disconnect(INSTALLATION_ID)
+        self.clock.value += STRAVA_PENDING_REVOCATION_SECONDS
+
+        maintenance = self.service.maintenance()
+
+        self.assertEqual(maintenance["completedRevocations"], 0)
+        self.assertEqual(maintenance["expiredPendingRevocations"], 1)
+        self.assertEqual(maintenance["pendingRevocations"], 0)
+        self.assertFalse(self.store.connection_exists(INSTALLATION_ID))
+
+    def test_expired_revocation_credential_is_deleted_without_strava_client(self):
+        self.connect()
+        self.client.revoke_error = StravaClientError(
+            "strava_temporarily_unavailable",
+            status_code=503,
+        )
+        self.service.disconnect(INSTALLATION_ID)
+        self.clock.value += STRAVA_PENDING_REVOCATION_SECONDS
+        self.service.client = None
+
+        maintenance = self.service.maintenance()
+
+        self.assertEqual(maintenance["expiredPendingRevocations"], 1)
+        self.assertEqual(maintenance["pendingRevocations"], 0)
         self.assertFalse(self.store.connection_exists(INSTALLATION_ID))
 
     def test_disconnect_removes_an_undecryptable_local_connection(self):
@@ -440,6 +491,21 @@ class StravaIntegrationServiceTests(unittest.TestCase):
         result = self.service.maintenance()
         self.assertEqual(result["markedIdleConnections"], 1)
         self.assertEqual(result["completedRevocations"], 1)
+        self.assertFalse(self.store.connection_exists(INSTALLATION_ID))
+
+    def test_idle_connection_credential_is_deleted_if_revocation_is_unavailable(self):
+        self.connect()
+        self.client.revoke_error = StravaClientError(
+            "strava_temporarily_unavailable",
+            status_code=503,
+        )
+        self.clock.value += 31 * 24 * 60 * 60
+
+        result = self.service.maintenance()
+
+        self.assertEqual(result["markedIdleConnections"], 1)
+        self.assertEqual(result["completedRevocations"], 0)
+        self.assertEqual(result["expiredPendingRevocations"], 1)
         self.assertFalse(self.store.connection_exists(INSTALLATION_ID))
 
 

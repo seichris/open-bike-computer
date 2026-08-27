@@ -94,7 +94,7 @@ fi
 xcrun simctl bootstatus "${SIMULATOR_UDID}" -b
 
 cd "${IOS_APP_DIR}"
-xcodebuild \
+"${SCRIPT_DIR}/xcodebuild-cli.sh" \
   -quiet \
   -project BikeComputer/BikeComputer.xcodeproj \
   -scheme "${SCHEME}" \

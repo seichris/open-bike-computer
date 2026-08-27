@@ -8,6 +8,13 @@ This document is the reviewed implementation contract for the Strava
 integration on this branch. It does not contain credentials and does not by
 itself authorize or perform a production rollout.
 
+Implementation status on this branch: the backend, shared retention contract,
+iPhone import/reload UI, Watch expiry path, tests, and operator/privacy
+documentation are implemented. The feature remains disabled until the
+Strava-side applications, credentials, capacity, privacy/branding review, live
+OAuth validation, deployment, and physical iPhone/Watch/Bicino gates are
+completed.
+
 The product input is a normal Strava route URL such as
 `https://www.strava.com/routes/3009840108578231836`. A rider may paste the URL
 before connecting Strava, but the actual import must use that rider's Strava
@@ -78,7 +85,8 @@ return the route to the connected athlete, Bicino reports that it is unavailable
 ### Retention decision
 
 Strava's current policy permits at most a seven-day cache and separately
-requires user deletions to be reflected within 48 hours. For the first release:
+requires a route deletion made on Strava to be reflected within 48 hours. For
+the first release:
 
 - set Strava route archive lifetime to the full seven days from backend fetch;
 - encode the deletion deadline into the existing `deleteAfter` archive field;
@@ -477,7 +485,8 @@ the import UI does not need them.
 `DELETE /v1/integrations/strava/connection`
 
 Require installation authentication. Immediately mark the connection unusable,
-call Strava's current OAuth revoke endpoint, and delete the local token bundle.
+call Strava's current Basic-authenticated `POST /oauth/revoke` endpoint with the
+encrypted refresh token, and delete the local token bundle.
 If Strava returns a retryable failure, retain only an encrypted, unusable
 pending-revocation record and let maintenance retry with a strict deadline.
 The endpoint remains available when new OAuth/import is feature-disabled.

@@ -113,7 +113,11 @@ compiled in and cannot be extended with an environment variable.
 Only the API and maintenance services receive Strava credentials. The map
 worker deliberately receives none. Maintenance removes expired OAuth sessions,
 revokes idle connections, and retries transiently failed disconnect
-revocations.
+revocations. A pending encrypted revocation credential is deleted after
+success or no later than 30 days after disconnection, including when Strava or
+its client configuration remains unavailable. Revocation uses Strava's current
+Basic-authenticated `POST /oauth/revoke` flow with the encrypted refresh token;
+do not restore the legacy deauthorization endpoint.
 
 Run a job:
 

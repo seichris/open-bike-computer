@@ -329,6 +329,18 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             ios_info["BicinoMapServiceHost"],
             "$(BICINO_MAP_SERVICE_HOST)",
         )
+        self.assertEqual(
+            ios_info["BicinoURLScheme"],
+            "$(BICINO_URL_SCHEME)",
+        )
+        self.assertEqual(
+            ios_info["CFBundleURLTypes"][0]["CFBundleURLSchemes"],
+            ["$(BICINO_URL_SCHEME)"],
+        )
+        self.assertEqual(
+            ios_info["LSApplicationQueriesSchemes"],
+            ["strava"],
+        )
         self.assertTrue(ios_entitlements["com.apple.developer.healthkit"])
         self.assertTrue(watch_entitlements["com.apple.developer.healthkit"])
 
@@ -427,6 +439,7 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             {
                 "NSPrivacyCollectedDataTypePreciseLocation",
                 "NSPrivacyCollectedDataTypeDeviceID",
+                "NSPrivacyCollectedDataTypeUserID",
                 "NSPrivacyCollectedDataTypeOtherUserContent",
                 "NSPrivacyCollectedDataTypeProductInteraction",
             },

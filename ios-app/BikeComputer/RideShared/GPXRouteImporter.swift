@@ -75,7 +75,7 @@ enum GPXRouteImportSourceV1: Equatable {
 }
 
 enum GPXRouteImporterV1 {
-    static let maximumInputBytes = 4 * 1_024 * 1_024
+    nonisolated static let maximumInputBytes = 4 * 1_024 * 1_024
 
     static func archive(
         data: Data,

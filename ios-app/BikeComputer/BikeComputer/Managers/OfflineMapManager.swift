@@ -1698,13 +1698,12 @@ final class OfflineMapManager: ObservableObject {
 
     private let defaults: UserDefaults
     private let mapPlatformSession: URLSession
+    private let bicinoServiceSession: BicinoServiceSession
     private let packDownload: PackDownloadOperation
     private let previewLoad: OfflineMapPreviewLoadOperation
     private let mapSnapshot: OfflineMapSnapshotOperation
     private let metadataSave: SavedMapArtifactMetadataSaveOperation
     private let cacheDirectoryOverride: URL?
-    private let installationCredentialStore: OfflineMapInstallationCredentialStore
-    private let legacyBearerTokenStore: OfflineMapLegacyBearerTokenStore
     private let mapStreamTrustStore: BikeMapStreamTrustStore
     private let catalogAppIdentity: MapStreamAppBuildIdentity?
     private let catalogHost: String?
@@ -1712,7 +1711,6 @@ final class OfflineMapManager: ObservableObject {
     private let catalogPendingAliasStore: OfflineMapCatalogPendingAliasStore
     private let catalogClient: OfflineMapCatalogClient?
     private let catalogCredentialCoordinator = OfflineMapCatalogCredentialCoordinator()
-    private let legacyClientInstallationId: String
     private(set) var clientInstallationId: String
     private(set) var clientInstallationToken: String?
     private let deviceTransferManager = DeviceTransferManager()
@@ -1736,6 +1734,7 @@ final class OfflineMapManager: ObservableObject {
     init(
         defaults: UserDefaults = .standard,
         mapPlatformSession: URLSession = .shared,
+        bicinoServiceSession: BicinoServiceSession? = nil,
         cacheDirectory: URL? = nil,
         mapStreamTrustStore: BikeMapStreamTrustStore? = nil,
         catalogAppIdentity: MapStreamAppBuildIdentity? = .current,
@@ -1773,18 +1772,17 @@ final class OfflineMapManager: ObservableObject {
         OfflineMapPackCompatibilityArchive.removeOrphans()
         self.defaults = defaults
         self.mapPlatformSession = mapPlatformSession
+        let bicinoServiceSession = bicinoServiceSession ??
+            BicinoServiceSession(
+                defaults: defaults,
+                urlSession: mapPlatformSession
+            )
+        self.bicinoServiceSession = bicinoServiceSession
         self.packDownload = packDownload
         self.previewLoad = previewLoad
         self.mapSnapshot = mapSnapshot
         self.metadataSave = metadataSave
         self.cacheDirectoryOverride = cacheDirectory
-        self.installationCredentialStore = OfflineMapInstallationCredentialStore(defaults: defaults)
-        let legacyBearerTokenStore = OfflineMapLegacyBearerTokenStore(defaults: defaults)
-        OfflineMapSharedSecretMigration.migrateCustomServerValues(
-            defaults: defaults,
-            tokenStore: legacyBearerTokenStore
-        )
-        self.legacyBearerTokenStore = legacyBearerTokenStore
         self.mapStreamTrustStore = mapStreamTrustStore ??
             OfflineMapCatalogConfig.mapStreamTrustStore
         self.catalogAppIdentity = catalogAppIdentity
@@ -1811,13 +1809,11 @@ final class OfflineMapManager: ObservableObject {
         ))
 #endif
         let resolvedServerURL = Self.resolvedServerURL(defaults: defaults)
-        let installationCredential = installationCredentialStore.load(
+        let installationCredential = bicinoServiceSession.loadedCredential(
             serverURLString: resolvedServerURL
         )
-        let legacyInstallationID = OfflineMapInstallationIdentity.resolve(defaults: defaults)
-        self.legacyClientInstallationId = legacyInstallationID
         self.clientInstallationId = installationCredential?.clientInstallationId ??
-            legacyInstallationID
+            OfflineMapInstallationIdentity.resolve(defaults: defaults)
         self.clientInstallationToken = installationCredential?.clientInstallationToken
         self.packDisplayNames = defaults.dictionary(forKey: OfflineMapDefaults.packDisplayNamesKey) as? [String: String] ?? [:]
         self.serverURLString = resolvedServerURL
@@ -3868,22 +3864,8 @@ final class OfflineMapManager: ObservableObject {
         serverURLString: String? = nil
     ) throws -> OfflineMapPlatformClient {
         let value = serverURLString ?? self.serverURLString
-        guard let url = URL(string: value), url.scheme != nil else {
-            throw OfflineMapPlatformError.invalidBaseURL
-        }
-        let credential = installationCredentialStore.load(serverURLString: value)
-        let installationID = credential?.clientInstallationId ?? legacyClientInstallationId
-        let legacyBearerToken = legacyBearerTokenStore.load(serverURLString: value) ??
-            OfflineMapSharedSecretMigration.legacyCustomToken(
-                serverURLString: value,
-                defaults: defaults
-            )
-        return OfflineMapPlatformClient(
-            baseURL: url,
-            legacyBearerToken: legacyBearerToken,
-            clientInstallationId: installationID,
-            clientInstallationToken: credential?.clientInstallationToken,
-            session: mapPlatformSession
+        return try bicinoServiceSession.makeOfflineMapClient(
+            serverURLString: value
         )
     }
 
@@ -3891,95 +3873,18 @@ final class OfflineMapManager: ObservableObject {
         client: OfflineMapPlatformClient,
         honorRefreshBackoff: Bool = true
     ) async throws -> OfflineMapPlatformClient {
-        if honorRefreshBackoff,
-           client.clientInstallationToken?.isEmpty == false,
-           OfflineMapInstallationRefreshBackoff.shouldDefer(
-                serverURLString: client.baseURL.absoluteString,
-                defaults: defaults
-           ) {
-            do {
-                _ = try await client.jobs()
-                return client
-            } catch let error as OfflineMapPlatformError {
-                guard case .serverStatus(let status, _) = error,
-                      status == 401 else {
-                    return client
-                }
-                OfflineMapInstallationRefreshBackoff.clear(
-                    serverURLString: client.baseURL.absoluteString,
-                    defaults: defaults
-                )
-                return try await ensureRegisteredInstallation(
-                    client: client,
-                    honorRefreshBackoff: false
-                )
-            } catch {
-                return client
-            }
-        }
-        do {
-            let credential = try await client.registerInstallation()
-            if !client.canAdoptInstallationCredential(credential) {
-                // Servers predating credential refresh ignore the existing ID
-                // and issue a replacement. Keep the proven credential so owned
-                // jobs are not orphaned during a staggered deployment. Back off
-                // before probing again so the legacy endpoint's issuance quota
-                // cannot be exhausted by normal map actions.
-                OfflineMapInstallationRefreshBackoff.deferRefresh(
-                    serverURLString: client.baseURL.absoluteString,
-                    defaults: defaults
-                )
-                return client
-            }
-            OfflineMapInstallationRefreshBackoff.clear(
-                serverURLString: client.baseURL.absoluteString,
-                defaults: defaults
+        let registered = try await bicinoServiceSession
+            .ensureRegisteredInstallation(
+                client: client,
+                honorRefreshBackoff: honorRefreshBackoff
             )
-            return try registeredClient(credential, replacing: client)
-        } catch let error as OfflineMapPlatformError {
-            if case .serverStatus(let status, _) = error, status == 404 || status == 405 {
-                return client
-            }
-            if case .serverStatus(let status, _) = error,
-               status == 401,
-               client.clientInstallationToken?.isEmpty == false {
-                let replacement = OfflineMapPlatformClient(
-                    baseURL: client.baseURL,
-                    legacyBearerToken: client.legacyBearerToken,
-                    clientInstallationId: legacyClientInstallationId,
-                    mapStreamTrustCapabilities: client.mapStreamTrustCapabilities,
-                    mapStreamAppBuildIdentity: client.mapStreamAppBuildIdentity,
-                    session: mapPlatformSession
-                )
-                let credential = try await replacement.registerInstallation()
-                return try registeredClient(credential, replacing: replacement)
-            }
-            throw error
+        if OfflineMapServerIdentity.normalized(
+            registered.baseURL.absoluteString
+        ) == OfflineMapServerIdentity.normalized(serverURLString) {
+            clientInstallationId = registered.clientInstallationId
+            clientInstallationToken = registered.clientInstallationToken
         }
-    }
-
-    private func registeredClient(
-        _ credential: OfflineMapInstallationCredential,
-        replacing client: OfflineMapPlatformClient
-    ) throws -> OfflineMapPlatformClient {
-        try installationCredentialStore.save(
-            credential,
-            serverURLString: client.baseURL.absoluteString
-        )
-        if OfflineMapServerIdentity.normalized(client.baseURL.absoluteString) ==
-            OfflineMapServerIdentity.normalized(serverURLString) {
-            clientInstallationId = credential.clientInstallationId
-            clientInstallationToken = credential.clientInstallationToken
-        }
-        return OfflineMapPlatformClient(
-            baseURL: client.baseURL,
-            legacyBearerToken: client.legacyBearerToken,
-            clientInstallationId: credential.clientInstallationId,
-            clientInstallationToken: credential.clientInstallationToken,
-            mapStreamTrustCapabilities: client.mapStreamTrustCapabilities,
-            mapStreamAppBuildIdentity: client.mapStreamAppBuildIdentity,
-            session: mapPlatformSession
-        )
+        return registered
     }
 
     private func recoveryServerURL(

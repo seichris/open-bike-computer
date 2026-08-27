@@ -55,6 +55,8 @@ struct ContentView: View {
     @StateObject private var offlineMapManager: OfflineMapManager
     @StateObject private var watchAvailability: WorkoutWatchAvailabilityMonitor
     @ObservedObject private var routeLibrary: PhoneRouteLibrary
+    @ObservedObject private var stravaIntegrationCoordinator:
+        StravaIntegrationCoordinator
     @ObservedObject private var workoutStore: WorkoutMetricsStore
     @ObservedObject private var liveActivityDiagnostics:
         WorkoutLiveActivityDiagnosticStore
@@ -114,6 +116,9 @@ struct ContentView: View {
         rideAutomationCoordinator: RideAutomationCoordinator? = nil,
         watchAvailability: WorkoutWatchAvailabilityMonitor? = nil,
         routeLibrary: PhoneRouteLibrary? = nil,
+        bicinoServiceSession: BicinoServiceSession? = nil,
+        stravaIntegrationCoordinator:
+            StravaIntegrationCoordinator? = nil,
         liveActivityDiagnostics:
             WorkoutLiveActivityDiagnosticStore? = nil,
         rideDiagnosticsRecorder: RideDiagnosticsRecorder? = nil,
@@ -146,6 +151,17 @@ struct ContentView: View {
         let routeLibrary = routeLibrary ?? PhoneRouteLibrary(
             connectivity: PhoneWatchConnectivityCoordinator()
         )
+        let bicinoServiceSession = bicinoServiceSession ??
+            BicinoServiceSession()
+        let stravaIntegrationCoordinator =
+            stravaIntegrationCoordinator ?? StravaIntegrationCoordinator(
+                client: StravaIntegrationClient(
+                    serviceSession: bicinoServiceSession,
+                    expectedCallbackScheme: BicinoURLSchemeConfig.current
+                ),
+                routeLibrary: routeLibrary,
+                callbackScheme: BicinoURLSchemeConfig.current
+            )
         let rideAutomationCoordinator =
             rideAutomationCoordinator ?? RideAutomationCoordinator(
                 bleManager: coordinator.bleManager,
@@ -177,6 +193,9 @@ struct ContentView: View {
         )
         _watchAvailability = StateObject(wrappedValue: watchAvailability)
         _routeLibrary = ObservedObject(wrappedValue: routeLibrary)
+        _stravaIntegrationCoordinator = ObservedObject(
+            wrappedValue: stravaIntegrationCoordinator
+        )
         _workoutStore = ObservedObject(
             wrappedValue: workoutMirrorManager.store
         )
@@ -194,6 +213,7 @@ struct ContentView: View {
         )
         _offlineMapManager = StateObject(
             wrappedValue: OfflineMapManager(
+                bicinoServiceSession: bicinoServiceSession,
                 diagnosticsRecorder: rideDiagnosticsRecorder
             )
         )
@@ -343,11 +363,14 @@ struct ContentView: View {
             workoutMirrorManager.refreshFreshness()
             observedWorkoutSegmentIndex = currentWorkoutSegment?.index
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
+            stravaIntegrationCoordinator.activate()
             synchronizeRideMetricsSheet()
             presentNearbyBicinoIfEligible()
         }
         .onOpenURL { url in
-            offlineMapManager.handleShareURL(url)
+            if !stravaIntegrationCoordinator.handleOpenURL(url) {
+                offlineMapManager.handleShareURL(url)
+            }
         }
         .alert(
             "Add Shared Map?",
@@ -398,6 +421,7 @@ struct ContentView: View {
             coordinator.applicationDidBecomeActive()
             workoutMirrorManager.refreshFreshness()
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
+            stravaIntegrationCoordinator.activate()
             presentNearbyBicinoIfEligible()
         }
         .onChange(of: coordinator.isNavigating) { _ in
@@ -602,6 +626,8 @@ struct ContentView: View {
                 offlineMapManager: offlineMapManager,
                 firmwareUpdateManager: coordinator.firmwareUpdateManager,
                 routeLibrary: routeLibrary,
+                stravaIntegrationCoordinator:
+                    stravaIntegrationCoordinator,
                 watchAvailability: watchAvailability,
                 cyclingSensorStore: cyclingSensorStore,
                 cyclingSensorDetectionCoordinator:

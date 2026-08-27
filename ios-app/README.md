@@ -221,6 +221,38 @@ Ride Detection is not advertised by production firmware until the physical
 false-start, recovery, and long-run board gates pass. Standalone device ride
 recording and ride history are not part of this feature.
 
+## Importing a Strava route
+
+When the configured Bicino service advertises Strava support, open **Settings >
+Saved Routes** and choose **Import from Strava** directly below **Import GPX**.
+Paste a URL in the form `https://www.strava.com/routes/123`; query parameters
+and fragments are discarded. The first import opens Strava's app or web OAuth
+flow. Bicino can import a cycling route only when it belongs to the connected
+Strava athlete and is visible under the granted `read` or `read_all` scope.
+
+A successful import uses the existing validated route archive and Watch
+transfer path. Its iPhone and Watch copies expire exactly seven days after the
+backend fetch. Every active Strava route has a reload button, and an expired
+route leaves a minimal iPhone reload row with the same button. One tap retrieves
+the route again, replaces its geometry in place, preserves its Bicino-local
+alias, and starts a fresh seven-day window. The rider never needs to paste the
+URL again or repeat OAuth while the connection remains valid.
+
+Expiry removes all Strava-supplied route data and the Watch copy. If the route
+is being navigated on Watch at the deadline, navigation stops but an active
+workout continues. Delete removes the route and reload row; **Disconnect Strava
+and Delete Data** removes every Strava route, reload bookmark, and Bicino-held
+connection for that app installation without modifying routes on Strava.
+
+The integration is disabled by default and does not place a Strava client
+secret or athlete token in the app. Development and Production require separate
+Strava applications, exact callback URLs, backend secrets, encryption keys,
+and sufficient athlete capacity. See
+[`../map-platform/backend/README.md`](../map-platform/backend/README.md#strava-route-import)
+and
+[`../map-platform/deploy/README.md`](../map-platform/deploy/README.md#strava-route-import-configuration)
+for the complete configuration and promotion contract.
+
 ## Watch + Bicino navigation without iPhone
 
 The Watch can own location, route progress, maneuvers, and the direct
@@ -246,11 +278,12 @@ behavior.
 
 Offline mode is the default:
 
-1. On iPhone, open **Settings**, find **Saved Routes**, choose **Import GPX**,
-   and select a user-owned GPX route or track. The longest usable route/track
-   segment is validated and saved. MapKit alternatives remain
-   active-navigation only; **Save Offline** stays disabled until an approved
-   export-capable provider is configured.
+1. On iPhone, open **Settings** and find **Saved Routes**. Choose **Import GPX**
+   for a durable user-owned GPX route or track, or use the optional Strava flow
+   above for a seven-day provider-backed copy. The longest usable route/track
+   segment is validated and saved. MapKit alternatives remain active-navigation
+   only; **Save Offline** stays disabled until an approved export-capable
+   provider is configured.
 2. Send the route to Watch and wait for its green Watch status icon. **Queued**
    does not prove the route is installed.
 3. On Watch, open **Offline Navigation**, select the installed route, and

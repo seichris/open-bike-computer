@@ -24,12 +24,24 @@ enum RideSharedTests {
                     "https://www.strava.com/routes/3009840108578231836",
             "a canonical Strava route URL is parsed without retaining raw input"
         )
-        for invalid in [
-            "http://www.strava.com/routes/3009840108578231836",
+        for accepted in [
             "https://strava.com/routes/3009840108578231836",
-            "https://www.strava.com/segments/3009840108578231836",
             "https://www.strava.com/routes/3009840108578231836/",
             "https://www.strava.com/routes/3009840108578231836?utm=test",
+            "https://www.strava.com/routes/3009840108578231836#map"
+        ] {
+            try expect(
+                try StravaRouteURLV1(accepted) == routeURL,
+                "supported Strava URL variants canonicalize"
+            )
+        }
+        for invalid in [
+            "http://www.strava.com/routes/3009840108578231836",
+            "https://www.strava.com/segments/3009840108578231836",
+            "https://share.strava.com/routes/3009840108578231836",
+            "https://www.strava.com:444/routes/3009840108578231836",
+            "https://user@www.strava.com/routes/3009840108578231836",
+            "https://www.strava.com/routes/3009840108578231836/extra",
             "https://www.strava.com/routes/9223372036854775808"
         ] {
             expectThrows(
@@ -38,6 +50,59 @@ enum RideSharedTests {
             ) {
                 _ = try StravaRouteURLV1(invalid)
             }
+        }
+
+        let oauthSessionID =
+            "oauth_abcdefghijklmnopqrstuvwxyz0123456789"
+        let callback = URL(
+            string: "bikecomputer-dev://strava/oauth-complete?" +
+                "result=connected&sessionId=\(oauthSessionID)"
+        )!
+        expect(
+            StravaOAuthCallbackV1.parse(
+                callback,
+                expectedScheme: "bikecomputer-dev",
+                expectedSessionID: oauthSessionID
+            ) == StravaOAuthCallbackV1(
+                result: .connected,
+                sessionID: oauthSessionID
+            ),
+            "the exact OAuth callback route and session are accepted"
+        )
+        expect(
+            StravaOAuthCallbackV1.matchesReturnLocation(
+                callback,
+                expectedScheme: "bikecomputer-dev"
+            ),
+            "the Strava callback location is claimed before query parsing"
+        )
+        expect(
+            !StravaOAuthCallbackV1.matchesReturnLocation(
+                URL(string: "bikecomputer-dev://offline-map/share?id=route")!,
+                expectedScheme: "bikecomputer-dev"
+            ) &&
+                !StravaOAuthCallbackV1.matchesReturnLocation(
+                    callback,
+                    expectedScheme: "bikecomputer"
+                ),
+            "unrelated deep links and the other app channel are not consumed"
+        )
+        for confusedCallback in [
+            "bikecomputer://strava/oauth-complete?result=connected&sessionId=\(oauthSessionID)",
+            "bikecomputer-dev://strava.example/oauth-complete?result=connected&sessionId=\(oauthSessionID)",
+            "bikecomputer-dev://strava/oauth-complete/extra?result=connected&sessionId=\(oauthSessionID)",
+            "bikecomputer-dev://strava/oauth-complete?result=connected&sessionId=oauth_wrongwrongwrongwrongwrongwrong",
+            "bikecomputer-dev://strava/oauth-complete?result=connected&result=denied&sessionId=\(oauthSessionID)",
+            "bikecomputer-dev://strava/oauth-complete?result=connected&sessionId=\(oauthSessionID)&next=https://example.com"
+        ] {
+            expect(
+                StravaOAuthCallbackV1.parse(
+                    URL(string: confusedCallback)!,
+                    expectedScheme: "bikecomputer-dev",
+                    expectedSessionID: oauthSessionID
+                ) == nil,
+                "OAuth callback scheme, route, query, and session fail closed"
+            )
         }
 
         let fetchedAt = Date(timeIntervalSince1970: 1_700_000_000)
@@ -59,6 +124,87 @@ enum RideSharedTests {
                 fetchedAt: fetchedAt,
                 deleteAfter: deleteAfter.addingTimeInterval(1),
                 validatedAt: fetchedAt
+            )
+        }
+        let fetchedAtText = "2023-11-14T22:13:20Z"
+        let deleteAfterText = "2023-11-21T22:13:20Z"
+        let minimalGPX = Data("<gpx/>".utf8)
+        let response = try StravaRouteImportResponseV1.validate(
+            gpx: minimalGPX,
+            requestedRouteURL: routeURL,
+            contentType: "application/gpx+xml; charset=utf-8",
+            cacheControl: "private, no-store",
+            providerID: RouteProviderPolicyV1.strava.providerID,
+            externalRouteID: routeURL.externalRouteID,
+            fetchedAt: fetchedAtText,
+            deleteAfter: deleteAfterText,
+            now: fetchedAt
+        )
+        expect(
+            response.gpx == minimalGPX && response.receipt == receipt,
+            "the exact Strava GPX response contract produces a receipt"
+        )
+        expectThrows(
+            StravaRouteContractError.emptyResponse,
+            "an empty Strava GPX response is rejected"
+        ) {
+            _ = try StravaRouteImportResponseV1.validate(
+                gpx: Data(),
+                requestedRouteURL: routeURL,
+                contentType: "application/gpx+xml",
+                cacheControl: "private, no-store",
+                providerID: RouteProviderPolicyV1.strava.providerID,
+                externalRouteID: routeURL.externalRouteID,
+                fetchedAt: fetchedAtText,
+                deleteAfter: deleteAfterText,
+                now: fetchedAt
+            )
+        }
+        let maximumBody = Data(
+            repeating: 0x20,
+            count: GPXRouteImporterV1.maximumInputBytes
+        )
+        _ = try StravaRouteImportResponseV1.validate(
+            gpx: maximumBody,
+            requestedRouteURL: routeURL,
+            contentType: "application/gpx+xml",
+            cacheControl: "private, no-store",
+            providerID: RouteProviderPolicyV1.strava.providerID,
+            externalRouteID: routeURL.externalRouteID,
+            fetchedAt: fetchedAtText,
+            deleteAfter: deleteAfterText,
+            now: fetchedAt
+        )
+        expectThrows(
+            StravaRouteContractError.responseTooLarge,
+            "a Strava GPX response one byte over the parser bound is rejected"
+        ) {
+            _ = try StravaRouteImportResponseV1.validate(
+                gpx: maximumBody + Data([0]),
+                requestedRouteURL: routeURL,
+                contentType: "application/gpx+xml",
+                cacheControl: "private, no-store",
+                providerID: RouteProviderPolicyV1.strava.providerID,
+                externalRouteID: routeURL.externalRouteID,
+                fetchedAt: fetchedAtText,
+                deleteAfter: deleteAfterText,
+                now: fetchedAt
+            )
+        }
+        expectThrows(
+            StravaRouteContractError.invalidResponseContract,
+            "a mismatched route response cannot be imported"
+        ) {
+            _ = try StravaRouteImportResponseV1.validate(
+                gpx: minimalGPX,
+                requestedRouteURL: routeURL,
+                contentType: "application/gpx+xml",
+                cacheControl: "private, no-store",
+                providerID: RouteProviderPolicyV1.strava.providerID,
+                externalRouteID: "123",
+                fetchedAt: fetchedAtText,
+                deleteAfter: deleteAfterText,
+                now: fetchedAt
             )
         }
 
@@ -243,7 +389,16 @@ enum RideSharedTests {
                 !storedText.contains("points"),
             "the reload bookmark cannot retain API-derived route content"
         )
-        let updated = try bookmark.updating(
+        let attempted = try bookmark.updating(
+            lastReloadAttemptAt: .some(deleteAfter.addingTimeInterval(-60))
+        )
+        try store.upsert(attempted)
+        try expect(
+            try store.bookmark(routeID: routeID) == attempted &&
+                attempted != bookmark,
+            "reload continues with the exact bookmark produced by its attempt write"
+        )
+        let updated = try attempted.updating(
             lastRevision: 4,
             lastReloadAttemptAt: .some(deleteAfter),
             lastReloadSucceededAt: .some(deleteAfter),

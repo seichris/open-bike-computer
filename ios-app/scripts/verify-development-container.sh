@@ -99,6 +99,12 @@ require_plist_value "${APP_PATH}/Info.plist" \
   ":CFBundleDisplayName" "Bicino Dev"
 require_plist_value "${APP_PATH}/Info.plist" \
   ":CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName" "AppIconDev"
+require_plist_value "${APP_PATH}/Info.plist" \
+  ":BicinoURLScheme" "bikecomputer-dev"
+require_url_scheme "${APP_PATH}/Info.plist" "bikecomputer-dev"
+forbid_url_scheme "${APP_PATH}/Info.plist" "bikecomputer"
+require_plist_value "${APP_PATH}/Info.plist" \
+  ":LSApplicationQueriesSchemes:0" "strava"
 
 require_plist_value "${WATCH_PATH}/Info.plist" \
   ":CFBundleIdentifier" "LetItRide.BikeComputer.dev.watchkitapp"

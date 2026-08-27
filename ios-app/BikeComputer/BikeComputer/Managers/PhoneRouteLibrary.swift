@@ -208,10 +208,11 @@ final class PhoneRouteLibrary: ObservableObject {
         )
     }
 
+    @discardableResult
     func recordStravaReloadAttempt(
         _ bookmark: StravaRouteReloadBookmarkV1,
         failed: Bool = false
-    ) throws {
+    ) throws -> StravaRouteReloadBookmarkV1 {
         guard stravaReloadBookmarks.contains(bookmark) else {
             throw PhoneRouteLibraryError.stravaBookmarkConflict
         }
@@ -219,6 +220,24 @@ final class PhoneRouteLibrary: ObservableObject {
         let updated = try bookmark.updating(
             lastReloadAttemptAt: .some(timestamp),
             lastErrorAt: failed ? .some(timestamp) : .some(nil)
+        )
+        try stravaBookmarkStore.upsert(updated)
+        loadStravaBookmarks()
+        return updated
+    }
+
+    func recordStravaValidation(
+        _ bookmark: StravaRouteReloadBookmarkV1,
+        checkedAt: Date
+    ) throws {
+        guard let stored = stravaReloadBookmarks.first(where: {
+            $0.routeID == bookmark.routeID
+        }), stored == bookmark else {
+            throw PhoneRouteLibraryError.stravaBookmarkConflict
+        }
+        let updated = try bookmark.updating(
+            lastValidationAt: .some(checkedAt),
+            lastErrorAt: .some(nil)
         )
         try stravaBookmarkStore.upsert(updated)
         loadStravaBookmarks()

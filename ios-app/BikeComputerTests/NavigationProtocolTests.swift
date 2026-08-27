@@ -2536,6 +2536,7 @@ struct NavigationProtocolTests {
         )
     }
 
+    @MainActor
     static func testOfflineMapInstallationCredentialClient() async {
         let suite = "OfflineMapInstallationCredentialTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -2765,6 +2766,56 @@ struct NavigationProtocolTests {
                 ).absoluteString,
                 "https://maps.example.com/immutable/map.bmap",
                 "artifact URL refresh returns an absolute immutable URL"
+            )
+
+            let managedCredential = OfflineMapInstallationCredential(
+                clientInstallationId:
+                    "inst_v2_fedcba0987654321fedcba0987654321",
+                clientInstallationToken:
+                    "v1." + String(repeating: "D", count: 43)
+            )
+            try store.save(
+                managedCredential,
+                serverURLString:
+                    OfflineMapServiceConfig.productionServerURLString
+            )
+            let serviceSession = BicinoServiceSession(
+                defaults: defaults,
+                urlSession: session
+            )
+            let authenticated = try await serviceSession.authenticatedRequest(
+                path: "/v1/integrations/strava/connection",
+                method: "GET"
+            )
+            assertEqual(
+                authenticated.url?.host,
+                "maps.8o.vc",
+                "shared service authentication uses the build-owned managed host"
+            )
+            assert(
+                authenticated.url?.query?.contains(
+                    "clientInstallationId=\(managedCredential.clientInstallationId)"
+                ) == true,
+                "shared service authentication reuses the map installation identity"
+            )
+            assertEqual(
+                authenticated.value(
+                    forHTTPHeaderField: "X-Installation-Token"
+                ),
+                managedCredential.clientInstallationToken,
+                "shared service authentication reuses the Keychain credential"
+            )
+            assert(
+                BicinoServiceSession.validatedManagedServiceURL(
+                    OfflineMapServiceConfig.developmentServerURLString
+                ) != nil &&
+                    BicinoServiceSession.validatedManagedServiceURL(
+                        OfflineMapServiceConfig.productionServerURLString
+                    ) != nil &&
+                    BicinoServiceSession.validatedManagedServiceURL(
+                        "https://maps.example.com"
+                    ) == nil,
+                "shared integration requests cannot cross to an arbitrary host"
             )
         } catch {
             assert(false, "installation credential client contract succeeds: \(error)")

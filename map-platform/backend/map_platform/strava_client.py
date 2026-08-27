@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 import socket
@@ -15,7 +16,7 @@ from .strict_json import loads_strict_json
 STRAVA_HTTPS_ORIGIN = "https://www.strava.com"
 STRAVA_API_BASE = f"{STRAVA_HTTPS_ORIGIN}/api/v3"
 STRAVA_OAUTH_TOKEN_URL = f"{STRAVA_HTTPS_ORIGIN}/oauth/token"
-STRAVA_OAUTH_REVOKE_URL = f"{STRAVA_HTTPS_ORIGIN}/oauth/deauthorize"
+STRAVA_OAUTH_REVOKE_URL = f"{STRAVA_HTTPS_ORIGIN}/oauth/revoke"
 STRAVA_WEB_AUTHORIZE_URL = f"{STRAVA_HTTPS_ORIGIN}/oauth/mobile/authorize"
 STRAVA_NATIVE_AUTHORIZE_URL = "strava://oauth/mobile/authorize"
 MAXIMUM_STRAVA_JSON_BYTES = 512 * 1_024
@@ -149,7 +150,14 @@ class StravaClient:
     ):
         if not client_id.isascii() or not client_id.isdigit() or int(client_id) <= 0:
             raise ValueError("Strava client ID is invalid")
-        if not client_secret:
+        if (
+            not isinstance(client_secret, str)
+            or not 1 <= len(client_secret) <= 4_096
+            or any(
+                ord(character) < 0x21 or ord(character) > 0x7E
+                for character in client_secret
+            )
+        ):
             raise ValueError("Strava client secret is missing")
         if not redirect_uri.startswith("https://"):
             raise ValueError("Strava redirect URI must use HTTPS")
@@ -204,16 +212,27 @@ class StravaClient:
             require_athlete=False,
         )
 
-    def revoke(self, access_token: str) -> None:
-        self._validate_token_text(access_token)
+    def revoke(self, refresh_token: str) -> None:
+        self._validate_token_text(refresh_token)
+        basic_credentials = base64.b64encode(
+            f"{self.client_id}:{self._client_secret}".encode("ascii")
+        ).decode("ascii")
         response = self._request(
             method="POST",
             url=STRAVA_OAUTH_REVOKE_URL,
-            headers={"Authorization": f"Bearer {access_token}"},
-            body=b"",
+            headers={
+                "Authorization": f"Basic {basic_credentials}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body=urlencode(
+                {
+                    "token": refresh_token,
+                    "token_type_hint": "refresh_token",
+                }
+            ).encode("ascii"),
             maximum_body_bytes=MAXIMUM_STRAVA_JSON_BYTES,
         )
-        if response.status_code in {200, 204, 401}:
+        if response.status_code in {200, 204}:
             return
         self._raise_for_status(response, unavailable_is_not_found=False)
 

@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlparse
 from map_platform.strava_client import (
     MAXIMUM_STRAVA_GPX_BYTES,
     STRAVA_API_BASE,
+    STRAVA_OAUTH_REVOKE_URL,
     STRAVA_OAUTH_TOKEN_URL,
     StravaClient,
     StravaClientError,
@@ -97,6 +98,29 @@ class StravaClientTests(unittest.TestCase):
         self.assertEqual(transport.requests[0]["url"], STRAVA_OAUTH_TOKEN_URL)
         self.assertNotIn("client-secret", str(transport.requests[0]["headers"]))
         self.assertIn(b"client_secret=client-secret", transport.requests[0]["body"])
+
+    def test_revoke_uses_current_basic_authenticated_refresh_token_flow(self):
+        transport = FakeTransport([response(STRAVA_OAUTH_REVOKE_URL, b"")])
+        client = self.client(transport)
+
+        client.revoke("refresh-token")
+
+        request = transport.requests[0]
+        self.assertEqual(request["url"], STRAVA_OAUTH_REVOKE_URL)
+        self.assertEqual(request["method"], "POST")
+        self.assertEqual(
+            request["headers"]["Content-Type"],
+            "application/x-www-form-urlencoded",
+        )
+        self.assertTrue(request["headers"]["Authorization"].startswith("Basic "))
+        self.assertNotIn("refresh-token", request["headers"]["Authorization"])
+        self.assertEqual(
+            parse_qs(request["body"].decode("ascii")),
+            {
+                "token": ["refresh-token"],
+                "token_type_hint": ["refresh_token"],
+            },
+        )
 
     def test_route_metadata_and_gpx_use_only_fixed_paths_and_bearer_header(self):
         route_id = "3009840108578231836"
