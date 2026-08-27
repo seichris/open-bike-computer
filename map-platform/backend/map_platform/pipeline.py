@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import codecs
 import json
 import hashlib
 import math
@@ -295,6 +296,248 @@ class _ParentPhaseLeaseHeartbeat:
                 return
 
 
+@dataclass(frozen=True)
+class CommandExecutionPolicy:
+    name: str
+    wall_timeout_seconds: float
+    idle_timeout_seconds: float | None
+    max_captured_output_bytes: int
+    max_progress_record_bytes: int
+    termination_grace_seconds: float
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", self.name):
+            raise ValueError("command policy name is invalid")
+        for field_name in ("wall_timeout_seconds", "termination_grace_seconds"):
+            value = getattr(self, field_name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value <= 0
+            ):
+                raise ValueError(f"{field_name} must be a positive finite number")
+        if self.idle_timeout_seconds is not None and (
+            isinstance(self.idle_timeout_seconds, bool)
+            or not isinstance(self.idle_timeout_seconds, (int, float))
+            or not math.isfinite(float(self.idle_timeout_seconds))
+            or self.idle_timeout_seconds <= 0
+        ):
+            raise ValueError("idle_timeout_seconds must be a positive finite number")
+        for field_name in (
+            "max_captured_output_bytes",
+            "max_progress_record_bytes",
+        ):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{field_name} must be a positive integer")
+
+
+SOURCE_INDEX_COMMAND_POLICY = CommandExecutionPolicy(
+    name="source_index",
+    wall_timeout_seconds=6 * 60 * 60,
+    idle_timeout_seconds=None,
+    max_captured_output_bytes=1024 * 1024,
+    max_progress_record_bytes=64 * 1024,
+    termination_grace_seconds=5,
+)
+GENERIC_EXTRACTION_COMMAND_POLICY = CommandExecutionPolicy(
+    name="generic_extraction",
+    wall_timeout_seconds=6 * 60 * 60,
+    idle_timeout_seconds=None,
+    max_captured_output_bytes=1024 * 1024,
+    max_progress_record_bytes=64 * 1024,
+    termination_grace_seconds=5,
+)
+BUILDING_PREPROCESSING_COMMAND_POLICY = CommandExecutionPolicy(
+    name="building_preprocessing",
+    wall_timeout_seconds=30 * 60,
+    idle_timeout_seconds=None,
+    max_captured_output_bytes=512 * 1024,
+    max_progress_record_bytes=64 * 1024,
+    termination_grace_seconds=5,
+)
+CONVERSION_COMMAND_POLICY = CommandExecutionPolicy(
+    name="conversion",
+    wall_timeout_seconds=6 * 60 * 60,
+    idle_timeout_seconds=None,
+    max_captured_output_bytes=1024 * 1024,
+    max_progress_record_bytes=64 * 1024,
+    termination_grace_seconds=5,
+)
+PACKAGING_COMMAND_POLICY = CommandExecutionPolicy(
+    name="packaging",
+    wall_timeout_seconds=6 * 60 * 60,
+    idle_timeout_seconds=None,
+    max_captured_output_bytes=1024 * 1024,
+    max_progress_record_bytes=64 * 1024,
+    termination_grace_seconds=5,
+)
+VERIFICATION_COMMAND_POLICY = CommandExecutionPolicy(
+    name="verification",
+    wall_timeout_seconds=10 * 60,
+    idle_timeout_seconds=None,
+    max_captured_output_bytes=256 * 1024,
+    max_progress_record_bytes=64 * 1024,
+    termination_grace_seconds=5,
+)
+
+
+class CommandExecutionTimeout(TimeoutError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        output: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.output = output
+        self.command_metrics: dict[str, Any] = {}
+
+
+class CommandExecutionCancelled(RuntimeError):
+    code = "command_cancelled"
+
+    def __init__(self, message: str, *, output: str = "") -> None:
+        super().__init__(message)
+        self.output = output
+        self.command_metrics: dict[str, Any] = {}
+
+
+class _BoundedCommandOutput:
+    """Retain a byte-bounded diagnostic head and tail."""
+
+    _MAX_HEAD_BYTES = 64 * 1024
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.total_bytes = 0
+        self._buffer = bytearray()
+        self._head = bytearray()
+        self._tail = bytearray()
+        self._truncated = False
+        self._head_limit = min(self._MAX_HEAD_BYTES, limit // 2)
+        self._tail_limit = limit - self._head_limit
+
+    def append(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+        self.total_bytes += len(chunk)
+        if not self._truncated and len(self._buffer) + len(chunk) <= self.limit:
+            self._buffer.extend(chunk)
+            return
+        if not self._truncated:
+            combined = bytes(self._buffer) + chunk
+            self._head.extend(combined[: self._head_limit])
+            if self._tail_limit:
+                self._tail.extend(combined[-self._tail_limit :])
+            self._buffer.clear()
+            self._truncated = True
+            return
+        if self._tail_limit:
+            self._tail.extend(chunk)
+            excess = len(self._tail) - self._tail_limit
+            if excess > 0:
+                del self._tail[:excess]
+
+    @property
+    def retained_bytes(self) -> int:
+        if not self._truncated:
+            return len(self._buffer)
+        return len(self._head) + len(self._tail)
+
+    @property
+    def truncated_bytes(self) -> int:
+        return max(0, self.total_bytes - self.retained_bytes)
+
+    def text(self) -> str:
+        if not self._truncated:
+            return bytes(self._buffer).decode("utf-8", errors="replace")
+        marker = f"\n...[{self.truncated_bytes} output bytes truncated]...\n"
+        return (
+            bytes(self._head).decode("utf-8", errors="replace")
+            + marker
+            + bytes(self._tail).decode("utf-8", errors="replace")
+        )
+
+
+class _ProgressRecordFramer:
+    """Decode incrementally and emit bounded LF/CR/CRLF records."""
+
+    def __init__(self, callback, max_record_bytes: int) -> None:
+        self._callback = callback
+        self._max_record_bytes = max_record_bytes
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._record = bytearray()
+        self._record_truncated_bytes = 0
+        self._skip_leading_lf = False
+        self.truncated_bytes = 0
+        self.truncated_records = 0
+
+    def feed(self, chunk: bytes) -> None:
+        self._feed_text(self._decoder.decode(chunk))
+
+    def finish(self) -> None:
+        self._feed_text(self._decoder.decode(b"", final=True))
+        if self._record or self._record_truncated_bytes:
+            self._emit(delimited=False)
+
+    def disable_callback(self) -> None:
+        self._callback = None
+
+    def _feed_text(self, text: str) -> None:
+        if not text:
+            return
+        if self._skip_leading_lf:
+            if text.startswith("\n"):
+                text = text[1:]
+            self._skip_leading_lf = False
+            if not text:
+                return
+        position = 0
+        for match in re.finditer(r"\r\n|\r|\n", text):
+            self._append(text[position : match.start()])
+            delimiter = match.group(0)
+            self._emit(delimited=True)
+            position = match.end()
+            if delimiter == "\r" and position == len(text):
+                self._skip_leading_lf = True
+        self._append(text[position:])
+
+    def _append(self, value: str) -> None:
+        if not value:
+            return
+        encoded = value.encode("utf-8")
+        remaining = self._max_record_bytes - len(self._record)
+        retained_bytes = 0
+        if remaining > 0:
+            retained = encoded[:remaining]
+            retained_text = retained.decode("utf-8", errors="ignore")
+            retained_encoded = retained_text.encode("utf-8")
+            retained_bytes = len(retained_encoded)
+            self._record.extend(retained_encoded)
+        dropped = len(encoded) - retained_bytes
+        if dropped > 0:
+            self._record_truncated_bytes += dropped
+
+    def _emit(self, *, delimited: bool) -> None:
+        record = bytes(self._record).decode("utf-8", errors="replace")
+        if self._record_truncated_bytes:
+            record += (
+                f"...[{self._record_truncated_bytes} progress bytes truncated]"
+            )
+            self.truncated_bytes += self._record_truncated_bytes
+            self.truncated_records += 1
+        if delimited:
+            record += "\n"
+        self._record.clear()
+        self._record_truncated_bytes = 0
+        if self._callback is not None:
+            self._callback(record)
+
+
 class CommandRunner:
     _OOM_EVENT_KEYS = frozenset({"oom", "oom_kill", "oom_group_kill"})
 
@@ -511,11 +754,13 @@ class CommandRunner:
         self,
         args: list[str],
         *,
+        policy: CommandExecutionPolicy,
         cwd: Path | None = None,
         cancellation_check=None,
     ) -> str:
         return self.run_streaming(
             args,
+            policy=policy,
             cwd=cwd,
             cancellation_check=cancellation_check,
         )
@@ -524,12 +769,15 @@ class CommandRunner:
         self,
         args: list[str],
         *,
+        policy: CommandExecutionPolicy,
         cwd: Path | None = None,
         on_output=None,
         cancellation_check=None,
     ) -> str:
+        if not isinstance(policy, CommandExecutionPolicy):
+            raise TypeError("command execution requires a named policy")
         self._clear_last_execution_metrics()
-        started = time.perf_counter()
+        started = time.monotonic()
         memory_events_before = self._read_memory_events()
         process = subprocess.Popen(
             args,
@@ -539,65 +787,152 @@ class CommandRunner:
             bufsize=0,
             start_new_session=True,
         )
-        output: list[str] = []
-        pending = ""
+        captured = _BoundedCommandOutput(policy.max_captured_output_bytes)
+        framer = _ProgressRecordFramer(
+            on_output,
+            policy.max_progress_record_bytes,
+        )
         stdout_open = True
         peak_resident_bytes = self._process_group_resident_bytes(process.pid)
         memory_events_delta = None
+        last_output_at = started
+        maximum_idle_seconds = 0.0
+        return_code: int | None = None
+        termination_reason = "completed"
+        pending_failure: BaseException | None = None
+
+        assert process.stdout is not None
+        descriptor = process.stdout.fileno()
+
+        def drain_once(timeout_seconds: float) -> bool:
+            nonlocal stdout_open, last_output_at
+            if not stdout_open:
+                if timeout_seconds > 0:
+                    time.sleep(timeout_seconds)
+                return False
+            readable, _, _ = select.select(
+                [descriptor],
+                [],
+                [],
+                max(0.0, timeout_seconds),
+            )
+            if not readable:
+                return False
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                stdout_open = False
+                return False
+            captured.append(chunk)
+            last_output_at = time.monotonic()
+            framer.feed(chunk)
+            return True
+
+        def signal_group(signal_number: int) -> None:
+            try:
+                os.killpg(process.pid, signal_number)
+            except ProcessLookupError:
+                pass
+
+        def process_group_exists() -> bool:
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            return True
+
+        def terminate_and_drain() -> None:
+            nonlocal return_code
+            signal_group(signal.SIGTERM)
+            grace_deadline = time.monotonic() + policy.termination_grace_seconds
+            while time.monotonic() < grace_deadline:
+                process.poll()
+                if not process_group_exists() and not stdout_open:
+                    break
+                drain_once(min(0.05, max(0.0, grace_deadline - time.monotonic())))
+            if process_group_exists():
+                signal_group(signal.SIGKILL)
+            kill_deadline = time.monotonic() + policy.termination_grace_seconds
+            while time.monotonic() < kill_deadline:
+                process.poll()
+                if process.returncode is not None and not stdout_open:
+                    break
+                drain_once(min(0.05, max(0.0, kill_deadline - time.monotonic())))
+            if process.poll() is None:
+                try:
+                    return_code = process.wait(
+                        timeout=policy.termination_grace_seconds
+                    )
+                except subprocess.TimeoutExpired:
+                    signal_group(signal.SIGKILL)
+                    return_code = process.wait()
+            else:
+                return_code = process.returncode
+
         try:
-            assert process.stdout is not None
-            descriptor = process.stdout.fileno()
             while True:
+                now = time.monotonic()
                 resident_bytes = self._process_group_resident_bytes(process.pid)
                 if resident_bytes is not None:
                     peak_resident_bytes = max(
                         peak_resident_bytes or 0, resident_bytes
                     )
+                maximum_idle_seconds = max(
+                    maximum_idle_seconds,
+                    now - last_output_at,
+                )
                 if cancellation_check is not None and cancellation_check():
-                    raise RuntimeError("preprocessing command was cancelled")
+                    termination_reason = "cancelled"
+                    pending_failure = CommandExecutionCancelled(
+                        "preprocessing command was cancelled"
+                    )
+                    break
+                if now - started >= policy.wall_timeout_seconds:
+                    termination_reason = "wall_timeout"
+                    pending_failure = CommandExecutionTimeout(
+                        "command_wall_time_exceeded",
+                        f"command exceeded {policy.name} wall-time policy",
+                    )
+                    break
+                if (
+                    policy.idle_timeout_seconds is not None
+                    and now - last_output_at >= policy.idle_timeout_seconds
+                ):
+                    termination_reason = "idle_timeout"
+                    pending_failure = CommandExecutionTimeout(
+                        "command_idle_time_exceeded",
+                        f"command exceeded {policy.name} idle-time policy",
+                    )
+                    break
                 if not stdout_open:
                     if process.poll() is not None:
                         break
                     time.sleep(0.1)
                     continue
-                readable, _, _ = select.select([descriptor], [], [], 0.1)
-                if readable:
-                    chunk = os.read(descriptor, 64 * 1024)
-                    if not chunk:
-                        stdout_open = False
-                        continue
-                    pending += chunk.decode("utf-8", errors="replace")
-                    while "\n" in pending:
-                        line, pending = pending.split("\n", 1)
-                        line += "\n"
-                        output.append(line)
-                        if on_output:
-                            on_output(line)
-                elif process.poll() is not None:
-                    chunk = os.read(descriptor, 64 * 1024)
-                    if chunk:
-                        pending += chunk.decode("utf-8", errors="replace")
-                        continue
-                    stdout_open = False
-            if pending:
-                output.append(pending)
-                if on_output:
-                    on_output(pending)
-            return_code = process.wait()
-        except BaseException:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait()
-            raise
+                next_deadline = started + policy.wall_timeout_seconds
+                if policy.idle_timeout_seconds is not None:
+                    next_deadline = min(
+                        next_deadline,
+                        last_output_at + policy.idle_timeout_seconds,
+                    )
+                poll_seconds = min(0.1, max(0.0, next_deadline - now))
+                if not drain_once(poll_seconds) and process.poll() is not None:
+                    drain_once(0)
+            if pending_failure is not None:
+                framer.disable_callback()
+                terminate_and_drain()
+            else:
+                return_code = process.wait()
+                if return_code != 0:
+                    termination_reason = "exit_nonzero"
+            framer.finish()
+        except BaseException as exc:
+            if pending_failure is None:
+                pending_failure = exc
+                termination_reason = "callback_error"
+                framer.disable_callback()
+                terminate_and_drain()
         finally:
             if process.stdout is not None:
                 process.stdout.close()
@@ -605,22 +940,58 @@ class CommandRunner:
                 memory_events_before,
                 self._read_memory_events(),
             )
+            maximum_idle_seconds = max(
+                maximum_idle_seconds,
+                time.monotonic() - last_output_at,
+            )
             metrics: dict[str, Any] = {
-                "wallSeconds": round(time.perf_counter() - started, 6)
+                "wallSeconds": round(time.monotonic() - started, 6),
+                "maxIdleSeconds": round(maximum_idle_seconds, 6),
+                "rawOutputBytes": captured.total_bytes,
+                "retainedOutputBytes": captured.retained_bytes,
+                "truncatedOutputBytes": captured.truncated_bytes,
+                "outputTruncated": captured.truncated_bytes > 0,
+                "truncatedProgressBytes": framer.truncated_bytes,
+                "truncatedProgressRecords": framer.truncated_records,
+                "terminationReason": termination_reason,
+                "exitStatus": return_code,
+                "policy": policy.name,
             }
             if peak_resident_bytes is not None:
                 metrics["peakResidentBytes"] = peak_resident_bytes
             if memory_events_delta is not None:
                 metrics["memoryEventsDelta"] = memory_events_delta
-            self._record_execution_metrics(metrics, args)
-        combined_output = "".join(output)
+            recorded_metrics = self._record_execution_metrics(metrics, args)
+        combined_output = captured.text()
+        if pending_failure is not None:
+            if hasattr(pending_failure, "output"):
+                try:
+                    pending_failure.output = combined_output
+                except (AttributeError, TypeError):
+                    pass
+            if hasattr(pending_failure, "command_metrics"):
+                try:
+                    pending_failure.command_metrics = deepcopy(recorded_metrics)
+                except (AttributeError, TypeError):
+                    pass
+            raise pending_failure
         if self._oom_event_incremented(memory_events_delta):
-            raise BuildingScopeError(
+            failure = BuildingScopeError(
                 "building_worker_oom",
                 "worker cgroup reported an out-of-memory event during subprocess execution",
             )
+            failure.output = combined_output
+            failure.command_metrics = deepcopy(recorded_metrics)
+            raise failure
         if return_code != 0:
-            raise subprocess.CalledProcessError(return_code, args, output=combined_output)
+            failure = subprocess.CalledProcessError(
+                return_code,
+                args,
+                output=combined_output,
+            )
+            failure.command_metrics = deepcopy(recorded_metrics)
+            failure.output_truncated_bytes = captured.truncated_bytes
+            raise failure
         return combined_output.strip()
 
 
@@ -5728,14 +6099,15 @@ class MapBuildPipeline:
         self,
         args: list[str],
         *,
+        policy: CommandExecutionPolicy,
         cwd: Path | None = None,
         cancellation_check=None,
     ) -> str:
         kwargs: dict[str, Any] = {"cwd": cwd} if cwd is not None else {}
-        if cancellation_check is not None and isinstance(
-            self.runner, CommandRunner
-        ):
-            kwargs["cancellation_check"] = cancellation_check
+        if isinstance(self.runner, CommandRunner):
+            kwargs["policy"] = policy
+            if cancellation_check is not None:
+                kwargs["cancellation_check"] = cancellation_check
         return self.runner.run(args, **kwargs)
 
     @staticmethod
@@ -5763,6 +6135,51 @@ class MapBuildPipeline:
             and wall_seconds >= 0
         ):
             metrics["wallSeconds"] = round(float(wall_seconds), 6)
+        max_idle_seconds = raw.get("maxIdleSeconds")
+        if (
+            isinstance(max_idle_seconds, (int, float))
+            and not isinstance(max_idle_seconds, bool)
+            and math.isfinite(float(max_idle_seconds))
+            and max_idle_seconds >= 0
+        ):
+            metrics["maxIdleSeconds"] = round(float(max_idle_seconds), 6)
+        for key in (
+            "rawOutputBytes",
+            "retainedOutputBytes",
+            "truncatedOutputBytes",
+            "truncatedProgressBytes",
+            "truncatedProgressRecords",
+        ):
+            value = raw.get(key)
+            if (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and value >= 0
+            ):
+                metrics[key] = value
+        output_truncated = raw.get("outputTruncated")
+        if isinstance(output_truncated, bool):
+            metrics["outputTruncated"] = output_truncated
+        termination_reason = raw.get("terminationReason")
+        if isinstance(termination_reason, str) and termination_reason in {
+            "completed",
+            "wall_timeout",
+            "idle_timeout",
+            "cancelled",
+            "callback_error",
+            "exit_nonzero",
+        }:
+            metrics["terminationReason"] = termination_reason
+        exit_status = raw.get("exitStatus")
+        if (
+            exit_status is None
+            or isinstance(exit_status, int)
+            and not isinstance(exit_status, bool)
+        ):
+            metrics["exitStatus"] = exit_status
+        policy = raw.get("policy")
+        if isinstance(policy, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", policy):
+            metrics["policy"] = policy
         peak_resident_bytes = raw.get("peakResidentBytes")
         if (
             isinstance(peak_resident_bytes, int)
@@ -5986,7 +6403,11 @@ class MapBuildPipeline:
                 str(clipped_pbf),
                 "--overwrite",
             ]
-        self._run_command(args, cancellation_check=cancellation_check)
+        self._run_command(
+            args,
+            policy=GENERIC_EXTRACTION_COMMAND_POLICY,
+            cancellation_check=cancellation_check,
+        )
         extract_command_metrics = self._last_command_execution_metrics()
         if extract_command_metrics:
             extraction_metrics["extractCommand"] = extract_command_metrics
@@ -6000,6 +6421,7 @@ class MapBuildPipeline:
                     str(clipped_pbf),
                     "--overwrite",
                 ],
+                policy=GENERIC_EXTRACTION_COMMAND_POLICY,
                 cancellation_check=cancellation_check,
             )
             merge_command_metrics = self._last_command_execution_metrics()
@@ -6049,6 +6471,11 @@ class MapBuildPipeline:
         cancellation_check=None,
     ) -> str:
         command_started = time.perf_counter()
+        command_policy = (
+            SOURCE_INDEX_COMMAND_POLICY
+            if default_unit == "source_index"
+            else BUILDING_PREPROCESSING_COMMAND_POLICY
+        )
         self._emit_phase_progress(
             on_phase_progress,
             unit=default_unit,
@@ -6080,11 +6507,16 @@ class MapBuildPipeline:
                     "cwd": cwd,
                     "on_output": handle_output,
                 }
+                if isinstance(self.runner, CommandRunner):
+                    streaming_kwargs["policy"] = command_policy
                 if cancellation_check is not None:
                     streaming_kwargs["cancellation_check"] = cancellation_check
                 output = self.runner.run_streaming(args, **streaming_kwargs)
             else:
-                output = self.runner.run(args, cwd=cwd)
+                run_kwargs = {"cwd": cwd}
+                if isinstance(self.runner, CommandRunner):
+                    run_kwargs["policy"] = command_policy
+                output = self.runner.run(args, **run_kwargs)
                 if on_phase_progress is not None:
                     for line in output.splitlines():
                         handle_output(line)
@@ -6110,9 +6542,16 @@ class MapBuildPipeline:
                 default_code,
                 f"{default_unit} preprocessing failed",
             ) from exc
+        except (CommandExecutionCancelled, CommandExecutionTimeout):
+            self._cleanup_interrupted_source_index(
+                args,
+                cwd=cwd,
+                default_unit=default_unit,
+            )
+            raise
         except RuntimeError:
             if cancellation_check is not None and cancellation_check():
-                self._cleanup_cancelled_source_index(
+                self._cleanup_interrupted_source_index(
                     args,
                     cwd=cwd,
                     default_unit=default_unit,
@@ -6132,7 +6571,7 @@ class MapBuildPipeline:
             )
         return output
 
-    def _cleanup_cancelled_source_index(
+    def _cleanup_interrupted_source_index(
         self,
         args: list[str],
         *,
@@ -6163,6 +6602,7 @@ class MapBuildPipeline:
                     "--lock-timeout-seconds",
                     "5",
                 ],
+                policy=VERIFICATION_COMMAND_POLICY,
                 cwd=cwd,
             )
         except (OSError, RuntimeError, subprocess.CalledProcessError):
@@ -6607,6 +7047,7 @@ class MapBuildPipeline:
                 "osmium", "getid", "--add-referenced", str(source_pbf),
                 "--id-file", str(closure_ids), "-o", str(closure_pbf), "--overwrite",
             ],
+            policy=GENERIC_EXTRACTION_COMMAND_POLICY,
             cancellation_check=cancellation_check,
         )
         self._run_command(
@@ -6614,6 +7055,7 @@ class MapBuildPipeline:
                 "osmium", "merge", str(clipped_pbf), str(closure_pbf),
                 "-o", str(merged_pbf), "--overwrite",
             ],
+            policy=GENERIC_EXTRACTION_COMMAND_POLICY,
             cancellation_check=cancellation_check,
         )
         if sha256_file(source_pbf) != source_snapshot_sha256:
@@ -6669,6 +7111,7 @@ class MapBuildPipeline:
         try:
             self._run_command(
                 args,
+                policy=CONVERSION_COMMAND_POLICY,
                 cwd=self.paths.osm_extract_root / "scripts",
                 cancellation_check=cancellation_check,
             )
@@ -6873,13 +7316,18 @@ class MapBuildPipeline:
                     "cwd": self.paths.osm_extract_root / "scripts",
                     "on_output": handle_output,
                 }
+                if isinstance(self.runner, CommandRunner):
+                    streaming_kwargs["policy"] = PACKAGING_COMMAND_POLICY
                 if cancellation_check is not None:
                     streaming_kwargs["cancellation_check"] = cancellation_check
                 self.runner.run_streaming(args, **streaming_kwargs)
             else:
-                output = self.runner.run(
-                    args, cwd=self.paths.osm_extract_root / "scripts"
-                )
+                run_kwargs = {
+                    "cwd": self.paths.osm_extract_root / "scripts"
+                }
+                if isinstance(self.runner, CommandRunner):
+                    run_kwargs["policy"] = PACKAGING_COMMAND_POLICY
+                output = self.runner.run(args, **run_kwargs)
                 for line in output.splitlines():
                     handle_output(line)
         except subprocess.CalledProcessError as exc:

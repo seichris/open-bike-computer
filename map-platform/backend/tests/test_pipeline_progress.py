@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import sys
 import subprocess
 import tempfile
@@ -16,6 +17,8 @@ from map_platform.building_scope import BuildingScopeError, plan_building_scope
 from map_platform.models import Bounds, SourceRegion
 from map_platform.pipeline import (
     BuildingChunkSplitRequired,
+    CommandExecutionPolicy,
+    CommandExecutionTimeout,
     CommandRunner,
     MapBuildPipeline,
     PipelinePaths,
@@ -29,6 +32,16 @@ from map_platform.pipeline import (
     safe_build_failure,
 )
 from map_platform.sources import SourceIndex
+
+
+TEST_COMMAND_POLICY = CommandExecutionPolicy(
+    name="test",
+    wall_timeout_seconds=5,
+    idle_timeout_seconds=None,
+    max_captured_output_bytes=64 * 1024,
+    max_progress_record_bytes=4 * 1024,
+    termination_grace_seconds=0.25,
+)
 
 
 class FakeStreamingRunner:
@@ -103,6 +116,16 @@ class BuildingPhaseStreamingRunner:
 
 
 class PipelineProgressTests(unittest.TestCase):
+    def assert_process_exits(self, process_id: int, *, timeout_seconds: float = 2) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                os.kill(process_id, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail(f"process {process_id} survived command termination")
+
     def test_chunk_runtime_hard_deadline_is_typed_and_parent_cancel_wins(self):
         self.assertTrue(
             MapBuildPipeline._chunk_task_cancellation_requested(
@@ -297,6 +320,7 @@ class PipelineProgressTests(unittest.TestCase):
         runner = CommandRunner()
         output = runner.run_streaming(
             [sys.executable, "-c", "print('MAP_PROGRESS:1:2', flush=True); print('MAP_PROGRESS:2:2', flush=True)"],
+            policy=TEST_COMMAND_POLICY,
             on_output=lines.append,
         )
 
@@ -307,6 +331,193 @@ class PipelineProgressTests(unittest.TestCase):
         self.assertIn("MAP_PROGRESS:2:2", output)
         self.assertIn("wallSeconds", runner.last_execution_metrics)
         self.assertGreaterEqual(runner.last_execution_metrics["wallSeconds"], 0)
+
+    def test_streaming_runner_frames_lf_cr_crlf_and_split_utf8(self):
+        records = []
+        output = CommandRunner().run_streaming(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os,time; "
+                    "os.write(1,b'LF\\nCR\\rCRLF\\r\\nSPLIT\\r'); "
+                    "time.sleep(0.05); os.write(1,b'\\n'); "
+                    "value='雪'.encode('utf-8'); os.write(1,value[:1]); "
+                    "time.sleep(0.05); os.write(1,value[1:]+b'\\n')"
+                ),
+            ],
+            policy=TEST_COMMAND_POLICY,
+            on_output=records.append,
+        )
+
+        self.assertEqual(records, ["LF\n", "CR\n", "CRLF\n", "SPLIT\n", "雪\n"])
+        self.assertIn("CRLF\r\n", output)
+        self.assertIn("雪", output)
+
+    def test_streaming_runner_bounds_capture_and_delimiter_free_record(self):
+        policy = CommandExecutionPolicy(
+            name="test_bounded",
+            wall_timeout_seconds=5,
+            idle_timeout_seconds=None,
+            max_captured_output_bytes=64,
+            max_progress_record_bytes=16,
+            termination_grace_seconds=0.25,
+        )
+        records = []
+        runner = CommandRunner()
+        output = runner.run_streaming(
+            [sys.executable, "-c", "import os; os.write(1, b'A' * 200)"],
+            policy=policy,
+            on_output=records.append,
+        )
+
+        self.assertEqual(len(records), 1)
+        self.assertTrue(records[0].startswith("A" * 16))
+        self.assertIn("184 progress bytes truncated", records[0])
+        self.assertIn("136 output bytes truncated", output)
+        self.assertEqual(runner.last_execution_metrics["rawOutputBytes"], 200)
+        self.assertEqual(runner.last_execution_metrics["retainedOutputBytes"], 64)
+        self.assertEqual(runner.last_execution_metrics["truncatedOutputBytes"], 136)
+        self.assertEqual(runner.last_execution_metrics["truncatedProgressBytes"], 184)
+
+    def test_streaming_runner_failure_exposes_only_bounded_diagnostics(self):
+        policy = CommandExecutionPolicy(
+            name="test_failure",
+            wall_timeout_seconds=5,
+            idle_timeout_seconds=None,
+            max_captured_output_bytes=32,
+            max_progress_record_bytes=16,
+            termination_grace_seconds=0.25,
+        )
+        runner = CommandRunner()
+        with self.assertRaises(subprocess.CalledProcessError) as raised:
+            runner.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os; os.write(1,b'HEAD'+b'x'*100+b'TAIL'); raise SystemExit(7)",
+                ],
+                policy=policy,
+            )
+
+        self.assertIn("HEAD", raised.exception.output)
+        self.assertTrue(raised.exception.output.endswith("TAIL"))
+        self.assertIn("76 output bytes truncated", raised.exception.output)
+        self.assertEqual(raised.exception.output_truncated_bytes, 76)
+        self.assertEqual(
+            raised.exception.command_metrics["terminationReason"],
+            "exit_nonzero",
+        )
+
+    def test_streaming_runner_enforces_idle_and_wall_deadlines(self):
+        idle_policy = CommandExecutionPolicy(
+            name="test_idle",
+            wall_timeout_seconds=3,
+            idle_timeout_seconds=0.2,
+            max_captured_output_bytes=1024,
+            max_progress_record_bytes=128,
+            termination_grace_seconds=0.1,
+        )
+        idle_runner = CommandRunner()
+        with self.assertRaises(CommandExecutionTimeout) as idle:
+            idle_runner.run(
+                [sys.executable, "-c", "import time; time.sleep(10)"],
+                policy=idle_policy,
+            )
+        self.assertEqual(idle.exception.code, "command_idle_time_exceeded")
+        self.assertEqual(
+            idle_runner.last_execution_metrics["terminationReason"],
+            "idle_timeout",
+        )
+
+        wall_policy = CommandExecutionPolicy(
+            name="test_wall",
+            wall_timeout_seconds=0.35,
+            idle_timeout_seconds=0.2,
+            max_captured_output_bytes=1024,
+            max_progress_record_bytes=128,
+            termination_grace_seconds=0.1,
+        )
+        wall_runner = CommandRunner()
+        with self.assertRaises(CommandExecutionTimeout) as wall:
+            wall_runner.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import time; "
+                        "[(print('progress', flush=True), time.sleep(0.03)) "
+                        "for _ in range(1000)]"
+                    ),
+                ],
+                policy=wall_policy,
+            )
+        self.assertEqual(wall.exception.code, "command_wall_time_exceeded")
+        self.assertEqual(
+            wall_runner.last_execution_metrics["terminationReason"],
+            "wall_timeout",
+        )
+
+    def test_streaming_runner_deadline_terminates_grandchild(self):
+        policy = CommandExecutionPolicy(
+            name="test_process_group",
+            wall_timeout_seconds=0.35,
+            idle_timeout_seconds=None,
+            max_captured_output_bytes=1024,
+            max_progress_record_bytes=128,
+            termination_grace_seconds=0.1,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            child_pid_path = Path(tmp) / "child.pid"
+            with self.assertRaises(CommandExecutionTimeout):
+                CommandRunner().run(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "import pathlib,subprocess,sys,time; "
+                            "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)']); "
+                            f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid)); "
+                            "print('ready',flush=True); time.sleep(10)"
+                        ),
+                    ],
+                    policy=policy,
+                )
+            child_pid = int(child_pid_path.read_text(encoding="ascii"))
+            self.assert_process_exits(child_pid)
+
+    def test_streaming_runner_callback_failure_terminates_grandchild(self):
+        class CallbackFailure(RuntimeError):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            child_pid_path = Path(tmp) / "child.pid"
+            runner = CommandRunner()
+
+            def fail_callback(_record):
+                raise CallbackFailure("callback failed")
+
+            with self.assertRaises(CallbackFailure):
+                runner.run_streaming(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "import pathlib,subprocess,sys,time; "
+                            "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)']); "
+                            f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid)); "
+                            "print('ready',flush=True); time.sleep(10)"
+                        ),
+                    ],
+                    policy=TEST_COMMAND_POLICY,
+                    on_output=fail_callback,
+                )
+            self.assertEqual(
+                runner.last_execution_metrics["terminationReason"],
+                "callback_error",
+            )
+            child_pid = int(child_pid_path.read_text(encoding="ascii"))
+            self.assert_process_exits(child_pid)
 
     @unittest.skipUnless(Path("/proc/self/status").is_file(), "requires Linux procfs")
     def test_streaming_runner_measures_intermediate_child_process_peak(self):
@@ -324,7 +535,8 @@ class PipelineProgressTests(unittest.TestCase):
                         "'import time; payload=bytearray(64*1024*1024); "
                         "time.sleep(0.5)'], check=True)"
                     ),
-                ]
+                ],
+                policy=TEST_COMMAND_POLICY,
             )
 
         self.assertGreater(
@@ -350,7 +562,10 @@ class PipelineProgressTests(unittest.TestCase):
                     "_read_memory_events",
                     side_effect=[baseline, after],
                 ), self.assertRaises(BuildingScopeError) as raised:
-                    runner.run([sys.executable, "-c", "pass"])
+                    runner.run(
+                        [sys.executable, "-c", "pass"],
+                        policy=TEST_COMMAND_POLICY,
+                    )
 
                 self.assertEqual(raised.exception.code, "building_worker_oom")
                 self.assertEqual(
@@ -388,7 +603,10 @@ class PipelineProgressTests(unittest.TestCase):
             "_read_memory_events",
             side_effect=[memory_events, memory_events],
         ), self.assertRaises(subprocess.CalledProcessError):
-            runner.run([sys.executable, "-c", "raise SystemExit(9)"])
+            runner.run(
+                [sys.executable, "-c", "raise SystemExit(9)"],
+                policy=TEST_COMMAND_POLICY,
+            )
 
         self.assertEqual(
             runner.last_execution_metrics["memoryEventsDelta"]["oom_kill"],
@@ -402,7 +620,10 @@ class PipelineProgressTests(unittest.TestCase):
                 metrics_history_limit=2,
             )
             for _ in range(3):
-                runner.run([sys.executable, "-c", "pass"])
+                runner.run(
+                    [sys.executable, "-c", "pass"],
+                    policy=TEST_COMMAND_POLICY,
+                )
 
         self.assertEqual(
             [item["sequence"] for item in runner.execution_metrics_history],
@@ -472,7 +693,10 @@ class PipelineProgressTests(unittest.TestCase):
             )
 
             def run_light_phase(*_args, **_kwargs):
-                runner.run([sys.executable, "-c", "pass"])
+                runner.run(
+                    [sys.executable, "-c", "pass"],
+                    policy=TEST_COMMAND_POLICY,
+                )
 
             def extract_phase(*_args, **_kwargs):
                 run_light_phase()
@@ -493,7 +717,8 @@ class PipelineProgressTests(unittest.TestCase):
                             "'import time; payload=bytearray(64*1024*1024); "
                             "time.sleep(0.5)'], check=True)"
                         ),
-                    ]
+                    ],
+                    policy=TEST_COMMAND_POLICY,
                 )
 
             def feature_phase(*_args, **_kwargs):
@@ -573,6 +798,7 @@ class PipelineProgressTests(unittest.TestCase):
     def test_streaming_runner_cancels_silent_preprocessing_promptly(self):
         with tempfile.TemporaryDirectory() as tmp:
             result_path = Path(tmp) / "published.json"
+            child_pid_path = Path(tmp) / "child.pid"
             cancelled = threading.Event()
 
             def cancel_later():
@@ -588,13 +814,17 @@ class PipelineProgressTests(unittest.TestCase):
                         sys.executable,
                         "-c",
                         (
-                            "import pathlib,time; "
+                            "import pathlib,subprocess,sys,time; "
+                            "child=subprocess.Popen([sys.executable,'-c',"
+                            "'import time; time.sleep(10)']); "
+                            f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid)); "
                             "print('BUILDING_PREPROCESS_PROGRESS:{\"completed\":0,'"
                             "'\"indeterminate\":true,\"unit\":\"source_index\"}',"
                             "flush=True); time.sleep(10); "
                             f"pathlib.Path({str(result_path)!r}).write_text('published')"
                         ),
                     ],
+                    policy=TEST_COMMAND_POLICY,
                     cancellation_check=cancelled.is_set,
                 )
             elapsed = time.monotonic() - started
@@ -602,6 +832,8 @@ class PipelineProgressTests(unittest.TestCase):
 
             self.assertLess(elapsed, 2.0)
             self.assertFalse(result_path.exists())
+            child_pid = int(child_pid_path.read_text(encoding="ascii"))
+            self.assert_process_exits(child_pid)
 
     def test_streaming_runner_keeps_polling_cancellation_after_stdout_eof(self):
         cancelled = threading.Event()
@@ -620,6 +852,7 @@ class PipelineProgressTests(unittest.TestCase):
                     "-c",
                     "import os,time; os.close(1); os.close(2); time.sleep(10)",
                 ],
+                policy=TEST_COMMAND_POLICY,
                 cancellation_check=cancelled.is_set,
             )
         elapsed = time.monotonic() - started
