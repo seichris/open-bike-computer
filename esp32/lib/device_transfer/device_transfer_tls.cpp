@@ -93,9 +93,8 @@ bool certificateFingerprint(const std::string &certificatePem,
   std::array<uint8_t, 32> digest{};
   const bool valid = parsed == 0 && certificate.raw.p != nullptr &&
                      certificate.raw.len > 0 &&
-                     mbedtls_sha256_ret(certificate.raw.p,
-                                        certificate.raw.len, digest.data(),
-                                        0) == 0;
+                     mbedtls_sha256(certificate.raw.p, certificate.raw.len,
+                                    digest.data(), 0) == 0;
   mbedtls_x509_crt_free(&certificate);
   if (valid)
     fingerprint = hexEncode(digest.data(), digest.size());
