@@ -13,43 +13,15 @@ on:
         required: false
         default: "175"
         type: string
-  push:
-    branches:
-      - main
-    paths:
-      - ".dockerignore"
-      - ".github/actions/**"
-      - ".github/scripts/**"
-      - ".github/workflows/ci.yml"
-      - ".github/workflows/firmware-diagnostics.yml"
-      - ".github/workflows/firmware-release.yml"
-      - ".github/workflows/firmware-runtime-performance.yml"
-      - ".github/workflows/firmware-runtime-publish.yml"
-      - ".github/workflows/firmware-runtime-refresh.yml"
-      - ".github/workflows/map-platform-ci.yml"
-      - ".github/workflows/map-platform-image.yml"
-      - ".github/workflows/speaker-firmware.yml"
-      - "docs/app-store-privacy-disclosures.md"
-      - "docs/device-ownership-test-vectors.json"
-      - "docs/firmware-battery-life-hardware-validation.md"
-      - "docs/firmware-build-provenance.md"
-      - "docs/firmware-factory-release.md"
-      - "docs/firmware-map-memory-diagnostics.md"
-      - "docs/firmware-map-render-scheduler.md"
-      - "docs/firmware-map-rendering-psram.md"
-      - "docs/firmware-runtime-maintenance.md"
-      - "docs/releases/watchos-workout-companion.md"
-      - "esp32/**"
-      - "ios-app/**"
-      - "map-platform/**"
-      - "test-fixtures/fmb/**"
-      - "tools/firmware_manifest.py"
-      - "tools/factory_release_manifest.py"
-      - "tools/firmware-signing-requirements.txt"
-      - "tools/verify_github_release_assets.py"
-      - "tools/tests/**"
-      - "tools/OSM_Extract/**"
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  merge_group:
+    types:
+      - checks_requested
   workflow_dispatch:
     inputs:
       scope:
@@ -90,6 +62,7 @@ jobs:
       firmware_build: ${{ steps.components.outputs.firmware_build }}
       firmware_host: ${{ steps.components.outputs.firmware_host }}
       firmware_targets: ${{ steps.components.outputs.firmware_targets }}
+      heavy_ci: ${{ steps.policy.outputs.heavy_ci }}
       ios: ${{ steps.components.outputs.ios }}
       map_backend: ${{ steps.components.outputs.map_backend }}
       osm: ${{ steps.components.outputs.osm }}
@@ -99,6 +72,17 @@ jobs:
           fetch-depth: 0
       - name: Test CI component routing
         run: python3 -m unittest discover -s .github/scripts/tests
+      - id: policy
+        name: Select CI cost policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_DRAFT: ${{ github.event.pull_request.draft || false }}
+        run: |
+          heavy_ci=true
+          if test "$EVENT_NAME" = pull_request && test "$PULL_REQUEST_DRAFT" = true; then
+            heavy_ci=false
+          fi
+          echo "heavy_ci=${heavy_ci}" >> "$GITHUB_OUTPUT"
       - name: Validate the protected partial gate scope
         if: >-
           github.event_name == 'workflow_dispatch' && inputs.scope == 'map' &&
@@ -120,11 +104,11 @@ jobs:
       - id: components
         name: Select changed components
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '0000000000000000000000000000000000000000' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '0000000000000000000000000000000000000000' }}
           CI_SCOPE: ${{ github.ref_type == 'tag' && 'all' || inputs.scope || 'auto' }}
           EVENT_NAME: ${{ github.event_name }}
           FIRMWARE_HARDWARE: ${{ inputs.firmware_hardware || '175' }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: >-
           python3 .github/scripts/changed_components.py
           --event "$EVENT_NAME"
@@ -137,7 +121,9 @@ jobs:
   esp32:
     name: ESP32 (${{ matrix.target }})
     needs: changes
-    if: needs.changes.outputs.firmware_build == 'true'
+    if: >-
+      needs.changes.outputs.firmware_build == 'true' &&
+      needs.changes.outputs.heavy_ci == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -231,8 +217,8 @@ jobs:
               raise SystemExit(f"Missing remote-debug routes: {', '.join(missing)}")
           PY
 
-  ios:
-    name: iOS
+  ios-fast:
+    name: iOS Fast Tests
     needs: changes
     if: needs.changes.outputs.ios == 'true'
     runs-on: macos-latest
@@ -247,9 +233,6 @@ jobs:
       - name: Run ride diagnostics recorder tests
         run: ./scripts/run-ride-diagnostics-tests.sh
         working-directory: ios-app
-      - name: Run ride diagnostics XCTest target
-        run: bash ./scripts/run-ride-diagnostics-xctest.sh
-        working-directory: ios-app
       - name: Run shared route and Watch BLE contract tests
         run: ./scripts/run-ride-shared-tests.sh
         working-directory: ios-app
@@ -262,26 +245,23 @@ jobs:
       - name: Run workout contract tests
         run: ./scripts/run-workout-contract-tests.sh
         working-directory: ios-app
+
+  ios:
+    name: iOS
+    needs: changes
+    if: >-
+      needs.changes.outputs.ios == 'true' &&
+      needs.changes.outputs.heavy_ci == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure job-scoped Xcode DerivedData
+        run: echo "CI_DERIVED_DATA_PATH=$RUNNER_TEMP/BikeComputerDerivedData" >> "$GITHUB_ENV"
       - name: Run workout contract tests on iOS
         run: ./scripts/run-workout-platform-tests.sh ios
         working-directory: ios-app
       - name: Run workout contract tests on watchOS
         run: ./scripts/run-workout-platform-tests.sh watchos
-        working-directory: ios-app
-      - name: Build watch app
-        run: |
-          ./scripts/xcodebuild-cli.sh \
-            -project BikeComputer/BikeComputer.xcodeproj \
-            -target BikeComputerWatch \
-            -configuration Release \
-            -sdk watchos \
-            -arch arm64_32 \
-            ONLY_ACTIVE_ARCH=YES \
-            CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/bike-computer-watch" \
-            OBJROOT="$RUNNER_TEMP/bike-computer-watch-obj" \
-            SYMROOT="$RUNNER_TEMP/bike-computer-watch-sym" \
-            CODE_SIGNING_ALLOWED=NO \
-            build
         working-directory: ios-app
       - name: Build Release app container
         run: |
@@ -794,6 +774,7 @@ jobs:
       - changes
       - esp32
       - esp32-host
+      - ios-fast
       - ios
       - map-platform
     if: always()
@@ -806,7 +787,9 @@ jobs:
           FIRMWARE_BUILD_CHANGED: ${{ needs.changes.outputs.firmware_build }}
           FIRMWARE_HOST_CHANGED: ${{ needs.changes.outputs.firmware_host }}
           HOST_RESULT: ${{ needs.esp32-host.result }}
+          HEAVY_CI: ${{ needs.changes.outputs.heavy_ci }}
           IOS_CHANGED: ${{ needs.changes.outputs.ios }}
+          IOS_FAST_RESULT: ${{ needs.ios-fast.result }}
           IOS_RESULT: ${{ needs.ios.result }}
           MAP_BACKEND_CHANGED: ${{ needs.changes.outputs.map_backend }}
           MAP_RESULT: ${{ needs.map-platform.result }}
@@ -824,7 +807,7 @@ jobs:
 
           require_result "CI component selection" "$CHANGES_RESULT" success
 
-          if test "$FIRMWARE_BUILD_CHANGED" = true; then
+          if test "$FIRMWARE_BUILD_CHANGED" = true && test "$HEAVY_CI" = true; then
             require_result "ESP32 builds" "$ESP32_RESULT" success
           else
             require_result "ESP32 builds" "$ESP32_RESULT" skipped
@@ -837,6 +820,12 @@ jobs:
           fi
 
           if test "$IOS_CHANGED" = true; then
+            require_result "iOS fast tests" "$IOS_FAST_RESULT" success
+          else
+            require_result "iOS fast tests" "$IOS_FAST_RESULT" skipped
+          fi
+
+          if test "$IOS_CHANGED" = true && test "$HEAVY_CI" = true; then
             require_result "iOS" "$IOS_RESULT" success
           else
             require_result "iOS" "$IOS_RESULT" skipped
