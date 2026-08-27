@@ -1121,7 +1121,7 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
         case .deviceMapTransferRejected(let message):
             return "Device could not start map transfer mode: \(message)"
         case .firmwareMapStreamUnsupported:
-            return "This saved map needs newer device firmware, and no compatible legacy map artifact is available."
+            return "This saved map cannot be installed securely. Update the device firmware and regenerate the map as a signed stream."
         case .backgroundMapUploadInProgress:
             return "Another map upload is already in progress. Wait for it to finish before transferring a different map."
         case .mapActivationFailed(let message):
@@ -1412,7 +1412,6 @@ nonisolated struct MapTransferActivationAcknowledgement: Decodable, Equatable {
 
 nonisolated enum MapInstallProtocolSelection: Equatable {
     case streamV2
-    case archiveV1
     case legacyArtifactRequired
 }
 
@@ -1433,7 +1432,7 @@ nonisolated enum MapInstallProtocolSelector {
         requiredFirmwareGitSha: String? = nil,
         deviceStatus: MapTransferDeviceStatus
     ) -> MapInstallProtocolSelection {
-        guard isBikeMapStream else { return .archiveV1 }
+        guard isBikeMapStream else { return .legacyArtifactRequired }
         guard let signatureTrustCapability else {
             return .legacyArtifactRequired
         }
@@ -2067,7 +2066,7 @@ nonisolated enum OfflineMapPackPreviewReader {
 struct MapTransferDeviceClient {
     let baseURL: URL
     var sessionToken: String? = nil
-    var session: URLSession = .shared
+    let session: URLSession
     var recoveryRetryNanoseconds: UInt64 = 2_000_000_000
 
     nonisolated func upload(
@@ -2358,6 +2357,7 @@ nonisolated struct BackgroundMapUploadDescriptor: Codable, Equatable {
     let streamFormatVersion: Int?
     let artifactFilename: String
     let accessPointSSID: String?
+    let tlsCertificateSHA256: String?
 
     init(
         mapID: String,
@@ -2365,7 +2365,8 @@ nonisolated struct BackgroundMapUploadDescriptor: Codable, Equatable {
         protocolVersion: Int,
         streamFormatVersion: Int?,
         artifactFilename: String,
-        accessPointSSID: String? = nil
+        accessPointSSID: String? = nil,
+        tlsCertificateSHA256: String? = nil
     ) {
         self.mapID = mapID
         self.sessionID = sessionID
@@ -2373,6 +2374,7 @@ nonisolated struct BackgroundMapUploadDescriptor: Codable, Equatable {
         self.streamFormatVersion = streamFormatVersion
         self.artifactFilename = artifactFilename
         self.accessPointSSID = accessPointSSID
+        self.tlsCertificateSHA256 = tlsCertificateSHA256
     }
 }
 
@@ -2611,6 +2613,11 @@ final class BackgroundMapUploadCoordinator: NSObject,
         configuration.allowsExpensiveNetworkAccess = true
         configuration.allowsConstrainedNetworkAccess = true
         configuration.httpMaximumConnectionsPerHost = 1
+        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.connectionProxyDictionary = [:]
         configuration.timeoutIntervalForRequest = 120
         configuration.timeoutIntervalForResource = 6 * 60 * 60
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
@@ -2762,6 +2769,95 @@ final class BackgroundMapUploadCoordinator: NSObject,
         lock.lock()
         retiredTaskIDs.subtract(taskIDs)
         lock.unlock()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (
+            URLSession.AuthChallengeDisposition,
+            URLCredential?
+        ) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod ==
+                NSURLAuthenticationMethodServerTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        session.getAllTasks { tasks in
+            let pins = Set(tasks.compactMap { task -> String? in
+                guard task.state == .running || task.state == .suspended,
+                      let descriptor = Self.descriptor(for: task),
+                      let pin = DeviceTransferSecurityPolicy
+                        .normalizedCertificateSHA256(
+                            descriptor.tlsCertificateSHA256 ?? ""
+                        ),
+                      let url = task.currentRequest?.url ??
+                        task.originalRequest?.url,
+                      url.scheme?.lowercased() == "https",
+                      url.host?.caseInsensitiveCompare(
+                        challenge.protectionSpace.host
+                      ) == .orderedSame,
+                      (url.port ?? 443) == challenge.protectionSpace.port else {
+                    return nil
+                }
+                return pin
+            })
+            guard pins.count == 1, let pin = pins.first else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                return
+            }
+            let result = DeviceTransferSecurityPolicy.evaluate(
+                challenge: challenge,
+                expectedHost: challenge.protectionSpace.host,
+                certificateSHA256: pin
+            )
+            completionHandler(result.0, result.1)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (
+            URLSession.AuthChallengeDisposition,
+            URLCredential?
+        ) -> Void
+    ) {
+        guard let descriptor = Self.descriptor(for: task),
+              let certificateSHA256 = descriptor.tlsCertificateSHA256,
+              let originalURL = task.originalRequest?.url,
+              originalURL.scheme?.lowercased() == "https",
+              originalURL.user == nil,
+              originalURL.password == nil,
+              originalURL.query == nil,
+              originalURL.fragment == nil,
+              let expectedHost = originalURL.host,
+              expectedHost.caseInsensitiveCompare(
+                challenge.protectionSpace.host
+              ) == .orderedSame,
+              (originalURL.port ?? 443) ==
+                challenge.protectionSpace.port else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        let result = DeviceTransferSecurityPolicy.evaluate(
+            challenge: challenge,
+            expectedHost: expectedHost,
+            certificateSHA256: certificateSHA256
+        )
+        completionHandler(result.0, result.1)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 
     func urlSession(

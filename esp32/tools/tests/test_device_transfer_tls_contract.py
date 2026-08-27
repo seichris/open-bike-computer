@@ -1,0 +1,94 @@
+from pathlib import Path
+import unittest
+
+
+ROOT = Path(__file__).parents[2]
+TLS_HEADER = (
+    ROOT / "lib/device_transfer/device_transfer_tls.hpp"
+).read_text(encoding="utf-8")
+TLS_SOURCE = (
+    ROOT / "lib/device_transfer/device_transfer_tls.cpp"
+).read_text(encoding="utf-8")
+HTTP_SOURCE = (
+    ROOT / "lib/device_transfer/device_transfer_http.cpp"
+).read_text(encoding="utf-8")
+HTTP_HEADER = (
+    ROOT / "lib/device_transfer/device_transfer_http.hpp"
+).read_text(encoding="utf-8")
+
+
+class DeviceTransferTLSContractTests(unittest.TestCase):
+    def test_tls_handshake_precedes_http_parsing(self):
+        worker = HTTP_SOURCE[
+            HTTP_SOURCE.index("void HttpTransferServer::runWorker()") :
+            HTTP_SOURCE.index("void HttpTransferServer::workerTaskThunk")
+        ]
+        self.assertLess(worker.index("client.begin("), worker.index("handleClient(client)"))
+        begin = TLS_SOURCE[
+            TLS_SOURCE.index("bool TransferClient::begin") :
+            TLS_SOURCE.index("int TransferClient::available")
+        ]
+        self.assertLess(begin.index("::dup(accepted.fd())"), begin.index("accepted.stop()"))
+        self.assertLess(
+            begin.index("accepted.stop()"),
+            begin.index("esp_tls_server_session_create"),
+        )
+        self.assertIn("TransferClient &client", HTTP_HEADER)
+
+    def test_leaf_fingerprint_is_sha256_over_certificate_der(self):
+        fingerprint = TLS_SOURCE[
+            TLS_SOURCE.index("bool certificateFingerprint") :
+            TLS_SOURCE.index("bool keyMatchesCertificate")
+        ]
+        self.assertIn("certificate.raw.p", fingerprint)
+        self.assertIn("certificate.raw.len", fingerprint)
+        self.assertIn("mbedtls_sha256_ret", fingerprint)
+        self.assertIn("mbedtls_pk_check_pair", TLS_SOURCE)
+
+    def test_identity_selector_is_one_atomic_nvs_value(self):
+        self.assertIn('constexpr char kSelectorKey[] = "selector";', TLS_SOURCE)
+        self.assertIn("putUShort(kSelectorKey, encodeSelector(0)) == 2", TLS_SOURCE)
+        self.assertIn("putUShort(kSelectorKey, encodeSelector(nextSlot)) == 2", TLS_SOURCE)
+        self.assertNotIn("kSchemaKey", TLS_SOURCE)
+        self.assertNotIn("kActiveSlotKey", TLS_SOURCE)
+
+    def test_identity_corruption_fails_closed(self):
+        load = TLS_SOURCE[
+            TLS_SOURCE.index("bool TransferTlsIdentityStore::load()") :
+            TLS_SOURCE.index("bool TransferTlsIdentityStore::generate")
+        ]
+        self.assertIn("namespaceContainsIdentityState", load)
+        self.assertIn("selector == 0xffff && validSlots[0] && !validSlots[1]", load)
+        self.assertIn('lastError_ = "tls_identity_invalid";', load)
+        self.assertNotIn("generate(1, generated)", load[load.index("if (schema !="):])
+
+    def test_rotation_is_two_phase_and_fingerprint_bound(self):
+        self.assertIn("prepareRotation()", TLS_HEADER)
+        self.assertIn("commitRotation(", TLS_HEADER)
+        commit = TLS_SOURCE[
+            TLS_SOURCE.index("bool TransferTlsIdentityStore::commitRotation") :
+            TLS_SOURCE.index("bool TransferTlsIdentityStore::cancelRotation")
+        ]
+        self.assertIn("expectedCertificateSha256 != pending_.certificateSha256", commit)
+        self.assertLess(commit.index("putUShort(kSelectorKey"), commit.index("clearSlot(oldSlot)"))
+
+    def test_tls_close_notify_is_the_response_completion_boundary(self):
+        finish = TLS_SOURCE[
+            TLS_SOURCE.index("bool TransferClient::finishResponse") :
+            TLS_SOURCE.index("void TransferClient::stop")
+        ]
+        self.assertIn("mbedtls_ssl_close_notify", finish)
+        self.assertIn("esp_tls_conn_read", finish)
+        self.assertIn("client.finishResponse(timeoutMs)", HTTP_SOURCE)
+
+    def test_all_hotspots_are_protected_and_status_advertises_https(self):
+        self.assertIn("apPassphrase_ = generateSessionToken().substr(0, 24);", HTTP_SOURCE)
+        self.assertIn(
+            "WiFi.softAP(apSsid.c_str(), apPassphrase.c_str())", HTTP_SOURCE
+        )
+        self.assertNotIn("WiFi.softAP(apSsid.c_str());", HTTP_SOURCE)
+        self.assertIn('std::string("https://")', HTTP_SOURCE)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -38,18 +38,15 @@ class MapActivationHandoffTests(unittest.TestCase):
         self.assertNotIn("startActivationTask(", body)
         self.assertNotIn("xTaskCreate(", body)
 
-    def test_explicit_activation_also_crosses_response_boundary(self):
-        body = method_body("handleActivate")
-        self.assertIn("deferActivationUntilResponse(", body)
-        self.assertNotIn("startActivationTask(", body)
-        self.assertNotIn("xTaskCreate(", body)
+    def test_unsigned_archive_routes_are_rejected(self):
+        body = method_body("handleRequest")
+        self.assertIn('startsWith(request.path, kSessionPrefix)', body)
+        self.assertIn('sendError(client, 426, "signed_stream_required"', body)
+        self.assertNotIn("handleActivate(", SOURCE)
+        self.assertNotIn("handlePut(", SOURCE)
 
-    def test_dedicated_task_is_reserved_for_boot_recovery(self):
-        self.assertEqual(SOURCE.count("startActivationTask("), 3)
-        self.assertIn(
-            "startActivationTask(",
-            method_body("resumePendingArchiveActivation"),
-        )
+    def test_dedicated_task_is_reserved_for_signed_stream_boot_recovery(self):
+        self.assertEqual(SOURCE.count("startActivationTask("), 2)
         self.assertIn(
             "startActivationTask(",
             method_body("resumePendingStreamActivation"),
@@ -82,8 +79,14 @@ class MapActivationHandoffTests(unittest.TestCase):
         self.assertIn("vTaskDelay(pdMS_TO_TICKS(1));", body)
 
     def test_deferred_state_records_response_semantics(self):
-        self.assertIn("bool activationAlreadyBegun = false;", HEADER)
-        self.assertIn("bool automaticExitOnCleanResponse = true;", HEADER)
+        deferred = HEADER[
+            HEADER.index("struct DeferredActivation") :
+            HEADER.index("DeferredActivation deferredActivation_")
+        ]
+        self.assertIn("HttpResponseCompletionToken response;", deferred)
+        self.assertIn("std::string sessionId;", deferred)
+        self.assertIn("uint32_t minimumSequence = 0;", deferred)
+        self.assertNotIn("activationAlreadyBegun", deferred)
 
     def test_renderer_handoff_preserves_bounded_diagnostic_identity(self):
         self.assertIn("struct ActivatedMapRoot", HEADER)
@@ -95,11 +98,13 @@ class MapActivationHandoffTests(unittest.TestCase):
             body,
         )
 
-    def test_completed_upload_survives_obsolete_cleanup_failure(self):
-        body = method_body("handlePut")
-        self.assertIn("post-upload cleanup incomplete", body)
-        self.assertIn("continuing with completed upload", body)
-        self.assertNotIn('sendError(client, 500, "staging_cleanup"', body)
+    def test_boot_recovery_discards_pending_unsigned_archives(self):
+        body = method_body("resumePendingActivations")
+        self.assertIn("readPendingArchiveActivation", body)
+        self.assertIn("discardStagedSession", body)
+        self.assertIn("clearPendingArchiveActivation", body)
+        self.assertIn('"legacy_archive_disabled"', body)
+        self.assertNotIn("resumePendingArchiveActivation", SOURCE)
 
 
 if __name__ == "__main__":

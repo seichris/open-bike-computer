@@ -10,6 +10,7 @@
 #include <string>
 
 #include "device_transfer_network_protocol.hpp"
+#include "device_transfer_tls.hpp"
 
 namespace device_transfer {
 
@@ -26,6 +27,14 @@ struct HttpTransferStatus {
   bool hotspotFallback = false;
   std::string hotspotFallbackReason;
   std::string sessionToken;
+  std::string tlsCertificateSha256;
+  uint32_t tlsIdentityVersion = 0;
+  std::string pendingTlsCertificateSha256;
+  uint32_t pendingTlsIdentityVersion = 0;
+  uint32_t transferGeneration = 0;
+  bool secureTransferV1 = false;
+  bool signedMapStreamV1 = false;
+  std::string legacyArchivePolicy;
   std::string lastErrorCode;
   std::string lastErrorMessage;
   uint32_t errorSequence = 0;
@@ -47,7 +56,7 @@ class HttpRequestHandler {
 public:
   virtual ~HttpRequestHandler() = default;
   virtual bool handleRequest(const HttpRequest &request,
-                             WiFiClient &client) = 0;
+                             TransferClient &client) = 0;
   virtual bool allowShortUnauthenticatedResponseCompletion(
       const HttpRequest &request) const {
     return false;
@@ -68,6 +77,12 @@ public:
   bool setPreferredNetwork(const LanCredentials &credentials);
   bool forceHotspotFallbackAfterEndpointFailure();
   void clearPreferredNetwork();
+  bool bindAuthenticatedBleSession(uint64_t sessionId);
+  void clearAuthenticatedBleSession();
+  bool prepareTlsIdentityRotation();
+  bool commitTlsIdentityRotation(
+      const std::string &expectedCertificateSha256);
+  bool cancelTlsIdentityRotation();
   void setLastError(const std::string &code, const std::string &message);
   void process();
   HttpTransferStatus status() const;
@@ -90,8 +105,11 @@ private:
   std::string apSsid_ = "BikeComputer-Transfer";
   std::string apPassphrase_;
   std::string sessionToken_;
+  TransferTlsIdentityStore tlsIdentityStore_;
+  uint64_t authenticatedBleSessionId_ = 0;
   WiFiServer server_{8080};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
+  mutable SemaphoreHandle_t tlsIdentityMutex_ = nullptr;
   std::string lastErrorCode_;
   std::string lastErrorMessage_;
   uint32_t errorSequence_ = 0;
@@ -108,18 +126,20 @@ private:
   size_t handlerCount_ = 0;
   TaskHandle_t workerTask_ = nullptr;
 
-  void handleClient(WiFiClient &client);
+  void handleClient(TransferClient &client);
   void runWorker();
   bool startNetwork();
   void stopNetwork();
   static void workerTaskThunk(void *arg);
   HttpRequestHandler *handlerForPath(const std::string &path) const;
   std::string generateSessionToken() const;
-  void sendError(WiFiClient &client, int status, const std::string &code,
+  void sendError(TransferClient &client, int status, const std::string &code,
                  const std::string &message);
   void rememberError(const std::string &code, const std::string &message);
   void lockState() const;
   void unlockState() const;
+  void lockTlsIdentity() const;
+  void unlockTlsIdentity() const;
 };
 
 struct HttpResponseHeader {
@@ -127,16 +147,20 @@ struct HttpResponseHeader {
   const char *value = nullptr;
 };
 
-bool sendHttpHead(WiFiClient &client, int status, uint64_t contentLength = 0,
+bool sendHttpHead(TransferClient &client, int status,
+                  uint64_t contentLength = 0,
                   const char *contentType = nullptr,
                   const HttpResponseHeader *additionalHeaders = nullptr,
                   size_t additionalHeaderCount = 0);
-bool writeHttpBytes(WiFiClient &client, const uint8_t *data, size_t length,
+bool writeHttpBytes(TransferClient &client, const uint8_t *data,
+                    size_t length,
                     uint32_t timeoutMs = 5000);
-bool sendHttpJson(WiFiClient &client, int status, const std::string &body);
-bool sendHttpError(WiFiClient &client, int status, const std::string &code,
+bool sendHttpJson(TransferClient &client, int status,
+                  const std::string &body);
+bool sendHttpError(TransferClient &client, int status,
+                   const std::string &code,
                    const std::string &message);
-bool readHttpBody(WiFiClient &client, uint64_t contentLength,
+bool readHttpBody(TransferClient &client, uint64_t contentLength,
                   uint64_t maxLength, std::string &body,
                   uint32_t timeoutMs = 5000);
 
