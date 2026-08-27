@@ -155,8 +155,10 @@ static std::atomic<uint8_t> radioRequestedConnectionProfile{
 #endif
 static std::atomic<uint16_t> radioConnectionHandle{BLE_HS_CONN_HANDLE_NONE};
 // Producers may run on the Arduino/LVGL task, while NimBLE owns the live
-// connection state on its host task. Keep the last host-reported MTU in an
-// atomic snapshot so chunking never calls getPeerMTU() outside that task.
+// connection state on its host task. Refresh the host-reported MTU from each
+// incoming callback as well as onMTUChange: some restored iOS connections do
+// not deliver the latter callback even though their ATT MTU is already larger
+// than 23. Chunking must never call getPeerMTU() outside the host task.
 static std::atomic<uint16_t> activePeerMtu{23};
 static std::atomic<uint32_t> lastConnectionParameterSampleMs{0};
 struct RadioDebugSnapshot {
@@ -4085,6 +4087,14 @@ public:
   ScopedNimbleCallback() {
     previousTask = nimbleCallbackTask.exchange(
         xTaskGetCurrentTaskHandle(), std::memory_order_acq_rel);
+    const uint16_t connectionHandle = activeConnHandle;
+    NimBLEServer *server = NimBLEDevice::getServer();
+    if (connectionHandle != BLE_HS_CONN_HANDLE_NONE && server != nullptr) {
+      const uint16_t peerMtu = server->getPeerMTU(connectionHandle);
+      if (peerMtu >= 23) {
+        activePeerMtu.store(peerMtu, std::memory_order_release);
+      }
+    }
   }
   ~ScopedNimbleCallback() {
     nimbleCallbackTask.store(previousTask, std::memory_order_release);
