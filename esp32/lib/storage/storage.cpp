@@ -15,12 +15,13 @@
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "freertos/task.h"
-#include <SD.h>
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include <SD_MMC.h>
+#else
+#include <SD.h>
+#include <SPI.h>
 #endif
 #include <FFat.h>
-#include <SPI.h>
 #include <Wire.h>
 #include <cmath>
 #include <hal.hpp>

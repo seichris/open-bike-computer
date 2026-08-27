@@ -87,6 +87,16 @@ class RideDiagnosticsStorageContractTests(unittest.TestCase):
             shutdown.index('"controlled_shutdown"'),
         )
 
+    def test_waveshare_build_does_not_link_the_legacy_arduino_sd_stack(self):
+        include_block = STORAGE.split('#include "freertos/task.h"', 1)[1].split(
+            "#include <FFat.h>", 1
+        )[0]
+        self.assertIn("#include <SD_MMC.h>", include_block)
+        self.assertIn("#else\n#include <SD.h>\n#include <SPI.h>", include_block)
+        self.assertNotIn(
+            "#include <SD.h>\n#if defined(WAVESHARE_AMOLED_175)", include_block
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
