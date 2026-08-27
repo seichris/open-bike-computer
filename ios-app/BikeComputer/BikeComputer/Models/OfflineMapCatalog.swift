@@ -200,15 +200,12 @@ nonisolated enum OfflineMapCatalogAvailabilityPolicy {
             return .unavailable
         }
 
-        if map.artifacts.contains(where: {
-            isCompatible(
-                $0,
-                map: map,
-                channel: channel,
-                trustStore: trustStore,
-                readerCapabilities: readerCapabilities
-            )
-        }) {
+        if !preferredCompatibleArtifacts(
+            for: map,
+            channel: channel,
+            trustStore: trustStore,
+            readerCapabilities: readerCapabilities
+        ).isEmpty {
             return .available
         }
 
@@ -226,6 +223,30 @@ nonisolated enum OfflineMapCatalogAvailabilityPolicy {
         return .incompatible
     }
 
+    static func localArtifactNeedsRefresh(
+        localArtifactSHA256s: Set<String>,
+        map: OfflineMapCatalogMap,
+        channel: String,
+        trustStore: BikeMapStreamTrustStore,
+        readerCapabilities: OfflineMapReaderCapabilities = .current
+    ) -> Bool {
+        let deliveryState = map.deliveryState.lowercased()
+        guard deliveryState != "blocked", deliveryState != "tombstoned" else {
+            return false
+        }
+        let preferredArtifacts = preferredCompatibleArtifacts(
+            for: map,
+            channel: channel,
+            trustStore: trustStore,
+            readerCapabilities: readerCapabilities
+        )
+        guard !preferredArtifacts.isEmpty else { return false }
+        let localSHA256s = Set(localArtifactSHA256s.map { $0.lowercased() })
+        return preferredArtifacts.allSatisfy {
+            !localSHA256s.contains($0.sha256.lowercased())
+        }
+    }
+
     static func availability(
         for preview: OfflineMapSharePreview,
         channel: String
@@ -239,6 +260,35 @@ nonisolated enum OfflineMapCatalogAvailabilityPolicy {
             return .available
         default:
             return .incompatible
+        }
+    }
+
+    private static func preferredCompatibleArtifacts(
+        for map: OfflineMapCatalogMap,
+        channel: String,
+        trustStore: BikeMapStreamTrustStore,
+        readerCapabilities: OfflineMapReaderCapabilities
+    ) -> [OfflineMapCatalogArtifact] {
+        let normalizedChannel = channel.lowercased()
+        let compatibleArtifacts = map.artifacts.filter {
+            isCompatible(
+                $0,
+                map: map,
+                channel: normalizedChannel,
+                trustStore: trustStore,
+                readerCapabilities: readerCapabilities
+            )
+        }
+        if normalizedChannel == "development" {
+            let developmentArtifacts = compatibleArtifacts.filter {
+                $0.deliveryTier.lowercased() == "development"
+            }
+            if !developmentArtifacts.isEmpty {
+                return developmentArtifacts
+            }
+        }
+        return compatibleArtifacts.filter {
+            $0.deliveryTier.lowercased() == "production"
         }
     }
 

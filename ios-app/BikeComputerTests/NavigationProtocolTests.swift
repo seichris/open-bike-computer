@@ -6435,6 +6435,7 @@ struct NavigationProtocolTests {
             id: String,
             tier: String,
             requiredBuild: String?,
+            sha256: String = String(repeating: "c", count: 64),
             includesReaderRequirements: Bool = true,
             readerSchemaVersion: Int = 1,
             streamFormat: String = OfflineMapArtifact.bikeMapStreamFormat,
@@ -6449,7 +6450,7 @@ struct NavigationProtocolTests {
                 mediaType: "application/vnd.openbikecomputer.map-stream",
                 filename: "test.bmap",
                 bytes: 100,
-                sha256: String(repeating: "c", count: 64),
+                sha256: sha256,
                 manifestReceipt: String(repeating: "d", count: 64),
                 signedManifestReceipt: String(repeating: "e", count: 64),
                 signatureKeyId: keyID,
@@ -6480,7 +6481,7 @@ struct NavigationProtocolTests {
 
         func map(
             deliveryState: String,
-            artifact: OfflineMapCatalogArtifact
+            artifacts: [OfflineMapCatalogArtifact]
         ) -> OfflineMapCatalogMap {
             OfflineMapCatalogMap(
                 mapEntryId: "map_v1_" + String(repeating: "m", count: 43),
@@ -6499,8 +6500,15 @@ struct NavigationProtocolTests {
                 generatedAt: nil,
                 addedAt: "2026-08-25T00:00:00.000Z",
                 updatedAt: "2026-08-25T00:00:00.000Z",
-                artifacts: [artifact]
+                artifacts: artifacts
             )
+        }
+
+        func map(
+            deliveryState: String,
+            artifact: OfflineMapCatalogArtifact
+        ) -> OfflineMapCatalogMap {
+            map(deliveryState: deliveryState, artifacts: [artifact])
         }
 
         let developmentMap = map(
@@ -6538,6 +6546,82 @@ struct NavigationProtocolTests {
             ),
             .available,
             "production exposes an exact compatible promoted artifact"
+        )
+        let developmentSHA256 = String(repeating: "2", count: 64)
+        let productionSHA256 = String(repeating: "3", count: 64)
+        let mixedTierMap = map(
+            deliveryState: "production",
+            artifacts: [
+                artifact(
+                    id: "mixed-dev",
+                    tier: "development",
+                    requiredBuild: nil,
+                    sha256: developmentSHA256
+                ),
+                artifact(
+                    id: "mixed-prod",
+                    tier: "production",
+                    requiredBuild: nil,
+                    sha256: productionSHA256
+                ),
+            ]
+        )
+        assert(
+            OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+                localArtifactSHA256s: [developmentSHA256],
+                map: mixedTierMap,
+                channel: "production",
+                trustStore: .production
+            ),
+            "production refreshes a cached development artifact for the same map entry"
+        )
+        assert(
+            !OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+                localArtifactSHA256s: [productionSHA256.uppercased()],
+                map: mixedTierMap,
+                channel: "production",
+                trustStore: .production
+            ),
+            "production keeps a cached compatible production artifact"
+        )
+        assert(
+            !OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+                localArtifactSHA256s: [developmentSHA256],
+                map: mixedTierMap,
+                channel: "development",
+                trustStore: .production
+            ),
+            "development keeps its preferred compatible development artifact"
+        )
+        assert(
+            OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+                localArtifactSHA256s: [productionSHA256],
+                map: mixedTierMap,
+                channel: "development",
+                trustStore: .production
+            ),
+            "development refreshes a production fallback when a development artifact exists"
+        )
+        assert(
+            OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+                localArtifactSHA256s: [],
+                map: mixedTierMap,
+                channel: "production",
+                trustStore: .production
+            ),
+            "a catalog-backed local file without verified artifact identity is refreshed"
+        )
+        assert(
+            !OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+                localArtifactSHA256s: [developmentSHA256],
+                map: map(
+                    deliveryState: "blocked",
+                    artifacts: mixedTierMap.artifacts
+                ),
+                channel: "production",
+                trustStore: .production
+            ),
+            "blocked maps never advertise a catalog artifact refresh"
         )
         let olderBuildMap = map(
             deliveryState: "production",
@@ -10447,6 +10531,17 @@ struct NavigationProtocolTests {
             "catalog rows explain and disable downloads that are pending or incompatible"
         )
         assert(
+            source.contains(
+                "let catalogArtifactNeedsRefresh = manager.catalogArtifactNeedsRefresh(for: item)"
+            ) &&
+                source.contains("Label(\"Updated map available\"") &&
+                source.contains(".accessibilityLabel(\"Update \\(displayName) on this iPhone\")") &&
+                source.contains("manager.isDeviceTransferBusy ||") &&
+                source.contains("manager.hasActiveBackgroundUpload ||") &&
+                source.contains("isPausedUpload ||"),
+            "a stale local catalog artifact offers a current verified download before transfer"
+        )
+        assert(
             source.contains("SavedMapDeviceTransferPolicy.canStart(") &&
                 source.contains("isDeviceTransferBusy: manager.isDeviceTransferBusy") &&
                 source.contains("manager.hasActiveBackgroundUpload") &&
@@ -10646,6 +10741,38 @@ struct NavigationProtocolTests {
         }
         let developerSource = String(source[developerStart...])
         let rootSettingsSource = String(source[..<developerStart])
+        guard let rootBodyStart = source.range(
+            of: "var body: some View {"
+        )?.lowerBound,
+        let rootBodyEnd = source.range(
+            of: "private var shouldPromoteBikeComputerSettings",
+            range: rootBodyStart..<source.endIndex
+        )?.lowerBound else {
+            assert(false, "root settings body boundaries should be present")
+            return
+        }
+        let rootBodySource = String(source[rootBodyStart..<rootBodyEnd])
+        assert(
+            !rootBodySource.contains("MapLibrarySettingsView") &&
+                developerSource.contains(
+                    "MapLibrarySettingsView(manager: offlineMapManager)"
+                ) &&
+                developerSource.contains(
+                    "Label(\"Map Library\", systemImage: \"map.circle\")"
+                ),
+            "Map Library is available only from Developer Settings"
+        )
+        assert(
+            developerSource.contains("Button(action: useProductionMapServer)") &&
+                developerSource.contains(
+                    "OfflineMapServiceConfig.productionServerURLString"
+                ) &&
+                developerSource.contains("Button(action: useDevelopmentMapServer)") &&
+                developerSource.contains(
+                    "OfflineMapServiceConfig.developmentServerURLString"
+                ),
+            "Developer Settings explicitly selects production or development maps"
+        )
         assert(
             !rootSettingsSource.contains("title: \"App Version\"") &&
                 developerSource.contains("Section(header: Text(\"App\"))") &&

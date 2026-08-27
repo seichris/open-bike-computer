@@ -16,10 +16,19 @@ struct OfflineMapsView: View {
             Section(header: Text("Map Server")) {
                 OfflineMapValueRow(title: "Service", value: manager.serverURLString)
                 Button {
-                    manager.serverURLString = OfflineMapServiceConfig.defaultServerURLString
+                    manager.serverURLString =
+                        OfflineMapServiceConfig.productionServerURLString
                 } label: {
                     Label("Use Production Server", systemImage: "checkmark.seal")
                 }
+#if DEBUG
+                Button {
+                    manager.serverURLString =
+                        OfflineMapServiceConfig.developmentServerURLString
+                } label: {
+                    Label("Use Development Server", systemImage: "hammer")
+                }
+#endif
             }
 
             Section(header: Text("Download Map")) {
