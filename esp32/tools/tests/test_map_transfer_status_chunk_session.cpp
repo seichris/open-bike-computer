@@ -113,8 +113,9 @@ int main() {
   assert(map_transfer_status_protocol::chunkPayloadBytes(32) == 0);
   assert(map_transfer_status_protocol::chunkPayloadBytes(33) == 1);
   assert(map_transfer_status_protocol::chunkPayloadBytes(45) == 13);
-  assert(map_transfer_status_protocol::chunkPayloadBytes(185) == 153);
-  assert(map_transfer_status_protocol::chunkPayloadBytes(512) == 480);
+  assert(map_transfer_status_protocol::chunkPayloadBytes(160) == 128);
+  assert(map_transfer_status_protocol::chunkPayloadBytes(185) == 128);
+  assert(map_transfer_status_protocol::chunkPayloadBytes(512) == 128);
 
   map_transfer_status_protocol::ChunkSession session;
 
