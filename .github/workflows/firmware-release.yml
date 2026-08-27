@@ -46,9 +46,9 @@ jobs:
       run:
         working-directory: esp32
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Restore pinned PlatformIO downloads
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: esp32/.pio/open-bike-build/downloads
           key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
@@ -59,7 +59,7 @@ jobs:
           set -euo pipefail
           cp ".pio/build/${{ matrix.environment }}/firmware.bin" "dist/${{ matrix.target }}.bin"
           shasum -a 256 dist/*
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: firmware-${{ matrix.target }}
           path: esp32/dist/
@@ -84,15 +84,15 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY: ${{ secrets.FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
       - name: Install exact hashed manifest dependencies
         run: >-
           python -m pip install --require-hashes --only-binary=:all: --no-deps
           -r tools/firmware-signing-requirements.txt
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
       - name: Generate signed manifests
@@ -178,16 +178,16 @@ jobs:
             --asset-dir release-assets \
             --require-immutable \
             --output "${RUNNER_TEMP}/publication-receipt.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: firmware-release-publication-receipt
           path: ${{ runner.temp }}/publication-receipt.json
           if-no-files-found: error
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: public
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
 
   recover-pages:
     name: Recover Firmware OTA Pages
@@ -216,7 +216,7 @@ jobs:
             echo "Invalid firmware release tag: ${RELEASE_TAG}" >&2
             exit 1
           fi
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -250,13 +250,13 @@ jobs:
             echo "Recovery payload must contain exactly two OTA manifests" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: firmware-release-recovery-receipt-${{ inputs.release_tag }}
           path: ${{ runner.temp }}/recovery-receipt.json
           if-no-files-found: error
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: public
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
