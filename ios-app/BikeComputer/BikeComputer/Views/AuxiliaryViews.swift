@@ -57,20 +57,23 @@ struct ConnectionStatusView: View {
         return trimmedName.isEmpty ? "Bicino" : trimmedName
     }
 
-    private var statusColor: Color {
-        isConnected ? .green : Color(uiColor: .systemGray3)
+    private var statusSymbolName: String {
+        isConnected
+            ? "antenna.radiowaves.left.and.right"
+            : "antenna.radiowaves.left.and.right.slash"
+    }
+
+    private var statusSymbolColor: Color {
+        isConnected ? .black : Color(uiColor: .systemGray3)
     }
     
     var body: some View {
         Button(action: onReconnect) {
             HStack(spacing: 8) {
-                Image(systemName: "circle.fill")
-                    .font(.caption)
-                    .foregroundColor(statusColor)
-                    .shadow(
-                        color: isConnected ? .green.opacity(0.5) : .clear,
-                        radius: 4
-                    )
+                Image(systemName: statusSymbolName)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(statusSymbolColor)
+                    .accessibilityHidden(true)
 
                 Text(displayName)
                     .font(.footnote.weight(.medium))
