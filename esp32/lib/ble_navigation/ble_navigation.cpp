@@ -5023,10 +5023,14 @@ void BLENavigationServer::process() {
         Serial.println("BLE Status: ADVERTISING (Waiting for connection...)");
     }
 
+    const device_ownership::CryptoResourceDiagnostics cryptoResources =
+        device_ownership::cryptoResourceDiagnostics();
     Serial.printf("BLE Debug: up=%lus init=%d conn=%d auth=%d connects=%lu "
                   "disconnects=%lu authOK=%lu nav=%lu route=%lu gps=%lu "
                   "settings=%lu rejectAuth=%lu lastMs[c=%lu a=%lu n=%lu r=%lu "
-                  "g=%lu s=%lu rej=%lu] gpsGapMs[last=%lu max=%lu]\n",
+                  "g=%lu s=%lu rej=%lu] gpsGapMs[last=%lu max=%lu] "
+                  "cryptoDma[free=%lu largest=%lu minFree=%lu minLargest=%lu "
+                  "rejected=%lu failed=%lu]\n",
                   millis() / 1000, initialized, connected,
                   bleSessionAuthenticated, bleDebugStats.connectCount,
                   bleDebugStats.disconnectCount, bleDebugStats.authSuccessCount,
@@ -5041,7 +5045,17 @@ void BLENavigationServer::process() {
                   bleDebugStats.lastSettingsPacketMs,
                   bleDebugStats.lastRejectedUnauthenticatedMs,
                   bleDebugStats.lastGpsPacketGapMs,
-                  bleDebugStats.maximumGpsPacketGapMs);
+                  bleDebugStats.maximumGpsPacketGapMs,
+                  static_cast<unsigned long>(cryptoResources.current.dmaFree),
+                  static_cast<unsigned long>(
+                      cryptoResources.current.dmaLargest),
+                  static_cast<unsigned long>(cryptoResources.minimumDmaFree),
+                  static_cast<unsigned long>(
+                      cryptoResources.minimumDmaLargest),
+                  static_cast<unsigned long>(
+                      cryptoResources.headroomRejections),
+                  static_cast<unsigned long>(
+                      cryptoResources.operationFailures));
   }
 #else
   (void)lastLog;

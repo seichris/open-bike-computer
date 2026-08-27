@@ -1,6 +1,7 @@
 #pragma once
 
 #include "device_ownership_crypto.hpp"
+#include "device_ownership_crypto_resource.hpp"
 #include "ride_controller_lease.hpp"
 
 #include <array>

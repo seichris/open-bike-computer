@@ -14,7 +14,8 @@ candidate selection, not permission to change the default profile.
   least three complete 120-second fixture loops per profile;
 - authenticated, rate-limited snapshots from the same bounded firmware state
   over HTTP or BLE;
-- internal RAM and PSRAM free/largest-block floors and monotonic-decline checks;
+- internal RAM, DMA-capable internal RAM, and PSRAM free/largest-block floors
+  and monotonic-decline checks;
 - render/building/display timings, UI and GPS gaps, render job outcomes,
   building selection/reach, quota limiters, allocation fallback, GPS packet
   cadence, route-marker freshness, reset identity, and remote-debug capture
@@ -122,8 +123,10 @@ snapshot fails rather than producing an optimistic ranking.
 
 The checked-in gate file is
 `esp32/tools/renderer_benchmark_gates.json`. Its initial safety floors include
-32 KiB free/16 KiB largest internal-RAM block and 1.5 MB free/750 KiB largest
-PSRAM block. It requires a dense view (at least 40 median candidates, 24
+32 KiB free/16 KiB largest internal-RAM block, 8 KiB free/2 KiB largest
+DMA-capable block, and 1.5 MB free/750 KiB largest PSRAM block. The DMA floor
+protects task-stack and hardware-crypto allocations that cannot fall back to
+PSRAM. It requires a dense view (at least 40 median candidates, 24
 selected buildings, and 16 extrusions in every non-flat profile), so a wrong
 map, screen, or disabled-3D setup cannot pass as a useful baseline. It also
 rejects monotonic memory loss, allocation fallback,

@@ -1004,6 +1004,36 @@ int main() {
   const std::string goldenNotifyFrame = binary(
       "523200000001f19f6c8cd9263269e34a54aa910f37738270d42cb7d8632c8f0e20bfa6a4588d369304ab9662");
 
+  static_assert(hasCryptoDmaHeadroom(
+      {kMinimumCryptoDmaFreeBytes, kMinimumCryptoDmaLargestBlockBytes}));
+  static_assert(!hasCryptoDmaHeadroom(
+      {kMinimumCryptoDmaFreeBytes - 1,
+       kMinimumCryptoDmaLargestBlockBytes}));
+  static_assert(!hasCryptoDmaHeadroom(
+      {kMinimumCryptoDmaFreeBytes,
+       kMinimumCryptoDmaLargestBlockBytes - 1}));
+  resetCryptoResourceDiagnosticsForTesting();
+  setCryptoResourceSnapshotForTesting(
+      {kMinimumCryptoDmaFreeBytes - 1,
+       kMinimumCryptoDmaLargestBlockBytes});
+  DeviceOwnership constrainedWire;
+  constrainedWire.setAuthenticatedSessionKeysForTesting(goldenWriteKey,
+                                                         goldenNotifyKey);
+  std::string constrainedPlaintext;
+  assert(!constrainedWire.unwrapAuthenticatedPayload(
+      AuthenticatedChannel::Auth, goldenWriteFrame, constrainedPlaintext));
+  CryptoResourceDiagnostics constrainedDiagnostics =
+      cryptoResourceDiagnostics();
+  assert(constrainedDiagnostics.headroomRejections == 1);
+  assert(constrainedDiagnostics.operationFailures == 0);
+  setCryptoResourceSnapshotForTesting(
+      {kMinimumCryptoDmaFreeBytes, kMinimumCryptoDmaLargestBlockBytes});
+  assert(constrainedWire.unwrapAuthenticatedPayload(
+      AuthenticatedChannel::Auth, goldenWriteFrame, constrainedPlaintext));
+  assert(constrainedPlaintext == "NAME|4d792062696b65");
+  clearCryptoResourceSnapshotForTesting();
+  resetCryptoResourceDiagnosticsForTesting();
+
   DeviceOwnership wire;
   wire.setAuthenticatedSessionKeysForTesting(goldenWriteKey, goldenNotifyKey);
   std::string plaintext;

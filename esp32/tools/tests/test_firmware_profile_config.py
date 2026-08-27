@@ -39,6 +39,10 @@ assert "def record_link_finish(target, source, env):" in prebuild_source
 assert main_source.index("recoverInterruptedActivation()") < main_source.index(
     "ride_diagnostics::startWriter()"
 )
+assert main_source.index("std::fflush(stdout)") < main_source.index(
+    'bleNavServer.init("BikeComputer")'
+)
+assert main_source.count("heap8=%lu/%lu dma=%lu/%lu") == 2
 
 waveshare_sdkconfig = config.get("waveshare_amoled_common", "custom_sdkconfig")
 assert "CONFIG_PM_ENABLE=y" in waveshare_sdkconfig
@@ -47,6 +51,8 @@ assert "CONFIG_PM_PROFILING=n" in waveshare_sdkconfig
 assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n" in waveshare_sdkconfig
 assert "CONFIG_ARDUINO_LOOP_STACK_SIZE=16384" in waveshare_sdkconfig
 assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in waveshare_sdkconfig
+assert "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096" in waveshare_sdkconfig
+assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536" in waveshare_sdkconfig
 waveshare_unflags = config.get("waveshare_amoled_common", "build_unflags")
 assert "-Wl,--wrap=log_printf" in waveshare_unflags
 waveshare_flags = config.get("waveshare_amoled_common", "build_flags")
@@ -165,6 +171,21 @@ for environment in large_diagnostic_profiles:
         == "partitions_remote_debug.csv"
     )
 
+for partition_name in ("partitions.csv", "partitions_remote_debug.csv"):
+    partition_rows = [
+        [field.strip() for field in line.split(",")]
+        for line in (project_dir / partition_name).read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert partition_rows[-2][0] == "ffat"
+    assert partition_rows[-1][:5] == [
+        "coredump",
+        "data",
+        "coredump",
+        "",
+        "0x0F0000",
+    ]
+
 light_sleep_profiles = {
     "env:WAVESHARE_AMOLED_175_LIGHT_SLEEP": (
         "env:WAVESHARE_AMOLED_175_POWER_METRICS",
@@ -185,6 +206,8 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y" in sdkconfig
     assert "CONFIG_ARDUINO_LOOP_STACK_SIZE=16384" in sdkconfig
     assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in sdkconfig
+    assert "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096" in sdkconfig
+    assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536" in sdkconfig
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
     assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" in flags

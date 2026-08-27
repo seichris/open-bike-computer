@@ -19,6 +19,8 @@
     "minimumInternalLargestBlockBytes": 16384,
     "minimumPsramFreeBytes": 1500000,
     "minimumPsramLargestBlockBytes": 750000,
+    "minimumDmaFreeBytes": 8192,
+    "minimumDmaLargestBlockBytes": 2048,
     "maximumRenderP95Ms": 1250,
     "maximumUiGapMs": 1000,
     "maximumFlushP95Ms": 150,
@@ -38,14 +40,18 @@
     "internalLargestAllowedDeclineBytes": 4096,
     "psramFreeAllowedDeclineBytes": 65536,
     "psramLargestAllowedDeclineBytes": 65536,
+    "dmaFreeAllowedDeclineBytes": 1024,
+    "dmaLargestAllowedDeclineBytes": 1024,
     "crossRunInternalAllowedDeclineBytes": 4096,
-    "crossRunPsramAllowedDeclineBytes": 65536
+    "crossRunPsramAllowedDeclineBytes": 65536,
+    "crossRunDmaAllowedDeclineBytes": 1024
   },
   "candidateRelativeToCurrent": {
     "maximumRenderP95Multiplier": 1.25,
     "maximumUiGapMultiplier": 1.25,
     "maximumInternalHeadroomLossBytes": 4096,
     "maximumPsramHeadroomLossBytes": 65536,
+    "maximumDmaHeadroomLossBytes": 2048,
     "minimumReachGainFraction": 0.05
   }
 }

@@ -1099,8 +1099,9 @@ production builds fail closed.
 
 The snapshot is generated from one fixed-size state object: no per-render trace
 is retained on the device. It includes build/boot identity, measurement-window
-identity, active profile and immutable tuning values, internal RAM and PSRAM,
-bounded timing histograms, building selection/reach and limiter counters,
+identity, active profile and immutable tuning values, internal RAM,
+DMA-capable internal RAM, and PSRAM, bounded timing histograms, building
+selection/reach and limiter counters,
 render-job outcomes, UI/display/GPS gaps, prediction state, fixture-marker
 freshness, and remote-debug overhead. It intentionally contains no route
 coordinates, network credentials, or transfer token.

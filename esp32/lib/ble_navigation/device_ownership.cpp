@@ -1,15 +1,20 @@
 #include "device_ownership.hpp"
 
 #include <Preferences.h>
-#include <esp_system.h>
 #include <esp_mac.h>
+#include <esp_system.h>
 #include <mbedtls/gcm.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+
+#ifndef DEVICE_OWNERSHIP_HOST_TEST
+#include <esp_heap_caps.h>
+#endif
 
 namespace device_ownership {
 namespace {
@@ -38,6 +43,63 @@ constexpr char WATCH_STAGED_CHALLENGE_KEY[] = "wcStCh";
 constexpr uint8_t OWNER_VERSION = 2;
 constexpr uint8_t REVOCATION_VERSION = 1;
 constexpr uint8_t WATCH_CONTROLLER_VERSION = 1;
+
+std::atomic<uint32_t> cryptoMinimumDmaFree{UINT32_MAX};
+std::atomic<uint32_t> cryptoMinimumDmaLargest{UINT32_MAX};
+std::atomic<uint32_t> cryptoHeadroomRejections{0};
+std::atomic<uint32_t> cryptoOperationFailures{0};
+
+#ifdef DEVICE_OWNERSHIP_HOST_TEST
+std::atomic<bool> cryptoTestSnapshotEnabled{false};
+std::atomic<uint32_t> cryptoTestDmaFree{UINT32_MAX};
+std::atomic<uint32_t> cryptoTestDmaLargest{UINT32_MAX};
+#endif
+
+void noteMinimum(std::atomic<uint32_t> &minimum, uint32_t value) {
+  uint32_t observed = minimum.load(std::memory_order_relaxed);
+  while (value < observed &&
+         !minimum.compare_exchange_weak(observed, value,
+                                        std::memory_order_relaxed,
+                                        std::memory_order_relaxed)) {
+  }
+}
+
+CryptoResourceSnapshot readCryptoResourceSnapshot() {
+#ifdef DEVICE_OWNERSHIP_HOST_TEST
+  if (cryptoTestSnapshotEnabled.load(std::memory_order_relaxed)) {
+    return {
+        cryptoTestDmaFree.load(std::memory_order_relaxed),
+        cryptoTestDmaLargest.load(std::memory_order_relaxed),
+    };
+  }
+  return {UINT32_MAX, UINT32_MAX};
+#else
+  return {
+      static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_DMA)),
+      static_cast<uint32_t>(
+          heap_caps_get_largest_free_block(MALLOC_CAP_DMA)),
+  };
+#endif
+}
+
+CryptoResourceSnapshot observeCryptoResources() {
+  const CryptoResourceSnapshot snapshot = readCryptoResourceSnapshot();
+  noteMinimum(cryptoMinimumDmaFree, snapshot.dmaFree);
+  noteMinimum(cryptoMinimumDmaLargest, snapshot.dmaLargest);
+  return snapshot;
+}
+
+bool cryptoDmaHeadroomAvailable() {
+  if (hasCryptoDmaHeadroom(observeCryptoResources())) {
+    return true;
+  }
+  cryptoHeadroomRejections.fetch_add(1, std::memory_order_relaxed);
+  return false;
+}
+
+void noteCryptoOperationFailure() {
+  cryptoOperationFailures.fetch_add(1, std::memory_order_relaxed);
+}
 
 std::vector<std::string> split(const std::string &value) {
   std::vector<std::string> parts;
@@ -138,6 +200,9 @@ bool decryptFrame(const OwnerKey &key, AuthenticatedChannel channel,
                   uint32_t sequence, const uint8_t *ciphertext, size_t length,
                   const uint8_t tag[16], const char *aadPrefix,
                   std::string &plaintext) {
+  if (!cryptoDmaHeadroomAvailable()) {
+    return false;
+  }
   std::array<uint8_t, 12> nonce{};
   makeFrameNonce(channel, sequence, nonce);
   std::vector<uint8_t> aad(aadPrefix, aadPrefix + strlen(aadPrefix));
@@ -160,7 +225,10 @@ bool decryptFrame(const OwnerKey &key, AuthenticatedChannel channel,
                 aad.size(), tag, 16, safeCiphertext, safeOutput)
                          : -1;
   mbedtls_gcm_free(&context);
-  if (result != 0) return false;
+  if (result != 0) {
+    noteCryptoOperationFailure();
+    return false;
+  }
   if (output.empty()) {
     plaintext.clear();
   } else {
@@ -174,6 +242,9 @@ bool encryptFrame(const OwnerKey &key, AuthenticatedChannel channel,
                   uint32_t sequence, const std::string &plaintext,
                   const char *aadPrefix, std::string &ciphertext,
                   std::array<uint8_t, 16> &tag) {
+  if (!cryptoDmaHeadroomAvailable()) {
+    return false;
+  }
   std::array<uint8_t, 12> nonce{};
   makeFrameNonce(channel, sequence, nonce);
   std::vector<uint8_t> aad(aadPrefix, aadPrefix + strlen(aadPrefix));
@@ -200,7 +271,10 @@ bool encryptFrame(const OwnerKey &key, AuthenticatedChannel channel,
                 safePlaintext, safeOutput, tag.size(), tag.data())
                          : -1;
   mbedtls_gcm_free(&context);
-  if (result != 0) return false;
+  if (result != 0) {
+    noteCryptoOperationFailure();
+    return false;
+  }
   if (output.empty()) {
     ciphertext.clear();
   } else {
@@ -211,6 +285,40 @@ bool encryptFrame(const OwnerKey &key, AuthenticatedChannel channel,
 }
 
 } // namespace
+
+CryptoResourceDiagnostics cryptoResourceDiagnostics() {
+  const CryptoResourceSnapshot current = observeCryptoResources();
+  const uint32_t minimumFree =
+      cryptoMinimumDmaFree.load(std::memory_order_relaxed);
+  const uint32_t minimumLargest =
+      cryptoMinimumDmaLargest.load(std::memory_order_relaxed);
+  return {
+      current,
+      minimumFree == UINT32_MAX ? current.dmaFree : minimumFree,
+      minimumLargest == UINT32_MAX ? current.dmaLargest : minimumLargest,
+      cryptoHeadroomRejections.load(std::memory_order_relaxed),
+      cryptoOperationFailures.load(std::memory_order_relaxed),
+  };
+}
+
+#ifdef DEVICE_OWNERSHIP_HOST_TEST
+void setCryptoResourceSnapshotForTesting(CryptoResourceSnapshot snapshot) {
+  cryptoTestDmaFree.store(snapshot.dmaFree, std::memory_order_relaxed);
+  cryptoTestDmaLargest.store(snapshot.dmaLargest, std::memory_order_relaxed);
+  cryptoTestSnapshotEnabled.store(true, std::memory_order_relaxed);
+}
+
+void clearCryptoResourceSnapshotForTesting() {
+  cryptoTestSnapshotEnabled.store(false, std::memory_order_relaxed);
+}
+
+void resetCryptoResourceDiagnosticsForTesting() {
+  cryptoMinimumDmaFree.store(UINT32_MAX, std::memory_order_relaxed);
+  cryptoMinimumDmaLargest.store(UINT32_MAX, std::memory_order_relaxed);
+  cryptoHeadroomRejections.store(0, std::memory_order_relaxed);
+  cryptoOperationFailures.store(0, std::memory_order_relaxed);
+}
+#endif
 
 std::string hexEncode(const uint8_t *data, size_t length) {
   static const char digits[] = "0123456789abcdef";

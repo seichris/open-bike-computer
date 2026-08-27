@@ -27,6 +27,11 @@ MemorySample memorySample() {
       static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
       static_cast<uint32_t>(
           heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),
+      static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_DMA)),
+      static_cast<uint32_t>(
+          heap_caps_get_minimum_free_size(MALLOC_CAP_DMA)),
+      static_cast<uint32_t>(
+          heap_caps_get_largest_free_block(MALLOC_CAP_DMA)),
   };
 }
 
@@ -315,7 +320,13 @@ std::string toJson(const Snapshot &value) {
        << ",\"largestBlock\":" << value.memory.psramLargest
        << ",\"windowMinimumFree\":" << value.windowMinimumPsramFree
        << ",\"windowMinimumLargestBlock\":"
-       << value.windowMinimumPsramLargest << "}}"
+       << value.windowMinimumPsramLargest << "}"
+       << ",\"dmaHeap\":{\"free\":" << value.memory.dmaFree
+       << ",\"minimumEverFree\":" << value.memory.dmaMinimumEverFree
+       << ",\"largestBlock\":" << value.memory.dmaLargest
+       << ",\"windowMinimumFree\":" << value.windowMinimumDmaFree
+       << ",\"windowMinimumLargestBlock\":"
+       << value.windowMinimumDmaLargest << "}}"
        << ",\"render\":{\"timings\":{\"total\":";
     appendTiming(body, value.totalRender);
     body << ",\"blockLoad\":";

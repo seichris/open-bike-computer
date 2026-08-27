@@ -124,6 +124,13 @@ def snapshot(
                 "windowMinimumFree": 2_400_000,
                 "windowMinimumLargestBlock": 1_400_000,
             },
+            "dmaHeap": {
+                "free": 24_000,
+                "minimumEverFree": 20_000,
+                "largestBlock": 12_000,
+                "windowMinimumFree": 20_000,
+                "windowMinimumLargestBlock": 10_000,
+            },
         },
         "render": {
             "timings": {
@@ -333,6 +340,55 @@ class RendererBenchmarkTests(unittest.TestCase):
             )
         )
 
+    def test_dma_floor_and_decline_are_hard_failures(self):
+        fixture = {
+            "id": "shanghai-renderer-v1",
+            "manifestReceipt": "a" * 64,
+        }
+        route_hash = "b" * 64
+        snapshots = []
+        for index in range(25):
+            value = snapshot(
+                sequence=index + 1,
+                timestamp_ms=1000 + index * 1000,
+                map_fixture=fixture,
+                route_id="shanghai-center-renderer-v1",
+                route_sha256=route_hash,
+            )
+            dma_free = 24_000 - index * 750
+            dma_largest = 12_000 - index * 400
+            value["memory"]["dmaHeap"].update(
+                {
+                    "free": dma_free,
+                    "minimumEverFree": dma_free,
+                    "largestBlock": dma_largest,
+                    "windowMinimumFree": dma_free,
+                    "windowMinimumLargestBlock": dma_largest,
+                }
+            )
+            snapshots.append(value)
+        samples = [
+            renderer_benchmark.compact_sample(value, index)
+            for index, value in enumerate(snapshots)
+        ]
+        failures = renderer_benchmark.evaluate_run(
+            snapshots=snapshots,
+            samples=samples,
+            summary=renderer_benchmark.summarize_run(snapshots, samples),
+            duration_seconds=24,
+            poll_interval_seconds=1,
+            screenshots=[],
+            checkpoint_count=0,
+            expected_route_sample_count=120,
+            gates=renderer_benchmark.load_gates(
+                TOOLS / "renderer_benchmark_gates.json"
+            ),
+            expect_remote_debug=False,
+        )
+        self.assertIn("dma_free_floor:6000", failures)
+        self.assertIn("dma_free_decline", failures)
+        self.assertIn("dma_largest_decline", failures)
+
     def test_pareto_candidate_excludes_absolute_failures(self):
         base = {
             "passed": True,
@@ -341,6 +397,7 @@ class RendererBenchmarkTests(unittest.TestCase):
             "uiMaximumGapMs": 200,
             "minimumInternalFree": 50_000,
             "minimumPsramFree": 2_500_000,
+            "minimumDmaFree": 20_000,
             "extrudedBuildings": 32,
             "extrudedP90DistancePx": 60,
             "extrudedFarthestDistancePx": 80,
