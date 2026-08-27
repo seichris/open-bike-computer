@@ -17,9 +17,9 @@ Strava-side applications, credentials, capacity, privacy/branding review, live
 OAuth validation, deployment, and physical iPhone/Watch/Bicino gates are
 completed.
 
-The product input is a normal Strava route URL such as
-`https://www.strava.com/routes/3009840108578231836`. A rider may paste the URL
-before connecting Strava, but the actual import must use that rider's Strava
+The product accepts either a route selected from the authenticated athlete's
+route catalog or a normal Strava route URL such as
+`https://www.strava.com/routes/3009840108578231836`. Both paths require Strava
 OAuth authorization. The implementation must not scrape the public Strava web
 page or use a shared personal access token.
 
@@ -29,10 +29,11 @@ Add **Import from Strava** directly below **Import GPX** in the iPhone Saved
 Routes section. The complete rider flow is:
 
 1. Open **Import from Strava**.
-2. Paste a canonical Strava route URL.
-3. If Bicino is not connected to Strava, review a short data-use disclosure and
-   complete Strava OAuth. A rider does not need to have been signed in to
-   Strava beforehand; Strava supplies its app or web sign-in flow.
+2. If Bicino is not connected to Strava, complete Strava OAuth using the single
+   **Connect with Strava** action.
+3. Bicino loads every page of routes created by the authenticated athlete,
+   including private routes under `read_all`. The rider can select a cycling
+   route or paste a canonical Strava route URL for a specific route.
 4. Bicino imports any cycling route that Strava makes visible to the connected
    account under its granted scopes. Public routes require `read`; private
    routes require `read_all`.
@@ -152,16 +153,19 @@ format.
 
 ## Product decisions locked by this plan
 
-### 1. The user can paste first, but import is authenticated
+### 1. Route browsing and URL import are authenticated
 
-The import sheet always allows URL entry. If no connection exists, its primary
-action is **Connect with Strava**; after successful OAuth, it resumes the
-pending import. If a connection exists, the action is **Import Route**.
+Without a usable `read_all` connection, the import sheet exposes only
+**Connect with Strava**. After OAuth, it loads every paginated route created by
+the authenticated athlete and exposes the specific-route URL field. Each
+cycling route and valid pasted URL has an **Import** action; run routes remain
+visible but are not importable into cycling navigation.
 
-The sheet explains, before OAuth, that Bicino will read route name and geometry,
+After OAuth, the sheet explains that Bicino will read route name and geometry,
 temporarily keep the selected route for offline navigation, and let the rider
-disconnect and delete the data. Link to the Bicino privacy policy and Strava's
-authorization screen. Do not claim that URL-only anonymous import is possible.
+disconnect and delete the data. Link to the Bicino privacy policy. Strava's
+authorization screen owns the permission disclosure; do not claim that
+URL-only anonymous import is possible.
 
 ### 2. Supported URL grammar is intentionally narrow
 
@@ -373,7 +377,12 @@ Backend
 
 iPhone -> Bicino backend
   GET /v1/integrations/strava/connection
-  confirms authoritative connection state, then resumes pending import
+  confirms authoritative connection state
+
+iPhone -> Bicino backend -> Strava
+  GET /v1/integrations/strava/routes?page=N
+  GET /athletes/{encryptedAthleteId}/routes?page=N&per_page=200
+  repeats through the final page without exposing athlete ID or tokens
 ```
 
 The callback deep link contains only an opaque OAuth session ID and result. It
@@ -494,6 +503,19 @@ The successful response instructs the iPhone to execute a provider purge. The
 iPhone removes local Strava archives and reload bookmarks immediately and
 durably queues exact Watch deletions. Watch also enforces each archive's
 absolute expiry in case it remains unreachable during disconnect.
+
+### List athlete routes
+
+`GET /v1/integrations/strava/routes?page=N`
+
+Require installation authentication, a live connection with `read_all`, and
+dedicated per-installation and per-IP limits. The backend reads the encrypted
+athlete ID and token, calls `GET /athletes/{id}/routes` with 200 routes per
+page, and returns only `routeId`, `name`, `distanceMeters`,
+`elevationGainMeters`, and normalized ride/run `type`, plus `page` and
+`nextPage`. Every response uses `Cache-Control: private, no-store`. Athlete IDs,
+tokens, arbitrary upstream fields, and raw Strava fault bodies never cross the
+API boundary.
 
 ### Fetch route GPX
 
@@ -1333,7 +1355,12 @@ remain in Coolify or backups beyond the documented deletion window.
 ### Product
 
 - **Import from Strava** appears directly below **Import GPX**.
-- A rider can paste the example URL shape before being connected.
+- Before authorization, the sheet shows only **Connect with Strava**.
+- After authorization, every paginated athlete-created route is listed with
+  name, distance, elevation, type, and an import action; the specific-route URL
+  field is also available.
+- Loading, empty, loading-more, expired-authorization, and API-error states are
+  explicit and retryable where appropriate.
 - OAuth is requested only when needed and returns to the correct app channel.
 - Any cycling route visible under the rider's granted scopes imports into the
   existing Saved Routes library, including routes created by another athlete.

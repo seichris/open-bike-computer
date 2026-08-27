@@ -225,10 +225,14 @@ recording and ride history are not part of this feature.
 
 When the configured Bicino service advertises Strava support, open **Settings >
 Saved Routes** and choose **Import from Strava** directly below **Import GPX**.
-Paste a URL in the form `https://www.strava.com/routes/123`; query parameters
-and fragments are discarded. The first import opens Strava's app or web OAuth
-flow. Bicino can import any cycling route that Strava makes visible to the
-connected account under the granted `read` or `read_all` scope.
+Before authorization, this page shows only **Connect with Strava**. Once the
+connection has `read_all`, Bicino loads every page of routes created by that
+athlete and shows each route's name, distance, elevation, type, and import
+action. Run routes remain visible but cannot be imported for cycling
+navigation. The authorized page also accepts a URL in the form
+`https://www.strava.com/routes/123`; query parameters and fragments are
+discarded. URL import can fetch any cycling route that Strava makes visible to
+the connected account.
 
 A successful import uses the existing validated route archive and Watch
 transfer path. Its iPhone and Watch copies expire exactly seven days after the
@@ -244,9 +248,11 @@ workout continues. Delete removes the route and reload row; **Disconnect Strava
 and Delete Data** removes every Strava route, reload bookmark, and Bicino-held
 connection for that app installation without modifying routes on Strava.
 
-The integration is disabled by default and does not place a Strava client
-secret or athlete token in the app. Development and Production require separate
-Strava applications, exact callback URLs, backend secrets, encryption keys,
+The route catalog is held only in memory while the page is open. The
+integration is disabled by default and does not place a Strava client secret,
+athlete ID, access token, or refresh token in the app. Development and
+Production require separate Strava applications, exact callback URLs, backend
+secrets, encryption keys,
 and sufficient athlete capacity. See
 [`../map-platform/backend/README.md`](../map-platform/backend/README.md#strava-route-import)
 and

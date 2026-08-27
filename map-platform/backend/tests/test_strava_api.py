@@ -80,6 +80,7 @@ class StravaAPITests(unittest.TestCase):
                 "MAP_PLATFORM_STRAVA_CONNECTION_IDLE_TTL_DAYS": "30",
                 "MAP_PLATFORM_STRAVA_OAUTH_START_LIMIT_PER_HOUR": "10000",
                 "MAP_PLATFORM_STRAVA_ROUTE_IMPORT_LIMIT_PER_HOUR": "10000",
+                "MAP_PLATFORM_STRAVA_ROUTE_LIST_LIMIT_PER_HOUR": "10000",
                 "MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR": "10000",
                 "MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR": "10000",
             },
@@ -152,6 +153,63 @@ class StravaAPITests(unittest.TestCase):
         self.assertNotIn("access-token", status.text)
 
         self.transport.queue_json(
+            [
+                {
+                    "id": int(ROUTE_ID),
+                    "name": "Morning Ride",
+                    "distance": 42_195.5,
+                    "elevation_gain": 612.25,
+                    "type": 1,
+                    "private": True,
+                    "description": "server-only upstream field",
+                },
+                {
+                    "id": 101,
+                    "name": "Trail Run",
+                    "distance": 10_000,
+                    "elevation_gain": 240,
+                    "type": 2,
+                },
+            ]
+        )
+        routes = self.client.get(
+            "/v1/integrations/strava/routes",
+            params={**self.params, "page": 1},
+            headers=self.headers,
+        )
+        self.assertEqual(routes.status_code, 200)
+        self.assertEqual(routes.headers["Cache-Control"], "private, no-store")
+        self.assertEqual(
+            routes.json(),
+            {
+                "page": 1,
+                "nextPage": None,
+                "routes": [
+                    {
+                        "routeId": ROUTE_ID,
+                        "name": "Morning Ride",
+                        "distanceMeters": 42_195.5,
+                        "elevationGainMeters": 612.25,
+                        "type": "ride",
+                    },
+                    {
+                        "routeId": "101",
+                        "name": "Trail Run",
+                        "distanceMeters": 10_000.0,
+                        "elevationGainMeters": 240.0,
+                        "type": "run",
+                    },
+                ],
+            },
+        )
+        self.assertNotIn("athlete", routes.text.lower())
+        self.assertNotIn("token", routes.text.lower())
+        list_request = self.transport.requests[-1]
+        self.assertIn("/athletes/44/routes?", list_request["url"])
+        self.assertIn("page=1", list_request["url"])
+        self.assertIn("per_page=200", list_request["url"])
+
+        self.transport.queue_json(
             {"id": int(ROUTE_ID), "athlete": {"id": 44}, "type": 1}
         )
         self.transport.queue_gpx()
@@ -196,6 +254,7 @@ class StravaAPITests(unittest.TestCase):
             ("post", "/v1/integrations/strava/oauth/start"),
             ("get", "/v1/integrations/strava/connection"),
             ("delete", "/v1/integrations/strava/connection"),
+            ("get", "/v1/integrations/strava/routes"),
             ("post", f"/v1/integrations/strava/routes/{ROUTE_ID}/gpx"),
             ("post", f"/v1/integrations/strava/routes/{ROUTE_ID}/validate"),
         )
@@ -245,6 +304,45 @@ class StravaAPITests(unittest.TestCase):
         self.assertEqual(unavailable.status_code, 404)
         self.assertEqual(unavailable.json()["code"], "strava_route_unavailable")
         self.assertNotIn(sentinel, unavailable.text)
+
+    def test_route_listing_maps_expired_authorization_and_missing_scope(self):
+        self.connect()
+        self.transport.queue_json({}, status=401)
+        expired = self.client.get(
+            "/v1/integrations/strava/routes",
+            params=self.params,
+            headers=self.headers,
+        )
+        self.assertEqual(expired.status_code, 401)
+        self.assertEqual(expired.json()["code"], "strava_not_connected")
+        status = self.client.get(
+            "/v1/integrations/strava/connection",
+            params=self.params,
+            headers=self.headers,
+        )
+        self.assertFalse(status.json()["connected"])
+
+        self.connect(scope="read")
+        request_count = len(self.transport.requests)
+        missing_scope = self.client.get(
+            "/v1/integrations/strava/routes",
+            params=self.params,
+            headers=self.headers,
+        )
+        self.assertEqual(missing_scope.status_code, 403)
+        self.assertEqual(missing_scope.json()["code"], "strava_scope_required")
+        self.assertEqual(len(self.transport.requests), request_count)
+
+    def test_route_listing_rejects_out_of_range_page_before_upstream(self):
+        self.connect()
+        request_count = len(self.transport.requests)
+        invalid = self.client.get(
+            "/v1/integrations/strava/routes",
+            params={**self.params, "page": 101},
+            headers=self.headers,
+        )
+        self.assertEqual(invalid.status_code, 422)
+        self.assertEqual(len(self.transport.requests), request_count)
 
 
 if __name__ == "__main__":

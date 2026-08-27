@@ -4,11 +4,11 @@ import UniformTypeIdentifiers
 struct SavedRoutesSettingsSection: View {
     @ObservedObject var routeLibrary: PhoneRouteLibrary
     @ObservedObject var stravaCoordinator: StravaIntegrationCoordinator
+    let onImportFromStrava: () -> Void
     @FocusState private var focusedRouteID: UUID?
     @State private var renameInteraction = SavedRouteRenameInteraction()
     @State private var errorMessage: String?
     @State private var isImportingGPX = false
-    @State private var isImportingStrava = false
 
     var body: some View {
         Section {
@@ -42,7 +42,7 @@ struct SavedRoutesSettingsSection: View {
                     finishRenaming()
                     focusedRouteID = nil
                     stravaCoordinator.clearError()
-                    isImportingStrava = true
+                    onImportFromStrava()
                 } label: {
                     Label(
                         "Import from Strava",
@@ -51,8 +51,7 @@ struct SavedRoutesSettingsSection: View {
                 }
             }
 
-            if let error = stravaCoordinator.errorMessage,
-               !isImportingStrava {
+            if let error = stravaCoordinator.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -88,11 +87,6 @@ struct SavedRoutesSettingsSection: View {
             allowsMultipleSelection: false
         ) { result in
             importGPX(result)
-        }
-        .sheet(isPresented: $isImportingStrava) {
-            StravaRouteImportView(
-                coordinator: stravaCoordinator
-            )
         }
     }
 

@@ -169,6 +169,7 @@ been lazily re-encrypted or retired.
 The optional quota variables are
 `MAP_PLATFORM_STRAVA_OAUTH_START_LIMIT_PER_HOUR`,
 `MAP_PLATFORM_STRAVA_ROUTE_IMPORT_LIMIT_PER_HOUR`,
+`MAP_PLATFORM_STRAVA_ROUTE_LIST_LIMIT_PER_HOUR`,
 `MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR`, and
 `MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR`. The route archive lifetime is
 always 604,800 seconds and is intentionally not configurable.

@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .strict_json import loads_strict_json
 from .strava_client import (
+    StravaAthleteRoutePage,
     StravaClient,
     StravaClientError,
     StravaRouteMetadata,
@@ -1006,6 +1007,30 @@ class StravaIntegrationService:
             return {"disconnected": True, "revocationPending": False}
         self.store.delete_connection(installation_id)
         return {"disconnected": True, "revocationPending": False}
+
+    def athlete_routes(
+        self,
+        installation_id: str,
+        *,
+        page: int,
+    ) -> StravaAthleteRoutePage:
+        client = self._require_enabled()
+        record = self._usable_connection(installation_id)
+        if "read_all" not in record.bundle.granted_scopes:
+            raise StravaIntegrationError(
+                "strava_scope_required",
+                status_code=403,
+            )
+        try:
+            result = client.athlete_routes(
+                record.bundle.athlete_id,
+                record.bundle.access_token,
+                page=page,
+            )
+        except StravaClientError as exc:
+            raise self._map_client_error(exc, installation_id) from exc
+        self.store.touch_connection(installation_id, now=self._clock())
+        return result
 
     def fetch_route(self, installation_id: str, route_id: str) -> StravaRouteDownload:
         client = self._require_enabled()
