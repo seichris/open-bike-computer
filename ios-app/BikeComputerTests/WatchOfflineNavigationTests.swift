@@ -7,8 +7,77 @@ enum WatchOfflineNavigationTests {
         try testActiveRoutePinAndDeferredDeletion()
         try testNavigationJournalRoundTripAndValidation()
         try testExpiryAndDowngradeFailClosed()
+        try testStravaStartWindowAndActiveExpiry()
         try testEvictionReportsExactIdentity()
         print("WatchOfflineNavigationTests passed")
+    }
+
+    private static func testStravaStartWindowAndActiveExpiry() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "watch-strava-expiry-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "watch-strava-expiry-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let createdAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let deadline = createdAt.addingTimeInterval(604_800)
+        var currentTime = createdAt
+        let store = NavigationRouteFileStoreV1(
+            rootDirectory: root,
+            limits: .watch
+        )
+        let library = WatchRouteLibrary(
+            store: store,
+            now: { currentTime },
+            defaults: defaults
+        )
+        let strava = try archive(
+            revision: 1,
+            now: createdAt,
+            deleteAfter: deadline,
+            provider: RouteProviderPolicyV1.strava,
+            sourceReference: RouteSourceReferenceV1(
+                providerID: RouteProviderPolicyV1.strava.providerID,
+                externalRouteID: "3009840108578231836",
+                canonicalURL:
+                    "https://www.strava.com/routes/3009840108578231836"
+            )
+        )
+        let identity = WatchRouteIdentityV1(archive: strava)
+        _ = try library.install(
+            strava.encoded(purpose: .offlineNavigation, now: createdAt),
+            expectedIdentity: identity
+        )
+
+        currentTime = deadline.addingTimeInterval(
+            -WatchRouteLibrary.minimumRemainingValidityForNewNavigation + 1
+        )
+        expectThrows(
+            WatchRouteLibraryError.nearExpiry,
+            "Watch requires a reload before starting a near-expiry Strava route"
+        ) {
+            _ = try library.record(routeID: strava.routeID)
+        }
+
+        currentTime = createdAt
+        _ = try library.activate(identity)
+        var expiredIdentity: WatchRouteIdentityV1?
+        library.onRouteExpired = { identity in
+            expiredIdentity = identity
+            library.deactivate(identity)
+        }
+        currentTime = deadline
+        library.reload()
+        expect(
+            expiredIdentity == identity &&
+                library.activeIdentity == nil &&
+                library.pendingDeletionIdentity == nil &&
+                library.routes.isEmpty &&
+                store.recordsIncludingExpired().isEmpty,
+            "hard expiry notifies navigation and removes active Watch geometry"
+        )
     }
 
     private static func testEvictionReportsExactIdentity() throws {
@@ -343,7 +412,9 @@ enum WatchOfflineNavigationTests {
         )!,
         revision: UInt32,
         now: Date,
-        deleteAfter: Date? = nil
+        deleteAfter: Date? = nil,
+        provider: RouteProviderMetadataV1 = RouteProviderPolicyV1.importedGPX,
+        sourceReference: RouteSourceReferenceV1? = nil
     ) throws -> NavigationRouteArchiveV1 {
         let points = [
             RouteCoordinateV1(latitude: 1, longitude: 2),
@@ -352,7 +423,8 @@ enum WatchOfflineNavigationTests {
         let route = NavigationRouteV1(
             id: routeID,
             revision: revision,
-            provider: RouteProviderPolicyV1.importedGPX,
+            provider: provider,
+            sourceReference: sourceReference,
             localeIdentifier: "en_US",
             transportType: .cycling,
             source: RouteEndpointV1(

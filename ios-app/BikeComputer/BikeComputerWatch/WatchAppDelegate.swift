@@ -117,6 +117,7 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
     }
 
     func applicationDidBecomeActive() {
+        routeLibrary.reload()
         connectivityCoordinator.refreshDeviceMetadata()
     }
 

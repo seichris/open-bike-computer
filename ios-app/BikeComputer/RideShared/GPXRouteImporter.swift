@@ -20,6 +20,60 @@ enum GPXRouteImporterError: Error, Equatable, LocalizedError {
     }
 }
 
+enum GPXRouteImportSourceV1: Equatable {
+    case local(createdAt: Date)
+    case strava(receipt: StravaRouteImportReceiptV1)
+
+    var provider: RouteProviderMetadataV1 {
+        switch self {
+        case .local: RouteProviderPolicyV1.importedGPX
+        case .strava: RouteProviderPolicyV1.strava
+        }
+    }
+
+    var sourceReference: RouteSourceReferenceV1? {
+        switch self {
+        case .local: nil
+        case .strava(let receipt): receipt.routeURL.sourceReference
+        }
+    }
+
+    var createdAt: Date {
+        switch self {
+        case .local(let createdAt): createdAt
+        case .strava(let receipt): receipt.fetchedAt
+        }
+    }
+
+    var deleteAfter: Date? {
+        switch self {
+        case .local: nil
+        case .strava(let receipt): receipt.deleteAfter
+        }
+    }
+
+    var startFallback: String {
+        switch self {
+        case .local: "GPX start"
+        case .strava: "Strava start"
+        }
+    }
+
+    var destinationFallback: String {
+        switch self {
+        case .local: "GPX destination"
+        case .strava: "Strava destination"
+        }
+    }
+
+    var followInstruction: String {
+        switch self {
+        case .local: "Follow imported GPX route"
+        case .strava: "Follow Strava route"
+        }
+    }
+}
+
 enum GPXRouteImporterV1 {
     static let maximumInputBytes = 4 * 1_024 * 1_024
 
@@ -28,6 +82,24 @@ enum GPXRouteImporterV1 {
         fallbackName: String,
         routeID: UUID = UUID(),
         createdAt: Date = Date(),
+        localeIdentifier: String = Locale.current.identifier
+    ) throws -> NavigationRouteArchiveV1 {
+        try archive(
+            data: data,
+            fallbackName: fallbackName,
+            routeID: routeID,
+            revision: 1,
+            source: .local(createdAt: createdAt),
+            localeIdentifier: localeIdentifier
+        )
+    }
+
+    static func archive(
+        data: Data,
+        fallbackName: String,
+        routeID: UUID,
+        revision: UInt32,
+        source importSource: GPXRouteImportSourceV1,
         localeIdentifier: String = Locale.current.identifier
     ) throws -> NavigationRouteArchiveV1 {
         guard !data.isEmpty, data.count <= maximumInputBytes else {
@@ -80,19 +152,20 @@ enum GPXRouteImporterV1 {
         )
         let destinationName = normalizedLabel(
             pointsWithNames.last?.name,
-            fallback: "GPX destination"
+            fallback: importSource.destinationFallback
         )
         let route = NavigationRouteV1(
             id: routeID,
-            revision: 1,
-            provider: RouteProviderPolicyV1.importedGPX,
+            revision: revision,
+            provider: importSource.provider,
+            sourceReference: importSource.sourceReference,
             localeIdentifier: localeIdentifier,
             transportType: .cycling,
             source: RouteEndpointV1(
                 coordinate: points[0],
                 label: normalizedLabel(
                     pointsWithNames.first?.name,
-                    fallback: "GPX start"
+                    fallback: importSource.startFallback
                 )
             ),
             destination: RouteEndpointV1(
@@ -107,14 +180,16 @@ enum GPXRouteImporterV1 {
             steps: steps(
                 points: pointsWithNames,
                 cumulativeDistances: cumulative,
-                destinationName: destinationName
+                destinationName: destinationName,
+                followInstruction: importSource.followInstruction
             ),
             normalizationVersion: 1
         )
         do {
             return try NavigationRouteArchiveV1.create(
                 route: route,
-                createdAt: createdAt,
+                createdAt: importSource.createdAt,
+                deleteAfter: importSource.deleteAfter,
                 purpose: .offlineNavigation
             )
         } catch {
@@ -125,7 +200,8 @@ enum GPXRouteImporterV1 {
     private static func steps(
         points: [GPXPoint],
         cumulativeDistances: [Double],
-        destinationName: String
+        destinationName: String,
+        followInstruction: String
     ) -> [NavigationRouteStepV1] {
         let lastIndex = points.count - 1
         let namedIntermediateIndices = points.indices.dropFirst().dropLast()
@@ -151,7 +227,7 @@ enum GPXRouteImporterV1 {
                 instruction = "Continue to \(pointName)"
                 maneuver = .straight
             } else {
-                instruction = "Follow imported GPX route"
+                instruction = followInstruction
                 maneuver = .straight
             }
             result.append(NavigationRouteStepV1(

@@ -55,11 +55,13 @@ struct WatchWorkoutRootView: View {
             }
         }
         .onAppear {
+            routeLibrary.reload()
             manager.retryPendingTerminalCleanupIfPossible()
             manager.refreshAuthorizationIfNeeded()
         }
         .onChange(of: scenePhase) { _, newValue in
             guard newValue == .active else { return }
+            routeLibrary.reload()
             manager.retryPendingTerminalCleanupIfPossible()
             manager.refreshAuthorizationIfNeeded()
         }

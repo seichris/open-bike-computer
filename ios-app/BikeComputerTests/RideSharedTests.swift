@@ -11,7 +11,254 @@ enum RideSharedTests {
         try testWatchDirectBLEContract()
         try testFavoriteSyncPolicyAndCoordinateNormalization()
         try testGPXImport()
+        try testStravaRouteContractAndReloadBookmarks()
         print("RideSharedTests passed")
+    }
+
+    private static func testStravaRouteContractAndReloadBookmarks() throws {
+        let rawURL = " https://www.strava.com/routes/3009840108578231836\n"
+        let routeURL = try StravaRouteURLV1(rawURL)
+        expect(
+            routeURL.externalRouteID == "3009840108578231836" &&
+                routeURL.canonicalURL ==
+                    "https://www.strava.com/routes/3009840108578231836",
+            "a canonical Strava route URL is parsed without retaining raw input"
+        )
+        for invalid in [
+            "http://www.strava.com/routes/3009840108578231836",
+            "https://strava.com/routes/3009840108578231836",
+            "https://www.strava.com/segments/3009840108578231836",
+            "https://www.strava.com/routes/3009840108578231836/",
+            "https://www.strava.com/routes/3009840108578231836?utm=test",
+            "https://www.strava.com/routes/9223372036854775808"
+        ] {
+            expectThrows(
+                StravaRouteContractError.invalidURL,
+                "non-canonical Strava URL \(invalid) fails closed"
+            ) {
+                _ = try StravaRouteURLV1(invalid)
+            }
+        }
+
+        let fetchedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let deleteAfter = fetchedAt.addingTimeInterval(
+            RouteProviderPolicyV1.stravaRouteMaximumRetentionSeconds
+        )
+        let receipt = try StravaRouteImportReceiptV1(
+            routeURL: routeURL,
+            fetchedAt: fetchedAt,
+            deleteAfter: deleteAfter,
+            validatedAt: fetchedAt
+        )
+        expectThrows(
+            StravaRouteContractError.invalidCacheLifetime,
+            "a backend response cannot extend or shorten the seven-day window"
+        ) {
+            _ = try StravaRouteImportReceiptV1(
+                routeURL: routeURL,
+                fetchedAt: fetchedAt,
+                deleteAfter: deleteAfter.addingTimeInterval(1),
+                validatedAt: fetchedAt
+            )
+        }
+
+        let routeID = UUID(
+            uuidString: "dddddddd-1111-2222-3333-eeeeeeeeeeee"
+        )!
+        let gpx = Data("""
+        <gpx version="1.1" creator="Strava">
+          <rte><name>Provider route name</name>
+            <rtept lat="1.0000" lon="103.0000"/>
+            <rtept lat="1.0005" lon="103.0005"/>
+            <rtept lat="1.0010" lon="103.0010"/>
+          </rte>
+        </gpx>
+        """.utf8)
+        let archive = try GPXRouteImporterV1.archive(
+            data: gpx,
+            fallbackName: "Strava route",
+            routeID: routeID,
+            revision: 3,
+            source: .strava(receipt: receipt),
+            localeIdentifier: "en_US"
+        )
+        expect(
+            archive.route.provider == RouteProviderPolicyV1.strava &&
+                archive.route.sourceReference == routeURL.sourceReference &&
+                archive.route.revision == 3 &&
+                archive.createdAt == fetchedAt &&
+                archive.deleteAfter == deleteAfter &&
+                archive.route.steps.first?.instruction == "Follow Strava route",
+            "Strava GPX uses the reviewed provider, source, revision, wording, and deadline"
+        )
+        expectThrows(
+            NavigationRouteArchiveError.deletionDateRequired(
+                providerID: RouteProviderPolicyV1.strava.providerID
+            ),
+            "Strava geometry can never enter offline storage without an expiry"
+        ) {
+            _ = try NavigationRouteArchiveV1.create(
+                route: archive.route,
+                createdAt: fetchedAt,
+                purpose: .offlineNavigation
+            )
+        }
+        expectThrows(
+            NavigationRouteArchiveError.retentionExceeded(
+                providerID: RouteProviderPolicyV1.strava.providerID
+            ),
+            "Strava geometry cannot outlive the compiled seven-day maximum"
+        ) {
+            _ = try NavigationRouteArchiveV1.create(
+                route: archive.route,
+                createdAt: fetchedAt,
+                deleteAfter: deleteAfter.addingTimeInterval(0.001),
+                purpose: .offlineNavigation
+            )
+        }
+        expectThrows(
+            NavigationRouteArchiveError.expired,
+            "a Strava archive stops being usable at the exact seven-day deadline"
+        ) {
+            try archive.validate(
+                purpose: .offlineNavigation,
+                now: deleteAfter
+            )
+        }
+
+        let routeStoreRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "open-bike-strava-archive-transaction-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: routeStoreRoot) }
+        let routeStore = NavigationRouteFileStoreV1(
+            rootDirectory: routeStoreRoot
+        )
+        let archiveData = try archive.encoded(
+            purpose: .offlineNavigation,
+            now: fetchedAt
+        )
+        _ = try routeStore.install(archiveData, now: fetchedAt)
+        let revisionFour = try GPXRouteImporterV1.archive(
+            data: gpx,
+            fallbackName: "Strava route",
+            routeID: routeID,
+            revision: 4,
+            source: .strava(receipt: receipt),
+            localeIdentifier: "en_US"
+        )
+        enum CompanionWriteFailure: Error { case expected }
+        do {
+            _ = try routeStore.installAtomically(
+                revisionFour.encoded(
+                    purpose: .offlineNavigation,
+                    now: fetchedAt
+                ),
+                now: fetchedAt
+            ) {
+                throw CompanionWriteFailure.expected
+            }
+            fatalError("FAILED: failed companion metadata must abort replacement")
+        } catch CompanionWriteFailure.expected {
+            // Expected.
+        }
+        expect(
+            routeStore.records(now: fetchedAt).map(\.archive.revision) == [3],
+            "a failed bookmark commit leaves the prior archive revision intact"
+        )
+        expect(
+            routeStore.records(now: deleteAfter).isEmpty &&
+                routeStore.expiredRecords(now: deleteAfter).map(
+                    \.archive.revision
+                ) == [3],
+            "expired geometry is unavailable while its exact identity remains inspectable for deletion"
+        )
+        expect(
+            routeStore.pruneInvalidAndExpired(now: deleteAfter) == 1 &&
+                routeStore.recordsIncludingExpired().isEmpty,
+            "deadline reconciliation removes the retained route bytes"
+        )
+
+        let localArchive = try GPXRouteImporterV1.archive(
+            data: gpx,
+            fallbackName: "local.gpx",
+            routeID: UUID(),
+            createdAt: fetchedAt,
+            localeIdentifier: "en_US"
+        )
+        let localData = try localArchive.encoded(
+            purpose: .offlineNavigation,
+            now: fetchedAt
+        )
+        expect(
+            localArchive.deleteAfter == nil &&
+                localArchive.route.sourceReference == nil &&
+                !String(decoding: localData, as: UTF8.self)
+                    .contains("sourceReference"),
+            "legacy local GPX archives remain durable and encode without the optional source field"
+        )
+        try expect(
+            try NavigationRouteArchiveV1.decode(
+                localData,
+                purpose: .offlineNavigation,
+                now: fetchedAt
+            ) == localArchive,
+            "version-one archives without a source reference still decode"
+        )
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "open-bike-strava-bookmarks-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = StravaRouteReloadBookmarkStoreV1(
+            fileURL: root.appendingPathComponent("bookmarks.json")
+        )
+        let bookmark = try StravaRouteReloadBookmarkV1(
+            routeURL: routeURL,
+            routeID: routeID,
+            lastRevision: 3,
+            localAlias: "  My local alias  ",
+            createdAt: fetchedAt,
+            lastReloadSucceededAt: fetchedAt,
+            lastValidationAt: fetchedAt
+        )
+        try store.upsert(bookmark)
+        let loaded = try store.bookmark(routeID: routeID)
+        expect(
+            loaded?.localAlias == "My local alias" &&
+                loaded?.externalRouteID == routeURL.externalRouteID &&
+                loaded?.nextRevision == 4,
+            "the reload bookmark retains only canonical user/local identity"
+        )
+        let storedText = try String(
+            contentsOf: store.fileURL,
+            encoding: .utf8
+        )
+        expect(
+            !storedText.contains("Provider route name") &&
+                !storedText.contains("Strava start") &&
+                !storedText.contains("distanceMeters") &&
+                !storedText.contains("points"),
+            "the reload bookmark cannot retain API-derived route content"
+        )
+        let updated = try bookmark.updating(
+            lastRevision: 4,
+            lastReloadAttemptAt: .some(deleteAfter),
+            lastReloadSucceededAt: .some(deleteAfter),
+            lastValidationAt: .some(deleteAfter),
+            lastErrorAt: .some(nil)
+        )
+        try store.upsert(updated)
+        try expect(
+            try store.bookmark(externalRouteID: routeURL.externalRouteID) == updated,
+            "a successful reload updates the same route identity and revision"
+        )
+        try expect(
+            try store.purge() == 1 && (try store.bookmarks()).isEmpty,
+            "provider purge removes the retained reload reference"
+        )
     }
 
     private static func testGPXImport() throws {

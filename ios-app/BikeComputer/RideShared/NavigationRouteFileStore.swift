@@ -57,6 +57,41 @@ final class NavigationRouteFileStoreV1 {
         evictingOldestUnprotected protectedIdentities:
             Set<WatchRouteIdentityV1>? = nil
     ) throws -> InstalledNavigationRouteV1 {
+        try install(
+            data,
+            now: now,
+            evictingOldestUnprotected: protectedIdentities,
+            cleanupFailuresAreFatal: true,
+            committing: {}
+        )
+    }
+
+    /// Stages and verifies a new archive, commits its companion metadata, and
+    /// only then retires the previous revision. If metadata persistence fails,
+    /// the staged archive is removed and the prior revision remains intact.
+    @discardableResult
+    func installAtomically(
+        _ data: Data,
+        now: Date = Date(),
+        committing companionMetadata: () throws -> Void
+    ) throws -> InstalledNavigationRouteV1 {
+        try install(
+            data,
+            now: now,
+            evictingOldestUnprotected: nil,
+            cleanupFailuresAreFatal: false,
+            committing: companionMetadata
+        )
+    }
+
+    private func install(
+        _ data: Data,
+        now: Date,
+        evictingOldestUnprotected protectedIdentities:
+            Set<WatchRouteIdentityV1>?,
+        cleanupFailuresAreFatal: Bool,
+        committing companionMetadata: () throws -> Void
+    ) throws -> InstalledNavigationRouteV1 {
         let archive = try NavigationRouteArchiveV1.decode(
             data,
             purpose: .offlineNavigation,
@@ -76,10 +111,18 @@ final class NavigationRouteFileStoreV1 {
                 throw NavigationRouteFileStoreError.revisionConflict
             }
             if newest.archive.contentHash == archive.contentHash {
-                try removeSuperseded(
-                    sameRoute,
-                    keeping: newest.fileURL
-                )
+                try companionMetadata()
+                if cleanupFailuresAreFatal {
+                    try removeSuperseded(
+                        sameRoute,
+                        keeping: newest.fileURL
+                    )
+                } else {
+                    try? removeSuperseded(
+                        sameRoute,
+                        keeping: newest.fileURL
+                    )
+                }
                 return newest
             }
         }
@@ -133,8 +176,23 @@ final class NavigationRouteFileStoreV1 {
             throw NavigationRouteFileStoreError.ioFailure
         }
 
-        try removeSuperseded(sameRoute, keeping: destination)
-        try removeSuperseded(recordsToEvict, keeping: destination)
+        do {
+            try companionMetadata()
+        } catch {
+            try? fileManager.removeItem(at: destination)
+            try? synchronizeRootDirectory()
+            throw error
+        }
+        if cleanupFailuresAreFatal {
+            try removeSuperseded(sameRoute, keeping: destination)
+            try removeSuperseded(recordsToEvict, keeping: destination)
+        } else {
+            // Companion metadata now points at the fully verified new archive.
+            // A stale older file is harmless and will be hidden by record
+            // reconciliation; do not turn a committed reload into ambiguity.
+            try? removeSuperseded(sameRoute, keeping: destination)
+            try? removeSuperseded(recordsToEvict, keeping: destination)
+        }
         return InstalledNavigationRouteV1(
             archive: archive,
             fileURL: destination,
@@ -143,18 +201,26 @@ final class NavigationRouteFileStoreV1 {
     }
 
     func records(now: Date = Date()) -> [InstalledNavigationRouteV1] {
+        recordsIncludingExpired().filter { record in
+            guard let deleteAfter = record.archive.deleteAfter else { return true }
+            return now < deleteAfter
+        }
+    }
+
+    func recordsIncludingExpired() -> [InstalledNavigationRouteV1] {
         guard let urls = try? fileManager.contentsOfDirectory(
             at: rootDirectory,
             includingPropertiesForKeys: [.fileSizeKey],
             options: [.skipsHiddenFiles]
         ) else { return [] }
-        return urls.compactMap { url in
+        let decoded: [InstalledNavigationRouteV1] = urls.compactMap {
+            url -> InstalledNavigationRouteV1? in
             guard url.pathExtension == "routev1",
                   let data = try? Data(contentsOf: url),
-                  let archive = try? NavigationRouteArchiveV1.decode(
+                  let archive = try? NavigationRouteArchiveV1
+                    .decodeForRetentionInspection(
                     data,
-                    purpose: .offlineNavigation,
-                    now: now
+                    purpose: .offlineNavigation
                   ) else {
                 return nil
             }
@@ -163,11 +229,34 @@ final class NavigationRouteFileStoreV1 {
                 fileURL: url.standardizedFileURL,
                 encodedSize: data.count
             )
-        }.sorted {
+        }
+        var newestByRouteID: [UUID: InstalledNavigationRouteV1] = [:]
+        for record in decoded {
+            guard let current = newestByRouteID[record.archive.routeID] else {
+                newestByRouteID[record.archive.routeID] = record
+                continue
+            }
+            let hasNewerRevision =
+                record.archive.revision > current.archive.revision
+            let hasNewerTimestamp =
+                record.archive.revision == current.archive.revision &&
+                record.archive.createdAt > current.archive.createdAt
+            if hasNewerRevision || hasNewerTimestamp {
+                newestByRouteID[record.archive.routeID] = record
+            }
+        }
+        return newestByRouteID.values.sorted {
             if $0.archive.createdAt != $1.archive.createdAt {
                 return $0.archive.createdAt > $1.archive.createdAt
             }
             return $0.archive.routeID.uuidString < $1.archive.routeID.uuidString
+        }
+    }
+
+    func expiredRecords(now: Date = Date()) -> [InstalledNavigationRouteV1] {
+        recordsIncludingExpired().filter { record in
+            guard let deleteAfter = record.archive.deleteAfter else { return false }
+            return now >= deleteAfter
         }
     }
 
@@ -212,7 +301,10 @@ final class NavigationRouteFileStoreV1 {
     }
 
     @discardableResult
-    func pruneInvalidAndExpired(now: Date = Date()) -> Int {
+    func pruneInvalidAndExpired(
+        now: Date = Date(),
+        protecting protectedIdentities: Set<WatchRouteIdentityV1> = []
+    ) -> Int {
         guard let urls = try? fileManager.contentsOfDirectory(
             at: rootDirectory,
             includingPropertiesForKeys: nil,
@@ -225,14 +317,23 @@ final class NavigationRouteFileStoreV1 {
                 continue
             }
             do {
-                _ = try NavigationRouteArchiveV1.decode(
+                let archive = try NavigationRouteArchiveV1
+                    .decodeForRetentionInspection(
                     data,
-                    purpose: .offlineNavigation,
-                    now: now
+                    purpose: .offlineNavigation
                 )
-            } catch NavigationRouteArchiveError.expired {
-                if (try? fileManager.removeItem(at: url)) != nil {
-                    removed += 1
+                if let deleteAfter = archive.deleteAfter,
+                   now >= deleteAfter {
+                    let identity = WatchRouteIdentityV1(archive: archive)
+                    if !protectedIdentities.contains(identity),
+                       (try? fileManager.removeItem(at: url)) != nil {
+                        removed += 1
+                    }
+                } else {
+                    try archive.validate(
+                        purpose: .offlineNavigation,
+                        now: now
+                    )
                 }
             } catch {
                 if quarantineOrRemove(url) { removed += 1 }
