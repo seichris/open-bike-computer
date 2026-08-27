@@ -1793,6 +1793,8 @@ nonisolated enum SavedMapRemovalPolicy {
 
 @MainActor
 final class OfflineMapManager: ObservableObject {
+    private static let maximumInMemoryDetailPreviewCount = 3
+
     typealias PackDownloadOperation = (
         URL,
         OfflineMapDownloadConstraints,
@@ -1910,6 +1912,7 @@ final class OfflineMapManager: ObservableObject {
     @Published private var packPreviewImages: [String: UIImage] = [:]
     @Published private var detailPreviewImages: [String: UIImage] = [:]
     @Published private var detailPreviewLoadingKeys: Set<String> = []
+    private var detailPreviewAccessOrder: [String] = []
     private var unavailablePackPreviews: Set<String> = []
     private var unavailableDetailPreviews: Set<String> = []
     private var previewLoadTasks: [String: Task<Void, Never>] = [:]
@@ -2570,7 +2573,7 @@ final class OfflineMapManager: ObservableObject {
             packPreviewImages.removeValue(forKey: key)
             unavailablePackPreviews.remove(key)
             detailPreviewLoadRegistry.invalidate(key)
-            detailPreviewImages.removeValue(forKey: key)
+            removeDetailPreviewImage(forKey: key)
             detailPreviewLoadingKeys.remove(key)
             unavailableDetailPreviews.remove(key)
         }
@@ -2595,8 +2598,12 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func detailPreviewImage(for item: SavedMapListItem) -> UIImage? {
-        guard let key = detailPreviewCacheKey(for: item) else { return nil }
-        return detailPreviewImages[key]
+        guard let key = detailPreviewCacheKey(for: item),
+              let image = detailPreviewImages[key] else {
+            return nil
+        }
+        recordDetailPreviewAccess(forKey: key)
+        return image
     }
 
     func isDetailPreviewLoading(for item: SavedMapListItem) -> Bool {
@@ -2607,8 +2614,7 @@ final class OfflineMapManager: ObservableObject {
     func loadDetailPreviewIfNeeded(for item: SavedMapListItem) async {
         guard let key = detailPreviewCacheKey(for: item),
               detailPreviewImages[key] == nil,
-              !unavailableDetailPreviews.contains(key),
-              !detailPreviewLoadingKeys.contains(key) else {
+              !unavailableDetailPreviews.contains(key) else {
             return
         }
         let token = detailPreviewLoadRegistry.begin(for: key)
@@ -2666,7 +2672,7 @@ final class OfflineMapManager: ObservableObject {
             return
         }
         if let image = usableDetailPreviewImage(from: storedData) {
-            detailPreviewImages[key] = image
+            cacheDetailPreviewImage(image, forKey: key)
             return
         }
         if storedFileExists {
@@ -2708,7 +2714,7 @@ final class OfflineMapManager: ObservableObject {
                 in: cacheRoot
             )
         }
-        detailPreviewImages[key] = image
+        cacheDetailPreviewImage(image, forKey: key)
     }
 
     func previewImage(forCachedPack packURL: URL) -> UIImage? {
@@ -2839,6 +2845,25 @@ final class OfflineMapManager: ObservableObject {
             return nil
         }
         return image
+    }
+
+    private func cacheDetailPreviewImage(_ image: UIImage, forKey key: String) {
+        detailPreviewImages[key] = image
+        recordDetailPreviewAccess(forKey: key)
+        while detailPreviewAccessOrder.count > Self.maximumInMemoryDetailPreviewCount {
+            let evictedKey = detailPreviewAccessOrder.removeFirst()
+            detailPreviewImages.removeValue(forKey: evictedKey)
+        }
+    }
+
+    private func recordDetailPreviewAccess(forKey key: String) {
+        detailPreviewAccessOrder.removeAll { $0 == key }
+        detailPreviewAccessOrder.append(key)
+    }
+
+    private func removeDetailPreviewImage(forKey key: String) {
+        detailPreviewImages.removeValue(forKey: key)
+        detailPreviewAccessOrder.removeAll { $0 == key }
     }
 
     private func detailPreviewCacheKey(for item: SavedMapListItem) -> String? {
@@ -6137,7 +6162,7 @@ final class OfflineMapManager: ObservableObject {
                 packPreviewImages.removeValue(forKey: key)
             }
             for key in Array(detailPreviewImages.keys) where !activePreviewKeys.contains(key) {
-                detailPreviewImages.removeValue(forKey: key)
+                removeDetailPreviewImage(forKey: key)
             }
             for key in Array(previewLoadTasks.keys) where !activePreviewKeys.contains(key) {
                 previewLoadTasks.removeValue(forKey: key)?.cancel()
@@ -6163,6 +6188,7 @@ final class OfflineMapManager: ObservableObject {
             packPreviewImages.removeAll()
             detailPreviewLoadRegistry.removeAll()
             detailPreviewImages.removeAll()
+            detailPreviewAccessOrder.removeAll()
             detailPreviewLoadingKeys.removeAll()
             unavailablePackPreviews.removeAll()
             unavailableDetailPreviews.removeAll()
@@ -6190,7 +6216,7 @@ final class OfflineMapManager: ObservableObject {
         packPreviewImages.removeValue(forKey: key)
         unavailablePackPreviews.remove(key)
         detailPreviewLoadRegistry.invalidate(key)
-        detailPreviewImages.removeValue(forKey: key)
+        removeDetailPreviewImage(forKey: key)
         detailPreviewLoadingKeys.remove(key)
         unavailableDetailPreviews.remove(key)
         try? SavedMapSnapshotPreviewStore.delete(for: packURL)

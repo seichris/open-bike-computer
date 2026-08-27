@@ -744,6 +744,46 @@ struct SavedMapPreviewCatalystTests {
             fail("the versioned Retina preview should survive relaunch without regeneration")
         }
 
+        let memoryPackData: Data
+        do {
+            memoryPackData = try Data(contentsOf: snapshotPackURL)
+        } catch {
+            fail("detail memory fixture should read: \(error)")
+        }
+        let memoryPackURLs = (0..<4).map { index in
+            cacheDirectory.appendingPathComponent("detail-memory-\(index).zip")
+        }
+        do {
+            for url in memoryPackURLs {
+                try memoryPackData.write(to: url)
+            }
+        } catch {
+            fail("detail memory fixtures should write: \(error)")
+        }
+        let detailMemoryManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { _ in nil },
+            detailMapSnapshot: { _ in detailSnapshotPNG }
+        )
+        let detailMemoryItems = memoryPackURLs.compactMap { url in
+            detailMemoryManager.savedMapListItems(activeDeviceMap: nil).first {
+                $0.packURL?.lastPathComponent == url.lastPathComponent
+            }
+        }
+        guard detailMemoryItems.count == memoryPackURLs.count else {
+            fail("all detail memory fixtures should appear in the local inventory")
+        }
+        for item in detailMemoryItems {
+            await detailMemoryManager.loadDetailPreviewIfNeeded(for: item)
+        }
+        guard detailMemoryManager.detailPreviewImage(for: detailMemoryItems[0]) == nil,
+              detailMemoryItems.dropFirst().allSatisfy({
+                  detailMemoryManager.detailPreviewImage(for: $0) != nil
+              }) else {
+            fail("decoded Retina previews should retain only the three most recent maps")
+        }
+
         restoredManager.deleteCachedPack(at: snapshotPackURL)
         guard SavedMapSnapshotPreviewStore.imageData(for: snapshotPackURL) == nil,
               SavedMapDetailPreviewStore.imageData(for: snapshotPackURL) == nil else {
@@ -819,6 +859,60 @@ struct SavedMapPreviewCatalystTests {
               ) == nil,
               SavedMapDetailPreviewStore.imageData(for: cancellationPackURL) == nil else {
             fail("cancelling the sheet task must stop and discard detail generation")
+        }
+
+        var supersedingDetailRequestCount = 0
+        let supersedingDetailManager = OfflineMapManager(
+            defaults: defaults,
+            cacheDirectory: cacheDirectory,
+            mapSnapshot: { _ in nil },
+            detailMapSnapshot: { _ in
+                supersedingDetailRequestCount += 1
+                if supersedingDetailRequestCount == 1 {
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                }
+                return detailSnapshotPNG
+            }
+        )
+        guard let supersedingDetailItem = supersedingDetailManager.savedMapListItems(
+            activeDeviceMap: nil
+        ).first(where: {
+            $0.packURL?.lastPathComponent == cancellationPackURL.lastPathComponent
+        }) else {
+            fail("superseding detail fixture should appear in the local inventory")
+        }
+        let firstDetailTask = Task { @MainActor in
+            await supersedingDetailManager.loadDetailPreviewIfNeeded(
+                for: supersedingDetailItem
+            )
+        }
+        let firstDetailDeadline = Date().addingTimeInterval(3)
+        while supersedingDetailRequestCount < 1 && Date() < firstDetailDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let secondDetailTask = Task { @MainActor in
+            await supersedingDetailManager.loadDetailPreviewIfNeeded(
+                for: supersedingDetailItem
+            )
+        }
+        let secondDetailDeadline = Date().addingTimeInterval(1)
+        while supersedingDetailRequestCount < 2 && Date() < secondDetailDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard supersedingDetailRequestCount == 2 else {
+            firstDetailTask.cancel()
+            await firstDetailTask.value
+            await secondDetailTask.value
+            fail("a reopened sheet should supersede an unwinding detail request")
+        }
+        firstDetailTask.cancel()
+        await firstDetailTask.value
+        await secondDetailTask.value
+        guard imageMatchesPNG(
+            supersedingDetailManager.detailPreviewImage(for: supersedingDetailItem),
+            data: detailSnapshotPNG
+        ) else {
+            fail("the superseding detail request should publish its Retina preview")
         }
 
         var snapshotStarted = false
