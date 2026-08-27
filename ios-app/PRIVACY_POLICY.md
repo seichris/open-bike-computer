@@ -70,10 +70,11 @@ If you choose **Import from Strava**, you paste a Strava route URL and connect
 your Strava account through Strava's authorization flow. The Bicino service
 stores your Strava athlete ID, granted scopes, access token, and refresh token
 in encrypted form, linked only to the random Bicino app-installation identifier.
-It uses them only to confirm that the requested cycling route belongs to the
-connected athlete and to retrieve that route from Strava. The service relays
-the route GPX directly to your app with a no-store response and does not persist
-the route name, coordinates, distance, instructions, or GPX payload.
+It uses them only to confirm that the requested route is a cycling route that
+Strava makes available to the connected account and to retrieve that route from
+Strava. The service relays the route GPX directly to your app with a no-store
+response and does not persist the route name, coordinates, distance,
+instructions, or GPX payload.
 
 Your iPhone and paired Watch may cache a Strava route for no more than seven
 days from each successful import or reload. At the deadline they delete all

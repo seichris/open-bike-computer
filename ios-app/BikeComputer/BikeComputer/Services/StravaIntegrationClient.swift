@@ -73,7 +73,7 @@ nonisolated enum StravaIntegrationClientError: Error, Equatable,
         case .scopeRequired:
             "Reconnect Strava and allow private-route access to import this route."
         case .routeNotImportable:
-            "This route is not an owned cycling route available to Bicino."
+            "This route is not a cycling route available to Bicino."
         case .routeUnavailable:
             "This Strava route is unavailable."
         case .oauthSessionInvalid:

@@ -33,9 +33,9 @@ Routes section. The complete rider flow is:
 3. If Bicino is not connected to Strava, review a short data-use disclosure and
    complete Strava OAuth. A rider does not need to have been signed in to
    Strava beforehand; Strava supplies its app or web sign-in flow.
-4. Bicino imports any cycling route created by the connected athlete that the
-   granted scopes allow it to read. Public routes require `read`; private routes
-   require `read_all`.
+4. Bicino imports any cycling route that Strava makes visible to the connected
+   account under its granted scopes. Public routes require `read`; private
+   routes require `read_all`.
 5. The route appears in the existing Saved Routes library and uses the existing
    validated archive, Apple Watch transfer, offline navigation, and Bicino BLE
    display paths.
@@ -75,14 +75,13 @@ Official references:
 ### Meaning of “any Strava route” in this release
 
 The URL field accepts any syntactically valid canonical route URL. A successful
-import is deliberately narrower: the route must be a cycling route created by
-the athlete who connected Strava to this Bicino installation and must be
-visible under the granted scopes.
+import requires a cycling route that Strava's authenticated API makes visible
+to the account connected to this Bicino installation under the granted scopes.
+The route may have been created by another athlete.
 
-Do not fetch or display another athlete's route merely because its web page is
-public. Do not add an HTML, embedded-page, undocumented endpoint, headless
-browser, or polyline-scraping fallback. If Strava's authenticated API does not
-return the route to the connected athlete, Bicino reports that it is unavailable.
+Do not add an HTML, embedded-page, undocumented endpoint, headless browser, or
+polyline-scraping fallback. If Strava's authenticated API does not return the
+route to the connected account, Bicino reports that it is unavailable.
 
 ### Retention decision
 
@@ -102,8 +101,8 @@ the first release:
 
 The separate 48-hour deletion rule is an early-deletion path, not the normal
 cache lifetime. While connected and online, iPhone revalidates cached route
-ownership/availability when the previous successful validation is more than 24
-hours old and purges immediately when Strava authoritatively reports the route
+availability when the previous successful validation is more than 24 hours old
+and purges immediately when Strava authoritatively reports the route
 unavailable. Disconnect, revocation, and an explicit Bicino delete also purge
 immediately. Transient network or Strava failures do not destroy an otherwise
 unexpired offline route.
@@ -212,18 +211,16 @@ The backend:
 Use separate Strava applications for Development and Production. Their client
 secrets, callback domains, athlete capacities, and test users stay isolated.
 
-### 4. Bicino enforces route ownership even if Strava returns public data
+### 4. Bicino validates route identity and cycling type before GPX export
 
 Before exporting GPX, the backend calls `GET /routes/{id}` and verifies:
 
 - the response `id_str` or numeric ID equals the requested canonical ID;
-- `route.athlete.id` equals the athlete ID captured during this installation's
-  OAuth exchange; and
 - the route type is cycling (`type == 1`).
 
 Only then call `GET /routes/{id}/export_gpx` with the same athlete token. A run
-route, route from another athlete, unavailable private route, or inconsistent
-response fails closed without returning geometry.
+route, unavailable route, or inconsistent response fails closed without
+returning geometry.
 
 ### 5. The backend is a bounded mediator, not a route store or generic proxy
 
@@ -340,7 +337,7 @@ flowchart LR
 
     UI --> AUTH --> API
     API <--> OAUTH
-    API -->|"owned route metadata + GPX"| ROUTES
+    API -->|"visible route metadata + GPX"| ROUTES
     API -->|"bounded GPX; no server cache"| GPX
     GPX --> LIB --> WATCH --> DEVICE
     UI --> BOOKMARK
@@ -396,7 +393,7 @@ iPhone -> Bicino backend
 Backend -> Strava
   refresh access token if needed
   GET /routes/{routeId}
-  verify connected athlete owns a cycling route
+  verify route identity and cycling type
   GET /routes/{routeId}/export_gpx
 
 Backend -> iPhone
@@ -498,7 +495,7 @@ iPhone removes local Strava archives and reload bookmarks immediately and
 durably queues exact Watch deletions. Watch also enforces each archive's
 absolute expiry in case it remains unreachable during disconnect.
 
-### Fetch owned route GPX
+### Fetch route GPX
 
 `POST /v1/integrations/strava/routes/{routeId}/gpx`
 
@@ -525,7 +522,7 @@ custom headers.
 `POST /v1/integrations/strava/routes/{routeId}/validate`
 
 Require installation authentication, a live Strava connection, and the same
-strict route-ID and ownership/type checks as GPX fetch. The endpoint takes no
+strict route-ID and cycling-type checks as GPX fetch. The endpoint takes no
 request body, performs only the route metadata lookup, and returns
 `Cache-Control: private, no-store`:
 
@@ -555,7 +552,7 @@ Use stable codes and user-safe messages:
 | 401 | `installation_credential_required` | Existing Bicino installation auth failed |
 | 401 | `strava_not_connected` | This installation has no usable Strava connection |
 | 403 | `strava_scope_required` | Required route scope was not granted |
-| 403 | `strava_route_not_importable` | Route is not an owned cycling route |
+| 403 | `strava_route_not_importable` | Route is not a cycling route |
 | 404 | `strava_route_unavailable` | Route is absent, deleted, private, or unavailable |
 | 409 | `strava_oauth_session_invalid` | OAuth state is expired, consumed, or inconsistent |
 | 413 | `strava_route_too_large` | GPX exceeds the shared 4 MiB input limit |
@@ -901,7 +898,7 @@ Completion:
 
 - all endpoints enforce the contract above;
 - callback state cannot be replayed or moved between installations/channels;
-- route ownership and cycling type are checked before GPX export;
+- route identity and cycling type are checked before GPX export;
 - availability validation applies the same identity checks without returning
   route metadata or geometry;
 - response reads stop at the shared byte bound; and
@@ -1178,10 +1175,11 @@ Test with an injected fake Strava transport:
 - AES-GCM round trip, tamper rejection, AAD isolation, key rotation, and
   unknown-key failure;
 - serialized refresh-token rotation and crashed lease recovery;
-- route ID and athlete ownership equality using 64-bit-safe values;
-- rejection of another athlete, run routes, missing fields, wrong IDs, and
-  malformed upstream JSON;
-- validation endpoint ownership/type checks, metadata-free success response,
+- route ID equality using 64-bit-safe values;
+- acceptance of visible cycling routes from another athlete;
+- rejection of run routes, missing fields, wrong IDs, and malformed upstream
+  JSON;
+- validation endpoint identity/type checks, metadata-free success response,
   definitive-unavailable response, and transient-failure mapping;
 - exact fixed-host requests and redirect refusal;
 - GPX content type, empty body, byte limit, timeout, and upstream fault mapping;
@@ -1211,12 +1209,12 @@ Use a Development Strava application and Bicino Dev:
 | Strava app installed | Native authorization returns to Bicino Dev |
 | Strava app absent | `ASWebAuthenticationSession` completes and returns |
 | OAuth denied | URL remains; no backend connection or route is created |
-| Own public cycling route | Imports with `read` |
-| Own private cycling route | Imports with `read_all` |
+| Public cycling route from any athlete | Imports when visible with `read` |
+| Private cycling route | Imports when visible with `read_all` |
 | Private permission not granted | Actionable scope error; no fallback scrape |
-| Another athlete's public route | Generic unavailable/not-importable error; no GPX returned |
+| Another athlete's visible public route | Imports |
 | Strava run route | Rejected as unsupported for Bicino cycling navigation |
-| Provided example route | Imports only if it belongs to the connected test athlete |
+| Provided example route | Imports when Strava exposes it to the connected test account |
 | Expired access token | Exactly one serialized refresh, then import succeeds |
 | App killed during OAuth | Foreground/status reconciliation completes or safely expires |
 | GPX malformed/oversized | Existing importer/size error; no partial archive |
@@ -1337,9 +1335,9 @@ remain in Coolify or backups beyond the documented deletion window.
 - **Import from Strava** appears directly below **Import GPX**.
 - A rider can paste the example URL shape before being connected.
 - OAuth is requested only when needed and returns to the correct app channel.
-- Any owned cycling route visible under the rider's granted scopes imports into
-  the existing Saved Routes library.
-- Another athlete's route, a segment URL, and a run route do not import.
+- Any cycling route visible under the rider's granted scopes imports into the
+  existing Saved Routes library, including routes created by another athlete.
+- A segment URL and a run route do not import.
 - Every active or expired Strava row has a reload button.
 - One reload tap updates that route in place, preserves its local alias, and
   starts a fresh seven-day window without another URL paste.
@@ -1353,7 +1351,7 @@ remain in Coolify or backups beyond the documented deletion window.
   credential.
 - OAuth state is high-entropy, installation/channel-bound, expiring, and
   one-time.
-- Route ownership is verified before GPX export.
+- Route identity and cycling type are verified before GPX export.
 - Upstream hosts, redirects, response types, times, IDs, and byte counts fail
   closed.
 - Tokens are encrypted at rest with rotation and serialized refresh.
@@ -1397,7 +1395,6 @@ remain in Coolify or backups beyond the documented deletion window.
 ## Non-goals
 
 - anonymous extraction from a public Strava page;
-- import of routes created by another athlete;
 - Strava segments, activities, starred segments, route discovery, or a route
   browser;
 - automatic synchronization of every Strava route;

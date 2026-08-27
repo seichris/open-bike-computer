@@ -34,7 +34,7 @@ contract and operating procedure.
   The versioned estimator combines a checked-in conservative baseline with
   compatible local timing cohorts, then refines selected 3D jobs from actual
   scope, dependency/cache, and pre-normalization building complexity signals.
-- Installation-scoped Strava OAuth, connection management, owned cycling-route
+- Installation-scoped Strava OAuth, connection management, cycling-route
   GPX import, availability checks, encrypted token storage, and revocation
   maintenance behind an opt-in capability flag.
 - Coolify-oriented compose file and Dockerfile.
