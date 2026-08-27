@@ -28,11 +28,17 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
             TLS_SOURCE.index("bool TransferClient::begin") :
             TLS_SOURCE.index("int TransferClient::available")
         ]
-        self.assertLess(begin.index("::dup(accepted.fd())"), begin.index("accepted.stop()"))
         self.assertLess(
-            begin.index("accepted.stop()"),
+            begin.index("socketOwner_ = accepted"),
+            begin.index("accepted = WiFiClient()"),
+        )
+        self.assertLess(
+            begin.index("accepted = WiFiClient()"),
             begin.index("esp_tls_server_session_create"),
         )
+        self.assertNotIn("::dup", begin)
+        self.assertNotIn("accepted.stop()", begin)
+        self.assertIn("WiFiClient socketOwner_;", TLS_HEADER)
         self.assertIn("TransferClient &client", HTTP_HEADER)
 
     def test_leaf_fingerprint_is_sha256_over_certificate_der(self):
@@ -42,7 +48,7 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
         ]
         self.assertIn("certificate.raw.p", fingerprint)
         self.assertIn("certificate.raw.len", fingerprint)
-        self.assertIn("mbedtls_sha256_ret", fingerprint)
+        self.assertIn("mbedtls_sha256(", fingerprint)
         self.assertIn("mbedtls_pk_check_pair", TLS_SOURCE)
 
     def test_identity_selector_is_one_atomic_nvs_value(self):

@@ -13,7 +13,6 @@
 #include <sys/socket.h>
 #include <sys/poll.h>
 #include <sys/time.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -467,10 +466,16 @@ bool TransferClient::begin(WiFiClient &accepted,
   stop();
   if (!identity.valid() || accepted.fd() < 0)
     return false;
-  socket_ = ::dup(accepted.fd());
-  accepted.stop();
-  if (socket_ < 0)
+  // NetworkClient owns its socket through a shared handle. Retain that handle,
+  // then clear the caller without closing it; this is the ESP32 equivalent of
+  // transferring the accepted descriptor into the TLS-only adapter.
+  socketOwner_ = accepted;
+  socket_ = socketOwner_.fd();
+  accepted = WiFiClient();
+  if (socket_ < 0) {
+    socketOwner_.stop();
     return false;
+  }
   const int flags = ::fcntl(socket_, F_GETFL, 0);
   if (flags >= 0)
     ::fcntl(socket_, F_SETFL, flags & ~O_NONBLOCK);
@@ -482,7 +487,7 @@ bool TransferClient::begin(WiFiClient &accepted,
 
   tls_ = esp_tls_init();
   if (tls_ == nullptr) {
-    ::close(socket_);
+    socketOwner_.stop();
     socket_ = -1;
     return false;
   }
@@ -495,11 +500,10 @@ bool TransferClient::begin(WiFiClient &accepted,
   configuration.serverkey_bytes = identity.privateKeyPem.size();
   configuration.tls_handshake_timeout_ms = handshakeTimeoutMs;
   if (esp_tls_server_session_create(&configuration, socket_, tls_) != 0) {
-    const int failedSocket = socket_;
     esp_tls_server_session_delete(tls_);
     tls_ = nullptr;
     socket_ = -1;
-    ::close(failedSocket);
+    socketOwner_.stop();
     return false;
   }
   connected_ = true;
@@ -626,16 +630,10 @@ bool TransferClient::finishResponse(uint32_t timeoutMs) {
 void TransferClient::stop() {
   connected_ = false;
   if (tls_ != nullptr) {
-    const int activeSocket = socket_;
     esp_tls_server_session_delete(tls_);
     tls_ = nullptr;
-    socket_ = -1;
-    if (activeSocket >= 0)
-      ::close(activeSocket);
-    return;
   }
-  if (socket_ >= 0)
-    ::close(socket_);
+  socketOwner_.stop();
   socket_ = -1;
 }
 

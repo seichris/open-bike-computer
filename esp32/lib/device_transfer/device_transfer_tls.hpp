@@ -53,9 +53,10 @@ private:
   bool clearSlot(uint8_t slot);
 };
 
-// Small TLS stream adapter around an accepted Arduino socket. Every device
-// transfer handler consumes this type, so plaintext clients never reach HTTP
-// parsing or authorization-token handling.
+// Small TLS stream adapter around an accepted Arduino socket. begin() takes
+// ownership of the socket handle and clears the caller's plaintext wrapper
+// before handshaking. Every device transfer handler consumes this type, so
+// plaintext clients never reach HTTP parsing or authorization-token handling.
 class TransferClient {
 public:
   TransferClient() = default;
@@ -76,6 +77,7 @@ public:
   explicit operator bool() { return connected() != 0; }
 
 private:
+  WiFiClient socketOwner_;
   esp_tls *tls_ = nullptr;
   int socket_ = -1;
   bool connected_ = false;
