@@ -979,7 +979,7 @@ struct ContentView: View {
     }
 
     private var mapControlCluster: some View {
-        VStack(alignment: .trailing, spacing: 10) {
+        VStack(alignment: .center, spacing: 10) {
             MapCompassControl(controlState: mapViewControlState)
                 .frame(width: 44, height: 44)
 
