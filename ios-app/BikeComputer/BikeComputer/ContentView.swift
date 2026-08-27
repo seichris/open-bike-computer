@@ -1083,7 +1083,7 @@ struct ContentView: View {
                 .labelsHidden()
             }
 
-            Section("Elevation") {
+            Section {
                 Toggle(isOn: $usesRealisticMapElevation) {
                     Label("3D Terrain", systemImage: "mountain.2.fill")
                 }
