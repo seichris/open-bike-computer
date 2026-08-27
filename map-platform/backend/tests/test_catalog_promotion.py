@@ -120,7 +120,7 @@ class CatalogPromotionDownloadTests(unittest.TestCase):
                     body,
                     "https://a" + "1" * 31 + ".r2.cloudflarestorage.com/map-artifacts/source.zip",
                 ),
-            ):
+            ) as open_url:
                 _download_exact_zip(
                     "https://maps-share.8o.vc/v1/internal/promotions/downloads/token",
                     destination,
@@ -131,6 +131,8 @@ class CatalogPromotionDownloadTests(unittest.TestCase):
                     timeout_seconds=10,
                 )
             self.assertEqual(destination.read_bytes(), body)
+            request = open_url.call_args.args[0]
+            self.assertEqual(request.get_header("User-agent"), "BicinoMapPlatform/1.0")
 
     def test_download_rejects_redirect_away_from_configured_r2_host(self):
         body = b"untrusted"

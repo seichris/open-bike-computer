@@ -170,7 +170,13 @@ def _download_exact_zip(
         raise CatalogPromotionError("promotion download endpoint is invalid")
     digest = hashlib.sha256()
     written = 0
-    request = Request(url, headers={"Accept": ZIP_MEDIA_TYPE})
+    request = Request(
+        url,
+        headers={
+            "Accept": ZIP_MEDIA_TYPE,
+            "User-Agent": "BicinoMapPlatform/1.0",
+        },
+    )
     try:
         with urlopen(request, timeout=timeout_seconds) as response:
             final = urlparse(response.geturl())
