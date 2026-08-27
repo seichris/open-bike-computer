@@ -85,6 +85,16 @@ class MapActivationHandoffTests(unittest.TestCase):
         self.assertIn("bool activationAlreadyBegun = false;", HEADER)
         self.assertIn("bool automaticExitOnCleanResponse = true;", HEADER)
 
+    def test_renderer_handoff_preserves_bounded_diagnostic_identity(self):
+        self.assertIn("struct ActivatedMapRoot", HEADER)
+        body = method_body("takeActivatedMapRoot")
+        self.assertIn("activated.root = pendingMapRoot_;", body)
+        self.assertIn("activated.mapId = pendingMapId_;", body)
+        self.assertIn(
+            "activated.sessionPresent = !pendingMapSessionId_.empty();",
+            body,
+        )
+
     def test_completed_upload_survives_obsolete_cleanup_failure(self):
         body = method_body("handlePut")
         self.assertIn("post-upload cleanup incomplete", body)

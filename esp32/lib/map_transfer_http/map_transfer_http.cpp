@@ -1040,14 +1040,16 @@ void MapTransferHttpServer::updateStreamInstallState(
   unlockState();
 }
 
-bool MapTransferHttpServer::takeActivatedMapRoot(std::string &root) {
+bool MapTransferHttpServer::takeActivatedMapRoot(ActivatedMapRoot &activated) {
   lockState();
   if (pendingMapRoot_.empty() ||
       (pendingRendererAcknowledgement_ && pendingMapRootTaken_)) {
     unlockState();
     return false;
   }
-  root = pendingMapRoot_;
+  activated.root = pendingMapRoot_;
+  activated.mapId = pendingMapId_;
+  activated.sessionPresent = !pendingMapSessionId_.empty();
   if (pendingRendererAcknowledgement_)
     pendingMapRootTaken_ = true;
   else

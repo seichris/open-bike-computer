@@ -125,6 +125,7 @@ void setStorageRecoveryAllowedProbe(StorageRecoveryAllowedProbe probe);
 
 bool record(Level level, const char *category, const char *event,
             const char *fieldsJson = "{}");
+bool recordHealth(const char *reason);
 bool recordClockAnchor();
 bool markIssue(const char *code, uint32_t markerSequence);
 bool bindCapture(const char *captureId, bool detailed = false);
