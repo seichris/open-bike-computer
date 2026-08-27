@@ -164,16 +164,26 @@ private final class MemoryWorkoutLiveActivitySuppressionStore:
 private final class WorkoutLiveActivityWaitScheduler {
     private(set) var requestedIntervals: [TimeInterval] = []
     private var continuations: [CheckedContinuation<Void, Error>] = []
+    private var registrationWaiters: [CheckedContinuation<Void, Never>] = []
 
     func wait(_ interval: TimeInterval) async throws {
         requestedIntervals.append(interval)
         try await withCheckedThrowingContinuation { continuation in
             continuations.append(continuation)
+            let waiters = registrationWaiters
+            registrationWaiters.removeAll()
+            for waiter in waiters {
+                waiter.resume()
+            }
         }
     }
 
-    func resumeNext() {
-        guard !continuations.isEmpty else { return }
+    func resumeNext() async {
+        if continuations.isEmpty {
+            await withCheckedContinuation { continuation in
+                registrationWaiters.append(continuation)
+            }
+        }
         continuations.removeFirst().resume()
     }
 }
@@ -217,6 +227,22 @@ private final class FakeWorkoutBackgroundExecutionLease:
 final class WorkoutLiveActivityControllerTests: XCTestCase {
     private let capturedAt =
         Date(timeIntervalSinceReferenceDate: 800_500_000)
+
+    func testWaitSchedulerResumeWaitsForRegistration() async throws {
+        let scheduler = WorkoutLiveActivityWaitScheduler()
+        let resumeTask = Task { @MainActor in
+            await scheduler.resumeNext()
+        }
+        await Task.yield()
+        let waitTask = Task { @MainActor in
+            try await scheduler.wait(1)
+        }
+
+        await resumeTask.value
+        try await waitTask.value
+
+        XCTAssertEqual(scheduler.requestedIntervals, [1])
+    }
 
     func testForegroundVerifiedWorkoutRequestsOnlyOneActivity() async {
         let sessionID = UUID()
@@ -378,7 +404,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
 
         XCTAssertTrue(client.updates.isEmpty)
         XCTAssertEqual(scheduler.requestedIntervals.count, 1)
-        scheduler.resumeNext()
+        await scheduler.resumeNext()
         await settle()
 
         XCTAssertEqual(client.updates.count, 1)
@@ -419,7 +445,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
             )
         )
         await settle()
-        scheduler.resumeNext()
+        await scheduler.resumeNext()
         await settle()
 
         source.send(
@@ -433,7 +459,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
 
         XCTAssertTrue(client.updates.isEmpty)
         XCTAssertEqual(scheduler.requestedIntervals.count, 2)
-        scheduler.resumeNext()
+        await scheduler.resumeNext()
         await settle()
         XCTAssertEqual(
             client.updates.last?.1.currentSpeedKilometersPerHour,
@@ -857,7 +883,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         source.send(active)
         await settle()
         XCTAssertFalse(lease.isActive)
-        scheduler.resumeNext()
+        await scheduler.resumeNext()
         await settle()
 
         XCTAssertEqual(client.endings.map(\.0), ["other"])
@@ -886,7 +912,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         controller.start(isApplicationForeground: false)
         await settle()
 
-        scheduler.resumeNext()
+        await scheduler.resumeNext()
         await settle()
 
         XCTAssertEqual(client.endings.count, 1)
@@ -921,7 +947,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         XCTAssertTrue(lease.isActive)
         XCTAssertEqual(scheduler.requestedIntervals, [3])
 
-        scheduler.resumeNext()
+        await scheduler.resumeNext()
         await settle()
 
         XCTAssertFalse(lease.isActive)
@@ -995,7 +1021,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         await settle()
         XCTAssertTrue(lease.isActive)
 
-        scheduler.resumeNext()
+        await scheduler.resumeNext()
         await settle()
 
         XCTAssertEqual(client.endings.count, 1)
@@ -1047,7 +1073,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         controller.start(isApplicationForeground: true)
         await settle()
 
-        scheduler.resumeNext()
+        await scheduler.resumeNext()
         await settle()
         XCTAssertEqual(client.endAttempts, ["ending"])
 
@@ -1095,7 +1121,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         controller.start(isApplicationForeground: true)
         await settle()
 
-        scheduler.resumeNext()
+        await scheduler.resumeNext()
         source.send(
             makeLiveActivityPresentation(
                 sessionID: sessionID,
@@ -1162,7 +1188,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         controller.start(isApplicationForeground: true)
         await settle()
 
-        scheduler.resumeNext()
+        await scheduler.resumeNext()
         await settle()
         XCTAssertEqual(client.endAttempts, ["unrelated"])
         XCTAssertTrue(
@@ -1223,7 +1249,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         controller.start(isApplicationForeground: true)
         await settle()
 
-        scheduler.resumeNext()
+        await scheduler.resumeNext()
         await settle()
         XCTAssertEqual(client.endAttempts, ["existing"])
 

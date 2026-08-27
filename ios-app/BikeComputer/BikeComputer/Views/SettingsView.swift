@@ -120,18 +120,6 @@ struct SettingsView: View {
                     manager: offlineMapManager,
                     focusedPackFilename: $focusedSavedMapFilename
                 )
-                Section {
-                    NavigationLink {
-                        MapLibrarySettingsView(manager: offlineMapManager)
-                    } label: {
-                        Label("Map Library", systemImage: "map.circle")
-                    }
-                } footer: {
-                    Text(
-                        "Manage shared map links or link Bicino and Bicino Dev " +
-                            "when shared Keychain access is unavailable."
-                    )
-                }
                 if OfflineMapDownloadingSectionPresentation.isVisible(
                     isBusy: offlineMapManager.isBusy,
                     hasPendingJob: offlineMapManager.hasPendingMapJob,
@@ -873,9 +861,10 @@ private struct MapLibrarySettingsView: View {
                 Text("Link Bicino Apps")
             } footer: {
                 Text(
-                    "Normally both apps share the same private Keychain library. " +
-                        "If they do not, create a code in the app whose library " +
-                        "you want to keep, then enter it in the other app within 10 minutes."
+                    "Normally both apps use the same private Cloudflare map library " +
+                        "credential from the shared Keychain. If they do not, create " +
+                        "a code in the app whose library you want to keep, then enter " +
+                        "it in the other app within 10 minutes."
                 )
             }
 
@@ -1117,6 +1106,7 @@ private struct SavedMapRow: View {
         ) ?? false
         let previewImage = manager.previewImage(for: item)
         let catalogAvailability = item.catalogMap.map(manager.catalogAvailability(for:))
+        let catalogArtifactNeedsRefresh = manager.catalogArtifactNeedsRefresh(for: item)
 
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
@@ -1229,6 +1219,26 @@ private struct SavedMapRow: View {
                         .accessibilityLabel(
                             "Waiting for the Bike Computer to confirm \(displayName)"
                         )
+                } else if catalogArtifactNeedsRefresh,
+                          let catalogMap = item.catalogMap {
+                    Button {
+                        finishRenaming()
+                        focusedPackFilename = nil
+                        manager.downloadCatalogMap(catalogMap)
+                    } label: {
+                        Image(systemName: "arrow.down.circle")
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(
+                        manager.isBusy ||
+                            manager.isDeviceTransferBusy ||
+                            manager.hasActiveBackgroundUpload ||
+                            isPausedUpload ||
+                            catalogAvailability?.canDownload != true
+                    )
+                    .accessibilityLabel("Update \(displayName) on this iPhone")
+                    .accessibilityHint("Downloads the current compatible map artifact")
                 } else if let packURL {
                     Button {
                         finishRenaming()
@@ -1317,6 +1327,13 @@ private struct SavedMapRow: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .accessibilityLabel("\(displayName): \(status)")
+            }
+
+            if catalogArtifactNeedsRefresh {
+                Label("Updated map available", systemImage: "arrow.down.circle")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .accessibilityLabel("\(displayName): Updated map available")
             }
 
             if let mapEntryID = item.catalogMap?.mapEntryId,
@@ -3006,11 +3023,27 @@ private struct DeveloperSettingsView: View {
 
             Section(header: Text("Map Server")) {
                 SettingsValueRow(title: "Service", value: offlineMapManager.serverURLString)
-                Button {
-                    offlineMapManager.serverURLString = OfflineMapServiceConfig.defaultServerURLString
-                } label: {
+                Button(action: useProductionMapServer) {
                     Label("Use Production Server", systemImage: "checkmark.seal")
                 }
+#if DEBUG
+                Button(action: useDevelopmentMapServer) {
+                    Label("Use Development Server", systemImage: "hammer")
+                }
+#endif
+            }
+
+            Section {
+                NavigationLink {
+                    MapLibrarySettingsView(manager: offlineMapManager)
+                } label: {
+                    Label("Map Library", systemImage: "map.circle")
+                }
+            } footer: {
+                Text(
+                    "Manage the private Cloudflare map library, shared links, " +
+                        "and Bicino app linking."
+                )
             }
 
             Section {
@@ -3141,6 +3174,18 @@ private struct DeveloperSettingsView: View {
                 .foregroundColor(bleManager.isConnected ? .green : .red)
         }
     }
+
+    private func useProductionMapServer() {
+        offlineMapManager.serverURLString =
+            OfflineMapServiceConfig.productionServerURLString
+    }
+
+#if DEBUG
+    private func useDevelopmentMapServer() {
+        offlineMapManager.serverURLString =
+            OfflineMapServiceConfig.developmentServerURLString
+    }
+#endif
 
     private var connectionStatusText: String {
         guard bleManager.isConnected else {

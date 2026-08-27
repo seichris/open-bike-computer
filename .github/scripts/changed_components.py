@@ -211,6 +211,16 @@ def git_diff_command(event: str, base: str, head: str) -> Sequence[str] | None:
             f"{base_sha}...{head_sha}",
             "--",
         )
+    if event == "merge_group":
+        return (
+            "git",
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            f"{base_sha}..{head_sha}",
+            "--",
+        )
     if event == "push":
         if base_sha == ZERO_SHA:
             return (
