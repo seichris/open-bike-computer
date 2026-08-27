@@ -34,6 +34,9 @@ contract and operating procedure.
   The versioned estimator combines a checked-in conservative baseline with
   compatible local timing cohorts, then refines selected 3D jobs from actual
   scope, dependency/cache, and pre-normalization building complexity signals.
+- Installation-scoped Strava OAuth, connection management, owned cycling-route
+  GPX import, availability checks, encrypted token storage, and revocation
+  maintenance behind an opt-in capability flag.
 - Coolify-oriented compose file and Dockerfile.
 
 ## Local API
@@ -66,6 +69,51 @@ curl -s http://localhost:8080/v1/map-jobs \
     "target": { "renderer": "esp32-fmb", "firmwareVersion": "0.0.0" }
   }'
 ```
+
+### Strava route import
+
+Strava route import is disabled unless `MAP_PLATFORM_STRAVA_ENABLED=1` and all
+provider configuration is present. The iOS app keeps no Strava client secret or
+athlete token: it authenticates these endpoints with its existing Bicino
+installation credential, and the backend owns OAuth and provider traffic.
+
+Register separate Strava applications for Development and Production. Their
+exact callbacks are:
+
+- Development: `https://maps-dev.8o.vc/v1/integrations/strava/oauth/callback`
+- Production: `https://maps.8o.vc/v1/integrations/strava/oauth/callback`
+
+Configure the matching channel with:
+
+```text
+MAP_PLATFORM_STRAVA_ENABLED=1
+MAP_PLATFORM_STRAVA_CLIENT_ID=<positive numeric client ID>
+MAP_PLATFORM_STRAVA_CLIENT_SECRET=<secret from Strava>
+MAP_PLATFORM_STRAVA_REDIRECT_URI=<exact callback above>
+MAP_PLATFORM_STRAVA_TOKEN_KEY_ID=<non-secret key identifier>
+MAP_PLATFORM_STRAVA_TOKEN_KEY_BASE64=<base64 of exactly 32 random bytes>
+MAP_PLATFORM_STRAVA_PREVIOUS_TOKEN_KEYS=<optional key-id=base64 pairs or JSON object>
+MAP_PLATFORM_STRAVA_CONNECTION_IDLE_TTL_DAYS=30
+```
+
+Generate the token-encryption key with `openssl rand -base64 32`. Keep it in
+the deployment secret manager and never commit or log it. To rotate, move the
+old `key-id=base64-key` pair to `MAP_PLATFORM_STRAVA_PREVIOUS_TOKEN_KEYS`, install a new
+current ID/key pair, deploy API and maintenance together, and retain the old
+key until every live row has been read or its connection has aged out.
+
+The API applies separate installation and IP quotas. Defaults can be tuned with
+`MAP_PLATFORM_STRAVA_OAUTH_START_LIMIT_PER_HOUR` (10),
+`MAP_PLATFORM_STRAVA_ROUTE_IMPORT_LIMIT_PER_HOUR` (30),
+`MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR` (60), and
+`MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR` (30). Imported GPX responses
+always carry a backend-owned seven-day `deleteAfter`; that retention maximum is
+compiled in and cannot be extended with an environment variable.
+
+Only the API and maintenance services receive Strava credentials. The map
+worker deliberately receives none. Maintenance removes expired OAuth sessions,
+revokes idle connections, and retries transiently failed disconnect
+revocations.
 
 Run a job:
 
@@ -168,6 +216,10 @@ Required Coolify secrets:
   for stateless v2 installation credentials. Rotate it by moving the old value
   into comma-separated `MAP_PLATFORM_INSTALLATION_PREVIOUS_SECRETS`, deploy the
   new current value, then remove retired values after the app migration window.
+- `MAP_PLATFORM_STRAVA_CLIENT_SECRET` and
+  `MAP_PLATFORM_STRAVA_TOKEN_KEY_BASE64` when Strava import is enabled. Keep
+  Development and Production values isolated and configure the complete set
+  listed in **Strava route import** above.
 
 The public iOS app contains no server-wide credential. It requests a unique
 installation credential from `POST /v1/installations`, stores it in the

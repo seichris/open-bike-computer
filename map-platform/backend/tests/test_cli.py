@@ -357,6 +357,35 @@ class MaintenanceTests(unittest.TestCase):
             max_items=100,
         )
 
+    def test_iteration_runs_strava_revocation_maintenance_independently(self):
+        strava = Mock()
+        strava.maintenance.return_value = {
+            "removedOAuthSessions": 2,
+            "markedIdleConnections": 1,
+            "completedRevocations": 1,
+            "pendingRevocations": 0,
+        }
+        with (
+            patch("map_platform.cli.expire_ready_jobs", return_value=0),
+            patch("map_platform.cli.cleanup_work_dirs", return_value=0),
+            patch("map_platform.cli.purge_expired_rate_limits", return_value=0),
+            patch("map_platform.cli.prune_building_block_cache", return_value={}),
+        ):
+            result = _perform_maintenance(
+                Mock(),
+                Path("/data"),
+                retention_days=30,
+                artifact_store=Mock(),
+                max_gc_items=100,
+                strava_integration=strava,
+            )
+
+        self.assertEqual(
+            result["stravaIntegrations"],
+            strava.maintenance.return_value,
+        )
+        strava.maintenance.assert_called_once_with()
+
     @patch(
         "map_platform.cli.delete_catalog_retention_artifacts",
         return_value={"authorized": 0, "deleted": 0, "deferred": 0},

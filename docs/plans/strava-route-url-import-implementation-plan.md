@@ -4,8 +4,9 @@ Prepared on 2026-08-27 from freshly fetched GitHub `origin/main` at
 `fdfc2be1cc96170690548b04e7aef67756ad7322` on branch
 `plan/strava-route-import`.
 
-This is a planning-only branch. It does not contain the Strava integration,
-credentials, deployment changes, or a production rollout.
+This document is the reviewed implementation contract for the Strava
+integration on this branch. It does not contain credentials and does not by
+itself authorize or perform a production rollout.
 
 The product input is a normal Strava route URL such as
 `https://www.strava.com/routes/3009840108578231836`. A rider may paste the URL
@@ -1035,6 +1036,7 @@ MAP_PLATFORM_STRAVA_CONNECTION_IDLE_TTL_DAYS
 MAP_PLATFORM_STRAVA_OAUTH_START_LIMIT_PER_HOUR
 MAP_PLATFORM_STRAVA_ROUTE_IMPORT_LIMIT_PER_HOUR
 MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR
+MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR
 ```
 
 Validation rules:

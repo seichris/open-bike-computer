@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import html
 import os
 import secrets
 import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlencode
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
-    from fastapi.responses import FileResponse, JSONResponse
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 except ImportError as exc:  # pragma: no cover - exercised only without the API extra
     Depends = FastAPI = Header = HTTPException = Request = Response = None  # type: ignore[assignment]
-    FileResponse = JSONResponse = None  # type: ignore[assignment]
+    FileResponse = HTMLResponse = JSONResponse = None  # type: ignore[assignment]
     _FASTAPI_IMPORT_ERROR: ImportError | None = exc
 else:
     _FASTAPI_IMPORT_ERROR = None
@@ -83,6 +85,11 @@ from .source_cache import (
     default_backend_data_root,
 )
 from .sources import SourceIndex
+from .strava_client import StravaTransport
+from .strava_integrations import (
+    StravaIntegrationError,
+    StravaIntegrationService,
+)
 from .worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
 
 
@@ -116,7 +123,11 @@ def _project_building_progress(
     result["buildingProgress"] = projected
 
 
-def create_app():
+def create_app(
+    *,
+    strava_transport: StravaTransport | None = None,
+    strava_clock=time.time,
+):
     if _FASTAPI_IMPORT_ERROR is not None:
         raise RuntimeError(
             "Install backend API dependencies with "
@@ -136,6 +147,7 @@ def create_app():
         if configured_data_root
         else default_backend_data_root(repo_root)
     )
+    deployment_channel = configured_deployment_channel()
     max_request_body_bytes = int(
         os.environ.get("MAP_PLATFORM_MAX_REQUEST_BODY_BYTES", "2097152")
     )
@@ -180,6 +192,12 @@ def create_app():
             os.environ.get("MAP_PLATFORM_ESTIMATE_MAX_REVISIONS_PER_JOB", "16")
         ),
     )
+    strava_integration = StravaIntegrationService.from_environment(
+        data_root=data_root,
+        deployment_channel=deployment_channel,
+        transport=strava_transport,
+        clock=strava_clock,
+    )
     rate_limiter = PersistentRateLimiter(
         data_root / "rate-limits.sqlite3",
         installation_secret,
@@ -213,6 +231,41 @@ def create_app():
     download_url_installation_policy = RateLimitPolicy(
         "download-url-installation",
         int(os.environ.get("MAP_PLATFORM_DOWNLOAD_URL_LIMIT_PER_HOUR", "30")),
+        3_600,
+    )
+    strava_oauth_start_ip_policy = RateLimitPolicy(
+        "strava-oauth-start-ip",
+        int(os.environ.get("MAP_PLATFORM_STRAVA_OAUTH_START_LIMIT_PER_HOUR", "10")),
+        3_600,
+    )
+    strava_oauth_start_installation_policy = RateLimitPolicy(
+        "strava-oauth-start-installation",
+        int(os.environ.get("MAP_PLATFORM_STRAVA_OAUTH_START_LIMIT_PER_HOUR", "10")),
+        3_600,
+    )
+    strava_route_import_ip_policy = RateLimitPolicy(
+        "strava-route-import-ip",
+        int(os.environ.get("MAP_PLATFORM_STRAVA_ROUTE_IMPORT_LIMIT_PER_HOUR", "30")),
+        3_600,
+    )
+    strava_route_import_installation_policy = RateLimitPolicy(
+        "strava-route-import-installation",
+        int(os.environ.get("MAP_PLATFORM_STRAVA_ROUTE_IMPORT_LIMIT_PER_HOUR", "30")),
+        3_600,
+    )
+    strava_route_validation_ip_policy = RateLimitPolicy(
+        "strava-route-validation-ip",
+        int(os.environ.get("MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR", "60")),
+        3_600,
+    )
+    strava_route_validation_installation_policy = RateLimitPolicy(
+        "strava-route-validation-installation",
+        int(os.environ.get("MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR", "60")),
+        3_600,
+    )
+    strava_disconnect_ip_policy = RateLimitPolicy(
+        "strava-disconnect-ip",
+        int(os.environ.get("MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR", "30")),
         3_600,
     )
     rollout_approvals_path = Path(
@@ -270,7 +323,6 @@ def create_app():
         monitoring_store=monitoring_store,
         preprocessing_mode=preprocessing_scope_mode,
     )
-    deployment_channel = configured_deployment_channel()
     generation_profile_policy = load_generation_profile_policy(repo_root)
     service = MapJobService(
         SourceIndex.from_json(source_index_path, fallback_provider=source_provider),
@@ -310,6 +362,7 @@ def create_app():
     app.state.map_stream_rollout = map_stream_rollout
     app.state.rate_limiter = rate_limiter
     app.state.catalog_client = catalog_client
+    app.state.strava_integration = strava_integration
 
     def client_ip(request: Request) -> str:
         return client_address_resolver.resolve(
@@ -322,6 +375,21 @@ def create_app():
             status_code=429,
             detail="request rate limit exceeded",
             headers={"Retry-After": str(exc.retry_after_seconds)},
+        )
+
+    @app.exception_handler(StravaIntegrationError)
+    async def strava_integration_error(
+        request: Request,
+        exc: StravaIntegrationError,
+    ) -> JSONResponse:
+        del request
+        headers = {"Cache-Control": "private, no-store"}
+        if exc.retry_after_seconds is not None:
+            headers["Retry-After"] = str(exc.retry_after_seconds)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"code": exc.code, "message": exc.safe_message},
+            headers=headers,
         )
 
     def enforce_rate_limits(
@@ -345,6 +413,7 @@ def create_app():
         return (
             path == "/v1/installations"
             or path == "/v1/capabilities"
+            or path == "/v1/integrations/strava/oauth/callback"
             or path == "/v1/source-regions"
             or path == "/v1/map-jobs"
             or path.startswith(("/v1/map-jobs/", "/v1/map-packs/"))
@@ -487,6 +556,9 @@ def create_app():
             "mapStreamRollout": map_stream_rollout.public_summary(),
             "preparationEstimates": estimate_coordinator.mode.value,
             "catalog": catalog_status_from_environment(),
+            "stravaIntegration": (
+                "enabled" if strava_integration.config.enabled else "disabled"
+            ),
         }
 
     @app.get("/v1/capabilities")
@@ -505,7 +577,11 @@ def create_app():
         )
         assert installation_id is not None
         response.headers["Cache-Control"] = "private, no-store"
-        return service.generation_capabilities(installation_id)
+        result = service.generation_capabilities(installation_id)
+        result["integrations"] = {
+            "stravaRouteImport": strava_integration.capability(),
+        }
+        return result
 
     @app.get("/v1/admin/maps", dependencies=[Depends(require_admin_token)])
     def admin_maps(includeUndownloaded: bool = False) -> dict[str, Any]:
@@ -615,6 +691,208 @@ def create_app():
         return {
             "clientInstallationId": installation_id,
             "clientInstallationToken": token,
+        }
+
+    @app.post("/v1/integrations/strava/oauth/start")
+    def start_strava_oauth(
+        request: Request,
+        response: Response,
+        clientInstallationId: str,
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> dict[str, str]:
+        installation_id = verify_registered_installation(
+            clientInstallationId,
+            x_installation_token,
+            required=True,
+        )
+        assert installation_id is not None
+        enforce_rate_limits(
+            (strava_oauth_start_ip_policy, client_ip(request)),
+            (strava_oauth_start_installation_policy, installation_id),
+        )
+        started = strava_integration.start_oauth(installation_id)
+        response.headers["Cache-Control"] = "private, no-store"
+        return {
+            "sessionId": started.session_id,
+            "appAuthorizationUrl": started.app_authorization_url,
+            "webAuthorizationUrl": started.web_authorization_url,
+            "callbackScheme": started.callback_scheme,
+            "expiresAt": started.expires_at,
+        }
+
+    @app.get("/v1/integrations/strava/oauth/callback")
+    def complete_strava_oauth(request: Request) -> HTMLResponse:
+        allowed = {"state", "code", "scope", "error", "error_description"}
+        unexpected = set(request.query_params.keys()).difference(allowed)
+
+        def single(name: str, maximum_length: int) -> str | None:
+            values = request.query_params.getlist(name)
+            if len(values) > 1:
+                return None
+            if not values:
+                return ""
+            value = values[0]
+            return value if len(value) <= maximum_length else None
+
+        state = single("state", 256)
+        code = single("code", 512)
+        scope = single("scope", 256)
+        error = single("error", 128)
+        error_description = single("error_description", 512)
+        malformed = (
+            bool(unexpected)
+            or state in {None, ""}
+            or code is None
+            or scope is None
+            or error is None
+            or error_description is None
+            or (bool(code) == bool(error))
+            or (bool(code) and not scope)
+        )
+        if malformed:
+            result = None
+        else:
+            assert state is not None
+            result = strava_integration.complete_oauth(
+                state=state,
+                code=code or None,
+                scope=scope or None,
+                denied=bool(error),
+            )
+        session_id = result.session_id if result is not None else None
+        result_code = result.result if result is not None else "invalid"
+        query: dict[str, str] = {"result": result_code}
+        if session_id is not None:
+            query["sessionId"] = session_id
+        return_url = (
+            f"{strava_integration.config.return_scheme}://strava/oauth-complete?"
+            f"{urlencode(query)}"
+        )
+        escaped_url = html.escape(return_url, quote=True)
+        escaped_result = html.escape(result_code)
+        document = (
+            "<!doctype html><html><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            f"<meta http-equiv=\"refresh\" content=\"0;url={escaped_url}\">"
+            "<title>Return to Bicino</title></head><body>"
+            f"<p>Strava authorization: {escaped_result}.</p>"
+            f"<p><a href=\"{escaped_url}\">Return to Bicino</a></p>"
+            "</body></html>"
+        )
+        return HTMLResponse(
+            content=document,
+            status_code=200,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": (
+                    "default-src 'none'; base-uri 'none'; form-action 'none'"
+                ),
+                "Referrer-Policy": "no-referrer",
+            },
+        )
+
+    @app.get("/v1/integrations/strava/connection")
+    def strava_connection_status(
+        response: Response,
+        clientInstallationId: str,
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> dict[str, object]:
+        installation_id = verify_registered_installation(
+            clientInstallationId,
+            x_installation_token,
+            required=True,
+        )
+        assert installation_id is not None
+        response.headers["Cache-Control"] = "private, no-store"
+        return strava_integration.connection_status(installation_id)
+
+    @app.delete("/v1/integrations/strava/connection")
+    def disconnect_strava(
+        request: Request,
+        response: Response,
+        clientInstallationId: str,
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> dict[str, object]:
+        installation_id = verify_registered_installation(
+            clientInstallationId,
+            x_installation_token,
+            required=True,
+        )
+        assert installation_id is not None
+        enforce_rate_limits(
+            (strava_disconnect_ip_policy, client_ip(request)),
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        return strava_integration.disconnect(installation_id)
+
+    @app.post("/v1/integrations/strava/routes/{route_id}/gpx")
+    def fetch_strava_route_gpx(
+        route_id: str,
+        request: Request,
+        clientInstallationId: str,
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> Response:
+        installation_id = verify_registered_installation(
+            clientInstallationId,
+            x_installation_token,
+            required=True,
+        )
+        assert installation_id is not None
+        enforce_rate_limits(
+            (strava_route_import_ip_policy, client_ip(request)),
+            (strava_route_import_installation_policy, installation_id),
+        )
+        download = strava_integration.fetch_route(installation_id, route_id)
+        return Response(
+            content=download.gpx,
+            media_type="application/gpx+xml",
+            headers={
+                "Cache-Control": "private, no-store",
+                "X-Bicino-Route-Provider": "strava.route",
+                "X-Bicino-External-Route-ID": download.route_id,
+                "X-Bicino-Fetched-At": download.fetched_at,
+                "X-Bicino-Delete-After": download.delete_after,
+            },
+        )
+
+    @app.post("/v1/integrations/strava/routes/{route_id}/validate")
+    def validate_strava_route(
+        route_id: str,
+        request: Request,
+        response: Response,
+        clientInstallationId: str,
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> dict[str, object]:
+        installation_id = verify_registered_installation(
+            clientInstallationId,
+            x_installation_token,
+            required=True,
+        )
+        assert installation_id is not None
+        enforce_rate_limits(
+            (strava_route_validation_ip_policy, client_ip(request)),
+            (strava_route_validation_installation_policy, installation_id),
+        )
+        validation = strava_integration.validate_route(installation_id, route_id)
+        response.headers["Cache-Control"] = "private, no-store"
+        return {
+            "available": True,
+            "checkedAt": validation.checked_at,
         }
 
     @app.get("/v1/source-regions")
