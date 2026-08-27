@@ -2600,16 +2600,17 @@ InstallStatus MapTransferInstaller::readActiveMapContentReceipt(
     return {true, "ok", ""};
   }
 
-  MapManifest manifest;
-  const InstallStatus installed =
-      readInstalledManifest(selection.root, manifest);
-  if (!installed.ok)
-    return installed;
-  if (manifest.mapId != selection.mapId) {
-    return fail("active_manifest_identity",
-                "installed map manifest does not match active map ID");
+  if (!safeActiveRoot(selection.root) || !activeRootExists(selection.root))
+    return fail("installed_root", "installed map root is missing");
+  if (!readTextFile(joinPath(joinPath(storageRoot_, selection.root),
+                             kInstalledReceiptFile),
+                    receipt, 64) ||
+      !isHexSha256(receipt)) {
+    receipt.clear();
+    return fail("installed_receipt",
+                "installed map verification receipt is missing or invalid");
   }
-  receipt = manifestReceipt(manifest);
+  std::transform(receipt.begin(), receipt.end(), receipt.begin(), ::tolower);
   return {true, "ok", ""};
 }
 

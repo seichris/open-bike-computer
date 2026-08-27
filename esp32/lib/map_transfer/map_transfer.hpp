@@ -183,8 +183,8 @@ public:
   bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;
   // Signed streams persist their manifest receipt in the active pointer.
-  // Legacy archives predate that pointer field, so derive the same stable
-  // content identity from their installed manifest instead.
+  // Legacy archives predate that pointer field, so use the bounded canonical
+  // receipt that activation persisted after verifying their manifest.
   InstallStatus readActiveMapContentReceipt(ActiveMapSelection &selection,
                                             std::string &receipt) const;
   InstallStatus readActiveManifest(MapManifest &manifest) const;
