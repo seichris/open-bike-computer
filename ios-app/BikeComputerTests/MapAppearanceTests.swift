@@ -34,6 +34,7 @@ struct MapAppearanceTests {
         testConfigurationMapping()
         testAppearanceEquality()
         testIdempotentApplication()
+        testMapPitchControlTargets()
 
         print("MapAppearanceTests passed")
     }
@@ -162,6 +163,18 @@ struct MapAppearanceTests {
         precondition(coordinator.lastAppliedAppearance == terrain)
         precondition(
             target.preferredConfiguration.elevationStyle == .realistic
+        )
+    }
+
+    private static func testMapPitchControlTargets() {
+        precondition(!MapViewControlState.isPitched(0))
+        precondition(!MapViewControlState.isPitched(5))
+        precondition(MapViewControlState.isPitched(5.01))
+        precondition(
+            MapViewControlState.targetPitch(isCurrentlyPitched: false) == 45
+        )
+        precondition(
+            MapViewControlState.targetPitch(isCurrentlyPitched: true) == 0
         )
     }
 }

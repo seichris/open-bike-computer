@@ -8,6 +8,7 @@
 import SwiftUI
 import MapKit
 import CoreLocation
+import Combine
 
 // MARK: - Destination Annotation
 
@@ -51,8 +52,75 @@ protocol MapAppearanceConfigurationTarget: AnyObject {
 
 extension MKMapView: MapAppearanceConfigurationTarget {}
 
+@MainActor
+final class MapViewControlState: ObservableObject {
+    static let pitchedThreshold: CLLocationDegrees = 5
+    static let defaultPitchedAngle: CLLocationDegrees = 45
+
+    @Published private(set) var mapView: MKMapView?
+    @Published private(set) var isPitched = false
+
+    static func isPitched(_ pitch: CLLocationDegrees) -> Bool {
+        pitch > pitchedThreshold
+    }
+
+    static func targetPitch(
+        isCurrentlyPitched: Bool
+    ) -> CLLocationDegrees {
+        isCurrentlyPitched ? 0 : defaultPitchedAngle
+    }
+
+    func connect(to mapView: MKMapView) {
+        if self.mapView !== mapView {
+            self.mapView = mapView
+        }
+        updatePitch(from: mapView)
+    }
+
+    func disconnect(from mapView: MKMapView) {
+        guard self.mapView === mapView else { return }
+        self.mapView = nil
+        isPitched = false
+    }
+
+    func updatePitch(from mapView: MKMapView) {
+        let newValue = Self.isPitched(mapView.camera.pitch)
+        guard newValue != isPitched else { return }
+        isPitched = newValue
+    }
+
+    func togglePitch() {
+        guard let mapView else { return }
+
+        let currentCamera = mapView.camera
+        let camera = MKMapCamera(
+            lookingAtCenter: currentCamera.centerCoordinate,
+            fromDistance: currentCamera.centerCoordinateDistance,
+            pitch: Self.targetPitch(isCurrentlyPitched: isPitched),
+            heading: currentCamera.heading
+        )
+        mapView.setCamera(camera, animated: true)
+    }
+}
+
+struct MapCompassControl: UIViewRepresentable {
+    @ObservedObject var controlState: MapViewControlState
+
+    func makeUIView(context: Context) -> MKCompassButton {
+        let compass = MKCompassButton(mapView: controlState.mapView)
+        compass.compassVisibility = .adaptive
+        return compass
+    }
+
+    func updateUIView(_ compass: MKCompassButton, context: Context) {
+        compass.mapView = controlState.mapView
+        compass.compassVisibility = .adaptive
+    }
+}
+
 struct MapViewContainer: UIViewRepresentable {
     let appearance: IPhoneMapAppearance
+    let controlState: MapViewControlState
     let location: CLLocation?
     let route: MKRoute?
     let simulatedPosition: CLLocationCoordinate2D?
@@ -68,7 +136,7 @@ struct MapViewContainer: UIViewRepresentable {
         let mapView = MKMapView()
         mapView.isPitchEnabled = true
         if #available(iOS 17.0, macCatalyst 17.0, *) {
-            mapView.pitchButtonVisibility = .adaptive
+            mapView.pitchButtonVisibility = .hidden
         }
         context.coordinator.applyAppearanceIfNeeded(
             appearance,
@@ -81,7 +149,8 @@ struct MapViewContainer: UIViewRepresentable {
         // Configure map appearance
         mapView.showsCompass = false
         mapView.showsScale = true
-        context.coordinator.installMapControls(on: mapView)
+        context.coordinator.controlState = controlState
+        context.coordinator.installTrackingControl(on: mapView)
         
         // Add long press gesture recognizer
         let longPress = UILongPressGestureRecognizer(
@@ -107,6 +176,10 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.isSimulationMode = isSimulationMode
         context.coordinator.isUserLocationAuthorized = isUserLocationAuthorized
         context.coordinator.simulatedPosition = simulatedPosition
+
+        DispatchQueue.main.async {
+            controlState.connect(to: mapView)
+        }
         
         return mapView
     }
@@ -124,6 +197,7 @@ struct MapViewContainer: UIViewRepresentable {
 
         // Store reference to map view in coordinator
         context.coordinator.mapView = uiView
+        context.coordinator.controlState = controlState
         context.coordinator.onMapTapped = onMapTapped
         context.coordinator.offlineMapSelectionFrame = offlineMapSelectionFrame
         context.coordinator.onOfflineMapSelectionBoundsChanged = onOfflineMapSelectionBoundsChanged
@@ -133,6 +207,11 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.isUserLocationAuthorized = isUserLocationAuthorized
         context.coordinator.simulatedPosition = simulatedPosition
         context.coordinator.updateControlVisibility(isNavigating: isNavigating)
+        if controlState.mapView !== uiView {
+            DispatchQueue.main.async {
+                controlState.connect(to: uiView)
+            }
+        }
         context.coordinator.updateOfflineMapSelectionBounds()
         
         context.coordinator.updateInitialRegionIfNeeded(
@@ -241,12 +320,20 @@ struct MapViewContainer: UIViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
+
+    static func dismantleUIView(
+        _ uiView: MKMapView,
+        coordinator: Coordinator
+    ) {
+        coordinator.controlState?.disconnect(from: uiView)
+    }
     
     class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         typealias AddressResolver = @MainActor (CLLocation) async -> String?
 
         var lastRoute: MKRoute?
         var mapView: MKMapView?
+        weak var controlState: MapViewControlState?
         var onMapTapped: (() -> Void)?
         var offlineMapSelectionFrame: CGRect?
         var onOfflineMapSelectionBoundsChanged: ((OfflineMapBounds) -> Void)?
@@ -257,7 +344,6 @@ struct MapViewContainer: UIViewRepresentable {
         var simulatedPosition: CLLocationCoordinate2D?
         var hasSetInitialRegion = false
         private(set) var lastAppliedAppearance: IPhoneMapAppearance?
-        private var compassButton: MKCompassButton?
         private var trackingButton: MKUserTrackingButton?
         private var lastNavigationCoordinate: CLLocationCoordinate2D?
         private var lastNavigationHeading: CLLocationDirection = 0
@@ -283,32 +369,25 @@ struct MapViewContainer: UIViewRepresentable {
             lastAppliedAppearance = appearance
         }
 
-        func installMapControls(on mapView: MKMapView) {
-            guard compassButton == nil else { return }
-
-            let compass = MKCompassButton(mapView: mapView)
-            compass.compassVisibility = .adaptive
-            compass.translatesAutoresizingMaskIntoConstraints = false
-            mapView.addSubview(compass)
+        func installTrackingControl(on mapView: MKMapView) {
+            guard trackingButton == nil else { return }
 
             let tracking = MKUserTrackingButton(mapView: mapView)
             tracking.translatesAutoresizingMaskIntoConstraints = false
             mapView.addSubview(tracking)
 
             NSLayoutConstraint.activate([
-                compass.leadingAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.leadingAnchor, constant: 18),
-                compass.topAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.topAnchor, constant: 220),
-
                 tracking.trailingAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.trailingAnchor, constant: -18),
-                tracking.topAnchor.constraint(equalTo: compass.topAnchor)
+                tracking.topAnchor.constraint(
+                    equalTo: mapView.safeAreaLayoutGuide.topAnchor,
+                    constant: 220
+                )
             ])
 
-            compassButton = compass
             trackingButton = tracking
         }
 
         func updateControlVisibility(isNavigating: Bool) {
-            compassButton?.compassVisibility = isNavigating ? .visible : .adaptive
             trackingButton?.isHidden = !isNavigating
         }
 
@@ -503,6 +582,7 @@ struct MapViewContainer: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            controlState?.updatePitch(from: mapView)
             updateOfflineMapSelectionBounds()
         }
 

@@ -10,6 +10,12 @@ switch the Apple MapKit presentation without leaving the main map:
 - Hybrid satellite imagery with roads and labels; and
 - optional realistic 3D terrain for any of those base maps.
 
+Present Settings, a direct 2D/3D camera toggle, and Layers in one vertical
+bottom-right control rail. Put MapKit's adaptive compass immediately above the
+rail so it remains hidden at north-up and appears after the map rotates. Use
+native Liquid Glass for the rail on iOS 26 and a system material fallback on
+older supported iOS versions.
+
 The switcher uses MapKit's supported map-configuration APIs. It does not add a
 third-party tile provider, custom topographic tiles, contour lines, or a new
 route provider. The existing Apple route, destination pins, user location,
@@ -63,11 +69,13 @@ configurations. The local Xcode 26.5 SDK marks live-map
 `preferredConfiguration` and realistic elevation as available from iOS 16.0,
 so the iOS 16.4 app target does not require a legacy `mapType` fallback.
 
-MapKit provides a pitch button through
-[`pitchButtonVisibility`](https://developer.apple.com/documentation/mapkit/mkmapview/pitchbuttonvisibility)
-on iOS 17 and later, but it does not provide an iOS control that chooses among
-Standard, Imagery, and Hybrid configurations. Bicino therefore needs a small
-native switcher UI while continuing to let MapKit render and manage the map.
+MapKit provides official compass and pitch controls, but it does not provide an
+iOS control that chooses among Standard, Imagery, and Hybrid configurations.
+Bicino therefore owns the unified SwiftUI rail while reusing
+[`MKCompassButton`](https://developer.apple.com/documentation/mapkit/mkcompassbutton)
+for correct heading behavior. The custom rail uses SwiftUI's official
+[`glassEffect`](https://developer.apple.com/documentation/swiftui/view/glasseffect(_:in:))
+on iOS 26.
 
 ## Product contract
 
@@ -112,13 +120,17 @@ iphoneMapAppearance.realisticElevation.v1
 
 ### Switcher placement and behavior
 
-Add a 44-by-44-point SwiftUI `Menu` button to `ContentView.topOverlay`, between
-the expanding connection-status view and the existing Settings button.
+Add one trailing, bottom-right vertical rail above Bicino's existing dynamic
+bottom overlay. Its order from top to bottom is Settings, 2D/3D, and Layers.
 
-- Use `square.3.layers.3d` or the closest available system symbol.
-- Give the button the same foreground, shadow, hit-target, and plain-button
-  treatment as Settings.
-- Use the accessibility label `Map appearance`.
+- Give every item at least a 44-by-44-point hit target and use standard system
+  symbols.
+- Settings opens the existing settings sheet.
+- 2D/3D directly toggles the live camera between 0 and 45 degrees without
+  changing base style or realistic elevation.
+- Disable the pitch action during active navigation so it cannot compete with
+  the existing 58-degree navigation camera.
+- Layers uses the accessibility label `Layers` and opens the appearance menu.
 - Organize menu commands into Base Map and Elevation sections.
 - Show a checkmark beside the selected base map and beside 3D Terrain when it
   is enabled.
@@ -129,10 +141,15 @@ the expanding connection-status view and the existing Settings button.
   interaction priority while they are visible.
 - Changing a choice updates the existing map immediately and closes the menu.
 - Do not open the full Settings sheet merely to change the live map.
+- Apply one interactive Liquid Glass surface to the whole rail on iOS 26. Use
+  `.ultraThinMaterial`, a subtle stroke, and a small shadow on iOS 16.4 through
+  iOS 25.
+- Place the standard adaptive `MKCompassButton` directly above the rail. It is
+  hidden by default and appears only when the map heading differs from north.
 
 The menu is Bicino-owned UI because MapKit has no base-style picker. It should
 still use standard SwiftUI menu semantics, Dynamic Type, VoiceOver, and system
-symbols rather than a custom floating palette.
+symbols. The native compass retains MapKit's behavior and accessibility.
 
 ### Camera and pitch behavior
 
@@ -141,16 +158,14 @@ symbols rather than a custom floating palette.
   when a map appearance changes.
 - The existing 58-degree navigation camera immediately reveals realistic
   terrain during active navigation.
-- Outside navigation, the person can use MapKit's standard pitch gesture.
-- On iOS 17 and later, set `pitchButtonVisibility = .adaptive` so MapKit may
-  expose its official pitch/flatten control. Use the repository's existing
-  `if #available(iOS 17.0, macCatalyst 17.0, *)` guard shape so the iOS 16.4
-  Catalyst host tests still compile. Keep the normal gesture fallback on iOS
-  16.4.
-- Validate that MapKit's adaptive pitch control does not collide with
-  Bicino's top overlay, custom compass, or tracking button. If MapKit chooses a
-  conflicting placement on a supported device, hide the adaptive button and
-  retain gestures rather than adding a second custom camera state machine.
+- Outside navigation, the person can use either MapKit's pitch gesture or the
+  rail's direct 2D/3D action.
+- On iOS 17 and later, set `pitchButtonVisibility = .hidden` because the rail
+  now owns the explicit pitch action and a second control would be redundant.
+- Observe camera changes through the existing `MKMapViewDelegate` so the rail's
+  action icon stays correct after gestures and compass resets.
+- The adaptive compass is never forced visible during navigation; its
+  visibility depends only on heading.
 
 Not changing the camera is intentional. A base-layer choice must not interrupt
 free panning, dismiss a destination callout, or make the map jump while the
@@ -176,13 +191,20 @@ person is riding.
 10. Do not market realistic elevation as a complete topographic map.
 11. Do not add provider selection, Apple Maps caching controls, downloadable
     Apple map data, or custom tile overlays.
-12. Keep iOS 16.4 support. Any use of the iOS 17 pitch-button API remains
-    availability-guarded.
+12. Keep iOS 16.4 support. Liquid Glass and the iOS 17 pitch-button visibility
+    API remain availability-guarded with native fallbacks.
+13. Keep realistic elevation and camera pitch independent: Layers chooses the
+    terrain surface, while 2D/3D chooses the viewing angle.
+14. Use MapKit's adaptive compass instead of recreating heading behavior.
 
 ## Proposed architecture
 
 ```text
-SwiftUI Map appearance menu
+SwiftUI bottom-right control rail
+       |
+       +---- Settings
+       +---- 2D/3D camera action ----> MapViewControlState ----> MKMapCamera
+       +---- Layers menu
        |
        +---- persisted base-style raw value
        +---- persisted realistic-elevation Boolean
@@ -247,6 +269,10 @@ Build one resolved `IPhoneMapAppearance` and pass it to `MapViewContainer`.
 The menu writes only those two persisted values. It must not reach into the
 coordinator, BLE manager, or `MKMapView` directly.
 
+A narrow observable control state bridges the explicit 2D/3D action and native
+compass to the existing `MKMapView`. It does not own appearance persistence,
+route state, or navigation policy.
+
 ### UIKit application boundary
 
 Add `appearance: IPhoneMapAppearance` to `MapViewContainer`.
@@ -296,10 +322,12 @@ the only owner of those transitions.
 
 ## UI details
 
-Suggested menu hierarchy:
+Control rail and menu hierarchy:
 
 ```text
-Map appearance
+Settings
+2D / 3D
+Layers
   Base Map
     [check] Standard
             Satellite
@@ -312,7 +340,9 @@ Suggested symbols:
 
 | Item | Symbol |
 | --- | --- |
-| Menu button | `square.3.layers.3d` |
+| Settings | `gearshape.fill` |
+| 2D/3D action | `view.2d` / `view.3d` |
+| Layers menu | `map.fill` |
 | Standard | `map` |
 | Satellite | `globe.americas.fill` |
 | Hybrid | `map.fill` |
@@ -321,10 +351,9 @@ Suggested symbols:
 Use availability-safe symbol fallbacks if any selected symbol is unavailable
 on iOS 16.4. Symbol availability must not raise the deployment target.
 
-The menu label should remain legible over Standard, Satellite, and Hybrid in
-light and dark system appearance. Reuse the Settings button's current styling
-first; change the shared treatment only if visual testing demonstrates a real
-contrast failure.
+The unified rail should remain legible over Standard, Satellite, and Hybrid in
+light and dark system appearance. Liquid Glass supplies the iOS 26 treatment;
+the system-material fallback supplies contrast on older iOS versions.
 
 ## Persistence and recovery behavior
 
@@ -356,7 +385,9 @@ Required assertions:
 5. an unknown raw base style falls back to Standard;
 6. changing only terrain produces a different appearance value; and
 7. equal appearance values compare equal so the coordinator can suppress
-   redundant assignments.
+   redundant assignments; and
+8. camera pitches around the threshold resolve to the correct 2D/3D state and
+   action target.
 
 Keep MapKit renderer behavior out of pure tests. Validate only Bicino's mapping,
 normalization, and idempotence contract there.
@@ -402,12 +433,16 @@ Validate at minimum:
    same geographic bounds;
 9. Standard, Satellite, and Hybrid keep the route line and controls readable
    in light/dark appearance and portrait/landscape;
-10. the menu and pitch control have correct VoiceOver labels, selected state,
-    and 44-point hit targets;
-11. iOS 16.4 uses pitch gestures without calling iOS 17-only APIs;
-12. iOS 17 or later presents the adaptive MapKit pitch control without
-    overlapping Bicino controls; and
-13. changing styles during slow or unavailable networking does not crash or
+10. all three rail actions have correct VoiceOver labels, state, and at least
+    44-point hit targets;
+11. iOS 16.4 uses the system-material rail fallback without calling iOS 26-only
+    APIs;
+12. iOS 26 presents the native Liquid Glass rail;
+13. the compass is absent at north-up, appears above the rail after rotation,
+    and resets the map correctly when tapped;
+14. the 2D/3D action tracks gesture-driven pitch changes, toggles 0/45 degrees,
+    and stays disabled during active navigation; and
+15. changing styles during slow or unavailable networking does not crash or
     remove application overlays. MapKit-owned placeholder/loading behavior is
     acceptable.
 
@@ -428,7 +463,10 @@ readability in motion.
 
 - Add versioned persisted base-style and terrain state.
 - Build the resolved appearance value.
-- Add the Map appearance `Menu` to `topOverlay`.
+- Move Settings into a bottom-right vertical control rail.
+- Add the direct 2D/3D action and Layers menu to that rail.
+- Apply native Liquid Glass on iOS 26 and the material fallback earlier.
+- Place the MapKit compass immediately above the rail.
 - Pass the appearance into `MapViewContainer`.
 - Preserve existing overlay ordering and settings presentation.
 
@@ -438,13 +476,15 @@ readability in motion.
 - Apply it during `makeUIView`.
 - Apply changes idempotently during `updateUIView`.
 - Explicitly enable pitch.
-- Availability-guard adaptive pitch-button visibility on iOS 17 and later.
+- Add a narrow camera-control state and update it from delegate callbacks.
+- Hide MapKit's separate pitch button on iOS 17 and later.
+- Keep the existing navigation-only tracking control.
 - Preserve all route, annotation, tracking, and camera ownership boundaries.
 
 ### `ios-app/BikeComputerTests/MapAppearanceTests.swift`
 
 - Cover defaults, normalization, configuration-class mapping, elevation
-  mapping, and equality/idempotence inputs.
+  mapping, equality/idempotence inputs, and pitch-state/action mapping.
 
 ### `ios-app/scripts/run-navigation-tests.sh`
 
@@ -453,7 +493,8 @@ readability in motion.
 
 ### `docs/README.md`
 
-- Index this implementation plan with status `Planned`.
+- Index this implementation plan and track the remaining physical-validation
+  status.
 
 No change is expected in:
 
@@ -470,8 +511,9 @@ No change is expected in:
 2. Thread the resolved appearance through `ContentView` and
    `MapViewContainer` without adding UI, then verify the default is unchanged.
 3. Add the idempotent `preferredConfiguration` application helper.
-4. Add the layers menu and persisted bindings.
-5. Add pitch enablement and the iOS 17 adaptive pitch control.
+4. Add the Layers menu and persisted bindings.
+5. Add the bottom-right Settings / 2D-3D / Layers rail, native compass, and
+   iOS 26 Liquid Glass with the earlier-system fallback.
 6. Run host tests and the unsigned generic iOS build.
 7. Exercise route preview, callout free-pan, offline selection, simulation, and
    active-navigation continuity in Simulator.
@@ -519,12 +561,13 @@ the same detail.
 
 ### Pitch-control layout
 
-MapKit owns placement of its adaptive iOS 17 pitch button, while Bicino already
-has SwiftUI and UIKit controls.
+The rail sits above dynamic route, workout, and search panels, and the adaptive
+compass needs a stable position even while hidden.
 
-Mitigation: validate all supported orientations and compact heights. If the
-system control overlaps, hide it and retain the standard pitch gesture instead
-of introducing custom camera-state synchronization.
+Mitigation: keep the rail inside the same bottom overlay stack so it moves above
+the panels, reserve the compass's 44-point slot to avoid rail jumps, and
+validate portrait, landscape, compact height, navigation, and offline-selection
+states.
 
 ### Network and data use
 
@@ -544,7 +587,8 @@ preloading, and do not promise offline availability.
 - synchronizing the iPhone style with device Map/Map + Navigation profiles;
 - changing MapKit routing or transport type;
 - changing saved-map preview thumbnails;
-- automatic camera flyovers or forced pitch changes;
+- automatic camera flyovers or non-user-initiated pitch changes outside the
+  existing navigation camera;
 - Apple Maps offline-download management; and
 - telemetry or analytics for map-style selection.
 
@@ -553,6 +597,10 @@ preloading, and do not promise offline availability.
 The implementation is complete when:
 
 - the app presents a native, accessible Map appearance menu;
+- Settings, 2D/3D, and Layers appear in one bottom-right rail with the adaptive
+  compass above it;
+- iOS 26 uses native Liquid Glass and older supported systems use native
+  material fallback;
 - Standard, Satellite, and Hybrid use the correct official MapKit
   configurations;
 - 3D Terrain independently selects flat or realistic elevation;
@@ -560,7 +608,8 @@ The implementation is complete when:
 - the selection persists safely across relaunches;
 - configuration changes are idempotent and retain camera, route, annotations,
   callouts, tracking, and SwiftUI overlays;
-- iOS 16.4 and iOS 17+ pitch paths behave as specified;
+- the camera action and adaptive compass behave as specified without competing
+  with navigation camera ownership;
 - host tests, the unsigned generic iOS build, and `git diff --check` pass;
 - physical-iPhone testing demonstrates realistic mountain terrain in a pitched
   view and acceptable control/route readability; and

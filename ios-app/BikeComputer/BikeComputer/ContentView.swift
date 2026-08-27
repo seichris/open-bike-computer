@@ -51,6 +51,7 @@ struct ContentView: View {
     // MARK: - State
     
     @StateObject private var coordinator: BikeComputerCoordinator
+    @StateObject private var mapViewControlState: MapViewControlState
     @StateObject private var offlineMapManager: OfflineMapManager
     @StateObject private var watchAvailability: WorkoutWatchAvailabilityMonitor
     @ObservedObject private var routeLibrary: PhoneRouteLibrary
@@ -188,6 +189,9 @@ struct ContentView: View {
         _coordinator = StateObject(
             wrappedValue: coordinator
         )
+        _mapViewControlState = StateObject(
+            wrappedValue: MapViewControlState()
+        )
         _offlineMapManager = StateObject(
             wrappedValue: OfflineMapManager(
                 diagnosticsRecorder: rideDiagnosticsRecorder
@@ -257,6 +261,14 @@ struct ContentView: View {
                     }
 
                     Spacer()
+
+                    HStack {
+                        Spacer()
+                        mapControlCluster
+                    }
+                    .padding(.trailing, 18)
+                    .padding(.bottom, 12)
+                    .zIndex(10)
 
                     bottomOverlay(
                         maxHeight: proxy.size.height * 0.68,
@@ -939,26 +951,13 @@ struct ContentView: View {
     }
 
     private var topOverlay: some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .center) {
             ConnectionStatusView(
                 isConnected: coordinator.isConnected,
                 hasRegisteredDevice:
                     !coordinator.bleManager.knownDevices.isEmpty,
                 onReconnect: { coordinator.reconnect() }
             )
-
-            mapAppearanceMenu
-
-            Button(action: { presentedSheet = .settings }) {
-                Image(systemName: "gearshape.fill")
-                    .font(.title3)
-                    .foregroundColor(.primary)
-                    .shadow(color: .white.opacity(0.8), radius: 2, x: 0, y: 1)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Settings")
         }
         .padding(.horizontal, 18)
         .padding(.top, 8)
@@ -979,7 +978,99 @@ struct ContentView: View {
         )
     }
 
-    private var mapAppearanceMenu: some View {
+    private var mapControlCluster: some View {
+        VStack(alignment: .trailing, spacing: 10) {
+            MapCompassControl(controlState: mapViewControlState)
+                .frame(width: 44, height: 44)
+
+            mapControlRail
+        }
+    }
+
+    @ViewBuilder
+    private var mapControlRail: some View {
+        if #available(iOS 26.0, *) {
+            mapControlRailContent
+                .glassEffect(
+                    .regular.interactive(),
+                    in: .rect(cornerRadius: 26)
+                )
+        } else {
+            mapControlRailContent
+                .background(
+                    .ultraThinMaterial,
+                    in: RoundedRectangle(
+                        cornerRadius: 26,
+                        style: .continuous
+                    )
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
+                }
+                .shadow(
+                    color: .black.opacity(0.14),
+                    radius: 7,
+                    x: 0,
+                    y: 3
+                )
+        }
+    }
+
+    private var mapControlRailContent: some View {
+        VStack(spacing: 0) {
+            Button(action: { presentedSheet = .settings }) {
+                mapControlIcon("gearshape.fill")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Settings")
+
+            mapControlDivider
+
+            Button(action: { mapViewControlState.togglePitch() }) {
+                mapControlIcon(
+                    mapViewControlState.isPitched ? "view.2d" : "view.3d"
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(coordinator.isNavigating)
+            .opacity(coordinator.isNavigating ? 0.45 : 1)
+            .accessibilityLabel(
+                mapViewControlState.isPitched
+                    ? "Show map in 2D"
+                    : "Show map in 3D"
+            )
+            .accessibilityValue(
+                mapViewControlState.isPitched ? "3D view" : "2D view"
+            )
+            .accessibilityHint(
+                coordinator.isNavigating
+                    ? "Available outside navigation."
+                    : "Changes the viewing angle. Realistic terrain is controlled in Layers."
+            )
+
+            mapControlDivider
+
+            mapLayersMenu
+        }
+        .frame(width: 52)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func mapControlIcon(_ systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 20, weight: .semibold))
+            .foregroundStyle(.primary)
+            .frame(width: 52, height: 50)
+            .contentShape(Rectangle())
+    }
+
+    private var mapControlDivider: some View {
+        Divider()
+            .padding(.horizontal, 11)
+    }
+
+    private var mapLayersMenu: some View {
         Menu {
             Section("Base Map") {
                 Picker("Base Map", selection: mapBaseStyleBinding) {
@@ -1001,15 +1092,10 @@ struct ContentView: View {
                 )
             }
         } label: {
-            Image(systemName: "square.3.layers.3d")
-                .font(.title3)
-                .foregroundColor(.primary)
-                .shadow(color: .white.opacity(0.8), radius: 2, x: 0, y: 1)
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
+            mapControlIcon("map.fill")
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Map appearance")
+        .accessibilityLabel("Layers")
         .accessibilityValue(
             "\(mapAppearance.baseStyle.title), " +
             (usesRealisticMapElevation ? "3D Terrain on" : "3D Terrain off")
@@ -1326,6 +1412,7 @@ struct ContentView: View {
 
         return MapViewContainer(
             appearance: mapAppearance,
+            controlState: mapViewControlState,
             location: coordinator.currentLocation,
             route: coordinator.currentRoute ?? coordinator.routePreview,
             simulatedPosition: coordinator.simulatedPosition,
