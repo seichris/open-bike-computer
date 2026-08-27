@@ -2,7 +2,9 @@
 
 Prepared on 2026-08-27 from freshly fetched GitHub `origin/main` at
 `fdfc2be1cc96170690548b04e7aef67756ad7322` on branch
-`plan/strava-route-import`.
+`plan/strava-route-import`. After implementation and validation, the branch was
+rebased without conflict onto freshly fetched `origin/main` at
+`d396b60a28f3f2041e8659ca8659bbb4a6ef54f3`.
 
 This document is the reviewed implementation contract for the Strava
 integration on this branch. It does not contain credentials and does not by
