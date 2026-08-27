@@ -94,6 +94,16 @@ class BLENotificationDispatchTests(unittest.TestCase):
         )
         self.assertIn("deferredNotificationEventScheduled.store(false", init)
 
+    def test_host_callback_refreshes_peer_mtu_before_deferring_work(self):
+        callback = function_body(BLE_SOURCE, "ScopedNimbleCallback() {")
+        self.assertIn("NimBLEDevice::getServer()", callback)
+        self.assertIn("server->getPeerMTU(connectionHandle)", callback)
+        self.assertIn("activePeerMtu.store(peerMtu", callback)
+        self.assertLess(
+            callback.index("server->getPeerMTU(connectionHandle)"),
+            callback.index("activePeerMtu.store(peerMtu"),
+        )
+
     def test_chunked_map_status_resumes_after_each_host_drain(self):
         notify = function_body(
             BLE_SOURCE, "static void notifyMapTransferStatus"
