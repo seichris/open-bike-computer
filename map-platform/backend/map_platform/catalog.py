@@ -617,13 +617,13 @@ def publish_ready_job(
         return job
     if job.catalog_publication_state == "finalized":
         return job
-    job.catalog_publication_id = publication_id(job, client.channel)
-    job.catalog_map_entry_id = map_entry_id(job)
     job.catalog_publication_state = "pending"
     job.catalog_publication_error = None
     job.updated_at = utc_now_iso()
     store.save(job)
     try:
+        job.catalog_publication_id = publication_id(job, client.channel)
+        job.catalog_map_entry_id = map_entry_id(job)
         _verify_catalog_artifacts(job, artifact_store)
         result = client.finalize(job)
     except Exception as exc:
@@ -660,15 +660,31 @@ def retry_ready_publications(
         raise ValueError("catalog publication retry limit must be positive")
     if client is None:
         return {"attempted": 0, "finalized": 0, "failed": 0}
-    candidates = sorted(
+    pending = sorted(
         (
             job
             for job in store.list()
             if job.status == JobStatus.READY
             and job.catalog_publication_state != "finalized"
         ),
-        key=lambda value: (value.catalog_publication_updated_at or value.finished_at or value.created_at),
-    )[:maximum_jobs]
+        key=lambda value: (
+            value.catalog_publication_updated_at
+            or value.finished_at
+            or value.created_at
+        ),
+    )
+    candidates: list[MapJob] = []
+    for job in pending:
+        try:
+            map_entry_id(job)
+        except CatalogPublicationError:
+            # READY jobs created before renderer targets became mandatory are
+            # immutable but not safely catalogable. Leave their local download
+            # intact without letting them consume every retry slot.
+            continue
+        candidates.append(job)
+        if len(candidates) == maximum_jobs:
+            break
     finalized = 0
     for job in candidates:
         result = publish_ready_job(

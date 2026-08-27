@@ -18,6 +18,7 @@ from map_platform.catalog import (
     map_entry_id,
     publication_payload,
     publish_ready_job,
+    retry_ready_publications,
 )
 from map_platform.jobs import JobStore
 from map_platform.models import (
@@ -245,6 +246,59 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(result.catalog_publication_state, "failed")
             self.assertEqual(result.catalog_publication_attempts, 1)
             self.assertNotIn("secret value", result.catalog_publication_error)
+
+    def test_legacy_ready_map_without_target_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp) / "jobs")
+            legacy = ready_job()
+            legacy.request.pop("target")
+            store.save(legacy)
+            catalog = SuccessfulCatalog()
+            catalog.finalize = Mock(wraps=catalog.finalize)
+
+            result = publish_ready_job(
+                store,
+                catalog,
+                legacy.job_id,
+                artifact_store=VerifyingArtifactStore(),
+            )
+
+            self.assertEqual(result.status, JobStatus.READY)
+            self.assertEqual(result.catalog_publication_state, "failed")
+            self.assertEqual(result.catalog_publication_attempts, 1)
+            catalog.finalize.assert_not_called()
+
+    def test_legacy_ready_map_does_not_starve_catalogable_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(Path(tmp) / "jobs")
+            legacy = ready_job()
+            legacy.job_id = "job-legacy"
+            legacy.request.pop("target")
+            legacy.finished_at = "2026-08-24T00:00:00Z"
+            catalogable = ready_job()
+            catalogable.job_id = "job-current"
+            catalogable.finished_at = "2026-08-25T00:00:00Z"
+            store.save(legacy)
+            store.save(catalogable)
+
+            result = retry_ready_publications(
+                store,
+                SuccessfulCatalog(),
+                artifact_store=VerifyingArtifactStore(),
+                maximum_jobs=1,
+            )
+
+            self.assertEqual(
+                result,
+                {"attempted": 1, "finalized": 1, "failed": 0},
+            )
+            self.assertIsNone(
+                store.get(legacy.job_id).catalog_publication_state
+            )
+            self.assertEqual(
+                store.get(catalogable.job_id).catalog_publication_state,
+                "finalized",
+            )
 
     def test_catalog_never_finalizes_without_every_shared_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
