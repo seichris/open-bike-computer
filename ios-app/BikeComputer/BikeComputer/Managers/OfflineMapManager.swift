@@ -2778,6 +2778,29 @@ final class OfflineMapManager: ObservableObject {
         )
     }
 
+    func catalogArtifactNeedsRefresh(for item: SavedMapListItem) -> Bool {
+        guard let record = item.localRecord,
+              let map = item.catalogMap else {
+            return false
+        }
+        let metadata = SavedMapArtifactMetadataStore.load(for: record.packURL)
+        let localArtifactSHA256s: Set<String> = Set([
+            metadata?.primaryArtifact?.sha256,
+            metadata?.legacyArtifact?.sha256,
+        ].compactMap { (value: String?) -> String? in
+            guard let value, !value.isEmpty else { return nil }
+            return value
+        })
+        return OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+            localArtifactSHA256s: localArtifactSHA256s,
+            map: map,
+            channel: OfflineMapCatalogConfig.channel(
+                generationServerURLString: serverURLString
+            ),
+            trustStore: mapStreamTrustStore
+        )
+    }
+
     func catalogAvailability(
         for preview: OfflineMapSharePreview
     ) -> OfflineMapCatalogAvailability {
