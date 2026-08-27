@@ -828,6 +828,7 @@ struct NavigationProtocolTests {
         testSavedMapRenameViewWiring()
         testSettingsSheetPresentationWiring()
         testStravaRouteCatalogUIWiring()
+        testLandingMapConnectionStatusPositioning()
         testDeviceScreenUISettingsWiring()
         testSavedRouteNamingAndViewWiring()
         testOfflineMapManagerRestoresLastTransferIdentity()
@@ -10817,6 +10818,32 @@ struct NavigationProtocolTests {
         )
     }
 
+    static func testLandingMapConnectionStatusPositioning() {
+        let sourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/ContentView.swift"
+        )
+        guard let source = try? String(contentsOf: sourceURL, encoding: .utf8),
+              let overlayStart = source.range(
+                  of: "private var topOverlay: some View"
+              )?.lowerBound,
+              let overlayEnd = source.range(
+                  of: "private var mapAppearance: IPhoneMapAppearance",
+                  range: overlayStart..<source.endIndex
+              )?.lowerBound
+        else {
+            assert(false, "landing-map connection overlay source should be available")
+            return
+        }
+
+        let overlaySource = String(source[overlayStart..<overlayEnd])
+        assert(
+            overlaySource.contains("ConnectionStatusView(") &&
+                overlaySource.contains(".frame(maxWidth: .infinity, alignment: .center)") &&
+                overlaySource.contains(".offset(y: -8)"),
+            "the landing map raises the Bicino connection status without changing its layout space"
+        )
+    }
+
     static func testDeviceScreenUISettingsWiring() {
         let sourceURL = URL(fileURLWithPath:
             "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift"
@@ -11130,6 +11157,11 @@ struct NavigationProtocolTests {
                 source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
                 !source.contains("Ready on Watch"),
             "Watch-ready routes use an inline green status icon without a second-row label"
+        )
+        assert(
+            !source.contains("Powered by Strava") &&
+                source.contains("Link(\"View on Strava\", destination: url)"),
+            "saved Strava routes keep their source link without the Powered by Strava label"
         )
     }
 
