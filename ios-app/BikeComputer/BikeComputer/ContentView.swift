@@ -960,7 +960,6 @@ struct ContentView: View {
         )
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.horizontal, 18)
-        .padding(.top, 8)
         .zIndex(10)
     }
 

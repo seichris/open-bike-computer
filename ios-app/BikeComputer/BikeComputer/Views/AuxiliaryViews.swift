@@ -39,8 +39,8 @@ struct ConnectionStatusView: View {
                     )
 
                 Text(displayName)
-                    .font(.caption)
-                    .foregroundColor(isConnected ? .primary : statusColor)
+                    .font(.footnote.weight(.medium))
+                    .foregroundColor(isConnected ? .primary : .black)
                     .shadow(
                         color: isConnected
                             ? .white.opacity(0.8)
