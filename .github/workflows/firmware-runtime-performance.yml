@@ -36,7 +36,7 @@ jobs:
       run:
         working-directory: esp32
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Warm and measure five verified runtime handoffs
         run: |
           set -euo pipefail
@@ -56,7 +56,7 @@ jobs:
             --samples "$samples" \
             --target "${{ matrix.target }}" \
             --output "$RUNNER_TEMP/runtime-performance-${{ matrix.target }}.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: firmware-runtime-performance-${{ matrix.target }}
           path: ${{ runner.temp }}/runtime-performance-${{ matrix.target }}.json

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW_ROOT = REPO_ROOT / ".github" / "workflows"
+WORKFLOW_SCRIPTS_ROOT = REPO_ROOT / ".github" / "scripts"
+sys.path.insert(0, str(WORKFLOW_SCRIPTS_ROOT))
+import workflow_policy  # noqa: E402
 CACHE_ACTION_SHA = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 CORE_FIRMWARE_TARGETS = {
     "WAVESHARE_AMOLED_175",
@@ -577,11 +581,11 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('gh release verify "${RELEASE_TAG}"', recovery)
         self.assertIn('gh release verify-asset "${RELEASE_TAG}"', recovery)
         self.assertIn(
-            "actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa",
+            "actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3",
             recovery,
         )
         self.assertIn(
-            "actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+            "actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4",
             recovery,
         )
         self.assertNotIn("FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY", recovery)
@@ -918,6 +922,114 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_every_firmware_builder_reuses_verified_downloads(self) -> None:
         self.assert_firmware_builders_reuse_verified_downloads()
+
+
+class ImmutableActionPolicyTests(unittest.TestCase):
+    def test_repository_external_actions_are_immutable(self) -> None:
+        self.assertEqual(workflow_policy.validate_repository(REPO_ROOT), [])
+
+    def test_mutable_action_tags_and_branches_are_rejected(self) -> None:
+        for value in (
+            "actions/checkout@v7",
+            "owner/action@main",
+            "owner/repository/.github/workflows/ci.yml@release",
+            "docker://example/action:latest",
+        ):
+            with self.subTest(value=value):
+                use = workflow_policy.WorkflowUse(
+                    path=Path("workflow.yml"),
+                    line=1,
+                    value=value,
+                    comment="version",
+                )
+                self.assertIsNotNone(
+                    workflow_policy.validate_workflow_use(use)
+                )
+
+    def test_full_shas_digests_and_local_actions_are_allowed(self) -> None:
+        values = (
+            "./.github/actions/local",
+            "./.github/workflows/reusable.yml",
+            "actions/checkout@" + "a" * 40,
+            "owner/repo/.github/workflows/ci.yml@" + "b" * 40,
+            "docker://example/action@sha256:" + "c" * 64,
+        )
+        for value in values:
+            with self.subTest(value=value):
+                use = workflow_policy.WorkflowUse(
+                    path=Path("workflow.yml"),
+                    line=1,
+                    value=value,
+                    comment="v1",
+                )
+                self.assertIsNone(
+                    workflow_policy.validate_workflow_use(use)
+                )
+
+    def test_yaml_scalar_scanner_handles_lists_quotes_and_comments(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "workflow.yml"
+            path.write_text(
+                """
+# uses: ignored/comment@main
+steps:
+  - uses: \"actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" # v7
+  - name: Text is not a use
+    run: echo 'uses: owner/action@main'
+job:
+  uses: ./.github/workflows/local.yml
+""".lstrip(),
+                encoding="utf-8",
+            )
+            uses = workflow_policy.collect_workflow_uses(path)
+
+        self.assertEqual(
+            [(item.value, item.comment) for item in uses],
+            [
+                (
+                    "actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "v7",
+                ),
+                ("./.github/workflows/local.yml", None),
+            ],
+        )
+
+    def test_noncanonical_uses_keys_cannot_bypass_the_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            workflow_root = root / ".github" / "workflows"
+            workflow_root.mkdir(parents=True)
+            (workflow_root / "workflow.yml").write_text(
+                """
+jobs:
+  quoted:
+    "uses": owner/repository/.github/workflows/ci.yml@main
+  flow:
+    steps: [{ uses: owner/action@main }]
+  script:
+    steps:
+      - run: |
+          printf '{ uses: documentation-only }\\n'
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            errors = workflow_policy.validate_repository(root)
+
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all("full commit SHA" in error for error in errors))
+
+    def test_external_pin_requires_a_version_comment(self) -> None:
+        use = workflow_policy.WorkflowUse(
+            path=Path("workflow.yml"),
+            line=1,
+            value="actions/checkout@" + "a" * 40,
+            comment=None,
+        )
+        self.assertIn(
+            "version comment",
+            workflow_policy.validate_workflow_use(use),
+        )
 
 
 if __name__ == "__main__":

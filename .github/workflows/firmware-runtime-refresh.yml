@@ -27,13 +27,13 @@ jobs:
       run:
         working-directory: esp32
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
       - name: Require a clean exact generator checkout
         run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
         working-directory: ${{ github.workspace }}
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
       - name: Load the reviewed runtime publication identity
@@ -83,7 +83,7 @@ jobs:
             --target "${{ matrix.target }}" \
             --output-dir runtime-candidate-a \
             > "runtime-candidate-a/offline-replay-${{ matrix.target }}.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: firmware-runtime-candidate-${{ matrix.target }}
@@ -110,13 +110,13 @@ jobs:
       run:
         working-directory: esp32
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
       - name: Require a clean exact validation checkout
         run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
         working-directory: ${{ github.workspace }}
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
       - name: Load the reviewed runtime publication identity
@@ -126,7 +126,7 @@ jobs:
           echo "RUNTIME_RELEASE_TAG=$(python -c 'import json,sys; print(json.loads(sys.argv[1])["releaseTag"])' "$publication")" >> "$GITHUB_ENV"
       - name: Configure the isolated runtime cache
         run: echo "OPEN_BIKE_FIRMWARE_RUNTIME_CACHE=$RUNNER_TEMP/firmware-runtime-cache" >> "$GITHUB_ENV"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: firmware-runtime-candidate-*
           path: ${{ runner.temp }}/runtime-candidates
@@ -256,7 +256,7 @@ jobs:
             echo "tampered runtime reached PlatformIO" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: firmware-build-validation-${{ matrix.target }}
@@ -273,17 +273,17 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: firmware-runtime-candidate-*
           path: ${{ runner.temp }}/runtime-candidates
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: firmware-build-validation-*
           path: ${{ runner.temp }}/firmware-validation
@@ -315,7 +315,7 @@ jobs:
             --candidate-root "$RUNNER_TEMP/runtime-candidates" \
             --validation-root "$RUNNER_TEMP/firmware-validation" \
             --output "$RUNNER_TEMP/firmware-runtime-review-summary.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: firmware-runtime-review-summary
           path: ${{ runner.temp }}/firmware-runtime-review-summary.json

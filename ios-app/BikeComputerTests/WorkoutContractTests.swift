@@ -7846,6 +7846,20 @@ private struct WorkoutContractTestSuite {
             ) == nil,
             "foreign URL schemes must not start a workout"
         )
+        for noncanonicalURL in [
+            "bikecomputer://workout/start?source=complication",
+            "bikecomputer://workout/start?source=a&source=b",
+            "bikecomputer://workout/start#start",
+            "bikecomputer://workout/start/",
+            "BikeComputer://workout/start",
+        ] {
+            expect(
+                WatchWorkoutLaunchRequest(
+                    url: URL(string: noncanonicalURL)!
+                ) == nil,
+                "noncanonical workout URLs must be rejected"
+            )
+        }
 
         let developmentURL = WatchWorkoutLaunchRequest.startOutdoorCyclingURL(
             urlScheme: "bikecomputer-dev"
@@ -7867,6 +7881,22 @@ private struct WorkoutContractTestSuite {
                 urlScheme: "bikecomputer-dev"
             ) == nil,
             "the development Watch app must reject production complication URLs"
+        )
+
+        let createdAt = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let pending = PendingWorkoutLaunchRequest(
+            workoutType: .outdoorCycling,
+            source: .complicationURL,
+            createdAt: createdAt,
+            expiresAt: createdAt.addingTimeInterval(30)
+        )
+        expect(
+            !pending.isExpired(at: createdAt.addingTimeInterval(29.999)),
+            "a pending workout launch must remain valid before its deadline"
+        )
+        expect(
+            pending.isExpired(at: createdAt.addingTimeInterval(30)),
+            "a pending workout launch must expire at its deadline"
         )
     }
 
