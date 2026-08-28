@@ -20,6 +20,7 @@ else:
     _FASTAPI_IMPORT_ERROR = None
 
 from .admin_inventory import map_inventory
+from .admission import AdmissionCapacityError, AdmissionPolicy
 from .artifacts import BIKE_MAP_STREAM_FORMAT, create_artifact_store_from_environment
 from .catalog import (
     CatalogClient,
@@ -322,8 +323,12 @@ def create_app(
         "0",
     ).strip().lower() in {"1", "true", "yes"}
     limits = JobLimits(max_active_jobs=int(os.environ.get("MAP_PLATFORM_MAX_ACTIVE_JOBS", "25")))
+    admission_policy = AdmissionPolicy.from_environment()
     source_provider = GeofabrikSourceProvider.from_environment(data_root)
-    job_store = JobStore(data_root / "jobs")
+    job_store = JobStore(
+        data_root / "jobs",
+        admission_policy=admission_policy,
+    )
     building_task_store = BuildingTaskStore(data_root / "building-tasks.sqlite3")
     preprocessing_scope_mode = building_preprocessing_scope_mode()
     estimate_coordinator = load_estimate_coordinator(
@@ -552,6 +557,7 @@ def create_app(
             "generationProfilePolicySha256": generation_profile_policy.sha256,
             "mapStreamRollout": map_stream_rollout.public_summary(),
             "preparationEstimates": estimate_coordinator.mode.value,
+            "admissionPolicyVersion": admission_policy.policy_version,
             "catalog": catalog_status_from_environment(),
             "stravaIntegration": (
                 "enabled" if strava_integration.config.enabled else "disabled"
@@ -991,6 +997,12 @@ def create_app(
                     app_git_sha,
                     app_build_sha256,
                 )
+        except AdmissionCapacityError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.response_detail(),
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            ) from exc
         except UnsupportedRendererTargetError as exc:
             raise HTTPException(status_code=400, detail=exc.response_detail()) from exc
         except ValueError as exc:
