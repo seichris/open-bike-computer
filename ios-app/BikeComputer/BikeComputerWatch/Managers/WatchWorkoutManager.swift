@@ -307,6 +307,7 @@ typealias WatchSegmentEventOperation = @MainActor (
 @MainActor
 final class WatchWorkoutManager: NSObject, ObservableObject {
     private static let maxTerminalCleanupRetryAttempts = 3
+    private static let defaultWorkoutLaunchRequestLifetime: TimeInterval = 30
 
     private enum RideDetectionMirrorKey {
         static let payload = "rideDetection.watchMirror.v1"
@@ -363,7 +364,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         case discarded(summary: WatchWorkoutSummary, at: Date)
     }
 
-    @Published private(set) var setupState: WatchWorkoutSetupState = .checking
+    @Published private(set) var setupState: WatchWorkoutSetupState = .checking {
+        didSet {
+            if [.denied, .unavailable, .failed].contains(setupState) {
+                clearPendingWorkoutLaunchRequest()
+            }
+        }
+    }
     @Published private(set) var snapshot = WorkoutSnapshotV1(state: .idle)
     @Published private(set) var latestEnvelope: WorkoutEnvelopeV1?
     @Published private(set) var summary: WatchWorkoutSummary?
@@ -381,6 +388,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     @Published private(set) var rideDetectionSettingsConfirmed = false
     @Published private(set) var isMarkingSegment = false
     @Published private(set) var segmentError: WatchWorkoutSegmentError?
+    @Published private(set) var pendingWorkoutLaunchRequest:
+        PendingWorkoutLaunchRequest? = nil
+    @Published private(set) var rejectedWorkoutLaunchURLCount: UInt64 = 0
 
     private let healthStore: HKHealthStore
     private let routeRecorder: WatchRouteRecorder
@@ -438,6 +448,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private let mirrorRetryDelay: TimeInterval
     private let mirrorShutdownDeliveryTimeout: TimeInterval
     private let terminalCleanupRetryDelay: TimeInterval
+    private let workoutLaunchRequestLifetime: TimeInterval
     private var cancellables: Set<AnyCancellable> = []
 
     private var session: HKWorkoutSession?
@@ -450,6 +461,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var mirrorRetryTask: Task<Void, Never>?
     private var mirrorShutdownWatchdogTask: Task<Void, Never>?
     private var complicationStartTask: Task<Void, Never>?
+    private var workoutLaunchRequestExpiryTask: Task<Void, Never>?
     private var authorizationRefreshTask: Task<Void, Never>?
     private var segmentOperationTask: Task<Void, Never>?
     private var segmentOperationTimeoutTask: Task<Void, Never>?
@@ -510,7 +522,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var terminalCleanupRetryAttemptCount = 0
     private var shutdownMirrorFailureRetryCount = 0
     private var pendingWorkoutConfiguration: HKWorkoutConfiguration?
-    private var hasPendingComplicationStartRequest = false
     private var pendingTerminalErrorPersistence: (
         code: WorkoutSafeErrorCodeV1,
         endDate: Date
@@ -579,6 +590,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             mirrorRetryDelay: 5,
             mirrorShutdownDeliveryTimeout: 10,
             terminalCleanupRetryDelay: 1,
+            workoutLaunchRequestLifetime:
+                Self.defaultWorkoutLaunchRequestLifetime,
             initializeOnLaunch: !isAppStoreScreenshotPreview
         )
 #if DEBUG
@@ -643,6 +656,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         mirrorRetryDelay: TimeInterval = 5,
         mirrorShutdownDeliveryTimeout: TimeInterval = 10,
         terminalCleanupRetryDelay: TimeInterval = 1,
+        workoutLaunchRequestLifetime: TimeInterval = 30,
         initializeOnLaunch: Bool = true,
         heartRateZoneDefaults: UserDefaults = .standard
     ) {
@@ -702,6 +716,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         self.terminalCleanupRetryDelay = terminalCleanupRetryDelay.isFinite
             ? min(max(0, terminalCleanupRetryDelay), 60)
             : 1
+        self.workoutLaunchRequestLifetime =
+            workoutLaunchRequestLifetime.isFinite
+            ? min(max(0.01, workoutLaunchRequestLifetime), 300)
+            : Self.defaultWorkoutLaunchRequestLifetime
         self.locationAuthorizationState = routeRecorder.authorizationState
         super.init()
 
@@ -759,6 +777,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         mirrorShutdownWatchdogTask?.cancel()
         terminalCleanupRetryTask?.cancel()
         complicationStartTask?.cancel()
+        workoutLaunchRequestExpiryTask?.cancel()
         authorizationRefreshTask?.cancel()
         segmentOperationTask?.cancel()
         segmentOperationTimeoutTask?.cancel()
@@ -875,7 +894,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             guard let self else { return }
             defer {
                 self.authorizationRefreshTask = nil
-                self.drainPendingComplicationStartIfPossible()
+                self.reconcilePendingWorkoutLaunchRequest()
             }
             await self.refreshAuthorizationState()
         }
@@ -916,13 +935,74 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         startRecoveryLoopIfNeeded()
     }
 
-    func handleLaunchURL(_ url: URL) {
-        guard WatchWorkoutLaunchRequest(url: url) == .startOutdoorCycling,
-              complicationStartTask == nil else {
+    func handleLaunchURL(_ url: URL, now: Date = Date()) {
+        guard WatchWorkoutLaunchRequest(url: url) == .startOutdoorCycling else {
+            if rejectedWorkoutLaunchURLCount < UInt64.max {
+                rejectedWorkoutLaunchURLCount += 1
+            }
             return
         }
-        hasPendingComplicationStartRequest = true
-        drainPendingComplicationStartIfPossible()
+        guard !isWorkoutActive,
+              complicationStartTask == nil,
+              ![.denied, .unavailable, .failed].contains(setupState) else {
+            return
+        }
+        let request = PendingWorkoutLaunchRequest(
+            workoutType: .outdoorCycling,
+            source: .complicationURL,
+            createdAt: now,
+            expiresAt: now.addingTimeInterval(workoutLaunchRequestLifetime)
+        )
+        workoutLaunchRequestExpiryTask?.cancel()
+        pendingWorkoutLaunchRequest = request
+        workoutLaunchRequestExpiryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(
+                    nanoseconds: UInt64(
+                        (self?.workoutLaunchRequestLifetime ?? 0)
+                            * 1_000_000_000
+                    )
+                )
+            } catch {
+                return
+            }
+            self?.expirePendingWorkoutLaunchRequest(
+                id: request.id,
+                now: request.expiresAt
+            )
+        }
+    }
+
+    var canConfirmPendingWorkoutLaunchRequest: Bool {
+        guard let request = pendingWorkoutLaunchRequest,
+              !request.isExpired(at: Date()) else {
+            return false
+        }
+        return canAdmitConfirmedWorkoutLaunch
+    }
+
+    func confirmPendingWorkoutLaunchRequest() {
+        guard pendingWorkoutLaunchRequest != nil,
+              canConfirmPendingWorkoutLaunchRequest,
+              complicationStartTask == nil else {
+            reconcilePendingWorkoutLaunchRequest()
+            return
+        }
+        clearPendingWorkoutLaunchRequest()
+        complicationStartTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { complicationStartTask = nil }
+            guard canAdmitConfirmedWorkoutLaunch else { return }
+            if let injectedComplicationStartOperation {
+                await injectedComplicationStartOperation()
+            } else {
+                await startOutdoorCyclingWorkout()
+            }
+        }
+    }
+
+    func cancelPendingWorkoutLaunchRequest() {
+        clearPendingWorkoutLaunchRequest()
     }
 
     func startOutdoorCycling() {
@@ -1491,7 +1571,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             startRecoveryLoopIfNeeded()
         }
         drainPendingWorkoutConfigurationIfPossible()
-        drainPendingComplicationStartIfPossible()
+        reconcilePendingWorkoutLaunchRequest()
     }
 
     private func initialize() async {
@@ -1499,7 +1579,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         defer {
             isRecoveryLoopRunning = false
             drainPendingWorkoutConfigurationIfPossible()
-            drainPendingComplicationStartIfPossible()
+            reconcilePendingWorkoutLaunchRequest()
         }
         guard HKHealthStore.isHealthDataAvailable() else {
             setupState = .unavailable
@@ -1578,42 +1658,31 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
     }
 
-    private func drainPendingComplicationStartIfPossible() {
-        guard hasPendingComplicationStartRequest else { return }
-        if isWorkoutActive {
-            hasPendingComplicationStartRequest = false
+    private func clearPendingWorkoutLaunchRequest() {
+        workoutLaunchRequestExpiryTask?.cancel()
+        workoutLaunchRequestExpiryTask = nil
+        pendingWorkoutLaunchRequest = nil
+    }
+
+    private func expirePendingWorkoutLaunchRequest(id: UUID, now: Date) {
+        guard let request = pendingWorkoutLaunchRequest,
+              request.id == id,
+              request.isExpired(at: now) else {
             return
         }
-        guard complicationStartTask == nil,
-              canAdmitPendingComplicationStart else {
-            return
-        }
-        complicationStartTask = Task { [weak self] in
-            guard let self else { return }
-            let admissionRecoveryGeneration = recoverySignalQueue.generation
-            defer {
-                if !isWorkoutActive,
-                   recoverySignalQueue.generation != admissionRecoveryGeneration {
-                    hasPendingComplicationStartRequest = true
-                }
-                complicationStartTask = nil
-                drainPendingComplicationStartIfPossible()
-            }
-            if isWorkoutActive {
-                hasPendingComplicationStartRequest = false
-                return
-            }
-            guard canAdmitPendingComplicationStart else { return }
-            hasPendingComplicationStartRequest = false
-            if let injectedComplicationStartOperation {
-                await injectedComplicationStartOperation()
-            } else {
-                await startOutdoorCyclingWorkout()
-            }
+        clearPendingWorkoutLaunchRequest()
+    }
+
+    private func reconcilePendingWorkoutLaunchRequest(now: Date = Date()) {
+        guard let request = pendingWorkoutLaunchRequest else { return }
+        if request.isExpired(at: now)
+            || isWorkoutActive
+            || [.denied, .unavailable, .failed].contains(setupState) {
+            clearPendingWorkoutLaunchRequest()
         }
     }
 
-    private var canAdmitPendingComplicationStart: Bool {
+    private var canAdmitConfirmedWorkoutLaunch: Bool {
         !isRecovering
             && !isRecoveryLoopRunning
             && [.ready, .needsAuthorization].contains(setupState)
@@ -1654,7 +1723,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     }
 
     private func authorizeHealthKit() async {
-        defer { drainPendingComplicationStartIfPossible() }
+        defer { reconcilePendingWorkoutLaunchRequest() }
         guard !isWorkoutActive,
               setupState != .denied,
               setupState != .authorizing else {
@@ -1708,6 +1777,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
               !hasPendingWorkoutRecovery else {
             return
         }
+        clearPendingWorkoutLaunchRequest()
         guard lifecycle.apply(.requestStart) else { return }
         let automaticStartContext = suppliedConfiguration == nil
             ? nil
@@ -2720,7 +2790,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             isRecovering = false
         }
         drainPendingWorkoutConfigurationIfPossible()
-        drainPendingComplicationStartIfPossible()
+        reconcilePendingWorkoutLaunchRequest()
     }
 
     private func attachRecoveredRouteBuilder(

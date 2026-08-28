@@ -362,6 +362,35 @@ class BikeComputerCoordinator: ObservableObject {
             }
             .store(in: &cancellables)
 
+        bleManager.$connectedDeviceID
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                // @Published emits before the property commits. Defer so the
+                // migration manager selects the stable connected identity.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.firmwareUpdateManager.selectStorageMigrationDevice(
+                        self.bleManager.connectedDeviceID
+                    )
+                }
+            }
+            .store(in: &cancellables)
+
+        bleManager.$deviceTransferStatusRevision
+            .dropFirst()
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self,
+                          self.bleManager.deviceTransferStatusRevision > 0
+                    else { return }
+                    self.firmwareUpdateManager
+                        .reconcileStorageMigrationStatus(
+                            bleManager: self.bleManager
+                        )
+                }
+            }
+            .store(in: &cancellables)
+
         Publishers.CombineLatest(
             bleManager.$isNavigationReady,
             bleManager.$supportsDestinationPicker

@@ -21,7 +21,7 @@ public:
   void cancelSession();
   void finishSessionTeardown();
   bool handleRequest(const device_transfer::HttpRequest &request,
-                     WiFiClient &client) override;
+                     device_transfer::TransferClient &client) override;
   bool allowShortUnauthenticatedResponseCompletion(
       const device_transfer::HttpRequest &request) const override;
   void responseDidComplete(const device_transfer::HttpRequest &request,
@@ -35,21 +35,21 @@ public:
 
 private:
   bool authorize(const device_transfer::HttpRequest &request,
-                 WiFiClient &client);
-  bool requireMode(WiFiClient &client);
-  bool handleInfo(WiFiClient &client);
+                 device_transfer::TransferClient &client);
+  bool requireMode(device_transfer::TransferClient &client);
+  bool handleInfo(device_transfer::TransferClient &client);
   bool handleFrame(const device_transfer::HttpRequest &request,
-                   WiFiClient &client);
+                   device_transfer::TransferClient &client);
   bool handlePointer(const device_transfer::HttpRequest &request,
-                     WiFiClient &client);
-  bool handleWake(WiFiClient &client);
+                     device_transfer::TransferClient &client);
+  bool handleWake(device_transfer::TransferClient &client);
   bool handleBootPress(const device_transfer::HttpRequest &request,
-                       WiFiClient &client);
-  bool handleRendererMetrics(WiFiClient &client);
+                       device_transfer::TransferClient &client);
+  bool handleRendererMetrics(device_transfer::TransferClient &client);
   bool handleRendererWindow(const device_transfer::HttpRequest &request,
-                            WiFiClient &client);
+                            device_transfer::TransferClient &client);
   void updateRendererDebugOverhead();
-  bool handleExit(WiFiClient &client);
+  bool handleExit(device_transfer::TransferClient &client);
 
   device_transfer::HttpTransferServer *server_ = nullptr;
   bool configured_ = false;

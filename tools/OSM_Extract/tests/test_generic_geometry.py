@@ -1,0 +1,255 @@
+import json
+import pathlib
+import subprocess
+import sys
+import tempfile
+import unittest
+
+from PIL import Image
+from shapely import Polygon, box
+from shapely.ops import unary_union
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from funcs import (  # noqa: E402
+    BACKGROUND_COLOR,
+    GenericGeometryLimitError,
+    clip_polygons,
+    get_geoms,
+    render_map,
+)
+from map_format import write_fmb  # noqa: E402
+
+
+def styled_feature(geometry, identifier="source"):
+    return {
+        "id": identifier,
+        "type": "landuse.grass",
+        "geom_type": "polygon",
+        "color": "0x07E0",
+        "width": None,
+        "maxzoom": "",
+        "bbox": geometry.bounds,
+        "geom": geometry,
+        "_source_geometry_key": identifier,
+    }
+
+
+class GenericGeometryTests(unittest.TestCase):
+    def test_polygon_and_multipolygon_preserve_holes_and_all_components(self):
+        polygon = get_geoms(
+            {
+                "type": "Polygon",
+                "coordinates": [
+                    [[0, 0], [20, 0], [20, 20], [0, 20], [0, 0]],
+                    [[5, 5], [5, 15], [15, 15], [15, 5], [5, 5]],
+                ],
+            }
+        )
+        self.assertEqual(len(polygon), 1)
+        self.assertEqual(len(polygon[0].interiors), 1)
+        self.assertEqual(polygon[0].area, 300)
+
+        multipolygon = get_geoms(
+            {
+                "type": "MultiPolygon",
+                "coordinates": [
+                    [[[30, 0], [40, 0], [40, 10], [30, 10], [30, 0]]],
+                    [
+                        [[0, 0], [20, 0], [20, 20], [0, 20], [0, 0]],
+                        [[5, 5], [5, 15], [15, 15], [15, 5], [5, 5]],
+                    ],
+                ],
+            }
+        )
+        self.assertEqual(len(multipolygon), 2)
+        self.assertEqual([part.bounds[0] for part in multipolygon], [0, 30])
+        self.assertEqual(sum(part.area for part in multipolygon), 400)
+
+    def test_invalid_and_nonfinite_components_emit_typed_drop_diagnostics(self):
+        diagnostics = {}
+        geometries = get_geoms(
+            {
+                "type": "MultiPolygon",
+                "coordinates": [
+                    [[[0, 0], [10, 0], [10, 10], [0, 0]]],
+                    [[[0, 0], [float("nan"), 0], [0, 10], [0, 0]]],
+                    [[[0, 0], [1, 1], [0, 0]]],
+                ],
+            },
+            geometry_diagnostics=diagnostics,
+        )
+        self.assertEqual(len(geometries), 1)
+        self.assertEqual(
+            diagnostics,
+            {
+                "droppedGeometryCount": 2,
+                "droppedByCode": {"invalid_polygon_component": 2},
+            },
+        )
+
+    def test_clipping_decomposes_holes_without_area_loss_or_overlap(self):
+        source = Polygon(
+            [(0, 0), (30, 0), (30, 30), (0, 30), (0, 0)],
+            [
+                [(4, 4), (12, 4), (12, 12), (4, 12), (4, 4)],
+                [(18, 16), (28, 16), (28, 26), (18, 26), (18, 16)],
+            ],
+        )
+        clipping_box = box(0, 0, 24, 24)
+        expected = source.intersection(clipping_box)
+        pieces = clip_polygons([styled_feature(source)], clipping_box)
+        geometries = [feature["geom"] for feature in pieces]
+        merged = unary_union(geometries)
+
+        self.assertGreater(len(geometries), 1)
+        self.assertTrue(all(not geometry.interiors for geometry in geometries))
+        self.assertLess(expected.symmetric_difference(merged).area, 1e-7)
+        self.assertLess(abs(sum(item.area for item in geometries) - merged.area), 1e-7)
+        for interior in expected.interiors:
+            self.assertLess(merged.intersection(Polygon(interior)).area, 1e-7)
+
+    def test_decomposition_is_stable_and_writes_identical_fmb_bytes(self):
+        source = Polygon(
+            [(0, 0), (30, 0), (30, 30), (0, 30), (0, 0)],
+            [[(5, 5), (25, 5), (25, 25), (5, 25), (5, 5)]],
+        )
+        clipping_box = box(0, 0, 30, 30)
+        first = clip_polygons([styled_feature(source)], clipping_box)
+        second = clip_polygons([styled_feature(source)], clipping_box)
+        self.assertEqual(
+            [geometry["geom"].wkb for geometry in first],
+            [geometry["geom"].wkb for geometry in second],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            write_fmb(root / "first.fmb", first, [], 0, 0)
+            write_fmb(root / "second.fmb", second, [], 0, 0)
+            self.assertEqual(
+                (root / "first.fmb").read_bytes(),
+                (root / "second.fmb").read_bytes(),
+            )
+
+    def test_amplification_limit_fails_closed(self):
+        source = Polygon(
+            [(0, 0), (30, 0), (30, 30), (0, 30), (0, 0)],
+            [[(5, 5), (25, 5), (25, 25), (5, 25), (5, 5)]],
+        )
+        with self.assertRaises(GenericGeometryLimitError) as raised:
+            clip_polygons(
+                [styled_feature(source)],
+                box(0, 0, 30, 30),
+                max_pieces_per_source=2,
+            )
+        self.assertEqual(raised.exception.code, "generic_geometry_amplification_limit")
+
+        second = Polygon(
+            [(40, 0), (50, 0), (50, 10), (40, 10), (40, 0)]
+        )
+        with self.assertRaises(GenericGeometryLimitError):
+            clip_polygons(
+                [styled_feature(source), styled_feature(second, "second")],
+                box(0, 0, 60, 60),
+                max_pieces_per_block=8,
+            )
+
+    def test_explicit_debug_render_keeps_hole_transparent(self):
+        source = Polygon(
+            [(8, 8), (56, 8), (56, 56), (8, 56), (8, 8)],
+            [[(24, 24), (40, 24), (40, 40), (24, 40), (24, 24)]],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = pathlib.Path(tmp) / "debug.png"
+            render_map(
+                [styled_feature(source)],
+                output,
+                min_x=0,
+                min_y=0,
+                image_size=(64, 64),
+            )
+            with Image.open(output) as rendered:
+                background = (
+                    (BACKGROUND_COLOR >> 16) & 0xFF,
+                    (BACKGROUND_COLOR >> 8) & 0xFF,
+                    BACKGROUND_COLOR & 0xFF,
+                )
+                self.assertEqual(rendered.getpixel((32, 32)), background)
+                self.assertNotEqual(rendered.getpixel((16, 32)), background)
+
+    def test_cli_defaults_to_no_debug_artifacts_and_rejects_output_subdirectory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            prefix = root / "features"
+            output = root / "map"
+            (root / "features_lines.geojson").write_text(
+                json.dumps({"type": "FeatureCollection", "features": []}),
+                encoding="utf-8",
+            )
+            (root / "features_polygons.geojson").write_text(
+                json.dumps(
+                    {
+                        "type": "FeatureCollection",
+                        "features": [
+                            {
+                                "type": "Feature",
+                                "properties": {
+                                    "osm_way_id": 1,
+                                    "landuse": "grass",
+                                },
+                                "geometry": {
+                                    "type": "Polygon",
+                                    "coordinates": [
+                                        [[0, 0], [100, 0], [100, 100], [0, 100], [0, 0]]
+                                    ],
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            command = [
+                sys.executable,
+                str(ROOT / "scripts" / "extract_features.py"),
+                "0",
+                "0",
+                "0.01",
+                "0.01",
+                str(prefix),
+                str(output),
+            ]
+            result = subprocess.run(
+                command,
+                cwd=ROOT / "scripts",
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(list(output.rglob("*.fmb")))
+            self.assertFalse((output / "test_imgs").exists())
+            self.assertFalse(list(output.rglob("*.png")))
+
+            rejected = subprocess.run(
+                command
+                + [
+                    "--debug-image-dir",
+                    str(output / "debug"),
+                    "--debug-image-limit",
+                    "1",
+                ],
+                cwd=ROOT / "scripts",
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn(
+                "--debug-image-dir must be outside the map output",
+                rejected.stderr,
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

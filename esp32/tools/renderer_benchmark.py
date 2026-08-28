@@ -6,11 +6,9 @@ from __future__ import annotations
 import argparse
 import csv
 from datetime import datetime, timezone
-import getpass
 import hashlib
 import json
 import math
-import os
 from pathlib import Path, PurePosixPath
 import statistics
 import struct
@@ -18,15 +16,13 @@ import sys
 import time
 from typing import Any, Iterable
 import uuid
-from urllib import parse
 import zipfile
 
 from device_debug import (
     DebugClient,
     DebugClientError,
     TARGET_ROTATIONS,
-    TOKEN_ENV,
-    _load_session,
+    _session_values,
     write_rgb565_png,
 )
 
@@ -412,6 +408,8 @@ def load_gates(path: Path) -> dict[str, Any]:
         "minimumPsramLargestBlockBytes",
         "minimumDmaFreeBytes",
         "minimumDmaLargestBlockBytes",
+        "maximumCryptoHeadroomRejections",
+        "maximumCryptoOperationFailures",
         "maximumRenderP95Ms",
         "maximumUiGapMs",
         "maximumFlushP95Ms",
@@ -790,6 +788,12 @@ def summarize_run(
         "minimumDmaLargest": nested(
             memory, "dmaHeap", "windowMinimumLargestBlock"
         ),
+        "cryptoHeadroomRejections": nested(
+            memory, "dmaHeap", "cryptoHeadroomRejections"
+        ),
+        "cryptoOperationFailures": nested(
+            memory, "dmaHeap", "cryptoOperationFailures"
+        ),
         "candidateBuildings": building_median("candidates"),
         "selectedBuildings": building_median("selected"),
         "extrudedBuildings": building_median("extruded"),
@@ -904,6 +908,18 @@ def evaluate_run(
             "minimumDmaLargestBlockBytes",
             "dma_largest_floor",
             False,
+        ),
+        (
+            "cryptoHeadroomRejections",
+            "maximumCryptoHeadroomRejections",
+            "crypto_headroom_rejections",
+            True,
+        ),
+        (
+            "cryptoOperationFailures",
+            "maximumCryptoOperationFailures",
+            "crypto_operation_failures",
+            True,
         ),
         ("renderP95Ms", "maximumRenderP95Ms", "render_p95", True),
         ("uiMaximumGapMs", "maximumUiGapMs", "ui_gap", True),
@@ -1149,6 +1165,8 @@ def aggregate_profiles(runs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         "minimumPsramLargest",
         "minimumDmaFree",
         "minimumDmaLargest",
+        "cryptoHeadroomRejections",
+        "cryptoOperationFailures",
         "candidateBuildings",
         "selectedBuildings",
         "extrudedBuildings",
@@ -1781,6 +1799,8 @@ def write_reports(report: dict[str, Any], output: Path) -> None:
         "minimumPsramLargest",
         "minimumDmaFree",
         "minimumDmaLargest",
+        "cryptoHeadroomRejections",
+        "cryptoOperationFailures",
         "candidateBuildings",
         "selectedBuildings",
         "extrudedBuildings",
@@ -1832,8 +1852,8 @@ def write_reports(report: dict[str, Any], output: Path) -> None:
         "",
         "## Comparison runs",
         "",
-        "| Profile | Repeat | Pass | Render p95 | Building p95 | UI max | Flush p95 | Internal min | DMA min | PSRAM min | Candidates | Selected | Extruded | Flat | Deferred | Reach p90/farthest |",
-        "|---|---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Profile | Repeat | Pass | Render p95 | Building p95 | UI max | Flush p95 | Internal min | DMA min | Crypto reject/fail | PSRAM min | Candidates | Selected | Extruded | Flat | Deferred | Reach p90/farthest |",
+        "|---|---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for run in report["runs"]:
         summary = run["summary"]
@@ -1842,6 +1862,8 @@ def write_reports(report: dict[str, Any], output: Path) -> None:
             f"{summary['renderP95Ms']} ms | {summary['buildingP95Ms']} ms | "
             f"{summary['uiMaximumGapMs']} ms | {summary['flushP95Ms']} ms | "
             f"{summary['minimumInternalFree']} | {summary['minimumDmaFree']} | "
+            f"{summary['cryptoHeadroomRejections']}/"
+            f"{summary['cryptoOperationFailures']} | "
             f"{summary['minimumPsramFree']} | "
             f"{summary['candidateBuildings']:.1f} | {summary['selectedBuildings']:.1f} | "
             f"{summary['extrudedBuildings']:.1f} | {summary['flatBuildings']:.1f} | "
@@ -2347,6 +2369,9 @@ def write_ordinary_report(report: dict[str, Any], output: Path) -> None:
         f"{summary['minimumPsramLargest']} bytes",
         f"- DMA-capable heap minimum/largest: {summary['minimumDmaFree']} / "
         f"{summary['minimumDmaLargest']} bytes",
+        f"- Crypto headroom rejections/operation failures: "
+        f"{summary['cryptoHeadroomRejections']} / "
+        f"{summary['cryptoOperationFailures']}",
         f"- Buildings candidate/selected/extruded/flat/deferred: "
         f"{summary['candidateBuildings']:.1f} / "
         f"{summary['selectedBuildings']:.1f} / "
@@ -2375,28 +2400,17 @@ def write_ordinary_report(report: dict[str, Any], output: Path) -> None:
     )
 
 
-def resolve_session(args: argparse.Namespace) -> tuple[str, str]:
-    stored: dict[str, Any] = {}
-    if args.session_file:
-        stored = _load_session(args.session_file)
-    base_url = args.base_url or stored.get("baseUrl")
-    if not isinstance(base_url, str) or not base_url:
-        raise BenchmarkError("provide --base-url or a mode-0600 session file")
-    parsed = parse.urlsplit(base_url)
-    if parsed.scheme != "http" or not parsed.netloc or parsed.username or parsed.password:
-        raise BenchmarkError("base URL must be absolute HTTP without credentials")
-    clean_url = parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
-    token = os.environ.get(TOKEN_ENV) or stored.get("token")
-    if token is None:
-        token = getpass.getpass("Transfer token: ")
-    if not isinstance(token, str) or not token or any(value.isspace() for value in token):
-        raise BenchmarkError("transfer token is missing or invalid")
-    return clean_url.rstrip("/"), token
+def resolve_session(args: argparse.Namespace) -> tuple[str, str, str]:
+    try:
+        return _session_values(args)
+    except DebugClientError as exc:
+        raise BenchmarkError(str(exc)) from exc
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--base-url")
+    result.add_argument("--tls-sha256")
     result.add_argument("--session-file", type=Path)
     result.add_argument("--map-fixture", required=True, type=Path)
     result.add_argument("--route-fixture", type=Path, default=DEFAULT_ROUTE_FIXTURE)
@@ -2513,9 +2527,14 @@ def main() -> int:
         )
         if output.exists() and any(output.iterdir()):
             raise BenchmarkError("output directory already contains files")
-        base_url, token = resolve_session(args)
+        base_url, token, certificate_sha256 = resolve_session(args)
         runner = BenchmarkRunner(
-            client=DebugClient(base_url, token, timeout=args.timeout),
+            client=DebugClient(
+                base_url,
+                token,
+                certificate_sha256,
+                timeout=args.timeout,
+            ),
             output=output,
             gates=gates,
             map_fixture_id=map_fixture["id"],

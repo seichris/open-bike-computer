@@ -7,6 +7,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from .admission import AdmissionPolicy
 from .artifacts import create_artifact_store_from_environment
 from .catalog import (
     CatalogClient,
@@ -631,7 +632,10 @@ def main() -> int:
         / "config"
         / "source-regions.json"
     )
-    store = JobStore(data_root / "jobs")
+    store = JobStore(
+        data_root / "jobs",
+        admission_policy=AdmissionPolicy.from_environment(),
+    )
     building_task_store = BuildingTaskStore(data_root / "building-tasks.sqlite3")
     if args.command == "build-plan":
         if args.build_plan_command == "complete-workload-scan":
@@ -892,7 +896,16 @@ def main() -> int:
 
     if args.command == "create-job":
         request = json.loads(args.request_json)
-        print(json.dumps(service.create_job(request).to_dict(), indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                service.create_job(
+                    request,
+                    admission_partition="operator",
+                ).to_dict(),
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
     if args.command == "get-job":
         print(json.dumps(service.get_job(args.job_id).to_dict(), indent=2, sort_keys=True))

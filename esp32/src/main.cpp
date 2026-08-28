@@ -1612,10 +1612,9 @@ void setup() {
       boot_diagnostics::Stage::ClockAndSensors);
 #endif
 
-  // IMPORTANT: Initialize TFT BEFORE SD card!
-  // The QSPI display init can disrupt SPI bus settings.
-  // By initializing display first, the SPI buses are settled
-  // before we configure the SD card.
+  // Preserve the established display-first board bring-up order. Waveshare
+  // storage now uses the independent native SDMMC peripheral, so later QSPI
+  // display traffic cannot change the card bus configuration.
 #ifndef WAVESHARE_AMOLED_206
 #if defined(WAVESHARE_AMOLED_175)
   boot_diagnostics::enterStage(boot_diagnostics::Stage::Display);
@@ -1634,7 +1633,7 @@ void setup() {
 #endif
 #endif
 
-  // Now initialize SD card after display is fully configured
+  // Initialize removable storage after board display bring-up.
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   boot_diagnostics::enterStage(boot_diagnostics::Stage::Storage);
 #endif

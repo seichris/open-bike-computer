@@ -14,6 +14,9 @@ enum class Action : uint8_t {
   EnableDebug = 5,
   DisableOnBleDisconnect = 6,
   EnableDiagnostics = 7,
+  PrepareTlsIdentity = 8,
+  CommitTlsIdentity = 9,
+  CancelTlsIdentity = 10,
 };
 
 enum Notification : uint8_t {

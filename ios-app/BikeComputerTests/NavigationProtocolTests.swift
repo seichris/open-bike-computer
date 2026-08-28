@@ -256,6 +256,46 @@ final class OfflineMapTestURLProtocol: URLProtocol {
 }
 
 @MainActor
+final class TestOfflineMapAppAttestService: OfflineMapAppAttestServicing {
+    let keyID: String
+    let attestationObject: Data
+    let assertionObject: Data
+    private(set) var generatedKeyCount = 0
+    private(set) var attestationHashes: [Data] = []
+    private(set) var assertionHashes: [Data] = []
+
+    init(
+        keyID: String,
+        attestationObject: Data = Data("test-attestation".utf8),
+        assertionObject: Data = Data("test-assertion".utf8)
+    ) {
+        self.keyID = keyID
+        self.attestationObject = attestationObject
+        self.assertionObject = assertionObject
+    }
+
+    var isSupported: Bool { true }
+
+    func generateKey() async throws -> String {
+        generatedKeyCount += 1
+        return keyID
+    }
+
+    func attestKey(_: String, clientDataHash: Data) async throws -> Data {
+        attestationHashes.append(clientDataHash)
+        return attestationObject
+    }
+
+    func generateAssertion(
+        _: String,
+        clientDataHash: Data
+    ) async throws -> Data {
+        assertionHashes.append(clientDataHash)
+        return assertionObject
+    }
+}
+
+@MainActor
 final class TestDeviceDiagnosticsSessionController:
     DeviceDiagnosticsSessionControlling
 {
@@ -795,6 +835,8 @@ struct NavigationProtocolTests {
         await testDeviceDiagnosticsRecordsEntryFailure()
         await testDeviceDiagnosticsDownloadEndToEnd()
         await testOfflineMapInstallationCredentialClient()
+        testOfflineMapAppAttestGoldenVector()
+        await testManagedOfflineMapAppAttestContract()
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
         testOfflineMapJobPhaseOnlyProgressDecoding()
@@ -854,6 +896,7 @@ struct NavigationProtocolTests {
         testMapTransferDeviceStatusDecodesActivationFailure()
         testFirmwareManifestDecodingAndHash()
         testFirmwareUpdateManagerRestoresPendingStatus()
+        testFirmwareStorageMigrationFlow()
         testFirmwareUpdateAvailabilitySemantics()
         testFirmwareDeviceClientSendsSignedBeginRequest()
         await testOfflineMapRecoveryRoutes()
@@ -1929,8 +1972,8 @@ struct NavigationProtocolTests {
         )
         assertEqual(
             MapInstallProtocolSelector.select(isBikeMapStream: false, deviceStatus: v2Status),
-            .archiveV1,
-            "existing ZIP remains explicitly protocol v1"
+            .legacyArtifactRequired,
+            "unsigned ZIP archives are never selected for device installation"
         )
         assertEqual(
             ExistingMapStreamAttemptDisposition.evaluate(
@@ -2822,6 +2865,321 @@ struct NavigationProtocolTests {
             )
         } catch {
             assert(false, "installation credential client contract succeeds: \(error)")
+        }
+    }
+
+    @MainActor
+    static func testManagedOfflineMapAppAttestContract() async {
+        let suite = "OfflineMapAppAttestTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            OfflineMapTestURLProtocol.reset()
+        }
+
+        let baseURL = URL(string: "https://maps.example.com")!
+        let rawAttestationChallenge = Data((0..<32).map(UInt8.init))
+        let rawAssertionChallenge = Data((32..<64).map(UInt8.init))
+        let rawAssertionRetryChallenge = Data((64..<96).map(UInt8.init))
+        func base64URL(_ data: Data) -> String {
+            data.base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "=", with: "")
+        }
+        let attestationChallenge = OfflineMapAppAttestChallenge(
+            challengeId: String(repeating: "a", count: 32),
+            challenge: base64URL(rawAttestationChallenge),
+            purpose: "attestation",
+            expiresAt: Int64(Date().timeIntervalSince1970) + 300,
+            keyId: nil
+        )
+        let keyID = Data(repeating: 0x42, count: 32).base64EncodedString()
+        let assertionChallenge = OfflineMapAppAttestChallenge(
+            challengeId: String(repeating: "b", count: 32),
+            challenge: base64URL(rawAssertionChallenge),
+            purpose: "map-create",
+            expiresAt: Int64(Date().timeIntervalSince1970) + 300,
+            keyId: keyID
+        )
+        let assertionRetryChallenge = OfflineMapAppAttestChallenge(
+            challengeId: String(repeating: "c", count: 32),
+            challenge: base64URL(rawAssertionRetryChallenge),
+            purpose: "map-create",
+            expiresAt: Int64(Date().timeIntervalSince1970) + 300,
+            keyId: keyID
+        )
+        let credential = OfflineMapInstallationCredential(
+            clientInstallationId:
+                "inst_v2_1234567890abcdef1234567890abcdef",
+            clientInstallationToken:
+                "v1." + String(repeating: "A", count: 43),
+            appAttestKeyId: keyID
+        )
+        let appAttestService = TestOfflineMapAppAttestService(keyID: keyID)
+        let managedClient = ManagedOfflineMapAppAttestClient(
+            defaults: defaults,
+            session: session,
+            service: appAttestService,
+            appBuild: "123"
+        )
+        var challengeCount = 0
+        var mapCreateCount = 0
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/installations/app-attest/challenges"):
+                challengeCount += 1
+                let body = try! JSONSerialization.jsonObject(
+                    with: OfflineMapTestURLProtocol.bodyData(from: request)
+                ) as! [String: Any]
+                if challengeCount == 1 {
+                    assertEqual(
+                        body["purpose"] as? String,
+                        "attestation",
+                        "initial registration requests an attestation challenge"
+                    )
+                    assert(
+                        request.value(forHTTPHeaderField: "X-Installation-Token") == nil,
+                        "initial attestation challenge is not authenticated by an unproven identity"
+                    )
+                    return (
+                        200,
+                        try! JSONEncoder().encode(attestationChallenge)
+                    )
+                }
+                assertEqual(
+                    body["purpose"] as? String,
+                    "map-create",
+                    "map creation requests a single-use assertion challenge"
+                )
+                assertEqual(
+                    body["clientInstallationId"] as? String,
+                    credential.clientInstallationId,
+                    "assertion challenge is scoped to the attested installation"
+                )
+                assertEqual(
+                    request.value(forHTTPHeaderField: "X-Installation-Token"),
+                    credential.clientInstallationToken,
+                    "assertion challenge uses the installation credential"
+                )
+                let challenge = challengeCount == 2
+                    ? assertionChallenge
+                    : assertionRetryChallenge
+                return (200, try! JSONEncoder().encode(challenge))
+            case ("POST", "/v1/installations"):
+                let body = try! JSONSerialization.jsonObject(
+                    with: OfflineMapTestURLProtocol.bodyData(from: request)
+                ) as! [String: Any]
+                let attestation = body["appAttest"] as! [String: Any]
+                assertEqual(
+                    attestation["challengeId"] as? String,
+                    attestationChallenge.challengeId,
+                    "registration binds the server-issued challenge"
+                )
+                assertEqual(
+                    attestation["keyId"] as? String,
+                    keyID,
+                    "registration submits the generated App Attest key"
+                )
+                assertEqual(
+                    attestation["attestationObject"] as? String,
+                    appAttestService.attestationObject.base64EncodedString(),
+                    "registration submits Apple's opaque attestation object"
+                )
+                assertEqual(
+                    attestation["appBuild"] as? String,
+                    "123",
+                    "registration binds the installed app build"
+                )
+                return (201, try! JSONEncoder().encode(credential))
+            case ("POST", "/v1/map-jobs"):
+                mapCreateCount += 1
+                let expectedChallenge = mapCreateCount == 1
+                    ? assertionChallenge
+                    : assertionRetryChallenge
+                assertEqual(
+                    request.value(forHTTPHeaderField:
+                        "X-App-Attest-Challenge-Id"),
+                    expectedChallenge.challengeId,
+                    "map creation carries the assertion challenge identity"
+                )
+                assertEqual(
+                    request.value(forHTTPHeaderField: "X-App-Attest-Key-Id"),
+                    keyID,
+                    "map creation carries the enrolled App Attest key"
+                )
+                assertEqual(
+                    request.value(forHTTPHeaderField: "X-App-Attest-Assertion"),
+                    appAttestService.assertionObject.base64EncodedString(),
+                    "map creation carries the generated assertion"
+                )
+                assertEqual(
+                    request.value(forHTTPHeaderField: "X-App-Attest-App-Build"),
+                    "123",
+                    "map creation binds the same app build"
+                )
+                if mapCreateCount == 1 {
+                    return (
+                        401,
+                        Data(
+                            #"{"detail":{"code":"app_attest_counter_replay","message":"App Attest assertion was replayed"}}"#.utf8
+                        )
+                    )
+                }
+                return (201, Data(#"{"jobId":"job-attested","status":"queued"}"#.utf8))
+            default:
+                assert(false, "unexpected App Attest request \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+
+        do {
+            let enrolled = try await managedClient.enroll(baseURL: baseURL)
+            assertEqual(enrolled, credential, "App Attest enrollment returns its bound identity")
+            assert(
+                managedClient.hasKey(keyID, serverURLString: baseURL.absoluteString),
+                "the device-only key identifier is retained for later assertions"
+            )
+            assertEqual(
+                appAttestService.attestationHashes,
+                [Data(SHA256.hash(data: rawAttestationChallenge))],
+                "Apple attestation hashes the exact server challenge"
+            )
+
+            let jobRequest = OfflineMapJobRequest.customBBox(
+                OfflineMapBounds(
+                    minLon: 103.75,
+                    minLat: 1.24,
+                    maxLon: 103.93,
+                    maxLat: 1.37
+                )
+            ).identified(
+                clientInstallationId: credential.clientInstallationId,
+                clientRequestId: "request-app-attest-123",
+                installOnDevice: true
+            )
+            let client = OfflineMapPlatformClient(
+                baseURL: baseURL,
+                clientInstallationId: credential.clientInstallationId,
+                clientInstallationToken: credential.clientInstallationToken,
+                clientAppAttestKeyId: keyID,
+                mapStreamTrustCapabilities: nil,
+                mapStreamAppBuildIdentity: nil,
+                managedAppAttestClient: managedClient,
+                session: session
+            )
+            let job = try await client.createJob(jobRequest)
+            assertEqual(job.jobId, "job-attested", "attested map creation decodes normally")
+
+            let unsignedRequest = try OfflineMapPlatformClient
+                .makeCreateJobURLRequest(
+                    baseURL: baseURL,
+                    jobRequest: jobRequest
+                )
+            let expectedClientData = try OfflineMapAppAttestClientData.mapCreate(
+                challenge: assertionChallenge,
+                clientInstallationID: credential.clientInstallationId,
+                appBuild: "123",
+                request: unsignedRequest,
+                jobRequest: jobRequest
+            )
+            let expectedRetryClientData = try OfflineMapAppAttestClientData.mapCreate(
+                challenge: assertionRetryChallenge,
+                clientInstallationID: credential.clientInstallationId,
+                appBuild: "123",
+                request: unsignedRequest,
+                jobRequest: jobRequest
+            )
+            assertEqual(
+                appAttestService.assertionHashes,
+                [
+                    Data(SHA256.hash(data: expectedClientData)),
+                    Data(SHA256.hash(data: expectedRetryClientData)),
+                ],
+                "the assertion binds the request and a replay rejection gets one fresh challenge"
+            )
+        } catch {
+            assert(false, "managed App Attest client contract succeeds: \(error)")
+        }
+    }
+
+    static func testOfflineMapAppAttestGoldenVector() {
+        let fixtureURL = URL(
+            fileURLWithPath:
+                "map-platform/backend/tests/fixtures/app_attest_map_create_v1.json"
+        )
+        guard let fixtureData = try? Data(contentsOf: fixtureURL),
+              let fixture = try? JSONSerialization.jsonObject(
+                  with: fixtureData
+              ) as? [String: String],
+              let challengeID = fixture["challengeId"],
+              let challenge = fixture["challenge"],
+              let installationID = fixture["clientInstallationId"],
+              let appBuild = fixture["appBuild"],
+              let requestBody = fixture["requestBody"]?.data(using: .utf8),
+              let expectedClientData = fixture["expectedClientData"],
+              let expectedHash = fixture["expectedClientDataSha256"] else {
+            assert(false, "App Attest golden vector is readable")
+            return
+        }
+        let challengeDocument = OfflineMapAppAttestChallenge(
+            challengeId: challengeID,
+            challenge: challenge,
+            purpose: "map-create",
+            expiresAt: 1_800_000_000,
+            keyId: nil
+        )
+        let jobRequest = OfflineMapJobRequest(
+            mode: "custom_bbox",
+            bbox: [103.75, 1.24, 103.93, 1.37],
+            geometry: nil,
+            route: nil,
+            corridorWidthM: nil,
+            clientInstallationId: installationID,
+            clientRequestId: "request-golden-123",
+            installOnDevice: nil,
+            target: .init(
+                renderer: "esp32-fmb",
+                rendererFormatVersion: 3,
+                firmwareVersion: nil
+            ),
+            labels: .init(
+                profileVersion: 1,
+                preferredLanguages: [],
+                internationalFallback: "en"
+            )
+        )
+        var request = URLRequest(
+            url: URL(string: "https://maps.example.com/v1/map-jobs")!
+        )
+        request.httpBody = requestBody
+        do {
+            let clientData = try OfflineMapAppAttestClientData.mapCreate(
+                challenge: challengeDocument,
+                clientInstallationID: installationID,
+                appBuild: appBuild,
+                request: request,
+                jobRequest: jobRequest
+            )
+            assertEqual(
+                String(data: clientData, encoding: .utf8),
+                expectedClientData,
+                "Swift and backend canonical App Attest client data match"
+            )
+            let clientDataHash = SHA256.hash(data: clientData)
+                .map { String(format: "%02x", $0) }
+                .joined()
+            assertEqual(
+                clientDataHash,
+                expectedHash,
+                "Swift and backend App Attest client-data hashes match"
+            )
+        } catch {
+            assert(false, "App Attest golden vector validates: \(error)")
         }
     }
 
@@ -8811,8 +9169,10 @@ struct NavigationProtocolTests {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         assert(
-            corruptCacheManager.errorMessage?.contains("hash mismatch") == true,
-            "cached packs are hash-validated before device transfer"
+            corruptCacheManager.errorMessage?.contains(
+                "cannot be installed securely"
+            ) == true,
+            "unsigned cached ZIPs are rejected before device transfer"
         )
 
         let persistedSuite = "offline-map-persisted-route-\(UUID().uuidString)"
@@ -10694,15 +11054,41 @@ struct NavigationProtocolTests {
             "replacing a pack at the same URL explicitly reloads its invalidated preview"
         )
         assert(
-            managerSource.contains("OfflineMapPackCompatibilityArchive.make(") &&
+            !managerSource.contains("uploadArchiveInBackground(") &&
+                !managerSource.contains("materializeLegacyFallback(") &&
                 managerSource.contains(
-                    "archiveURL: compatibilityArchiveURL ?? packURL"
+                    "throw OfflineMapPlatformError.firmwareMapStreamUnsupported"
                 ) &&
-                managerSource.contains("useForegroundTransfer = true") &&
-                managerSource.contains("allowLocalStorageFailure:") &&
-                managerSource.contains("catch is CancellationError") &&
-                managerSource.contains("OfflineMapPackCompatibilityArchive.remove("),
-            "preview ZIPs retain resumable background upload through a sanitized archive"
+                managerSource.contains(
+                    "tlsCertificateSHA256:\n                            transferSession.tlsCertificateSHA256"
+                ),
+            "device map installation is signed-stream-only and pins background TLS"
+        )
+        let platformSourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift"
+        )
+        let securitySourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift"
+        )
+        guard let platformSource = try? String(
+            contentsOf: platformSourceURL,
+            encoding: .utf8
+        ), let securitySource = try? String(
+            contentsOf: securitySourceURL,
+            encoding: .utf8
+        ) else {
+            assert(false, "device transfer security sources should be available")
+            return
+        }
+        assert(
+            securitySource.contains(
+                "_ session: URLSession,\n        didReceive challenge: URLAuthenticationChallenge"
+            ) &&
+                platformSource.contains("session.getAllTasks { tasks in") &&
+                platformSource.contains(
+                    "challenge.protectionSpace.port"
+                ),
+            "foreground and restorable transfers pin connection-level TLS challenges"
         )
     }
 
@@ -12651,6 +13037,134 @@ struct NavigationProtocolTests {
         assertEqual(manager.statusMessage,
                     "device rebooting",
                     "firmware manager restores pending reboot status after app relaunch")
+    }
+
+    @MainActor
+    static func testFirmwareStorageMigrationFlow() {
+        let suiteName = "FirmwareStorageMigrationTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            assert(false, "test defaults should be available")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let deviceA = "device-a"
+        let deviceB = "device-b"
+        let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting(deviceA)
+        let manager = FirmwareUpdateManager(defaults: defaults)
+        manager.selectStorageMigrationDevice(deviceA)
+
+        func applyStorageStatus(
+            backend: String?,
+            powerCycleRequired: Bool?
+        ) {
+            var object: [String: Any] = [
+                "configured": true,
+                "enabled": false,
+                "firmware": [
+                    "status": "idle",
+                    "target": "WAVESHARE_AMOLED_175",
+                    "version": "0.4.0",
+                    "build": 87,
+                    "gitSha": "abcdef123456",
+                    "receivedBytes": 0,
+                    "totalBytes": 0
+                ]
+            ]
+            if let backend, let powerCycleRequired {
+                object["storage"] = [
+                    "backend": backend,
+                    "powerCycleRequired": powerCycleRequired
+                ]
+            }
+            let body = try! JSONSerialization.data(withJSONObject: object)
+            let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8)
+                + body
+            assert(
+                bleManager.handleDeviceTransferStatusNotification(packet),
+                "storage migration DSTS should be consumed"
+            )
+            manager.reconcileStorageMigrationStatus(bleManager: bleManager)
+        }
+
+        applyStorageStatus(
+            backend: "legacy_spi_migration",
+            powerCycleRequired: true
+        )
+        assertEqual(manager.storageMigrationNotice?.deviceID,
+                    deviceA,
+                    "legacy compatibility mode creates a device-scoped notice")
+        assert(manager.isStorageMigrationAlertPresented,
+               "legacy compatibility mode presents the user-facing action")
+        assertEqual(manager.statusMessage,
+                    FirmwareStorageMigrationNotice.statusMessage,
+                    "firmware status remains actionable while migration is pending")
+
+        bleManager.setConnectedDeviceIDForTesting(deviceB)
+        manager.selectStorageMigrationDevice(deviceB)
+        assert(manager.storageMigrationNotice == nil,
+               "another device does not inherit the migration notice")
+        assert(!manager.isStorageMigrationAlertPresented,
+               "another device does not inherit the migration alert")
+        assert(manager.statusMessage != FirmwareStorageMigrationNotice.statusMessage,
+               "another device does not inherit the migration status text")
+
+        bleManager.setConnectedDeviceIDForTesting(deviceA)
+        manager.selectStorageMigrationDevice(deviceA)
+        manager.dismissStorageMigrationAlert()
+        let restored = FirmwareUpdateManager(defaults: defaults)
+        restored.selectStorageMigrationDevice(deviceA)
+        assertEqual(restored.storageMigrationNotice?.deviceID,
+                    deviceA,
+                    "migration guidance survives app relaunch")
+        assert(restored.isStorageMigrationAlertPresented,
+               "migration guidance is presented again after app relaunch")
+
+        // Firmware predating the optional storage object and an FFat fallback
+        // are not proof of native SDMMC, so neither may clear the notice.
+        applyStorageStatus(backend: nil, powerCycleRequired: nil)
+        assertEqual(manager.storageMigrationNotice?.deviceID,
+                    deviceA,
+                    "legacy DSTS without storage fields preserves the notice")
+        applyStorageStatus(backend: "ffat", powerCycleRequired: false)
+        assertEqual(manager.storageMigrationNotice?.deviceID,
+                    deviceA,
+                    "internal fallback does not falsely complete migration")
+
+        bleManager.setConnectedDeviceIDForTesting(deviceB)
+        manager.selectStorageMigrationDevice(deviceB)
+        applyStorageStatus(backend: "sdmmc", powerCycleRequired: false)
+        manager.selectStorageMigrationDevice(deviceA)
+        assertEqual(manager.storageMigrationNotice?.deviceID,
+                    deviceA,
+                    "native status from another device cannot clear this device")
+
+        bleManager.setConnectedDeviceIDForTesting(deviceA)
+        applyStorageStatus(backend: "sdmmc", powerCycleRequired: false)
+        assert(manager.storageMigrationNotice == nil,
+               "only native SDMMC on the same device clears the notice")
+        assertEqual(manager.statusMessage,
+                    FirmwareStorageMigrationNotice.completionStatus,
+                    "native confirmation reports migration completion")
+
+        let settingsURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift"
+        )
+        let settingsSource = try? String(
+            contentsOf: settingsURL,
+            encoding: .utf8
+        )
+        assert(
+            settingsSource?.contains(
+                "FirmwareStorageMigrationNotice.title"
+            ) == true &&
+                settingsSource?.contains(
+                    "Section(header: Text(\"SD Card Upgrade\"))"
+                ) == true &&
+                settingsSource?.contains("Check Device Again") == true,
+            "Settings presents both the one-time alert and persistent recovery section"
+        )
     }
 
     @MainActor
@@ -15322,12 +15836,6 @@ struct NavigationProtocolTests {
                "transfer handshake refreshes status after one second")
         assert(!DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 3),
                "transfer handshake does not flood status between refreshes")
-        assert(DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(attempt: 8),
-               "legacy map entry is attempted after two seconds without DSTS")
-        assert(!DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(attempt: 7),
-               "generic DTRN gets the full compatibility grace period")
-        assert(!DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(attempt: 9),
-               "legacy map entry is sent only once")
         assert(DeviceNetworkJoinPolicy.isAlreadyAssociated(
             domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
             code: 13,
@@ -18138,7 +18646,7 @@ struct NavigationProtocolTests {
 
         var sentPackets: [Data] = []
         manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
-            maximumWriteLength: 64,
+            maximumWriteLength: 96,
             canSend: { true },
             write: { sentPackets.append($0) }
         ))
@@ -18208,26 +18716,139 @@ struct NavigationProtocolTests {
             "diagnostics endpoint fallback requests a protected hotspot"
         )
 
-        let session = DeviceTransferSession(
-            mode: .debug,
-            baseURL: URL(string: "http://192.168.4.1:8080")!,
-            accessPointSSID: "BikeComputer-Transfer",
-            accessPointPassphrase: "hotspot-secret",
-            sessionToken: "fragment-secret",
-            hotspotFallback: true,
-            hotspotFallbackReason: "endpoint_unreachable"
+        let nextTLSFingerprint = String(repeating: "a", count: 64)
+        assert(
+            manager.requestDeviceTransferTLSIdentityPreparation(),
+            "TLS identity preparation queues on the authenticated channel"
+        )
+        assert(
+            manager.requestDeviceTransferTLSIdentityCommit(
+                certificateSHA256: nextTLSFingerprint.uppercased()
+            ),
+            "TLS identity commit normalizes and queues an exact fingerprint"
+        )
+        assert(
+            manager.requestDeviceTransferTLSIdentityCancellation(),
+            "TLS identity cancellation queues on the authenticated channel"
         )
         assertEqual(
-            RemoteDeviceDebugSessionPolicy.browserURL(for: session)?.absoluteString,
-            "http://192.168.4.1:8080/device-debug/#fragment-secret",
-            "browser URL keeps the debug token in the fragment"
+            String(data: sentPackets[8], encoding: .utf8),
+            "DTRNtls|prepare",
+            "TLS preparation uses the documented DTRN frame"
+        )
+        assertEqual(
+            String(data: sentPackets[9], encoding: .utf8),
+            "DTRNtls|commit|\(nextTLSFingerprint)",
+            "TLS commit binds the exact lowercase pending leaf fingerprint"
+        )
+        assertEqual(
+            String(data: sentPackets[10], encoding: .utf8),
+            "DTRNtls|cancel",
+            "TLS cancellation uses the documented DTRN frame"
+        )
+        assert(
+            !manager.requestDeviceTransferTLSIdentityCommit(
+                certificateSHA256: "not-a-fingerprint"
+            ),
+            "malformed TLS fingerprints never reach BLE"
+        )
+
+        assertEqual(
+            DeviceTransferSecurityPolicy.normalizedCertificateSHA256(
+                nextTLSFingerprint.uppercased()
+            ),
+            nextTLSFingerprint,
+            "TLS pins normalize to one lowercase representation"
+        )
+        let transferToken = String(repeating: "b", count: 32)
+        assertEqual(
+            DeviceTransferSecurityPolicy.normalizedTransferToken(
+                transferToken
+            ),
+            transferToken,
+            "transfer tokens use the firmware's exact lowercase format"
+        )
+        assert(
+            DeviceTransferSecurityPolicy.normalizedTransferToken(
+                transferToken.uppercased()
+            ) == nil,
+            "noncanonical transfer tokens fail closed"
+        )
+        assert(
+            DeviceTransferSecurityPolicy.validate(
+                baseURL: URL(string: "https://192.168.4.1:8080")!,
+                certificateSHA256: nextTLSFingerprint,
+                identityVersion: 1,
+                transferGeneration: 1,
+                secureTransferV1: true
+            ),
+            "complete BLE-delivered HTTPS metadata is accepted"
+        )
+        assert(
+            !DeviceTransferSecurityPolicy.validate(
+                baseURL: URL(string: "http://192.168.4.1:8080")!,
+                certificateSHA256: nextTLSFingerprint,
+                identityVersion: 1,
+                transferGeneration: 1,
+                secureTransferV1: true
+            ),
+            "plaintext transfer origins fail closed"
+        )
+        assert(
+            !DeviceTransferSecurityPolicy.validate(
+                baseURL: URL(string: "https://192.168.4.1:8080?token=bad")!,
+                certificateSHA256: nextTLSFingerprint,
+                identityVersion: 1,
+                transferGeneration: 1,
+                secureTransferV1: true
+            ),
+            "transfer origins carrying query data fail closed"
+        )
+        assert(
+            !DeviceTransferSecurityPolicy.validate(
+                baseURL: URL(string: "https://192.168.4.1:8080/not-an-origin")!,
+                certificateSHA256: nextTLSFingerprint,
+                identityVersion: 1,
+                transferGeneration: 1,
+                secureTransferV1: true
+            ),
+            "transfer base URLs must be clean HTTPS origins"
+        )
+        assert(
+            !DeviceTransferSecurityPolicy.validate(
+                baseURL: URL(string: "https://192.168.4.1:8080")!,
+                certificateSHA256: nextTLSFingerprint,
+                identityVersion: 1,
+                transferGeneration: 0,
+                secureTransferV1: true
+            ),
+            "missing authorization generation fails closed"
+        )
+
+        let session = DeviceTransferSession(
+            mode: .debug,
+            baseURL: URL(string: "https://192.168.4.1:8080")!,
+            accessPointSSID: "BikeComputer-Transfer",
+            accessPointPassphrase: "hotspot-secret",
+            sessionToken: String(repeating: "b", count: 32),
+            hotspotFallback: true,
+            hotspotFallbackReason: "endpoint_unreachable",
+            tlsCertificateSHA256: String(repeating: "a", count: 64),
+            tlsIdentityVersion: 1,
+            transferGeneration: 1,
+            secureTransferV1: true
+        )
+        assertEqual(
+            RemoteDeviceDebugSessionPolicy.pageURL(for: session)?.absoluteString,
+            "https://192.168.4.1:8080/device-debug/",
+            "debug page URL is HTTPS and contains no authorization token"
         )
         let details = RemoteDeviceDebugSessionPolicy.sessionDetails(
             for: session,
             target: "WAVESHARE_AMOLED_175",
             deviceName: "Bicino"
         )
-        assert(!details.contains("fragment-secret"),
+        assert(!details.contains(String(repeating: "b", count: 32)),
                "copyable session details redact the transfer token")
         assert(!details.contains("hotspot-secret"),
                "copyable session details redact the hotspot password")
@@ -18368,7 +18989,11 @@ struct NavigationProtocolTests {
             mode: .diagnostics,
             baseURL: URL(string: "https://diagnostics.test")!,
             accessPointSSID: nil,
-            sessionToken: "test-token"
+            sessionToken: "test-token",
+            tlsCertificateSHA256: String(repeating: "a", count: 64),
+            tlsIdentityVersion: 1,
+            transferGeneration: 1,
+            secureTransferV1: true
         )
         defer { OfflineMapTestURLProtocol.reset() }
 
@@ -18608,7 +19233,11 @@ struct NavigationProtocolTests {
             mode: .diagnostics,
             baseURL: URL(string: "https://diagnostics.test")!,
             accessPointSSID: nil,
-            sessionToken: "unused-token"
+            sessionToken: "unused-token",
+            tlsCertificateSHA256: String(repeating: "a", count: 64),
+            tlsIdentityVersion: 1,
+            transferGeneration: 1,
+            secureTransferV1: true
         )
         let sessionController = TestDeviceDiagnosticsSessionController(
             session: session,
@@ -18710,7 +19339,11 @@ struct NavigationProtocolTests {
             mode: .diagnostics,
             baseURL: URL(string: "https://diagnostics.test")!,
             accessPointSSID: nil,
-            sessionToken: "test-token"
+            sessionToken: "test-token",
+            tlsCertificateSHA256: String(repeating: "a", count: 64),
+            tlsIdentityVersion: 1,
+            transferGeneration: 1,
+            secureTransferV1: true
         )
         let sessionController = TestDeviceDiagnosticsSessionController(
             session: session
@@ -18827,8 +19460,9 @@ struct NavigationProtocolTests {
                     "DTRNenter|debug",
                     "remote-debug handshake starts with the dedicated mode")
         try? await Task.sleep(nanoseconds: 25_000_000)
+        let tlsFingerprint = String(repeating: "a", count: 64)
         let freshStatus = """
-        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"fresh-token"}
+        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"https://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","sessionToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tls":{"identityVersion":1,"certificateSha256":"\(tlsFingerprint)"},"transferGeneration":2,"capabilities":{"secureTransferV1":true,"signedMapStreamV1":true,"legacyArchivePolicy":"disabled"}}
         """
         _ = bleManager.handleDeviceTransferStatusNotification(
             Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
@@ -18840,7 +19474,7 @@ struct NavigationProtocolTests {
             let session = try await task.value
             assertEqual(session.mode, .debug,
                         "fresh remote-debug handshake returns debug mode")
-            assertEqual(session.sessionToken, "fresh-token",
+            assertEqual(session.sessionToken, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                         "stale token is never returned")
         } catch {
             assert(false, "fresh remote-debug handshake should succeed: \(error)")
@@ -18907,8 +19541,9 @@ struct NavigationProtocolTests {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
 
+        let tlsFingerprint = String(repeating: "b", count: 64)
         let lanStatus = """
-        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"http://192.168.31.195:8080","networkTransport":"lan","networkSsid":"Home Wi-Fi","sessionToken":"lan-token"}
+        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"https://192.168.31.195:8080","networkTransport":"lan","networkSsid":"Home Wi-Fi","sessionToken":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","tls":{"identityVersion":1,"certificateSha256":"\(tlsFingerprint)"},"transferGeneration":3,"capabilities":{"secureTransferV1":true,"signedMapStreamV1":true,"legacyArchivePolicy":"disabled"}}
         """
         _ = bleManager.handleDeviceTransferStatusNotification(
             Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
@@ -18920,7 +19555,7 @@ struct NavigationProtocolTests {
             assertEqual(session.networkTransport, "lan",
                         "firmware-confirmed LAN debug remains on LAN")
             assertEqual(session.baseURL.absoluteString,
-                        "http://192.168.31.195:8080",
+                        "https://192.168.31.195:8080",
                         "LAN debug preserves the firmware endpoint")
             assert(statuses.contains("local Wi-Fi ready"),
                    "LAN debug reports browser readiness without a phone probe")
@@ -19058,8 +19693,9 @@ struct NavigationProtocolTests {
         // Reproduce the real notification order: MSTS can arrive before the
         // token-bearing DSTS. The manager must not return a tokenless session.
         try? await Task.sleep(nanoseconds: 25_000_000)
+        let tlsFingerprint = String(repeating: "c", count: 64)
         let deviceStatus = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"http://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","sessionToken":"fresh-map-token","firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"https://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","sessionToken":"dddddddddddddddddddddddddddddddd","tls":{"identityVersion":1,"certificateSha256":"\(tlsFingerprint)"},"transferGeneration":4,"capabilities":{"secureTransferV1":true,"signedMapStreamV1":true,"legacyArchivePolicy":"disabled"},"firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
         """
         _ = bleManager.handleDeviceTransferStatusNotification(
             Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(deviceStatus.utf8)
@@ -19071,9 +19707,9 @@ struct NavigationProtocolTests {
             let session = try await transferTask.value
             assertEqual(session.mode, .map,
                         "map transfer handshake returns map mode")
-            assertEqual(session.baseURL.absoluteString, "http://192.168.4.20:8080",
+            assertEqual(session.baseURL.absoluteString, "https://192.168.4.20:8080",
                         "map transfer handshake binds matching status origins")
-            assertEqual(session.sessionToken, "fresh-map-token",
+            assertEqual(session.sessionToken, "dddddddddddddddddddddddddddddddd",
                         "map transfer handshake waits for the fresh token")
         } catch {
             assert(false, "map transfer handshake should succeed: \(error)")
@@ -19107,8 +19743,9 @@ struct NavigationProtocolTests {
 
         // DSTS is the atomic transfer-session response. A dropped MSTC chunk
         // must not make an otherwise ready authenticated HTTP server unusable.
+        let tlsFingerprint = String(repeating: "d", count: 64)
         let deviceStatus = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"http://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","sessionToken":"fresh-map-token","firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"https://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","sessionToken":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","tls":{"identityVersion":1,"certificateSha256":"\(tlsFingerprint)"},"transferGeneration":5,"capabilities":{"secureTransferV1":true,"signedMapStreamV1":true,"legacyArchivePolicy":"disabled"},"firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
         """
         _ = bleManager.handleDeviceTransferStatusNotification(
             Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(deviceStatus.utf8)
@@ -19118,9 +19755,9 @@ struct NavigationProtocolTests {
             let session = try await transferTask.value
             assertEqual(session.mode, .map,
                         "fresh device status opens a map session")
-            assertEqual(session.baseURL.absoluteString, "http://192.168.4.20:8080",
+            assertEqual(session.baseURL.absoluteString, "https://192.168.4.20:8080",
                         "device status owns the transfer server origin")
-            assertEqual(session.sessionToken, "fresh-map-token",
+            assertEqual(session.sessionToken, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
                         "device status owns the transfer credential")
         } catch {
             assert(false, "fresh device status should not require map status: \(error)")
@@ -19357,7 +19994,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","lastError":{"code":"transfer_busy","message":"another transfer mode is active"},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","lastError":{"code":"transfer_busy","message":"another transfer mode is active"},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -19375,6 +20012,12 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceTransferSessionToken, "abc123", "status parser exposes session token")
         assertEqual(manager.deviceTransferLastErrorCode, "transfer_busy", "status parser exposes transfer error code")
         assertEqual(manager.deviceTransferLastErrorMessage, "another transfer mode is active", "status parser exposes transfer error message")
+        assertEqual(manager.deviceStorageBackend,
+                    "legacy_spi_migration",
+                    "status parser exposes the active storage backend")
+        assertEqual(manager.deviceStoragePowerCycleRequired,
+                    true,
+                    "status parser exposes the one-time card power-cycle requirement")
         assertEqual(manager.firmwareTarget, "WAVESHARE_AMOLED_206", "status parser exposes firmware target")
         assertEqual(manager.firmwareVersion, "0.2.2", "status parser exposes firmware version")
         assertEqual(manager.firmwareBuild, 86, "status parser exposes firmware build")

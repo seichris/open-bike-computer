@@ -67,6 +67,8 @@ struct MemorySample {
   uint32_t dmaFree = 0;
   uint32_t dmaMinimumEverFree = 0;
   uint32_t dmaLargest = 0;
+  uint32_t cryptoHeadroomRejections = 0;
+  uint32_t cryptoOperationFailures = 0;
 };
 
 struct TimingSummary {

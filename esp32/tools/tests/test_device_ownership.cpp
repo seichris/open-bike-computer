@@ -1050,6 +1050,10 @@ int main() {
   tampered.back() ^= 0x01;
   assert(!tamperedWire.unwrapAuthenticatedPayload(AuthenticatedChannel::Auth,
                                                   tampered, plaintext));
+  const CryptoResourceDiagnostics tamperedDiagnostics =
+      cryptoResourceDiagnostics();
+  assert(tamperedDiagnostics.headroomRejections == 0);
+  assert(tamperedDiagnostics.operationFailures == 0);
   assert(tamperedWire.unwrapAuthenticatedPayload(AuthenticatedChannel::Auth,
                                                   goldenWriteFrame,
                                                   plaintext));

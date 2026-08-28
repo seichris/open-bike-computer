@@ -226,7 +226,12 @@ bool decryptFrame(const OwnerKey &key, AuthenticatedChannel channel,
                          : -1;
   mbedtls_gcm_free(&context);
   if (result != 0) {
-    noteCryptoOperationFailure();
+    // Authentication failure is an expected rejection path for malformed or
+    // tampered input. Reserve the operation-failure counter for allocator,
+    // key-setup, or crypto-engine failures that indicate device instability.
+    if (result != MBEDTLS_ERR_GCM_AUTH_FAILED) {
+      noteCryptoOperationFailure();
+    }
     return false;
   }
   if (output.empty()) {

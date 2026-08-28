@@ -130,6 +130,8 @@ def snapshot(
                 "largestBlock": 12_000,
                 "windowMinimumFree": 20_000,
                 "windowMinimumLargestBlock": 10_000,
+                "cryptoHeadroomRejections": 0,
+                "cryptoOperationFailures": 0,
             },
         },
         "render": {
@@ -389,6 +391,39 @@ class RendererBenchmarkTests(unittest.TestCase):
         self.assertIn("dma_free_decline", failures)
         self.assertIn("dma_largest_decline", failures)
 
+    def test_crypto_resource_failures_are_hard_failures(self):
+        value = snapshot(
+            sequence=1,
+            timestamp_ms=1000,
+            map_fixture={
+                "id": "shanghai-renderer-v1",
+                "manifestReceipt": "a" * 64,
+            },
+            route_id="shanghai-center-renderer-v1",
+            route_sha256="b" * 64,
+        )
+        value["memory"]["dmaHeap"]["cryptoHeadroomRejections"] = 1
+        value["memory"]["dmaHeap"]["cryptoOperationFailures"] = 2
+        summary = renderer_benchmark.summarize_run(
+            [value], [renderer_benchmark.compact_sample(value, 0)]
+        )
+        failures = renderer_benchmark.evaluate_run(
+            snapshots=[value],
+            samples=[renderer_benchmark.compact_sample(value, 0)],
+            summary=summary,
+            duration_seconds=1,
+            poll_interval_seconds=1,
+            screenshots=[],
+            checkpoint_count=0,
+            expected_route_sample_count=120,
+            gates=renderer_benchmark.load_gates(
+                TOOLS / "renderer_benchmark_gates.json"
+            ),
+            expect_remote_debug=False,
+        )
+        self.assertIn("crypto_headroom_rejections:1", failures)
+        self.assertIn("crypto_operation_failures:2", failures)
+
     def test_pareto_candidate_excludes_absolute_failures(self):
         base = {
             "passed": True,
@@ -398,6 +433,8 @@ class RendererBenchmarkTests(unittest.TestCase):
             "minimumInternalFree": 50_000,
             "minimumPsramFree": 2_500_000,
             "minimumDmaFree": 20_000,
+            "cryptoHeadroomRejections": 0,
+            "cryptoOperationFailures": 0,
             "extrudedBuildings": 32,
             "extrudedP90DistancePx": 60,
             "extrudedFarthestDistancePx": 80,

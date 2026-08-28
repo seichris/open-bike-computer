@@ -16,6 +16,9 @@ INPUT = (ROOT / "lib/device_debug/device_debug_input.cpp").read_text(
     encoding="utf-8"
 )
 MAIN = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+RENDERER_DIAGNOSTICS = (
+    ROOT / "lib/renderer_diagnostics/renderer_diagnostics.cpp"
+).read_text(encoding="utf-8")
 IOS_TRANSFER_MANAGER = (
     ROOT.parent
     / "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift"
@@ -116,6 +119,15 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             window.index("xQueueOverwrite"),
         )
 
+    def test_renderer_metrics_expose_non_secret_crypto_resource_counters(self):
+        for field in (
+            r'\"cryptoHeadroomRejections\"',
+            r'\"cryptoOperationFailures\"',
+        ):
+            self.assertIn(field, RENDERER_DIAGNOSTICS)
+        self.assertNotIn("sessionToken", RENDERER_DIAGNOSTICS)
+        self.assertNotIn("apPassphrase", RENDERER_DIAGNOSTICS)
+
     def test_renderer_windows_bind_the_active_map_before_profile_change(self):
         active_identity = MAIN[
             MAIN.index("static bool readActiveRendererMap") :
@@ -162,10 +174,13 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            'apPassphrase_ = (mode_ == "debug" || mode_ == "diagnostics")',
+            "apPassphrase_ = generateSessionToken().substr(0, 24);",
             transfer,
         )
-        self.assertIn("WiFi.softAP(apSsid.c_str(),", transfer)
+        self.assertIn(
+            "WiFi.softAP(apSsid.c_str(), apPassphrase.c_str())", transfer
+        )
+        self.assertNotIn("WiFi.softAP(apSsid.c_str());", transfer)
         info = HTTP[
             HTTP.index("bool DeviceDebugHttp::handleInfo") :
             HTTP.index("bool DeviceDebugHttp::handleFrame")
@@ -235,7 +250,7 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         ]
         self.assertIn("DisableOnBleDisconnect", disconnect)
         self.assertLess(
-            disconnect.index("clearPreferredNetwork()"),
+            disconnect.index("clearAuthenticatedBleSession()"),
             disconnect.index("DisableOnBleDisconnect"),
         )
         self.assertIn("stopActiveDeviceTransfer();", owner_reset)

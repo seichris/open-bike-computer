@@ -1300,7 +1300,7 @@ Folder/block naming follows the OSM extract pipeline:
 
 ## Map Transfer Control
 
-Bulk map packs are transferred over Wi-Fi/HTTP, not BLE. BLE is the control and
+Bulk map packs are transferred over Wi-Fi/HTTPS, not BLE. BLE is the control and
 status channel used by the iOS app to ask the device to enter transfer mode and
 to inspect the installed map state.
 
@@ -1323,14 +1323,17 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `DTRN` | iOS -> ESP32 | `capture\|1\|<standard-or-detailed>\|<uuid>` | Bind the current random iPhone capture UUID and capture level; idempotent on reconnect. Detailed mode is sent only with CAP2 bit `21` and is rejected by firmware without the read-only ride-automation shadow producer. |
 | `DTRN` | iOS -> ESP32 | `mark\|1\|<sequence>\|<code>` | Persist one predefined issue marker. Sequence is positive and strictly increasing for the bound capture; replayed or out-of-order markers are rejected. |
 | `DTRN` | iOS -> ESP32 | `capture_end` | End the active detailed capture binding. |
+| `DTRN` | iOS -> ESP32 | `tls\|prepare` | Generate and durably stage the next device-local TLS identity while no transfer is active. |
+| `DTRN` | iOS -> ESP32 | `tls\|commit\|<sha256>` | Atomically select the staged identity only when the exact lowercase leaf-certificate SHA-256 matches. |
+| `DTRN` | iOS -> ESP32 | `tls\|cancel` | Delete a staged identity without changing the active identity. |
+| `DTRN` | iOS -> ESP32 | `exit` | Exit the active map, firmware, debug, or diagnostics transfer mode. |
+| `DSTS` | iOS -> ESP32 | empty | Request generic device-transfer status and the current HTTPS credential/pin. |
 
 The device preserves a detailed binding through short BLE gaps. If the last
 confirmed workout lifecycle was active and workout telemetry remains stale for
 five minutes, firmware ends detailed sampling conservatively because it can no
 longer observe the phone-side ride-end transition. The independent four-hour
 deadline remains the final fail-safe.
-| `DTRN` | iOS -> ESP32 | `exit` | Exit the active map, firmware, debug, or diagnostics transfer mode. |
-| `DSTS` | iOS -> ESP32 | empty | Request generic device-transfer status and the current HTTP credential. |
 
 When the settings characteristic advertises acknowledged writes, iOS uses them
 for transfer control and status requests. These commands establish or inspect a
@@ -1341,7 +1344,7 @@ write-without-response remains supported through CoreBluetooth flow control.
 For an accessory AP session (`baseUrl` host `192.168.4.1`), iOS clears any
 failed saved configuration for the advertised `apSsid`, waits for the AP to
 settle, applies one persistent background-transfer configuration, and verifies
-the token-authenticated HTTP status endpoint. Only transient NetworkExtension
+the token-authenticated, certificate-pinned HTTPS status endpoint. Only transient NetworkExtension
 errors receive one bounded retry. A failed or unreachable join removes the
 configuration, exits transfer mode, and surfaces the exact error domain and
 code; bulk upload never starts on an unverified network path.
@@ -1350,8 +1353,8 @@ Map stream app-build attestation remains fail closed. A transport-only app
 update may resume an already downloaded stream only when its complete prior
 identity tuple (bundle build, Git SHA, and component SHA-256) appears in the
 reviewed predecessor allowlist. Matching only a build number or Git revision is
-insufficient, and arbitrary older artifacts continue to require the compatible
-legacy archive path.
+insufficient. Unsigned ZIP artifacts are preview-only and must be regenerated
+as a signed stream before device installation.
 
 When the full legacy `MSTS{...}` response fits the negotiated ATT MTU, firmware
 continues to use it. Otherwise `MSTC` responses fit the minimum BLE notification
@@ -1359,16 +1362,18 @@ payload: ASCII `MSTC`, a one-byte transfer id, zero-based chunk index, chunk
 count, and up to 13 JSON bytes (20 bytes total). The app reassembles chunks by
 transfer id and accepts both forms.
 
-The HTTP credential is not part of the map-status payload. Current iOS clients
+The HTTPS credential is not part of the map-status payload. Current iOS clients
 send `DTRNenter|map`, which applies map mode and publishes a fresh generic
-device-transfer response in one application-level handshake. If no fresh
-response arrives after two seconds, the client sends the legacy `MTRNenter`
-command and requests `DSTS` explicitly for compatibility with older firmware.
-In either case, iOS requires a new authenticated response whose `mode` is
-`map`, whose `baseUrl` identifies the transfer server, and whose `sessionToken`
-is non-empty. A status cached before the enter request is not sufficient. The
-app sends that token as
-`X-BikeComputer-Transfer-Token` on every local HTTP request.
+device-transfer response in one application-level handshake. There is no
+unsigned or legacy transfer fallback. iOS requires a new authenticated response
+whose `mode` is `map`, whose `baseUrl` is HTTPS, whose `sessionToken` is
+exactly 32 lowercase hexadecimal characters, whose `transferGeneration` is
+nonzero, and whose `tls` and
+`capabilities` objects advertise a valid certificate fingerprint,
+`secureTransferV1`, `signedMapStreamV1`, and `legacyArchivePolicy: "disabled"`.
+A status cached before the enter request is not sufficient. The app pins the
+exact leaf certificate from that response and sends the token as
+`X-BikeComputer-Transfer-Token` on every local HTTPS request.
 
 Remote-debug entry has no legacy protocol fallback. The plain
 `DTRNenter|debug` form starts the device hotspot directly. The compact
@@ -1388,31 +1393,52 @@ UI task. Failure starts `BikeComputer-Transfer` with a fresh per-session WPA2
 password and reports a hotspot fallback.
 `DSTS` reports `networkTransport` (`starting`, `connecting`, `lan`, or
 `hotspot`), `networkSsid`, `hotspotFallback`, `hotspotFallbackReason`, and (only
-for an active debug or diagnostics hotspot) `apPassphrase`; `baseUrl` remains empty until the
+for an active hotspot) `apPassphrase`; `baseUrl` remains empty until the
 selected listener is ready. Stable fallback reasons are `ssid_unavailable`,
 `authentication_failed`, `association_timeout`, and `endpoint_unreachable`.
+
+`DSTS` also includes a top-level `storage` object. `storage.backend` is one of
+`sdmmc`, `legacy_spi_migration`, `spi`, `ffat`, or `unavailable`, and
+`storage.powerCycleRequired` is `true` only while a Waveshare card is mounted
+through the HSPI migration compatibility path. The object is optional for
+older firmware. iOS persists a warning per stable device identity when it sees
+`legacy_spi_migration`; missing fields, FFat, an unavailable card, or another
+device cannot clear that warning. It clears only after the same device reports
+`backend: "sdmmc"` and `powerCycleRequired: false` on a later boot.
+
 The normal LAN password is never returned. The app verifies a LAN result
-against the token-authenticated `/device-debug/v1/info` endpoint. If association succeeded
+against the token-authenticated, certificate-pinned `/device-debug/v1/info`
+endpoint. If association succeeded
 but the endpoint is unreachable, it exits that session over BLE and sends a
 compact endpoint-fallback debug-enter form to force the hotspot while retaining
 the reason in firmware status.
 
 iOS requires authenticated navigation readiness, CAP2 bit `16`, and a fresh
 `DSTS` response whose `mode` is exactly `debug`, whose `baseUrl` is present,
-and whose `sessionToken` is non-empty. It does not automatically join the
-accessory AP because the copied browser URL is intended for a Mac. For a LAN
-result the Mac remains on the same local network; for a hotspot result the user
-joins the reported AP. The browser URL is
-`<baseUrl>/device-debug/#<sessionToken>`: the fragment is removed from the
-address bar by the device-served page and is never sent in the HTTP request
-target. API requests carry the token header. Debug, map, and firmware modes are
-mutually exclusive.
+whose `sessionToken` is exactly 32 lowercase hexadecimal characters, and whose
+secure TLS metadata validates. The
+app joins the accessory AP when needed and opens the console only in an
+ephemeral in-app `WKWebView`. The page URL is
+`<baseUrl>/device-debug/` and never contains the token. After the exact page and
+pinned certificate load, iOS injects the 32-character token directly into page
+memory; API requests carry it only in the transfer-token header. Main-frame
+navigation, redirects, and certificate changes are rejected. Debug, map,
+firmware, and diagnostics modes are mutually exclusive.
 
 The hotspot password is delivered only through authenticated BLE and is never
-part of an HTTP response or copied session diagnostics. It protects hotspot
-traffic from passive nearby observers. LAN debug traffic is plain HTTP and is
-supported only on a trusted local network; it does not defend against other
-LAN clients or administrators observing the bearer token.
+part of an HTTPS response or copied session diagnostics. Every transfer mode,
+including trusted-LAN debug, uses TLS with an exact BLE-delivered leaf pin, so
+nearby hotspot clients and LAN observers cannot read or alter the bearer token.
+
+Firmware creates a device-local P-256 self-signed transfer identity on first
+boot and stores its certificate/private key in a versioned dual-slot NVS
+record. The active selector is one atomic NVS value. Once identity state exists,
+invalid selector, certificate, key, fingerprint, or key-pair data fails closed;
+firmware never silently replaces a previously pinnable identity. Rotation is
+two phase through the `DTRNtls` commands above. `DSTS.pendingTls` exposes only
+the staged version and fingerprint so the authenticated controller can verify
+the exact candidate before commit. No private-key material crosses BLE or
+appears in status/log output.
 
 ### Device diagnostics transfer
 
@@ -1506,38 +1532,46 @@ Status responses should include:
   validation and the active renderer can open it. The app uses these fields to
   distinguish unsupported firmware, a legacy map that needs regeneration, and
   an unhealthy label asset.
-- `enabled`: whether Wi-Fi/HTTP upload mode is enabled.
+- `enabled`: whether Wi-Fi/HTTPS upload mode is enabled.
 - `firmwareVersion`, `firmwareBuild`, and `firmwareGitSha`: the exact running
   firmware identity. The git identity must be the full 40-character lowercase
   SHA from a clean source tree; dirty or unidentified builds fail closed and do
   not advertise protocol v2. Promoted stream artifacts name the approved values
-  and iOS stays on protocol v1 when any field differs.
+  and iOS rejects device installation when any field differs.
 - `protocols`: supported map-install protocol versions. Version `2` is present
   only when SD storage is initialized and at least one production stream
-  verification key is compiled into firmware.
+  verification key is compiled into firmware. Version `1` is never advertised.
 - `streamFormatVersions`: accepted device-native stream versions when protocol
   v2 is available.
 - `streamTrust`: exact production verification capabilities, each encoded as
   `keyId=SHA256(X9.63 public key)`. iOS selects v2 only when the artifact's key
   identity matches one of these entries; a device with an older or rotated-out
-  trust set stays on protocol v1.
-- `baseUrl`: temporary HTTP base URL when transfer mode is enabled.
+  trust set rejects installation until firmware or the artifact is updated.
+- `baseUrl`: temporary HTTPS base URL when transfer mode is enabled.
+- `transferGeneration`: nonzero boot-local authorization generation. BLE
+  disconnect, exit, or mode replacement increments it so in-flight requests
+  from the old session fail authorization.
+- `tls`: active `identityVersion` and exact lowercase DER leaf-certificate
+  `certificateSha256` used by iOS for pinning.
+- `pendingTls`: optional staged identity version/fingerprint during two-phase
+  rotation.
+- `capabilities`: `secureTransferV1`, `signedMapStreamV1`, and
+  `legacyArchivePolicy`. Current map installation requires both booleans and
+  the exact policy value `disabled`.
 - `activation`: the latest activation `status`, monotonic boot-local
   `sequence`, `sessionId`, optional `mapId`, numbered `step`, total `steps`,
   integer `progress` percentage, and structured `error`, when present. Status
   is `idle`, `receiving`, `paused`, `finalizing`, `ready`, `activating`,
   `failed`, or `installed`. BLE uses a compact form
-  that omits error messages and duplicate `lastError`; HTTP retains the full
+  that omits error messages and duplicate `lastError`; HTTPS retains the full
   diagnostic text.
-- `lastError`: last installer/upload error code, when present. HTTP also includes
+- `lastError`: last installer/upload error code, when present. HTTPS also includes
   the diagnostic message.
 - `activeError`: active-map metadata error code, when no active map is installed.
-  HTTP also includes the diagnostic message.
+  HTTPS also includes the diagnostic message.
 
 The ESP32 map installer validates staged packs before activation:
 
-- uploading a new session manifest removes abandoned staging sessions while
-  preserving the current content-derived session for resume.
 - manifest schema version must be `1`.
 - `mapId` and session ids may contain only letters, numbers, `.`, `_`, and `-`.
 - files must live under `VECTMAP/` and be `.fmb`/legacy `.fmp` blocks, or the
@@ -1546,10 +1580,6 @@ The ESP32 map installer validates staged packs before activation:
 - declared byte size and SHA-256 must match the staged file. New uploads are
   hashed while streaming to SD and receive a verification receipt, avoiding a
   second full read during activation.
-- archive entries are hashed while they are extracted. Each completed file gets
-  a durable verification receipt, so boot recovery skips completed entries and
-  only redoes a file interrupted in progress. The original archive remains on
-  SD until activation commits, so recovery never requires another phone upload.
 - activation moves verified files into `.maps/<sessionId>` using same-volume
   renames, then switches `/sdcard/VECTMAP/active-map.json` to that immutable
   root. Each installed root retains a hidden manifest and verification receipt,
@@ -1567,25 +1597,18 @@ transfer can proceed. The previous selected root remains
 available for rollback until the next transfer begins; at that point only the
 current version is retained before the replacement uploads.
 
-When transfer mode is enabled, the ESP32 exposes a short-lived HTTP service for
+When transfer mode is enabled, the ESP32 exposes a short-lived HTTPS service for
 bulk upload:
 
 | Method | Path | Meaning |
 | --- | --- | --- |
 | `GET` | `/map-transfer/status` | Read transfer status and active map metadata. |
-| `PUT` | `/map-transfer/sessions/{sessionId}/pack.zip` | Store one complete archive, then start durable device-owned activation. |
 | `PUT` | `/map-transfer/sessions/{sessionId}/install-stream` | Stream one signed v2 artifact directly into an inactive root, then start durable device-owned activation. |
-| `PUT` | `/map-transfer/sessions/{sessionId}/manifest.json` | Upload the map pack manifest. |
-| `PUT` | `/map-transfer/sessions/{sessionId}/VECTMAP/{mapId}/{folder}/{file}` | Upload one `.fmb` or `.fmp` file. |
-| `POST` | `/map-transfer/sessions/{sessionId}/activate` | Validate and atomically activate the staged map. |
 
-The archive route starts activation after its response is durably staged so a
-background iOS upload remains installable even if iOS terminates the originating
-app process. A pending-session marker is committed before the upload response;
-firmware resumes it after a board reset until activation reaches a terminal
-result. Firmware disables transfer mode after that activation finishes.
-The explicit activation route remains idempotent for the foreground per-file
-fallback and for clients that are still alive after the archive upload.
+Every former `pack.zip`, per-file, manifest, and explicit-activation route
+returns `426 signed_stream_required`. Firmware also discards any pending
+unsigned archive marker/staging directory found during boot recovery; it never
+parses or activates that artifact.
 
 The v2 stream route requires
 `Content-Type: application/vnd.openbikecomputer.map-stream`, an exact
@@ -1603,7 +1626,8 @@ entries per block. ASCII input is normalized for CRLF, must end with a physical
 newline, and uses the renderer's lowercase `0x` color and signed 16-bit
 coordinate grammar.
 
-All transfer requests use HTTP/1.1 with a five-second request-wide header
+All transfer requests use HTTP/1.1 inside the pinned TLS session, with a
+five-second request-wide header
 deadline, at most 512 bytes per line, 8 KiB of request-line/header bytes, and 64
 lines. Over-limit or incomplete headers are rejected explicitly. Duplicate
 `Content-Length`, `Content-Type`, or transfer-token headers fail closed, and
@@ -1625,18 +1649,19 @@ were already structurally validated during their unavoidable write/hash pass,
 so activation adds no full payload scan. Only that acknowledgement emits
 `installed` and closes
 transfer mode. A rejected renderer root restores the previous valid selection
-and emits `renderer_reload`. A completed v1 archive is an explicit fallback
-choice: before v1 activation, firmware removes any unselected ready or paused
-v2 root and its pending marker. Boot applies the same arbitration, so a stale
-v2 install cannot silently replace the archive after restart.
+and emits `renderer_reload`. Authorization revoked before response completion
+discards an unselected ready stream so it cannot activate under a later BLE
+session.
 
-An accepted activation returns HTTP 202 with the boot-local activation
-`sequence`. The app matches that acknowledgement to later HTTP/BLE terminal
+An accepted activation returns HTTPS 202 with the boot-local activation
+`sequence`. The app matches that acknowledgement to later HTTPS/BLE terminal
 status so a cached same-session result cannot be mistaken for the new attempt.
 If a manifest HEAD encounters an interrupted activation journal, firmware first
 returns 503 and then performs exceptional recovery. The app permits a bounded
 long wait only after that explicit recovery/busy response; ordinary transport
 timeouts retain a short retry limit.
 
-The HTTP service is configured by firmware at boot but remains disabled until
-BLE transfer control enables it for an authenticated app session.
+The HTTPS service is configured by firmware at boot but remains disabled until
+BLE transfer control binds it to an authenticated owner session. BLE disconnect
+synchronously clears the token, hotspot secret, binding, and request generation,
+stops the listener, and schedules mode-specific cleanup.

@@ -81,10 +81,17 @@ nonisolated private enum DeviceDiagnosticsHTTPClient {
 
     static func request(
         _ request: URLRequest,
+        transferSession: DeviceTransferSession,
         configuration: URLSessionConfiguration,
         maximumBytes: Int
     ) async throws -> Data {
-        let urlSession = URLSession(configuration: configuration)
+        guard let urlSession = DeviceTransferPinnedSessionFactory.make(
+            configuration: configuration,
+            baseURL: transferSession.baseURL,
+            certificateSHA256: transferSession.tlsCertificateSHA256
+        ) else {
+            throw DeviceTransferSecurityError.secureTransferRequired
+        }
         defer { urlSession.invalidateAndCancel() }
         let (bytes, response) = try await urlSession.bytes(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
@@ -447,6 +454,7 @@ final class DeviceDiagnosticsTransferManager {
         configuration.timeoutIntervalForResource = timeoutInterval
         return try await DeviceDiagnosticsHTTPClient.request(
             request,
+            transferSession: session,
             configuration: configuration,
             maximumBytes: maximumBytes
         )

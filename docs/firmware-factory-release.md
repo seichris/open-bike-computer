@@ -23,6 +23,45 @@ The option is deliberately absent from ordinary developer and device-test
 builds. Diagnostic/calibration images stored elsewhere are not production
 inputs.
 
+Tagged publication is split across two trust domains. A pushed `v*` tag starts
+`.github/workflows/firmware-release-candidate.yml`, which has read-only
+permissions, no environment, and no signing or release credential. It runs the
+full CI and diagnostic gates, builds both production targets, and records a
+canonical receipt for the exact OTA image, factory archive, and factory
+descriptor from the tagged commit.
+
+Only `.github/workflows/firmware-release.yml`, loaded by GitHub from the
+protected default branch through `workflow_run`, may publish. Before entering
+the `firmware-release` environment, it verifies the registered candidate
+workflow ID and path, repository, first successful push attempt, semantic tag,
+full source SHA, exact candidate artifact names and GitHub SHA-256 digests, tag
+target, protected-main ancestry, and absence of an existing release. After
+environment approval it repeats the workflow/artifact and tag checks, then
+uses only protected-default-branch verification and signing tools. Tagged code
+is never checked out or executed by the publisher.
+
+Before merging and using this flow, repository administrators must:
+
+1. Create the `firmware-release` environment, require at least one named human
+   reviewer, prevent self-review, restrict deployments to the protected
+   default branch used by `workflow_run`, and limit bypass actors to the
+   reviewed break-glass owner.
+2. Make `FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY`,
+   `FIRMWARE_RELEASE_PREFLIGHT_APP_ID`, and
+   `FIRMWARE_RELEASE_PREFLIGHT_APP_PRIVATE_KEY` available to that environment
+   with no broader scope than operationally required. Store both private keys
+   as environment secrets and remove any repository-level copies after the
+   environment migration is verified.
+3. Add a `v*` tag ruleset that restricts tag creation, update, and deletion to
+   release maintainers. Enable GitHub's full-SHA Actions policy after every
+   workflow has landed with immutable action pins.
+4. Run a non-production rehearsal proving that an off-main tag, moved tag,
+   rerun candidate, altered candidate receipt, missing artifact, and existing
+   release all stop before signing.
+
+Source changes alone do not prove those live controls are configured. Do not
+push the first release tag until their read-back has been reviewed.
+
 Compilation, host tests, and a merged pull request establish software readiness;
 they do not establish physical acceptance. Before calling an artifact
 factory/golden firmware, record the target-specific device identity, attested
@@ -39,9 +78,24 @@ physical screen-switch/render-ahead validation from
 speaker soak is an accepted non-blocking risk documented in
 [`hardware/README.md`](../hardware/README.md).
 
+The first OTA release that changes Waveshare storage from HSPI/Arduino `SD` to
+native `SD_MMC` has an additional migration gate. A card selected into SPI mode
+cannot return to native SD mode without losing card power, while the OTA
+finalizer performs only a warm `ESP.restart()`. Before publishing that release,
+physically validate the native-first HSPI migration fallback on the exact
+release head and release an iOS build that understands the optional `DSTS`
+storage state. The fallback must keep the existing map available after the warm
+OTA reboot, the app must instruct the rider to fully power off and disconnect
+USB, and the warning must clear only after the same device reports a true
+native-SDMMC boot. Post-reboot firmware identity alone does not prove that
+removable storage or installed maps are available. The exact observed behavior
+and remaining matrix are recorded in
+[`hardware/README.md`](../hardware/README.md#8-sd-card--map-io).
+
 ## Release outputs
 
-For each production target, `.github/workflows/firmware-release.yml` publishes:
+For each production target, the candidate and protected publisher together
+publish:
 
 | Asset | Purpose |
 |---|---|

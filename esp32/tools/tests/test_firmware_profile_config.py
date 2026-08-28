@@ -51,8 +51,8 @@ assert "CONFIG_PM_PROFILING=n" in waveshare_sdkconfig
 assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n" in waveshare_sdkconfig
 assert "CONFIG_ARDUINO_LOOP_STACK_SIZE=16384" in waveshare_sdkconfig
 assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in waveshare_sdkconfig
-assert "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096" in waveshare_sdkconfig
-assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536" in waveshare_sdkconfig
+assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768" in waveshare_sdkconfig
+assert "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL" not in waveshare_sdkconfig
 waveshare_unflags = config.get("waveshare_amoled_common", "build_unflags")
 assert "-Wl,--wrap=log_printf" in waveshare_unflags
 waveshare_flags = config.get("waveshare_amoled_common", "build_flags")
@@ -206,8 +206,8 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y" in sdkconfig
     assert "CONFIG_ARDUINO_LOOP_STACK_SIZE=16384" in sdkconfig
     assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in sdkconfig
-    assert "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096" in sdkconfig
-    assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536" in sdkconfig
+    assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768" in sdkconfig
+    assert "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL" not in sdkconfig
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
     assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" in flags
@@ -393,13 +393,18 @@ assert not raw_write_offenders, (
     + ", ".join(raw_write_offenders)
 )
 
-release_workflow = (repo_root / ".github/workflows/firmware-release.yml").read_text()
-assert "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py" in release_workflow
+release_candidate_workflow = (
+    repo_root / ".github/workflows/firmware-release-candidate.yml"
+).read_text()
+assert (
+    "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py"
+    in release_candidate_workflow
+)
 for environment in remote_debug_profiles:
-    assert environment.removeprefix("env:") not in release_workflow
+    assert environment.removeprefix("env:") not in release_candidate_workflow
 for environment, target in expected_targets.items():
     profile = environment.removeprefix("env:")
     mapping = f"target: {target}\n            environment: {profile}"
-    assert mapping in release_workflow
+    assert mapping in release_candidate_workflow
 
 print("firmware production profile contracts passed")

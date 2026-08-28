@@ -21,6 +21,8 @@
     "minimumPsramLargestBlockBytes": 750000,
     "minimumDmaFreeBytes": 8192,
     "minimumDmaLargestBlockBytes": 2048,
+    "maximumCryptoHeadroomRejections": 0,
+    "maximumCryptoOperationFailures": 0,
     "maximumRenderP95Ms": 1250,
     "maximumUiGapMs": 1000,
     "maximumFlushP95Ms": 150,

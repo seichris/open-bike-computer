@@ -1279,7 +1279,8 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertFalse(manager.isRecovering)
     }
 
-    func testComplicationStartWaitsForColdLaunchRecovery() async throws {
+    func testComplicationLaunchRequiresConfirmationAfterColdLaunchRecovery()
+        async throws {
         let recovery = RecoveryProbe()
         var startCount = 0
         let manager = WatchWorkoutManager(
@@ -1301,13 +1302,23 @@ final class WatchWorkoutManagerTests: XCTestCase {
         )
         await Task.yield()
         XCTAssertEqual(startCount, 0)
+        XCTAssertNotNil(manager.pendingWorkoutLaunchRequest)
+        XCTAssertFalse(manager.canConfirmPendingWorkoutLaunchRequest)
 
         recovery.completeWithoutSession()
+        try await waitUntil {
+            manager.canConfirmPendingWorkoutLaunchRequest
+        }
+        await Task.yield()
+        XCTAssertEqual(startCount, 0)
+        manager.confirmPendingWorkoutLaunchRequest()
         try await waitUntil { startCount == 1 }
+        XCTAssertNil(manager.pendingWorkoutLaunchRequest)
         XCTAssertFalse(manager.isRecovering)
     }
 
-    func testComplicationStartIgnoresUnknownAndDuplicateURLs() async throws {
+    func testComplicationLaunchIgnoresUnknownAndReplacesDuplicateURLs()
+        async throws {
         let start = AsyncVoidProbe()
         let manager = WatchWorkoutManager(
             healthStore: HKHealthStore(),
@@ -1329,20 +1340,40 @@ final class WatchWorkoutManagerTests: XCTestCase {
         )
         await Task.yield()
         XCTAssertEqual(start.callCount, 0)
+        XCTAssertNil(manager.pendingWorkoutLaunchRequest)
+        XCTAssertEqual(manager.rejectedWorkoutLaunchURLCount, 1)
 
         manager.handleLaunchURL(
             WatchWorkoutLaunchRequest.startOutdoorCyclingURL
         )
+        let firstRequestID = try XCTUnwrap(
+            manager.pendingWorkoutLaunchRequest?.id
+        )
         manager.handleLaunchURL(
             WatchWorkoutLaunchRequest.startOutdoorCyclingURL
         )
+        let replacementRequestID = try XCTUnwrap(
+            manager.pendingWorkoutLaunchRequest?.id
+        )
+        XCTAssertNotEqual(firstRequestID, replacementRequestID)
+        await Task.yield()
+        XCTAssertEqual(start.callCount, 0)
+
+        manager.confirmPendingWorkoutLaunchRequest()
         try await waitUntil { start.callCount == 1 }
+        manager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+        XCTAssertNil(manager.pendingWorkoutLaunchRequest)
         start.complete()
+        await Task.yield()
+        manager.confirmPendingWorkoutLaunchRequest()
         await Task.yield()
         XCTAssertEqual(start.callCount, 1)
     }
 
-    func testComplicationStartWaitsForSuccessfulRecoveryRetry() async throws {
+    func testComplicationLaunchExpiresOnRecoveryFailureAndNeedsNewConsent()
+        async throws {
         let recovery = RecoveryProbe()
         var startCount = 0
         let manager = WatchWorkoutManager(
@@ -1368,10 +1399,21 @@ final class WatchWorkoutManagerTests: XCTestCase {
         }
         await Task.yield()
         XCTAssertEqual(startCount, 0)
+        XCTAssertNil(manager.pendingWorkoutLaunchRequest)
 
         manager.retrySetup()
         try await waitUntil { recovery.callCount == 2 }
         recovery.completeWithoutSession()
+        try await waitUntil {
+            manager.setupState == .ready && !manager.isRecovering
+        }
+        await Task.yield()
+        XCTAssertEqual(startCount, 0)
+
+        manager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+        manager.confirmPendingWorkoutLaunchRequest()
         try await waitUntil { startCount == 1 }
     }
 
@@ -1401,6 +1443,10 @@ final class WatchWorkoutManagerTests: XCTestCase {
             WatchWorkoutLaunchRequest.startOutdoorCyclingURL
         )
 
+        await Task.yield()
+        XCTAssertEqual(authorizationRequestCount, 0)
+        XCTAssertNotNil(manager.pendingWorkoutLaunchRequest)
+        manager.confirmPendingWorkoutLaunchRequest()
         try await waitUntil { authorizationRequestCount == 1 }
         XCTAssertEqual(manager.setupState, .needsAuthorization)
     }
@@ -1435,7 +1481,7 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertEqual(manager.setupState, .denied)
     }
 
-    func testComplicationStartRequeuesIfRecoveryBeginsBeforeTaskRuns() async throws {
+    func testComplicationLaunchCancelStartsZeroWorkouts() async throws {
         let recovery = RecoveryProbe()
         var startCount = 0
         let manager = WatchWorkoutManager(
@@ -1459,48 +1505,78 @@ final class WatchWorkoutManagerTests: XCTestCase {
         manager.handleLaunchURL(
             WatchWorkoutLaunchRequest.startOutdoorCyclingURL
         )
-        manager.handleActiveWorkoutRecovery()
-        try await waitUntil { recovery.callCount == 2 }
+        XCTAssertNotNil(manager.pendingWorkoutLaunchRequest)
+        manager.cancelPendingWorkoutLaunchRequest()
+        manager.confirmPendingWorkoutLaunchRequest()
         await Task.yield()
         XCTAssertEqual(startCount, 0)
-
-        recovery.completeWithoutSession()
-        try await waitUntil { startCount == 1 }
+        XCTAssertNil(manager.pendingWorkoutLaunchRequest)
     }
 
-    func testComplicationStartRequeuesIfRecoveryBeginsDuringAuthorization() async throws {
-        let recovery = RecoveryProbe()
-        let authorization = AsyncThrowingVoidProbe()
+    func testComplicationLaunchIsIgnoredDuringActiveWorkout() throws {
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let identity = try recoveryStore.begin(
+            startDate: Date(timeIntervalSinceReferenceDate: 800_060_000)
+        )
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        var startCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            complicationStartOperation: { startCount += 1 },
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running
+        )
+
+        manager.handleLaunchURL(
+            WatchWorkoutLaunchRequest.startOutdoorCyclingURL
+        )
+
+        XCTAssertNil(manager.pendingWorkoutLaunchRequest)
+        XCTAssertEqual(startCount, 0)
+    }
+
+    func testComplicationLaunchExpiresWithoutStartingOrAuthorizing()
+        async throws {
+        var authorizationRequestCount = 0
+        var startCount = 0
         let manager = WatchWorkoutManager(
             healthStore: HKHealthStore(),
             routeRecorder: WatchRouteRecorder(),
             recoveryStore: WatchWorkoutRecoveryStore(
                 persistence: ToggleRecoveryPersistence()
             ),
-            recoverActiveWorkoutSession: { await recovery.run() },
-            requestAuthorization: { try await authorization.run() },
+            requestAuthorization: { authorizationRequestCount += 1 },
             refreshAuthorization: {},
             authorizationRefreshState: .needsAuthorization,
-            initializeOnLaunch: true
+            complicationStartOperation: { startCount += 1 },
+            workoutLaunchRequestLifetime: 0.01,
+            initializeOnLaunch: false
         )
-        try await waitUntil { recovery.callCount == 1 }
-        recovery.completeWithoutSession()
-        try await waitUntil {
-            manager.setupState == .needsAuthorization
-                && !manager.isRecovering
-        }
+        manager.refreshAuthorizationIfNeeded()
+        try await waitUntil { manager.setupState == .needsAuthorization }
 
         manager.handleLaunchURL(
             WatchWorkoutLaunchRequest.startOutdoorCyclingURL
         )
-        try await waitUntil { authorization.callCount == 1 }
-        manager.handleActiveWorkoutRecovery()
-        try await waitUntil { recovery.callCount == 2 }
-
-        authorization.complete()
-        recovery.completeWithoutSession()
-        try await waitUntil { authorization.callCount == 2 }
-        authorization.complete()
+        XCTAssertNotNil(manager.pendingWorkoutLaunchRequest)
+        try await waitUntil { manager.pendingWorkoutLaunchRequest == nil }
+        XCTAssertEqual(authorizationRequestCount, 0)
+        XCTAssertEqual(startCount, 0)
     }
 
     func testComplicationStartStaysBlockedForUnsafeRecoveryStores() async throws {
@@ -1522,6 +1598,7 @@ final class WatchWorkoutManagerTests: XCTestCase {
         )
         await Task.yield()
         XCTAssertEqual(corruptStartCount, 0)
+        XCTAssertNil(corruptManager.pendingWorkoutLaunchRequest)
         XCTAssertTrue(corruptManager.hasCorruptRecoveryState)
 
         let unavailablePersistence = ToggleRecoveryPersistence()
@@ -1542,6 +1619,7 @@ final class WatchWorkoutManagerTests: XCTestCase {
         )
         await Task.yield()
         XCTAssertEqual(unavailableStartCount, 0)
+        XCTAssertNil(unavailableManager.pendingWorkoutLaunchRequest)
         XCTAssertTrue(unavailableManager.hasUnavailableRecoveryState)
     }
 
@@ -7712,7 +7790,8 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertFalse(manager.hasAttachedSessionForTesting)
     }
 
-    func testQueuedComplicationStartDrainsAfterRecoveredTombstoneCleanup() async throws {
+    func testConfirmedComplicationLaunchWaitsForTombstoneCleanup()
+        async throws {
         let recoveryStore = WatchWorkoutRecoveryStore(
             persistence: ToggleRecoveryPersistence()
         )
@@ -7753,6 +7832,10 @@ final class WatchWorkoutManagerTests: XCTestCase {
             disposition: .save
         )
 
+        await Task.yield()
+        XCTAssertEqual(startCount, 0)
+        XCTAssertTrue(manager.canConfirmPendingWorkoutLaunchRequest)
+        manager.confirmPendingWorkoutLaunchRequest()
         try await waitUntil { startCount == 1 }
         XCTAssertFalse(manager.hasAttachedSessionForTesting)
     }
