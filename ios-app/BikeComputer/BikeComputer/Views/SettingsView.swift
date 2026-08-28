@@ -2948,42 +2948,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
     }
 
     private var activeSession: DeviceTransferSession? {
-        guard bleManager.deviceTransferMode == DeviceTransferSession.Mode.debug.rawValue,
-              let baseURL = bleManager.deviceTransferBaseURL,
-              let rawToken = bleManager.deviceTransferSessionToken,
-              let token = DeviceTransferSecurityPolicy
-                .normalizedTransferToken(rawToken),
-              let certificateSHA256 =
-                bleManager.deviceTransferTLSCertificateSHA256,
-              DeviceTransferSecurityPolicy.validate(
-                baseURL: baseURL,
-                certificateSHA256: certificateSHA256,
-                identityVersion:
-                    bleManager.deviceTransferTLSIdentityVersion,
-                transferGeneration: bleManager.deviceTransferGeneration,
-                secureTransferV1:
-                    bleManager.supportsSecureDeviceTransferV1
-              ) else { return nil }
-        return DeviceTransferSession(
-            mode: .debug,
-            baseURL: baseURL,
-            accessPointSSID: bleManager.deviceTransferAccessPointSSID,
-            accessPointPassphrase: bleManager.deviceTransferAccessPointPassphrase,
-            sessionToken: token,
-            networkTransport: bleManager.deviceTransferNetworkTransport,
-            networkSSID: bleManager.deviceTransferNetworkSSID,
-            hotspotFallback: bleManager.deviceTransferUsedHotspotFallback,
-            hotspotFallbackReason:
-                bleManager.deviceTransferHotspotFallbackReason,
-            tlsCertificateSHA256: certificateSHA256,
-            tlsIdentityVersion:
-                bleManager.deviceTransferTLSIdentityVersion,
-            transferGeneration: bleManager.deviceTransferGeneration,
-            secureTransferV1: bleManager.supportsSecureDeviceTransferV1,
-            signedMapStreamV1: bleManager.supportsSignedMapStreamV1,
-            legacyArchivePolicy:
-                bleManager.deviceTransferLegacyArchivePolicy ?? ""
-        )
+        RemoteDeviceDebugSessionPolicy.activeSession(bleManager: bleManager)
     }
 
     private var pageURL: URL? {
@@ -3184,6 +3149,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
 private struct RendererBenchmarkReplaySettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
     @StateObject private var replay = RendererBenchmarkReplayCoordinator()
+    @StateObject private var secureSweep = SecureRendererBenchmarkController()
     let isNavigationActive: Bool
 
     var body: some View {
@@ -3195,6 +3161,10 @@ private struct RendererBenchmarkReplaySettingsSection: View {
             SettingsValueRow(
                 title: "Diagnostics",
                 value: bleManager.rendererDiagnosticsStatus
+            )
+            SettingsValueRow(
+                title: "Secure Sweep",
+                value: secureSweep.progressDescription
             )
             if !replay.fixtureID.isEmpty {
                 SettingsValueRow(title: "Fixture", value: replay.fixtureID)
@@ -3209,7 +3179,38 @@ private struct RendererBenchmarkReplaySettingsSection: View {
                         Text(profile.title).tag(profile)
                     }
                 }
-                .disabled(replay.isRunning)
+                .disabled(replay.isRunning || secureSweep.isRunning)
+            }
+
+            if bleManager.supportsRemoteDeviceDebug {
+                Button {
+                    if secureSweep.isRunning {
+                        secureSweep.stop()
+                    } else {
+                        secureSweep.start(
+                            bleManager: bleManager,
+                            replay: replay,
+                            isNavigationActive: isNavigationActive
+                        )
+                    }
+                } label: {
+                    Label(
+                        secureSweep.isRunning ?
+                            "Stop Secure Full Sweep" : "Run Secure Full Sweep",
+                        systemImage: secureSweep.isRunning ?
+                            "stop.fill" : "lock.shield.fill"
+                    )
+                }
+                .disabled(!secureSweep.isRunning && !canStartSecureSweep)
+
+                if let exportURL = secureSweep.exportURL {
+                    ShareLink(item: exportURL) {
+                        Label(
+                            "Share Benchmark Evidence ZIP",
+                            systemImage: "square.and.arrow.up"
+                        )
+                    }
+                }
             }
 
             Button {
@@ -3229,14 +3230,17 @@ private struct RendererBenchmarkReplaySettingsSection: View {
                         "location.fill.viewfinder"
                 )
             }
-            .disabled(!replay.isRunning && !canStartReplay)
+            .disabled(
+                secureSweep.isRunning ||
+                    (!replay.isRunning && !canStartReplay)
+            )
 
             Button {
                 _ = bleManager.requestRendererDiagnosticsSnapshot()
             } label: {
                 Label("Request Diagnostics Snapshot", systemImage: "waveform.path.ecg")
             }
-            .disabled(!canRequestSnapshot)
+            .disabled(!canRequestSnapshot || secureSweep.isRunning)
 
             if let snapshot = bleManager.rendererDiagnosticsSnapshotJSON {
                 Button {
@@ -3264,23 +3268,46 @@ private struct RendererBenchmarkReplaySettingsSection: View {
                     .font(.caption)
                     .foregroundStyle(.red)
             }
+            if let errorMessage = secureSweep.errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
         } header: {
             Text("Renderer Benchmark Replay")
         } footer: {
             Text(
-                "Replays the checked-in Shanghai route at exactly 1 Hz, including its SHA-256 marker and GPS sample; the route window follows the app's normal two-second cadence. Snapshot requests also work with ordinary diagnostics firmware."
+                "The secure full sweep keeps the HTTPS token and TLS pin in app memory, runs the balanced flat/current/medium/high comparison plus a five-minute soak, and exports only non-secret metrics, screenshots, and reports. The manual replay and snapshot tools remain available for ordinary diagnostics firmware."
             )
         }
         .onChange(of: bleManager.isNavigationReady) { ready in
-            if !ready { replay.stop(clearRoute: false) }
+            if !ready {
+                secureSweep.stop()
+                if !secureSweep.isRunning { replay.stop(clearRoute: false) }
+            }
         }
         .onChange(of: bleManager.supportsRendererDiagnostics) { supported in
-            if !supported { replay.stop(clearRoute: false) }
+            if !supported {
+                secureSweep.stop()
+                if !secureSweep.isRunning { replay.stop(clearRoute: false) }
+            }
         }
         .onChange(of: isNavigationActive) { active in
-            if active { replay.stop() }
+            if active {
+                secureSweep.stop()
+                if !secureSweep.isRunning { replay.stop() }
+            }
         }
-        .onDisappear { replay.stop() }
+        .onChange(of: bleManager.deviceTransferSessionToken) { _ in
+            if activeSession == nil { secureSweep.stop() }
+        }
+        .onChange(of: bleManager.activeDeviceMap) { _ in
+            if secureSweep.isRunning { secureSweep.stop() }
+        }
+        .onDisappear {
+            secureSweep.stop()
+            if !secureSweep.isRunning { replay.stop() }
+        }
     }
 
     private var canRequestSnapshot: Bool {
@@ -3290,6 +3317,20 @@ private struct RendererBenchmarkReplaySettingsSection: View {
 
     private var canStartReplay: Bool {
         canRequestSnapshot && !isNavigationActive
+    }
+
+    private var activeSession: DeviceTransferSession? {
+        RemoteDeviceDebugSessionPolicy.activeSession(bleManager: bleManager)
+    }
+
+    private var canStartSecureSweep: Bool {
+        canStartReplay &&
+            activeSession != nil &&
+            bleManager.activeDeviceMap?.manifestReceipt != nil &&
+            bleManager.activeDeviceMap?.bounds != nil &&
+            bleManager.deviceStorageBackend == "sdmmc" &&
+            bleManager.deviceStoragePowerCycleRequired == false &&
+            !replay.isRunning
     }
 }
 #endif

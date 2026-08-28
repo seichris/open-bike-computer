@@ -26,6 +26,20 @@ IOS_TRANSFER_MANAGER = (
 IOS_SETTINGS = (
     ROOT.parent / "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift"
 ).read_text(encoding="utf-8")
+IOS_SECURE_BENCHMARK = (
+    ROOT.parent
+    / "ios-app/BikeComputer/BikeComputer/Managers/SecureRendererBenchmarkController.swift"
+).read_text(encoding="utf-8")
+IOS_BENCHMARK_GATES = (
+    ROOT.parent
+    / "ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-gates-v1.json"
+).read_bytes()
+FIRMWARE_BENCHMARK_GATES = (
+    ROOT / "tools/renderer_benchmark_gates.json"
+).read_bytes()
+RENDERER_BENCHMARK_DOC = (
+    ROOT.parent / "docs/renderer-benchmark.md"
+).read_text(encoding="utf-8")
 LV_CONFIG = (ROOT / "lib/lvgl/lv_conf.h").read_text(encoding="utf-8")
 LV_CONFIG_TEMPLATE = (ROOT / "tools/lv_conf_template.h").read_text(
     encoding="utf-8"
@@ -33,6 +47,30 @@ LV_CONFIG_TEMPLATE = (ROOT / "tools/lv_conf_template.h").read_text(
 
 
 class DeviceDebugHttpContractTests(unittest.TestCase):
+    def test_ios_secure_benchmark_keeps_session_credentials_in_memory(self):
+        self.assertTrue(IOS_SECURE_BENCHMARK.startswith("#if DEBUG\n"))
+        for contract in (
+            "DeviceTransferPinnedSessionFactory.make",
+            'private static let tokenHeader = "X-BikeComputer-Transfer-Token"',
+            "URLSessionConfiguration.ephemeral",
+            "configuration.connectionProxyDictionary = [:]",
+            "MapStreamAppBuildIdentity.current",
+            'deviceStorageBackend == "sdmmc"',
+            "deviceStoragePowerCycleRequired == false",
+            "UIApplication.shared.isIdleTimerDisabled",
+            "RendererBenchmarkEvidenceSecurityPolicy.isSecretFree",
+            "RideDiagnosticsStoredZipWriter.write",
+            "checksums.sha256",
+        ):
+            self.assertIn(contract, IOS_SECURE_BENCHMARK)
+        self.assertNotIn("UIPasteboard", IOS_SECURE_BENCHMARK)
+        self.assertNotIn("http://", IOS_SECURE_BENCHMARK)
+        self.assertNotIn("session-file", RENDERER_BENCHMARK_DOC)
+        self.assertNotIn("--session-file", RENDERER_BENCHMARK_DOC)
+
+    def test_ios_and_firmware_benchmark_gates_are_identical(self):
+        self.assertEqual(IOS_BENCHMARK_GATES, FIRMWARE_BENCHMARK_GATES)
+
     def test_ordinary_builds_compile_only_route_free_debug_stubs(self):
         real_implementation = HTTP.index("#if DEVICE_REMOTE_DEBUG")
         route_registration = HTTP.index(

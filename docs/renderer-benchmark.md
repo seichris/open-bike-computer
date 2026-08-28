@@ -25,9 +25,10 @@ candidate selection, not permission to change the default profile.
   and timestamp-bound to its observed route marker;
 - absolute and relative rejection gates, a Pareto frontier, and a 300-second or
   longer soak of the selected candidate;
-- JSON, CSV, Markdown, and PNG evidence tied to device, board, firmware commit,
-  build profile, boot, map manifest receipt, route hash, tuning fingerprint,
-  run ID, and repeat number.
+- JSON, CSV, Markdown, and PNG evidence tied to the clean iOS Git/component
+  identity, device, board, firmware commit, build profile, boot, map manifest
+  receipt, native-SDMMC state, route hash, tuning fingerprint, run ID, and
+  repeat number.
 
 The experiment does not automate AMOLED motion/tearing, color, daylight
 readability, physical touch, natural Core Location/BLE jitter, battery or
@@ -59,26 +60,27 @@ no longer valid.
 1. Identify whether the connected device is the 1.75-inch or 2.06-inch board.
    Build and flash the matching `*_REMOTE_DEBUG` profile for the automated
    sweep. Never infer the board from a transient serial path.
-2. Install the exact Shanghai map artifact that will be supplied to the runner.
-   Keep its signed `.bmap` artifact, its retained-path ZIP with one root
-   `manifest.json`, or the retained manifest JSON. The runner reproduces the
-   receipt used by that install path and refuses to start a measurement window
-   unless the active map ID and receipt match.
-3. Connect an authenticated Debug build of the iPhone app. In **Developer
-   Settings → Renderer Benchmark Replay**, tap **Start Pinned 1 Hz Replay** and
-   leave that Developer Settings page open; replay keeps the iPhone awake while
-   active. Put the Bike Computer itself on the map-backed navigation screen
-   with 3D buildings enabled. The iPhone sends the route window on the app's
-   normal two-second cadence and sends GPS plus the fixture marker at 1 Hz.
-   Stop any active navigation first. While replay is active, a scoped GPS
-   override prevents live Core Location fixes from interleaving with the
-   fixture; starting navigation stops replay and releases the override.
-4. Start **Remote Device Debugging**. For a separately authorized automation
-   harness, put the Mac on the reported LAN or device-hotspot network and store
-   `baseUrl`, `tlsCertificateSha256`, and `token` in a mode-`0600` JSON session
-   file as described in [Remote device debugging](remote-device-debugging.md).
-   The ordinary iOS console intentionally does not export this file. Do not
-   paste the token into logs or reports.
+2. Perform the required full power cycle, then confirm authenticated BLE status
+   reports `storage.backend=sdmmc` and `storage.powerCycleRequired=false`. The
+   in-app controller refuses to start or continue without both values.
+3. Install the exact Shanghai map artifact used for the benchmark.
+   The in-app controller reads the active map ID and signed manifest receipt
+   directly from authenticated BLE state and refuses to start unless both are
+   available. Keep the Bike Computer on the Shanghai map-backed navigation
+   screen with 3D buildings enabled.
+4. Connect an authenticated Debug build of the iPhone app and stop any active
+   navigation or manual renderer replay. Start **Remote Device Debugging** and
+   leave the authenticated iPhone connected over BLE for the entire run.
+5. Keep **Developer Settings → Renderer Benchmark Replay** open while the sweep
+   runs. The controller keeps the iPhone awake, starts the checked-in route
+   replay itself, and prevents live Core Location fixes from interleaving with
+   the exact 1 Hz fixture.
+
+The benchmark does not copy a URL, TLS fingerprint, or transfer token to a Mac.
+It constructs the pinned `URLSession` from the active `DeviceTransferSession`,
+keeps the token and certificate pin in app memory, rejects redirects, caches,
+cookies, proxies, and cellular transport, and exports none of those session
+values. Ending BLE or remote debug revokes the run.
 
 The built-in route fixture is
 `ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-shanghai-v1.json`.
@@ -87,25 +89,17 @@ Its ID is `shanghai-center-renderer-v1`; its SHA-256 is
 
 ## Run the automated sweep
 
-From the repository root:
+In **Developer Settings → Renderer Benchmark Replay**, tap **Run Secure Full
+Sweep**. The app performs three balanced repeats, twelve 120-second comparison
+windows, four checkpoint screenshots per window, Pareto selection, and a
+300-second soak. Warm-up, window acknowledgement, and report generation add a
+few minutes; budget roughly half an hour and keep both screens awake and near
+each other. Tap **Stop Secure Full Sweep** to request a checked `current`-profile
+cleanup before the replay ends.
 
-```sh
-python3 esp32/tools/renderer_benchmark.py \
-  --session-file /path/to/device-debug-session.json \
-  --map-fixture /path/to/shanghai-map.bmap \
-  --output /path/to/renderer-benchmark-output
-```
-
-The defaults are three balanced repeats, 120-second comparison windows, four
-checkpoint screenshots per window, and a 600-second soak. A full issue #210 run
-requires all four profiles, at least three repeats, one complete 120-second
-fixture loop per window, screenshots, and a soak of at least 300 seconds.
-
-For wiring or fixture development only, `--allow-partial` permits shorter runs,
-a subset of profiles, no soak, or `--skip-screenshots`. Partial output is not
-acceptance evidence.
-
-The output directory must be empty. A completed sweep writes:
+The in-app acceptance path is deliberately full-only: it has no shortened-run,
+profile-subset, no-soak, or screenshot-skip switch. When it finishes, tap
+**Share Benchmark Evidence ZIP**. The stored ZIP contains:
 
 - `renderer-benchmark.json`: identities, exact fixtures and gates, bounded time
   series, per-run failures, aggregates, Pareto frontier, and soak result;
@@ -114,19 +108,27 @@ The output directory must be empty. A completed sweep writes:
   and remaining physical gates;
 - `screenshots/*.png`: target-oriented checkpoints whose rotation matches the
   browser view; the JSON records each frame timestamp, marker timestamp,
-  capture lag, byte count, and SHA-256 digest.
+  capture lag, byte count, and SHA-256 digest;
+- `manifest.json` and `checksums.sha256`: bounded file identities for review.
 
-Exit status `0` means every automated gate passed, `2` means the run completed
-but at least one gate rejected it, and `1` means setup, identity, transport, or
-schema validation failed. A reset, changed boot identity, wrong map receipt,
-stale/missing fixture markers, missing samples/screenshots, or malformed
-snapshot fails rather than producing an optimistic ranking.
+The app reports **Automated gates passed** only when every comparison and soak
+gate passes and the checked `current` cleanup is observed. A reset, changed boot
+identity, wrong map receipt, stale/missing fixture markers, missing samples or
+screenshots, malformed metrics, revoked session, or cleanup failure fails rather
+than producing an optimistic ranking. A completed ZIP is non-secret evidence;
+it is still not physical acceptance.
+
+`esp32/tools/renderer_benchmark.py` remains the protocol reference, host-tested
+evaluator, and ordinary-capture evaluator. Its direct remote endpoint mode is
+not the ordinary iOS workflow and must not be fed credentials copied from the
+app.
 
 ## Predeclared gates
 
-The checked-in gate file is
-`esp32/tools/renderer_benchmark_gates.json`. Its initial safety floors include
-32 KiB free/16 KiB largest internal-RAM block, 8 KiB free/2 KiB largest
+The canonical checked-in gate file is
+`esp32/tools/renderer_benchmark_gates.json`; the iOS Debug target embeds an
+exact byte-for-byte copy and host tests reject drift. Its initial safety floors
+include 32 KiB free/16 KiB largest internal-RAM block, 8 KiB free/2 KiB largest
 DMA-capable block, and 1.5 MB free/750 KiB largest PSRAM block. The DMA floor
 protects task-stack and hardware-crypto allocations that cannot fall back to
 PSRAM; any crypto headroom rejection or operation failure also rejects the
