@@ -259,10 +259,12 @@ Updated constants:
 
 #### [lib/storage/storage.cpp](file:///Users/chris/Documents/Workspace/esp32-bike-computer/IceNav-v3/lib/storage/storage.cpp)
 
-SD card initialization for Waveshare board (lines 68-126):
-- Uses Arduino `SD.begin()` in SPI mode (not SDMMC)
-- Pins: CS=21, CLK=14, MOSI=15, MISO=16
-- 1MHz initial speed with 400kHz fallback
+Current SD card initialization for both Waveshare boards:
+- Uses Arduino `SD_MMC` with the ESP32-S3 native controller in one-bit mode
+- Pins: CLK=2, CMD=1, D0=3; the board's D3/legacy-CS trace is unused
+- Defaults to the standard 20 MHz SDMMC frequency
+- Performs three bounded mount attempts with full `SD_MMC.end()` teardown,
+  card-type validation, and a root-directory health check
 
 FFat initialization (lines 230-262):
 - Mounts internal flash partition at `/sdcard` as fallback
@@ -270,7 +272,18 @@ FFat initialization (lines 230-262):
 
 #### [lib/storage/storage.hpp](file:///Users/chris/Documents/Workspace/esp32-bike-computer/IceNav-v3/lib/storage/storage.hpp)
 
-Added `#include <SD.h>` and `#include <FFat.h>` conditionally.
+The public storage interface remains backend-neutral. `storage.cpp` always
+tries `SD_MMC` first on Waveshare targets. Only after bounded native failure may
+it use the former isolated Arduino `SD`/HSPI transport as
+`legacy_spi_migration`; other boards retain their existing Arduino `SD`/SPI or
+ESP-IDF SDSPI backends.
+
+An existing card left in SPI mode by pre-migration firmware needs one complete
+card power cycle before native SDMMC can mount it. The temporary HSPI backend
+keeps maps available on that warm migration boot and reports the required
+action over BLE. This is a transport migration constraint, not a failure that
+additional `SD_MMC.end()` retries can repair; see the authoritative migration
+note in [hardware/README.md](../hardware/README.md#8-sd-card--map-io).
 
 ---
 
@@ -365,13 +378,13 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
 
 ---
 
-### 2. SD Card Failure After Touch (FIXED)
+### 2. SD Card Failure After Touch (historical HSPI fix, now superseded)
 
 **Problem:** SD card worked at boot but failed with "no token received" after touch/scroll interaction.
 
 **Root Cause:** Default SPI (FSPI/SPI2) shared internal resources with QSPI display driver. Display flush operations corrupted SD card SPI state.
 
-**Solution in `storage.cpp` — Use dedicated HSPI bus:**
+**Original solution in `storage.cpp` — use a dedicated HSPI bus:**
 ```cpp
 #ifdef WAVESHARE_AMOLED_175
   static SPIClass hspi(HSPI);  // Dedicated bus, isolated from QSPI
@@ -380,12 +393,22 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
 #endif
 ```
 
-**Solution in `main.cpp` — Init order matters:**
+**Original supporting order in `main.cpp`:**
 ```cpp
 // Display MUST init before SD card
 initTFT();    // Settles QSPI bus first
 storage.initSD();  // Then init SD on HSPI
 ```
+
+That fix documented the important invariant: storage must not share the
+display's SPI controller. It did not establish that SD must remain in SPI mode.
+Later 32 GB SDHC warm-reset testing still produced CMD0/CRC failures after full
+HSPI teardown. Waveshare's maintained 1.75 and 2.06 examples instead use the
+ESP32-S3 native one-bit `SD_MMC` peripheral on GPIO2/1/3.
+
+Current firmware follows that vendor path. `SD_MMC` and display QSPI are
+independent peripherals, so file opens no longer reinitialize any SPI bus and
+display-first ordering is retained only as established board bring-up order.
 
 ---
 
@@ -497,7 +520,7 @@ graph TD
         AMOLED["CO5300 466x466"]
         Touch["CST9217"]
         TCA["TCA9554 GPIO Exp"]
-        SD["SD Card (HSPI)"]
+        SD["SD Card (native 1-bit SDMMC)"]
         GPS["GPS Module"]
     end
 

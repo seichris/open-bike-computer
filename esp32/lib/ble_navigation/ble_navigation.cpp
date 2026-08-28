@@ -2106,6 +2106,10 @@ static std::string genericTransferStatusJson() {
             jsonEscape(transferStatus.lastErrorCode) + "\",\"message\":\"" +
             jsonEscape(transferStatus.lastErrorMessage) + "\"}";
   }
+  body += ",\"storage\":{\"backend\":\"" +
+          jsonEscape(storage.storageBackendName()) +
+          "\",\"powerCycleRequired\":" +
+          (storage.storagePowerCycleRequired() ? "true" : "false") + "}";
   firmware_update::FirmwareUpdateStatus firmwareStatus =
       firmwareUpdateHttp.status();
   body += ",\"firmware\":{\"status\":\"" +

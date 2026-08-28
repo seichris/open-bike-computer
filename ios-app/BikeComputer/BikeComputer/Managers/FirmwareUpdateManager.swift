@@ -106,6 +106,24 @@ struct PendingFirmwareUpdate: Codable, Equatable {
     var status: String
 }
 
+struct FirmwareStorageMigrationNotice: Codable, Equatable {
+    let deviceID: String
+    let target: String
+    let version: String
+    let build: Int
+    let gitSha: String
+    let detectedAt: Date
+
+    static let title = "Finish SD Card Upgrade"
+    static let statusMessage = "SD card upgrade needs one full power cycle"
+    static let completionStatus = "SD card upgrade complete"
+    static let instructions =
+        "Your maps are available in compatibility mode. Fully power the "
+        + "Bike Computer off, disconnect USB power, wait 10 seconds, then "
+        + "turn it on again. Bicino will clear this notice after the device "
+        + "confirms native SD card mode."
+}
+
 enum FirmwareManifestSignatureVerifier {
     static let publicKeyBase64 = "BLaIQlnOfdWu7uvpUR2V/Nhbk92m95BL+MP2ovOCAGkf4N0eDhMNH4cTiD8g6qm0IgAi2/xe0sNOMvCMGYwPlCs="
 
@@ -153,6 +171,9 @@ final class FirmwareUpdateManager: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var lastManifestURLString: String = ""
     @Published private(set) var isBusy = false
+    @Published private(set) var storageMigrationNotice:
+        FirmwareStorageMigrationNotice?
+    @Published private(set) var isStorageMigrationAlertPresented = false
 
     weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)? {
         didSet {
@@ -164,6 +185,7 @@ final class FirmwareUpdateManager: ObservableObject {
         static let manifestBaseURLKey = "firmware.manifestBaseURL"
         static let allowDowngradeKey = "firmware.allowDeveloperDowngrade"
         static let pendingUpdateKey = "firmware.pendingUpdate"
+        static let storageMigrationsKey = "firmware.storageMigrations.v1"
         static let defaultManifestBaseURL = "https://seichris.github.io/open-bike-computer/firmware"
     }
 
@@ -171,6 +193,8 @@ final class FirmwareUpdateManager: ObservableObject {
     private let session: URLSession
     private let deviceTransferManager = DeviceTransferManager()
     private var lastSuccessfulAutomaticCheckDeviceKey: String?
+    private var selectedStorageMigrationDeviceID: String?
+    private var alertedStorageMigrationDeviceIDs: Set<String> = []
 
     init(defaults: UserDefaults = .standard, session: URLSession = .shared) {
         self.defaults = defaults
@@ -274,7 +298,10 @@ final class FirmwareUpdateManager: ObservableObject {
                 self.updatePendingStatus(self.statusMessage)
                 try await self.waitForPostRebootVerification(bleManager: bleManager,
                                                              manifest: manifest)
-                self.statusMessage = "firmware update installed"
+                self.reconcileStorageMigrationStatus(bleManager: bleManager)
+                self.statusMessage = self.storageMigrationNotice == nil
+                    ? "firmware update installed"
+                    : FirmwareStorageMigrationNotice.statusMessage
                 self.clearPendingUpdate()
             }
         }
@@ -284,7 +311,95 @@ final class FirmwareUpdateManager: ObservableObject {
         bleManager.requestDeviceTransferStatus()
         Task {
             try? await Task.sleep(nanoseconds: 600_000_000)
+            self.reconcileStorageMigrationStatus(bleManager: bleManager)
             self.reconcilePendingUpdate(bleManager: bleManager)
+        }
+    }
+
+    func selectStorageMigrationDevice(_ deviceID: String?) {
+        if selectedStorageMigrationDeviceID != deviceID {
+            isStorageMigrationAlertPresented = false
+        }
+        selectedStorageMigrationDeviceID = deviceID
+
+        guard let deviceID else {
+            storageMigrationNotice = nil
+            isStorageMigrationAlertPresented = false
+            clearStorageMigrationStatusMessageIfNeeded()
+            return
+        }
+        storageMigrationNotice = loadStorageMigrations()[deviceID]
+        if storageMigrationNotice != nil {
+            statusMessage = FirmwareStorageMigrationNotice.statusMessage
+        } else {
+            clearStorageMigrationStatusMessageIfNeeded()
+        }
+        if storageMigrationNotice != nil,
+           !alertedStorageMigrationDeviceIDs.contains(deviceID) {
+            alertedStorageMigrationDeviceIDs.insert(deviceID)
+            isStorageMigrationAlertPresented = true
+        }
+    }
+
+    func reconcileStorageMigrationStatus(bleManager: BLEManager) {
+        guard let deviceID = bleManager.connectedDeviceID else { return }
+        if selectedStorageMigrationDeviceID != deviceID {
+            selectStorageMigrationDevice(deviceID)
+        }
+        var migrations = loadStorageMigrations()
+
+        if bleManager.deviceStorageBackend == "legacy_spi_migration",
+           bleManager.deviceStoragePowerCycleRequired == true {
+            let notice = migrations[deviceID] ?? FirmwareStorageMigrationNotice(
+                deviceID: deviceID,
+                target: bleManager.firmwareTarget,
+                version: bleManager.firmwareVersion,
+                build: bleManager.firmwareBuild,
+                gitSha: bleManager.firmwareGitSha,
+                detectedAt: Date()
+            )
+            migrations[deviceID] = notice
+            saveStorageMigrations(migrations)
+            storageMigrationNotice = notice
+            statusMessage = FirmwareStorageMigrationNotice.statusMessage
+            if !alertedStorageMigrationDeviceIDs.contains(deviceID) {
+                alertedStorageMigrationDeviceIDs.insert(deviceID)
+                isStorageMigrationAlertPresented = true
+            }
+            return
+        }
+
+        // Missing fields, FFat, an unavailable card, and unknown future
+        // backends are not proof that the card completed the migration. Only
+        // an explicit native-SDMMC status can clear a persisted warning.
+        if bleManager.deviceStorageBackend == "sdmmc",
+           bleManager.deviceStoragePowerCycleRequired == false {
+            let hadMigration = migrations.removeValue(forKey: deviceID) != nil
+            if hadMigration {
+                saveStorageMigrations(migrations)
+            }
+            if storageMigrationNotice?.deviceID == deviceID {
+                storageMigrationNotice = nil
+                isStorageMigrationAlertPresented = false
+            }
+            if hadMigration {
+                statusMessage = FirmwareStorageMigrationNotice.completionStatus
+            }
+            alertedStorageMigrationDeviceIDs.remove(deviceID)
+            return
+        }
+
+        storageMigrationNotice = migrations[deviceID]
+    }
+
+    func dismissStorageMigrationAlert() {
+        isStorageMigrationAlertPresented = false
+    }
+
+    private func clearStorageMigrationStatusMessageIfNeeded() {
+        if statusMessage == FirmwareStorageMigrationNotice.statusMessage ||
+            statusMessage == FirmwareStorageMigrationNotice.completionStatus {
+            statusMessage = ""
         }
     }
 
@@ -431,7 +546,9 @@ final class FirmwareUpdateManager: ObservableObject {
             bleManager.firmwareVersion == pending.version &&
             bleManager.firmwareBuild == pending.build &&
             bleManager.firmwareGitSha == pending.gitSha {
-            statusMessage = "firmware update installed"
+            statusMessage = storageMigrationNotice == nil
+                ? "firmware update installed"
+                : FirmwareStorageMigrationNotice.statusMessage
             clearPendingUpdate()
         } else if let error = bleManager.firmwareUpdateLastError {
             statusMessage = "firmware update failed: \(error)"
@@ -480,6 +597,28 @@ final class FirmwareUpdateManager: ObservableObject {
 
     private func clearPendingUpdate() {
         defaults.removeObject(forKey: Defaults.pendingUpdateKey)
+    }
+
+    private func loadStorageMigrations() ->
+        [String: FirmwareStorageMigrationNotice] {
+        guard let data = defaults.data(forKey: Defaults.storageMigrationsKey),
+              let migrations = try? JSONDecoder().decode(
+                  [String: FirmwareStorageMigrationNotice].self,
+                  from: data
+              ) else {
+            return [:]
+        }
+        return migrations
+    }
+
+    private func saveStorageMigrations(
+        _ migrations: [String: FirmwareStorageMigrationNotice]
+    ) {
+        if migrations.isEmpty {
+            defaults.removeObject(forKey: Defaults.storageMigrationsKey)
+        } else if let data = try? JSONEncoder().encode(migrations) {
+            defaults.set(data, forKey: Defaults.storageMigrationsKey)
+        }
     }
 
     private func runBusy(_ operation: @MainActor @escaping () async throws -> Void) async {

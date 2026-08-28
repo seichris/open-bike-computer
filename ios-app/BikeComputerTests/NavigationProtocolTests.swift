@@ -896,6 +896,7 @@ struct NavigationProtocolTests {
         testMapTransferDeviceStatusDecodesActivationFailure()
         testFirmwareManifestDecodingAndHash()
         testFirmwareUpdateManagerRestoresPendingStatus()
+        testFirmwareStorageMigrationFlow()
         testFirmwareUpdateAvailabilitySemantics()
         testFirmwareDeviceClientSendsSignedBeginRequest()
         await testOfflineMapRecoveryRoutes()
@@ -13039,6 +13040,134 @@ struct NavigationProtocolTests {
     }
 
     @MainActor
+    static func testFirmwareStorageMigrationFlow() {
+        let suiteName = "FirmwareStorageMigrationTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            assert(false, "test defaults should be available")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let deviceA = "device-a"
+        let deviceB = "device-b"
+        let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting(deviceA)
+        let manager = FirmwareUpdateManager(defaults: defaults)
+        manager.selectStorageMigrationDevice(deviceA)
+
+        func applyStorageStatus(
+            backend: String?,
+            powerCycleRequired: Bool?
+        ) {
+            var object: [String: Any] = [
+                "configured": true,
+                "enabled": false,
+                "firmware": [
+                    "status": "idle",
+                    "target": "WAVESHARE_AMOLED_175",
+                    "version": "0.4.0",
+                    "build": 87,
+                    "gitSha": "abcdef123456",
+                    "receivedBytes": 0,
+                    "totalBytes": 0
+                ]
+            ]
+            if let backend, let powerCycleRequired {
+                object["storage"] = [
+                    "backend": backend,
+                    "powerCycleRequired": powerCycleRequired
+                ]
+            }
+            let body = try! JSONSerialization.data(withJSONObject: object)
+            let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8)
+                + body
+            assert(
+                bleManager.handleDeviceTransferStatusNotification(packet),
+                "storage migration DSTS should be consumed"
+            )
+            manager.reconcileStorageMigrationStatus(bleManager: bleManager)
+        }
+
+        applyStorageStatus(
+            backend: "legacy_spi_migration",
+            powerCycleRequired: true
+        )
+        assertEqual(manager.storageMigrationNotice?.deviceID,
+                    deviceA,
+                    "legacy compatibility mode creates a device-scoped notice")
+        assert(manager.isStorageMigrationAlertPresented,
+               "legacy compatibility mode presents the user-facing action")
+        assertEqual(manager.statusMessage,
+                    FirmwareStorageMigrationNotice.statusMessage,
+                    "firmware status remains actionable while migration is pending")
+
+        bleManager.setConnectedDeviceIDForTesting(deviceB)
+        manager.selectStorageMigrationDevice(deviceB)
+        assert(manager.storageMigrationNotice == nil,
+               "another device does not inherit the migration notice")
+        assert(!manager.isStorageMigrationAlertPresented,
+               "another device does not inherit the migration alert")
+        assert(manager.statusMessage != FirmwareStorageMigrationNotice.statusMessage,
+               "another device does not inherit the migration status text")
+
+        bleManager.setConnectedDeviceIDForTesting(deviceA)
+        manager.selectStorageMigrationDevice(deviceA)
+        manager.dismissStorageMigrationAlert()
+        let restored = FirmwareUpdateManager(defaults: defaults)
+        restored.selectStorageMigrationDevice(deviceA)
+        assertEqual(restored.storageMigrationNotice?.deviceID,
+                    deviceA,
+                    "migration guidance survives app relaunch")
+        assert(restored.isStorageMigrationAlertPresented,
+               "migration guidance is presented again after app relaunch")
+
+        // Firmware predating the optional storage object and an FFat fallback
+        // are not proof of native SDMMC, so neither may clear the notice.
+        applyStorageStatus(backend: nil, powerCycleRequired: nil)
+        assertEqual(manager.storageMigrationNotice?.deviceID,
+                    deviceA,
+                    "legacy DSTS without storage fields preserves the notice")
+        applyStorageStatus(backend: "ffat", powerCycleRequired: false)
+        assertEqual(manager.storageMigrationNotice?.deviceID,
+                    deviceA,
+                    "internal fallback does not falsely complete migration")
+
+        bleManager.setConnectedDeviceIDForTesting(deviceB)
+        manager.selectStorageMigrationDevice(deviceB)
+        applyStorageStatus(backend: "sdmmc", powerCycleRequired: false)
+        manager.selectStorageMigrationDevice(deviceA)
+        assertEqual(manager.storageMigrationNotice?.deviceID,
+                    deviceA,
+                    "native status from another device cannot clear this device")
+
+        bleManager.setConnectedDeviceIDForTesting(deviceA)
+        applyStorageStatus(backend: "sdmmc", powerCycleRequired: false)
+        assert(manager.storageMigrationNotice == nil,
+               "only native SDMMC on the same device clears the notice")
+        assertEqual(manager.statusMessage,
+                    FirmwareStorageMigrationNotice.completionStatus,
+                    "native confirmation reports migration completion")
+
+        let settingsURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift"
+        )
+        let settingsSource = try? String(
+            contentsOf: settingsURL,
+            encoding: .utf8
+        )
+        assert(
+            settingsSource?.contains(
+                "FirmwareStorageMigrationNotice.title"
+            ) == true &&
+                settingsSource?.contains(
+                    "Section(header: Text(\"SD Card Upgrade\"))"
+                ) == true &&
+                settingsSource?.contains("Check Device Again") == true,
+            "Settings presents both the one-time alert and persistent recovery section"
+        )
+    }
+
+    @MainActor
     static func testFirmwareUpdateAvailabilitySemantics() {
         let suiteName = "FirmwareUpdateAvailabilityTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
@@ -19865,7 +19994,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","lastError":{"code":"transfer_busy","message":"another transfer mode is active"},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","lastError":{"code":"transfer_busy","message":"another transfer mode is active"},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -19883,6 +20012,12 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceTransferSessionToken, "abc123", "status parser exposes session token")
         assertEqual(manager.deviceTransferLastErrorCode, "transfer_busy", "status parser exposes transfer error code")
         assertEqual(manager.deviceTransferLastErrorMessage, "another transfer mode is active", "status parser exposes transfer error message")
+        assertEqual(manager.deviceStorageBackend,
+                    "legacy_spi_migration",
+                    "status parser exposes the active storage backend")
+        assertEqual(manager.deviceStoragePowerCycleRequired,
+                    true,
+                    "status parser exposes the one-time card power-cycle requirement")
         assertEqual(manager.firmwareTarget, "WAVESHARE_AMOLED_206", "status parser exposes firmware target")
         assertEqual(manager.firmwareVersion, "0.2.2", "status parser exposes firmware version")
         assertEqual(manager.firmwareBuild, 86, "status parser exposes firmware build")

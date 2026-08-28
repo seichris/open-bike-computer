@@ -899,6 +899,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceTransferLastErrorCode: String?
     @Published private(set) var deviceTransferLastErrorMessage: String?
     @Published private(set) var deviceTransferStatusRevision: UInt64 = 0
+    @Published private(set) var deviceStorageBackend: String?
+    @Published private(set) var deviceStoragePowerCycleRequired: Bool?
     @Published var firmwareTarget: String = ""
     @Published var firmwareVersion: String = ""
     @Published var firmwareBuild: Int = 0
@@ -5329,6 +5331,8 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferLastErrorCode = nil
         deviceTransferLastErrorMessage = nil
         deviceTransferStatusRevision = 0
+        deviceStorageBackend = nil
+        deviceStoragePowerCycleRequired = nil
         firmwareUpdateStatus = "unknown"
         firmwareTarget = ""
         firmwareVersion = ""
@@ -8433,6 +8437,16 @@ extension BLEManager: CBPeripheralDelegate {
         } else {
             deviceTransferLastErrorCode = nil
             deviceTransferLastErrorMessage = nil
+        }
+        if let storage = object["storage"] as? [String: Any] {
+            deviceStorageBackend = storage["backend"] as? String
+            deviceStoragePowerCycleRequired =
+                storage["powerCycleRequired"] as? Bool
+        } else {
+            // Optional for compatibility with firmware released before the
+            // native-SDMMC migration protocol extension.
+            deviceStorageBackend = nil
+            deviceStoragePowerCycleRequired = nil
         }
         deviceTransferStatusRevision &+= 1
 

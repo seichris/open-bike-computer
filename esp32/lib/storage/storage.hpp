@@ -38,6 +38,14 @@ struct SDCardInfo {
   std::string used_space;
 };
 
+enum class StorageBackend : uint8_t {
+  Unavailable,
+  NativeSdmmc,
+  LegacySpiMigration,
+  RemovableSpi,
+  InternalFFat,
+};
+
 class FileStream : public Stream {
 public:
   FileStream(FILE *file) : file(file) {}
@@ -121,6 +129,10 @@ private:
   // Recorder health is separate from the physical mount. A write fault must
   // not unmount SD beneath map/font readers or an in-flight diagnostics GET.
   std::atomic<bool> diagnosticsSdHealthy{true};
+  // Tracks the concrete owner of /sdcard. Waveshare firmware can temporarily
+  // use the historical isolated SPI transport only when native SDMMC fails
+  // during the HSPI-to-SDMMC migration boot.
+  std::atomic<StorageBackend> mountedBackend{StorageBackend::Unavailable};
   std::atomic<ride_diagnostics::transfer_policy::StoragePreparation>
       lastDiagnosticsMountResult{
           ride_diagnostics::transfer_policy::StoragePreparation::MountFailed};
@@ -137,6 +149,9 @@ public:
   bool ensureSdMounted(bool allowInternalFallback = true);
   void markSdUnavailable();
   bool hasInternalFallbackMounted() const;
+  StorageBackend storageBackend() const;
+  const char *storageBackendName() const;
+  bool storagePowerCycleRequired() const;
   bool canRetryRemovableSd() const;
   uint64_t removableSdFreeBytes() const;
   ride_diagnostics::transfer_policy::StoragePreparation

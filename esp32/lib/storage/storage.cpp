@@ -7,7 +7,9 @@
  */
 
 #include "storage.hpp"
+#include "sd_mount_retry_policy.hpp"
 #include "storage_mount_policy.hpp"
+#include "waveshare_storage_migration_policy.hpp"
 #include "../power_management/power_management.hpp"
 #include "driver/gpio.h"
 #include "driver/sdspi_host.h"
@@ -15,8 +17,11 @@
 #include "esp_vfs_fat.h"
 #include "freertos/task.h"
 #include <SD.h>
-#include <FFat.h>
 #include <SPI.h>
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#include <SD_MMC.h>
+#endif
+#include <FFat.h>
 #include <Wire.h>
 #include <cmath>
 #include <hal.hpp>
@@ -25,19 +30,21 @@
 
 #define SD_OCR_SDHC_CAP (1 << 30)
 
-// extern const uint8_t SD_CS;
-// extern const uint8_t SD_MISO;
-// extern const uint8_t SD_MOSI;
-// extern const uint8_t SD_CLK;
-
 static const char *TAG = "Storage";
 
 namespace {
-#ifndef WAVESHARE_SD_SPI_FREQ_HZ
-#define WAVESHARE_SD_SPI_FREQ_HZ 4000000
+#ifndef WAVESHARE_SDMMC_FREQ_KHZ
+#define WAVESHARE_SDMMC_FREQ_KHZ SDMMC_FREQ_DEFAULT
+#endif
+#ifndef WAVESHARE_SD_MIGRATION_SPI_FREQ_HZ
+#define WAVESHARE_SD_MIGRATION_SPI_FREQ_HZ 4000000
 #endif
 
 using ride_diagnostics::transfer_policy::StoragePreparation;
+
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+void endWaveshareMigrationBus();
+#endif
 
 bool mountedDirectoryAvailable(const char *root) {
   struct stat mounted = {};
@@ -63,10 +70,88 @@ bool writableProbeSucceeded(const char *root) {
   return wrote && flushed && closed && removed;
 }
 
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
+    defined(SPI_SHARED)
+uint8_t removableCardType(StorageBackend backend) {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-SPIClass &waveshareSdBus() {
+  return backend == StorageBackend::LegacySpiMigration ? SD.cardType()
+                                                        : SD_MMC.cardType();
+#else
+  (void)backend;
+  return SD.cardType();
+#endif
+}
+
+File openRemovableRoot(StorageBackend backend) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  return backend == StorageBackend::LegacySpiMigration ? SD.open("/")
+                                                        : SD_MMC.open("/");
+#else
+  (void)backend;
+  return SD.open("/");
+#endif
+}
+
+uint64_t removableCardSize(StorageBackend backend) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  return backend == StorageBackend::LegacySpiMigration ? SD.cardSize()
+                                                        : SD_MMC.cardSize();
+#else
+  (void)backend;
+  return SD.cardSize();
+#endif
+}
+
+uint64_t removableTotalBytes(StorageBackend backend) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  return backend == StorageBackend::LegacySpiMigration ? SD.totalBytes()
+                                                        : SD_MMC.totalBytes();
+#else
+  (void)backend;
+  return SD.totalBytes();
+#endif
+}
+
+uint64_t removableUsedBytes(StorageBackend backend) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  return backend == StorageBackend::LegacySpiMigration ? SD.usedBytes()
+                                                        : SD_MMC.usedBytes();
+#else
+  (void)backend;
+  return SD.usedBytes();
+#endif
+}
+
+void endRemovableStorage(StorageBackend backend) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  if (backend == StorageBackend::LegacySpiMigration) {
+    endWaveshareMigrationBus();
+  } else {
+    SD_MMC.end();
+  }
+#else
+  (void)backend;
+  SD.end();
+#endif
+}
+#endif
+
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+SPIClass &waveshareMigrationBus() {
   static SPIClass bus(HSPI);
   return bus;
+}
+
+bool waveshareMigrationBusBegun = false;
+
+void endWaveshareMigrationBus() {
+  SD.end();
+  if (waveshareMigrationBusBegun) {
+    waveshareMigrationBus().end();
+    waveshareMigrationBusBegun = false;
+  }
+  pinMode(WAVESHARE_LEGACY_SD_CS, OUTPUT);
+  digitalWrite(WAVESHARE_LEGACY_SD_CS, HIGH);
 }
 #endif
 
@@ -105,9 +190,10 @@ bool Storage::ensureSdMounted(bool allowInternalFallback) {
                S_ISDIR(mounted.st_mode);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
     defined(SPI_SHARED)
-  ready = ready && SD.cardType() != CARD_NONE;
+  const StorageBackend activeBackend = mountedBackend.load();
+  ready = ready && removableCardType(activeBackend) != CARD_NONE;
   if (ready) {
-    File root = SD.open("/");
+    File root = openRemovableRoot(activeBackend);
     ready = static_cast<bool>(root);
     root.close();
   }
@@ -131,7 +217,8 @@ bool Storage::ensureSdMounted(bool allowInternalFallback) {
         storage_mount_policy::shouldRestoreFallbackAfterFailedRetry(
             allowInternalFallback, internalFallbackMounted.load());
     FFat.end();
-    SD.end();
+    endRemovableStorage(mountedBackend.load());
+    mountedBackend = StorageBackend::Unavailable;
     delay(25);
 #endif
     ready = initSD() == ESP_OK;
@@ -150,6 +237,34 @@ bool Storage::hasInternalFallbackMounted() const {
   return internalFallbackMounted.load();
 }
 
+StorageBackend Storage::storageBackend() const {
+  if (internalFallbackMounted.load())
+    return StorageBackend::InternalFFat;
+  if (!isSdLoaded.load())
+    return StorageBackend::Unavailable;
+  return mountedBackend.load();
+}
+
+const char *Storage::storageBackendName() const {
+  switch (storageBackend()) {
+  case StorageBackend::NativeSdmmc:
+    return "sdmmc";
+  case StorageBackend::LegacySpiMigration:
+    return "legacy_spi_migration";
+  case StorageBackend::RemovableSpi:
+    return "spi";
+  case StorageBackend::InternalFFat:
+    return "ffat";
+  case StorageBackend::Unavailable:
+  default:
+    return "unavailable";
+  }
+}
+
+bool Storage::storagePowerCycleRequired() const {
+  return storageBackend() == StorageBackend::LegacySpiMigration;
+}
+
 bool Storage::canRetryRemovableSd() const {
   return storage_mount_policy::shouldAttemptAutomaticRemovableRetry(
       isSdLoaded.load(), internalFallbackMounted.load());
@@ -162,8 +277,9 @@ uint64_t Storage::removableSdFreeBytes() const {
     return 0;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
     defined(SPI_SHARED)
-  const uint64_t total = SD.totalBytes();
-  const uint64_t used = SD.usedBytes();
+  const StorageBackend activeBackend = mountedBackend.load();
+  const uint64_t total = removableTotalBytes(activeBackend);
+  const uint64_t used = removableUsedBytes(activeBackend);
   return total > used ? total - used : 0;
 #else
   // Persistent diagnostics is enabled only on the Waveshare targets. Other
@@ -193,7 +309,8 @@ StoragePreparation Storage::prepareDiagnosticsStorage() {
     }
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
     defined(SPI_SHARED)
-    else if (!internalMounted && SD.cardType() == CARD_NONE) {
+    else if (!internalMounted &&
+             removableCardType(mountedBackend.load()) == CARD_NONE) {
       result = StoragePreparation::CardMissing;
     }
 #endif
@@ -251,8 +368,9 @@ uint64_t Storage::diagnosticsSdFreeBytes() const {
     const uint64_t used = FFat.usedBytes();
     return total > used ? total - used : 0;
   }
-  const uint64_t total = SD.totalBytes();
-  const uint64_t used = SD.usedBytes();
+  const StorageBackend activeBackend = mountedBackend.load();
+  const uint64_t total = removableTotalBytes(activeBackend);
+  const uint64_t used = removableUsedBytes(activeBackend);
   return total > used ? total - used : 0;
 #else
   return UINT64_MAX;
@@ -264,70 +382,223 @@ const char *Storage::diagnosticsRootPath() const {
 }
 
 /**
- * @brief SD Card init with DMA using ESP-IDF
+ * @brief Initialize removable storage with the active board backend
  */
 esp_err_t Storage::initSD() {
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   const uint32_t mountStartMs = millis();
-  // Waveshare AMOLED boards: use dedicated HSPI to avoid conflict with the
-  // QSPI display. The default SPI (FSPI) shares resources with the display.
-  // NOTE: Use HSPI constant, not SPI3_HOST (which fails with "out of range")
-  // See hardware/README.md for variant-specific CS pins.
+  uint8_t mountedCardType = CARD_NONE;
+  uint64_t mountedCardSize = 0;
+  bool observedCardMissing = false;
+  std::size_t nativeAttempts = 0;
+  std::size_t legacyAttempts = 0;
 
-  Serial.printf("SDIO: init bus=HSPI freq=%luHz pins[cs=%d mosi=%d miso=%d "
-                "sck=%d]\n",
-                (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ, SD_CS, SD_MOSI,
-                SD_MISO, SD_CLK);
+  // Both Waveshare boards route CLK/CMD/D0 to the ESP32-S3 native SDMMC
+  // peripheral. One-bit mode leaves the board's SPI CS/D3 trace unused and
+  // keeps storage independent from the AMOLED QSPI controller. The former
+  // HSPI transport is attempted only when this native mount fails, allowing a
+  // still-powered card left in SPI mode by pre-migration firmware to keep maps
+  // available until the rider performs one complete card power cycle.
+  Serial.printf(
+      "SDIO: init bus=SDMMC mode=1bit freqKHz=%lu "
+      "pins[clk=%d cmd=%d d0=%d]\n",
+      (unsigned long)WAVESHARE_SDMMC_FREQ_KHZ, WAVESHARE_SDMMC_CLK,
+      WAVESHARE_SDMMC_CMD, WAVESHARE_SDMMC_D0);
 
-  // Explicitly set CS as output and deselect before SPI init
-  pinMode(SD_CS, OUTPUT);
-  digitalWrite(SD_CS, HIGH);
+  const auto migrationResult =
+      waveshare_storage_migration_policy::mountNativeFirst(
+          [&]() {
+            const auto mountResult =
+                storage_mount_retry_policy::runMountSequence(
+                    []() { SD_MMC.end(); },
+                    [](uint32_t delayMs) {
+                      Serial.printf(
+                          "SDIO: recovery action=sdmmc-teardown delayMs=%lu\n",
+                          (unsigned long)delayMs);
+                      delay(delayMs);
+                    },
+                    [&](std::size_t attempt) {
+                      const uint32_t attemptStartMs = millis();
+                      Serial.printf(
+                          "SDIO: attempt=%u/%u phase=begin bus=SDMMC "
+                          "mode=1bit freqKHz=%lu\n",
+                          static_cast<unsigned>(attempt),
+                          static_cast<unsigned>(
+                              storage_mount_retry_policy::kMountAttemptCount),
+                          (unsigned long)WAVESHARE_SDMMC_FREQ_KHZ);
 
-  // Create dedicated HSPI instance to isolate from QSPI display
-  SPIClass &hspi = waveshareSdBus();
-  hspi.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
+                      const bool pinsConfigured = SD_MMC.setPins(
+                          WAVESHARE_SDMMC_CLK, WAVESHARE_SDMMC_CMD,
+                          WAVESHARE_SDMMC_D0);
+                      const bool mounted =
+                          pinsConfigured &&
+                          SD_MMC.begin("/sdcard", true, false,
+                                       WAVESHARE_SDMMC_FREQ_KHZ, 5);
+                      uint8_t cardType = CARD_NONE;
+                      bool rootHealthy = false;
+                      if (mounted) {
+                        cardType = SD_MMC.cardType();
+                        observedCardMissing =
+                            observedCardMissing || cardType == CARD_NONE;
+                        if (cardType != CARD_NONE) {
+                          File root = SD_MMC.open("/");
+                          rootHealthy = static_cast<bool>(root);
+                          root.close();
+                        }
+                      }
 
-  if (!SD.begin(SD_CS, hspi, WAVESHARE_SD_SPI_FREQ_HZ, "/sdcard")) {
-    ESP_LOGE(TAG, "SD Card Mount Failed - check card insertion and format");
-    Serial.printf("SDIO: mount ok=0 elapsedMs=%lu freq=%lu\n",
-                  (unsigned long)(millis() - mountStartMs),
-                  (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ);
+                      Serial.printf(
+                          "SDIO: attempt=%u/%u phase=mount bus=SDMMC "
+                          "pins=%u mounted=%u card=%u root=%u elapsedMs=%lu\n",
+                          static_cast<unsigned>(attempt),
+                          static_cast<unsigned>(
+                              storage_mount_retry_policy::kMountAttemptCount),
+                          pinsConfigured ? 1U : 0U, mounted ? 1U : 0U,
+                          cardType != CARD_NONE ? 1U : 0U,
+                          rootHealthy ? 1U : 0U,
+                          (unsigned long)(millis() - attemptStartMs));
+
+                      if (mounted && cardType != CARD_NONE && rootHealthy) {
+                        mountedCardType = cardType;
+                        mountedCardSize = SD_MMC.cardSize();
+                      }
+                      return storage_mount_retry_policy::MountAttemptResult{
+                          mounted && cardType != CARD_NONE, rootHealthy};
+                    });
+            nativeAttempts = mountResult.attempts;
+            if (!mountResult.ok) {
+              SD_MMC.end();
+              Serial.printf(
+                  "SDIO: native-summary ok=0 attempts=%u elapsedMs=%lu "
+                  "next=legacy_spi_migration\n",
+                  static_cast<unsigned>(nativeAttempts),
+                  (unsigned long)(millis() - mountStartMs));
+            }
+            return mountResult.ok;
+          },
+          [&]() {
+            Serial.printf(
+                "SDIO: compatibility bus=HSPI reason=native_mount_failed "
+                "freqHz=%lu pins[cs=%d mosi=%d miso=%d sck=%d]\n",
+                (unsigned long)WAVESHARE_SD_MIGRATION_SPI_FREQ_HZ,
+                WAVESHARE_LEGACY_SD_CS, WAVESHARE_LEGACY_SD_MOSI,
+                WAVESHARE_LEGACY_SD_MISO, WAVESHARE_LEGACY_SD_CLK);
+            const auto mountResult =
+                storage_mount_retry_policy::runMountSequence(
+                    []() { endWaveshareMigrationBus(); },
+                    [](uint32_t delayMs) {
+                      Serial.printf(
+                          "SDIO: recovery action=legacy-spi-teardown "
+                          "delayMs=%lu\n",
+                          (unsigned long)delayMs);
+                      delay(delayMs);
+                    },
+                    [&](std::size_t attempt) {
+                      const uint32_t attemptStartMs = millis();
+                      SPIClass &migrationBus = waveshareMigrationBus();
+                      migrationBus.begin(
+                          WAVESHARE_LEGACY_SD_CLK,
+                          WAVESHARE_LEGACY_SD_MISO,
+                          WAVESHARE_LEGACY_SD_MOSI,
+                          WAVESHARE_LEGACY_SD_CS);
+                      waveshareMigrationBusBegun = true;
+                      const bool mounted = SD.begin(
+                          WAVESHARE_LEGACY_SD_CS, migrationBus,
+                          WAVESHARE_SD_MIGRATION_SPI_FREQ_HZ, "/sdcard");
+                      uint8_t cardType = CARD_NONE;
+                      bool rootHealthy = false;
+                      if (mounted) {
+                        cardType = SD.cardType();
+                        observedCardMissing =
+                            observedCardMissing || cardType == CARD_NONE;
+                        if (cardType != CARD_NONE) {
+                          File root = SD.open("/");
+                          rootHealthy = static_cast<bool>(root);
+                          root.close();
+                        }
+                      }
+                      Serial.printf(
+                          "SDIO: attempt=%u/%u phase=mount bus=HSPI "
+                          "mounted=%u card=%u root=%u elapsedMs=%lu\n",
+                          static_cast<unsigned>(attempt),
+                          static_cast<unsigned>(
+                              storage_mount_retry_policy::kMountAttemptCount),
+                          mounted ? 1U : 0U,
+                          cardType != CARD_NONE ? 1U : 0U,
+                          rootHealthy ? 1U : 0U,
+                          (unsigned long)(millis() - attemptStartMs));
+                      if (mounted && cardType != CARD_NONE && rootHealthy) {
+                        mountedCardType = cardType;
+                        mountedCardSize = SD.cardSize();
+                      }
+                      return storage_mount_retry_policy::MountAttemptResult{
+                          mounted && cardType != CARD_NONE, rootHealthy};
+                    });
+            legacyAttempts = mountResult.attempts;
+            if (!mountResult.ok)
+              endWaveshareMigrationBus();
+            return mountResult.ok;
+          });
+
+  if (migrationResult.backend ==
+      waveshare_storage_migration_policy::Backend::Unavailable) {
+    SD_MMC.end();
+    endWaveshareMigrationBus();
+    ESP_LOGE(TAG,
+             "Native SDMMC and migration SPI mounts failed after bounded recovery");
+    Serial.printf("SDIO: summary ok=0 nativeAttempts=%u legacyAttempts=%u "
+                  "totalElapsedMs=%lu next=ffat\n",
+                  static_cast<unsigned>(nativeAttempts),
+                  static_cast<unsigned>(legacyAttempts),
+                  (unsigned long)(millis() - mountStartMs));
     isSdLoaded = false;
-    lastDiagnosticsMountResult = StoragePreparation::MountFailed;
-    return ESP_FAIL;
-  }
-
-  uint8_t cardType = SD.cardType();
-  if (cardType == CARD_NONE) {
-    ESP_LOGE(TAG, "No SD card detected");
-    Serial.printf("SDIO: mount ok=0 elapsedMs=%lu freq=%lu card=none\n",
-                  (unsigned long)(millis() - mountStartMs),
-                  (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ);
-    isSdLoaded = false;
-    lastDiagnosticsMountResult = StoragePreparation::CardMissing;
+    mountedBackend = StorageBackend::Unavailable;
+    diagnosticsSdHealthy = false;
+    lastDiagnosticsMountResult =
+        observedCardMissing ? StoragePreparation::CardMissing
+                            : StoragePreparation::MountFailed;
     return ESP_FAIL;
   }
 
   const char *typeStr = "UNKNOWN";
-  if (cardType == CARD_MMC)
+  if (mountedCardType == CARD_MMC)
     typeStr = "MMC";
-  else if (cardType == CARD_SD)
+  else if (mountedCardType == CARD_SD)
     typeStr = "SD";
-  else if (cardType == CARD_SDHC)
+  else if (mountedCardType == CARD_SDHC)
     typeStr = "SDHC";
 
   ESP_LOGI(TAG, "SD Card Type: %s, Size: %lluMB", typeStr,
-           SD.cardSize() / (1024 * 1024));
-  Serial.printf("SDIO: mount ok=1 elapsedMs=%lu freq=%lu type=%s sizeMB=%llu\n",
-                (unsigned long)(millis() - mountStartMs),
-                (unsigned long)WAVESHARE_SD_SPI_FREQ_HZ, typeStr,
-                SD.cardSize() / (1024 * 1024));
+           mountedCardSize / (1024 * 1024));
+  if (migrationResult.backend ==
+      waveshare_storage_migration_policy::Backend::NativeSdmmc) {
+    mountedBackend = StorageBackend::NativeSdmmc;
+    Serial.printf(
+        "SDIO: summary ok=1 backend=sdmmc attempts=%u totalElapsedMs=%lu "
+        "mode=1bit freqKHz=%lu type=%s sizeMB=%llu "
+        "powerCycleRequired=0\n",
+        static_cast<unsigned>(nativeAttempts),
+        (unsigned long)(millis() - mountStartMs),
+        (unsigned long)WAVESHARE_SDMMC_FREQ_KHZ, typeStr,
+        mountedCardSize / (1024 * 1024));
+  } else {
+    mountedBackend = StorageBackend::LegacySpiMigration;
+    Serial.printf(
+        "SDIO: summary ok=1 backend=legacy_spi_migration "
+        "nativeAttempts=%u legacyAttempts=%u totalElapsedMs=%lu "
+        "freqHz=%lu type=%s sizeMB=%llu powerCycleRequired=1\n",
+        static_cast<unsigned>(nativeAttempts),
+        static_cast<unsigned>(legacyAttempts),
+        (unsigned long)(millis() - mountStartMs),
+        (unsigned long)WAVESHARE_SD_MIGRATION_SPI_FREQ_HZ, typeStr,
+        mountedCardSize / (1024 * 1024));
+  }
 
 #ifdef WAVESHARE_SD_LIST_ROOT
   Serial.println("SDIO: root listing enabled");
-  File root = SD.open("/");
+  File root = openRemovableRoot(mountedBackend.load());
   if (root) {
     File file = root.openNextFile();
     while (file) {
@@ -357,11 +628,13 @@ esp_err_t Storage::initSD() {
   if (!SD.begin(SD_CS, SPI, 4000000, "/sdcard")) {
     ESP_LOGE(TAG, "SD Card Mount Failed");
     isSdLoaded = false;
+    mountedBackend = StorageBackend::Unavailable;
     lastDiagnosticsMountResult = StoragePreparation::MountFailed;
     return ESP_FAIL;
   } else {
     ESP_LOGI(TAG, "SD Card Mounted");
     isSdLoaded = true;
+    mountedBackend = StorageBackend::RemovableSpi;
     internalFallbackMounted = false;
     diagnosticsSdHealthy = true;
     lastDiagnosticsMountResult = StoragePreparation::ReadyRemovable;
@@ -434,12 +707,14 @@ esp_err_t Storage::initSD() {
       ESP_LOGE(TAG, "Failed to initialize the card (%s).",
                esp_err_to_name(ret));
     }
+    mountedBackend = StorageBackend::Unavailable;
     lastDiagnosticsMountResult = StoragePreparation::MountFailed;
     return ret;
   } else {
     ESP_LOGI(TAG, "SD card initialized successfully");
     sdmmc_card_print_info(stdout, card);
     isSdLoaded = true;
+    mountedBackend = StorageBackend::RemovableSpi;
     internalFallbackMounted = false;
     diagnosticsSdHealthy = true;
     lastDiagnosticsMountResult = StoragePreparation::ReadyRemovable;
@@ -469,6 +744,7 @@ esp_err_t Storage::initSPIFFS() {
   if (!FFat.begin(true, "/sdcard", 20, "ffat")) {
     ESP_LOGE(TAG, "FFat Mount Failed");
     internalFallbackMounted = false;
+    mountedBackend = StorageBackend::Unavailable;
     return ESP_FAIL;
   }
 
@@ -476,6 +752,7 @@ esp_err_t Storage::initSPIFFS() {
   size_t used = FFat.usedBytes();
   ESP_LOGI(TAG, "FFat Mounted at /sdcard. Total: %d, Used: %d", total, used);
   internalFallbackMounted = true;
+  mountedBackend = StorageBackend::InternalFFat;
   diagnosticsSdHealthy = true;
 
 #ifdef WAVESHARE_SD_LIST_ROOT
@@ -507,9 +784,30 @@ esp_err_t Storage::initSPIFFS() {
 SDCardInfo Storage::getSDCardInfo() {
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
-  SDCardInfo info;
+  SDCardInfo info{};
 
-#ifndef SPI_SHARED
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
+    defined(SPI_SHARED)
+  const StorageBackend activeBackend = mountedBackend.load();
+  const uint8_t cardType = removableCardType(activeBackend);
+  if (cardType == CARD_MMC)
+    info.card_type = "MMC";
+  else if (cardType == CARD_SD)
+    info.card_type = "SDSC";
+  else if (cardType == CARD_SDHC)
+    info.card_type = "SDHC";
+  else
+    info.card_type = "UNKNOWN";
+
+  const uint64_t cardSize = removableCardSize(activeBackend);
+  const uint64_t totalBytes = removableTotalBytes(activeBackend);
+  const uint64_t usedBytes = removableUsedBytes(activeBackend);
+  info.capacity = formatSize(cardSize);
+  info.total_space = formatSize(totalBytes);
+  info.free_space =
+      formatSize(totalBytes > usedBytes ? totalBytes - usedBytes : 0);
+  info.used_space = formatSize(usedBytes);
+#else
   if (card != nullptr) {
     info.name = std::string(reinterpret_cast<const char *>(card->cid.name));
     info.capacity =
@@ -540,20 +838,6 @@ SDCardInfo Storage::getSDCardInfo() {
     }
   } else
     ESP_LOGE(TAG, "SD Card not initialized");
-#else
-  uint8_t cardType = SD.cardType();
-  if (cardType == CARD_MMC)
-    info.card_type = "MMC";
-  else if (cardType == CARD_SD)
-    info.card_type = "SDSC";
-  else if (cardType == CARD_SDHC)
-    info.card_type = "SDHC";
-  else
-    info.card_type = "UNKNOWN";
-
-  info.total_space = formatSize(SD.cardSize());
-  info.free_space = formatSize((SD.totalBytes() - SD.usedBytes()));
-  info.used_space = formatSize(SD.usedBytes());
 #endif
 
   return info;
@@ -576,13 +860,6 @@ bool Storage::getSdLoaded() const { return isSdLoaded.load(); }
 FILE *Storage::open(const char *path, const char *mode) {
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  // Reconfigure SPI bus before SD access - QSPI display operations may have
-  // altered SPI state. The card is mounted on the dedicated HSPI instance;
-  // reinitializing the global FSPI object here does not configure the card
-  // bus and can disturb an unrelated peripheral.
-  waveshareSdBus().begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
-#endif
   return fopen(path, mode);
 }
 
