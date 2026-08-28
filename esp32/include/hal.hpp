@@ -221,4 +221,15 @@ constexpr uint8_t TCH_I2C_ADDR = 0x5A; // CST9217 Address (verified)
 constexpr uint8_t WAVESHARE_SDMMC_CLK = GPIO_NUM_2;
 constexpr uint8_t WAVESHARE_SDMMC_CMD = GPIO_NUM_1;
 constexpr uint8_t WAVESHARE_SDMMC_D0 = GPIO_NUM_3;
+
+// Temporary migration-only SPI compatibility path. These are the former HSPI
+// pins; normal steady-state storage must use the native SDMMC constants above.
+#ifdef WAVESHARE_AMOLED_206
+constexpr uint8_t WAVESHARE_LEGACY_SD_CS = GPIO_NUM_17;
+#else
+constexpr uint8_t WAVESHARE_LEGACY_SD_CS = GPIO_NUM_41;
+#endif
+constexpr uint8_t WAVESHARE_LEGACY_SD_MOSI = GPIO_NUM_1;
+constexpr uint8_t WAVESHARE_LEGACY_SD_MISO = GPIO_NUM_3;
+constexpr uint8_t WAVESHARE_LEGACY_SD_CLK = GPIO_NUM_2;
 #endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

@@ -28,9 +28,11 @@ rendered an uploaded map after a true card power cycle, and subsequent resets
 mounted on the first attempt. The initial warm transition from HSPI firmware did
 not mount because the still-powered card remained in SPI mode. This is an SD
 protocol constraint, not a retry-policy failure: the rollout must include a
-one-time full-card-power-cycle step or a separately tested compatibility path.
-Steady-state SDMMC warm-reset acceptance and the remaining hardware matrix stay
-as gates.
+native-first compatibility path that keeps the old card accessible and a
+user-facing one-time full-card-power-cycle step. The implemented candidate
+reports compatibility mode over authenticated `DSTS`; exact-head physical
+migration acceptance, steady-state SDMMC warm-reset acceptance, and the
+remaining hardware matrix stay as gates.
 
 The retained scope is deliberately limited to the earlier recommendations:
 
@@ -149,10 +151,11 @@ retries, and does not add a hand-written SD command implementation.
 The old-to-new transport transition is different from a steady-state SDMMC
 restart. Once the old firmware has selected SPI mode, the card cannot return to
 native SD mode while powered. A software or OTA restart alone therefore cannot
-make that first native mount succeed. The rollout must surface a one-time full
-card power cycle or add and physically validate an explicit compatibility path;
-the three-attempt policy below must not be represented as solving bus-mode
-migration.
+make that first native mount succeed. The candidate therefore attempts bounded
+native SDMMC first, then mounts the card through the former isolated HSPI path
+for that boot and reports the one-time full-power-cycle action to iOS. The
+three-attempt native policy must not be represented as solving bus-mode
+migration, and the fallback still requires exact-head physical validation.
 
 ### Speaker cleanup
 
@@ -961,8 +964,10 @@ The retained plan is complete only when all of these are true:
 8. Dirty builds may consume but cannot publish cache entries or upload.
 9. Cross-worktree core reuse is enabled only with recorded relocatability and
    immutable-hydration evidence.
-10. After the explicitly handled one-time HSPI-to-SDMMC migration boundary,
-    warm reset, software restart, and upload reset meet the SD matrix without a
+10. The one-time HSPI-to-SDMMC migration keeps maps available through the
+    native-first compatibility fallback, reports the required power cycle to
+    iOS, and clears the device-scoped warning only after native SDMMC is proven;
+    later warm, software, and upload resets meet the SD matrix without another
     manual power cycle on every available supported board/card.
 11. Missing-card failure is bounded and falls back once to FFat.
 12. SD map-block and sequential-read throughput remains within the stated

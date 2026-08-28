@@ -1395,6 +1395,16 @@ password and reports a hotspot fallback.
 for an active hotspot) `apPassphrase`; `baseUrl` remains empty until the
 selected listener is ready. Stable fallback reasons are `ssid_unavailable`,
 `authentication_failed`, `association_timeout`, and `endpoint_unreachable`.
+
+`DSTS` also includes a top-level `storage` object. `storage.backend` is one of
+`sdmmc`, `legacy_spi_migration`, `spi`, `ffat`, or `unavailable`, and
+`storage.powerCycleRequired` is `true` only while a Waveshare card is mounted
+through the HSPI migration compatibility path. The object is optional for
+older firmware. iOS persists a warning per stable device identity when it sees
+`legacy_spi_migration`; missing fields, FFat, an unavailable card, or another
+device cannot clear that warning. It clears only after the same device reports
+`backend: "sdmmc"` and `powerCycleRequired: false` on a later boot.
+
 The normal LAN password is never returned. The app verifies a LAN result
 against the token-authenticated, certificate-pinned `/device-debug/v1/info`
 endpoint. If association succeeded

@@ -246,6 +246,29 @@ struct SettingsView: View {
         .onChange(of: offlineMapManager.createdShareURL) { _ in
             presentCreatedShareIfNeeded()
         }
+        .alert(
+            FirmwareStorageMigrationNotice.title,
+            isPresented: storageMigrationAlertPresentation
+        ) {
+            Button("Got It", role: .cancel) {
+                firmwareUpdateManager.dismissStorageMigrationAlert()
+            }
+        } message: {
+            Text(FirmwareStorageMigrationNotice.instructions)
+        }
+    }
+
+    private var storageMigrationAlertPresentation: Binding<Bool> {
+        Binding(
+            get: {
+                firmwareUpdateManager.isStorageMigrationAlertPresented
+            },
+            set: { isPresented in
+                if !isPresented {
+                    firmwareUpdateManager.dismissStorageMigrationAlert()
+                }
+            }
+        )
     }
 
     private var settingsSheetPresentation:
@@ -685,6 +708,29 @@ private struct MainFirmwareUpdateSection: View {
     @ObservedObject var manager: FirmwareUpdateManager
 
     var body: some View {
+        if manager.storageMigrationNotice != nil {
+            Section(header: Text("SD Card Upgrade")) {
+                Label(
+                    FirmwareStorageMigrationNotice.statusMessage,
+                    systemImage: "externaldrive.badge.exclamationmark"
+                )
+                .foregroundStyle(.orange)
+
+                Text(FirmwareStorageMigrationNotice.instructions)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Button {
+                    manager.refreshDeviceFirmwareStatus(
+                        bleManager: bleManager
+                    )
+                } label: {
+                    Label("Check Device Again", systemImage: "arrow.clockwise")
+                }
+                .disabled(!bleManager.isNavigationReady)
+            }
+        }
+
         if let manifest = manager.latestManifest,
            manager.isNewerUpdateAvailable(manifest, bleManager: bleManager) {
             Section(header: Text("Firmware Update")) {
@@ -1635,6 +1681,12 @@ private struct FirmwareUpdateSettingsSection: View {
                 title: "Status",
                 value: manager.statusMessage.isEmpty ? bleManager.firmwareUpdateStatus : manager.statusMessage
             )
+            if let storageBackend = bleManager.deviceStorageBackend {
+                SettingsValueRow(
+                    title: "Storage",
+                    value: storageBackend
+                )
+            }
 
             TextField("Manifest Base URL", text: $manager.manifestBaseURLString)
                 .textInputAutocapitalization(.never)

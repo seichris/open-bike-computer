@@ -100,7 +100,7 @@ Temporary reference clone used during bring-up:
 | IMU | QMI8658C | I2C | Schematic ties SDO/SAO low, so expected address is `0x6B` |
 | Audio Codec | ES8311 | I2C/I2S | Audio codec used by vendor `08_ES8311` demo |
 | Audio ADC / Mic Front End | ES7210 | I2S/TDM | Product page advertises dual digital microphone array; schematic includes ES7210 |
-| SD Card Slot | TF / microSD | Native 1-bit SDMMC | Vendor path uses `CLK=2`, `CMD=1`, `D0=3`; the `CS`/D3 trace on GPIO17 is unused in one-bit mode |
+| SD Card Slot | TF / microSD | Native 1-bit SDMMC | Vendor path uses `CLK=2`, `CMD=1`, `D0=3`; the `CS`/D3 trace on GPIO17 is reserved for the post-HSPI migration fallback |
 | Battery Header | MX1.25 3.7 V LiPo | PMU | Product page has battery-included and no-battery variants |
 | Buttons | PWR, BOOT | GPIO / PMU | BOOT is GPIO0; PWR drives PMU power key path |
 
@@ -189,7 +189,7 @@ Connected-device touch findings:
 | CLK / `SDMMC_CLK` | GPIO 2 | Native SDMMC clock |
 | CMD / `SDMMC_CMD` | GPIO 1 | Bidirectional command line |
 | D0 / `SDMMC_DATA` | GPIO 3 | Single data line in one-bit mode |
-| D3 / legacy SPI CS | GPIO 17 | Present on the board but unused by the one-bit firmware path |
+| D3 / legacy SPI CS | GPIO 17 | Unused by native one-bit SDMMC; driven only by the migration fallback after native failure |
 
 Waveshare's Arduino
 [`07_LVGL_SD_Test`](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.06/blob/main/examples/arduino/07_LVGL_SD_Test/07_LVGL_SD_Test.ino)
@@ -201,9 +201,11 @@ one-bit SDMMC path as well.
 Connected-device SD findings:
 - The former HSPI firmware read the card on `CS=17, MOSI=1, MISO=3, SCK=2`
   and rendered the offline map on the 2.06 board.
-- Current firmware uses the native SDMMC controller on GPIO2/1/3 in one-bit
-  mode. This preserves isolation from display QSPI without owning an Arduino
-  SPI controller. Physical SDMMC acceptance on 2.06 remains pending.
+- Current firmware tries the native SDMMC controller on GPIO2/1/3 in one-bit
+  mode first. This preserves isolation from display QSPI without owning an
+  Arduino SPI controller in steady state; the old HSPI pins are used only by
+  the migration fallback after native failure. Physical acceptance on 2.06
+  remains pending.
 
 ### RTC And IMU
 
@@ -382,7 +384,7 @@ card, and factory firmware.
 | Speaker Amplifier | NS4150B | Analog | Driven by ES8311; PA enable on GPIO46 |
 | IMU | QMI8658 | I2C | 0x6B primary, 0x6A fallback |
 | Display Driver | CO5300 | QSPI | 466x466 active AMOLED window |
-| SD Card Slot | SD1 | Native 1-bit SDMMC | GPIO2 CLK, GPIO1 CMD, GPIO3 D0; GPIO41 D3/legacy CS is unused |
+| SD Card Slot | SD1 | Native 1-bit SDMMC | GPIO2 CLK, GPIO1 CMD, GPIO3 D0; GPIO41 D3/legacy CS is reserved for the post-HSPI migration fallback |
 
 ---
 
@@ -450,7 +452,7 @@ as closed.
 | CLK | GPIO 2 | Native SDMMC clock |
 | CMD | GPIO 1 | Bidirectional command line |
 | D0 | GPIO 3 | Single data line in one-bit mode |
-| D3 / legacy SPI CS | GPIO 41 | Present on the board but unused by the one-bit firmware path |
+| D3 / legacy SPI CS | GPIO 41 | Unused by native one-bit SDMMC; driven only by the migration fallback after native failure |
 
 > **IMPORTANT:** There is no pin conflict between native SDMMC and touch I2C.
 > They use completely separate GPIO sets.
@@ -745,7 +747,8 @@ Observed axis signs:
 
 Current Waveshare firmware follows the vendor examples and uses the ESP32-S3
 native SDMMC peripheral in one-bit mode on `CLK=2`, `CMD=1`, and `D0=3`.
-The 1.75-inch GPIO41 and 2.06-inch GPIO17 D3/legacy-CS traces are not driven.
+The 1.75-inch GPIO41 and 2.06-inch GPIO17 D3/legacy-CS traces are not driven in
+steady-state native mode; they are reserved for the migration fallback below.
 SDMMC and the display QSPI controller are independent peripherals.
 
 HSPI was introduced after the original global-FSPI implementation produced
@@ -763,17 +766,23 @@ The transport transition has one unavoidable power-state boundary. An SD card
 that entered SPI mode under older HSPI firmware cannot return to native SD mode
 until the card itself loses power; `ESP.restart()` and SDMMC teardown do not
 remove that power. The first boot across the HSPI-to-SDMMC transition can
-therefore fall back to FFat until all power sources keeping the card slot alive
-are removed and the device is started again. Bounded mount retries remain useful
-for native-controller lifecycle failures, but they cannot change the card's bus
-mode. The first OTA release containing this migration must either ship a tested
-compatibility path or give the rider an explicit one-time full-power-cycle step;
-it must not be described as a seamless warm-reboot migration. See the
+therefore fail its native mount until all power sources keeping the card slot
+alive are removed and the device is started again. The migration candidate
+always tries bounded native SDMMC first, then uses the former isolated HSPI
+transport as `legacy_spi_migration` only when native mounting fails. This keeps
+the card and installed maps available during the warm migration boot. The
+authenticated `DSTS` response reports that backend with
+`powerCycleRequired: true`; Bicino persists a device-scoped instruction to fully
+power off and disconnect USB, and clears it only after the same device reports
+native SDMMC on a later boot. Bounded native retries remain useful for
+controller lifecycle failures, but they cannot change the card's bus mode. See
+the
 [SD Association Physical Layer Simplified Specification](https://www.sdcard.org/cms/wp-content/themes/sdcard-org/dl.php?f=Part1_Physical_Layer_Simplified_Specification_Ver5.10.pdf),
 section 7.2.1.
 
 Firmware defaults:
 - `WAVESHARE_SDMMC_FREQ_KHZ` default: `SDMMC_FREQ_DEFAULT` (20 MHz)
+- `WAVESHARE_SD_MIGRATION_SPI_FREQ_HZ` default: 4 MHz
 - `WAVESHARE_SD_LIST_ROOT` disabled by default
 - `WAVESHARE_MAPIO_TIMING_LOG` disabled by default
 
@@ -794,7 +803,9 @@ for comparison; they do not qualify the new SDMMC path:
 `SDIO:` mount timing is low volume and always visible. Mounting is bounded to
 three attempts with full `SD_MMC.end()` teardown before each attempt and 50 ms
 then 150 ms recovery delays. Success still requires a card type and root-open
-health check; failure retains the existing FFat fallback. `MAPIO:` timing is
+health check. Native failure runs the equally bounded migration HSPI sequence;
+only failure of both removable-card transports retains the existing FFat
+fallback. `MAPIO:` timing is
 verbose and must remain opt-in because redraw logging can add USB CDC pressure
 during normal app-driven map use.
 
@@ -814,7 +825,10 @@ Git SHA `059348754cce2c9712ff85f9a752bc2d5a7c8788`:
 This is one board/card and one developer-profile result. It does not qualify
 the 2.06-inch target, the production profiles, no-card fallback, runtime
 remount, the multi-card matrix, or the current merged integration head without
-a new physical run.
+a new physical run. It also predates the compatibility implementation: host
+policy/protocol tests prove native-first ordering and app persistence semantics,
+but an exact-head old-HSPI -> warm-reboot compatibility mount -> full-power-off
+-> native-SDMMC sequence remains a physical release gate.
 
 ---
 
@@ -839,7 +853,7 @@ When scanning the I2C bus, you should find:
 |---|---|---|
 | Display | ✅ Working | CO5300 QSPI via Arduino_GFX; vendor 466x466 + 6px X gap; 90-degree hardware rotation disabled |
 | Touch | ✅ Working | CST9217 @ 0x5A, TCA9554 P0 reset, GPIO21 hint + throttled fallback polling |
-| SD Card | ⚠️ Working / qualification incomplete | One 1.75-inch board/card passed cold mount, subsequent reset, map write/install/read/render on exact SHA `059348754cce2c9712ff85f9a752bc2d5a7c8788`; the HSPI-to-SDMMC warm transition requires one full card power cycle, and the remaining target/card/fallback matrix is open |
+| SD Card | ⚠️ Working / qualification incomplete | One 1.75-inch board/card passed cold mount, subsequent reset, map write/install/read/render on exact SHA `059348754cce2c9712ff85f9a752bc2d5a7c8788`; the new native-first HSPI compatibility/user-flow path has host coverage but still needs exact-head physical migration validation, and the remaining target/card/fallback matrix is open |
 | RTC | ✅ Integrated | PCF85063 @ 0x51; invalid/voltage-low values rejected; BLE sync and warm-reset restore verified with battery present; full USB-removal retention still needs final battery retest |
 | IMU | ✅ Diagnostic | QMI8658 @ 0x6B primary / 0x6A fallback; low-rate diagnostic accel/gyro sampling only |
 | I/O Expander | ✅ Working | TCA9554 @ 0x20 controls touch reset; can be missed early but recovered by shared I2C retry/recovery |

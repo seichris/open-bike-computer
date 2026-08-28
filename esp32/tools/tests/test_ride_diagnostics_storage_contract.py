@@ -5,6 +5,9 @@ import unittest
 ROOT = Path(__file__).parents[2]
 STORAGE = (ROOT / "lib/storage/storage.cpp").read_text(encoding="utf-8")
 HAL = (ROOT / "include/hal.hpp").read_text(encoding="utf-8")
+BLE_NAVIGATION = (ROOT / "lib/ble_navigation/ble_navigation.cpp").read_text(
+    encoding="utf-8"
+)
 RECORDER = (ROOT / "lib/ride_diagnostics/ride_diagnostics.cpp").read_text(
     encoding="utf-8"
 )
@@ -32,7 +35,7 @@ class RideDiagnosticsStorageContractTests(unittest.TestCase):
         self.assertIn("beginStorageTransition", RECORDER)
         self.assertIn("prepareForShutdown", RECORDER)
 
-    def test_writer_isolated_from_cpu0_watchdog_and_uses_native_sdmmc_bus(self):
+    def test_writer_isolated_from_cpu0_watchdog_and_uses_native_first_migration(self):
         self.assertIn(
             'xTaskCreatePinnedToCore(writerTask, "ride_diag_writer", 6144, nullptr, 0,',
             RECORDER,
@@ -44,9 +47,17 @@ class RideDiagnosticsStorageContractTests(unittest.TestCase):
         self.assertIn("SD_MMC.setPins(", waveshare_init)
         self.assertIn('SD_MMC.begin("/sdcard", true, false,', waveshare_init)
         self.assertIn("storage_mount_retry_policy::runMountSequence", waveshare_init)
-        self.assertNotIn("SD.begin(", waveshare_init)
-        self.assertNotIn("SPIClass", waveshare_init)
-        self.assertNotIn("HSPI", waveshare_init)
+        self.assertIn(
+            "waveshare_storage_migration_policy::mountNativeFirst",
+            waveshare_init,
+        )
+        self.assertIn("SD.begin(", waveshare_init)
+        self.assertIn("SPIClass &migrationBus", waveshare_init)
+        self.assertIn("bus=HSPI", waveshare_init)
+        self.assertLess(
+            waveshare_init.index("SD_MMC.begin"),
+            waveshare_init.index("SD.begin"),
+        )
 
         waveshare_pins = HAL.split(
             "// microSD in vendor-native one-bit SDMMC mode.", 1
@@ -56,7 +67,11 @@ class RideDiagnosticsStorageContractTests(unittest.TestCase):
         self.assertIn("WAVESHARE_SDMMC_CLK = GPIO_NUM_2", waveshare_pins)
         self.assertIn("WAVESHARE_SDMMC_CMD = GPIO_NUM_1", waveshare_pins)
         self.assertIn("WAVESHARE_SDMMC_D0 = GPIO_NUM_3", waveshare_pins)
-        self.assertNotIn("SD_CS", waveshare_pins)
+        self.assertIn("WAVESHARE_LEGACY_SD_CS = GPIO_NUM_17", waveshare_pins)
+        self.assertIn("WAVESHARE_LEGACY_SD_CS = GPIO_NUM_41", waveshare_pins)
+        self.assertIn("WAVESHARE_LEGACY_SD_MOSI = GPIO_NUM_1", waveshare_pins)
+        self.assertIn("WAVESHARE_LEGACY_SD_MISO = GPIO_NUM_3", waveshare_pins)
+        self.assertIn("WAVESHARE_LEGACY_SD_CLK = GPIO_NUM_2", waveshare_pins)
 
         open_body = STORAGE.split("FILE *Storage::open", 1)[1].split(
             "int Storage::close", 1
@@ -87,15 +102,29 @@ class RideDiagnosticsStorageContractTests(unittest.TestCase):
             shutdown.index('"controlled_shutdown"'),
         )
 
-    def test_waveshare_build_does_not_link_the_legacy_arduino_sd_stack(self):
+    def test_waveshare_build_links_legacy_stack_only_for_migration_fallback(self):
         include_block = STORAGE.split('#include "freertos/task.h"', 1)[1].split(
             "#include <FFat.h>", 1
         )[0]
         self.assertIn("#include <SD_MMC.h>", include_block)
-        self.assertIn("#else\n#include <SD.h>\n#include <SPI.h>", include_block)
-        self.assertNotIn(
-            "#include <SD.h>\n#if defined(WAVESHARE_AMOLED_175)", include_block
+        self.assertIn("#include <SD.h>", include_block)
+        self.assertIn("#include <SPI.h>", include_block)
+        self.assertIn(
+            '"legacy_spi_migration"',
+            STORAGE,
         )
+        self.assertIn(
+            "backend == StorageBackend::LegacySpiMigration",
+            STORAGE,
+        )
+
+    def test_device_transfer_status_exposes_storage_migration_state(self):
+        status = BLE_NAVIGATION.split(
+            "static std::string genericTransferStatusJson()", 1
+        )[1].split("static void notifyMapTransferStatus", 1)[0]
+        self.assertIn('\\"storage\\":{\\"backend\\":\\"', status)
+        self.assertIn("storage.storageBackendName()", status)
+        self.assertIn("storage.storagePowerCycleRequired()", status)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 #include "../../lib/storage/sd_mount_retry_policy.hpp"
+#include "../../lib/storage/waveshare_storage_migration_policy.hpp"
 
 #include <cassert>
 #include <cstddef>
@@ -73,6 +74,69 @@ int main() {
     assert(attempts == 3U);
     assert(teardowns == 3U);
     assert((delays == std::vector<uint32_t>{50U, 150U}));
+  }
+
+  {
+    std::vector<int> calls;
+    const auto result =
+        waveshare_storage_migration_policy::mountNativeFirst(
+            [&]() {
+              calls.push_back(1);
+              return true;
+            },
+            [&]() {
+              calls.push_back(2);
+              return true;
+            });
+    assert(result.backend ==
+           waveshare_storage_migration_policy::Backend::NativeSdmmc);
+    assert(result.nativeAttempted);
+    assert(!result.legacyAttempted);
+    assert((calls == std::vector<int>{1}));
+    assert(!waveshare_storage_migration_policy::requiresCardPowerCycle(
+        result.backend));
+  }
+
+  {
+    std::vector<int> calls;
+    const auto result =
+        waveshare_storage_migration_policy::mountNativeFirst(
+            [&]() {
+              calls.push_back(1);
+              return false;
+            },
+            [&]() {
+              calls.push_back(2);
+              return true;
+            });
+    assert(result.backend == waveshare_storage_migration_policy::Backend::
+                                 LegacySpiMigration);
+    assert(result.nativeAttempted);
+    assert(result.legacyAttempted);
+    assert((calls == std::vector<int>{1, 2}));
+    assert(waveshare_storage_migration_policy::requiresCardPowerCycle(
+        result.backend));
+  }
+
+  {
+    std::vector<int> calls;
+    const auto result =
+        waveshare_storage_migration_policy::mountNativeFirst(
+            [&]() {
+              calls.push_back(1);
+              return false;
+            },
+            [&]() {
+              calls.push_back(2);
+              return false;
+            });
+    assert(result.backend ==
+           waveshare_storage_migration_policy::Backend::Unavailable);
+    assert(result.nativeAttempted);
+    assert(result.legacyAttempted);
+    assert((calls == std::vector<int>{1, 2}));
+    assert(!waveshare_storage_migration_policy::requiresCardPowerCycle(
+        result.backend));
   }
 
   std::cout << "SD mount retry policy tests passed\n";

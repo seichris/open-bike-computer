@@ -272,14 +272,18 @@ FFat initialization (lines 230-262):
 
 #### [lib/storage/storage.hpp](file:///Users/chris/Documents/Workspace/esp32-bike-computer/IceNav-v3/lib/storage/storage.hpp)
 
-The public storage interface remains backend-neutral. `storage.cpp` selects
-`SD_MMC` only for the Waveshare targets and retains the legacy Arduino `SD`/SPI
-or ESP-IDF SDSPI backends for other boards.
+The public storage interface remains backend-neutral. `storage.cpp` always
+tries `SD_MMC` first on Waveshare targets. Only after bounded native failure may
+it use the former isolated Arduino `SD`/HSPI transport as
+`legacy_spi_migration`; other boards retain their existing Arduino `SD`/SPI or
+ESP-IDF SDSPI backends.
 
 An existing card left in SPI mode by pre-migration firmware needs one complete
-card power cycle before native SDMMC can mount it. This is a transport migration
-constraint, not a failure that additional `SD_MMC.end()` retries can repair; see
-the authoritative migration note in [hardware/README.md](../hardware/README.md#8-sd-card--map-io).
+card power cycle before native SDMMC can mount it. The temporary HSPI backend
+keeps maps available on that warm migration boot and reports the required
+action over BLE. This is a transport migration constraint, not a failure that
+additional `SD_MMC.end()` retries can repair; see the authoritative migration
+note in [hardware/README.md](../hardware/README.md#8-sd-card--map-io).
 
 ---
 
