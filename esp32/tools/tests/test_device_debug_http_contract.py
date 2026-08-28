@@ -162,10 +162,13 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            'apPassphrase_ = (mode_ == "debug" || mode_ == "diagnostics")',
+            "apPassphrase_ = generateSessionToken().substr(0, 24);",
             transfer,
         )
-        self.assertIn("WiFi.softAP(apSsid.c_str(),", transfer)
+        self.assertIn(
+            "WiFi.softAP(apSsid.c_str(), apPassphrase.c_str())", transfer
+        )
+        self.assertNotIn("WiFi.softAP(apSsid.c_str());", transfer)
         info = HTTP[
             HTTP.index("bool DeviceDebugHttp::handleInfo") :
             HTTP.index("bool DeviceDebugHttp::handleFrame")
@@ -235,7 +238,7 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         ]
         self.assertIn("DisableOnBleDisconnect", disconnect)
         self.assertLess(
-            disconnect.index("clearPreferredNetwork()"),
+            disconnect.index("clearAuthenticatedBleSession()"),
             disconnect.index("DisableOnBleDisconnect"),
         )
         self.assertIn("stopActiveDeviceTransfer();", owner_reset)

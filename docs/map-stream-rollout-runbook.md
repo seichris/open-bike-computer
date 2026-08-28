@@ -20,7 +20,8 @@ Four independent gates must agree before protocol v2 is used:
 
 The checked-in promotion registry remains empty until an operator explicitly
 approves an exact candidate identity. Empty or invalid configuration fails
-closed and keeps ZIP/protocol-v1 compatibility available.
+closed. Existing ZIPs remain usable for local preview, but device installation
+requires regeneration as an approved signed stream.
 
 ## Commission a signing key
 
@@ -57,7 +58,7 @@ the active trust set, and keeps iOS and firmware byte-identical.
 
 Build and ship the allowlisted iOS and firmware candidates from that commit
 before testing. Both clients advertise the exact trusted key fingerprint; an
-older build without the key stays on ZIP/protocol v1 even if its installation
+older build without the key rejects device installation even if its installation
 ID is allowlisted. Release candidates must come from a clean tree: firmware
 advertises protocol v2 only with a full 40-character git SHA, and iOS sends its
 numeric build, full 40-character git SHA, and generated component SHA-256. A
@@ -115,9 +116,9 @@ responsiveness, and a structured `observed` identity. Every non-compatibility
 run must record the exact iOS build/git/component identity, firmware
 version/build/git SHA, artifact SHA-256, signed manifest receipt, derived
 producer build SHA-256, worker image digest, and signing-key ID/fingerprint. The
-two compatibility runs must use the exact predecessor identities in
-`map-platform/config/map-stream-hardware-gate.json` and prove that the retained ZIP path was
-selected. Record values from the app/device/artifact under test, not from notes
+two predecessor runs must use the exact identities in
+`map-platform/config/map-stream-hardware-gate.json` and prove that unsigned ZIP
+installation is rejected with a regeneration requirement. Record values from the app/device/artifact under test, not from notes
 or a mutable deployment label. Every stream run enforces bounded integer byte
 counters and a reviewed write-amplification ceiling; clean scenarios require
 exactly one payload write, and interruption scenarios require nonzero
@@ -201,8 +202,8 @@ material is no longer trusted, the cohort secret is short, or rollout variables
 conflict. In percentage/global mode it hides any artifact whose signed producer
 identity, image digest, signing key, or requesting app build/git/component
 differs from the approval. The
-artifact tells iOS the exact approved firmware identity, and iOS negotiates ZIP
-when the connected device differs. A rotation or later untested binary therefore
+artifact tells iOS the exact approved firmware identity, and iOS rejects
+installation when the connected device differs. A rotation or later untested binary therefore
 cannot silently reuse an older hardware result.
 
 Recommended sequence:
@@ -220,8 +221,8 @@ Recommended sequence:
 
 Changing the cohort secret reshuffles users and is not a rollback mechanism.
 Rollback by reducing basis points, switching to the tested allowlist, or setting
-the mode to `disabled`. Keep ZIP artifacts and protocol v1 during the full
-migration window.
+the mode to `disabled`. Keep ZIP artifacts only for local preview or later
+regeneration; do not re-enable unsigned device transfer as a rollback.
 
 Rollout changes stop new stream metadata and URL refreshes immediately. A
 previously issued immutable download URL can remain usable for its bounded
@@ -255,8 +256,8 @@ still-valid old artifact.
 
 For a suspected signing-key compromise:
 
-1. Set rollout mode to `disabled` immediately. This hides stream metadata while
-   preserving ZIP delivery.
+1. Set rollout mode to `disabled` immediately. This hides stream metadata and
+   stops new device installations; existing ZIP previews remain local-only.
 2. Disable stream generation on workers and revoke the private secret.
 3. Preserve logs containing job ID, key ID, manifest receipt, and artifact
    receipt; never log or retrieve the private key through application logs.
@@ -267,5 +268,5 @@ For a suspected signing-key compromise:
    manual checks before resuming.
 
 Key rotation, emergency revocation, and rollout changes are separate reviewed
-changes. V1 retirement is also a separate decision after the compatibility and
+changes. Removing preview-only ZIP production is a separate decision after the
 rollback windows close.

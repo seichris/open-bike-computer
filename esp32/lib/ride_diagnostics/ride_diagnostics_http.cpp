@@ -234,7 +234,7 @@ ChunkIndex listChunks(
   return index;
 }
 
-bool sendBody(WiFiClient &client, const std::string &body,
+bool sendBody(device_transfer::TransferClient &client, const std::string &body,
               const char *contentType,
               device_transfer::HttpTransferServer *server,
               const device_transfer::HttpRequest &request) {
@@ -261,7 +261,7 @@ bool sendBody(WiFiClient &client, const std::string &body,
   return true;
 }
 
-bool sendFile(WiFiClient &client, const Chunk &chunk,
+bool sendFile(device_transfer::TransferClient &client, const Chunk &chunk,
               device_transfer::HttpTransferServer *server,
               const device_transfer::HttpRequest &request) {
   if (!requestStillAuthorized(server, request)) {
@@ -334,7 +334,7 @@ void RideDiagnosticsHttp::configure(device_transfer::HttpTransferServer *server)
 }
 
 bool RideDiagnosticsHttp::handleRequest(
-    const device_transfer::HttpRequest &request, WiFiClient &client) {
+    const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
   if (server_ == nullptr || !server_->isRequestAuthorized(request) ||
       server_->status().mode != "diagnostics") {
     device_transfer::sendHttpError(client, 401, "unauthorized",

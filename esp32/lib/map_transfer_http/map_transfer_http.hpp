@@ -61,36 +61,25 @@ private:
   bool pendingMapRootTaken_ = false;
   bool pendingRendererAcknowledgement_ = false;
   bool pendingRendererAutomaticExit_ = false;
-  bool pendingRendererStreamProtocol_ = false;
   bool pendingAutomaticExit_ = false;
-  bool recoveryBlocked_ = false;
   struct DeferredActivation {
     device_transfer::HttpResponseCompletionToken response;
     std::string sessionId;
     uint32_t minimumSequence = 0;
-    bool streamProtocol = false;
-    bool activationAlreadyBegun = false;
-    bool automaticExitOnCleanResponse = true;
 
     bool pending() const { return !sessionId.empty(); }
   };
   DeferredActivation deferredActivation_;
 
   bool handleRequest(const device_transfer::HttpRequest &request,
-                     WiFiClient &client) override;
+                     device_transfer::TransferClient &client) override;
   void responseDidComplete(const device_transfer::HttpRequest &request,
                            bool peerClosedCleanly) override;
-  bool handlePut(const device_transfer::HttpRequest &request,
-                 WiFiClient &client);
   bool handleInstallStream(const device_transfer::HttpRequest &request,
-                           WiFiClient &client);
-  bool handleHead(const std::string &path, WiFiClient &client);
-  bool handleActivate(const device_transfer::HttpRequest &request,
-                      WiFiClient &client);
-  void handleStatus(WiFiClient &client);
-  void sendHead(WiFiClient &client, int status, uint64_t contentLength = 0);
-  bool sendJson(WiFiClient &client, int status, const std::string &body);
-  void sendError(WiFiClient &client, int status, const std::string &code,
+                           device_transfer::TransferClient &client);
+  void handleStatus(device_transfer::TransferClient &client);
+  bool sendJson(device_transfer::TransferClient &client, int status, const std::string &body);
+  void sendError(device_transfer::TransferClient &client, int status, const std::string &code,
                  const std::string &message);
   void lockState() const;
   void unlockState() const;
@@ -98,27 +87,20 @@ private:
                         const std::string &errorCode,
                         const std::string &errorMessage);
   void updateActivationProgress(const ActivationProgress &progress);
-  bool startActivationTask(const std::string &sessionId, bool automaticExit,
-                           bool streamProtocol = false);
+  bool startActivationTask(const std::string &sessionId, bool automaticExit);
   bool deferActivationUntilResponse(
       const device_transfer::HttpRequest &request, const std::string &sessionId,
-      bool streamProtocol, uint32_t minimumSequence = 0,
-      bool activationAlreadyBegun = false,
-      bool automaticExitOnCleanResponse = true);
+      uint32_t minimumSequence = 0);
   void beginDeferredActivation(const DeferredActivation &activation,
                                bool peerClosedCleanly);
   void requestAutomaticExit();
-  void executeActivation(const std::string &sessionId, bool automaticExit,
-                         bool streamProtocol);
-  bool runActivationTask(const std::string &sessionId, bool automaticExit);
+  void executeActivation(const std::string &sessionId, bool automaticExit);
   bool runStreamActivationTask(const std::string &sessionId,
                                bool automaticExit);
-  InstallStatus supersedeRecoverableStreamForArchive();
   void updateStreamInstallState(const MapStreamInstallSnapshot &snapshot,
                                 bool active);
   bool streamStoragePathAccessible() const;
   bool streamStoragePathWritable() const;
-  bool resumePendingArchiveActivation();
   bool resumePendingStreamActivation(
       const MapStreamInstallSnapshot *recovered = nullptr);
   static void activationTaskThunk(void *arg);

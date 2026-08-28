@@ -1929,8 +1929,8 @@ struct NavigationProtocolTests {
         )
         assertEqual(
             MapInstallProtocolSelector.select(isBikeMapStream: false, deviceStatus: v2Status),
-            .archiveV1,
-            "existing ZIP remains explicitly protocol v1"
+            .legacyArtifactRequired,
+            "unsigned ZIP archives are never selected for device installation"
         )
         assertEqual(
             ExistingMapStreamAttemptDisposition.evaluate(
@@ -8811,8 +8811,10 @@ struct NavigationProtocolTests {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         assert(
-            corruptCacheManager.errorMessage?.contains("hash mismatch") == true,
-            "cached packs are hash-validated before device transfer"
+            corruptCacheManager.errorMessage?.contains(
+                "cannot be installed securely"
+            ) == true,
+            "unsigned cached ZIPs are rejected before device transfer"
         )
 
         let persistedSuite = "offline-map-persisted-route-\(UUID().uuidString)"
@@ -10694,15 +10696,41 @@ struct NavigationProtocolTests {
             "replacing a pack at the same URL explicitly reloads its invalidated preview"
         )
         assert(
-            managerSource.contains("OfflineMapPackCompatibilityArchive.make(") &&
+            !managerSource.contains("uploadArchiveInBackground(") &&
+                !managerSource.contains("materializeLegacyFallback(") &&
                 managerSource.contains(
-                    "archiveURL: compatibilityArchiveURL ?? packURL"
+                    "throw OfflineMapPlatformError.firmwareMapStreamUnsupported"
                 ) &&
-                managerSource.contains("useForegroundTransfer = true") &&
-                managerSource.contains("allowLocalStorageFailure:") &&
-                managerSource.contains("catch is CancellationError") &&
-                managerSource.contains("OfflineMapPackCompatibilityArchive.remove("),
-            "preview ZIPs retain resumable background upload through a sanitized archive"
+                managerSource.contains(
+                    "tlsCertificateSHA256:\n                            transferSession.tlsCertificateSHA256"
+                ),
+            "device map installation is signed-stream-only and pins background TLS"
+        )
+        let platformSourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift"
+        )
+        let securitySourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift"
+        )
+        guard let platformSource = try? String(
+            contentsOf: platformSourceURL,
+            encoding: .utf8
+        ), let securitySource = try? String(
+            contentsOf: securitySourceURL,
+            encoding: .utf8
+        ) else {
+            assert(false, "device transfer security sources should be available")
+            return
+        }
+        assert(
+            securitySource.contains(
+                "_ session: URLSession,\n        didReceive challenge: URLAuthenticationChallenge"
+            ) &&
+                platformSource.contains("session.getAllTasks { tasks in") &&
+                platformSource.contains(
+                    "challenge.protectionSpace.port"
+                ),
+            "foreground and restorable transfers pin connection-level TLS challenges"
         )
     }
 
@@ -15322,12 +15350,6 @@ struct NavigationProtocolTests {
                "transfer handshake refreshes status after one second")
         assert(!DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 3),
                "transfer handshake does not flood status between refreshes")
-        assert(DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(attempt: 8),
-               "legacy map entry is attempted after two seconds without DSTS")
-        assert(!DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(attempt: 7),
-               "generic DTRN gets the full compatibility grace period")
-        assert(!DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(attempt: 9),
-               "legacy map entry is sent only once")
         assert(DeviceNetworkJoinPolicy.isAlreadyAssociated(
             domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
             code: 13,
@@ -18138,7 +18160,7 @@ struct NavigationProtocolTests {
 
         var sentPackets: [Data] = []
         manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
-            maximumWriteLength: 64,
+            maximumWriteLength: 96,
             canSend: { true },
             write: { sentPackets.append($0) }
         ))
@@ -18208,26 +18230,139 @@ struct NavigationProtocolTests {
             "diagnostics endpoint fallback requests a protected hotspot"
         )
 
-        let session = DeviceTransferSession(
-            mode: .debug,
-            baseURL: URL(string: "http://192.168.4.1:8080")!,
-            accessPointSSID: "BikeComputer-Transfer",
-            accessPointPassphrase: "hotspot-secret",
-            sessionToken: "fragment-secret",
-            hotspotFallback: true,
-            hotspotFallbackReason: "endpoint_unreachable"
+        let nextTLSFingerprint = String(repeating: "a", count: 64)
+        assert(
+            manager.requestDeviceTransferTLSIdentityPreparation(),
+            "TLS identity preparation queues on the authenticated channel"
+        )
+        assert(
+            manager.requestDeviceTransferTLSIdentityCommit(
+                certificateSHA256: nextTLSFingerprint.uppercased()
+            ),
+            "TLS identity commit normalizes and queues an exact fingerprint"
+        )
+        assert(
+            manager.requestDeviceTransferTLSIdentityCancellation(),
+            "TLS identity cancellation queues on the authenticated channel"
         )
         assertEqual(
-            RemoteDeviceDebugSessionPolicy.browserURL(for: session)?.absoluteString,
-            "http://192.168.4.1:8080/device-debug/#fragment-secret",
-            "browser URL keeps the debug token in the fragment"
+            String(data: sentPackets[8], encoding: .utf8),
+            "DTRNtls|prepare",
+            "TLS preparation uses the documented DTRN frame"
+        )
+        assertEqual(
+            String(data: sentPackets[9], encoding: .utf8),
+            "DTRNtls|commit|\(nextTLSFingerprint)",
+            "TLS commit binds the exact lowercase pending leaf fingerprint"
+        )
+        assertEqual(
+            String(data: sentPackets[10], encoding: .utf8),
+            "DTRNtls|cancel",
+            "TLS cancellation uses the documented DTRN frame"
+        )
+        assert(
+            !manager.requestDeviceTransferTLSIdentityCommit(
+                certificateSHA256: "not-a-fingerprint"
+            ),
+            "malformed TLS fingerprints never reach BLE"
+        )
+
+        assertEqual(
+            DeviceTransferSecurityPolicy.normalizedCertificateSHA256(
+                nextTLSFingerprint.uppercased()
+            ),
+            nextTLSFingerprint,
+            "TLS pins normalize to one lowercase representation"
+        )
+        let transferToken = String(repeating: "b", count: 32)
+        assertEqual(
+            DeviceTransferSecurityPolicy.normalizedTransferToken(
+                transferToken
+            ),
+            transferToken,
+            "transfer tokens use the firmware's exact lowercase format"
+        )
+        assert(
+            DeviceTransferSecurityPolicy.normalizedTransferToken(
+                transferToken.uppercased()
+            ) == nil,
+            "noncanonical transfer tokens fail closed"
+        )
+        assert(
+            DeviceTransferSecurityPolicy.validate(
+                baseURL: URL(string: "https://192.168.4.1:8080")!,
+                certificateSHA256: nextTLSFingerprint,
+                identityVersion: 1,
+                transferGeneration: 1,
+                secureTransferV1: true
+            ),
+            "complete BLE-delivered HTTPS metadata is accepted"
+        )
+        assert(
+            !DeviceTransferSecurityPolicy.validate(
+                baseURL: URL(string: "http://192.168.4.1:8080")!,
+                certificateSHA256: nextTLSFingerprint,
+                identityVersion: 1,
+                transferGeneration: 1,
+                secureTransferV1: true
+            ),
+            "plaintext transfer origins fail closed"
+        )
+        assert(
+            !DeviceTransferSecurityPolicy.validate(
+                baseURL: URL(string: "https://192.168.4.1:8080?token=bad")!,
+                certificateSHA256: nextTLSFingerprint,
+                identityVersion: 1,
+                transferGeneration: 1,
+                secureTransferV1: true
+            ),
+            "transfer origins carrying query data fail closed"
+        )
+        assert(
+            !DeviceTransferSecurityPolicy.validate(
+                baseURL: URL(string: "https://192.168.4.1:8080/not-an-origin")!,
+                certificateSHA256: nextTLSFingerprint,
+                identityVersion: 1,
+                transferGeneration: 1,
+                secureTransferV1: true
+            ),
+            "transfer base URLs must be clean HTTPS origins"
+        )
+        assert(
+            !DeviceTransferSecurityPolicy.validate(
+                baseURL: URL(string: "https://192.168.4.1:8080")!,
+                certificateSHA256: nextTLSFingerprint,
+                identityVersion: 1,
+                transferGeneration: 0,
+                secureTransferV1: true
+            ),
+            "missing authorization generation fails closed"
+        )
+
+        let session = DeviceTransferSession(
+            mode: .debug,
+            baseURL: URL(string: "https://192.168.4.1:8080")!,
+            accessPointSSID: "BikeComputer-Transfer",
+            accessPointPassphrase: "hotspot-secret",
+            sessionToken: String(repeating: "b", count: 32),
+            hotspotFallback: true,
+            hotspotFallbackReason: "endpoint_unreachable",
+            tlsCertificateSHA256: String(repeating: "a", count: 64),
+            tlsIdentityVersion: 1,
+            transferGeneration: 1,
+            secureTransferV1: true
+        )
+        assertEqual(
+            RemoteDeviceDebugSessionPolicy.pageURL(for: session)?.absoluteString,
+            "https://192.168.4.1:8080/device-debug/",
+            "debug page URL is HTTPS and contains no authorization token"
         )
         let details = RemoteDeviceDebugSessionPolicy.sessionDetails(
             for: session,
             target: "WAVESHARE_AMOLED_175",
             deviceName: "Bicino"
         )
-        assert(!details.contains("fragment-secret"),
+        assert(!details.contains(String(repeating: "b", count: 32)),
                "copyable session details redact the transfer token")
         assert(!details.contains("hotspot-secret"),
                "copyable session details redact the hotspot password")
@@ -18368,7 +18503,11 @@ struct NavigationProtocolTests {
             mode: .diagnostics,
             baseURL: URL(string: "https://diagnostics.test")!,
             accessPointSSID: nil,
-            sessionToken: "test-token"
+            sessionToken: "test-token",
+            tlsCertificateSHA256: String(repeating: "a", count: 64),
+            tlsIdentityVersion: 1,
+            transferGeneration: 1,
+            secureTransferV1: true
         )
         defer { OfflineMapTestURLProtocol.reset() }
 
@@ -18608,7 +18747,11 @@ struct NavigationProtocolTests {
             mode: .diagnostics,
             baseURL: URL(string: "https://diagnostics.test")!,
             accessPointSSID: nil,
-            sessionToken: "unused-token"
+            sessionToken: "unused-token",
+            tlsCertificateSHA256: String(repeating: "a", count: 64),
+            tlsIdentityVersion: 1,
+            transferGeneration: 1,
+            secureTransferV1: true
         )
         let sessionController = TestDeviceDiagnosticsSessionController(
             session: session,
@@ -18710,7 +18853,11 @@ struct NavigationProtocolTests {
             mode: .diagnostics,
             baseURL: URL(string: "https://diagnostics.test")!,
             accessPointSSID: nil,
-            sessionToken: "test-token"
+            sessionToken: "test-token",
+            tlsCertificateSHA256: String(repeating: "a", count: 64),
+            tlsIdentityVersion: 1,
+            transferGeneration: 1,
+            secureTransferV1: true
         )
         let sessionController = TestDeviceDiagnosticsSessionController(
             session: session
@@ -18827,8 +18974,9 @@ struct NavigationProtocolTests {
                     "DTRNenter|debug",
                     "remote-debug handshake starts with the dedicated mode")
         try? await Task.sleep(nanoseconds: 25_000_000)
+        let tlsFingerprint = String(repeating: "a", count: 64)
         let freshStatus = """
-        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"fresh-token"}
+        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"https://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","sessionToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tls":{"identityVersion":1,"certificateSha256":"\(tlsFingerprint)"},"transferGeneration":2,"capabilities":{"secureTransferV1":true,"signedMapStreamV1":true,"legacyArchivePolicy":"disabled"}}
         """
         _ = bleManager.handleDeviceTransferStatusNotification(
             Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
@@ -18840,7 +18988,7 @@ struct NavigationProtocolTests {
             let session = try await task.value
             assertEqual(session.mode, .debug,
                         "fresh remote-debug handshake returns debug mode")
-            assertEqual(session.sessionToken, "fresh-token",
+            assertEqual(session.sessionToken, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                         "stale token is never returned")
         } catch {
             assert(false, "fresh remote-debug handshake should succeed: \(error)")
@@ -18907,8 +19055,9 @@ struct NavigationProtocolTests {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
 
+        let tlsFingerprint = String(repeating: "b", count: 64)
         let lanStatus = """
-        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"http://192.168.31.195:8080","networkTransport":"lan","networkSsid":"Home Wi-Fi","sessionToken":"lan-token"}
+        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"https://192.168.31.195:8080","networkTransport":"lan","networkSsid":"Home Wi-Fi","sessionToken":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","tls":{"identityVersion":1,"certificateSha256":"\(tlsFingerprint)"},"transferGeneration":3,"capabilities":{"secureTransferV1":true,"signedMapStreamV1":true,"legacyArchivePolicy":"disabled"}}
         """
         _ = bleManager.handleDeviceTransferStatusNotification(
             Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
@@ -18920,7 +19069,7 @@ struct NavigationProtocolTests {
             assertEqual(session.networkTransport, "lan",
                         "firmware-confirmed LAN debug remains on LAN")
             assertEqual(session.baseURL.absoluteString,
-                        "http://192.168.31.195:8080",
+                        "https://192.168.31.195:8080",
                         "LAN debug preserves the firmware endpoint")
             assert(statuses.contains("local Wi-Fi ready"),
                    "LAN debug reports browser readiness without a phone probe")
@@ -19058,8 +19207,9 @@ struct NavigationProtocolTests {
         // Reproduce the real notification order: MSTS can arrive before the
         // token-bearing DSTS. The manager must not return a tokenless session.
         try? await Task.sleep(nanoseconds: 25_000_000)
+        let tlsFingerprint = String(repeating: "c", count: 64)
         let deviceStatus = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"http://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","sessionToken":"fresh-map-token","firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"https://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","sessionToken":"dddddddddddddddddddddddddddddddd","tls":{"identityVersion":1,"certificateSha256":"\(tlsFingerprint)"},"transferGeneration":4,"capabilities":{"secureTransferV1":true,"signedMapStreamV1":true,"legacyArchivePolicy":"disabled"},"firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
         """
         _ = bleManager.handleDeviceTransferStatusNotification(
             Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(deviceStatus.utf8)
@@ -19071,9 +19221,9 @@ struct NavigationProtocolTests {
             let session = try await transferTask.value
             assertEqual(session.mode, .map,
                         "map transfer handshake returns map mode")
-            assertEqual(session.baseURL.absoluteString, "http://192.168.4.20:8080",
+            assertEqual(session.baseURL.absoluteString, "https://192.168.4.20:8080",
                         "map transfer handshake binds matching status origins")
-            assertEqual(session.sessionToken, "fresh-map-token",
+            assertEqual(session.sessionToken, "dddddddddddddddddddddddddddddddd",
                         "map transfer handshake waits for the fresh token")
         } catch {
             assert(false, "map transfer handshake should succeed: \(error)")
@@ -19107,8 +19257,9 @@ struct NavigationProtocolTests {
 
         // DSTS is the atomic transfer-session response. A dropped MSTC chunk
         // must not make an otherwise ready authenticated HTTP server unusable.
+        let tlsFingerprint = String(repeating: "d", count: 64)
         let deviceStatus = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"http://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","sessionToken":"fresh-map-token","firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"https://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","sessionToken":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","tls":{"identityVersion":1,"certificateSha256":"\(tlsFingerprint)"},"transferGeneration":5,"capabilities":{"secureTransferV1":true,"signedMapStreamV1":true,"legacyArchivePolicy":"disabled"},"firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
         """
         _ = bleManager.handleDeviceTransferStatusNotification(
             Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(deviceStatus.utf8)
@@ -19118,9 +19269,9 @@ struct NavigationProtocolTests {
             let session = try await transferTask.value
             assertEqual(session.mode, .map,
                         "fresh device status opens a map session")
-            assertEqual(session.baseURL.absoluteString, "http://192.168.4.20:8080",
+            assertEqual(session.baseURL.absoluteString, "https://192.168.4.20:8080",
                         "device status owns the transfer server origin")
-            assertEqual(session.sessionToken, "fresh-map-token",
+            assertEqual(session.sessionToken, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
                         "device status owns the transfer credential")
         } catch {
             assert(false, "fresh device status should not require map status: \(error)")
