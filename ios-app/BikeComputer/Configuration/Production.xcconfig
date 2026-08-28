@@ -8,6 +8,7 @@ BICINO_APP_DISPLAY_NAME = Bicino
 BICINO_COMPLICATION_DISPLAY_NAME = Start Ride
 BICINO_URL_SCHEME = bikecomputer
 BICINO_APP_ICON_NAME = AppIcon
+BICINO_APP_ATTEST_ENVIRONMENT = production
 BICINO_MAP_SERVICE_HOST = maps.8o.vc
 BICINO_MAP_CATALOG_HOST = maps-share.8o.vc
 // Exact Cloudflare account S3 hostname; bucket names remain path components.

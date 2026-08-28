@@ -59,19 +59,19 @@ private:
   bool otaOpen_ = false;
 
   bool handleRequest(const device_transfer::HttpRequest &request,
-                     WiFiClient &client) override;
-  void handleStatus(WiFiClient &client);
+                     device_transfer::TransferClient &client) override;
+  void handleStatus(device_transfer::TransferClient &client);
   void handleBegin(const device_transfer::HttpRequest &request,
-                   WiFiClient &client);
+                   device_transfer::TransferClient &client);
   void handleImage(const device_transfer::HttpRequest &request,
-                   WiFiClient &client);
+                   device_transfer::TransferClient &client);
   void handleFinalize(const device_transfer::HttpRequest &request,
-                      WiFiClient &client);
-  void handleCancel(WiFiClient &client);
+                      device_transfer::TransferClient &client);
+  void handleCancel(device_transfer::TransferClient &client);
   void resetUploadState();
-  void reject(WiFiClient &client, int httpStatus, const std::string &code,
+  void reject(device_transfer::TransferClient &client, int httpStatus, const std::string &code,
               const std::string &message);
-  void fail(WiFiClient &client, int httpStatus, const std::string &code,
+  void fail(device_transfer::TransferClient &client, int httpStatus, const std::string &code,
             const std::string &message);
   void rememberError(const std::string &code, const std::string &message);
   void lockState() const;

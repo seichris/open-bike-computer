@@ -86,6 +86,16 @@ nonisolated enum StravaIntegrationActivityV1: Equatable, Sendable {
     var isBusy: Bool { self != .idle }
 }
 
+nonisolated enum StravaRouteCatalogStateV1: Equatable, Sendable {
+    case idle
+    case loading
+    case loadingMore(loadedRouteCount: Int)
+    case loaded
+    case empty
+    case authorizationExpired
+    case failed(String)
+}
+
 @MainActor
 final class StravaIntegrationCoordinator: ObservableObject {
     static let revalidationInterval: TimeInterval = 24 * 60 * 60
@@ -96,6 +106,8 @@ final class StravaIntegrationCoordinator: ObservableObject {
         StravaConnectionStatusV1 = .unavailable
     @Published private(set) var activity: StravaIntegrationActivityV1 = .idle
     @Published private(set) var errorMessage: String?
+    @Published private(set) var athleteRoutes: [StravaAthleteRouteSummaryV1] = []
+    @Published private(set) var routeCatalogState: StravaRouteCatalogStateV1 = .idle
     @Published private(set) var completedImportSequence: UInt = 0
     @Published private(set) var lastCompletedRouteID: UUID?
 
@@ -127,6 +139,9 @@ final class StravaIntegrationCoordinator: ObservableObject {
     private var taskGeneration: UInt = 0
     private var revalidationTask: Task<Void, Never>?
     private var revalidationGeneration: UInt = 0
+    private var routeCatalogTask: Task<Void, Never>?
+    private var routeCatalogGeneration: UInt = 0
+    private var isRouteCatalogActive = false
     private var pendingOperation: PendingOperation?
     private var oauthSessionID: String?
     private var authorizationGeneration: UInt = 0
@@ -162,6 +177,10 @@ final class StravaIntegrationCoordinator: ObservableObject {
         connectionStatus.connected
     }
 
+    var isRouteCatalogAuthorized: Bool {
+        connectionStatus.connected && connectionStatus.canReadPrivateRoutes
+    }
+
     var shouldShowManagement: Bool {
         isConfigured || connectionStatus.connected ||
             !routeLibrary.stravaReloadBookmarks.isEmpty ||
@@ -174,6 +193,11 @@ final class StravaIntegrationCoordinator: ObservableObject {
         activity == .reloading(routeID)
     }
 
+    func isImporting(externalRouteID: String) -> Bool {
+        activity == .importing &&
+            pendingOperation?.routeURL?.externalRouteID == externalRouteID
+    }
+
     func clearError() {
         errorMessage = nil
     }
@@ -183,10 +207,29 @@ final class StravaIntegrationCoordinator: ObservableObject {
         refreshAndRevalidate()
     }
 
+    func activateRouteCatalog() {
+        isRouteCatalogActive = true
+        routeLibrary.reload()
+        refreshAndRevalidate()
+        startRouteCatalogIfNeeded()
+    }
+
+    func deactivateRouteCatalog() {
+        isRouteCatalogActive = false
+        cancelRouteCatalog()
+        athleteRoutes = []
+        routeCatalogState = .idle
+    }
+
+    func refreshRouteCatalog() {
+        guard isRouteCatalogActive else { return }
+        cancelRouteCatalog()
+        startRouteCatalogIfNeeded(resetRoutes: true)
+    }
+
     func refreshAndRevalidate() {
         guard task == nil, isConfigured else { return }
-        let shouldResumePendingAuthorization =
-            activity == .authorizing && pendingOperation != nil
+        let shouldResumeAuthorization = activity == .authorizing
         activity = .checking
         errorMessage = nil
         let generation = nextTaskGeneration()
@@ -198,27 +241,33 @@ final class StravaIntegrationCoordinator: ObservableObject {
                     return
                 }
                 self.applyAuthoritativeState(state)
-                if shouldResumePendingAuthorization,
-                   self.connectionStatus.connected,
-                   self.pendingOperation != nil {
+                if shouldResumeAuthorization,
+                   self.connectionStatus.connected {
                     self.cancelAuthorizationOnly()
-                    self.didAuthorizePendingOperation = true
+                    self.didAuthorizePendingOperation =
+                        self.pendingOperation != nil
                     self.finishTask(generation)
-                    self.executePendingOperation()
+                    if self.pendingOperation != nil {
+                        self.executePendingOperation()
+                    } else {
+                        self.activity = .idle
+                        self.startRouteCatalogIfNeeded(resetRoutes: true)
+                    }
                     return
                 }
                 self.finishTask(generation)
-                if shouldResumePendingAuthorization,
+                if shouldResumeAuthorization,
                    self.oauthSessionID != nil {
                     self.activity = .authorizing
                     return
                 }
                 if self.activity == .checking { self.activity = .idle }
+                self.startRouteCatalogIfNeeded()
                 self.startRevalidationIfNeeded()
             } catch {
                 guard self.isCurrentTask(generation) else { return }
                 self.finishTask(generation)
-                if shouldResumePendingAuthorization,
+                if shouldResumeAuthorization,
                    self.oauthSessionID != nil {
                     self.activity = .authorizing
                     return
@@ -235,6 +284,15 @@ final class StravaIntegrationCoordinator: ObservableObject {
         } catch {
             fail(error)
         }
+    }
+
+    func importRoute(_ route: StravaAthleteRouteSummaryV1) {
+        guard route.type.isImportable,
+              let routeURL = route.routeURL else {
+            fail(StravaIntegrationClientError.routeNotImportable)
+            return
+        }
+        begin(.firstImport(routeURL))
     }
 
     func reload(_ bookmark: StravaRouteReloadBookmarkV1) {
@@ -261,6 +319,7 @@ final class StravaIntegrationCoordinator: ObservableObject {
     func disconnectAndDeleteData() {
         guard task == nil, activity == .idle else { return }
         cancelRevalidation()
+        cancelRouteCatalog()
         cancelAuthorizationOnly()
         pendingOperation = nil
         didAuthorizePendingOperation = false
@@ -285,6 +344,8 @@ final class StravaIntegrationCoordinator: ObservableObject {
                 self.capability = capability
                 self.finishTask(generation)
                 self.activity = .idle
+                self.athleteRoutes = []
+                self.routeCatalogState = .idle
             } catch {
                 guard self.isCurrentTask(generation) else { return }
                 self.finishTask(generation)
@@ -296,6 +357,7 @@ final class StravaIntegrationCoordinator: ObservableObject {
     func cancelUserOperation() {
         cancelPrimaryTask()
         cancelRevalidation()
+        cancelRouteCatalog()
         cancelAuthorizationOnly()
         pendingOperation = nil
         didAuthorizePendingOperation = false
@@ -418,6 +480,7 @@ final class StravaIntegrationCoordinator: ObservableObject {
                         self.executePendingOperation()
                     } else {
                         self.activity = .idle
+                        self.startRouteCatalogIfNeeded(resetRoutes: true)
                     }
                 } catch {
                     guard self.isCurrentTask(generation) else { return }
@@ -527,6 +590,64 @@ final class StravaIntegrationCoordinator: ObservableObject {
         connectionStatus = state.connection
     }
 
+    private func startRouteCatalogIfNeeded(resetRoutes: Bool = false) {
+        guard isRouteCatalogActive,
+              routeCatalogTask == nil,
+              connectionStatus.connected,
+              capability?.isUsable == true else { return }
+        guard connectionStatus.canReadPrivateRoutes else {
+            athleteRoutes = []
+            routeCatalogState = .authorizationExpired
+            return
+        }
+        if resetRoutes { athleteRoutes = [] }
+        routeCatalogState = .loading
+        let generation = nextRouteCatalogGeneration()
+        routeCatalogTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var routes: [StravaAthleteRouteSummaryV1] = []
+            var routeIDs: Set<String> = []
+            var page = 1
+            do {
+                while true {
+                    let result = try await self.client.athleteRoutes(page: page)
+                    guard self.isCurrentRouteCatalog(generation),
+                          !Task.isCancelled else { return }
+                    guard result.routes.allSatisfy({
+                        routeIDs.insert($0.routeID).inserted
+                    }) else {
+                        throw StravaIntegrationClientError.invalidResponse
+                    }
+                    routes.append(contentsOf: result.routes)
+                    self.athleteRoutes = routes
+                    guard let nextPage = result.nextPage else {
+                        self.routeCatalogState = routes.isEmpty ? .empty : .loaded
+                        self.finishRouteCatalog(generation)
+                        return
+                    }
+                    self.routeCatalogState = .loadingMore(
+                        loadedRouteCount: routes.count
+                    )
+                    page = nextPage
+                }
+            } catch {
+                guard self.isCurrentRouteCatalog(generation),
+                      !Task.isCancelled else { return }
+                self.finishRouteCatalog(generation)
+                if let error = error as? StravaIntegrationClientError,
+                   error.requiresConnection {
+                    self.connectionStatus = .unavailable
+                    self.athleteRoutes = []
+                    self.routeCatalogState = .authorizationExpired
+                } else {
+                    let message = (error as? LocalizedError)?.errorDescription ??
+                        "The Strava routes could not be loaded."
+                    self.routeCatalogState = .failed(message)
+                }
+            }
+        }
+    }
+
     private func startRevalidationIfNeeded() {
         guard revalidationTask == nil,
               activity == .idle || activity == .checking,
@@ -630,6 +751,25 @@ final class StravaIntegrationCoordinator: ObservableObject {
         revalidationGeneration &+= 1
         revalidationTask?.cancel()
         revalidationTask = nil
+    }
+
+    private func nextRouteCatalogGeneration() -> UInt {
+        routeCatalogGeneration &+= 1
+        return routeCatalogGeneration
+    }
+
+    private func isCurrentRouteCatalog(_ generation: UInt) -> Bool {
+        generation == routeCatalogGeneration
+    }
+
+    private func finishRouteCatalog(_ generation: UInt) {
+        if isCurrentRouteCatalog(generation) { routeCatalogTask = nil }
+    }
+
+    private func cancelRouteCatalog() {
+        routeCatalogGeneration &+= 1
+        routeCatalogTask?.cancel()
+        routeCatalogTask = nil
     }
 
     private func fail(_ error: Error) {

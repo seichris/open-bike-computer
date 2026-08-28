@@ -15,6 +15,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift \
   ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
@@ -22,6 +23,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
   ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift \
   ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift \
+  ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift \
   ios-app/BikeComputer/BikeComputer/Managers/RideDetectionSettingsStore.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutDeviceRelay.swift \
@@ -135,12 +137,14 @@ xcrun swiftc \
   -o "${PREVIEW_CATALYST_OUT}" \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift \
   ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
   ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift \
   ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift \
+  ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift \
   ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
   ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamFormat.swift \
   ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift \

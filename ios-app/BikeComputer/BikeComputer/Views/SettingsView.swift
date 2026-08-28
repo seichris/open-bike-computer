@@ -9,6 +9,21 @@ import SwiftUI
 import UIKit
 import CoreLocation
 import MapKit
+import WebKit
+
+private enum SettingsSheetDestination: Identifiable, Equatable {
+    case stravaRouteImport
+    case savedMapShare(URL)
+
+    var id: String {
+        switch self {
+        case .stravaRouteImport:
+            return "strava-route-import"
+        case .savedMapShare(let url):
+            return "saved-map-share:\(url.absoluteString)"
+        }
+    }
+}
 
 struct SettingsView: View {
     @EnvironmentObject var bleManager: BLEManager
@@ -30,6 +45,7 @@ struct SettingsView: View {
     @ObservedObject private var rideDiagnosticsRecorder:
         RideDiagnosticsRecorder
     @FocusState private var focusedSavedMapFilename: String?
+    @State private var presentedSheet: SettingsSheetDestination?
     let locationAuthorizationStatus: CLAuthorizationStatus
     let locationAccuracyAuthorization: CLAccuracyAuthorization
     let currentLocation: CLLocation?
@@ -146,7 +162,10 @@ struct SettingsView: View {
 
                 SavedRoutesSettingsSection(
                     routeLibrary: routeLibrary,
-                    stravaCoordinator: stravaIntegrationCoordinator
+                    stravaCoordinator: stravaIntegrationCoordinator,
+                    onImportFromStrava: {
+                        presentedSheet = .stravaRouteImport
+                    }
                 )
 
                 Section {
@@ -217,26 +236,55 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
         }
-        .sheet(item: createdSharePresentation) { presentation in
-            SavedMapShareSheet(url: presentation.url)
-                .presentationDetents([.medium])
+        .sheet(
+            item: settingsSheetPresentation,
+            onDismiss: presentCreatedShareIfNeeded
+        ) { destination in
+            settingsSheetContent(for: destination)
+        }
+        .onAppear(perform: presentCreatedShareIfNeeded)
+        .onChange(of: offlineMapManager.createdShareURL) { _ in
+            presentCreatedShareIfNeeded()
         }
     }
 
-    private var createdSharePresentation:
-        Binding<SavedMapSharePresentation?> {
+    private var settingsSheetPresentation:
+        Binding<SettingsSheetDestination?> {
         Binding(
-            get: {
-                offlineMapManager.createdShareURL.map {
-                    SavedMapSharePresentation(url: $0)
-                }
-            },
-            set: { presentation in
-                if presentation == nil {
+            get: { presentedSheet },
+            set: { nextDestination in
+                let previousDestination = presentedSheet
+                presentedSheet = nextDestination
+                if nextDestination == nil,
+                   case .some(.savedMapShare) = previousDestination {
                     offlineMapManager.clearCreatedShareURL()
                 }
             }
         )
+    }
+
+    @ViewBuilder
+    private func settingsSheetContent(
+        for destination: SettingsSheetDestination
+    ) -> some View {
+        switch destination {
+        case .stravaRouteImport:
+            StravaRouteImportView(
+                coordinator: stravaIntegrationCoordinator
+            )
+        case .savedMapShare(let url):
+            SavedMapShareSheet(url: url)
+                .presentationDetents([.medium])
+        }
+    }
+
+    private func presentCreatedShareIfNeeded() {
+        if let url = offlineMapManager.createdShareURL {
+            guard presentedSheet == nil else { return }
+            presentedSheet = .savedMapShare(url)
+        } else if case .some(.savedMapShare) = presentedSheet {
+            presentedSheet = nil
+        }
     }
 
     private var shouldPromoteBikeComputerSettings: Bool {
@@ -1088,12 +1136,6 @@ private struct SavedMapsSettingsSection: View {
         }
         manager.renameCachedPack(at: packURL, to: commit.proposedName)
     }
-}
-
-private struct SavedMapSharePresentation: Identifiable {
-    let url: URL
-
-    var id: URL { url }
 }
 
 private struct SavedMapShareSheet: View {
@@ -2547,6 +2589,113 @@ private struct DiagnosticsTransferNetworkSettingsSection: View {
 }
 
 #if DEBUG
+private struct RemoteDeviceDebugWebView: UIViewRepresentable {
+    let session: DeviceTransferSession
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(session: session)
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        context.coordinator.load(in: webView)
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {}
+
+    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.stopLoading()
+        webView.navigationDelegate = nil
+        webView.configuration.userContentController.removeAllUserScripts()
+        webView.loadHTMLString("", baseURL: nil)
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        private let session: DeviceTransferSession
+        private let pageURL: URL
+
+        init(session: DeviceTransferSession) {
+            self.session = session
+            self.pageURL = RemoteDeviceDebugSessionPolicy.pageURL(
+                for: session
+            )!
+        }
+
+        func load(in webView: WKWebView) {
+            var request = URLRequest(url: pageURL)
+            request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            request.timeoutInterval = 15
+            webView.load(request)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
+        ) {
+            guard let url = navigationAction.request.url else {
+                decisionHandler(.cancel)
+                return
+            }
+            guard navigationAction.targetFrame?.isMainFrame == true,
+                  matchesPage(url) else {
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didReceive challenge: URLAuthenticationChallenge,
+            completionHandler: @escaping @MainActor (
+                URLSession.AuthChallengeDisposition,
+                URLCredential?
+            ) -> Void
+        ) {
+            let result = DeviceTransferSecurityPolicy.evaluate(
+                challenge: challenge,
+                expectedHost: pageURL.host ?? "",
+                certificateSHA256: session.tlsCertificateSHA256
+            )
+            completionHandler(result.0, result.1)
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard matchesPage(webView.url),
+                  let token = session.sessionToken,
+                  DeviceTransferSecurityPolicy
+                    .normalizedTransferToken(token) != nil,
+                  let data = try? JSONEncoder().encode(token),
+                  let literal = String(data: data, encoding: .utf8) else {
+                webView.stopLoading()
+                return
+            }
+            webView.evaluateJavaScript(
+                "window.openBikeComputerAuthorize(\(literal))"
+            )
+        }
+
+        private func matchesPage(_ url: URL?) -> Bool {
+            guard let url else { return false }
+            return url.scheme?.caseInsensitiveCompare(
+                    pageURL.scheme ?? ""
+                  ) == .orderedSame &&
+                url.host?.caseInsensitiveCompare(
+                    pageURL.host ?? ""
+                  ) == .orderedSame &&
+                url.port == pageURL.port &&
+                url.path == pageURL.path &&
+                url.query == nil &&
+                url.fragment == nil
+        }
+    }
+}
+
 @MainActor
 private struct RemoteDeviceDebugSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
@@ -2554,7 +2703,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
     @State private var isWorking = false
     @State private var statusMessage = "Idle"
     @State private var errorMessage: String?
-    @State private var copiedBrowserURL: String?
+    @State private var showsDebugConsole = false
     @State private var copiedHotspotPassphrase: String?
     @State private var revealsHotspotPassphrase = false
     @State private var lanSSID = ""
@@ -2625,10 +2774,15 @@ private struct RemoteDeviceDebugSettingsSection: View {
                         .textSelection(.enabled)
                 }
 
-                Button(action: copyBrowserURL) {
-                    Label("Copy Browser URL", systemImage: "safari")
+                Button {
+                    showsDebugConsole = true
+                } label: {
+                    Label(
+                        "Open Secure Debug Console",
+                        systemImage: "lock.rectangle"
+                    )
                 }
-                .disabled(isWorking || browserURL == nil)
+                .disabled(isWorking || pageURL == nil)
 
                 Button(action: copySessionDetails) {
                     Label("Copy Session Details", systemImage: "doc.on.doc")
@@ -2695,7 +2849,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
         .onAppear(perform: loadLANCredentialsIfNeeded)
         .onChange(of: bleManager.deviceTransferMode) { mode in
             if mode != DeviceTransferSession.Mode.debug.rawValue {
-                clearCopiedBrowserURLIfOwned()
+                showsDebugConsole = false
                 clearCopiedHotspotPassphraseIfOwned()
                 revealsHotspotPassphrase = false
                 if !isWorking {
@@ -2705,8 +2859,24 @@ private struct RemoteDeviceDebugSettingsSection: View {
             }
         }
         .onChange(of: bleManager.deviceTransferSessionToken) { _ in
-            if copiedBrowserURL != browserURL?.absoluteString {
-                clearCopiedBrowserURLIfOwned()
+            if activeSession == nil {
+                showsDebugConsole = false
+            }
+        }
+        .sheet(isPresented: $showsDebugConsole) {
+            if let session = activeSession {
+                NavigationStack {
+                    RemoteDeviceDebugWebView(session: session)
+                        .navigationTitle("Device Debug Console")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Done") {
+                                    showsDebugConsole = false
+                                }
+                            }
+                        }
+                }
             }
         }
         .task(id: bleManager.deviceTransferMode) {
@@ -2728,8 +2898,20 @@ private struct RemoteDeviceDebugSettingsSection: View {
     private var activeSession: DeviceTransferSession? {
         guard bleManager.deviceTransferMode == DeviceTransferSession.Mode.debug.rawValue,
               let baseURL = bleManager.deviceTransferBaseURL,
-              let token = bleManager.deviceTransferSessionToken,
-              !token.isEmpty else { return nil }
+              let rawToken = bleManager.deviceTransferSessionToken,
+              let token = DeviceTransferSecurityPolicy
+                .normalizedTransferToken(rawToken),
+              let certificateSHA256 =
+                bleManager.deviceTransferTLSCertificateSHA256,
+              DeviceTransferSecurityPolicy.validate(
+                baseURL: baseURL,
+                certificateSHA256: certificateSHA256,
+                identityVersion:
+                    bleManager.deviceTransferTLSIdentityVersion,
+                transferGeneration: bleManager.deviceTransferGeneration,
+                secureTransferV1:
+                    bleManager.supportsSecureDeviceTransferV1
+              ) else { return nil }
         return DeviceTransferSession(
             mode: .debug,
             baseURL: baseURL,
@@ -2739,13 +2921,22 @@ private struct RemoteDeviceDebugSettingsSection: View {
             networkTransport: bleManager.deviceTransferNetworkTransport,
             networkSSID: bleManager.deviceTransferNetworkSSID,
             hotspotFallback: bleManager.deviceTransferUsedHotspotFallback,
-            hotspotFallbackReason: bleManager.deviceTransferHotspotFallbackReason
+            hotspotFallbackReason:
+                bleManager.deviceTransferHotspotFallbackReason,
+            tlsCertificateSHA256: certificateSHA256,
+            tlsIdentityVersion:
+                bleManager.deviceTransferTLSIdentityVersion,
+            transferGeneration: bleManager.deviceTransferGeneration,
+            secureTransferV1: bleManager.supportsSecureDeviceTransferV1,
+            signedMapStreamV1: bleManager.supportsSignedMapStreamV1,
+            legacyArchivePolicy:
+                bleManager.deviceTransferLegacyArchivePolicy ?? ""
         )
     }
 
-    private var browserURL: URL? {
+    private var pageURL: URL? {
         activeSession.flatMap {
-            RemoteDeviceDebugSessionPolicy.browserURL(for: $0)
+            RemoteDeviceDebugSessionPolicy.pageURL(for: $0)
         }
     }
 
@@ -2762,7 +2953,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
     }
 
     private var sessionStatus: String {
-        if activeSession != nil { return "Ready for browser" }
+        if activeSession != nil { return "Ready for secure console" }
         if debugModeIsActive { return "Debug connection unavailable" }
         if !bleManager.isNavigationReady { return "Device not ready" }
         if !bleManager.hasReceivedDeviceCapabilities { return "Checking firmware" }
@@ -2776,9 +2967,9 @@ private struct RemoteDeviceDebugSettingsSection: View {
     private var footerText: String {
         if let activeSession {
             if activeSession.networkTransport == "lan" {
-                return "Open the copied URL from a computer on the same local network. The URL fragment is the session secret; do not paste it into logs."
+                return "Open the debug console in this app. Its authorization token stays in app memory and is never placed in a URL or on the clipboard."
             }
-            return "Reveal or copy the per-session hotspot password, join the shown device Wi-Fi on the Mac, then open the copied URL. The URL fragment and hotspot password are secrets; do not paste them into logs."
+            return "The app joined the device's WPA2 hotspot. Open the secure console here; its authorization token is never shown, logged, or copied."
         }
         return "Local Wi-Fi is tried first with credentials stored in this iPhone's Keychain and sent over authenticated BLE for this session only. The device hotspot is used if the device cannot join; turn off Prefer Local Wi-Fi to choose it directly."
     }
@@ -2849,13 +3040,6 @@ private struct RemoteDeviceDebugSettingsSection: View {
         }
     }
 
-    private func copyBrowserURL() {
-        guard let browserURL else { return }
-        UIPasteboard.general.string = browserURL.absoluteString
-        copiedBrowserURL = browserURL.absoluteString
-        statusMessage = "Browser URL copied"
-    }
-
     private func copyHotspotPassphrase() {
         guard let passphrase = activeSession?.accessPointPassphrase,
               !passphrase.isEmpty else { return }
@@ -2924,7 +3108,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
                 try await DeviceTransferManager().exitRemoteDebug(
                     bleManager: bleManager
                 )
-                clearCopiedBrowserURLIfOwned()
+                showsDebugConsole = false
                 clearCopiedHotspotPassphraseIfOwned()
                 revealsHotspotPassphrase = false
                 statusMessage = "Session ended"
@@ -2933,14 +3117,6 @@ private struct RemoteDeviceDebugSettingsSection: View {
                 statusMessage = "End failed"
             }
         }
-    }
-
-    private func clearCopiedBrowserURLIfOwned() {
-        guard let copiedBrowserURL else { return }
-        if UIPasteboard.general.string == copiedBrowserURL {
-            UIPasteboard.general.string = ""
-        }
-        self.copiedBrowserURL = nil
     }
 
     private func clearCopiedHotspotPassphraseIfOwned() {

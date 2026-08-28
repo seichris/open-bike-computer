@@ -1,10 +1,13 @@
+import argparse
 import importlib.util
+import os
 from pathlib import Path
 import struct
 import tempfile
 import unittest
 import zlib
 import json
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).parents[1] / "device_debug.py"
@@ -13,10 +16,15 @@ assert SPEC and SPEC.loader
 device_debug = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(device_debug)
 
+TEST_TOKEN = "b" * 32
+TEST_TLS_SHA256 = "a" * 64
+
 
 class StubClient(device_debug.DebugClient):
     def __init__(self, response: bytes):
-        super().__init__("http://192.0.2.1:8080", "secret")
+        super().__init__(
+            "https://192.0.2.1:8080", TEST_TOKEN, TEST_TLS_SHA256
+        )
         self.response = response
         self.identity = {
             "target": "WAVESHARE_AMOLED_206",
@@ -113,6 +121,53 @@ class DeviceDebugCliTests(unittest.TestCase):
             with self.assertRaisesRegex(device_debug.DebugClientError, "0600"):
                 device_debug._load_session(session)
 
+    def test_session_requires_https_token_and_tls_pin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = Path(directory) / "session.json"
+            session.write_text(
+                json.dumps(
+                    {
+                        "baseUrl": "https://192.0.2.1:8080",
+                        "token": TEST_TOKEN,
+                        "tlsCertificateSha256": TEST_TLS_SHA256,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session.chmod(0o600)
+            args = argparse.Namespace(
+                session_file=session,
+                base_url=None,
+                tls_sha256=None,
+            )
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(
+                    device_debug._session_values(args),
+                    (
+                        "https://192.0.2.1:8080",
+                        TEST_TOKEN,
+                        TEST_TLS_SHA256,
+                    ),
+                )
+            args.base_url = "http://192.0.2.1:8080"
+            with mock.patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(
+                    device_debug.DebugClientError, "HTTPS origin"
+                ):
+                    device_debug._session_values(args)
+
+    def test_redirects_are_never_followed(self):
+        handler = device_debug._NoRedirectHandler()
+        self.assertIsNone(
+            handler.redirect_request(None, None, 302, "Found", {}, "https://other")
+        )
+
+    def test_client_cannot_be_constructed_for_plaintext(self):
+        with self.assertRaisesRegex(device_debug.DebugClientError, "HTTPS origin"):
+            device_debug.DebugClient(
+                "http://192.0.2.1:8080", TEST_TOKEN, TEST_TLS_SHA256
+            )
+
     def test_token_redaction(self):
         self.assertEqual(
             device_debug._redact("failed with abc123", "abc123"),
@@ -156,7 +211,9 @@ class DeviceDebugCliTests(unittest.TestCase):
 
     def test_boot_uses_dedicated_short_press_route(self):
         calls = []
-        client = device_debug.DebugClient("http://192.0.2.1:8080", "secret")
+        client = device_debug.DebugClient(
+            "https://192.0.2.1:8080", TEST_TOKEN, TEST_TLS_SHA256
+        )
         client._request = lambda path, **kwargs: calls.append((path, kwargs))
         client.boot()
         self.assertEqual(
@@ -177,7 +234,9 @@ class DeviceDebugCliTests(unittest.TestCase):
                 "pointerSequenceInitialized": True,
             },
         }
-        client = device_debug.DebugClient("http://192.0.2.1:8080", "secret")
+        client = device_debug.DebugClient(
+            "https://192.0.2.1:8080", TEST_TOKEN, TEST_TLS_SHA256
+        )
 
         def fake_request(path, **kwargs):
             calls.append((path, kwargs))
@@ -218,7 +277,9 @@ class DeviceDebugCliTests(unittest.TestCase):
 
     def test_begin_renderer_window_sends_exact_fixture_identity(self):
         calls = []
-        client = device_debug.DebugClient("http://192.0.2.1:8080", "secret")
+        client = device_debug.DebugClient(
+            "https://192.0.2.1:8080", TEST_TOKEN, TEST_TLS_SHA256
+        )
 
         def fake_request(path, **kwargs):
             calls.append((path, kwargs))

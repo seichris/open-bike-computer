@@ -454,6 +454,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         )
         self.assertIn("probeVectorMapFolderOnStorageOwner", control)
         self.assertIn("switchVectorMapFolderOnStorageOwner", control)
+        self.assertIn("map_probe_diagnostics::Code::RootSwitchFailed", control)
         self.assertIn("gMapRenderControlOperation.store(true", control)
         self.assertIn("gMapRenderControlOperation.store(false", control)
         self.assertIn("WakeReason::Transfer", control)
@@ -468,6 +469,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             "bool Maps::takeVectorMapFolderActivationResult",
         )
         self.assertIn("if (result.loaded)", result)
+        self.assertIn("result.probe = completedVectorMapActivation.probe", result)
         self.assertIn("isPosMoved = true", result)
         self.assertIn("redrawMap = true", result)
 
@@ -479,6 +481,32 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("queueAttemptStartedMs", MAIN_SOURCE)
         self.assertNotIn(
             "acknowledgeActivatedMapRoot(activatedMapRoot, false)", loop
+        )
+
+    def test_map_recovery_and_availability_are_persisted_to_sd_diagnostics(self):
+        setup = function_body(MAIN_SOURCE, "void setup()")
+        loop = function_body(MAIN_SOURCE, "void loop()")
+        for event in (
+            '"recovery_checked"',
+            '"active_selection"',
+            '"renderer_probe"',
+            '"rollback_completed"',
+            '"boot_selection_final"',
+        ):
+            self.assertIn(event, setup)
+        self.assertIn("probeVectorMapFolderDetailed", setup)
+        self.assertIn('recordHealth("ready")', setup)
+        self.assertIn("takeMapAvailabilityTransition", loop)
+        self.assertIn('"runtime_map_unavailable"', loop)
+        self.assertIn('"map_data_not_found"', loop)
+
+        publish = function_body(
+            MAP_RENDERER_SOURCE, "bool Maps::publishReadyFrame"
+        )
+        self.assertIn(
+            "!mapAvailabilityKnown || "
+            "mapAvailabilityAvailable != result.mapFound",
+            publish,
         )
 
     def test_initial_map_canvas_allocation_does_not_stop_control_worker(self):

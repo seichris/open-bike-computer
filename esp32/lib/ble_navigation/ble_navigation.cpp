@@ -228,6 +228,9 @@ static uint32_t ownershipUiPairingGeneration = 0;
 static ownership_button_policy::ComparisonRenderGate
     ownershipComparisonRenderGate;
 static ble_transfer::PendingRequest pendingTransferControl;
+static portMUX_TYPE pendingTlsRotationMux = portMUX_INITIALIZER_UNLOCKED;
+static char pendingTlsRotationFingerprint[
+    device_transfer::TLS_CERTIFICATE_SHA256_HEX_BYTES + 1] = "";
 static std::atomic<bool> diagnosticsSessionStartInProgress{false};
 static std::atomic<uint32_t> diagnosticsSessionStartGeneration{0};
 static std::atomic<uint32_t> diagnosticsSessionActiveGeneration{0};
@@ -1939,9 +1942,8 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
                      std::to_string(firmware_metadata::build()) +
                      ",\"firmwareGitSha\":\"" +
                      jsonEscape(firmware_metadata::gitSha()) + "\"" +
-                     ",\"protocols\":[1" +
-                     (streamSupported ? ",2" : "") +
-                     "]" +
+                     ",\"protocols\":" +
+                     (streamSupported ? "[2]" : "[]") +
                      (streamSupported
                           ? ",\"streamFormatVersions\":[1],\"streamTrust\":" +
                                 map_transfer::compiledMapStreamTrustCapabilitiesJson()
@@ -1952,6 +1954,19 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
                      (mapView.debugIsMapFound() ? "true" : "false") +
                      ",\"mapBlocks\":" +
                      std::to_string(mapView.debugCachedBlockCount());
+
+  body += ",\"transferGeneration\":" +
+          std::to_string(transferStatus.transferGeneration) +
+          ",\"tls\":{\"identityVersion\":" +
+          std::to_string(transferStatus.tlsIdentityVersion) +
+          ",\"certificateSha256\":\"" +
+          jsonEscape(transferStatus.tlsCertificateSha256) + "\"}" +
+          ",\"capabilities\":{\"secureTransferV1\":" +
+          (transferStatus.secureTransferV1 ? "true" : "false") +
+          ",\"signedMapStreamV1\":" +
+          (transferStatus.signedMapStreamV1 ? "true" : "false") +
+          ",\"legacyArchivePolicy\":\"" +
+          jsonEscape(transferStatus.legacyArchivePolicy) + "\"}";
 
   if (!transferStatus.baseUrl.empty()) {
     body += ",\"baseUrl\":\"" + jsonEscape(transferStatus.baseUrl) + "\"";
@@ -2035,7 +2050,27 @@ static std::string genericTransferStatusJson() {
                      ",\"enabled\":" +
                      (transferStatus.enabled ? "true" : "false") +
                      ",\"port\":" + std::to_string(transferStatus.port) +
-                     ",\"mode\":\"" + jsonEscape(transferStatus.mode) + "\"";
+                     ",\"mode\":\"" + jsonEscape(transferStatus.mode) + "\"" +
+                     ",\"transferGeneration\":" +
+                     std::to_string(transferStatus.transferGeneration) +
+                     ",\"tls\":{\"identityVersion\":" +
+                     std::to_string(transferStatus.tlsIdentityVersion) +
+                     ",\"certificateSha256\":\"" +
+                     jsonEscape(transferStatus.tlsCertificateSha256) + "\"}" +
+                     ",\"capabilities\":{\"secureTransferV1\":" +
+                     (transferStatus.secureTransferV1 ? "true" : "false") +
+                     ",\"signedMapStreamV1\":" +
+                     (transferStatus.signedMapStreamV1 ? "true" : "false") +
+                     ",\"legacyArchivePolicy\":\"" +
+                     jsonEscape(transferStatus.legacyArchivePolicy) + "\"}";
+
+  if (transferStatus.pendingTlsIdentityVersion != 0 &&
+      !transferStatus.pendingTlsCertificateSha256.empty()) {
+    body += ",\"pendingTls\":{\"identityVersion\":" +
+            std::to_string(transferStatus.pendingTlsIdentityVersion) +
+            ",\"certificateSha256\":\"" +
+            jsonEscape(transferStatus.pendingTlsCertificateSha256) + "\"}";
+  }
 
   if (!transferStatus.baseUrl.empty()) {
     body += ",\"baseUrl\":\"" + jsonEscape(transferStatus.baseUrl) + "\"";
@@ -2301,6 +2336,29 @@ static void queueTransferControl(ble_transfer::Action action,
   ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
 }
 
+static void queueTlsRotationControl(ble_transfer::Action action,
+                                    const std::string &fingerprint = "") {
+  portENTER_CRITICAL(&pendingTlsRotationMux);
+  std::memset(pendingTlsRotationFingerprint, 0,
+              sizeof(pendingTlsRotationFingerprint));
+  if (fingerprint.size() ==
+      device_transfer::TLS_CERTIFICATE_SHA256_HEX_BYTES) {
+    std::memcpy(pendingTlsRotationFingerprint, fingerprint.data(),
+                fingerprint.size());
+  }
+  portEXIT_CRITICAL(&pendingTlsRotationMux);
+  queueTransferControl(action, ble_transfer::NotifyGeneric);
+}
+
+static std::string pendingTlsRotationFingerprintSnapshot() {
+  char fingerprint[sizeof(pendingTlsRotationFingerprint)] = {};
+  portENTER_CRITICAL(&pendingTlsRotationMux);
+  std::memcpy(fingerprint, pendingTlsRotationFingerprint,
+              sizeof(fingerprint));
+  portEXIT_CRITICAL(&pendingTlsRotationMux);
+  return fingerprint;
+}
+
 static bool handleRendererDiagnosticsCommand(const std::string &value,
                                              const char *authLabel) {
   const bool metricsPrefix =
@@ -2506,6 +2564,17 @@ static bool startDiagnosticsSessionAsync() {
   return true;
 }
 
+static uint64_t currentAuthenticatedTransferSessionId() {
+  if (!bleSessionAuthenticated || !deviceOwnershipReady ||
+      deviceOwnershipMutex == nullptr ||
+      xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return 0;
+  }
+  const uint64_t sessionId = deviceOwnership.authenticatedOwnerSessionId();
+  xSemaphoreGive(deviceOwnershipMutex);
+  return sessionId;
+}
+
 static void processPendingTransferControl() {
   const ble_transfer::Request request = pendingTransferControl.take();
   if (request.empty()) {
@@ -2514,14 +2583,14 @@ static void processPendingTransferControl() {
 
   if (request.disconnectCleanup) {
     cancelDiagnosticsSessionStart();
-    // Pending LAN credentials were synchronously cleared by the BLE
-    // disconnect callback before a new session could authenticate. Revoke
-    // modes whose lifetime must not outlive that old session. Firmware upload
-    // intentionally retains its existing disconnect behavior.
+    // Session credentials and request authorization were synchronously revoked
+    // by the BLE disconnect callback. Finish mode-specific cleanup here.
     const std::string mode = deviceTransferHttp.status().mode;
     bool disabled = true;
     if (mode == "map") {
       disabled = mapTransferHttp.setEnabled(false);
+    } else if (mode == "firmware") {
+      disabled = firmwareUpdateHttp.setEnabled(false);
     } else if (mode == "debug" || mode == "diagnostics" ||
                device_debug::frameStore().active()) {
       disabled = stopActiveDeviceTransfer();
@@ -2531,12 +2600,30 @@ static void processPendingTransferControl() {
                   mode.c_str(), disabled);
   }
 
-  const bool enablingOtherMode =
+  const bool requiresAuthenticatedTransferBinding =
       request.action == ble_transfer::Action::EnableMap ||
       request.action == ble_transfer::Action::EnableFirmware ||
-      request.action == ble_transfer::Action::EnableDebug;
-  if (enablingOtherMode && diagnosticsSessionStartInProgress.load(
-                               std::memory_order_acquire)) {
+      request.action == ble_transfer::Action::EnableDebug ||
+      request.action == ble_transfer::Action::EnableDiagnostics ||
+      request.action == ble_transfer::Action::PrepareTlsIdentity ||
+      request.action == ble_transfer::Action::CommitTlsIdentity ||
+      request.action == ble_transfer::Action::CancelTlsIdentity;
+  if (requiresAuthenticatedTransferBinding &&
+      !deviceTransferHttp.bindAuthenticatedBleSession(
+          currentAuthenticatedTransferSessionId())) {
+    deviceTransferHttp.setLastError(
+        "ble_owner_required",
+        "device transfer requires the authenticated owner BLE session");
+    if (request.notifications & ble_transfer::NotifyMap)
+      notifyMapTransferStatus(mapTransferStatusCharacteristic);
+    if (request.notifications & ble_transfer::NotifyGeneric)
+      notifyGenericTransferStatus(mapTransferStatusCharacteristic);
+    Serial.println(
+        "BLE Device Transfer: enter rejected, owner session unavailable");
+    return;
+  }
+  if (requiresAuthenticatedTransferBinding &&
+      diagnosticsSessionStartInProgress.load(std::memory_order_acquire)) {
     deviceTransferHttp.setLastError(
         "transfer_busy", "device diagnostics are still preparing storage");
     Serial.println(
@@ -2673,6 +2760,42 @@ static void processPendingTransferControl() {
       Serial.println(
           "BLE Device Transfer: diagnostics enter preparing asynchronously");
     }
+    break;
+  }
+  case ble_transfer::Action::PrepareTlsIdentity: {
+    const bool prepared = deviceTransferHttp.prepareTlsIdentityRotation();
+    if (!prepared) {
+      deviceTransferHttp.setLastError(
+          "tls_rotation_prepare",
+          "TLS identity rotation could not be prepared while transfer is active");
+    }
+    Serial.printf("BLE Device Transfer: TLS rotation prepare applied=%d\n",
+                  prepared);
+    break;
+  }
+  case ble_transfer::Action::CommitTlsIdentity: {
+    const std::string fingerprint =
+        pendingTlsRotationFingerprintSnapshot();
+    const bool committed = deviceTransferHttp.commitTlsIdentityRotation(
+        fingerprint);
+    if (!committed) {
+      deviceTransferHttp.setLastError(
+          "tls_rotation_commit",
+          "TLS identity rotation fingerprint did not match pending identity");
+    }
+    Serial.printf("BLE Device Transfer: TLS rotation commit applied=%d\n",
+                  committed);
+    break;
+  }
+  case ble_transfer::Action::CancelTlsIdentity: {
+    const bool cancelled = deviceTransferHttp.cancelTlsIdentityRotation();
+    if (!cancelled) {
+      deviceTransferHttp.setLastError(
+          "tls_rotation_cancel",
+          "TLS identity rotation could not be cancelled");
+    }
+    Serial.printf("BLE Device Transfer: TLS rotation cancel applied=%d\n",
+                  cancelled);
     break;
   }
   case ble_transfer::Action::DisableMap: {
@@ -3230,6 +3353,36 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
   if (data != nullptr && len > 0) {
     command.assign(reinterpret_cast<const char *>(data), len);
     command = trimAscii(command);
+  }
+
+  if (command == "tls|prepare") {
+    queueTlsRotationControl(ble_transfer::Action::PrepareTlsIdentity);
+    Serial.println("BLE Device Transfer: TLS rotation prepare queued");
+    return;
+  }
+
+  constexpr char kTlsCommitPrefix[] = "tls|commit|";
+  if (command.rfind(kTlsCommitPrefix, 0) == 0) {
+    const std::string fingerprint =
+        command.substr(sizeof(kTlsCommitPrefix) - 1);
+    if (device_transfer::validTlsCertificateSha256(fingerprint)) {
+      queueTlsRotationControl(ble_transfer::Action::CommitTlsIdentity,
+                              fingerprint);
+      Serial.println("BLE Device Transfer: TLS rotation commit queued");
+    } else {
+      deviceTransferHttp.setLastError(
+          "tls_rotation_fingerprint",
+          "TLS rotation commit requires a lowercase SHA-256 fingerprint");
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    }
+    return;
+  }
+
+  if (command == "tls|cancel") {
+    queueTlsRotationControl(ble_transfer::Action::CancelTlsIdentity);
+    Serial.println("BLE Device Transfer: TLS rotation cancel queued");
+    return;
   }
 
   if (command == "enter|map") {
@@ -4239,10 +4392,9 @@ public:
     if (activeConnHandle == BLE_HS_CONN_HANDLE_NONE && !server->connected) {
       return;
     }
-    // Prepared LAN credentials and forced-fallback metadata belong to this
-    // authenticated session. Clear them synchronously on NimBLE's serialized
-    // host callback before a reconnect can submit new session state.
-    deviceTransferHttp.clearPreferredNetwork();
+    // Revoke the session token, hotspot secret, and request generation on
+    // NimBLE's serialized host callback before a reconnect can authenticate.
+    deviceTransferHttp.clearAuthenticatedBleSession();
     queueTransferControl(ble_transfer::Action::DisableOnBleDisconnect,
                          ble_transfer::NotifyNone);
     server->connected = false;
