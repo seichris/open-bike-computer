@@ -64,6 +64,9 @@ other identifier as linked even when the app has no account or real-world name.
   private, no-store`, are not persisted by the backend, and are cached on
   iPhone and Watch for no more than seven days from each successful import or
   reload.
+- Confirm the authenticated athlete route catalog returns only allow-listed
+  summary fields, remains in iPhone memory only while the import page is open,
+  and never exposes athlete IDs or OAuth tokens to the app.
 - Confirm expiry deletes every API-derived Strava route field and Watch copy,
   leaving only the user/local reload bookmark on iPhone, and that its one-tap
   reload starts a fresh seven-day window.

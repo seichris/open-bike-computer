@@ -28,6 +28,12 @@ struct DeviceTransferSession: Equatable {
     let networkSSID: String?
     let hotspotFallback: Bool
     let hotspotFallbackReason: String?
+    let tlsCertificateSHA256: String
+    let tlsIdentityVersion: UInt32
+    let transferGeneration: UInt32
+    let secureTransferV1: Bool
+    let signedMapStreamV1: Bool
+    let legacyArchivePolicy: String
 
     init(
         mode: Mode,
@@ -38,7 +44,13 @@ struct DeviceTransferSession: Equatable {
         networkTransport: String? = nil,
         networkSSID: String? = nil,
         hotspotFallback: Bool = false,
-        hotspotFallbackReason: String? = nil
+        hotspotFallbackReason: String? = nil,
+        tlsCertificateSHA256: String = "",
+        tlsIdentityVersion: UInt32 = 0,
+        transferGeneration: UInt32 = 0,
+        secureTransferV1: Bool = false,
+        signedMapStreamV1: Bool = false,
+        legacyArchivePolicy: String = ""
     ) {
         self.mode = mode
         self.baseURL = baseURL
@@ -49,6 +61,26 @@ struct DeviceTransferSession: Equatable {
         self.networkSSID = networkSSID
         self.hotspotFallback = hotspotFallback
         self.hotspotFallbackReason = hotspotFallbackReason
+        self.tlsCertificateSHA256 = tlsCertificateSHA256
+        self.tlsIdentityVersion = tlsIdentityVersion
+        self.transferGeneration = transferGeneration
+        self.secureTransferV1 = secureTransferV1
+        self.signedMapStreamV1 = signedMapStreamV1
+        self.legacyArchivePolicy = legacyArchivePolicy
+    }
+}
+
+enum DeviceTransferSecurityError: LocalizedError, Equatable {
+    case secureTransferRequired
+    case signedMapStreamRequired
+
+    var errorDescription: String? {
+        switch self {
+        case .secureTransferRequired:
+            return "This transfer requires newer Bike Computer firmware with BLE-pinned HTTPS. Update the device firmware and try again."
+        case .signedMapStreamRequired:
+            return "Unsigned map archives are no longer supported. Update the device firmware and regenerate this map as a signed stream."
+        }
     }
 }
 
@@ -225,18 +257,18 @@ enum RemoteDeviceDebugError: LocalizedError, Equatable {
 }
 
 enum RemoteDeviceDebugSessionPolicy {
-    static func browserURL(for session: DeviceTransferSession) -> URL? {
+    static func pageURL(for session: DeviceTransferSession) -> URL? {
         guard session.mode == .debug,
-              let token = session.sessionToken,
-              !token.isEmpty else { return nil }
-        let pageURL = session.baseURL
+              session.secureTransferV1,
+              DeviceTransferSecurityPolicy.validate(
+                baseURL: session.baseURL,
+                certificateSHA256: session.tlsCertificateSHA256,
+                identityVersion: session.tlsIdentityVersion,
+                transferGeneration: session.transferGeneration,
+                secureTransferV1: session.secureTransferV1
+              ) else { return nil }
+        return session.baseURL
             .appendingPathComponent("device-debug", isDirectory: true)
-        guard var components = URLComponents(
-            url: pageURL,
-            resolvingAgainstBaseURL: false
-        ) else { return nil }
-        components.fragment = token
-        return components.url
     }
 
     static func sessionDetails(
@@ -276,12 +308,6 @@ enum DeviceTransferHandshakePolicy {
         lanFirst ? remoteDebugAttemptCount : attemptCount
     }
 
-    static func shouldRequestLegacyMapEnter(attempt: Int) -> Bool {
-        // A generic DTRN-aware device responds to the enter command itself.
-        // Give that application-level acknowledgement two seconds before
-        // trying the pre-DTRN map-control command for older firmware.
-        attempt == 8
-    }
 }
 
 enum DeviceTransferServerProbePolicy {
@@ -389,6 +415,65 @@ final class DeviceTransferManager {
         )
     }
 
+    private func secureSession(
+        mode: DeviceTransferSession.Mode,
+        bleManager: BLEManager
+    ) throws -> DeviceTransferSession? {
+        guard bleManager.deviceTransferMode == mode.rawValue,
+              let baseURL = bleManager.deviceTransferBaseURL,
+              let rawToken = bleManager.deviceTransferSessionToken,
+              let token = DeviceTransferSecurityPolicy
+                .normalizedTransferToken(rawToken) else {
+            return nil
+        }
+        guard let certificateSHA256 =
+                bleManager.deviceTransferTLSCertificateSHA256,
+              DeviceTransferSecurityPolicy.validate(
+                baseURL: baseURL,
+                certificateSHA256: certificateSHA256,
+                identityVersion: bleManager.deviceTransferTLSIdentityVersion,
+                transferGeneration: bleManager.deviceTransferGeneration,
+                secureTransferV1: bleManager.supportsSecureDeviceTransferV1
+              ) else {
+            throw DeviceTransferSecurityError.secureTransferRequired
+        }
+        if mode == .map {
+            guard bleManager.supportsSignedMapStreamV1,
+                  bleManager.deviceTransferLegacyArchivePolicy == "disabled" else {
+                throw DeviceTransferSecurityError.signedMapStreamRequired
+            }
+        }
+        let transport = bleManager.deviceTransferNetworkTransport
+        let accessPointSSID = bleManager.deviceTransferAccessPointSSID
+        let passphrase = bleManager.deviceTransferAccessPointPassphrase
+        if transport == "hotspot" {
+            guard accessPointSSID?.isEmpty == false,
+                  let passphrase,
+                  (8...63).contains(passphrase.utf8.count) else {
+                throw DeviceTransferSecurityError.secureTransferRequired
+            }
+        }
+        return DeviceTransferSession(
+            mode: mode,
+            baseURL: baseURL,
+            accessPointSSID: accessPointSSID,
+            accessPointPassphrase: passphrase,
+            sessionToken: token,
+            networkTransport: transport,
+            networkSSID: bleManager.deviceTransferNetworkSSID,
+            hotspotFallback: bleManager.deviceTransferUsedHotspotFallback,
+            hotspotFallbackReason:
+                bleManager.deviceTransferHotspotFallbackReason,
+            tlsCertificateSHA256: certificateSHA256,
+            tlsIdentityVersion: bleManager.deviceTransferTLSIdentityVersion,
+            transferGeneration: bleManager.deviceTransferGeneration,
+            secureTransferV1: bleManager.supportsSecureDeviceTransferV1,
+            signedMapStreamV1: bleManager.supportsSignedMapStreamV1,
+            legacyArchivePolicy:
+                bleManager.deviceTransferLegacyArchivePolicy ?? ""
+        )
+    }
+
     func enterMapTransfer(
         bleManager: BLEManager,
         status: @escaping @MainActor (String) -> Void
@@ -415,22 +500,14 @@ final class DeviceTransferManager {
                 bleManager.deviceTransferStatusRevision !=
                 initialDeviceTransferStatusRevision
             if hasFreshDeviceStatus,
-               bleManager.deviceTransferMode == DeviceTransferSession.Mode.map.rawValue,
-               let baseURL = bleManager.deviceTransferBaseURL,
-               let token = bleManager.deviceTransferSessionToken,
-               !token.isEmpty {
-                let session = DeviceTransferSession(
-                    mode: .map,
-                    baseURL: baseURL,
-                    accessPointSSID: bleManager.deviceTransferAccessPointSSID ??
-                        bleManager.mapTransferAccessPointSSID,
-                    sessionToken: token
-                )
+               let session = try secureSession(
+                mode: .map,
+                bleManager: bleManager
+               ) {
                 do {
                     try await joinDeviceNetworkIfNeeded(
                         session: session,
                         statusPath: "map-transfer/status",
-                        sessionToken: session.sessionToken,
                         status: status
                     )
                 } catch {
@@ -446,15 +523,6 @@ final class DeviceTransferManager {
                     ]
                 )
                 return session
-            }
-            if DeviceTransferHandshakePolicy.shouldRequestLegacyMapEnter(
-                attempt: attempt
-            ) {
-                // Compatibility only: firmware predating generic DTRN map
-                // mode needs the legacy MTRN command plus an explicit DSTS
-                // request. Current firmware never takes this path because its
-                // fresh DSTS response wins above.
-                _ = bleManager.requestMapTransferMode(enabled: true)
             }
             if DeviceTransferHandshakePolicy.shouldRequestStatus(
                 attempt: attempt
@@ -510,21 +578,14 @@ final class DeviceTransferManager {
         for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
             if bleManager.deviceTransferStatusRevision !=
                    initialDeviceTransferStatusRevision,
-               bleManager.deviceTransferMode == DeviceTransferSession.Mode.firmware.rawValue,
-               let baseURL = bleManager.deviceTransferBaseURL,
-               let token = bleManager.deviceTransferSessionToken,
-               !token.isEmpty {
-                let session = DeviceTransferSession(
-                    mode: .firmware,
-                    baseURL: baseURL,
-                    accessPointSSID: bleManager.deviceTransferAccessPointSSID,
-                    sessionToken: token
-                )
+               let session = try secureSession(
+                mode: .firmware,
+                bleManager: bleManager
+               ) {
                 do {
                     try await joinDeviceNetworkIfNeeded(
                         session: session,
                         statusPath: "firmware-update/status",
-                        sessionToken: session.sessionToken,
                         status: status
                     )
                 } catch {
@@ -593,9 +654,8 @@ final class DeviceTransferManager {
             if session.networkTransport == "lan" {
                 status("checking local Wi-Fi")
                 let reachable = try await waitForTransferServer(
-                    baseURL: session.baseURL,
+                    session: session,
                     statusPath: "device-diagnostics/v1/status",
-                    sessionToken: session.sessionToken,
                     timeout: 4
                 )
                 if !reachable {
@@ -620,7 +680,6 @@ final class DeviceTransferManager {
             try await joinDeviceNetworkIfNeeded(
                 session: session,
                 statusPath: "device-diagnostics/v1/status",
-                sessionToken: session.sessionToken,
                 status: status
             )
             record(
@@ -667,21 +726,11 @@ final class DeviceTransferManager {
     ) async throws -> DeviceTransferSession {
         for attempt in 0..<attemptCount {
             if bleManager.deviceTransferStatusRevision != initialRevision,
-               bleManager.deviceTransferMode == DeviceTransferSession.Mode.diagnostics.rawValue,
-               let baseURL = bleManager.deviceTransferBaseURL,
-               let token = bleManager.deviceTransferSessionToken,
-               !token.isEmpty {
-                return DeviceTransferSession(
-                    mode: .diagnostics,
-                    baseURL: baseURL,
-                    accessPointSSID: bleManager.deviceTransferAccessPointSSID,
-                    accessPointPassphrase: bleManager.deviceTransferAccessPointPassphrase,
-                    sessionToken: token,
-                    networkTransport: bleManager.deviceTransferNetworkTransport,
-                    networkSSID: bleManager.deviceTransferNetworkSSID,
-                    hotspotFallback: bleManager.deviceTransferUsedHotspotFallback,
-                    hotspotFallbackReason: bleManager.deviceTransferHotspotFallbackReason
-                )
+               let session = try secureSession(
+                mode: .diagnostics,
+                bleManager: bleManager
+               ) {
+                return session
             }
             // A fresh firmware rejection is authoritative. Do not spend the
             // remainder of the LAN/hotspot readiness window polling after the
@@ -844,21 +893,11 @@ final class DeviceTransferManager {
     ) async throws -> DeviceTransferSession {
         for attempt in 0..<DeviceTransferHandshakePolicy.remoteDebugAttemptCount {
             if bleManager.deviceTransferStatusRevision != initialRevision,
-               bleManager.deviceTransferMode == DeviceTransferSession.Mode.debug.rawValue,
-               let baseURL = bleManager.deviceTransferBaseURL,
-               let token = bleManager.deviceTransferSessionToken,
-               !token.isEmpty {
-                return DeviceTransferSession(
-                    mode: .debug,
-                    baseURL: baseURL,
-                    accessPointSSID: bleManager.deviceTransferAccessPointSSID,
-                    accessPointPassphrase: bleManager.deviceTransferAccessPointPassphrase,
-                    sessionToken: token,
-                    networkTransport: bleManager.deviceTransferNetworkTransport,
-                    networkSSID: bleManager.deviceTransferNetworkSSID,
-                    hotspotFallback: bleManager.deviceTransferUsedHotspotFallback,
-                    hotspotFallbackReason: bleManager.deviceTransferHotspotFallbackReason
-                )
+               let session = try secureSession(
+                mode: .debug,
+                bleManager: bleManager
+               ) {
+                return session
             }
             if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
                 _ = bleManager.requestDeviceTransferStatus()
@@ -908,7 +947,6 @@ final class DeviceTransferManager {
     private func joinDeviceNetworkIfNeeded(
         session: DeviceTransferSession,
         statusPath: String,
-        sessionToken: String?,
         status: @escaping @MainActor (String) -> Void
     ) async throws {
         guard session.baseURL.host == "192.168.4.1",
@@ -919,9 +957,8 @@ final class DeviceTransferManager {
 
 #if os(iOS)
         if await isTransferServerReachable(
-            baseURL: session.baseURL,
-            statusPath: statusPath,
-            sessionToken: sessionToken
+            session: session,
+            statusPath: statusPath
         ) {
             joinedAccessPointSSID = ssid
             return
@@ -983,9 +1020,8 @@ final class DeviceTransferManager {
                 // association. Preserve a server that is already reachable
                 // instead of tearing its network configuration back down.
                 if await isTransferServerReachable(
-                    baseURL: session.baseURL,
-                    statusPath: statusPath,
-                    sessionToken: sessionToken
+                    session: session,
+                    statusPath: statusPath
                 ) {
                     associationAccepted = true
                     break
@@ -1013,9 +1049,8 @@ final class DeviceTransferManager {
             joinedAccessPointSSID = ssid
             status("waiting for device transfer server")
             if try await waitForTransferServer(
-                baseURL: session.baseURL,
-                statusPath: statusPath,
-                sessionToken: sessionToken
+                session: session,
+                statusPath: statusPath
             ) {
                 print("Device Wi-Fi ready: \(ssid)")
                 return
@@ -1049,9 +1084,8 @@ final class DeviceTransferManager {
 #endif
 
     private func waitForTransferServer(
-        baseURL: URL,
+        session: DeviceTransferSession,
         statusPath: String,
-        sessionToken: String?,
         timeout: TimeInterval? = nil
     ) async throws -> Bool {
         let deadline = Date().addingTimeInterval(
@@ -1059,9 +1093,8 @@ final class DeviceTransferManager {
         )
         while true {
             if await isTransferServerReachable(
-                baseURL: baseURL,
-                statusPath: statusPath,
-                sessionToken: sessionToken
+                session: session,
+                statusPath: statusPath
             ) {
                 return true
             }
@@ -1090,20 +1123,30 @@ final class DeviceTransferManager {
 #endif
     }
 
-    private func isTransferServerReachable(baseURL: URL,
-                                           statusPath: String,
-                                           sessionToken: String?) async -> Bool {
-        let url = baseURL.appendingPathComponent(statusPath)
+    private func isTransferServerReachable(
+        session transferSession: DeviceTransferSession,
+        statusPath: String
+    ) async -> Bool {
+        let url = transferSession.baseURL.appendingPathComponent(statusPath)
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.timeoutInterval = DeviceTransferServerProbePolicy.requestTimeout
-        if let sessionToken, !sessionToken.isEmpty {
-            request.setValue(sessionToken, forHTTPHeaderField: "X-BikeComputer-Transfer-Token")
+        if let sessionToken = transferSession.sessionToken,
+           !sessionToken.isEmpty {
+            request.setValue(
+                sessionToken,
+                forHTTPHeaderField: "X-BikeComputer-Transfer-Token"
+            )
         }
 
-        let session = URLSession(
-            configuration: DeviceTransferServerProbePolicy.makeSessionConfiguration()
-        )
+        guard let session = DeviceTransferPinnedSessionFactory.make(
+            configuration:
+                DeviceTransferServerProbePolicy.makeSessionConfiguration(),
+            baseURL: transferSession.baseURL,
+            certificateSHA256: transferSession.tlsCertificateSHA256
+        ) else {
+            return false
+        }
         defer { session.invalidateAndCancel() }
         do {
             let (_, response) = try await session.data(for: request)

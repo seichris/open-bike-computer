@@ -189,6 +189,10 @@ class MapJob:
     download_receipts: list[MapDownloadReceipt] = field(default_factory=list)
     pending_artifact_keys: list[str] = field(default_factory=list)
     artifact_gc_keys: list[str] = field(default_factory=list)
+    admission_cost: int | None = None
+    admission_policy_version: str | None = None
+    admission_cost_inputs: dict[str, Any] | None = None
+    admission_partition: str = "public"
     attempts: int = 0
     max_attempts: int = 3
     worker_id: str | None = None
@@ -282,6 +286,13 @@ class MapJob:
             result["catalogPublicationError"] = self.catalog_publication_error
             result["catalogPublicationAttempts"] = self.catalog_publication_attempts
             result["catalogPublicationUpdatedAt"] = self.catalog_publication_updated_at
+            if self.admission_cost is not None:
+                result["admission"] = {
+                    "cost": self.admission_cost,
+                    "policyVersion": self.admission_policy_version,
+                    "inputs": self.admission_cost_inputs,
+                    "partition": self.admission_partition,
+                }
         return result
 
     @classmethod
@@ -296,6 +307,12 @@ class MapJob:
             route_point_count=int(geometry_data.get("routePointCount", 0)),
             corridor_width_m=geometry_data.get("corridorWidthM"),
         )
+        (
+            admission_cost,
+            admission_policy_version,
+            admission_cost_inputs,
+            admission_partition,
+        ) = _admission_metadata(data.get("admission"))
         return cls(
             job_id=str(data["jobId"]),
             status=JobStatus(data["status"]),
@@ -362,6 +379,10 @@ class MapJob:
             ],
             pending_artifact_keys=[str(value) for value in data.get("pendingArtifactKeys", [])],
             artifact_gc_keys=[str(value) for value in data.get("artifactGcKeys", [])],
+            admission_cost=admission_cost,
+            admission_policy_version=admission_policy_version,
+            admission_cost_inputs=admission_cost_inputs,
+            admission_partition=admission_partition,
             attempts=int(data.get("attempts", 0)),
             max_attempts=int(data.get("maxAttempts", 3)),
             worker_id=data.get("workerId"),
@@ -608,6 +629,32 @@ def _building_preprocessing_mode(value: Any) -> str | None:
     if value not in {"legacy", "shadow", "selected", "chunked_allowlist", "chunked"}:
         raise ValueError("building preprocessing mode is invalid")
     return value
+
+
+def _admission_metadata(
+    value: Any,
+) -> tuple[int | None, str | None, dict[str, Any] | None, str]:
+    if value is None:
+        # Jobs created before cost admission are conservatively treated as
+        # public work and are re-estimated from their durable request.
+        return None, None, None, "public"
+    if not isinstance(value, dict):
+        raise ValueError("job admission metadata is invalid")
+    cost = value.get("cost")
+    policy_version = value.get("policyVersion")
+    inputs = value.get("inputs")
+    partition = value.get("partition", "public")
+    if (
+        isinstance(cost, bool)
+        or not isinstance(cost, int)
+        or cost <= 0
+        or not isinstance(policy_version, str)
+        or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", policy_version) is None
+        or not isinstance(inputs, dict)
+        or partition not in {"public", "operator"}
+    ):
+        raise ValueError("job admission metadata is invalid")
+    return cost, policy_version, dict(inputs), partition
 
 
 def _duration_seconds(started_at: str | None, finished_at: str | None) -> float | None:

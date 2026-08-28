@@ -8,6 +8,7 @@ BICINO_APP_DISPLAY_NAME = Bicino Dev
 BICINO_COMPLICATION_DISPLAY_NAME = Start Ride Dev
 BICINO_URL_SCHEME = bikecomputer-dev
 BICINO_APP_ICON_NAME = AppIconDev
+BICINO_APP_ATTEST_ENVIRONMENT = development
 BICINO_MAP_SERVICE_HOST = maps-dev.8o.vc
 // Bicino Dev shares the production library identity and catalog with Bicino.
 // Staging validation builds override this setting at build time.

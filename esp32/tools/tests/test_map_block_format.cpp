@@ -1,5 +1,6 @@
 #include "../../lib/maps/src/mapBlockFormat.hpp"
 #include "../../lib/maps/src/mapBuildingBlock.hpp"
+#include "../../lib/maps/src/mapByteOrder.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -7,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -107,6 +109,20 @@ static void refreshSectionCrc(std::vector<uint8_t> &data,
 
 int main() {
   static_assert(map_block_format::kMaximumBuildings == 12288);
+  for (size_t offset = 0; offset < 8; ++offset) {
+    std::vector<uint8_t> unaligned(offset + 4, 0);
+    uint8_t *bytes = unaligned.data() + offset;
+    bytes[0] = 0x34;
+    bytes[1] = 0x12;
+    bytes[2] = 0x00;
+    bytes[3] = 0x80;
+    assert(map_byte_order::readLe16(bytes) == 0x1234);
+    assert(map_byte_order::readLeI16(bytes + 2) ==
+           std::numeric_limits<int16_t>::min());
+    bytes[2] = 0xfe;
+    bytes[3] = 0xff;
+    assert(map_byte_order::readLeI16(bytes + 2) == -2);
+  }
   const auto golden = loadGoldenBlocks();
   assert(golden.size() == 4);
   const std::vector<uint8_t> &validV1 = golden.at("fmb_v1");

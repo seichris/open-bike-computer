@@ -76,6 +76,26 @@ int main() {
                              std::strlen(wrongBooleanType)));
   const char *wrongNumberType = "{\"bootSequence\":\"7\"}";
   assert(!validateFieldsJson(wrongNumberType, std::strlen(wrongNumberType)));
+  const char *validMapFields =
+      "{\"mapPhase\":\"renderer_probe\",\"result\":\"failed\","
+      "\"code\":\"block_invalid\",\"mapId\":\"shanghai\","
+      "\"sha256Prefix\":\"0123456789abcdef\",\"sessionPresent\":false,"
+      "\"fallback\":true,\"durationMs\":41,\"visitedEntries\":12,"
+      "\"formatVersion\":1}";
+  assert(validateFieldsJson(validMapFields, std::strlen(validMapFields)));
+  const char *validLoggerHealth =
+      "{\"reason\":\"ready\",\"enqueuedCount\":9,\"writtenCount\":8,"
+      "\"droppedCount\":0,\"storageErrorCount\":0,\"queueDepth\":1,"
+      "\"maxQueueDepth\":3,\"available\":true}";
+  assert(validateFieldsJson(validLoggerHealth,
+                            std::strlen(validLoggerHealth)));
+  const char *wrongDurationType = "{\"durationMs\":\"41\"}";
+  assert(!validateFieldsJson(wrongDurationType,
+                             std::strlen(wrongDurationType)));
+  const char *validRenderTiming =
+      "{\"durationMs\":91,\"blockLoadMs\":17}";
+  assert(validateFieldsJson(validRenderTiming,
+                            std::strlen(validRenderTiming)));
 
   std::cout << "ride diagnostics format tests passed\n";
   return 0;

@@ -47,6 +47,7 @@ class ChangedComponentsTests(unittest.TestCase):
             "esp32/tools/tests/test_build_firmware.py",
             "tools/tests/test_future_release_tool.py",
             ".github/actions/require-immutable-releases/action.yml",
+            ".github/workflows/firmware-release-candidate.yml",
             ".github/workflows/firmware-release.yml",
             "docs/firmware-build-provenance.md",
         ):
@@ -158,7 +159,9 @@ class ChangedComponentsTests(unittest.TestCase):
 
     def test_release_tools_select_firmware_only(self) -> None:
         for path in (
+            ".github/scripts/firmware_release_gate.py",
             "tools/factory_release_manifest.py",
+            "tools/firmware_release_candidate.py",
             "tools/firmware-signing-requirements.txt",
             "tools/verify_github_release_assets.py",
         ):

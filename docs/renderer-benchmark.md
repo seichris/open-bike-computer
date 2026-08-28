@@ -13,7 +13,7 @@ candidate selection, not permission to change the default profile.
 - `flat`, `current`, `medium`, and `high` profiles in a balanced order, with at
   least three complete 120-second fixture loops per profile;
 - authenticated, rate-limited snapshots from the same bounded firmware state
-  over HTTP or BLE;
+  over pinned HTTPS or BLE;
 - internal RAM and PSRAM free/largest-block floors and monotonic-decline checks;
 - render/building/display timings, UI and GPS gaps, render job outcomes,
   building selection/reach, quota limiters, allocation fallback, GPS packet
@@ -71,10 +71,12 @@ no longer valid.
    Stop any active navigation first. While replay is active, a scoped GPS
    override prevents live Core Location fixes from interleaving with the
    fixture; starting navigation stops replay and releases the override.
-4. Start **Remote Device Debugging** and put the Mac on the reported LAN or
-   device-hotspot network. Store `baseUrl` and `token` in a mode-`0600` JSON
-   session file as described in [Remote device debugging](remote-device-debugging.md).
-   Do not paste the token into logs or reports.
+4. Start **Remote Device Debugging**. For a separately authorized automation
+   harness, put the Mac on the reported LAN or device-hotspot network and store
+   `baseUrl`, `tlsCertificateSha256`, and `token` in a mode-`0600` JSON session
+   file as described in [Remote device debugging](remote-device-debugging.md).
+   The ordinary iOS console intentionally does not export this file. Do not
+   paste the token into logs or reports.
 
 The built-in route fixture is
 `ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-shanghai-v1.json`.

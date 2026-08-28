@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
 import socket
 from dataclasses import dataclass
@@ -21,7 +22,10 @@ STRAVA_WEB_AUTHORIZE_URL = f"{STRAVA_HTTPS_ORIGIN}/oauth/mobile/authorize"
 STRAVA_NATIVE_AUTHORIZE_URL = "strava://oauth/mobile/authorize"
 MAXIMUM_STRAVA_JSON_BYTES = 512 * 1_024
 MAXIMUM_STRAVA_GPX_BYTES = 4 * 1_024 * 1_024
+MAXIMUM_STRAVA_ROUTE_LIST_JSON_BYTES = 4 * 1_024 * 1_024
 MAXIMUM_SIGNED_64_BIT_ID = 9_223_372_036_854_775_807
+STRAVA_ROUTES_PER_PAGE = 200
+MAXIMUM_STRAVA_ROUTE_PAGE = 100
 STRAVA_ROUTE_ID_PATTERN = re.compile(r"[1-9][0-9]{0,18}")
 
 
@@ -130,6 +134,22 @@ class StravaRouteMetadata:
     route_id: str
     athlete_id: str
     route_type: int
+
+
+@dataclass(frozen=True)
+class StravaAthleteRoute:
+    route_id: str
+    name: str
+    distance_meters: float
+    elevation_gain_meters: float
+    route_kind: str
+
+
+@dataclass(frozen=True)
+class StravaAthleteRoutePage:
+    page: int
+    next_page: int | None
+    routes: tuple[StravaAthleteRoute, ...]
 
 
 @dataclass(frozen=True)
@@ -270,6 +290,54 @@ class StravaClient:
             route_id=response_route_id,
             athlete_id=athlete_id,
             route_type=route_type,
+        )
+
+    def athlete_routes(
+        self,
+        athlete_id: str,
+        access_token: str,
+        *,
+        page: int,
+    ) -> StravaAthleteRoutePage:
+        validated_athlete_id = _strict_id(athlete_id)
+        if validated_athlete_id != athlete_id:
+            raise StravaClientError("strava_invalid_response", status_code=502)
+        if (
+            isinstance(page, bool)
+            or not isinstance(page, int)
+            or not 1 <= page <= MAXIMUM_STRAVA_ROUTE_PAGE
+        ):
+            raise StravaClientError("strava_invalid_response", status_code=502)
+        self._validate_token_text(access_token)
+        query = urlencode({"page": page, "per_page": STRAVA_ROUTES_PER_PAGE})
+        url = f"{STRAVA_API_BASE}/athletes/{athlete_id}/routes?{query}"
+        response = self._request(
+            method="GET",
+            url=url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            body=None,
+            maximum_body_bytes=MAXIMUM_STRAVA_ROUTE_LIST_JSON_BYTES,
+        )
+        self._raise_for_status(response, unavailable_is_not_found=False)
+        self._require_content_type(response, {"application/json"})
+        document = self._json_document(response.body, "Strava athlete routes response")
+        if not isinstance(document, list) or len(document) > STRAVA_ROUTES_PER_PAGE:
+            raise StravaClientError("strava_invalid_response", status_code=502)
+        routes: list[StravaAthleteRoute] = []
+        route_ids: set[str] = set()
+        for item in document:
+            route = _athlete_route(item)
+            if route.route_id in route_ids:
+                raise StravaClientError("strava_invalid_response", status_code=502)
+            route_ids.add(route.route_id)
+            routes.append(route)
+        has_next_page = len(routes) == STRAVA_ROUTES_PER_PAGE
+        if has_next_page and page == MAXIMUM_STRAVA_ROUTE_PAGE:
+            raise StravaClientError("strava_invalid_response", status_code=502)
+        return StravaAthleteRoutePage(
+            page=page,
+            next_page=page + 1 if has_next_page else None,
+            routes=tuple(routes),
         )
 
     def export_gpx(self, route_id: str, access_token: str) -> bytes:
@@ -451,6 +519,70 @@ def _strict_id(value: object) -> str | None:
         return validate_strava_route_id(candidate)
     except StravaClientError:
         return None
+
+
+def _athlete_route(value: object) -> StravaAthleteRoute:
+    if not isinstance(value, dict):
+        raise StravaClientError("strava_invalid_response", status_code=502)
+    route_id = _strict_id(value.get("id"))
+    name = _strict_route_name(value.get("name"))
+    distance = _strict_nonnegative_number(
+        value.get("distance"),
+        maximum=100_000_000,
+    )
+    elevation_gain = _strict_nonnegative_number(
+        value.get("elevation_gain"),
+        maximum=10_000_000,
+    )
+    route_type = value.get("type")
+    if (
+        route_id is None
+        or not isinstance(name, str)
+        or distance is None
+        or elevation_gain is None
+        or isinstance(route_type, bool)
+        or not isinstance(route_type, int)
+        or route_type not in {1, 2}
+    ):
+        raise StravaClientError("strava_invalid_response", status_code=502)
+    return StravaAthleteRoute(
+        route_id=route_id,
+        name=name,
+        distance_meters=distance,
+        elevation_gain_meters=elevation_gain,
+        route_kind="ride" if route_type == 1 else "run",
+    )
+
+
+def _strict_route_name(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    try:
+        encoded = name.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if not encoded or len(encoded) > 512 or not all(
+        character.isprintable() for character in name
+    ):
+        return None
+    return name
+
+
+def _strict_nonnegative_number(
+    value: object,
+    *,
+    maximum: float,
+) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(number) or not 0 <= number <= maximum:
+        return None
+    return number
 
 
 def _bounded_retry_after(value: str | None) -> int | None:

@@ -126,8 +126,15 @@ nonisolated struct StravaRouteURLV1: Codable, Equatable, Hashable, Sendable {
               path == prefix + routeID else {
             throw StravaRouteContractError.invalidURL
         }
-        externalRouteID = routeID
-        canonicalURL = "https://www.strava.com/routes/\(routeID)"
+        try self.init(externalRouteID: routeID)
+    }
+
+    init(externalRouteID: String) throws {
+        guard RouteProviderPolicyV1.isValidStravaRouteID(externalRouteID) else {
+            throw StravaRouteContractError.invalidURL
+        }
+        self.externalRouteID = externalRouteID
+        canonicalURL = "https://www.strava.com/routes/\(externalRouteID)"
     }
 
     init(reference: RouteSourceReferenceV1) throws {

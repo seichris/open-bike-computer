@@ -11,8 +11,85 @@ enum RideSharedTests {
         try testWatchDirectBLEContract()
         try testFavoriteSyncPolicyAndCoordinateNormalization()
         try testGPXImport()
+        try testStravaAthleteRoutePages()
         try testStravaRouteContractAndReloadBookmarks()
         print("RideSharedTests passed")
+    }
+
+    private static func testStravaAthleteRoutePages() throws {
+        func route(_ id: Int, type: String = "ride") -> [String: Any] {
+            [
+                "routeId": String(id),
+                "name": "Route \(id)",
+                "distanceMeters": Double(id) * 1_000,
+                "elevationGainMeters": Double(id) * 10,
+                "type": type,
+            ]
+        }
+
+        let shortData = try JSONSerialization.data(withJSONObject: [
+            "page": 1,
+            "nextPage": NSNull(),
+            "routes": [route(101), route(102, type: "run")],
+        ])
+        let shortPage = try JSONDecoder().decode(
+            StravaAthleteRoutePageV1.self,
+            from: shortData
+        )
+        expect(
+            shortPage.page == 1 &&
+                shortPage.nextPage == nil &&
+                shortPage.routes.map(\.type) == [.ride, .run] &&
+                shortPage.routes[0].routeURL?.canonicalURL ==
+                    "https://www.strava.com/routes/101" &&
+                shortPage.routes[0].type.isImportable &&
+                !shortPage.routes[1].type.isImportable,
+            "a safe route page exposes canonical route identity and importability"
+        )
+
+        let fullData = try JSONSerialization.data(withJSONObject: [
+            "page": 1,
+            "nextPage": 2,
+            "routes": (1...200).map { route($0) },
+        ])
+        let fullPage = try JSONDecoder().decode(
+            StravaAthleteRoutePageV1.self,
+            from: fullData
+        )
+        expect(
+            fullPage.routes.count == 200 && fullPage.nextPage == 2,
+            "a full Strava response explicitly advances pagination"
+        )
+
+        let duplicateData = try JSONSerialization.data(withJSONObject: [
+            "page": 1,
+            "nextPage": NSNull(),
+            "routes": [route(101), route(101)],
+        ])
+        expectThrows(
+            StravaRouteContractError.invalidResponseContract,
+            "duplicate route identities fail closed"
+        ) {
+            _ = try JSONDecoder().decode(
+                StravaAthleteRoutePageV1.self,
+                from: duplicateData
+            )
+        }
+
+        let inconsistentData = try JSONSerialization.data(withJSONObject: [
+            "page": 1,
+            "nextPage": 2,
+            "routes": [route(101)],
+        ])
+        expectThrows(
+            StravaRouteContractError.invalidResponseContract,
+            "a partial response cannot advertise another page"
+        ) {
+            _ = try JSONDecoder().decode(
+                StravaAthleteRoutePageV1.self,
+                from: inconsistentData
+            )
+        }
     }
 
     private static func testStravaRouteContractAndReloadBookmarks() throws {
