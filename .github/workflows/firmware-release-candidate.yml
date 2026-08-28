@@ -1,0 +1,100 @@
+name: Firmware Release Candidate
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  attestations: read
+  contents: read
+  packages: read
+
+concurrency:
+  group: firmware-release-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release CI
+    uses: ./.github/workflows/ci.yml
+    with:
+      scope: all
+      firmware_hardware: all
+
+  diagnostics:
+    name: Validate diagnostic firmware
+    uses: ./.github/workflows/firmware-diagnostics.yml
+
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: WAVESHARE_AMOLED_175
+            environment: WAVESHARE_AMOLED_175_PRODUCTION
+          - target: WAVESHARE_AMOLED_206
+            environment: WAVESHARE_AMOLED_206_PRODUCTION
+    defaults:
+      run:
+        working-directory: esp32
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Restore pinned PlatformIO downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: esp32/.pio/open-bike-build/downloads
+          key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
+      - name: Build with the repository-owned firmware runtime
+        run: env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "${{ matrix.environment }}" --factory-output-dir dist
+      - name: Bind the exact release candidate
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+          RELEASE_ENVIRONMENT: ${{ matrix.environment }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_GIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cp ".pio/build/${RELEASE_ENVIRONMENT}/firmware.bin" "dist/${RELEASE_TARGET}.bin"
+          python3 ../tools/firmware_release_candidate.py record \
+            --artifact-dir dist \
+            --output dist/candidate-receipt.json \
+            --target "${RELEASE_TARGET}" \
+            --environment "${RELEASE_ENVIRONMENT}" \
+            --repository "${RELEASE_REPOSITORY}" \
+            --tag "${RELEASE_TAG}" \
+            --git-sha "${RELEASE_GIT_SHA}"
+          shasum -a 256 dist/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: firmware-${{ matrix.target }}
+          path: esp32/dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  ready:
+    name: Release candidate ready
+    if: ${{ always() }}
+    needs:
+      - build
+      - diagnostics
+      - validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      BUILD_RESULT: ${{ needs.build.result }}
+      DIAGNOSTICS_RESULT: ${{ needs.diagnostics.result }}
+      VALIDATE_RESULT: ${{ needs.validate.result }}
+    steps:
+      - name: Require every candidate gate
+        run: |
+          set -euo pipefail
+          test "${BUILD_RESULT}" = success
+          test "${DIAGNOSTICS_RESULT}" = success
+          test "${VALIDATE_RESULT}" = success

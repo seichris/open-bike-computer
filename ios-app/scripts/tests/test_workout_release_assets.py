@@ -125,6 +125,7 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "BICINO_COMPLICATION_DISPLAY_NAME": "Start Ride Dev",
             "BICINO_URL_SCHEME": "bikecomputer-dev",
             "BICINO_APP_ICON_NAME": "AppIconDev",
+            "BICINO_APP_ATTEST_ENVIRONMENT": "development",
             "BICINO_MAP_SERVICE_HOST": "maps-dev.8o.vc",
             "BICINO_MAP_CATALOG_HOST": "maps-share.8o.vc",
             "BICINO_MAP_R2_DOWNLOAD_HOST": (
@@ -152,6 +153,7 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "BICINO_COMPLICATION_DISPLAY_NAME": "Start Ride",
             "BICINO_URL_SCHEME": "bikecomputer",
             "BICINO_APP_ICON_NAME": "AppIcon",
+            "BICINO_APP_ATTEST_ENVIRONMENT": "production",
             "BICINO_MAP_SERVICE_HOST": "maps.8o.vc",
             "BICINO_MAP_CATALOG_HOST": "maps-share.8o.vc",
             "BICINO_MAP_R2_DOWNLOAD_HOST": (
@@ -198,6 +200,12 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         self.assertEqual(
             entitlements["com.apple.developer.associated-domains"],
             ["applinks:$(BICINO_MAP_CATALOG_HOST)"],
+        )
+        self.assertEqual(
+            entitlements[
+                "com.apple.developer.devicecheck.appattest-environment"
+            ],
+            "$(BICINO_APP_ATTEST_ENVIRONMENT)",
         )
 
         self.assertIn(

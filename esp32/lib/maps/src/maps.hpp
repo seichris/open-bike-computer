@@ -21,6 +21,7 @@
 #include "map_projection.hpp"
 #include "mapPresentation.hpp"
 #include "mapPoseInputPolicy.hpp"
+#include "mapProbeDiagnostics.hpp"
 #include "mapRenderJob.hpp"
 #include "mapSurface.hpp"
 #include "../../utils/src/mapDragPreview.hpp"
@@ -38,6 +39,13 @@
 struct MapSettings;
 
 class Maps {
+public:
+  struct MapAvailabilityTransition {
+    bool available = false;
+    uint32_t renderDurationMs = 0;
+    uint32_t blockLoadMs = 0;
+  };
+
 private:
   // Render Map
   struct MapTile // Tile Map structure
@@ -350,10 +358,12 @@ private:
     uint32_t sequence = 0;
     std::string folder;
     bool loaded = false;
+    map_probe_diagnostics::Result probe;
   };
   bool takeVectorMapActivationRequest(VectorMapActivationRequest &request);
   bool processPendingVectorMapActivation();
-  bool probeVectorMapFolderOnStorageOwner(const std::string &folder);
+  map_probe_diagnostics::Result
+  probeVectorMapFolderOnStorageOwner(const std::string &folder);
   bool switchVectorMapFolderOnStorageOwner(const std::string &folder);
   void finalizeVectorMapFolderSwitchOnUi();
   bool startRenderWorker();
@@ -406,6 +416,10 @@ private:
   uint32_t vectorMapActivationSequence = 0;
   bool publishedMapFrame = false;
   bool publishedMapFound = false;
+  bool mapAvailabilityKnown = false;
+  bool mapAvailabilityAvailable = false;
+  bool mapAvailabilityTransitionPending = false;
+  MapAvailabilityTransition mapAvailabilityTransition{};
   uint32_t lastCompletedRenderDurationMs = 1000;
   uint32_t navigationEpoch = 1;
   uint32_t styleEpoch = 1;
@@ -559,6 +573,7 @@ public:
   struct VectorMapActivationResult {
     std::string folder;
     bool loaded = false;
+    map_probe_diagnostics::Result probe;
   };
   uint16_t mapScrHeight;  // Screen map size height
   uint16_t mapScrWidth;   // Screen map size width
@@ -584,6 +599,8 @@ public:
   void initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull);
   bool setVectorMapFolder(const std::string &folder);
   bool probeVectorMapFolder(const std::string &folder);
+  map_probe_diagnostics::Result
+  probeVectorMapFolderDetailed(const std::string &folder);
   bool requestVectorMapFolderActivation(const std::string &folder);
   bool takeVectorMapFolderActivationResult(VectorMapActivationResult &result);
   void deleteMapScrSprites();
@@ -595,6 +612,7 @@ public:
   bool hasPendingRenderForCurrentScreen() const;
   bool takeFramePublication();
   bool takeRenderFailure();
+  bool takeMapAvailabilityTransition(MapAvailabilityTransition &transition);
   bool hasPublishedMapFrame() const { return publishedMapFrame; }
   bool hasMapCanvas() const { return canvasMap != nullptr; }
   void displayMap();

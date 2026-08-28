@@ -2589,6 +2589,31 @@ MapTransferInstaller::readActiveManifest(MapManifest &manifest) const {
   return readInstalledManifest(selection.root, manifest);
 }
 
+InstallStatus MapTransferInstaller::readActiveMapContentReceipt(
+    ActiveMapSelection &selection, std::string &receipt) const {
+  receipt.clear();
+  const InstallStatus active = readActiveMap(selection);
+  if (!active.ok)
+    return active;
+  if (!selection.manifestReceipt.empty()) {
+    receipt = selection.manifestReceipt;
+    return {true, "ok", ""};
+  }
+
+  if (!safeActiveRoot(selection.root) || !activeRootExists(selection.root))
+    return fail("installed_root", "installed map root is missing");
+  if (!readTextFile(joinPath(joinPath(storageRoot_, selection.root),
+                             kInstalledReceiptFile),
+                    receipt, 64) ||
+      !isHexSha256(receipt)) {
+    receipt.clear();
+    return fail("installed_receipt",
+                "installed map verification receipt is missing or invalid");
+  }
+  std::transform(receipt.begin(), receipt.end(), receipt.begin(), ::tolower);
+  return {true, "ok", ""};
+}
+
 InstallStatus MapTransferInstaller::readActiveMapPresentation(
     ActiveMapSelection &selection,
     MapPresentationMetadata &presentation) const {
