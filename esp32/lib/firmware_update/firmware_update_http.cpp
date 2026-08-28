@@ -356,7 +356,7 @@ void FirmwareUpdateHttpServer::markRunningAppValid() {
 }
 
 bool FirmwareUpdateHttpServer::handleRequest(
-    const device_transfer::HttpRequest &request, WiFiClient &client) {
+    const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
   if (!startsWith(request.path, "/firmware-update"))
     return false;
   Serial.printf("FIRMWARE_UPDATE_HTTP: %s %s length=%llu\n",
@@ -396,12 +396,12 @@ bool FirmwareUpdateHttpServer::handleRequest(
   return true;
 }
 
-void FirmwareUpdateHttpServer::handleStatus(WiFiClient &client) {
+void FirmwareUpdateHttpServer::handleStatus(device_transfer::TransferClient &client) {
   device_transfer::sendHttpJson(client, 200, statusJson());
 }
 
 void FirmwareUpdateHttpServer::handleBegin(
-    const device_transfer::HttpRequest &request, WiFiClient &client) {
+    const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
   std::string body;
   if (!device_transfer::readHttpBody(client, request.contentLength,
                                      kMaxBeginBodyBytes, body)) {
@@ -505,7 +505,7 @@ void FirmwareUpdateHttpServer::handleBegin(
 }
 
 void FirmwareUpdateHttpServer::handleImage(
-    const device_transfer::HttpRequest &request, WiFiClient &client) {
+    const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
   lockState();
   const bool ready = status_ == "receiving" && otaOpen_;
   const uint32_t expectedSize = totalBytes_;
@@ -601,7 +601,7 @@ void FirmwareUpdateHttpServer::handleImage(
 }
 
 void FirmwareUpdateHttpServer::handleFinalize(
-    const device_transfer::HttpRequest &request, WiFiClient &client) {
+    const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
   lockState();
   const bool ready = status_ == "received" && otaOpen_;
   const esp_ota_handle_t handle = otaHandle_;
@@ -681,7 +681,7 @@ void FirmwareUpdateHttpServer::handleFinalize(
   ESP.restart();
 }
 
-void FirmwareUpdateHttpServer::handleCancel(WiFiClient &client) {
+void FirmwareUpdateHttpServer::handleCancel(device_transfer::TransferClient &client) {
   resetUploadState();
   device_transfer::sendHttpJson(client, 200, statusJson());
 }
@@ -707,14 +707,14 @@ void FirmwareUpdateHttpServer::resetUploadState() {
   }
 }
 
-void FirmwareUpdateHttpServer::reject(WiFiClient &client, int httpStatus,
+void FirmwareUpdateHttpServer::reject(device_transfer::TransferClient &client, int httpStatus,
                                       const std::string &code,
                                       const std::string &message) {
   transferServer_->setLastError(code, message);
   device_transfer::sendHttpError(client, httpStatus, code, message);
 }
 
-void FirmwareUpdateHttpServer::fail(WiFiClient &client, int httpStatus,
+void FirmwareUpdateHttpServer::fail(device_transfer::TransferClient &client, int httpStatus,
                                     const std::string &code,
                                     const std::string &message) {
   setLastError(code, message);

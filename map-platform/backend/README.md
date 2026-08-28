@@ -9,9 +9,14 @@ contract and operating procedure.
 
 - `POST /v1/map-jobs` for curated, custom bbox, custom polygon, and route
   corridor requests, with installation-scoped idempotency metadata.
-- Installation-scoped job, list, map-pack, and download-URL reads. The client
-  installation ID is required for reads; legacy jobs without an owner remain
-  recoverable by ID.
+- Installation-authenticated creation, job/list reads, map-pack reads, and
+  download-URL issuance. Every public installation-owned request requires the
+  server-issued installation ID and matching `X-Installation-Token`; legacy
+  unowned jobs are available only through admin operations.
+- Apple App Attest enrollment for every new managed installation and a fresh,
+  single-use App Attest assertion for every non-idempotent map creation. The
+  assertion binds the exact request body, installation, idempotency key,
+  renderer/profile identity, and app build.
 - Source-region resolution from `map-platform/backend/config/source-regions.json`,
   with a cached Geofabrik catalog fallback for any requested area covered by
   Geofabrik.
@@ -50,25 +55,17 @@ export MAP_PLATFORM_INSTALLATION_SECRET='replace-with-at-least-32-random-bytes'
 uvicorn --factory map_platform.api:create_app --reload --port 8080
 ```
 
-Create a custom bbox job:
-
-```sh
-credential="$(curl -s -X POST http://localhost:8080/v1/installations)"
-installation_id="$(printf '%s' "$credential" | python -c 'import json,sys; print(json.load(sys.stdin)["clientInstallationId"])')"
-installation_token="$(printf '%s' "$credential" | python -c 'import json,sys; print(json.load(sys.stdin)["clientInstallationToken"])')"
-curl -s http://localhost:8080/v1/map-jobs \
-  -H 'content-type: application/json' \
-  -H "x-installation-token: $installation_token" \
-  -d '{
-    "mode": "custom_bbox",
-    "displayName": "Singapore central",
-    "bbox": [103.75, 1.24, 103.93, 1.37],
-    "clientInstallationId": "'"$installation_id"'",
-    "clientRequestId": "request-12345678",
-    "installOnDevice": false,
-    "target": { "renderer": "esp32-fmb", "firmwareVersion": "0.0.0" }
-  }'
-```
+Installation issuance and new map creation intentionally cannot be exercised
+with an anonymous `curl` request. A genuine iOS client obtains an
+`attestation` challenge from
+`POST /v1/installations/app-attest/challenges`, submits the Apple attestation
+object to `POST /v1/installations`, then obtains a `map-create` challenge and
+adds `X-App-Attest-Challenge-Id`, `X-App-Attest-Key-Id`,
+`X-App-Attest-Assertion`, and `X-App-Attest-App-Build` to
+`POST /v1/map-jobs`. Exact idempotent replays remain readable with the
+installation credential and do not consume a second assertion. There is no
+runtime test-verifier or disable switch; backend tests inject their verifier
+directly through `create_app`.
 
 ### Strava route import
 
@@ -76,6 +73,12 @@ Strava route import is disabled unless `MAP_PLATFORM_STRAVA_ENABLED=1` and all
 provider configuration is present. The iOS app keeps no Strava client secret or
 athlete token: it authenticates these endpoints with its existing Bicino
 installation credential, and the backend owns OAuth and provider traffic.
+
+`GET /v1/integrations/strava/routes?page=N` uses the encrypted connection's
+athlete ID and access token to request 200 routes at a time from Strava. Its
+private, no-store response exposes only route ID, name, distance, elevation,
+and ride/run type plus the next page number; neither the athlete ID nor any
+OAuth credential is returned to iOS.
 
 Register separate Strava applications for Development and Production. Their
 exact callbacks are:
@@ -105,6 +108,7 @@ key until every live row has been read or its connection has aged out.
 The API applies separate installation and IP quotas. Defaults can be tuned with
 `MAP_PLATFORM_STRAVA_OAUTH_START_LIMIT_PER_HOUR` (10),
 `MAP_PLATFORM_STRAVA_ROUTE_IMPORT_LIMIT_PER_HOUR` (30),
+`MAP_PLATFORM_STRAVA_ROUTE_LIST_LIMIT_PER_HOUR` (120),
 `MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR` (60), and
 `MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR` (30). Imported GPX responses
 always carry a backend-owned seven-day `deleteAfter`; that retention maximum is
@@ -230,18 +234,35 @@ Required Coolify secrets:
 
 The public iOS app contains no server-wide credential. It requests a unique
 installation credential from `POST /v1/installations`, stores it in the
-Keychain, and presents it only for installation-owned resources. Issuance,
+Keychain, and presents it only for installation-owned resources. Managed
+installation issuance is accepted only after Apple App Attest validates the
+app identity, environment, key, certificate chain, nonce, and (when present)
+launch-validation extensions. New map work additionally requires a monotonic,
+body-bound assertion. App Attest challenges, key bindings, receipts, and
+counters live in `/data/app-attest.sqlite3`; that database must use the same
+persistent volume and backup policy as the other control-plane state. Issuance,
 map creation, download-URL creation, and the general public API are protected
 by persistent limits in `/data/rate-limits.sqlite3`. Defaults are intentionally
 conservative and can be tuned with:
 
 - `MAP_PLATFORM_PUBLIC_REQUEST_LIMIT_PER_MINUTE` (default `240` per IP)
 - `MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY` (default `3` per IP)
+- `MAP_PLATFORM_APP_ATTEST_CHALLENGE_TTL_SECONDS` (default `300`; allowed
+  range `30` through `900`)
 - `MAP_PLATFORM_MAP_CREATE_LIMIT_PER_HOUR` (default `4` per installation)
 - `MAP_PLATFORM_MAP_CREATE_IP_LIMIT_PER_DAY` (default `20` per IP)
 - `MAP_PLATFORM_DOWNLOAD_URL_LIMIT_PER_HOUR` (default `30` per installation)
 - `MAP_PLATFORM_DOWNLOAD_URL_IP_LIMIT_PER_HOUR` (default `60` per IP)
 - `MAP_PLATFORM_MAX_REQUEST_BODY_BYTES` (default `2097152` for every non-GET request; large enough for the maximum supported route corridor)
+
+Every accepted map also receives a durable `map-cost-v1` reservation derived
+from its area, geometry complexity, source count, and renderer version. The API
+atomically enforces the per-installation rolling budget and global queued-cost
+ceiling with idempotent creation; workers independently enforce the running-cost
+ceiling before claiming work. Terminal and cancelled jobs release global
+capacity, while their recent cost remains in the installation window. Public
+work cannot consume the operator reserve. Admission-state corruption fails
+closed instead of silently undercounting work.
 
 Production Compose requires `MAP_PLATFORM_TRUSTED_PROXY_CIDRS` to contain the
 comma-separated CIDRs of the
@@ -352,6 +373,15 @@ selecting an image tag at runtime. See
 `docs/map-stream-rollout-runbook.md` for commissioning, hardware acceptance,
 promotion, rollback, retention, and rotation.
 
+Before releasing either iOS channel, enable App Attest for its App ID and
+signing profile. Development builds use the `development` entitlement and
+`4H5PK8686H.LetItRide.BikeComputer.dev`; Production/TestFlight/App Store builds
+use the `production` entitlement and
+`4H5PK8686H.LetItRide.BikeComputer`. Deploy the backend before the App Attest
+client build. Existing pre-attestation installations may continue reading
+their owned resources, but the app creates a new attested installation before
+it can submit new map work.
+
 Useful production environment variables:
 
 - `MAP_PLATFORM_ADMIN_TOKEN`: separate server-only bearer token for worker,
@@ -360,6 +390,15 @@ Useful production environment variables:
   available.
 - `MAP_PLATFORM_MAX_ACTIVE_JOBS`: maximum queued/running jobs accepted by the
   API, default `25`.
+- `MAP_PLATFORM_MAX_QUEUED_COST` and `MAP_PLATFORM_MAX_RUNNING_COST`: global
+  durable cost ceilings, defaults `4000` and `800`.
+- `MAP_PLATFORM_OPERATOR_RESERVED_QUEUED_COST` and
+  `MAP_PLATFORM_OPERATOR_RESERVED_RUNNING_COST`: capacity unavailable to public
+  requests but usable by the local operator create command, defaults `400` and
+  `100`.
+- `MAP_PLATFORM_INSTALLATION_COST_LIMIT` and
+  `MAP_PLATFORM_INSTALLATION_COST_WINDOW_SECONDS`: rolling per-installation
+  cost budget and window, defaults `1200` units per `86400` seconds.
 - `MAP_PLATFORM_JOB_RETENTION_DAYS`: days to retain ready job artifacts from
   their immutable completion time, default `30`; later downloads and label
   changes do not extend it. Must be between `1` and `3650`.

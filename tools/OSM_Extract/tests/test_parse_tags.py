@@ -12,6 +12,7 @@ def load_funcs_module():
     shapely = types.ModuleType("shapely")
     for name in [
         "geometry",
+        "GeometryCollection",
         "LineString",
         "LinearRing",
         "Polygon",
@@ -24,6 +25,7 @@ def load_funcs_module():
 
     shapely_ops = types.ModuleType("shapely.ops")
     shapely_ops.triangulate = lambda *args, **kwargs: []
+    shapely_ops.unary_union = lambda *args, **kwargs: None
 
     pil = types.ModuleType("PIL")
     pil_image_draw = types.ModuleType("PIL.ImageDraw")

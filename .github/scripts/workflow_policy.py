@@ -16,6 +16,12 @@ _DOCKER_DIGEST = re.compile(
     r"^docker://[A-Za-z0-9._/-]+@sha256:[0-9a-f]{64}$"
 )
 _USES_KEY = re.compile(r"^uses\s*:\s*(.*)$")
+_BLOCK_SCALAR = re.compile(
+    r"^(?:-\s+)?[A-Za-z0-9_.-]+\s*:\s*[>|](?:[+-]?[1-9]?|[1-9]?[+-]?)?\s*(?:#.*)?$"
+)
+_NONCANONICAL_USES_KEY = re.compile(
+    r"(?:^|[\[{,]\s*|-\s+)[\"']?uses[\"']?\s*:"
+)
 
 
 @dataclass(frozen=True)
@@ -69,16 +75,34 @@ def _yaml_scalar_and_comment(raw: str) -> tuple[str, str | None]:
 
 def collect_workflow_uses(path: Path) -> list[WorkflowUse]:
     results: list[WorkflowUse] = []
+    block_scalar_indent: int | None = None
     for line_number, raw_line in enumerate(
         path.read_text(encoding="utf-8").splitlines(), start=1
     ):
         content = raw_line.lstrip()
+        indentation = len(raw_line) - len(content)
+        if block_scalar_indent is not None:
+            if not content or indentation > block_scalar_indent:
+                continue
+            block_scalar_indent = None
         if not content or content.startswith("#"):
+            continue
+        if _BLOCK_SCALAR.fullmatch(content):
+            block_scalar_indent = indentation
             continue
         if content.startswith("- "):
             content = content[2:].lstrip()
         match = _USES_KEY.fullmatch(content)
         if match is None:
+            if _NONCANONICAL_USES_KEY.search(content):
+                results.append(
+                    WorkflowUse(
+                        path=path,
+                        line=line_number,
+                        value=content,
+                        comment=None,
+                    )
+                )
             continue
         value, comment = _yaml_scalar_and_comment(match.group(1))
         results.append(

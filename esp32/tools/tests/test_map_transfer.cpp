@@ -337,6 +337,30 @@ static void testTargetThreeBuildingContractValidation() {
   assert(installer.readActiveMap(active).ok);
   assert(active.target.formatVersion == 3);
   assert(active.target.buildingProfileVersion == 1);
+  assert(active.manifestReceipt.empty());
+  const std::string receiptPath =
+      root + active.root + "/.verified.sha256";
+  const std::string expectedReceipt = readFile(receiptPath);
+  ActiveMapSelection identified;
+  std::string contentReceipt;
+  assert(installer.readActiveMapContentReceipt(identified, contentReceipt).ok);
+  assert(identified.mapId == active.mapId);
+  assert(contentReceipt == expectedReceipt);
+
+  // Benchmark identity reads stay bounded even when the large installed
+  // manifest is unavailable to a concurrent renderer job.
+  writeFile(root + active.root + "/.manifest.json", "not-json");
+  contentReceipt.clear();
+  assert(installer.readActiveMapContentReceipt(identified, contentReceipt).ok);
+  assert(contentReceipt == expectedReceipt);
+
+  writeFile(receiptPath, "not-a-sha256");
+  contentReceipt = "stale";
+  const auto invalidReceipt =
+      installer.readActiveMapContentReceipt(identified, contentReceipt);
+  assert(!invalidReceipt.ok);
+  assert(invalidReceipt.code == "installed_receipt");
+  assert(contentReceipt.empty());
 }
 
 static void testActivationStateTracksAttemptsAndCompactStatus() {

@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 from map_platform.strava_client import (
     StravaAuthorizationURLs,
+    StravaAthleteRoute,
+    StravaAthleteRoutePage,
     StravaClientError,
     StravaRouteMetadata,
     StravaTokenResponse,
@@ -60,13 +62,28 @@ class FakeStravaClient:
             route_type=1,
         )
         self.gpx = b"<gpx><rte><rtept lat='1' lon='2'/></rte></gpx>"
+        self.routes_page = StravaAthleteRoutePage(
+            page=1,
+            next_page=None,
+            routes=(
+                StravaAthleteRoute(
+                    route_id=ROUTE_ID,
+                    name="Morning Ride",
+                    distance_meters=42_195.5,
+                    elevation_gain_meters=612.0,
+                    route_kind="ride",
+                ),
+            ),
+        )
         self.exchange_error = None
         self.refresh_error = None
         self.metadata_error = None
         self.gpx_error = None
+        self.routes_error = None
         self.revoke_error = None
         self.refresh_count = 0
         self.metadata_count = 0
+        self.routes_calls = []
         self.revoke_count = 0
         self._lock = threading.Lock()
 
@@ -99,6 +116,12 @@ class FakeStravaClient:
         if self.gpx_error:
             raise self.gpx_error
         return self.gpx
+
+    def athlete_routes(self, athlete_id, access_token, *, page):
+        self.routes_calls.append((athlete_id, access_token, page))
+        if self.routes_error:
+            raise self.routes_error
+        return self.routes_page
 
     def revoke(self, access_token):
         with self._lock:
@@ -375,6 +398,44 @@ class StravaIntegrationServiceTests(unittest.TestCase):
             STRAVA_ROUTE_CACHE_SECONDS,
         )
         self.assertEqual(validation.route_id, ROUTE_ID)
+
+    def test_athlete_routes_require_read_all_and_keep_credentials_server_side(self):
+        self.connect()
+
+        page = self.service.athlete_routes(INSTALLATION_ID, page=1)
+
+        self.assertEqual(page, self.client.routes_page)
+        self.assertEqual(
+            self.client.routes_calls,
+            [("44", "access-secret", 1)],
+        )
+
+        self.store.put_connection(
+            INSTALLATION_ID,
+            StravaTokenBundle(
+                athlete_id="44",
+                granted_scopes=("read",),
+                access_token="access-secret",
+                refresh_token="refresh-secret",
+                expires_at=int(self.clock()) + 3_600,
+            ),
+            connected_at=self.clock(),
+        )
+        with self.assertRaises(StravaIntegrationError) as scope_error:
+            self.service.athlete_routes(INSTALLATION_ID, page=1)
+        self.assertEqual(scope_error.exception.code, "strava_scope_required")
+        self.assertEqual(len(self.client.routes_calls), 1)
+
+    def test_athlete_route_token_rejection_disconnects_connection(self):
+        self.connect()
+        self.client.routes_error = StravaClientError(
+            "strava_token_rejected",
+            status_code=401,
+        )
+        with self.assertRaises(StravaIntegrationError) as raised:
+            self.service.athlete_routes(INSTALLATION_ID, page=1)
+        self.assertEqual(raised.exception.code, "strava_not_connected")
+        self.assertFalse(self.store.connection_exists(INSTALLATION_ID))
 
     def test_fetch_and_validation_reject_non_cycling_route(self):
         self.connect()

@@ -1,9 +1,11 @@
 name: Firmware Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows:
+      - Firmware Release Candidate
+    types:
+      - completed
   workflow_dispatch:
     inputs:
       release_tag:
@@ -12,129 +14,259 @@ on:
         type: string
 
 permissions:
-  attestations: read
+  actions: read
   contents: read
-  packages: read
+
+concurrency:
+  group: firmware-release-${{ github.event.workflow_run.id || inputs.release_tag }}
+  cancel-in-progress: false
 
 jobs:
-  validate:
-    name: Validate release CI
-    if: github.event_name == 'push'
-    uses: ./.github/workflows/ci.yml
-    with:
-      scope: all
-      firmware_hardware: all
-
-  diagnostics:
-    name: Validate diagnostic firmware
-    if: github.event_name == 'push'
-    uses: ./.github/workflows/firmware-diagnostics.yml
-
-  build:
-    name: Build ${{ matrix.target }}
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: WAVESHARE_AMOLED_175
-            environment: WAVESHARE_AMOLED_175_PRODUCTION
-          - target: WAVESHARE_AMOLED_206
-            environment: WAVESHARE_AMOLED_206_PRODUCTION
-    defaults:
-      run:
-        working-directory: esp32
+  gate:
+    name: Gate unprivileged release candidate
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      candidate_run_id: ${{ steps.candidate.outputs.candidate_run_id }}
+      git_sha: ${{ steps.candidate.outputs.git_sha }}
+      release_tag: ${{ steps.candidate.outputs.release_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Restore pinned PlatformIO downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: esp32/.pio/open-bike-build/downloads
-          key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
-      - name: Build with the repository-owned firmware runtime
-        run: env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "${{ matrix.environment }}" --factory-output-dir dist
-      - name: Stage OTA image and factory-flash bundle
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read the registered workflow and candidate artifacts
+        env:
+          CANDIDATE_RUN_ID: ${{ github.event.workflow_run.id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          cp ".pio/build/${{ matrix.environment }}/firmware.bin" "dist/${{ matrix.target }}.bin"
-          shasum -a 256 dist/*
+          [[ "${CANDIDATE_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/firmware-release-candidate.yml" \
+            > "${RUNNER_TEMP}/candidate-workflow.json"
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/artifacts?per_page=100" \
+            > "${RUNNER_TEMP}/candidate-artifacts.json"
+      - id: candidate
+        name: Validate the candidate workflow boundary
+        run: |
+          python3 .github/scripts/firmware_release_gate.py \
+            --event "${GITHUB_EVENT_PATH}" \
+            --workflow "${RUNNER_TEMP}/candidate-workflow.json" \
+            --artifacts "${RUNNER_TEMP}/candidate-artifacts.json" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --expected-workflow-path .github/workflows/firmware-release-candidate.yml \
+            --github-output "${GITHUB_OUTPUT}" \
+            --output-receipt "${RUNNER_TEMP}/firmware-release-gate.json"
+      - name: Require an unchanged tag on protected main and no existing release
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GIT_SHA: ${{ steps.candidate.outputs.git_sha }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.candidate.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          git check-ref-format --branch "${DEFAULT_BRANCH}" >/dev/null
+          git fetch --force --no-tags origin \
+            "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          git fetch --force --no-tags origin \
+            "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "${GIT_SHA}"
+          git merge-base --is-ancestor \
+            "${GIT_SHA}" "refs/remotes/origin/${DEFAULT_BRANCH}"
+
+          set +e
+          gh api --include -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+            > "${RUNNER_TEMP}/release-response.txt" 2> "${RUNNER_TEMP}/release-error.txt"
+          api_status=$?
+          set -e
+          http_status="$(awk '/^HTTP\// { status=$2 } END { print status }' \
+            "${RUNNER_TEMP}/release-response.txt")"
+          if [ "${http_status}" = 200 ]; then
+            echo "Release ${RELEASE_TAG} already exists; refusing to replace assets" >&2
+            exit 1
+          fi
+          if [ "${http_status}" != 404 ] || [ "${api_status}" -eq 0 ]; then
+            cat "${RUNNER_TEMP}/release-error.txt" >&2
+            echo "Unable to prove that release ${RELEASE_TAG} does not exist" >&2
+            exit 1
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: firmware-${{ matrix.target }}
-          path: esp32/dist/
+          name: firmware-release-gate-${{ github.event.workflow_run.id }}
+          path: ${{ runner.temp }}/firmware-release-gate.json
           if-no-files-found: error
+          retention-days: 90
 
   publish:
-    name: Publish Firmware
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    needs:
-      - build
-      - diagnostics
-      - validate
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    name: Approval-gated firmware publication
+    if: github.event_name == 'workflow_run'
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: firmware-release
     permissions:
+      actions: read
       contents: write
-      id-token: write
-      pages: write
     env:
       GH_TOKEN: ${{ github.token }}
-      FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY: ${{ secrets.FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
+      - name: Read the candidate boundary again after approval
+        env:
+          CANDIDATE_RUN_ID: ${{ needs.gate.outputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/firmware-release-candidate.yml" \
+            > "${RUNNER_TEMP}/candidate-workflow.json"
+          gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/artifacts?per_page=100" \
+            > "${RUNNER_TEMP}/candidate-artifacts.json"
+      - name: Revalidate the approved candidate
+        run: |
+          python3 .github/scripts/firmware_release_gate.py \
+            --event "${GITHUB_EVENT_PATH}" \
+            --workflow "${RUNNER_TEMP}/candidate-workflow.json" \
+            --artifacts "${RUNNER_TEMP}/candidate-artifacts.json" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --expected-workflow-path .github/workflows/firmware-release-candidate.yml \
+            --github-output "${GITHUB_OUTPUT}" \
+            --output-receipt "${RUNNER_TEMP}/firmware-release-gate-revalidated.json"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: firmware-release-gate-${{ needs.gate.outputs.candidate_run_id }}
+          path: ${{ runner.temp }}/release-gate
+      - name: Require the unchanged pre-approval gate receipt
+        run: |
+          cmp \
+            "${RUNNER_TEMP}/release-gate/firmware-release-gate.json" \
+            "${RUNNER_TEMP}/firmware-release-gate-revalidated.json"
+      - name: Download and hash the exact candidate archives
+        run: |
+          set -euo pipefail
+          gate_receipt="${RUNNER_TEMP}/firmware-release-gate-revalidated.json"
+          mkdir -p \
+            "${RUNNER_TEMP}/candidate-archives" \
+            "${RUNNER_TEMP}/firmware-candidates"
+          for target in WAVESHARE_AMOLED_175 WAVESHARE_AMOLED_206; do
+            artifact_name="firmware-${target}"
+            read -r artifact_id artifact_digest < <(
+              python - "${gate_receipt}" "${artifact_name}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          receipt = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          matches = [
+              artifact
+              for artifact in receipt["artifacts"]
+              if artifact["name"] == sys.argv[2]
+          ]
+          if len(matches) != 1:
+              raise SystemExit("candidate artifact is missing or ambiguous")
+          print(matches[0]["id"], matches[0]["digest"])
+          PY
+            )
+            [[ "${artifact_id}" =~ ^[1-9][0-9]*$ ]]
+            [[ "${artifact_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+            archive="${RUNNER_TEMP}/candidate-archives/${artifact_name}.zip"
+            gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+              > "${archive}"
+            test "sha256:$(sha256sum "${archive}" | cut -d ' ' -f 1)" = \
+              "${artifact_digest}"
+            python3 tools/firmware_release_candidate.py extract \
+              --archive "${archive}" \
+              --output-dir "${RUNNER_TEMP}/firmware-candidates/${artifact_name}" \
+              --target "${target}"
+          done
+      - name: Verify and stage the exact candidate files
+        env:
+          CANDIDATE_RUN_ID: ${{ needs.gate.outputs.candidate_run_id }}
+          GIT_SHA: ${{ needs.gate.outputs.git_sha }}
+          RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
+        run: |
+          python3 tools/firmware_release_candidate.py verify \
+            --artifact-root "${RUNNER_TEMP}/firmware-candidates" \
+            --release-assets "${RUNNER_TEMP}/release-assets" \
+            --output-receipt "${RUNNER_TEMP}/candidate-verification.json" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${RELEASE_TAG}" \
+            --git-sha "${GIT_SHA}" \
+            --run-id "${CANDIDATE_RUN_ID}"
       - name: Install exact hashed manifest dependencies
         run: >-
           python -m pip install --require-hashes --only-binary=:all: --no-deps
           -r tools/firmware-signing-requirements.txt
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          path: dist
+      - name: Re-resolve the protected branch and release tag
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GIT_SHA: ${{ needs.gate.outputs.git_sha }}
+          RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          git check-ref-format --branch "${DEFAULT_BRANCH}" >/dev/null
+          git fetch --force --no-tags origin \
+            "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          git fetch --force --no-tags origin \
+            "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "${GIT_SHA}"
+          git merge-base --is-ancestor \
+            "${GIT_SHA}" "refs/remotes/origin/${DEFAULT_BRANCH}"
       - name: Generate signed manifests
+        env:
+          FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY: ${{ secrets.FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY }}
+          GIT_SHA: ${{ needs.gate.outputs.git_sha }}
+          RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
         run: |
           set -euo pipefail
           if [ -z "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" ]; then
             echo "FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY is required" >&2
             exit 1
           fi
-          mkdir -p release-assets public/firmware
-          git_sha_full="$(git rev-parse HEAD)"
-          git_sha_short="$(git rev-parse --short=12 HEAD)"
+          release_assets="${RUNNER_TEMP}/release-assets"
+          candidate_receipt="${RUNNER_TEMP}/candidate-verification.json"
+          firmware_version="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["firmwareVersion"]["version"])' "${candidate_receipt}")"
+          firmware_build="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["firmwareVersion"]["build"])' "${candidate_receipt}")"
+          git_sha_short="${GIT_SHA:0:12}"
+          mkdir -p public/firmware
           for target in WAVESHARE_AMOLED_175 WAVESHARE_AMOLED_206; do
-            artifact_dir="dist/firmware-${target}"
-            for artifact in \
-              "${target}.bin" \
-              "${target}.factory.tar.gz" \
-              "${target}.factory-bundle.json"; do
-              if [ ! -f "${artifact_dir}/${artifact}" ]; then
-                echo "Missing release artifact: ${artifact_dir}/${artifact}" >&2
-                exit 1
-              fi
-              cp "${artifact_dir}/${artifact}" release-assets/
-            done
             python tools/firmware_manifest.py \
-              --firmware "release-assets/${target}.bin" \
+              --firmware "${release_assets}/${target}.bin" \
               --target "${target}" \
-              --repository "${{ github.repository }}" \
-              --tag "${GITHUB_REF_NAME}" \
+              --repository "${GITHUB_REPOSITORY}" \
+              --tag "${RELEASE_TAG}" \
               --git-sha "${git_sha_short}" \
+              --version "${firmware_version}" \
+              --build "${firmware_build}" \
               --private-key-base64 "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" \
               --output "public/firmware/${target}/manifest.json"
-            cp "public/firmware/${target}/manifest.json" "release-assets/${target}.manifest.json"
+            cp \
+              "public/firmware/${target}/manifest.json" \
+              "${release_assets}/${target}.manifest.json"
             python tools/factory_release_manifest.py \
-              --bundle "release-assets/${target}.factory.tar.gz" \
-              --bundle-manifest "release-assets/${target}.factory-bundle.json" \
+              --bundle "${release_assets}/${target}.factory.tar.gz" \
+              --bundle-manifest "${release_assets}/${target}.factory-bundle.json" \
               --target "${target}" \
-              --repository "${{ github.repository }}" \
-              --tag "${GITHUB_REF_NAME}" \
-              --git-sha "${git_sha_full}" \
+              --repository "${GITHUB_REPOSITORY}" \
+              --tag "${RELEASE_TAG}" \
+              --git-sha "${GIT_SHA}" \
+              --version "${firmware_version}" \
+              --build "${firmware_build}" \
               --private-key-base64 "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" \
-              --output "release-assets/${target}.factory-release.json"
+              --output "${release_assets}/${target}.factory-release.json"
           done
       - name: Require immutable releases
         uses: ./.github/actions/require-immutable-releases
@@ -142,21 +274,24 @@ jobs:
           app-id: ${{ vars.FIRMWARE_RELEASE_PREFLIGHT_APP_ID }}
           private-key: ${{ secrets.FIRMWARE_RELEASE_PREFLIGHT_APP_PRIVATE_KEY }}
       - name: Publish GitHub release assets
+        env:
+          RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
         run: |
           set -euo pipefail
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            echo "Release ${GITHUB_REF_NAME} already exists; refusing to replace assets" >&2
+          release_assets="${RUNNER_TEMP}/release-assets"
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_TAG} already exists; refusing to replace assets" >&2
             exit 1
           fi
-          gh release create "${GITHUB_REF_NAME}" \
+          gh release create "${RELEASE_TAG}" \
             --draft \
             --verify-tag \
-            --title "${GITHUB_REF_NAME}" \
+            --title "${RELEASE_TAG}" \
             --generate-notes
-          gh release upload "${GITHUB_REF_NAME}" release-assets/*
+          gh release upload "${RELEASE_TAG}" "${release_assets}"/*
           release_id="$(
             gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
-              jq -er --arg tag "${GITHUB_REF_NAME}" '
+              jq -er --arg tag "${RELEASE_TAG}" '
                 [.[] | select(.tag_name == $tag and .draft == true)] |
                 if length == 1 then .[0].id
                 else error("expected exactly one matching draft release")
@@ -168,31 +303,52 @@ jobs:
             > "${RUNNER_TEMP}/release.json"
           python tools/verify_github_release_assets.py \
             --release-json "${RUNNER_TEMP}/release.json" \
-            --asset-dir release-assets
-          gh release edit "${GITHUB_REF_NAME}" --draft=false
+            --asset-dir "${release_assets}"
+          gh release edit "${RELEASE_TAG}" --draft=false
           gh api -H "X-GitHub-Api-Version: 2026-03-10" \
-            "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
             > "${RUNNER_TEMP}/release.json"
           python tools/verify_github_release_assets.py \
             --release-json "${RUNNER_TEMP}/release.json" \
-            --asset-dir release-assets \
+            --asset-dir "${release_assets}" \
             --require-immutable \
             --output "${RUNNER_TEMP}/publication-receipt.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: firmware-release-publication-receipt
-          path: ${{ runner.temp }}/publication-receipt.json
+          name: firmware-release-publication-receipts
+          path: |
+            ${{ runner.temp }}/candidate-verification.json
+            ${{ runner.temp }}/firmware-release-gate-revalidated.json
+            ${{ runner.temp }}/publication-receipt.json
           if-no-files-found: error
+          retention-days: 90
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: public
+
+  deploy-pages:
+    name: Deploy Firmware OTA Pages
+    if: github.event_name == 'workflow_run'
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      pages: write
+    steps:
       - id: deployment
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
 
   recover-pages:
     name: Recover Firmware OTA Pages
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -220,6 +376,7 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
+          persist-credentials: false
       - name: Verify immutable release and stage exact OTA manifests
         run: |
           set -euo pipefail
@@ -255,6 +412,7 @@ jobs:
           name: firmware-release-recovery-receipt-${{ inputs.release_tag }}
           path: ${{ runner.temp }}/recovery-receipt.json
           if-no-files-found: error
+          retention-days: 90
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: public

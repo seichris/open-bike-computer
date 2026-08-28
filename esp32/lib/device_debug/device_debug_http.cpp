@@ -151,7 +151,7 @@ void DeviceDebugHttp::cancelSession() {
 
 void DeviceDebugHttp::finishSessionTeardown() { frameStore().end(); }
 
-bool DeviceDebugHttp::requireMode(WiFiClient &client) {
+bool DeviceDebugHttp::requireMode(device_transfer::TransferClient &client) {
   const device_transfer::HttpTransferStatus status = server_->status();
   if (!status.enabled || status.mode != "debug") {
     device_transfer::sendHttpError(client, 409, "debug_session_inactive",
@@ -162,7 +162,7 @@ bool DeviceDebugHttp::requireMode(WiFiClient &client) {
 }
 
 bool DeviceDebugHttp::authorize(const device_transfer::HttpRequest &request,
-                                WiFiClient &client) {
+                                device_transfer::TransferClient &client) {
   if (server_->isRequestAuthorized(request))
     return true;
   device_transfer::sendHttpError(client, 401, "unauthorized",
@@ -171,7 +171,7 @@ bool DeviceDebugHttp::authorize(const device_transfer::HttpRequest &request,
 }
 
 bool DeviceDebugHttp::handleRequest(
-    const device_transfer::HttpRequest &request, WiFiClient &client) {
+    const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
 #if !DEVICE_REMOTE_DEBUG
   (void)request;
   (void)client;
@@ -239,7 +239,7 @@ bool DeviceDebugHttp::allowShortUnauthenticatedResponseCompletion(
 #endif
 }
 
-bool DeviceDebugHttp::handleInfo(WiFiClient &client) {
+bool DeviceDebugHttp::handleInfo(device_transfer::TransferClient &client) {
   const uint32_t nowMs = millis();
   const TargetGeometry geometry = frameStore().geometry();
   const FrameStoreCounters frames = frameStore().counters();
@@ -325,7 +325,7 @@ void DeviceDebugHttp::updateRendererDebugOverhead() {
   renderer_diagnostics::noteRemoteDebug(overhead);
 }
 
-bool DeviceDebugHttp::handleRendererMetrics(WiFiClient &client) {
+bool DeviceDebugHttp::handleRendererMetrics(device_transfer::TransferClient &client) {
   const uint32_t nowMs = millis();
   if (lastMetricsResponseMs_ != 0 &&
       !intervalElapsed(nowMs, lastMetricsResponseMs_,
@@ -348,7 +348,7 @@ bool DeviceDebugHttp::handleRendererMetrics(WiFiClient &client) {
 }
 
 bool DeviceDebugHttp::handleRendererWindow(
-    const device_transfer::HttpRequest &request, WiFiClient &client) {
+    const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
   const uint32_t nowMs = millis();
   if (lastRendererWindowRequestMs_ != 0 &&
       !intervalElapsed(nowMs, lastRendererWindowRequestMs_,
@@ -457,7 +457,7 @@ bool DeviceDebugHttp::handleRendererWindow(
 }
 
 bool DeviceDebugHttp::handleFrame(
-    const device_transfer::HttpRequest &request, WiFiClient &client) {
+    const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
   uint32_t afterSequence = 0;
   if (!parseFrameAfterPath(request.path, afterSequence))
     return device_transfer::sendHttpError(client, 400, "invalid_after",
@@ -524,7 +524,7 @@ bool DeviceDebugHttp::handleFrame(
 }
 
 bool DeviceDebugHttp::handlePointer(
-    const device_transfer::HttpRequest &request, WiFiClient &client) {
+    const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
   if (displayPowerManager.state() == display_power::State::Off)
     return device_transfer::sendHttpError(client, 409, "display_off",
                                           "wake the display before sending input");
@@ -585,7 +585,7 @@ bool DeviceDebugHttp::handlePointer(
   return device_transfer::sendHttpJson(client, 202, "{\"ok\":true}");
 }
 
-bool DeviceDebugHttp::handleWake(WiFiClient &client) {
+bool DeviceDebugHttp::handleWake(device_transfer::TransferClient &client) {
   wakeRequested_.store(true, std::memory_order_release);
   frameStore().requestNextFrame();
   ui_scheduler::notify(ui_scheduler::WakeReason::RemoteDebug);
@@ -593,7 +593,7 @@ bool DeviceDebugHttp::handleWake(WiFiClient &client) {
 }
 
 bool DeviceDebugHttp::handleBootPress(
-    const device_transfer::HttpRequest &request, WiFiClient &client) {
+    const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
   if (!server_->isRequestAuthorized(request))
     return device_transfer::sendHttpError(client, 401, "session_revoked",
                                           "debug session was revoked");
@@ -606,7 +606,7 @@ bool DeviceDebugHttp::handleBootPress(
   return device_transfer::sendHttpJson(client, 202, "{\"ok\":true}");
 }
 
-bool DeviceDebugHttp::handleExit(WiFiClient &client) {
+bool DeviceDebugHttp::handleExit(device_transfer::TransferClient &client) {
   exitResponsePending_.store(true, std::memory_order_release);
   return device_transfer::sendHttpJson(client, 202, "{\"ok\":true}");
 }
@@ -666,7 +666,7 @@ void DeviceDebugHttp::cancelSession() {}
 void DeviceDebugHttp::finishSessionTeardown() {}
 
 bool DeviceDebugHttp::handleRequest(
-    const device_transfer::HttpRequest &request, WiFiClient &client) {
+    const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
   (void)request;
   (void)client;
   return false;

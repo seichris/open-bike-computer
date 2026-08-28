@@ -1377,6 +1377,26 @@ bool record(Level level, const char *category, const char *event,
   return recordInternal(level, category, event, fieldsJson, false, 0, 0);
 }
 
+bool recordHealth(const char *reason) {
+  if (reason == nullptr || !validToken(reason, 32))
+    return false;
+  const Stats snapshot = stats();
+  char fields[256] = {};
+  snprintf(fields, sizeof(fields),
+           "{\"reason\":\"%s\",\"enqueuedCount\":%lu,"
+           "\"writtenCount\":%lu,\"droppedCount\":%lu,"
+           "\"storageErrorCount\":%lu,\"queueDepth\":%u,"
+           "\"maxQueueDepth\":%u,\"available\":%s}",
+           reason, static_cast<unsigned long>(snapshot.enqueued),
+           static_cast<unsigned long>(snapshot.written),
+           static_cast<unsigned long>(snapshot.dropped),
+           static_cast<unsigned long>(snapshot.storageErrors),
+           static_cast<unsigned>(snapshot.queueDepth),
+           static_cast<unsigned>(snapshot.maxQueueDepth),
+           snapshot.storageAvailable ? "true" : "false");
+  return record(Level::Info, "logger", "health", fields);
+}
+
 bool recordClockAnchor() {
   const bool recorded = record(
       Level::Info, "lifecycle", "clock_anchor",
@@ -1662,6 +1682,7 @@ bool prepareForShutdown(uint32_t timeoutMs) {
   (void)timeoutMs;
   return true;
 #else
+  (void)recordHealth("shutdown");
   (void)record(Level::Warning, "lifecycle", "controlled_shutdown", "{}");
   checkpointRequested.store(true);
   // This is a one-way storage transition. Once shutdown begins, keep the

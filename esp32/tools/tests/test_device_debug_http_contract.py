@@ -117,6 +117,11 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         )
 
     def test_renderer_windows_bind_the_active_map_before_profile_change(self):
+        active_identity = MAIN[
+            MAIN.index("static bool readActiveRendererMap") :
+            MAIN.index("void appRemoteDebugPointerActivity")
+        ]
+        self.assertIn("readActiveMapContentReceipt", active_identity)
         renderer_loop = MAIN[
             MAIN.index("device_debug::RendererRunRequest rendererRunRequest") :
             MAIN.index("constexpr uint32_t kStaticHousekeepingPeriodMs")
@@ -157,10 +162,13 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            'apPassphrase_ = (mode_ == "debug" || mode_ == "diagnostics")',
+            "apPassphrase_ = generateSessionToken().substr(0, 24);",
             transfer,
         )
-        self.assertIn("WiFi.softAP(apSsid.c_str(),", transfer)
+        self.assertIn(
+            "WiFi.softAP(apSsid.c_str(), apPassphrase.c_str())", transfer
+        )
+        self.assertNotIn("WiFi.softAP(apSsid.c_str());", transfer)
         info = HTTP[
             HTTP.index("bool DeviceDebugHttp::handleInfo") :
             HTTP.index("bool DeviceDebugHttp::handleFrame")
@@ -230,7 +238,7 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         ]
         self.assertIn("DisableOnBleDisconnect", disconnect)
         self.assertLess(
-            disconnect.index("clearPreferredNetwork()"),
+            disconnect.index("clearAuthenticatedBleSession()"),
             disconnect.index("DisableOnBleDisconnect"),
         )
         self.assertIn("stopActiveDeviceTransfer();", owner_reset)

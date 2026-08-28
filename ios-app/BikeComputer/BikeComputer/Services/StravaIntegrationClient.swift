@@ -152,6 +152,7 @@ typealias StravaHTTPRequestExecutor = @MainActor (
 @MainActor
 final class StravaIntegrationClient {
     static let maximumGPXBytes = GPXRouteImporterV1.maximumInputBytes
+    static let maximumAthleteRoutePageBytes = 256 * 1_024
 
     private let serviceSession: BicinoServiceSession
     private let execute: StravaHTTPRequestExecutor
@@ -307,6 +308,27 @@ final class StravaIntegrationClient {
         }
     }
 
+    func athleteRoutes(page: Int) async throws -> StravaAthleteRoutePageV1 {
+        guard 1...StravaAthleteRoutePageV1.maximumPage ~= page else {
+            throw StravaIntegrationClientError.invalidResponse
+        }
+        let response = try await perform(
+            path: "/v1/integrations/strava/routes",
+            method: "GET",
+            additionalQueryItems: [
+                URLQueryItem(name: "page", value: String(page)),
+            ]
+        )
+        let result: StravaAthleteRoutePageV1 = try decodeJSON(
+            response,
+            maximumBytes: Self.maximumAthleteRoutePageBytes
+        )
+        guard result.page == page else {
+            throw StravaIntegrationClientError.invalidResponse
+        }
+        return result
+    }
+
     func validateRoute(
         _ routeURL: StravaRouteURLV1
     ) async throws -> StravaRouteValidationV1 {
@@ -344,11 +366,13 @@ final class StravaIntegrationClient {
 
     private func perform(
         path: String,
-        method: String
+        method: String,
+        additionalQueryItems: [URLQueryItem] = []
     ) async throws -> Response {
         var request = try await serviceSession.authenticatedRequest(
             path: path,
-            method: method
+            method: method,
+            additionalQueryItems: additionalQueryItems
         )
         var response = try await send(request)
         if response.http.statusCode == 401,
@@ -356,6 +380,7 @@ final class StravaIntegrationClient {
             request = try await serviceSession.authenticatedRequest(
                 path: path,
                 method: method,
+                additionalQueryItems: additionalQueryItems,
                 refreshCredential: true
             )
             response = try await send(request)
@@ -394,10 +419,11 @@ final class StravaIntegrationClient {
     }
 
     private func decodeJSON<Value: Decodable>(
-        _ response: Response
+        _ response: Response,
+        maximumBytes: Int = 64 * 1_024
     ) throws -> Value {
         guard Self.mediaType(response.http) == "application/json",
-              response.data.count <= 64 * 1_024 else {
+              response.data.count <= maximumBytes else {
             throw StravaIntegrationClientError.invalidResponse
         }
         do {

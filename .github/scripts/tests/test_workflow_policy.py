@@ -12,7 +12,6 @@ WORKFLOW_ROOT = REPO_ROOT / ".github" / "workflows"
 WORKFLOW_SCRIPTS_ROOT = REPO_ROOT / ".github" / "scripts"
 sys.path.insert(0, str(WORKFLOW_SCRIPTS_ROOT))
 import workflow_policy  # noqa: E402
-
 CACHE_ACTION_SHA = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 CORE_FIRMWARE_TARGETS = {
     "WAVESHARE_AMOLED_175",
@@ -459,6 +458,7 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_release_tags_use_one_gated_validation_orchestrator(self) -> None:
         general_ci = workflow_source("ci.yml")
         diagnostic_ci = workflow_source("firmware-diagnostics.yml")
+        candidate = workflow_source("firmware-release-candidate.yml")
         release = workflow_source("firmware-release.yml")
 
         self.assertIn("  workflow_call:\n", general_ci)
@@ -466,22 +466,56 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn('      - "v*"', general_ci)
         self.assertIn("  workflow_call:\n", diagnostic_ci)
         self.assertNotIn('      - "v*"', diagnostic_ci)
-        self.assertIn('      - "v*"', release)
-        self.assertIn("uses: ./.github/workflows/ci.yml", release)
-        self.assertIn("firmware_hardware: all", release)
+        self.assertIn('      - "v*"', candidate)
+        self.assertNotIn('      - "v*"', release)
+        self.assertIn("uses: ./.github/workflows/ci.yml", candidate)
+        self.assertIn("firmware_hardware: all", candidate)
         self.assertIn(
-            "uses: ./.github/workflows/firmware-diagnostics.yml", release
+            "uses: ./.github/workflows/firmware-diagnostics.yml", candidate
         )
-        self.assertIn("      - build\n      - diagnostics\n      - validate\n", release)
-        release_permissions = mapping_block(release, "permissions", indent=0)
-        self.assertIn("  attestations: read", release_permissions)
-        self.assertIn("  contents: read", release_permissions)
-        self.assertIn("  packages: read", release_permissions)
+        self.assertIn(
+            "      - build\n      - diagnostics\n      - validate\n", candidate
+        )
+        candidate_permissions = mapping_block(candidate, "permissions", indent=0)
+        self.assertIn("  attestations: read", candidate_permissions)
+        self.assertIn("  contents: read", candidate_permissions)
+        self.assertIn("  packages: read", candidate_permissions)
+        self.assertNotIn("write", candidate_permissions)
+        self.assertNotIn("secrets.", candidate)
+        self.assertNotRegex(candidate, r"(?m)^    environment:")
+
+        self.assertIn("  workflow_run:\n", release)
+        self.assertIn("      - Firmware Release Candidate", release)
+        gate_job = mapping_block(release, "gate", indent=2)
+        self.assertIn("firmware_release_gate.py", gate_job)
+        self.assertIn("run_attempt", (
+            REPO_ROOT / ".github" / "scripts" / "firmware_release_gate.py"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("git merge-base --is-ancestor", gate_job)
+        self.assertIn('"${RELEASE_TAG}^{commit}"', gate_job)
+        self.assertIn("ref: ${{ github.sha }}", gate_job)
         publish_job = mapping_block(release, "publish", indent=2)
+        self.assertIn("needs: gate", publish_job)
+        self.assertIn("environment: firmware-release", publish_job)
         self.assertIn("contents: write", publish_job)
-        self.assertIn("pages: write", publish_job)
+        self.assertNotIn("pages: write", publish_job)
+        self.assertNotIn(
+            "    env:\n      GH_TOKEN: ${{ github.token }}\n      FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY",
+            publish_job,
+        )
+        signing_step = next(
+            block
+            for block in sequence_mapping_blocks(publish_job, "steps", indent=4)
+            if "name: Generate signed manifests" in block
+        )
+        self.assertIn("FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY", signing_step)
+        self.assertIn("Re-resolve the protected branch and release tag", publish_job)
+        deploy_job = mapping_block(release, "deploy-pages", indent=2)
+        self.assertIn("pages: write", deploy_job)
+        self.assertNotIn("FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY", deploy_job)
 
     def test_release_publishes_signed_factory_flash_bundles(self) -> None:
+        candidate = workflow_source("firmware-release-candidate.yml")
         release = workflow_source("firmware-release.yml")
         immutable_preflight = (
             REPO_ROOT
@@ -491,13 +525,19 @@ class WorkflowPolicyTests(unittest.TestCase):
             / "action.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("--factory-output-dir dist", release)
-        self.assertNotIn("tools/package_factory_firmware.py", release)
-        self.assertIn('"${target}.factory.tar.gz"', release)
-        self.assertIn('"${target}.factory-bundle.json"', release)
+        self.assertIn("--factory-output-dir dist", candidate)
+        self.assertIn("firmware_release_candidate.py record", candidate)
+        self.assertNotIn("tools/package_factory_firmware.py", candidate)
+        self.assertNotIn("FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY", candidate)
+        self.assertIn("firmware_release_candidate.py verify", release)
+        self.assertIn("firmware_release_candidate.py extract", release)
+        self.assertIn("actions/artifacts/${artifact_id}/zip", release)
+        self.assertIn("sha256sum", release)
+        self.assertIn("${target}.factory.tar.gz", release)
+        self.assertIn("${target}.factory-bundle.json", release)
         self.assertIn("tools/factory_release_manifest.py", release)
         self.assertIn(
-            '--output "release-assets/${target}.factory-release.json"',
+            '--output "${release_assets}/${target}.factory-release.json"',
             release,
         )
         self.assertNotIn("find dist -name '*.bin'", release)
@@ -953,6 +993,31 @@ job:
                 ("./.github/workflows/local.yml", None),
             ],
         )
+
+    def test_noncanonical_uses_keys_cannot_bypass_the_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            workflow_root = root / ".github" / "workflows"
+            workflow_root.mkdir(parents=True)
+            (workflow_root / "workflow.yml").write_text(
+                """
+jobs:
+  quoted:
+    "uses": owner/repository/.github/workflows/ci.yml@main
+  flow:
+    steps: [{ uses: owner/action@main }]
+  script:
+    steps:
+      - run: |
+          printf '{ uses: documentation-only }\\n'
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            errors = workflow_policy.validate_repository(root)
+
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all("full commit SHA" in error for error in errors))
 
     def test_external_pin_requires_a_version_comment(self) -> None:
         use = workflow_policy.WorkflowUse(

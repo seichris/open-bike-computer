@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .admission import AdmissionCapacityError, AdmissionPolicy
 from .artifacts import ArtifactRecord
 from .generation_profiles import GenerationProfilePolicy
 from .geometry import GeometryError, normalize_geometry
@@ -81,7 +82,13 @@ class JobStore:
     _local_artifact_locks_guard = threading.Lock()
     _local_artifact_locks: dict[str, threading.Lock] = {}
 
-    def __init__(self, root: str | Path, *, lock_stale_seconds: float = 300.0):
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        lock_stale_seconds: float = 300.0,
+        admission_policy: AdmissionPolicy | None = None,
+    ):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.root / ".queue.lock"
@@ -97,6 +104,7 @@ class JobStore:
         self.active_index_root.mkdir(exist_ok=True)
         self.artifact_gc_cursor_path = self.root / ".artifact-gc-cursor"
         self.lock_stale_seconds = lock_stale_seconds
+        self.admission_policy = admission_policy
         self._rebuild_lookup_indexes()
 
     def save(self, job: MapJob) -> None:
@@ -1312,6 +1320,8 @@ class JobStore:
             job = self.get(job_id)
             if job.status != JobStatus.QUEUED:
                 raise JobClaimError(f"job is {job.status.value}, not queued")
+            if not self._can_start_unlocked(job):
+                raise JobClaimError("running admission capacity is exhausted")
             return self._claim_unlocked(job, worker_id)
 
     def claim_next(
@@ -1323,7 +1333,11 @@ class JobStore:
         resumable_job_ids: Iterable[str] | None = None,
     ) -> MapJob | None:
         with self._queue_lock():
-            jobs = self.list()
+            jobs = (
+                self._admission_jobs_unlocked()
+                if self.admission_policy is not None
+                else self.list()
+            )
             allowed_resumable_ids = (
                 None
                 if resumable_job_ids is None
@@ -1394,6 +1408,8 @@ class JobStore:
                 else:
                     initial_and_resumable.append(resumable.pop(0))
             for job in (*initial_and_resumable, *queued_retries):
+                if not self._can_start_unlocked(job, jobs=jobs):
+                    continue
                 if job.scheduler_yielded:
                     return self._resume_yielded_unlocked(job, worker_id)
                 claimed = self._claim_unlocked(job, worker_id)
@@ -1401,8 +1417,10 @@ class JobStore:
                     return claimed
             if interrupted_job_stale_seconds is None:
                 return None
-            for job in self.list():
+            for job in jobs:
                 if not self._is_interrupted(job, worker_id, interrupted_job_stale_seconds):
+                    continue
+                if not self._can_start_unlocked(job, jobs=jobs):
                     continue
                 job.status = JobStatus.QUEUED
                 job.updated_at = utc_now_iso()
@@ -1450,6 +1468,8 @@ class JobStore:
     def _resume_yielded_unlocked(self, job: MapJob, worker_id: str) -> MapJob:
         if not job.scheduler_yielded or job.worker_id is not None:
             raise JobClaimError("job is not available for scheduler resume")
+        if not self._can_start_unlocked(job):
+            raise JobClaimError("running admission capacity is exhausted")
         job.scheduler_yielded = False
         job.worker_id = worker_id
         job.updated_at = utc_now_iso()
@@ -1489,6 +1509,56 @@ class JobStore:
         )
         self.save(job)
         return job
+
+    def _admission_jobs_unlocked(
+        self,
+        *,
+        installation_id: str | None = None,
+    ) -> list[MapJob]:
+        """Load only durable records that can affect this admission decision."""
+        jobs: dict[str, MapJob] = {}
+        failures: list[Exception] = []
+        for path in sorted(self.active_index_root.glob("*.idx")):
+            try:
+                job = self.get(path.stem)
+            except Exception as exc:
+                failures.append(exc)
+                continue
+            if job.status in ACTIVE_STATUSES:
+                jobs[job.job_id] = job
+        if installation_id:
+            index_root = self._installation_index_path(installation_id)
+            for path in sorted(index_root.glob("*.idx")):
+                try:
+                    entry = json.loads(path.read_text())
+                    if entry.get("clientInstallationId") != installation_id:
+                        raise ValueError("installation admission index is inconsistent")
+                    job = self.get(str(entry["jobId"]))
+                    if job.client_installation_id != installation_id:
+                        raise ValueError("installation admission owner is inconsistent")
+                except Exception as exc:
+                    failures.append(exc)
+                    continue
+                jobs[job.job_id] = job
+        if failures:
+            raise AdmissionCapacityError(
+                "durable map admission state is unavailable",
+                code="admission_state_unavailable",
+            )
+        return list(jobs.values())
+
+    def _can_start_unlocked(
+        self,
+        job: MapJob,
+        *,
+        jobs: list[MapJob] | None = None,
+    ) -> bool:
+        if self.admission_policy is None:
+            return True
+        return self.admission_policy.can_start(
+            job,
+            jobs if jobs is not None else self._admission_jobs_unlocked(),
+        )
 
     def requeue_retryable_failures(
         self,
@@ -1655,7 +1725,14 @@ class MapJobService:
             "generationProfiles": [profile.public_dict() for profile in profiles],
         }
 
-    def create_job(self, request: dict[str, Any]) -> MapJob:
+    def create_job(
+        self,
+        request: dict[str, Any],
+        *,
+        admission_partition: str = "public",
+    ) -> MapJob:
+        if admission_partition not in {"public", "operator"}:
+            raise ValueError("admission partition is invalid")
         client_installation_id, client_request_id, existing = self.resolve_client_request(
             request
         )
@@ -1680,6 +1757,16 @@ class MapJobService:
             client_request_id=client_request_id,
             install_on_device=install_on_device,
         )
+        if self.store.admission_policy is not None:
+            admission = self.store.admission_policy.estimate(
+                request,
+                geometry,
+                source,
+            )
+            job.admission_cost = admission.units
+            job.admission_policy_version = admission.policy_version
+            job.admission_cost_inputs = admission.inputs
+            job.admission_partition = admission_partition
         with self.store.lock_job_creation():
             if client_installation_id and client_request_id:
                 existing = self.store.get_by_client_request(
@@ -1698,7 +1785,18 @@ class MapJobService:
                             "clientRequestId was already used for a different map request"
                         )
                     return existing
-            active_jobs = self.store.list_active()
+            if self.store.admission_policy is not None:
+                jobs = self.store._admission_jobs_unlocked(
+                    installation_id=job.client_installation_id,
+                )
+                self.store.admission_policy.validate_create(job, jobs)
+                active_jobs = [
+                    existing_job
+                    for existing_job in jobs
+                    if existing_job.status in ACTIVE_STATUSES
+                ]
+            else:
+                active_jobs = self.store.list_active()
             self.limits.validate_active_jobs(active_jobs)
             if self.estimate_coordinator is not None:
                 try:
@@ -1790,7 +1888,9 @@ class MapJobService:
     ) -> MapJob:
         job = self.get_job(job_id)
         if job.client_installation_id is None:
-            return job
+            if client_installation_id is None:
+                return job
+            raise KeyError(job_id)
         if client_installation_id is None:
             raise KeyError(job_id)
         normalized = _validate_identifier(client_installation_id, "clientInstallationId")
@@ -1828,8 +1928,11 @@ class MapJobService:
             if job.map_id == map_id and job.status == JobStatus.READY
         ]
         if normalized is not None:
-            owned = [job for job in candidates if job.client_installation_id == normalized]
-            candidates = owned or [job for job in candidates if job.client_installation_id is None]
+            candidates = [
+                job
+                for job in candidates
+                if job.client_installation_id == normalized
+            ]
         elif not allow_owned_without_installation:
             candidates = [job for job in candidates if job.client_installation_id is None]
         if not candidates:
