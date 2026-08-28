@@ -133,6 +133,27 @@ switching only the development Coolify Compose location and watch path does not
 change the running image. Verify development health and that production still
 watches `compose.yaml`; then merge the separate development image promotion.
 
+## App Attest rollout
+
+The API pins Apple's App Attestation root certificate in the image and selects
+the allowed App ID, environment, and launch-validation categories from
+`MAP_PLATFORM_DEPLOYMENT_CHANNEL`. Do not add a runtime bypass or a second root.
+The Compose locks pass
+`MAP_PLATFORM_APP_ATTEST_CHALLENGE_TTL_SECONDS` with a `300`-second default;
+keep it between `30` and `900` seconds.
+
+Before releasing the iOS client, enable App Attest for both Apple App IDs and
+regenerate the corresponding provisioning profiles. Promote the compatible API
+first and verify `/healthz` reports App Attest as required with the expected
+TTL. Then validate Development on a physical iPhone before submitting the
+production build. Existing installation credentials remain usable for reads,
+but only an attested installation can request a map-creation challenge.
+
+Back up `/data/app-attest.sqlite3` with the rest of the channel's persistent
+control-plane state. Restoring a snapshot that predates a device's enrollment
+causes that app to create a new attested installation; never copy this database
+between Development, hardware validation, and Production.
+
 ## Strava route import configuration
 
 Leave `MAP_PLATFORM_STRAVA_ENABLED=0` until the matching Strava developer app,
@@ -169,6 +190,7 @@ been lazily re-encrypted or retired.
 The optional quota variables are
 `MAP_PLATFORM_STRAVA_OAUTH_START_LIMIT_PER_HOUR`,
 `MAP_PLATFORM_STRAVA_ROUTE_IMPORT_LIMIT_PER_HOUR`,
+`MAP_PLATFORM_STRAVA_ROUTE_LIST_LIMIT_PER_HOUR`,
 `MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR`, and
 `MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR`. The route archive lifetime is
 always 604,800 seconds and is intentionally not configurable.
@@ -223,10 +245,10 @@ inputs have changed. Resolve the pending candidate or build a dedicated,
 reviewed compatibility release instead.
 
 The shared `map-platform-data` volume is also the restart-safe source for
-`jobs/*.json`, `map-monitoring.sqlite3`, source-cache state, and filesystem
-artifacts. Coolify/container stdout remains a live structured-log surface, not
-the durable monitoring store; use the admin monitoring endpoint or the CLI
-summary when inspecting history after a restart.
+`jobs/*.json`, `map-monitoring.sqlite3`, `app-attest.sqlite3`, source-cache
+state, and filesystem artifacts. Coolify/container stdout remains a live
+structured-log surface, not the durable monitoring store; use the admin
+monitoring endpoint or the CLI summary when inspecting history after a restart.
 
 The production PR body reports worker movement from the final manifest diff,
 not merely the latest commit's path classification. Neither promotion job

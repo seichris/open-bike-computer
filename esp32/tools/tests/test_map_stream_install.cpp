@@ -350,6 +350,11 @@ void testDirectWriteCheckpointAndReady() {
   assert(selected.target.formatVersion == 1);
   assert(selected.manifestReceipt == manifest.manifestReceipt);
   assert(selected.signedManifestReceipt == manifest.signedManifestReceipt);
+  ActiveMapSelection identified;
+  std::string contentReceipt;
+  assert(installer.readActiveMapContentReceipt(identified, contentReceipt).ok);
+  assert(identified.mapId == selected.mapId);
+  assert(contentReceipt == selected.manifestReceipt);
   assert(activationProgress.size() == 3);
   assert(activationProgress.front().step == 3);
   assert(activationProgress.front().totalSteps == 3);

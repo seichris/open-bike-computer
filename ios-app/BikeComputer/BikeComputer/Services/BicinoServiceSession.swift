@@ -15,6 +15,7 @@ final class BicinoServiceSession {
     private let defaults: UserDefaults
     private let installationCredentialStore:
         OfflineMapInstallationCredentialStore
+    private let managedAppAttestClient: ManagedOfflineMapAppAttestClient
     private let legacyBearerTokenStore: OfflineMapLegacyBearerTokenStore
     private let legacyInstallationID: String
     private var registrationTasks: [
@@ -23,12 +24,20 @@ final class BicinoServiceSession {
 
     init(
         defaults: UserDefaults = .standard,
-        urlSession: URLSession = .shared
+        urlSession: URLSession = .shared,
+        appAttestService: OfflineMapAppAttestServicing? = nil,
+        appAttestAppBuild: String? = nil
     ) {
         self.defaults = defaults
         self.urlSession = urlSession
         installationCredentialStore =
             OfflineMapInstallationCredentialStore(defaults: defaults)
+        managedAppAttestClient = ManagedOfflineMapAppAttestClient(
+            defaults: defaults,
+            session: urlSession,
+            service: appAttestService,
+            appBuild: appAttestAppBuild
+        )
         let legacyBearerTokenStore =
             OfflineMapLegacyBearerTokenStore(defaults: defaults)
         OfflineMapSharedSecretMigration.migrateCustomServerValues(
@@ -73,6 +82,9 @@ final class BicinoServiceSession {
             serverURLString: serverURLString,
             defaults: defaults
         )
+        let isManaged = OfflineMapServerIdentity.isManaged(
+            baseURL.absoluteString
+        )
         return OfflineMapPlatformClient(
             baseURL: baseURL,
             legacyBearerToken: legacyBearerToken,
@@ -80,8 +92,11 @@ final class BicinoServiceSession {
                 credential?.clientInstallationId ?? legacyInstallationID,
             clientInstallationToken:
                 credential?.clientInstallationToken,
+            clientAppAttestKeyId: credential?.appAttestKeyId,
             mapStreamTrustCapabilities: mapStreamTrustCapabilities,
             mapStreamAppBuildIdentity: mapStreamAppBuildIdentity,
+            managedAppAttestClient:
+                isManaged ? managedAppAttestClient : nil,
             session: urlSession
         )
     }
@@ -176,6 +191,14 @@ final class BicinoServiceSession {
         client: OfflineMapPlatformClient,
         honorRefreshBackoff: Bool
     ) async throws -> OfflineMapPlatformClient {
+        if OfflineMapServerIdentity.isManaged(
+            client.baseURL.absoluteString
+        ) {
+            return try await registerManagedInstallation(
+                client: client,
+                honorRefreshBackoff: honorRefreshBackoff
+            )
+        }
         if honorRefreshBackoff,
            client.clientInstallationToken?.isEmpty == false,
            OfflineMapInstallationRefreshBackoff.shouldDefer(
@@ -247,6 +270,93 @@ final class BicinoServiceSession {
         }
     }
 
+    private func registerManagedInstallation(
+        client: OfflineMapPlatformClient,
+        honorRefreshBackoff: Bool
+    ) async throws -> OfflineMapPlatformClient {
+        let hasUsableCredential =
+            client.clientInstallationToken?.isEmpty == false &&
+            managedAppAttestClient.hasKey(
+                client.clientAppAttestKeyId,
+                serverURLString: client.baseURL.absoluteString
+            )
+        guard hasUsableCredential else {
+            installationCredentialStore.delete(
+                serverURLString: client.baseURL.absoluteString
+            )
+            return try await enrollManagedInstallation(replacing: client)
+        }
+
+        if honorRefreshBackoff,
+           OfflineMapInstallationRefreshBackoff.shouldDefer(
+                serverURLString: client.baseURL.absoluteString,
+                defaults: defaults
+           ) {
+            do {
+                _ = try await client.jobs()
+                return client
+            } catch let error as OfflineMapPlatformError {
+                guard case .serverStatus(let status, _) = error,
+                      status == 401 else {
+                    return client
+                }
+                OfflineMapInstallationRefreshBackoff.clear(
+                    serverURLString: client.baseURL.absoluteString,
+                    defaults: defaults
+                )
+            } catch {
+                return client
+            }
+        }
+
+        do {
+            let credential = try await client.registerInstallation()
+            guard credential.clientInstallationId == client.clientInstallationId,
+                  managedAppAttestClient.hasKey(
+                    credential.appAttestKeyId,
+                    serverURLString: client.baseURL.absoluteString
+                  ) else {
+                managedAppAttestClient.invalidate(
+                    serverURLString: client.baseURL.absoluteString
+                )
+                installationCredentialStore.delete(
+                    serverURLString: client.baseURL.absoluteString
+                )
+                return try await enrollManagedInstallation(replacing: client)
+            }
+            OfflineMapInstallationRefreshBackoff.clear(
+                serverURLString: client.baseURL.absoluteString,
+                defaults: defaults
+            )
+            return try registeredClient(credential, replacing: client)
+        } catch let error as OfflineMapPlatformError {
+            guard case .serverStatus(let status, _) = error,
+                  status == 401 else {
+                throw error
+            }
+            managedAppAttestClient.invalidate(
+                serverURLString: client.baseURL.absoluteString
+            )
+            installationCredentialStore.delete(
+                serverURLString: client.baseURL.absoluteString
+            )
+            return try await enrollManagedInstallation(replacing: client)
+        }
+    }
+
+    private func enrollManagedInstallation(
+        replacing client: OfflineMapPlatformClient
+    ) async throws -> OfflineMapPlatformClient {
+        let credential = try await managedAppAttestClient.enroll(
+            baseURL: client.baseURL
+        )
+        OfflineMapInstallationRefreshBackoff.clear(
+            serverURLString: client.baseURL.absoluteString,
+            defaults: defaults
+        )
+        return try registeredClient(credential, replacing: client)
+    }
+
     private func registeredClient(
         _ credential: OfflineMapInstallationCredential,
         replacing client: OfflineMapPlatformClient
@@ -260,8 +370,10 @@ final class BicinoServiceSession {
             legacyBearerToken: client.legacyBearerToken,
             clientInstallationId: credential.clientInstallationId,
             clientInstallationToken: credential.clientInstallationToken,
+            clientAppAttestKeyId: credential.appAttestKeyId,
             mapStreamTrustCapabilities: client.mapStreamTrustCapabilities,
             mapStreamAppBuildIdentity: client.mapStreamAppBuildIdentity,
+            managedAppAttestClient: client.managedAppAttestClient,
             session: urlSession
         )
     }

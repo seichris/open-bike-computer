@@ -1010,6 +1010,12 @@ def build_map_job_monitoring_event(
         event["reuseStrategy"] = job.reuse_strategy
     if job.error_code is not None:
         event["errorCode"] = job.error_code
+    if job.admission_cost is not None:
+        event["admission"] = {
+            "cost": job.admission_cost,
+            "policyVersion": job.admission_policy_version,
+            "partition": job.admission_partition,
+        }
     if isinstance(job.preparation_estimate, dict):
         estimate = job.preparation_estimate
         event["preparationEstimate"] = {

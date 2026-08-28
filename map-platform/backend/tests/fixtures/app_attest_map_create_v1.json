@@ -1,0 +1,9 @@
+{
+  "appBuild": "123",
+  "challenge": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "challengeId": "0123456789abcdef0123456789abcdef",
+  "clientInstallationId": "inst_v2_0123456789abcdef0123456789abcdef",
+  "expectedClientData": "{\"appBuild\":\"123\",\"bodySha256\":\"33902fcf401574531ce57c987512ad5b925212585e5af749dc8f70cfd01e4ffe\",\"challenge\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\",\"challengeId\":\"0123456789abcdef0123456789abcdef\",\"clientInstallationId\":\"inst_v2_0123456789abcdef0123456789abcdef\",\"idempotencyKey\":\"request-golden-123\",\"labelProfileVersion\":1,\"method\":\"POST\",\"path\":\"/v1/map-jobs\",\"renderer\":\"esp32-fmb\",\"rendererFormatVersion\":3,\"schemaVersion\":1}",
+  "expectedClientDataSha256": "366ef974eec57310d94ad1f744786955ce4d51a42fde9f43528d0e8973af6da2",
+  "requestBody": "{\"bbox\":[103.75,1.24,103.93,1.37],\"clientInstallationId\":\"inst_v2_0123456789abcdef0123456789abcdef\",\"clientRequestId\":\"request-golden-123\",\"labels\":{\"profileVersion\":1},\"mode\":\"custom_bbox\",\"target\":{\"renderer\":\"esp32-fmb\",\"rendererFormatVersion\":3}}"
+}

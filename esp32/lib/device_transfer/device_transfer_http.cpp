@@ -5,9 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cerrno>
 #include <esp_system.h>
-#include <sys/socket.h>
 #include <sstream>
 
 namespace device_transfer {
@@ -46,6 +44,20 @@ static std::string lower(std::string value) {
   return value;
 }
 
+static bool constantTimeEqual(const std::string &left,
+                              const std::string &right) {
+  const size_t maximumLength = std::max(left.size(), right.size());
+  size_t difference = left.size() ^ right.size();
+  for (size_t index = 0; index < maximumLength; ++index) {
+    const unsigned char leftByte =
+        index < left.size() ? static_cast<unsigned char>(left[index]) : 0;
+    const unsigned char rightByte =
+        index < right.size() ? static_cast<unsigned char>(right[index]) : 0;
+    difference |= leftByte ^ rightByte;
+  }
+  return difference == 0;
+}
+
 static const char *httpReason(int status) {
   switch (status) {
   case 200:
@@ -70,6 +82,8 @@ static const char *httpReason(int status) {
     return "Payload Too Large";
   case 415:
     return "Unsupported Media Type";
+  case 426:
+    return "Upgrade Required";
   case 429:
     return "Too Many Requests";
   case 431:
@@ -83,7 +97,7 @@ static const char *httpReason(int status) {
 
 enum class ReadLineResult { Complete, Timeout, TooLarge, Disconnected };
 
-static ReadLineResult readLine(WiFiClient &client, std::string &line,
+static ReadLineResult readLine(TransferClient &client, std::string &line,
                                HttpHeaderBudget &budget,
                                uint32_t requestStartedMs) {
   line.clear();
@@ -134,7 +148,7 @@ static std::string jsonEscape(const std::string &value) {
 
 constexpr uint32_t kHttpResponseCloseTimeoutMs = 5000;
 
-static bool writeHttpResponse(WiFiClient &client, const std::string &response) {
+static bool writeHttpResponse(TransferClient &client, const std::string &response) {
   if (response.empty())
     return false;
   return writeHttpBytes(client,
@@ -142,29 +156,8 @@ static bool writeHttpResponse(WiFiClient &client, const std::string &response) {
                         response.size());
 }
 
-// HTTP responses use Connection: close. A write only hands bytes to lwIP; it
-// does not prove the peer received them. Half-closing the write side queues a
-// FIN after the response, then waiting for the peer's close provides a real
-// response-consumption boundary before a handler may tear down the AP.
-static bool finishHttpResponse(WiFiClient &client, uint32_t timeoutMs) {
-  const int socket = client.fd();
-  if (socket < 0 || ::shutdown(socket, SHUT_WR) != 0)
-    return false;
-
-  const uint32_t started = millis();
-  while (millis() - started < timeoutMs) {
-    uint8_t byte = 0;
-    errno = 0;
-    const int received =
-        ::recv(socket, &byte, sizeof(byte), MSG_DONTWAIT);
-    if (received == 0)
-      return true;
-    if (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
-        errno != EINTR)
-      return false;
-    vTaskDelay(pdMS_TO_TICKS(2));
-  }
-  return false;
+static bool finishHttpResponse(TransferClient &client, uint32_t timeoutMs) {
+  return client.finishResponse(timeoutMs);
 }
 
 } // namespace
@@ -182,7 +175,18 @@ void HttpTransferServer::configure(uint16_t port, std::string apSsid) {
   server_ = WiFiServer(port_);
   if (stateMutex_ == nullptr)
     stateMutex_ = xSemaphoreCreateMutex();
-  configured_ = true;
+  if (tlsIdentityMutex_ == nullptr)
+    tlsIdentityMutex_ = xSemaphoreCreateMutex();
+  configured_ = stateMutex_ != nullptr && tlsIdentityMutex_ != nullptr &&
+                tlsIdentityStore_.begin();
+  if (!configured_) {
+    rememberError(stateMutex_ == nullptr || tlsIdentityMutex_ == nullptr
+                      ? "transfer_mutex"
+                      : tlsIdentityStore_.lastError(),
+                  stateMutex_ == nullptr || tlsIdentityMutex_ == nullptr
+                      ? "could not allocate transfer state lock"
+                      : "device TLS identity is unavailable");
+  }
 }
 
 bool HttpTransferServer::registerHandler(std::string pathPrefix,
@@ -241,18 +245,128 @@ void HttpTransferServer::clearPreferredNetwork() {
   unlockState();
 }
 
+bool HttpTransferServer::bindAuthenticatedBleSession(uint64_t sessionId) {
+  if (sessionId == 0)
+    return false;
+  lockState();
+  if (enabled_ && authenticatedBleSessionId_ != sessionId) {
+    rememberError("ble_session_changed",
+                  "transfer is bound to another BLE session");
+    unlockState();
+    return false;
+  }
+  if (authenticatedBleSessionId_ != sessionId) {
+    authenticatedBleSessionId_ = sessionId;
+    transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
+  }
+  unlockState();
+  return true;
+}
+
+void HttpTransferServer::clearAuthenticatedBleSession() {
+  lockState();
+  const bool hadBinding = authenticatedBleSessionId_ != 0;
+  const bool wasEnabled = enabled_;
+  authenticatedBleSessionId_ = 0;
+  enabled_ = false;
+  sessionToken_.clear();
+  apPassphrase_.clear();
+  preferredNetwork_ = {};
+  requestedHotspotFallbackReason_.clear();
+  currentRequestAuthorized_ = false;
+  if (hadBinding || wasEnabled)
+    transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
+  unlockState();
+  if (wasEnabled)
+    server_.stop();
+}
+
+bool HttpTransferServer::prepareTlsIdentityRotation() {
+  lockState();
+  const uint64_t bleSessionId = authenticatedBleSessionId_;
+  const bool allowed = !enabled_ && bleSessionId != 0;
+  unlockState();
+  if (!allowed)
+    return false;
+  lockTlsIdentity();
+  const bool prepared = tlsIdentityStore_.prepareRotation();
+  unlockTlsIdentity();
+  if (!prepared)
+    return false;
+  lockState();
+  const bool stillAllowed = !enabled_ && authenticatedBleSessionId_ == bleSessionId;
+  unlockState();
+  if (!stillAllowed) {
+    lockTlsIdentity();
+    tlsIdentityStore_.cancelRotation();
+    unlockTlsIdentity();
+    return false;
+  }
+  return true;
+}
+
+bool HttpTransferServer::commitTlsIdentityRotation(
+    const std::string &expectedCertificateSha256) {
+  lockState();
+  const bool allowed = !enabled_ && authenticatedBleSessionId_ != 0;
+  unlockState();
+  if (!allowed)
+    return false;
+  lockTlsIdentity();
+  const bool committed =
+      tlsIdentityStore_.commitRotation(expectedCertificateSha256);
+  unlockTlsIdentity();
+  return committed;
+}
+
+bool HttpTransferServer::cancelTlsIdentityRotation() {
+  lockState();
+  const bool allowed = !enabled_ && authenticatedBleSessionId_ != 0;
+  unlockState();
+  if (!allowed)
+    return false;
+  lockTlsIdentity();
+  const bool cancelled = tlsIdentityStore_.cancelRotation();
+  unlockTlsIdentity();
+  return cancelled;
+}
+
 bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
   lockState();
   const bool configured = configured_;
   const bool wasEnabled = enabled_;
   const std::string previousMode = mode_;
   const std::string previousSessionToken = sessionToken_;
+  const uint64_t authenticatedBleSessionId = authenticatedBleSessionId_;
   unlockState();
   const std::string requestedMode = mode;
 
   if (!configured || handlerCount_ == 0) {
     lockState();
     rememberError("not_configured", "device transfer server is not configured");
+    unlockState();
+    return false;
+  }
+  if (enabled && authenticatedBleSessionId == 0) {
+    lockState();
+    rememberError("ble_authentication_required",
+                  "an authenticated owner BLE session is required");
+    unlockState();
+    return false;
+  }
+  lockTlsIdentity();
+  const bool tlsIdentityValid = tlsIdentityStore_.active().valid();
+  unlockTlsIdentity();
+  if (enabled && !tlsIdentityValid) {
+    lockState();
+    rememberError("tls_identity_invalid",
+                  "device TLS identity is unavailable");
+    unlockState();
+    return false;
+  }
+  if (enabled && wasEnabled && previousMode != requestedMode) {
+    lockState();
+    rememberError("transfer_busy", "another transfer mode is active");
     unlockState();
     return false;
   }
@@ -305,9 +419,7 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     if (enabled) {
       if (!wasEnabled || previousMode != mode_ || previousSessionToken.empty()) {
         sessionToken_ = generateSessionToken();
-        apPassphrase_ = (mode_ == "debug" || mode_ == "diagnostics")
-                            ? generateSessionToken().substr(0, 16)
-                            : "";
+        apPassphrase_ = generateSessionToken().substr(0, 24);
       }
       if (!wasEnabled) {
         if (requestedMode != "debug" && requestedMode != "diagnostics")
@@ -462,10 +574,8 @@ bool HttpTransferServer::startNetwork() {
       vTaskDelay(pdMS_TO_TICKS(50));
     }
     WiFi.mode(WIFI_AP);
-    const bool apStarted = mode == "debug" || mode == "diagnostics"
-                               ? WiFi.softAP(apSsid.c_str(),
-                                             apPassphrase.c_str())
-                               : WiFi.softAP(apSsid.c_str());
+    const bool apStarted =
+        WiFi.softAP(apSsid.c_str(), apPassphrase.c_str());
     if (!apStarted) {
       lockState();
       rememberError("wifi_ap", "could not start transfer Wi-Fi fallback");
@@ -573,8 +683,8 @@ void HttpTransferServer::runWorker() {
       }
       return;
     }
-    WiFiClient client = server_.accept();
-    if (client) {
+    WiFiClient acceptedClient = server_.accept();
+    if (acceptedClient) {
       const HttpTransferStatus networkStatus = status();
       Serial.printf(
           "DEVICE_TRANSFER_HTTP: accepted client transport=%s stations=%u "
@@ -585,6 +695,16 @@ void HttpTransferServer::runWorker() {
                                     : 0),
           static_cast<unsigned>(ESP.getFreeHeap()),
           static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+      TransferClient client;
+      lockTlsIdentity();
+      const TransferTlsIdentity tlsIdentity = tlsIdentityStore_.active();
+      unlockTlsIdentity();
+      if (!client.begin(acceptedClient, tlsIdentity)) {
+        Serial.println(
+            "DEVICE_TRANSFER_HTTP: rejected client before secure request");
+        vTaskDelay(pdMS_TO_TICKS(2));
+        continue;
+      }
       lockState();
       requestInProgress_ = true;
       currentRequestAuthorized_ = false;
@@ -642,6 +762,7 @@ HttpTransferStatus HttpTransferServer::status() const {
   const bool hotspotFallback = hotspotFallback_;
   const std::string hotspotFallbackReason = hotspotFallbackReason_;
   const std::string sessionToken = sessionToken_;
+  const uint32_t transferGeneration = transferGeneration_;
   const std::string lastErrorCode = lastErrorCode_;
   const std::string lastErrorMessage = lastErrorMessage_;
   const uint32_t errorSequence = errorSequence_;
@@ -651,6 +772,15 @@ HttpTransferStatus HttpTransferServer::status() const {
   const bool authorizedRequestInProgress =
       requestInProgress_ && currentRequestAuthorized_;
   unlockState();
+  lockTlsIdentity();
+  const std::string tlsCertificateSha256 =
+      tlsIdentityStore_.active().certificateSha256;
+  const uint32_t tlsIdentityVersion = tlsIdentityStore_.active().version;
+  const std::string pendingTlsCertificateSha256 =
+      tlsIdentityStore_.pending().certificateSha256;
+  const uint32_t pendingTlsIdentityVersion =
+      tlsIdentityStore_.pending().version;
+  unlockTlsIdentity();
 
   std::string baseUrl;
   if (enabled) {
@@ -660,29 +790,39 @@ HttpTransferStatus HttpTransferServer::status() const {
                          ? WiFi.localIP()
                          : IPAddress());
     if (ip != IPAddress()) {
-      baseUrl = std::string("http://") + ip.toString().c_str() + ":" +
+      baseUrl = std::string("https://") + ip.toString().c_str() + ":" +
                 std::to_string(port);
     }
   }
-  return {configured,
-          enabled,
-          port,
-          mode,
-          baseUrl,
-          startedAp ? apSsid : "",
-          startedAp && (mode == "debug" || mode == "diagnostics")
-              ? apPassphrase
-              : "",
-          networkTransport,
-          networkSsid,
-          hotspotFallback,
-          hotspotFallbackReason,
-          sessionToken,
-          lastErrorCode,
-          lastErrorMessage,
-          errorSequence,
-          lastUsefulTrafficMs,
-          authorizedRequestInProgress};
+  HttpTransferStatus result;
+  result.configured = configured;
+  result.enabled = enabled;
+  result.port = port;
+  result.mode = mode;
+  result.baseUrl = std::move(baseUrl);
+  result.apSsid = startedAp ? apSsid : "";
+  result.apPassphrase = startedAp ? apPassphrase : "";
+  result.networkTransport = networkTransport;
+  result.networkSsid = networkSsid;
+  result.hotspotFallback = hotspotFallback;
+  result.hotspotFallbackReason = hotspotFallbackReason;
+  result.sessionToken = sessionToken;
+  result.tlsCertificateSha256 = tlsCertificateSha256;
+  result.tlsIdentityVersion = tlsIdentityVersion;
+  result.pendingTlsCertificateSha256 = pendingTlsCertificateSha256;
+  result.pendingTlsIdentityVersion = pendingTlsIdentityVersion;
+  result.transferGeneration = transferGeneration;
+  result.secureTransferV1 =
+      tlsIdentityVersion != 0 &&
+      validTlsCertificateSha256(tlsCertificateSha256);
+  result.signedMapStreamV1 = true;
+  result.legacyArchivePolicy = "disabled";
+  result.lastErrorCode = lastErrorCode;
+  result.lastErrorMessage = lastErrorMessage;
+  result.errorSequence = errorSequence;
+  result.lastUsefulTrafficMs = lastUsefulTrafficMs;
+  result.authorizedRequestInProgress = authorizedRequestInProgress;
+  return result;
 }
 
 bool HttpTransferServer::isRequestAuthorized(
@@ -691,10 +831,12 @@ bool HttpTransferServer::isRequestAuthorized(
   const bool enabled = enabled_;
   const std::string sessionToken = sessionToken_;
   const uint32_t transferGeneration = transferGeneration_;
+  const uint64_t authenticatedBleSessionId = authenticatedBleSessionId_;
   const bool authorized =
       isHttpTransferGenerationCurrent(enabled, transferGeneration,
                                       request.transferGeneration) &&
-      !sessionToken.empty() && request.transferToken == sessionToken;
+      authenticatedBleSessionId != 0 && !sessionToken.empty() &&
+      constantTimeEqual(request.transferToken, sessionToken);
   currentRequestAuthorized_ = authorized;
   if (authorized) {
     lastUsefulTrafficMs_ = millis();
@@ -717,7 +859,7 @@ bool HttpTransferServer::waitUntilStopped(uint32_t timeoutMs) {
   }
 }
 
-void HttpTransferServer::handleClient(WiFiClient &client) {
+void HttpTransferServer::handleClient(TransferClient &client) {
   const uint32_t requestStartedMs = millis();
   HttpHeaderBudget headerBudget;
   std::string requestLine;
@@ -850,7 +992,7 @@ std::string HttpTransferServer::generateSessionToken() const {
   return token;
 }
 
-void HttpTransferServer::sendError(WiFiClient &client, int status,
+void HttpTransferServer::sendError(TransferClient &client, int status,
                                    const std::string &code,
                                    const std::string &message) {
   setLastError(code, message);
@@ -874,7 +1016,17 @@ void HttpTransferServer::unlockState() const {
     xSemaphoreGive(stateMutex_);
 }
 
-bool sendHttpHead(WiFiClient &client, int status, uint64_t contentLength,
+void HttpTransferServer::lockTlsIdentity() const {
+  if (tlsIdentityMutex_ != nullptr)
+    xSemaphoreTake(tlsIdentityMutex_, portMAX_DELAY);
+}
+
+void HttpTransferServer::unlockTlsIdentity() const {
+  if (tlsIdentityMutex_ != nullptr)
+    xSemaphoreGive(tlsIdentityMutex_);
+}
+
+bool sendHttpHead(TransferClient &client, int status, uint64_t contentLength,
                   const char *contentType,
                   const HttpResponseHeader *additionalHeaders,
                   size_t additionalHeaderCount) {
@@ -899,11 +1051,12 @@ bool sendHttpHead(WiFiClient &client, int status, uint64_t contentLength,
     response += name + ": " + value + "\r\n";
   }
   response += "Connection: close\r\nContent-Length: " +
-              std::to_string(contentLength) + "\r\n\r\n";
+              std::to_string(contentLength) +
+              "\r\nCache-Control: no-store\r\nPragma: no-cache\r\n\r\n";
   return writeHttpResponse(client, response);
 }
 
-bool writeHttpBytes(WiFiClient &client, const uint8_t *data, size_t length,
+bool writeHttpBytes(TransferClient &client, const uint8_t *data, size_t length,
                     uint32_t timeoutMs) {
   if (data == nullptr && length != 0)
     return false;
@@ -924,16 +1077,16 @@ bool writeHttpBytes(WiFiClient &client, const uint8_t *data, size_t length,
   return offset == length;
 }
 
-bool sendHttpJson(WiFiClient &client, int status, const std::string &body) {
+bool sendHttpJson(TransferClient &client, int status, const std::string &body) {
   const std::string response =
       std::string("HTTP/1.1 ") + std::to_string(status) + " " +
       httpReason(status) +
-      "\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: " +
+      "\r\nContent-Type: application/json\r\nConnection: close\r\nCache-Control: no-store\r\nPragma: no-cache\r\nContent-Length: " +
       std::to_string(body.size()) + "\r\n\r\n" + body;
   return writeHttpResponse(client, response);
 }
 
-bool sendHttpError(WiFiClient &client, int status, const std::string &code,
+bool sendHttpError(TransferClient &client, int status, const std::string &code,
                    const std::string &message) {
   return sendHttpJson(
       client, status,
@@ -941,7 +1094,7 @@ bool sendHttpError(WiFiClient &client, int status, const std::string &code,
           "\",\"message\":\"" + jsonEscape(message) + "\"}}");
 }
 
-bool readHttpBody(WiFiClient &client, uint64_t contentLength,
+bool readHttpBody(TransferClient &client, uint64_t contentLength,
                   uint64_t maxLength, std::string &body,
                   uint32_t timeoutMs) {
   body.clear();
@@ -954,6 +1107,8 @@ bool readHttpBody(WiFiClient &client, uint64_t contentLength,
   while (remaining > 0 && millis() - lastReadMs < timeoutMs) {
     int available = client.available();
     if (available <= 0) {
+      if (!client.connected())
+        return false;
       delay(1);
       continue;
     }

@@ -101,6 +101,9 @@ public:
     return legacyAuthenticationAllowed_;
   }
   bool isSessionAuthenticated() const { return sessionAuthenticated_; }
+  uint64_t authenticatedOwnerSessionId() const {
+    return isOwnerSession() ? sessionId_ : 0;
+  }
   const DeviceId &deviceId() const { return deviceId_; }
   const std::string &deviceName() const { return deviceName_; }
   std::string deviceIdHex() const;

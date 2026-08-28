@@ -1,7 +1,8 @@
 # Remote device debugging
 
-This facility shows and controls the currently connected physical Bicino in a
-browser. It is not a simulator. The framebuffer, HTTP service, and synthetic
+This facility shows and controls the currently connected physical Bicino in an
+ephemeral in-app web view. It is not a simulator. The framebuffer, HTTPS
+service, and synthetic
 pointer input are compiled into two opt-in firmware profiles:
 
 - `WAVESHARE_AMOLED_175_REMOTE_DEBUG`
@@ -31,16 +32,15 @@ CAP2 bit `16`, and reject debug-mode entry.
    the LAN for six seconds, then starts `BikeComputer-Transfer` automatically
    if association fails. The app requires a fresh BLE `DSTS` response and also
    forces hotspot fallback if the device joined the LAN but the authenticated
-   HTTP endpoint is unreachable from the iPhone.
-6. Follow the displayed **Connection** value. For **Local Wi-Fi**, keep the Mac
-   on the same LAN; no Wi-Fi switch is needed. For **Device hotspot**, join the
-   displayed `BikeComputer-Transfer` network on the Mac using the per-session
-   password shown by the iPhone app.
-7. Tap **Copy Browser URL** and open it in Brave (through the Codex browser
-   extension for automated checks). The token follows `#` and stays in page
-   memory; do not put that URL in logs or screenshots. The page has no external
-   resources, so losing internet connectivity while joined to the accessory AP
-   does not affect it.
+   HTTPS endpoint is unreachable from the iPhone.
+6. For **Device hotspot**, the app joins the displayed
+   `BikeComputer-Transfer` network using its per-session password. For
+   **Local Wi-Fi**, the iPhone remains on the configured LAN.
+7. Tap **Open Secure Debug Console**. The app validates the exact TLS leaf pin
+   delivered over authenticated BLE, loads only the fixed device page in a
+   nonpersistent `WKWebView`, then injects the transfer token directly into page
+   memory. The token is never placed in a URL, browser history, copied session
+   details, or the clipboard. The page has no external resources.
 
 The normal LAN password is never included in `DSTS`, the debug `/info` response,
 copied session details, or firmware/iOS logs. ESP32-S3 station mode supports
@@ -52,10 +52,9 @@ authentication failure, association timeout, and an unreachable LAN endpoint.
 
 The fallback hotspot uses a fresh WPA2 password for every debug session. That
 password is returned only by authenticated BLE `DSTS`, is not exposed by the
-HTTP API, and is revoked with the session. LAN mode uses plain HTTP with a
-bearer token and therefore must be used only on a trusted local network: other
-clients or administrators on that LAN may be able to observe debug traffic.
-Do not use browser debugging on an untrusted or shared LAN.
+HTTPS API, and is revoked with the session. Hotspot and LAN modes both use the
+same device-local P-256 TLS identity and exact BLE-delivered leaf-certificate
+pin. Redirects, host changes, and certificate changes fail closed.
 
 The browser displays target identity, dimensions, display state, frame/copy and
 HTTP-duration counters, PSRAM allocation evidence, the live user-oriented
@@ -87,9 +86,9 @@ exiting, the ordinary five-minute transfer inactivity boundary revokes the
 credential, stops the active Wi-Fi transport, releases synthetic input, and
 frees the snapshot.
 
-## HTTP contract
+## HTTPS contract
 
-The unauthenticated `GET /device-debug/` response is a secret-free, offline,
+The token-free `GET /device-debug/` response is a secret-free, offline,
 same-origin page. All versioned API routes require the existing
 `X-BikeComputer-Transfer-Token` header:
 
@@ -117,17 +116,22 @@ normally and the capture is counted as skipped.
 
 ## Automation CLI
 
-`esp32/tools/device_debug.py` operates on an already-established session. Pass
-the base URL separately and provide the secret through an interactive prompt,
-the task-specific `BICINO_DEVICE_DEBUG_TOKEN` environment variable, or a
-mode-`0600` JSON file with `baseUrl` and `token` fields:
+`esp32/tools/device_debug.py` operates only on an already-established secure
+session. The ordinary app flow intentionally does not export the token. For a
+separately authorized automation harness, provide the HTTPS origin, exact leaf
+pin, and token through task-specific environment variables or a mode-`0600`
+JSON file with `baseUrl`, `tlsCertificateSha256`, and `token` fields. The client
+disables ambient proxies, blocks redirects, completes and verifies the TLS
+handshake before sending the token, and refuses plaintext origins:
 
 ```sh
 cd esp32
-BICINO_DEVICE_DEBUG_TOKEN='session-token' \
-  python3 tools/device_debug.py --base-url http://192.168.4.1:8080 info
-BICINO_DEVICE_DEBUG_TOKEN='session-token' \
-  python3 tools/device_debug.py --base-url http://192.168.4.1:8080 \
+BICINO_DEVICE_DEBUG_TOKEN='0123456789abcdef0123456789abcdef' \
+  BICINO_DEVICE_DEBUG_TLS_SHA256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  python3 tools/device_debug.py --base-url https://192.168.4.1:8080 info
+BICINO_DEVICE_DEBUG_TOKEN='0123456789abcdef0123456789abcdef' \
+  BICINO_DEVICE_DEBUG_TLS_SHA256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  python3 tools/device_debug.py --base-url https://192.168.4.1:8080 \
   screenshot --output /tmp/bicino.png
 ```
 
