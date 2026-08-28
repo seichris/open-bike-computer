@@ -532,30 +532,17 @@ def create_app(
     def verify_registered_installation(
         installation_id: str | None,
         installation_token: str | None,
-        *,
-        required: bool = False,
-    ) -> str | None:
-        if installation_id is None:
-            if required:
-                raise HTTPException(status_code=401, detail="installation credential is required")
-            return None
+    ) -> str:
         if not isinstance(installation_id, str):
-            if required:
-                raise HTTPException(status_code=401, detail="installation credential is required")
-            return None
+            raise HTTPException(
+                status_code=401,
+                detail="installation credential is required",
+            )
         try:
-            registered = installation_store.is_registered(installation_id)
+            installation_store.verify(installation_id, installation_token)
         except InstallationCredentialError as exc:
-            if not required:
-                return None
             raise HTTPException(status_code=401, detail=str(exc)) from exc
-        if required or registered:
-            try:
-                installation_store.verify(installation_id, installation_token)
-            except InstallationCredentialError as exc:
-                raise HTTPException(status_code=401, detail=str(exc)) from exc
-            return installation_id
-        return None
+        return installation_id
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
@@ -583,9 +570,7 @@ def create_app(
         installation_id = verify_registered_installation(
             clientInstallationId,
             x_installation_token,
-            required=True,
         )
-        assert installation_id is not None
         response.headers["Cache-Control"] = "private, no-store"
         result = service.generation_capabilities(installation_id)
         result["integrations"] = {
@@ -716,9 +701,7 @@ def create_app(
         installation_id = verify_registered_installation(
             clientInstallationId,
             x_installation_token,
-            required=True,
         )
-        assert installation_id is not None
         enforce_rate_limits(
             (strava_oauth_start_ip_policy, client_ip(request)),
             (strava_oauth_start_installation_policy, installation_id),
@@ -816,9 +799,7 @@ def create_app(
         installation_id = verify_registered_installation(
             clientInstallationId,
             x_installation_token,
-            required=True,
         )
-        assert installation_id is not None
         response.headers["Cache-Control"] = "private, no-store"
         return strava_integration.connection_status(installation_id)
 
@@ -835,9 +816,7 @@ def create_app(
         installation_id = verify_registered_installation(
             clientInstallationId,
             x_installation_token,
-            required=True,
         )
-        assert installation_id is not None
         enforce_rate_limits(
             (strava_disconnect_ip_policy, client_ip(request)),
         )
@@ -858,9 +837,7 @@ def create_app(
         installation_id = verify_registered_installation(
             clientInstallationId,
             x_installation_token,
-            required=True,
         )
-        assert installation_id is not None
         enforce_rate_limits(
             (strava_route_list_ip_policy, client_ip(request)),
             (strava_route_list_installation_policy, installation_id),
@@ -898,9 +875,7 @@ def create_app(
         installation_id = verify_registered_installation(
             clientInstallationId,
             x_installation_token,
-            required=True,
         )
-        assert installation_id is not None
         enforce_rate_limits(
             (strava_route_import_ip_policy, client_ip(request)),
             (strava_route_import_installation_policy, installation_id),
@@ -932,9 +907,7 @@ def create_app(
         installation_id = verify_registered_installation(
             clientInstallationId,
             x_installation_token,
-            required=True,
         )
-        assert installation_id is not None
         enforce_rate_limits(
             (strava_route_validation_ip_policy, client_ip(request)),
             (strava_route_validation_installation_policy, installation_id),
@@ -1000,21 +973,19 @@ def create_app(
                 if existing is not None:
                     return public_job(
                         existing,
-                        payload.get("clientInstallationId"),
+                        registered_installation_id,
                         trust_capabilities,
                         app_build,
                         app_git_sha,
                         app_build_sha256,
                     )
-                rules = [(map_create_ip_policy, client_ip(request))]
-                if registered_installation_id is not None:
-                    rules.append(
-                        (map_create_installation_policy, registered_installation_id)
-                    )
-                enforce_rate_limits(*rules)
+                enforce_rate_limits(
+                    (map_create_ip_policy, client_ip(request)),
+                    (map_create_installation_policy, registered_installation_id),
+                )
                 return public_job(
                     service.create_job(payload),
-                    payload.get("clientInstallationId"),
+                    registered_installation_id,
                     trust_capabilities,
                     app_build,
                     app_git_sha,
@@ -1058,15 +1029,18 @@ def create_app(
                 x_map_stream_app_git_sha,
                 x_map_stream_app_build_sha256,
             )
-            verify_registered_installation(clientInstallationId, x_installation_token)
-            jobs = service.list_jobs(client_installation_id=clientInstallationId)
+            installation_id = verify_registered_installation(
+                clientInstallationId,
+                x_installation_token,
+            )
+            jobs = service.list_jobs(client_installation_id=installation_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {
             "jobs": [
                 public_job(
                     job,
-                    clientInstallationId,
+                    installation_id,
                     trust_capabilities,
                     app_build,
                     app_git_sha,
@@ -1108,10 +1082,13 @@ def create_app(
                 x_map_stream_app_git_sha,
                 x_map_stream_app_build_sha256,
             )
-            verify_registered_installation(clientInstallationId, x_installation_token)
-            return public_job(
-                service.get_job_for_installation(job_id, clientInstallationId),
+            installation_id = verify_registered_installation(
                 clientInstallationId,
+                x_installation_token,
+            )
+            return public_job(
+                service.get_job_for_installation(job_id, installation_id),
+                installation_id,
                 trust_capabilities,
                 app_build,
                 app_git_sha,
@@ -1140,7 +1117,6 @@ def create_app(
             verify_registered_installation(
                 clientInstallationId,
                 x_installation_token,
-                required=True,
             )
             job = service.update_user_label_for_installation(
                 job_id,
@@ -1192,7 +1168,6 @@ def create_app(
             verify_registered_installation(
                 clientInstallationId,
                 x_installation_token,
-                required=True,
             )
             job = service.get_job_for_installation(
                 job_id,
@@ -1250,7 +1225,6 @@ def create_app(
             verify_registered_installation(
                 clientInstallationId,
                 x_installation_token,
-                required=True,
             )
             job = service.record_download_for_installation(
                 job_id,
@@ -1338,11 +1312,14 @@ def create_app(
                 x_map_stream_app_git_sha,
                 x_map_stream_app_build_sha256,
             )
-            verify_registered_installation(clientInstallationId, x_installation_token)
-            service.get_job_for_installation(job_id, clientInstallationId)
+            installation_id = verify_registered_installation(
+                clientInstallationId,
+                x_installation_token,
+            )
+            service.get_job_for_installation(job_id, installation_id)
             return public_job(
                 service.cancel_job(job_id),
-                clientInstallationId,
+                installation_id,
                 trust_capabilities,
                 app_build,
                 app_git_sha,
@@ -1446,10 +1423,13 @@ def create_app(
                 x_map_stream_app_git_sha,
                 x_map_stream_app_build_sha256,
             )
-            verify_registered_installation(clientInstallationId, x_installation_token)
+            installation_id = verify_registered_installation(
+                clientInstallationId,
+                x_installation_token,
+            )
             job = service.find_by_map_id(
                 map_id,
-                client_installation_id=clientInstallationId,
+                client_installation_id=installation_id,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1457,7 +1437,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="map pack not found")
         return public_job(
             job,
-            clientInstallationId,
+            installation_id,
             trust_capabilities,
             app_build,
             app_git_sha,
@@ -1480,24 +1460,25 @@ def create_app(
                 clientInstallationId,
                 x_installation_token,
             )
-            rules = [(download_url_ip_policy, client_ip(request))]
-            if registered_installation_id is not None:
-                rules.append(
-                    (
-                        download_url_installation_policy,
-                        registered_installation_id,
-                    )
-                )
-            enforce_rate_limits(*rules)
+            enforce_rate_limits(
+                (download_url_ip_policy, client_ip(request)),
+                (
+                    download_url_installation_policy,
+                    registered_installation_id,
+                ),
+            )
             if jobId is not None:
-                job = service.get_job_for_installation(jobId, clientInstallationId)
+                job = service.get_job_for_installation(
+                    jobId,
+                    registered_installation_id,
+                )
                 if job.map_id != map_id:
                     job = None
             else:
                 # Preserve older clients that only identify a stable map ID.
                 job = service.find_by_map_id(
                     map_id,
-                    client_installation_id=clientInstallationId,
+                    client_installation_id=registered_installation_id,
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1552,7 +1533,6 @@ def create_app(
             registered_installation_id = verify_registered_installation(
                 clientInstallationId,
                 x_installation_token,
-                required=True,
             )
             enforce_rate_limits(
                 (download_url_ip_policy, client_ip(request)),
@@ -1562,13 +1542,16 @@ def create_app(
                 ),
             )
             if jobId is not None:
-                job = service.get_job_for_installation(jobId, clientInstallationId)
+                job = service.get_job_for_installation(
+                    jobId,
+                    registered_installation_id,
+                )
                 if job.map_id != map_id:
                     job = None
             else:
                 job = service.find_by_map_id(
                     map_id,
-                    client_installation_id=clientInstallationId,
+                    client_installation_id=registered_installation_id,
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

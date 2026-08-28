@@ -1790,7 +1790,9 @@ class MapJobService:
     ) -> MapJob:
         job = self.get_job(job_id)
         if job.client_installation_id is None:
-            return job
+            if client_installation_id is None:
+                return job
+            raise KeyError(job_id)
         if client_installation_id is None:
             raise KeyError(job_id)
         normalized = _validate_identifier(client_installation_id, "clientInstallationId")
@@ -1828,8 +1830,11 @@ class MapJobService:
             if job.map_id == map_id and job.status == JobStatus.READY
         ]
         if normalized is not None:
-            owned = [job for job in candidates if job.client_installation_id == normalized]
-            candidates = owned or [job for job in candidates if job.client_installation_id is None]
+            candidates = [
+                job
+                for job in candidates
+                if job.client_installation_id == normalized
+            ]
         elif not allow_owned_without_installation:
             candidates = [job for job in candidates if job.client_installation_id is None]
         if not candidates:

@@ -234,17 +234,68 @@ class MapJobRunAPITests(unittest.TestCase):
         self.client.headers["X-Map-Stream-App-Build"] = "100"
         self.client.headers["X-Map-Stream-App-Git-Sha"] = self.ios_git_sha
         self.client.headers["X-Map-Stream-App-Build-Sha256"] = self.ios_build_sha256
+        self.installation = self.issue_installation(self.client)
+        self.job_request_sequence = 0
 
     def tearDown(self):
         self.client.close()
         self.environment.stop()
         self.tmp.cleanup()
 
-    def create_job(self) -> str:
-        response = self.client.post(
-            "/v1/map-jobs",
-            json={"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]},
+    def issue_installation(self, client: TestClient) -> dict[str, str]:
+        response = client.post("/v1/installations")
+        self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    @staticmethod
+    def installation_headers(
+        credential: dict[str, str],
+        **extra: str,
+    ) -> dict[str, str]:
+        return {
+            "X-Installation-Token": credential["clientInstallationToken"],
+            **extra,
+        }
+
+    @staticmethod
+    def installation_params(credential: dict[str, str]) -> dict[str, str]:
+        return {"clientInstallationId": credential["clientInstallationId"]}
+
+    def post_map_job(
+        self,
+        payload: dict | None = None,
+        *,
+        client: TestClient | None = None,
+        credential: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+    ):
+        self.job_request_sequence += 1
+        request_payload = dict(
+            payload
+            or {
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+            }
         )
+        request_credential = credential or self.installation
+        request_payload.setdefault(
+            "clientInstallationId",
+            request_credential["clientInstallationId"],
+        )
+        request_payload.setdefault(
+            "clientRequestId",
+            f"request-test-{self.job_request_sequence:08d}",
+        )
+        request_headers = self.installation_headers(request_credential)
+        request_headers.update(headers or {})
+        return (client or self.client).post(
+            "/v1/map-jobs",
+            json=request_payload,
+            headers=request_headers,
+        )
+
+    def create_job(self) -> str:
+        response = self.post_map_job()
         self.assertEqual(response.status_code, 200)
         return response.json()["jobId"]
 
@@ -445,12 +496,12 @@ class MapJobRunAPITests(unittest.TestCase):
             ):
                 client = TestClient(create_app())
                 try:
-                    response = client.post(
-                        "/v1/map-jobs",
-                        json={
+                    response = self.post_map_job(
+                        {
                             "mode": "custom_bbox",
                             "bbox": [103.75, 1.24, 103.93, 1.37],
                         },
+                        client=client,
                     )
                     self.assertEqual(response.status_code, 200)
                     payload = response.json()
@@ -481,7 +532,7 @@ class MapJobRunAPITests(unittest.TestCase):
                 "internationalFallback": "en",
             },
         }
-        enabled = self.client.post("/v1/map-jobs", json=payload)
+        enabled = self.post_map_job(payload)
         self.assertEqual(enabled.status_code, 200)
 
     def test_target_three_is_globally_available_after_production_promotion(self):
@@ -823,7 +874,7 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(blocked.status_code, 429)
         self.assertGreater(int(blocked.headers["Retry-After"]), 0)
 
-    def test_anonymous_map_creation_is_limited_by_client_address(self):
+    def test_anonymous_map_creation_is_rejected_before_quota_consumption(self):
         limited_root = Path(self.tmp.name) / "anonymous-map-create-limit"
         with patch.dict(
             os.environ,
@@ -844,14 +895,21 @@ class MapJobRunAPITests(unittest.TestCase):
             finally:
                 client.close()
 
-        self.assertEqual(first.status_code, 200)
-        self.assertEqual(blocked.status_code, 429)
-        self.assertGreater(int(blocked.headers["Retry-After"]), 0)
+        self.assertEqual(first.status_code, 401)
+        self.assertEqual(blocked.status_code, 401)
+        self.assertEqual(
+            first.json()["detail"],
+            "installation credential is required",
+        )
+        with sqlite3.connect(limited_root / "rate-limits.sqlite3") as connection:
+            consumed = connection.execute(
+                "SELECT COUNT(*) FROM rate_limits WHERE scope LIKE 'map-create-%'"
+            ).fetchone()[0]
+        self.assertEqual(consumed, 0)
 
     def test_map_creation_rejects_unknown_fields_and_oversized_bodies(self):
-        unknown = self.client.post(
-            "/v1/map-jobs",
-            json={
+        unknown = self.post_map_job(
+            {
                 "mode": "custom_bbox",
                 "bbox": [103.75, 1.24, 103.93, 1.37],
                 "padding": "not persisted",
@@ -892,9 +950,8 @@ class MapJobRunAPITests(unittest.TestCase):
             [103.8 + index / 10_000_000, 1.3 + index / 10_000_000]
             for index in range(25_000)
         ]
-        response = self.client.post(
-            "/v1/map-jobs",
-            json={
+        response = self.post_map_job(
+            {
                 "mode": "route_corridor",
                 "route": route,
                 "corridorWidthM": 100,
@@ -1107,6 +1164,7 @@ class MapJobRunAPITests(unittest.TestCase):
         with patch("map_platform.api.run_job", return_value=result):
             response = self.client.post(
                 f"/v1/map-jobs/{job_id}/run",
+                params=self.installation_params(self.installation),
                 headers={"Authorization": "Bearer admin-secret"},
             )
 
@@ -1125,9 +1183,12 @@ class MapJobRunAPITests(unittest.TestCase):
         ):
             client = TestClient(create_app())
             try:
-                created = client.post(
-                    "/v1/map-jobs",
-                    json={"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]},
+                created = self.post_map_job(
+                    {
+                        "mode": "custom_bbox",
+                        "bbox": [103.75, 1.24, 103.93, 1.37],
+                    },
+                    client=client,
                 )
                 response = client.post(
                     f"/v1/map-jobs/{created.json()['jobId']}/run",
@@ -1173,12 +1234,10 @@ class MapJobRunAPITests(unittest.TestCase):
 
     def test_same_map_jobs_publish_and_download_exact_job_artifacts(self):
         def create_owned(request_id: str) -> str:
-            response = self.client.post(
-                "/v1/map-jobs",
-                json={
+            response = self.post_map_job(
+                {
                     "mode": "custom_bbox",
                     "bbox": [103.75, 1.24, 103.93, 1.37],
-                    "clientInstallationId": "installation-owner",
                     "clientRequestId": request_id,
                 },
             )
@@ -1228,9 +1287,12 @@ class MapJobRunAPITests(unittest.TestCase):
             signed = self.client.post(
                 "/v1/map-packs/map-shared/download-url",
                 params={
-                    "clientInstallationId": "installation-owner",
+                    "clientInstallationId": self.installation[
+                        "clientInstallationId"
+                    ],
                     "jobId": job_id,
                 },
+                headers=self.installation_headers(self.installation),
             )
             self.assertEqual(signed.status_code, 200)
             downloaded = self.client.get(signed.json()["url"])
@@ -1556,9 +1618,8 @@ class MapJobRunAPITests(unittest.TestCase):
     def test_malformed_stream_headers_are_rejected_before_reads_or_mutations(self):
         jobs_root = Path(self.tmp.name) / "jobs"
         before = len(list(jobs_root.glob("*.json"))) if jobs_root.exists() else 0
-        malformed_create = self.client.post(
-            "/v1/map-jobs",
-            json={"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]},
+        malformed_create = self.post_map_job(
+            {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]},
             headers={"X-Map-Stream-Trust": "malformed"},
         )
         self.assertEqual(malformed_create.status_code, 400)
@@ -1568,25 +1629,41 @@ class MapJobRunAPITests(unittest.TestCase):
         job_id = self.create_job()
         malformed_cancel = self.client.post(
             f"/v1/map-jobs/{job_id}/cancel",
-            headers={"X-Map-Stream-App-Build": "not-a-build"},
+            params=self.installation_params(self.installation),
+            headers=self.installation_headers(
+                self.installation,
+                **{"X-Map-Stream-App-Build": "not-a-build"},
+            ),
         )
         self.assertEqual(malformed_cancel.status_code, 400)
         self.assertEqual(
-            self.client.get(f"/v1/map-jobs/{job_id}").json()["status"],
+            self.client.get(
+                f"/v1/map-jobs/{job_id}",
+                params=self.installation_params(self.installation),
+                headers=self.installation_headers(self.installation),
+            ).json()["status"],
             "queued",
         )
 
         incomplete_identity = self.client.post(
             f"/v1/map-jobs/{job_id}/cancel",
-            headers={
-                "X-Map-Stream-App-Build": "100",
-                "X-Map-Stream-App-Git-Sha": "",
-                "X-Map-Stream-App-Build-Sha256": "",
-            },
+            params=self.installation_params(self.installation),
+            headers=self.installation_headers(
+                self.installation,
+                **{
+                    "X-Map-Stream-App-Build": "100",
+                    "X-Map-Stream-App-Git-Sha": "",
+                    "X-Map-Stream-App-Build-Sha256": "",
+                },
+            ),
         )
         self.assertEqual(incomplete_identity.status_code, 400)
         self.assertEqual(
-            self.client.get(f"/v1/map-jobs/{job_id}").json()["status"],
+            self.client.get(
+                f"/v1/map-jobs/{job_id}",
+                params=self.installation_params(self.installation),
+                headers=self.installation_headers(self.installation),
+            ).json()["status"],
             "queued",
         )
 
@@ -1732,7 +1809,11 @@ class MapJobRunAPITests(unittest.TestCase):
 
         issued = self.client.post(
             "/v1/map-packs/map-expired/download-url",
-            params={"jobId": job_id},
+            params={
+                **self.installation_params(self.installation),
+                "jobId": job_id,
+            },
+            headers=self.installation_headers(self.installation),
         )
         self.assertEqual(issued.status_code, 200)
 
@@ -1749,9 +1830,10 @@ class MapJobRunAPITests(unittest.TestCase):
         download = self.client.post(
             "/v1/map-packs/map-expired/download-url",
             params={
-                "clientInstallationId": "installation-owner",
+                **self.installation_params(self.installation),
                 "jobId": job_id,
             },
+            headers=self.installation_headers(self.installation),
         )
         previously_issued_download = self.client.get(issued.json()["url"])
 
@@ -1786,6 +1868,7 @@ class MapJobRunAPITests(unittest.TestCase):
 
         response = self.client.post(
             f"/v1/map-jobs/{job_id}/run",
+            params=self.installation_params(self.installation),
             headers={"Authorization": "Bearer admin-secret"},
         )
 
@@ -1794,10 +1877,18 @@ class MapJobRunAPITests(unittest.TestCase):
 
     def test_run_route_rejects_cancelled_job(self):
         job_id = self.create_job()
-        self.assertEqual(self.client.post(f"/v1/map-jobs/{job_id}/cancel").status_code, 200)
+        self.assertEqual(
+            self.client.post(
+                f"/v1/map-jobs/{job_id}/cancel",
+                params=self.installation_params(self.installation),
+                headers=self.installation_headers(self.installation),
+            ).status_code,
+            200,
+        )
 
         response = self.client.post(
             f"/v1/map-jobs/{job_id}/run",
+            params=self.installation_params(self.installation),
             headers={"Authorization": "Bearer admin-secret"},
         )
 
@@ -1813,30 +1904,31 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_list_jobs_filters_by_client_installation(self):
-        first = self.client.post(
-            "/v1/map-jobs",
-            json={
+        first_installation = self.issue_installation(self.client)
+        second_installation = self.issue_installation(self.client)
+        first = self.post_map_job(
+            {
                 "mode": "custom_bbox",
                 "bbox": [103.75, 1.24, 103.93, 1.37],
-                "clientInstallationId": "installation-first",
                 "clientRequestId": "request-first-123",
             },
+            credential=first_installation,
         )
         self.assertEqual(first.status_code, 200)
-        second = self.client.post(
-            "/v1/map-jobs",
-            json={
+        second = self.post_map_job(
+            {
                 "mode": "custom_bbox",
                 "bbox": [103.76, 1.25, 103.94, 1.38],
-                "clientInstallationId": "installation-second",
                 "clientRequestId": "request-second-123",
             },
+            credential=second_installation,
         )
         self.assertEqual(second.status_code, 200)
 
         response = self.client.get(
             "/v1/map-jobs",
-            params={"clientInstallationId": "installation-first"},
+            params=self.installation_params(first_installation),
+            headers=self.installation_headers(first_installation),
         )
 
         self.assertEqual(response.status_code, 200)
@@ -1844,43 +1936,89 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual([job["jobId"] for job in jobs], [first.json()["jobId"]])
 
     def test_job_reads_require_matching_installation(self):
-        owned = self.client.post(
-            "/v1/map-jobs",
-            json={
+        owner = self.issue_installation(self.client)
+        other_installation = self.issue_installation(self.client)
+        owned = self.post_map_job(
+            {
                 "mode": "custom_bbox",
                 "bbox": [103.75, 1.24, 103.93, 1.37],
-                "clientInstallationId": "installation-owner",
                 "clientRequestId": "request-owner-123",
             },
+            credential=owner,
         ).json()
 
         missing_filter = self.client.get("/v1/map-jobs")
         matching = self.client.get(
             f"/v1/map-jobs/{owned['jobId']}",
-            params={"clientInstallationId": "installation-owner"},
+            params=self.installation_params(owner),
+            headers=self.installation_headers(owner),
         )
         other = self.client.get(
             f"/v1/map-jobs/{owned['jobId']}",
-            params={"clientInstallationId": "installation-other"},
+            params=self.installation_params(other_installation),
+            headers=self.installation_headers(other_installation),
         )
         unscoped = self.client.get(f"/v1/map-jobs/{owned['jobId']}")
 
         self.assertEqual(missing_filter.status_code, 400)
         self.assertEqual(matching.status_code, 200)
         self.assertEqual(other.status_code, 404)
-        self.assertEqual(unscoped.status_code, 404)
+        self.assertEqual(unscoped.status_code, 401)
 
-    def test_legacy_job_remains_recoverable_by_an_installation(self):
+    def test_job_endpoints_reject_an_installation_id_without_its_token(self):
+        owner = self.issue_installation(self.client)
+        created = self.post_map_job(credential=owner)
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()["jobId"]
+        params = self.installation_params(owner)
+
+        attempts = [
+            self.client.get("/v1/map-jobs", params=params),
+            self.client.get(f"/v1/map-jobs/{job_id}", params=params),
+            self.client.post(f"/v1/map-jobs/{job_id}/cancel", params=params),
+        ]
+        for response in attempts:
+            with self.subTest(url=str(response.request.url)):
+                self.assertEqual(response.status_code, 401)
+                self.assertEqual(
+                    response.json()["detail"],
+                    "installation credential is required",
+                )
+
+        wrong_token = self.installation_headers(
+            owner,
+            **{"X-Installation-Token": "v1." + "A" * 43},
+        )
+        response = self.client.get(
+            f"/v1/map-jobs/{job_id}",
+            params=params,
+            headers=wrong_token,
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json()["detail"],
+            "installation credential is invalid",
+        )
+
+    def test_legacy_unowned_job_is_not_publicly_recoverable(self):
         legacy_job_id = self.create_job()
+        job_path = Path(self.tmp.name) / "jobs" / f"{legacy_job_id}.json"
+        legacy_job = json.loads(job_path.read_text())
+        legacy_job["clientInstallationId"] = None
+        legacy_job["clientRequestId"] = None
+        legacy_job["request"].pop("clientInstallationId", None)
+        legacy_job["request"].pop("clientRequestId", None)
+        self.client.app.state.job_store.save(MapJob.from_dict(legacy_job))
 
         response = self.client.get(
             f"/v1/map-jobs/{legacy_job_id}",
-            params={"clientInstallationId": "installation-owner"},
+            params=self.installation_params(self.installation),
+            headers=self.installation_headers(self.installation),
         )
         legacy_unscoped = self.client.get(f"/v1/map-jobs/{legacy_job_id}")
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(legacy_unscoped.status_code, 200)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(legacy_unscoped.status_code, 401)
 
     def test_client_metadata_validation_returns_bad_request(self):
         valid = {
@@ -1888,63 +2026,86 @@ class MapJobRunAPITests(unittest.TestCase):
             "bbox": [103.75, 1.24, 103.93, 1.37],
         }
         invalid_payloads = [
-            {**valid, "clientInstallationId": "installation-only"},
             {
                 **valid,
-                "clientInstallationId": "installation-owner",
+                "clientInstallationId": self.installation[
+                    "clientInstallationId"
+                ],
+            },
+            {
+                **valid,
+                "clientInstallationId": self.installation[
+                    "clientInstallationId"
+                ],
                 "clientRequestId": "request-owner-123",
                 "installOnDevice": "yes",
-            },
-            {
-                **valid,
-                "clientInstallationId": "bad",
-                "clientRequestId": "request-owner-123",
-            },
-            {
-                **valid,
-                "clientInstallationId": 123,
-                "clientRequestId": "request-owner-123",
             },
         ]
 
         for payload in invalid_payloads:
             with self.subTest(payload=payload):
-                response = self.client.post("/v1/map-jobs", json=payload)
+                response = self.client.post(
+                    "/v1/map-jobs",
+                    json=payload,
+                    headers=self.installation_headers(self.installation),
+                )
                 self.assertEqual(response.status_code, 400)
                 self.assertTrue(response.json()["detail"])
+
+        invalid_credentials = ["bad", 123]
+        for invalid_id in invalid_credentials:
+            with self.subTest(invalid_id=invalid_id):
+                response = self.client.post(
+                    "/v1/map-jobs",
+                    json={
+                        **valid,
+                        "clientInstallationId": invalid_id,
+                        "clientRequestId": "request-owner-123",
+                    },
+                    headers=self.installation_headers(self.installation),
+                )
+                self.assertEqual(response.status_code, 401)
 
         invalid_filter = self.client.get(
             "/v1/map-jobs",
             params={"clientInstallationId": "bad"},
+            headers=self.installation_headers(self.installation),
         )
-        self.assertEqual(invalid_filter.status_code, 400)
+        self.assertEqual(invalid_filter.status_code, 401)
 
     def test_map_pack_reads_are_scoped_and_choose_newest_owned_job(self):
-        def create_owned(installation_id: str, request_id: str, bbox: list[float]) -> str:
-            response = self.client.post(
-                "/v1/map-jobs",
-                json={
+        owner = self.issue_installation(self.client)
+        other_installation = self.issue_installation(self.client)
+        unknown_installation = self.issue_installation(self.client)
+
+        def create_owned(
+            credential: dict[str, str],
+            request_id: str,
+            bbox: list[float],
+        ) -> str:
+            response = self.post_map_job(
+                {
                     "mode": "custom_bbox",
                     "bbox": bbox,
-                    "clientInstallationId": installation_id,
                     "clientRequestId": request_id,
                 },
+                credential=credential,
             )
             self.assertEqual(response.status_code, 200)
             return response.json()["jobId"]
 
         older = create_owned(
-            "installation-owner",
+            owner,
             "request-owner-old",
             [103.75, 1.24, 103.93, 1.37],
         )
         newer = create_owned(
-            "installation-owner",
+            owner,
             "request-owner-new",
             [103.76, 1.25, 103.94, 1.38],
         )
         other = create_owned(
-            "installation-other",
+            other_installation,
             "request-other-new",
             [103.77, 1.26, 103.95, 1.39],
         )
@@ -1978,39 +2139,44 @@ class MapJobRunAPITests(unittest.TestCase):
 
         matching = self.client.get(
             "/v1/map-packs/map-shared",
-            params={"clientInstallationId": "installation-owner"},
+            params=self.installation_params(owner),
+            headers=self.installation_headers(owner),
         )
         unknown = self.client.get(
             "/v1/map-packs/map-shared",
-            params={"clientInstallationId": "installation-unknown"},
+            params=self.installation_params(unknown_installation),
+            headers=self.installation_headers(unknown_installation),
         )
         unscoped = self.client.get("/v1/map-packs/map-shared")
         download = self.client.post(
             "/v1/map-packs/map-shared/download-url",
             params={
-                "clientInstallationId": "installation-owner",
+                **self.installation_params(owner),
                 "jobId": newer,
             },
+            headers=self.installation_headers(owner),
         )
         older_download = self.client.post(
             "/v1/map-packs/map-shared/download-url",
             params={
-                "clientInstallationId": "installation-owner",
+                **self.installation_params(owner),
                 "jobId": older,
             },
+            headers=self.installation_headers(owner),
         )
         cross_install_download = self.client.post(
             "/v1/map-packs/map-shared/download-url",
             params={
-                "clientInstallationId": "installation-owner",
+                **self.installation_params(owner),
                 "jobId": other,
             },
+            headers=self.installation_headers(owner),
         )
 
         self.assertEqual(matching.status_code, 200)
         self.assertEqual(matching.json()["jobId"], newer)
         self.assertEqual(unknown.status_code, 404)
-        self.assertEqual(unscoped.status_code, 404)
+        self.assertEqual(unscoped.status_code, 401)
         self.assertEqual(download.status_code, 200)
         downloaded = self.client.get(download.json()["url"])
         self.assertEqual(downloaded.status_code, 200)
@@ -2029,29 +2195,30 @@ class MapJobRunAPITests(unittest.TestCase):
             status="ready",
             mapId="map-legacy",
             packPath=str(legacy_path),
+            clientInstallationId=None,
+            clientRequestId=None,
         )
-        self.assertEqual(self.client.get("/v1/map-packs/map-legacy").status_code, 200)
+        self.assertEqual(self.client.get("/v1/map-packs/map-legacy").status_code, 401)
         legacy_download = self.client.post(
             "/v1/map-packs/map-legacy/download-url",
             params={
-                "clientInstallationId": "installation-owner",
+                **self.installation_params(owner),
                 "jobId": legacy,
             },
+            headers=self.installation_headers(owner),
         )
-        self.assertEqual(legacy_download.status_code, 200)
-        legacy_file = self.client.get(legacy_download.json()["url"])
-        self.assertEqual(legacy_file.status_code, 200)
-        self.assertEqual(legacy_file.content, b"legacy")
+        self.assertEqual(legacy_download.status_code, 404)
 
     def test_modern_job_mutations_require_matching_installation(self):
-        response = self.client.post(
-            "/v1/map-jobs",
-            json={
+        owner = self.issue_installation(self.client)
+        other_installation = self.issue_installation(self.client)
+        response = self.post_map_job(
+            {
                 "mode": "custom_bbox",
                 "bbox": [103.75, 1.24, 103.93, 1.37],
-                "clientInstallationId": "installation-owner",
                 "clientRequestId": "request-owner-123",
             },
+            credential=owner,
         )
         self.assertEqual(response.status_code, 200)
         job_id = response.json()["jobId"]
@@ -2066,13 +2233,15 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(
             self.client.post(
                 f"/v1/map-jobs/{job_id}/cancel",
-                params={"clientInstallationId": "installation-other"},
+                params=self.installation_params(other_installation),
+                headers=self.installation_headers(other_installation),
             ).status_code,
             404,
         )
         cancelled = self.client.post(
             f"/v1/map-jobs/{job_id}/cancel",
-            params={"clientInstallationId": "installation-owner"},
+            params=self.installation_params(owner),
+            headers=self.installation_headers(owner),
         )
         self.assertEqual(cancelled.status_code, 200)
         self.assertEqual(cancelled.json()["status"], "cancelled")
