@@ -37,13 +37,46 @@ nonisolated enum WatchWorkoutLaunchRequest: Equatable, Sendable {
     }
 
     init?(url: URL, urlScheme: String) {
-        guard url.scheme?.lowercased() == Self.resolvedURLScheme(
+        let resolvedScheme = Self.resolvedURLScheme(
             configuredScheme: urlScheme
-        ),
-              url.host?.lowercased() == "workout",
-              url.path == "/start" else {
+        )
+        guard url.absoluteString == "\(resolvedScheme)://workout/start" else {
             return nil
         }
         self = .startOutdoorCycling
+    }
+}
+
+nonisolated struct PendingWorkoutLaunchRequest: Equatable, Identifiable, Sendable {
+    enum WorkoutType: Equatable, Sendable {
+        case outdoorCycling
+    }
+
+    enum Source: Equatable, Sendable {
+        case complicationURL
+    }
+
+    let id: UUID
+    let workoutType: WorkoutType
+    let source: Source
+    let createdAt: Date
+    let expiresAt: Date
+
+    init(
+        id: UUID = UUID(),
+        workoutType: WorkoutType,
+        source: Source,
+        createdAt: Date,
+        expiresAt: Date
+    ) {
+        self.id = id
+        self.workoutType = workoutType
+        self.source = source
+        self.createdAt = createdAt
+        self.expiresAt = expiresAt
+    }
+
+    func isExpired(at date: Date) -> Bool {
+        date >= expiresAt
     }
 }
