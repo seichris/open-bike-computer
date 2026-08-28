@@ -723,6 +723,7 @@ struct NavigationProtocolTests {
         testNavigationWriteQueue()
         testGPSQueuePolicy()
         testRendererBenchmarkProtocol()
+        testSecureRendererBenchmarkProtocol()
         testDeviceBLEProtocolConstants()
         testWorkoutDeviceFrameVectors()
         testWorkoutDeviceFrameSentinelsAndSaturation()
@@ -14202,6 +14203,183 @@ struct NavigationProtocolTests {
                "stale chunk remainder is consumed as a new incomplete stream")
         assertEqual(manager.rendererDiagnosticsRevision, 1,
                     "a newer direct snapshot invalidates older partial chunks")
+    }
+
+    static func testSecureRendererBenchmarkProtocol() {
+        let appGatesURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-gates-v1.json"
+        )
+        let firmwareGatesURL = URL(fileURLWithPath:
+            "esp32/tools/renderer_benchmark_gates.json"
+        )
+        guard let appGatesData = try? Data(contentsOf: appGatesURL),
+              let firmwareGatesData = try? Data(contentsOf: firmwareGatesURL),
+              let gates = try? RendererBenchmarkGates.decode(appGatesData) else {
+            assert(false, "secure renderer benchmark gates decode")
+            return
+        }
+        assertEqual(
+            appGatesData,
+            firmwareGatesData,
+            "the in-app sweep uses the exact firmware benchmark gate contract"
+        )
+        assertEqual(gates.schema, 1, "secure benchmark gates retain schema 1")
+
+        let schedule = SecureRendererBenchmarkPlan.balancedSchedule().map {
+            $0.map(\.wireName)
+        }
+        assertEqual(
+            schedule,
+            [
+                ["flat", "current", "high", "medium"],
+                ["current", "medium", "flat", "high"],
+                ["medium", "high", "current", "flat"],
+            ],
+            "secure benchmark reproduces the balanced firmware-tool schedule"
+        )
+        assertEqual(
+            SecureRendererBenchmarkPlan.checkpointIndexes(
+                sampleCount: 120,
+                fractions: gates.checkpointFractions
+            ),
+            [0, 30, 60, 90],
+            "secure benchmark captures the four route checkpoints"
+        )
+        assertEqual(
+            RendererBenchmarkProfile.allCases.map(\.expectedTuningFingerprint),
+            [
+                10_406_861_497_667_589_141,
+                8_401_707_559_015_286_048,
+                12_673_537_785_575_117_931,
+                7_901_381_679_465_817_306,
+            ],
+            "secure benchmark pins the firmware tuning fingerprints"
+        )
+
+        let metricsURL = URL(fileURLWithPath:
+            "ios-app/BikeComputerTests/Fixtures/renderer-metrics-v1.json"
+        )
+        guard let metricsData = try? Data(contentsOf: metricsURL),
+              let metrics = try? JSONDecoder().decode(
+                RendererBenchmarkMetricsSnapshot.self,
+                from: metricsData
+              ) else {
+            assert(false, "secure benchmark decodes the firmware metrics contract")
+            return
+        }
+        let sample = RendererBenchmarkEvaluator.sample(
+            snapshot: metrics,
+            elapsedSeconds: 42
+        )
+        guard let summary = RendererBenchmarkEvaluator.summary(
+            snapshots: [metrics],
+            samples: [sample]
+        ) else {
+            assert(false, "secure benchmark summarizes a metrics window")
+            return
+        }
+        assertEqual(
+            summary.minimumDmaFree,
+            20_000,
+            "secure benchmark retains the firmware DMA minimum"
+        )
+        assertEqual(
+            summary.cryptoHeadroomRejections,
+            0,
+            "secure benchmark retains the zero crypto-rejection gate"
+        )
+        assertEqual(
+            summary.cryptoOperationFailures,
+            0,
+            "secure benchmark retains the zero crypto-failure gate"
+        )
+        let baseline = RendererBenchmarkEvidenceIdentity(
+            deviceId: metrics.identity.deviceId,
+            firmwareCommit: metrics.identity.firmwareCommit,
+            firmwareVersion: "test",
+            firmwareBuild: 1,
+            board: metrics.identity.board,
+            buildProfile: metrics.identity.buildProfile,
+            storageBackend: "sdmmc",
+            storagePowerCycleRequired: false,
+            bootId: metrics.identity.bootId,
+            resetReason: metrics.identity.resetReason
+        )
+        assertEqual(
+            RendererBenchmarkEvaluator.identityFailures(
+                snapshot: metrics,
+                baseline: baseline,
+                profile: .medium,
+                runId: metrics.window.runId,
+                repeatNumber: metrics.window.repeatNumber,
+                mapFixture: metrics.identity.mapFixture,
+                routeFixture: metrics.identity.routeFixture,
+                windowId: metrics.window.id
+            ),
+            [],
+            "secure benchmark accepts an exact window/build/fixture identity"
+        )
+
+        let pixels = Data([0x00, 0xf8, 0xe0, 0x07])
+        var frame = Data("BCF1".utf8)
+        appendUInt16LE(32, to: &frame)
+        appendUInt16LE(0, to: &frame)
+        appendUInt32LE(7, to: &frame)
+        appendUInt32LE(9, to: &frame)
+        appendUInt16LE(2, to: &frame)
+        appendUInt16LE(1, to: &frame)
+        appendUInt16LE(4, to: &frame)
+        frame.append(contentsOf: [1, 0])
+        appendUInt32LE(UInt32(pixels.count), to: &frame)
+        appendUInt32LE(RendererBenchmarkFrameDecoder.crc32(pixels), to: &frame)
+        frame.append(pixels)
+        guard let decoded = try? RendererBenchmarkFrameDecoder.decode(
+            frame,
+            expectedPanelWidth: 2,
+            expectedPanelHeight: 1,
+            rotationQuarters: 1
+        ) else {
+            assert(false, "secure benchmark frame decoder accepts valid RGB565")
+            return
+        }
+        assertEqual(decoded.sequence, 7, "decoded frame retains its sequence")
+        assertEqual(decoded.width, 1, "quarter-turn frame width is rotated")
+        assertEqual(decoded.height, 2, "quarter-turn frame height is rotated")
+        assertEqual(
+            Array(decoded.rgba),
+            [0, 255, 0, 255, 255, 0, 0, 255],
+            "RGB565 frames are rotated and converted to RGBA deterministically"
+        )
+        var corruptFrame = frame
+        corruptFrame[corruptFrame.count - 1] ^= 0xff
+        assert(
+            (try? RendererBenchmarkFrameDecoder.decode(
+                corruptFrame,
+                expectedPanelWidth: 2,
+                expectedPanelHeight: 1,
+                rotationQuarters: 1
+            )) == nil,
+            "secure benchmark rejects a corrupt screenshot frame"
+        )
+
+        assert(
+            RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
+                jsonData: Data(#"{"deviceId":"abc","passed":true}"#.utf8)
+            ),
+            "non-secret benchmark evidence is exportable"
+        )
+        assert(
+            !RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
+                jsonData: Data(#"{"sessionToken":"secret"}"#.utf8)
+            ),
+            "benchmark evidence rejects transfer tokens"
+        )
+        assert(
+            !RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
+                jsonData: Data(#"{"baseURL":"https://device"}"#.utf8)
+            ),
+            "benchmark evidence rejects device session origins"
+        )
     }
 
     static func testDeviceBLEProtocolConstants() {

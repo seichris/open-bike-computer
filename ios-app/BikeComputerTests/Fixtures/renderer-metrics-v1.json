@@ -1,0 +1,146 @@
+{
+  "ok": true,
+  "schema": 1,
+  "sequence": 42,
+  "timestampMs": 42000,
+  "window": {
+    "id": 17,
+    "startedAtMs": 1000,
+    "runId": "rb-contract-r-m-1",
+    "repeat": 1
+  },
+  "identity": {
+    "deviceId": "0123456789abcdef",
+    "firmwareCommit": "1111111111111111111111111111111111111111",
+    "board": "WAVESHARE_AMOLED_175",
+    "buildProfile": "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
+    "bootId": 7,
+    "resetReason": 1,
+    "mapFixture": {
+      "id": "shanghai-renderer-v1",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "routeFixture": {
+      "id": "shanghai-center-renderer-v1",
+      "sha256": "d5171f6b30478a09948381bbdb86da33752bc646fa6077153f69a4bd840eb36e",
+      "mode": "ios-fixture-1hz"
+    }
+  },
+  "tuning": {
+    "profile": "medium",
+    "fingerprint": 12673537785575117931,
+    "minimumExtrusionAreaPx2": 6,
+    "total": {
+      "records": 96,
+      "points": 8192,
+      "projectedPixels": 220000
+    },
+    "extrusion": {
+      "records": 40,
+      "points": 3840,
+      "projectedPixels": 112500
+    }
+  },
+  "memory": {
+    "internalHeap": {
+      "free": 50000,
+      "minimumEverFree": 45000,
+      "largestBlock": 30000,
+      "windowMinimumFree": 45000,
+      "windowMinimumLargestBlock": 25000
+    },
+    "psram": {
+      "free": 2500000,
+      "largestBlock": 1500000,
+      "windowMinimumFree": 2400000,
+      "windowMinimumLargestBlock": 1400000
+    },
+    "dmaHeap": {
+      "free": 24000,
+      "minimumEverFree": 20000,
+      "largestBlock": 12000,
+      "windowMinimumFree": 20000,
+      "windowMinimumLargestBlock": 10000,
+      "cryptoHeadroomRejections": 0,
+      "cryptoOperationFailures": 0
+    }
+  },
+  "render": {
+    "timings": {
+      "total": {"count": 30, "lastMs": 100, "p50Ms": 100, "p95Ms": 200, "maximumMs": 250},
+      "blockLoad": {"count": 30, "lastMs": 100, "p50Ms": 100, "p95Ms": 200, "maximumMs": 250},
+      "draw": {"count": 30, "lastMs": 100, "p50Ms": 100, "p95Ms": 200, "maximumMs": 250},
+      "buildingProjection": {"count": 30, "lastMs": 100, "p50Ms": 100, "p95Ms": 200, "maximumMs": 250},
+      "buildingDraw": {"count": 30, "lastMs": 100, "p50Ms": 100, "p95Ms": 200, "maximumMs": 250},
+      "buildingTotal": {"count": 30, "lastMs": 100, "p50Ms": 100, "p95Ms": 200, "maximumMs": 250}
+    },
+    "buildings": {
+      "candidates": 70,
+      "selected": 60,
+      "extruded": 40,
+      "flat": 20,
+      "deferred": 10,
+      "oversized": 0,
+      "rendered": 60,
+      "allocationFallback": false,
+      "extrudedP90DistancePx": 80,
+      "extrudedFarthestDistancePx": 100,
+      "limiterFlags": 0,
+      "limiterPasses": {
+        "records": 0,
+        "points": 0,
+        "projectedPixels": 0,
+        "extrudedRecords": 0,
+        "extrudedPoints": 0,
+        "extrudedPixels": 0
+      }
+    },
+    "jobs": {
+      "requested": 30,
+      "started": 30,
+      "completed": 30,
+      "published": 30,
+      "stale": 0,
+      "cancelled": 0,
+      "interrupted": 0,
+      "coverageRejected": 0,
+      "invariantFailed": 0
+    }
+  },
+  "ui": {"maximumGapMs": 100},
+  "displayFlush": {"count": 30, "lastMs": 80, "p50Ms": 80, "p95Ms": 100, "maximumMs": 120},
+  "gps": {
+    "packets": 42,
+    "latestPacketGapMs": 1000,
+    "maximumPacketGapMs": 1000,
+    "predictionGraceEntries": 10,
+    "predictionExhaustionEntries": 0
+  },
+  "routeReplay": {
+    "valid": true,
+    "fixtureSha256": "d5171f6b30478a09948381bbdb86da33752bc646fa6077153f69a4bd840eb36e",
+    "fixtureMatches": true,
+    "sampleIndex": 42,
+    "sampleCount": 120,
+    "loop": 0,
+    "receivedAtMs": 42000,
+    "accepted": 42,
+    "rejected": 0
+  },
+  "remoteDebug": {
+    "active": true,
+    "snapshotBytes": 434312,
+    "captured": 4,
+    "skippedCadence": 0,
+    "skippedLocked": 0,
+    "captureErrors": 0,
+    "lastCopyUs": 1000,
+    "maximumCopyUs": 1200,
+    "lastHttpResponseMs": 20,
+    "maximumHttpResponseMs": 30,
+    "freeBefore": 2500000,
+    "largestBefore": 1500000,
+    "freeAfterAllocate": 2000000,
+    "largestAfterAllocate": 1400000
+  }
+}
