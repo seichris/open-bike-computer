@@ -20,6 +20,18 @@ else:
     _FASTAPI_IMPORT_ERROR = None
 
 from .admin_inventory import map_inventory
+from .admission import AdmissionCapacityError, AdmissionPolicy
+from .app_attest import (
+    APP_ATTEST_ATTESTATION_PURPOSE,
+    APP_ATTEST_MAP_CREATE_PURPOSE,
+    APP_ATTEST_MAX_ASSERTION_BYTES,
+    APP_ATTEST_MAX_OBJECT_BYTES,
+    AppAttestationVerifying,
+    AppAttestError,
+    AppAttestStore,
+    decode_base64,
+    production_app_attest_verifier,
+)
 from .artifacts import BIKE_MAP_STREAM_FORMAT, create_artifact_store_from_environment
 from .catalog import (
     CatalogClient,
@@ -127,6 +139,7 @@ def create_app(
     *,
     strava_transport: StravaTransport | None = None,
     strava_clock=time.time,
+    app_attest_verifier: AppAttestationVerifying | None = None,
 ):
     if _FASTAPI_IMPORT_ERROR is not None:
         raise RuntimeError(
@@ -164,6 +177,13 @@ def create_app(
     installation_store = InstallationCredentialStore(
         installation_secret,
         previous_secrets=previous_installation_secrets,
+    )
+    app_attest_store = AppAttestStore(
+        data_root / "app-attest.sqlite3",
+        app_attest_verifier or production_app_attest_verifier(deployment_channel),
+        challenge_ttl_seconds=int(
+            os.environ.get("MAP_PLATFORM_APP_ATTEST_CHALLENGE_TTL_SECONDS", "300")
+        ),
     )
     download_secret = os.environ.get("MAP_PLATFORM_DOWNLOAD_SECRET") or installation_secret
     download_signer = DownloadSigner(download_secret)
@@ -322,8 +342,12 @@ def create_app(
         "0",
     ).strip().lower() in {"1", "true", "yes"}
     limits = JobLimits(max_active_jobs=int(os.environ.get("MAP_PLATFORM_MAX_ACTIVE_JOBS", "25")))
+    admission_policy = AdmissionPolicy.from_environment()
     source_provider = GeofabrikSourceProvider.from_environment(data_root)
-    job_store = JobStore(data_root / "jobs")
+    job_store = JobStore(
+        data_root / "jobs",
+        admission_policy=admission_policy,
+    )
     building_task_store = BuildingTaskStore(data_root / "building-tasks.sqlite3")
     preprocessing_scope_mode = building_preprocessing_scope_mode()
     estimate_coordinator = load_estimate_coordinator(
@@ -365,6 +389,7 @@ def create_app(
     )
     app.state.artifact_store = artifact_store
     app.state.installation_store = installation_store
+    app.state.app_attest_store = app_attest_store
     app.state.job_store = service.store
     app.state.building_task_store = building_task_store
     app.state.monitoring_store = monitoring_store
@@ -402,6 +427,23 @@ def create_app(
             headers=headers,
         )
 
+    @app.exception_handler(AppAttestError)
+    async def app_attest_error(
+        request: Request,
+        exc: AppAttestError,
+    ) -> JSONResponse:
+        del request
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "detail": {
+                    "code": exc.code,
+                    "message": exc.safe_message,
+                }
+            },
+            headers={"Cache-Control": "private, no-store"},
+        )
+
     def enforce_rate_limits(
         *rules: tuple[RateLimitPolicy, str],
     ) -> None:
@@ -409,6 +451,12 @@ def create_app(
             rate_limiter.consume_many(rules)
         except RateLimitExceeded as exc:
             raise rate_limit_error(exc) from exc
+
+    async def captured_request_body(request: Request) -> bytes:
+        # FastAPI caches the body while resolving dependencies. Supplying the
+        # exact bytes to a synchronous handler keeps the existing thread-pool
+        # execution model while binding App Attest to the transmitted payload.
+        return await request.body()
 
     def is_public_api_request(request: Request) -> bool:
         path = request.url.path
@@ -421,7 +469,10 @@ def create_app(
         ):
             return False
         return (
-            path == "/v1/installations"
+            path in {
+                "/v1/installations",
+                "/v1/installations/app-attest/challenges",
+            }
             or path == "/v1/capabilities"
             or path == "/v1/integrations/strava/oauth/callback"
             or path == "/v1/source-regions"
@@ -532,30 +583,17 @@ def create_app(
     def verify_registered_installation(
         installation_id: str | None,
         installation_token: str | None,
-        *,
-        required: bool = False,
-    ) -> str | None:
-        if installation_id is None:
-            if required:
-                raise HTTPException(status_code=401, detail="installation credential is required")
-            return None
+    ) -> str:
         if not isinstance(installation_id, str):
-            if required:
-                raise HTTPException(status_code=401, detail="installation credential is required")
-            return None
+            raise HTTPException(
+                status_code=401,
+                detail="installation credential is required",
+            )
         try:
-            registered = installation_store.is_registered(installation_id)
+            installation_store.verify(installation_id, installation_token)
         except InstallationCredentialError as exc:
-            if not required:
-                return None
             raise HTTPException(status_code=401, detail=str(exc)) from exc
-        if required or registered:
-            try:
-                installation_store.verify(installation_id, installation_token)
-            except InstallationCredentialError as exc:
-                raise HTTPException(status_code=401, detail=str(exc)) from exc
-            return installation_id
-        return None
+        return installation_id
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
@@ -565,6 +603,12 @@ def create_app(
             "generationProfilePolicySha256": generation_profile_policy.sha256,
             "mapStreamRollout": map_stream_rollout.public_summary(),
             "preparationEstimates": estimate_coordinator.mode.value,
+            "admissionPolicyVersion": admission_policy.policy_version,
+            "appAttest": {
+                "requiredForInstallation": True,
+                "requiredForMapCreate": True,
+                "challengeTtlSeconds": app_attest_store.challenge_ttl_seconds,
+            },
             "catalog": catalog_status_from_environment(),
             "stravaIntegration": (
                 "enabled" if strava_integration.config.enabled else "disabled"
@@ -583,9 +627,7 @@ def create_app(
         installation_id = verify_registered_installation(
             clientInstallationId,
             x_installation_token,
-            required=True,
         )
-        assert installation_id is not None
         response.headers["Cache-Control"] = "private, no-store"
         result = service.generation_capabilities(installation_id)
         result["integrations"] = {
@@ -678,19 +720,114 @@ def create_app(
                 detail="map monitoring is temporarily unavailable",
             ) from exc
 
+    @app.post("/v1/installations/app-attest/challenges")
+    def create_app_attest_challenge(
+        request: Request,
+        response: Response,
+        payload: dict[str, Any],
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> dict[str, Any]:
+        if set(payload) - {"purpose", "clientInstallationId"}:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "app_attest_invalid_challenge_request",
+                    "message": "App Attest challenge request is invalid",
+                },
+            )
+        purpose = payload.get("purpose")
+        installation_id = payload.get("clientInstallationId")
+        if purpose == APP_ATTEST_ATTESTATION_PURPOSE:
+            if installation_id is not None or x_installation_token is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "app_attest_invalid_challenge_request",
+                        "message": "App Attest enrollment challenge is invalid",
+                    },
+                )
+            enforce_rate_limits((installation_issue_policy, client_ip(request)))
+            challenge = app_attest_store.issue_challenge(purpose=purpose)
+        elif purpose == APP_ATTEST_MAP_CREATE_PURPOSE:
+            registered_installation_id = verify_registered_installation(
+                installation_id,
+                x_installation_token,
+            )
+            challenge = app_attest_store.issue_challenge(
+                purpose=purpose,
+                installation_id=registered_installation_id,
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "app_attest_invalid_purpose",
+                    "message": "App Attest purpose is invalid",
+                },
+            )
+        response.headers["Cache-Control"] = "private, no-store"
+        return challenge.public_dict()
+
     @app.post("/v1/installations")
     def create_installation(
         request: Request,
+        response: Response,
+        payload: dict[str, Any] | None = None,
         clientInstallationId: str | None = None,
         x_installation_token: str | None = Header(
             default=None,
             alias="X-Installation-Token",
         ),
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         if clientInstallationId is None:
-            enforce_rate_limits((installation_issue_policy, client_ip(request)))
+            del request
+            if not isinstance(payload, dict) or set(payload) != {"appAttest"}:
+                raise AppAttestError(
+                    "installation_attestation_required",
+                    "installation App Attest enrollment is required",
+                )
+            attestation = payload["appAttest"]
+            if not isinstance(attestation, dict) or set(attestation) != {
+                "challengeId",
+                "keyId",
+                "attestationObject",
+                "appBuild",
+            }:
+                raise AppAttestError(
+                    "app_attest_invalid_attestation",
+                    "App Attest enrollment is invalid",
+                )
+            challenge_id = attestation["challengeId"]
+            key_id = attestation["keyId"]
+            app_build = attestation["appBuild"]
+            if not all(isinstance(value, str) for value in (
+                challenge_id,
+                key_id,
+                app_build,
+            )):
+                raise AppAttestError(
+                    "app_attest_invalid_attestation",
+                    "App Attest enrollment is invalid",
+                )
+            attestation_object = decode_base64(
+                attestation["attestationObject"],
+                field="App Attest object",
+                maximum_bytes=APP_ATTEST_MAX_OBJECT_BYTES,
+            )
             installation_id, token = installation_store.issue()
+            app_attest_store.enroll(
+                installation_id=installation_id,
+                challenge_id=challenge_id,
+                key_id=key_id,
+                attestation_object=attestation_object,
+                app_build=app_build,
+            )
         else:
+            if payload is not None and payload != {}:
+                raise HTTPException(status_code=400, detail="refresh body is not allowed")
             try:
                 installation_id, token = installation_store.refresh(
                     clientInstallationId,
@@ -698,10 +835,19 @@ def create_app(
                 )
             except InstallationCredentialError as exc:
                 raise HTTPException(status_code=401, detail=str(exc)) from exc
-        return {
+            key_id = app_attest_store.key_id_for_installation(installation_id)
+            if key_id is None:
+                raise AppAttestError(
+                    "installation_attestation_required",
+                    "installation App Attest enrollment is required",
+                )
+        response.headers["Cache-Control"] = "private, no-store"
+        result = {
             "clientInstallationId": installation_id,
             "clientInstallationToken": token,
+            "appAttestKeyId": key_id,
         }
+        return result
 
     @app.post("/v1/integrations/strava/oauth/start")
     def start_strava_oauth(
@@ -716,9 +862,7 @@ def create_app(
         installation_id = verify_registered_installation(
             clientInstallationId,
             x_installation_token,
-            required=True,
         )
-        assert installation_id is not None
         enforce_rate_limits(
             (strava_oauth_start_ip_policy, client_ip(request)),
             (strava_oauth_start_installation_policy, installation_id),
@@ -816,9 +960,7 @@ def create_app(
         installation_id = verify_registered_installation(
             clientInstallationId,
             x_installation_token,
-            required=True,
         )
-        assert installation_id is not None
         response.headers["Cache-Control"] = "private, no-store"
         return strava_integration.connection_status(installation_id)
 
@@ -835,9 +977,7 @@ def create_app(
         installation_id = verify_registered_installation(
             clientInstallationId,
             x_installation_token,
-            required=True,
         )
-        assert installation_id is not None
         enforce_rate_limits(
             (strava_disconnect_ip_policy, client_ip(request)),
         )
@@ -858,9 +998,7 @@ def create_app(
         installation_id = verify_registered_installation(
             clientInstallationId,
             x_installation_token,
-            required=True,
         )
-        assert installation_id is not None
         enforce_rate_limits(
             (strava_route_list_ip_policy, client_ip(request)),
             (strava_route_list_installation_policy, installation_id),
@@ -898,9 +1036,7 @@ def create_app(
         installation_id = verify_registered_installation(
             clientInstallationId,
             x_installation_token,
-            required=True,
         )
-        assert installation_id is not None
         enforce_rate_limits(
             (strava_route_import_ip_policy, client_ip(request)),
             (strava_route_import_installation_policy, installation_id),
@@ -932,9 +1068,7 @@ def create_app(
         installation_id = verify_registered_installation(
             clientInstallationId,
             x_installation_token,
-            required=True,
         )
-        assert installation_id is not None
         enforce_rate_limits(
             (strava_route_validation_ip_policy, client_ip(request)),
             (strava_route_validation_installation_policy, installation_id),
@@ -957,6 +1091,7 @@ def create_app(
     def create_map_job(
         request: Request,
         payload: dict[str, Any],
+        request_body: bytes = Depends(captured_request_body),
         x_installation_token: str | None = Header(
             default=None,
             alias="X-Installation-Token",
@@ -976,6 +1111,22 @@ def create_app(
         x_map_stream_app_build_sha256: str | None = Header(
             default=None,
             alias="X-Map-Stream-App-Build-Sha256",
+        ),
+        x_app_attest_challenge_id: str | None = Header(
+            default=None,
+            alias="X-App-Attest-Challenge-Id",
+        ),
+        x_app_attest_key_id: str | None = Header(
+            default=None,
+            alias="X-App-Attest-Key-Id",
+        ),
+        x_app_attest_assertion: str | None = Header(
+            default=None,
+            alias="X-App-Attest-Assertion",
+        ),
+        x_app_attest_app_build: str | None = Header(
+            default=None,
+            alias="X-App-Attest-App-Build",
         ),
     ) -> dict[str, Any]:
         try:
@@ -1000,26 +1151,57 @@ def create_app(
                 if existing is not None:
                     return public_job(
                         existing,
-                        payload.get("clientInstallationId"),
+                        registered_installation_id,
                         trust_capabilities,
                         app_build,
                         app_git_sha,
                         app_build_sha256,
                     )
-                rules = [(map_create_ip_policy, client_ip(request))]
-                if registered_installation_id is not None:
-                    rules.append(
-                        (map_create_installation_policy, registered_installation_id)
+                if not all(
+                    isinstance(value, str) and value
+                    for value in (
+                        x_app_attest_challenge_id,
+                        x_app_attest_key_id,
+                        x_app_attest_assertion,
+                        x_app_attest_app_build,
                     )
-                enforce_rate_limits(*rules)
+                ):
+                    raise AppAttestError(
+                        "app_attest_assertion_required",
+                        "a fresh App Attest assertion is required for map creation",
+                    )
+                assertion_object = decode_base64(
+                    x_app_attest_assertion,
+                    field="App Attest assertion",
+                    maximum_bytes=APP_ATTEST_MAX_ASSERTION_BYTES,
+                )
+                app_attest_store.verify_map_create_assertion(
+                    installation_id=registered_installation_id,
+                    challenge_id=x_app_attest_challenge_id,
+                    key_id=x_app_attest_key_id,
+                    assertion_object=assertion_object,
+                    request_body=request_body,
+                    payload=payload,
+                    app_build=x_app_attest_app_build,
+                )
+                enforce_rate_limits(
+                    (map_create_ip_policy, client_ip(request)),
+                    (map_create_installation_policy, registered_installation_id),
+                )
                 return public_job(
                     service.create_job(payload),
-                    payload.get("clientInstallationId"),
+                    registered_installation_id,
                     trust_capabilities,
                     app_build,
                     app_git_sha,
                     app_build_sha256,
                 )
+        except AdmissionCapacityError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.response_detail(),
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            ) from exc
         except UnsupportedRendererTargetError as exc:
             raise HTTPException(status_code=400, detail=exc.response_detail()) from exc
         except ValueError as exc:
@@ -1058,15 +1240,18 @@ def create_app(
                 x_map_stream_app_git_sha,
                 x_map_stream_app_build_sha256,
             )
-            verify_registered_installation(clientInstallationId, x_installation_token)
-            jobs = service.list_jobs(client_installation_id=clientInstallationId)
+            installation_id = verify_registered_installation(
+                clientInstallationId,
+                x_installation_token,
+            )
+            jobs = service.list_jobs(client_installation_id=installation_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {
             "jobs": [
                 public_job(
                     job,
-                    clientInstallationId,
+                    installation_id,
                     trust_capabilities,
                     app_build,
                     app_git_sha,
@@ -1108,10 +1293,13 @@ def create_app(
                 x_map_stream_app_git_sha,
                 x_map_stream_app_build_sha256,
             )
-            verify_registered_installation(clientInstallationId, x_installation_token)
-            return public_job(
-                service.get_job_for_installation(job_id, clientInstallationId),
+            installation_id = verify_registered_installation(
                 clientInstallationId,
+                x_installation_token,
+            )
+            return public_job(
+                service.get_job_for_installation(job_id, installation_id),
+                installation_id,
                 trust_capabilities,
                 app_build,
                 app_git_sha,
@@ -1140,7 +1328,6 @@ def create_app(
             verify_registered_installation(
                 clientInstallationId,
                 x_installation_token,
-                required=True,
             )
             job = service.update_user_label_for_installation(
                 job_id,
@@ -1192,7 +1379,6 @@ def create_app(
             verify_registered_installation(
                 clientInstallationId,
                 x_installation_token,
-                required=True,
             )
             job = service.get_job_for_installation(
                 job_id,
@@ -1250,7 +1436,6 @@ def create_app(
             verify_registered_installation(
                 clientInstallationId,
                 x_installation_token,
-                required=True,
             )
             job = service.record_download_for_installation(
                 job_id,
@@ -1338,11 +1523,14 @@ def create_app(
                 x_map_stream_app_git_sha,
                 x_map_stream_app_build_sha256,
             )
-            verify_registered_installation(clientInstallationId, x_installation_token)
-            service.get_job_for_installation(job_id, clientInstallationId)
+            installation_id = verify_registered_installation(
+                clientInstallationId,
+                x_installation_token,
+            )
+            service.get_job_for_installation(job_id, installation_id)
             return public_job(
                 service.cancel_job(job_id),
-                clientInstallationId,
+                installation_id,
                 trust_capabilities,
                 app_build,
                 app_git_sha,
@@ -1446,10 +1634,13 @@ def create_app(
                 x_map_stream_app_git_sha,
                 x_map_stream_app_build_sha256,
             )
-            verify_registered_installation(clientInstallationId, x_installation_token)
+            installation_id = verify_registered_installation(
+                clientInstallationId,
+                x_installation_token,
+            )
             job = service.find_by_map_id(
                 map_id,
-                client_installation_id=clientInstallationId,
+                client_installation_id=installation_id,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1457,7 +1648,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="map pack not found")
         return public_job(
             job,
-            clientInstallationId,
+            installation_id,
             trust_capabilities,
             app_build,
             app_git_sha,
@@ -1480,24 +1671,25 @@ def create_app(
                 clientInstallationId,
                 x_installation_token,
             )
-            rules = [(download_url_ip_policy, client_ip(request))]
-            if registered_installation_id is not None:
-                rules.append(
-                    (
-                        download_url_installation_policy,
-                        registered_installation_id,
-                    )
-                )
-            enforce_rate_limits(*rules)
+            enforce_rate_limits(
+                (download_url_ip_policy, client_ip(request)),
+                (
+                    download_url_installation_policy,
+                    registered_installation_id,
+                ),
+            )
             if jobId is not None:
-                job = service.get_job_for_installation(jobId, clientInstallationId)
+                job = service.get_job_for_installation(
+                    jobId,
+                    registered_installation_id,
+                )
                 if job.map_id != map_id:
                     job = None
             else:
                 # Preserve older clients that only identify a stable map ID.
                 job = service.find_by_map_id(
                     map_id,
-                    client_installation_id=clientInstallationId,
+                    client_installation_id=registered_installation_id,
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1552,7 +1744,6 @@ def create_app(
             registered_installation_id = verify_registered_installation(
                 clientInstallationId,
                 x_installation_token,
-                required=True,
             )
             enforce_rate_limits(
                 (download_url_ip_policy, client_ip(request)),
@@ -1562,13 +1753,16 @@ def create_app(
                 ),
             )
             if jobId is not None:
-                job = service.get_job_for_installation(jobId, clientInstallationId)
+                job = service.get_job_for_installation(
+                    jobId,
+                    registered_installation_id,
+                )
                 if job.map_id != map_id:
                     job = None
             else:
                 job = service.find_by_map_id(
                     map_id,
-                    client_installation_id=clientInstallationId,
+                    client_installation_id=registered_installation_id,
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

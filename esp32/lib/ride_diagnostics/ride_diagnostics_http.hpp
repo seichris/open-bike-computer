@@ -10,7 +10,7 @@ public:
 
   void configure(device_transfer::HttpTransferServer *server);
   bool handleRequest(const device_transfer::HttpRequest &request,
-                     WiFiClient &client) override;
+                     device_transfer::TransferClient &client) override;
   void responseDidComplete(const device_transfer::HttpRequest &request,
                            bool peerClosedCleanly) override;
 

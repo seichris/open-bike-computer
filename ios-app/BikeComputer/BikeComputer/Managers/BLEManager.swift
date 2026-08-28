@@ -888,6 +888,14 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceTransferUsedHotspotFallback = false
     @Published private(set) var deviceTransferHotspotFallbackReason: String?
     @Published var deviceTransferSessionToken: String?
+    @Published private(set) var deviceTransferTLSCertificateSHA256: String?
+    @Published private(set) var deviceTransferTLSIdentityVersion: UInt32 = 0
+    @Published private(set) var deviceTransferPendingTLSCertificateSHA256: String?
+    @Published private(set) var deviceTransferPendingTLSIdentityVersion: UInt32 = 0
+    @Published private(set) var deviceTransferGeneration: UInt32 = 0
+    @Published private(set) var supportsSecureDeviceTransferV1 = false
+    @Published private(set) var supportsSignedMapStreamV1 = false
+    @Published private(set) var deviceTransferLegacyArchivePolicy: String?
     @Published private(set) var deviceTransferLastErrorCode: String?
     @Published private(set) var deviceTransferLastErrorMessage: String?
     @Published private(set) var deviceTransferStatusRevision: UInt64 = 0
@@ -4701,6 +4709,45 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
+    func requestDeviceTransferTLSIdentityPreparation() -> Bool {
+        var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
+        packet.append(Data("tls|prepare".utf8))
+        return sendTransferControlPacket(
+            packet,
+            label: "device transfer TLS identity prepare",
+            coalescingKey: "transfer.device.tls"
+        )
+    }
+
+    @discardableResult
+    func requestDeviceTransferTLSIdentityCommit(
+        certificateSHA256: String
+    ) -> Bool {
+        guard let fingerprint = DeviceTransferSecurityPolicy
+            .normalizedCertificateSHA256(certificateSHA256) else {
+            return false
+        }
+        var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
+        packet.append(Data("tls|commit|\(fingerprint)".utf8))
+        return sendTransferControlPacket(
+            packet,
+            label: "device transfer TLS identity commit",
+            coalescingKey: "transfer.device.tls"
+        )
+    }
+
+    @discardableResult
+    func requestDeviceTransferTLSIdentityCancellation() -> Bool {
+        var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
+        packet.append(Data("tls|cancel".utf8))
+        return sendTransferControlPacket(
+            packet,
+            label: "device transfer TLS identity cancel",
+            coalescingKey: "transfer.device.tls"
+        )
+    }
+
+    @discardableResult
     func sendDiagnosticsCaptureBinding(
         _ captureID: UUID? = nil,
         detailed explicitDetailedMode: Bool? = nil
@@ -5271,6 +5318,14 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferUsedHotspotFallback = false
         deviceTransferHotspotFallbackReason = nil
         deviceTransferSessionToken = nil
+        deviceTransferTLSCertificateSHA256 = nil
+        deviceTransferTLSIdentityVersion = 0
+        deviceTransferPendingTLSCertificateSHA256 = nil
+        deviceTransferPendingTLSIdentityVersion = 0
+        deviceTransferGeneration = 0
+        supportsSecureDeviceTransferV1 = false
+        supportsSignedMapStreamV1 = false
+        deviceTransferLegacyArchivePolicy = nil
         deviceTransferLastErrorCode = nil
         deviceTransferLastErrorMessage = nil
         deviceTransferStatusRevision = 0
@@ -8340,6 +8395,38 @@ extension BLEManager: CBPeripheralDelegate {
         deviceTransferHotspotFallbackReason =
             object["hotspotFallbackReason"] as? String
         deviceTransferSessionToken = object["sessionToken"] as? String
+        deviceTransferGeneration =
+            (object["transferGeneration"] as? NSNumber)?.uint32Value ?? 0
+        if let tls = object["tls"] as? [String: Any] {
+            deviceTransferTLSIdentityVersion =
+                (tls["identityVersion"] as? NSNumber)?.uint32Value ?? 0
+            deviceTransferTLSCertificateSHA256 =
+                tls["certificateSha256"] as? String
+        } else {
+            deviceTransferTLSIdentityVersion = 0
+            deviceTransferTLSCertificateSHA256 = nil
+        }
+        if let pendingTLS = object["pendingTls"] as? [String: Any] {
+            deviceTransferPendingTLSIdentityVersion =
+                (pendingTLS["identityVersion"] as? NSNumber)?.uint32Value ?? 0
+            deviceTransferPendingTLSCertificateSHA256 =
+                pendingTLS["certificateSha256"] as? String
+        } else {
+            deviceTransferPendingTLSIdentityVersion = 0
+            deviceTransferPendingTLSCertificateSHA256 = nil
+        }
+        if let capabilities = object["capabilities"] as? [String: Any] {
+            supportsSecureDeviceTransferV1 =
+                capabilities["secureTransferV1"] as? Bool ?? false
+            supportsSignedMapStreamV1 =
+                capabilities["signedMapStreamV1"] as? Bool ?? false
+            deviceTransferLegacyArchivePolicy =
+                capabilities["legacyArchivePolicy"] as? String
+        } else {
+            supportsSecureDeviceTransferV1 = false
+            supportsSignedMapStreamV1 = false
+            deviceTransferLegacyArchivePolicy = nil
+        }
         if let lastError = object["lastError"] as? [String: Any] {
             deviceTransferLastErrorCode = lastError["code"] as? String
             deviceTransferLastErrorMessage = lastError["message"] as? String

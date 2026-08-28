@@ -241,10 +241,20 @@ final class FirmwareUpdateManager: ObservableObject {
                     }
                 }
 
+                guard let deviceSession = DeviceTransferPinnedSessionFactory.make(
+                    configuration: .ephemeral,
+                    baseURL: transferSession.baseURL,
+                    certificateSHA256:
+                        transferSession.tlsCertificateSHA256
+                ) else {
+                    throw DeviceTransferSecurityError.secureTransferRequired
+                }
+                defer { deviceSession.invalidateAndCancel() }
+
                 let client = FirmwareUpdateDeviceClient(
                     baseURL: transferSession.baseURL,
                     sessionToken: transferSession.sessionToken ?? "",
-                    session: self.session
+                    session: deviceSession
                 )
                 self.statusMessage = "preparing device update"
                 self.updatePendingStatus(self.statusMessage)
@@ -508,7 +518,7 @@ final class FirmwareUpdateManager: ObservableObject {
 struct FirmwareUpdateDeviceClient {
     let baseURL: URL
     let sessionToken: String
-    var session: URLSession = .shared
+    let session: URLSession
 
     func begin(manifest: FirmwareReleaseManifest,
                allowDowngrade: Bool) async throws -> FirmwareDeviceStatus {

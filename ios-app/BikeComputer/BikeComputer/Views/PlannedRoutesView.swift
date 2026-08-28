@@ -223,7 +223,6 @@ struct SavedRoutesSettingsSection: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 10) {
-                Text("Powered by Strava")
                 if let url = URL(string: bookmark.canonicalURL) {
                     Link("View on Strava", destination: url)
                 }
@@ -240,7 +239,6 @@ struct SavedRoutesSettingsSection: View {
         deleteAfter: Date?
     ) -> some View {
         HStack(spacing: 10) {
-            Text("Powered by Strava")
             if let sourceReference,
                let url = URL(string: sourceReference.canonicalURL) {
                 Link("View on Strava", destination: url)

@@ -31,6 +31,7 @@ FIRMWARE_HOST_ONLY_PATH_PREFIXES = ("esp32/tools/tests/",)
 FIRMWARE_HOST_PATH_PREFIXES = (".github/actions/require-immutable-releases/",)
 FIRMWARE_WORKFLOW_PATHS = {
     ".github/workflows/firmware-diagnostics.yml",
+    ".github/workflows/firmware-release-candidate.yml",
     ".github/workflows/firmware-release.yml",
     ".github/workflows/firmware-runtime-performance.yml",
     ".github/workflows/firmware-runtime-publish.yml",
@@ -57,7 +58,9 @@ FIRMWARE_MANIFEST_PATHS = {
 }
 RIDE_DIAGNOSTICS_TOOL_PATHS = {"tools/ride_diagnostics.py"}
 FIRMWARE_RELEASE_TOOL_PATHS = {
+    ".github/scripts/firmware_release_gate.py",
     "tools/factory_release_manifest.py",
+    "tools/firmware_release_candidate.py",
     "tools/firmware-signing-requirements.txt",
     "tools/verify_github_release_assets.py",
 }

@@ -370,13 +370,18 @@ assert not raw_write_offenders, (
     + ", ".join(raw_write_offenders)
 )
 
-release_workflow = (repo_root / ".github/workflows/firmware-release.yml").read_text()
-assert "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py" in release_workflow
+release_candidate_workflow = (
+    repo_root / ".github/workflows/firmware-release-candidate.yml"
+).read_text()
+assert (
+    "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py"
+    in release_candidate_workflow
+)
 for environment in remote_debug_profiles:
-    assert environment.removeprefix("env:") not in release_workflow
+    assert environment.removeprefix("env:") not in release_candidate_workflow
 for environment, target in expected_targets.items():
     profile = environment.removeprefix("env:")
     mapping = f"target: {target}\n            environment: {profile}"
-    assert mapping in release_workflow
+    assert mapping in release_candidate_workflow
 
 print("firmware production profile contracts passed")

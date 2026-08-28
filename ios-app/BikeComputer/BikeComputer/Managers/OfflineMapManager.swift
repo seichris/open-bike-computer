@@ -945,27 +945,11 @@ final class OfflineMapPreviewLoadRegistry {
     }
 }
 
-private enum PreparedMapTransfer {
-    case stream(VerifiedBikeMapArtifact, SavedMapArtifactMetadata)
-    case archive(OfflineMapPackArchive, mapID: String, sessionID: String)
+private struct PreparedMapTransfer {
+    let artifact: VerifiedBikeMapArtifact
 
-    var mapID: String {
-        switch self {
-        case .stream(let artifact, _): artifact.mapID
-        case .archive(_, let mapID, _): mapID
-        }
-    }
-
-    var sessionID: String {
-        switch self {
-        case .stream(let artifact, _): artifact.signedManifestReceipt
-        case .archive(_, _, let sessionID): sessionID
-        }
-    }
-}
-
-private enum MapTransferControl: Error {
-    case legacyArtifactRequired(SavedMapArtifactMetadata)
+    var mapID: String { artifact.mapID }
+    var sessionID: String { artifact.signedManifestReceipt }
 }
 
 nonisolated enum MapTransferOutcomePolicy {
@@ -1440,6 +1424,19 @@ nonisolated struct OfflineMapInstallationCredentialStore {
         }
 #else
         defaults.set(data, forKey: Self.fallbackKeyPrefix + account)
+#endif
+    }
+
+    func delete(serverURLString: String) {
+        let account = OfflineMapServerIdentity.normalized(serverURLString)
+#if os(iOS)
+        _ = SecItemDelete([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecAttrAccount as String: account,
+        ] as CFDictionary)
+#else
+        defaults.removeObject(forKey: Self.fallbackKeyPrefix + account)
 #endif
     }
 }
@@ -2124,17 +2121,12 @@ final class OfflineMapManager: ObservableObject {
 
         startMapJobTask { manager in
             var client = try manager.makeClient()
-            if client.clientInstallationToken?.isEmpty == false {
-                client = try await manager.ensureRegisteredInstallation(client: client)
-            }
+            client = try await manager.ensureRegisteredInstallation(client: client)
             if try await manager.recoverOwnedServerJobIfAvailable(
                 client: client,
                 bleManager: bleManager
             ) {
                 return
-            }
-            if client.clientInstallationToken?.isEmpty != false {
-                client = try await manager.ensureRegisteredInstallation(client: client)
             }
             let request = OfflineMapJobRequest
                 .customBBox(bounds)
@@ -2192,9 +2184,9 @@ final class OfflineMapManager: ObservableObject {
                 persistedServerURL: persistedServerURL
             )
             var client = try manager.makeClient(serverURLString: recoveryServerURL)
-            if client.clientInstallationToken?.isEmpty == false {
-                client = try await manager.ensureRegisteredInstallation(client: client)
-            }
+            client = try await manager.ensureRegisteredInstallationWithRetry(
+                client: client
+            )
             var jobId = persistedJobId
             var shouldInstallOnDevice = persistedInstallIntent
 
@@ -2268,7 +2260,9 @@ final class OfflineMapManager: ObservableObject {
         guard let jobId = currentJob?.jobId else { return }
         Task {
             await runBusy {
-                let client = try self.makeClient()
+                let client = try await self.ensureRegisteredInstallation(
+                    client: self.makeClient()
+                )
                 self.currentJob = try await client.job(id: jobId)
                 self.statusMessage = self.currentJob?.status ?? ""
                 if self.currentJob?.mapId == nil {
@@ -2290,7 +2284,9 @@ final class OfflineMapManager: ObservableObject {
         }
         Task {
             await runBusy {
-                let client = try self.makeClient()
+                let client = try await self.ensureRegisteredInstallation(
+                    client: self.makeClient()
+                )
                 self.downloadURL = try await client.downloadURL(mapId: mapId, jobId: jobId)
                 self.statusMessage = "download ready"
             }
@@ -2300,7 +2296,10 @@ final class OfflineMapManager: ObservableObject {
     func downloadPack() {
         Task {
             await runBusy {
-                try await self.downloadReadyPack(client: self.makeClient())
+                let client = try await self.ensureRegisteredInstallation(
+                    client: self.makeClient()
+                )
+                try await self.downloadReadyPack(client: client)
             }
         }
     }
@@ -3684,17 +3683,12 @@ final class OfflineMapManager: ObservableObject {
         guard canStartNewMapJob() else { return }
         startMapJobTask { manager in
             var client = try manager.makeClient()
-            if client.clientInstallationToken?.isEmpty == false {
-                client = try await manager.ensureRegisteredInstallation(client: client)
-            }
+            client = try await manager.ensureRegisteredInstallation(client: client)
             if try await manager.recoverOwnedServerJobIfAvailable(
                 client: client,
                 bleManager: nil
             ) {
                 return
-            }
-            if client.clientInstallationToken?.isEmpty != false {
-                client = try await manager.ensureRegisteredInstallation(client: client)
             }
             manager.currentJob = nil
             manager.downloadURL = nil
@@ -3792,6 +3786,29 @@ final class OfflineMapManager: ObservableObject {
                 return try await client.jobs()
             } catch {
                 guard OfflineMapPollingRetryPolicy.shouldRetry(error) else { throw error }
+                failureCount += 1
+                statusMessage = "reconnecting to map server"
+                try await Task.sleep(
+                    nanoseconds: OfflineMapPollingRetryPolicy.delayNanoseconds(
+                        failureCount: failureCount
+                    )
+                )
+            }
+        }
+        throw CancellationError()
+    }
+
+    private func ensureRegisteredInstallationWithRetry(
+        client: OfflineMapPlatformClient
+    ) async throws -> OfflineMapPlatformClient {
+        var failureCount = 0
+        while !Task.isCancelled {
+            do {
+                return try await ensureRegisteredInstallation(client: client)
+            } catch {
+                guard OfflineMapPollingRetryPolicy.shouldRetry(error) else {
+                    throw error
+                }
                 failureCount += 1
                 statusMessage = "reconnecting to map server"
                 try await Task.sleep(
@@ -4829,9 +4846,7 @@ final class OfflineMapManager: ObservableObject {
         if packURL.pathExtension.lowercased() == "bmap",
            let metadata = SavedMapArtifactMetadataStore.load(for: packURL),
            SavedMapStreamMigrationFallback.shouldUseLegacyArtifact(for: metadata) {
-            let legacyURL = try await materializeLegacyFallback(for: metadata)
-            try await transferPack(at: legacyURL, bleManager: bleManager)
-            return
+            throw OfflineMapPlatformError.firmwareMapStreamUnsupported
         }
         let trustStore = mapStreamTrustStore
         let validationTask = Task.detached(priority: .userInitiated) {
@@ -4850,26 +4865,9 @@ final class OfflineMapManager: ObservableObject {
                     trustStore: trustStore,
                     readerRequirements: metadata.readerRequirements
                 )
-                return PreparedMapTransfer.stream(verified, metadata)
+                return PreparedMapTransfer(artifact: verified)
             }
-            if let artifact = SavedMapArtifactMetadataStore.load(for: packURL)?.primaryArtifact {
-                try OfflineMapArtifactFileValidator.validate(url: packURL, artifact: artifact)
-            }
-            let archive = try OfflineMapPackArchive(url: packURL)
-            guard let mapId = try archive.manifest().mapId, !mapId.isEmpty,
-                  let manifestEntry = archive.manifestEntry else {
-                throw OfflineMapPlatformError.invalidPack("manifest.json has no mapId")
-            }
-            try archive.validate(expectedMapId: mapId)
-            let sessionID = MapTransferSessionIdentity.make(
-                mapId: mapId,
-                manifestData: try archive.data(for: manifestEntry)
-            )
-            return PreparedMapTransfer.archive(
-                archive,
-                mapID: mapId,
-                sessionID: sessionID
-            )
+            throw OfflineMapPlatformError.firmwareMapStreamUnsupported
         }
         let prepared = try await withTaskCancellationHandler {
             try await validationTask.value
@@ -4877,9 +4875,8 @@ final class OfflineMapManager: ObservableObject {
             validationTask.cancel()
         }
         try Task.checkCancellation()
-        if case .stream(let artifact, _) = prepared,
-           !SavedMapRendererCompatibilityPolicy.isCompatible(
-               rendererFormatVersion: artifact.rendererFormatVersion,
+        if !SavedMapRendererCompatibilityPolicy.isCompatible(
+               rendererFormatVersion: prepared.artifact.rendererFormatVersion,
                supportsStreetLabels: bleManager.supportsStreetLabels,
                supports3DBuildings: bleManager.supports3DBuildings
            ) {
@@ -4902,35 +4899,24 @@ final class OfflineMapManager: ObservableObject {
             resumeRequested: resumePausedUpload
         ) {
         case .retainExisting:
-            if case .stream = prepared {
-                retainExistingStreamAttempt(
-                    mapID: expectedMapId,
-                    sessionID: sessionId,
-                    artifactURL: packURL,
-                    activeMapID: bleManager.mapTransferActiveMapId,
-                    activeSessionID: bleManager.mapTransferActiveSessionId,
-                    activationStatus: "receiving",
-                    activationSequence: bleManager.mapTransferActivationSequence,
-                    activationSessionID: sessionId,
-                    activationStep: 1,
-                    activationStepCount: 3,
-                    activationProgress: BackgroundMapUploadStateStore.latest(
-                        mapID: expectedMapId,
-                        sessionID: sessionId,
-                        defaults: defaults
-                    )?.percentage,
-                    bleManager: bleManager
-                )
-            } else {
-                statusMessage = "Map upload continues on device"
-                if let upload = BackgroundMapUploadStateStore.latest(
+            retainExistingStreamAttempt(
+                mapID: expectedMapId,
+                sessionID: sessionId,
+                artifactURL: packURL,
+                activeMapID: bleManager.mapTransferActiveMapId,
+                activeSessionID: bleManager.mapTransferActiveSessionId,
+                activationStatus: "receiving",
+                activationSequence: bleManager.mapTransferActivationSequence,
+                activationSessionID: sessionId,
+                activationStep: 1,
+                activationStepCount: 3,
+                activationProgress: BackgroundMapUploadStateStore.latest(
                     mapID: expectedMapId,
                     sessionID: sessionId,
                     defaults: defaults
-                ), let percentage = upload.percentage {
-                    transferProgress = Double(percentage) / 100
-                }
-            }
+                )?.percentage,
+                bleManager: bleManager
+            )
             return
         case .retireExisting:
             break
@@ -4960,30 +4946,28 @@ final class OfflineMapManager: ObservableObject {
         }
 #endif
 
-        if case .stream = prepared {
-            let disposition = ExistingMapStreamAttemptDisposition.evaluate(
-                expectedSessionID: sessionId,
+        let disposition = ExistingMapStreamAttemptDisposition.evaluate(
+            expectedSessionID: sessionId,
+            activeSessionID: bleManager.mapTransferActiveSessionId,
+            activationStatus: bleManager.mapTransferActivationStatus,
+            activationSessionID: bleManager.mapTransferActivationSessionId
+        )
+        if disposition != .upload {
+            retainExistingStreamAttempt(
+                mapID: expectedMapId,
+                sessionID: sessionId,
+                artifactURL: packURL,
+                activeMapID: bleManager.mapTransferActiveMapId,
                 activeSessionID: bleManager.mapTransferActiveSessionId,
                 activationStatus: bleManager.mapTransferActivationStatus,
-                activationSessionID: bleManager.mapTransferActivationSessionId
+                activationSequence: bleManager.mapTransferActivationSequence,
+                activationSessionID: bleManager.mapTransferActivationSessionId,
+                activationStep: bleManager.mapTransferActivationStep,
+                activationStepCount: bleManager.mapTransferActivationStepCount,
+                activationProgress: bleManager.mapTransferActivationProgress,
+                bleManager: bleManager
             )
-            if disposition != .upload {
-                retainExistingStreamAttempt(
-                    mapID: expectedMapId,
-                    sessionID: sessionId,
-                    artifactURL: packURL,
-                    activeMapID: bleManager.mapTransferActiveMapId,
-                    activeSessionID: bleManager.mapTransferActiveSessionId,
-                    activationStatus: bleManager.mapTransferActivationStatus,
-                    activationSequence: bleManager.mapTransferActivationSequence,
-                    activationSessionID: bleManager.mapTransferActivationSessionId,
-                    activationStep: bleManager.mapTransferActivationStep,
-                    activationStepCount: bleManager.mapTransferActivationStepCount,
-                    activationProgress: bleManager.mapTransferActivationProgress,
-                    bleManager: bleManager
-                )
-                return
-            }
+            return
         }
 
         do {
@@ -4997,14 +4981,24 @@ final class OfflineMapManager: ObservableObject {
                 self.statusMessage = message
             }
             try await withBackgroundTransferLifecycle(bleManager: bleManager) {
+                guard let pinnedSession =
+                        DeviceTransferPinnedSessionFactory.make(
+                    configuration: .ephemeral,
+                    baseURL: transferSession.baseURL,
+                    certificateSHA256:
+                        transferSession.tlsCertificateSHA256
+                ) else {
+                    throw DeviceTransferSecurityError.secureTransferRequired
+                }
+                defer { pinnedSession.invalidateAndCancel() }
                 let client = MapTransferDeviceClient(
                     baseURL: transferSession.baseURL,
-                    sessionToken: transferSession.sessionToken
+                    sessionToken: transferSession.sessionToken,
+                    session: pinnedSession
                 )
                 let initialDeviceStatus = try await client.status()
                 bleManager.applyAuthenticatedMapTransferStatus(initialDeviceStatus)
-                if case .stream = prepared,
-                   let activation = initialDeviceStatus.activation,
+                if let activation = initialDeviceStatus.activation,
                    activation.sessionId == sessionId,
                    activation.step == 1,
                    let deviceProgress = activation.progress {
@@ -5021,8 +5015,8 @@ final class OfflineMapManager: ObservableObject {
                         progress: deviceProgress
                     )
                 }
-                if case .stream(let artifact, let metadata) = prepared,
-                   MapInstallProtocolSelector.select(
+                let artifact = prepared.artifact
+                if MapInstallProtocolSelector.select(
                        isBikeMapStream: true,
                        signatureTrustCapability:
                            "\(artifact.signatureKeyID)=\(artifact.signatureKeySHA256)",
@@ -5042,45 +5036,33 @@ final class OfflineMapManager: ObservableObject {
                        requiredFirmwareGitSha: artifact.requiredFirmwareGitSHA,
                        deviceStatus: initialDeviceStatus
                    ) == .legacyArtifactRequired {
-                    throw MapTransferControl.legacyArtifactRequired(metadata)
+                    throw OfflineMapPlatformError.firmwareMapStreamUnsupported
                 }
-                if case .stream = prepared {
-                    let disposition = ExistingMapStreamAttemptDisposition.evaluate(
-                        expectedSessionID: sessionId,
+                let disposition = ExistingMapStreamAttemptDisposition.evaluate(
+                    expectedSessionID: sessionId,
+                    activeSessionID: initialDeviceStatus.activeSessionId,
+                    activationStatus: initialDeviceStatus.activation?.status,
+                    activationSessionID: initialDeviceStatus.activation?.sessionId
+                )
+                if disposition != .upload {
+                    retainExistingStreamAttempt(
+                        mapID: expectedMapId,
+                        sessionID: sessionId,
+                        artifactURL: packURL,
+                        activeMapID: initialDeviceStatus.activeMapId,
                         activeSessionID: initialDeviceStatus.activeSessionId,
                         activationStatus: initialDeviceStatus.activation?.status,
-                        activationSessionID: initialDeviceStatus.activation?.sessionId
+                        activationSequence: initialDeviceStatus.activation?.sequence,
+                        activationSessionID: initialDeviceStatus.activation?.sessionId,
+                        activationStep: initialDeviceStatus.activation?.step,
+                        activationStepCount: initialDeviceStatus.activation?.steps,
+                        activationProgress: initialDeviceStatus.activation?.progress,
+                        bleManager: bleManager
                     )
-                    if disposition != .upload {
-                        retainExistingStreamAttempt(
-                            mapID: expectedMapId,
-                            sessionID: sessionId,
-                            artifactURL: packURL,
-                            activeMapID: initialDeviceStatus.activeMapId,
-                            activeSessionID: initialDeviceStatus.activeSessionId,
-                            activationStatus: initialDeviceStatus.activation?.status,
-                            activationSequence: initialDeviceStatus.activation?.sequence,
-                            activationSessionID: initialDeviceStatus.activation?.sessionId,
-                            activationStep: initialDeviceStatus.activation?.step,
-                            activationStepCount: initialDeviceStatus.activation?.steps,
-                            activationProgress: initialDeviceStatus.activation?.progress,
-                            bleManager: bleManager
-                        )
-                        return
-                    }
+                    return
                 }
                 transferProgress = 0
                 statusMessage = "uploading \(displayName(forMapId: expectedMapId)) to device"
-                let protocolVersion: Int
-                let streamFormatVersion: Int?
-                switch prepared {
-                case .stream:
-                    protocolVersion = 2
-                    streamFormatVersion = 1
-                case .archive:
-                    protocolVersion = 1
-                    streamFormatVersion = nil
-                }
                 recordTransfer(
                     mapId: expectedMapId,
                     sessionId: sessionId,
@@ -5091,160 +5073,57 @@ final class OfflineMapManager: ObservableObject {
                     previousSequence: initialDeviceStatus.activation?.sequence ??
                         bleManager.mapTransferActivationSequence,
                     outcome: "uploading",
-                    protocolVersion: protocolVersion,
-                    streamFormatVersion: streamFormatVersion,
+                    protocolVersion: 2,
+                    streamFormatVersion: 1,
                     artifactURL: packURL
                 )
 
-                switch prepared {
-                case .archive(let archive, _, _):
-                    var compatibilityArchiveURL: URL?
-                    var useForegroundTransfer = false
-                    if MapArchiveUploadStrategy.requiresCompatibilityArchive(
-                        for: archive
-                    ) {
-                        statusMessage = "preparing compatible map transfer"
-                        let sourceURL = packURL
-                        let preparation = Task.detached(priority: .utility) {
-                            try Task.checkCancellation()
-                            let sourceArchive = try OfflineMapPackArchive(url: sourceURL)
-                            return try OfflineMapPackCompatibilityArchive.make(
-                                from: sourceArchive
-                            )
-                        }
-                        do {
-                            compatibilityArchiveURL = try await withTaskCancellationHandler {
-                                try await preparation.value
-                            } onCancel: {
-                                preparation.cancel()
-                            }
-                        } catch is CancellationError {
-                            throw CancellationError()
-                        } catch {
-                            useForegroundTransfer = true
-                        }
-                    }
-                    defer {
-                        if let compatibilityArchiveURL {
-                            OfflineMapPackCompatibilityArchive.remove(
-                                compatibilityArchiveURL
-                            )
-                        }
-                    }
-                    try Task.checkCancellation()
-
-                    if !useForegroundTransfer {
-                        do {
-                            try await client.uploadArchiveInBackground(
-                                archiveURL: compatibilityArchiveURL ?? packURL,
-                                sessionId: sessionId,
-                                descriptor: BackgroundMapUploadDescriptor(
-                                    mapID: expectedMapId,
-                                    sessionID: sessionId,
-                                    protocolVersion: 1,
-                                    streamFormatVersion: nil,
-                                    artifactFilename: packURL.lastPathComponent,
-                                    accessPointSSID: transferSession.accessPointSSID
-                                ),
-                                onTaskStarted: { taskID in
-                                    self.recordBackgroundUploadTask(
-                                        taskID,
-                                        mapID: expectedMapId
-                                    )
-                                    if let compatibilityArchiveURL {
-                                        OfflineMapPackCompatibilityArchive.remove(
-                                            compatibilityArchiveURL
-                                        )
-                                    }
-                                }
-                            ) { completedBytes, totalBytes in
-                                self.transferProgress = totalBytes == 0 ? 0 :
-                                    Double(completedBytes) / Double(totalBytes)
-                                let percent = Int((self.transferProgress * 100).rounded())
-                                self.statusMessage = "uploading \(self.displayName(forMapId: expectedMapId)): \(percent)%"
-                            }
-                        } catch {
-                            guard MapArchiveUploadFallback.shouldUseForeground(
-                                for: error,
-                                allowLocalStorageFailure:
-                                    compatibilityArchiveURL != nil
-                            ) else {
-                                throw error
-                            }
-                            useForegroundTransfer = true
-                        }
-                    }
-                    if useForegroundTransfer {
-                        statusMessage = "device uses foreground map transfer"
-                        try await client.upload(
-                            archive: archive,
-                            sessionId: sessionId
-                        ) { completed, total, path, didUpload in
-                            self.transferProgress = total == 0 ? 0 :
-                                Double(completed) / Double(total)
-                            let prefix = didUpload ? "uploaded" : "already on device"
-                            self.statusMessage = "\(prefix) \(completed)/\(total): \(path)"
-                        }
-                    }
-                    transferProgress = 1
-                    try await beginLegacyActivationAndConfirm(
-                        expectedMapID: expectedMapId,
+                activationMayBeInFlight = true
+                let retryProgressFloor = resumeProgressFloor
+                try await client.uploadStreamInBackground(
+                    artifact: artifact,
+                    sessionId: sessionId,
+                    descriptor: BackgroundMapUploadDescriptor(
+                        mapID: expectedMapId,
                         sessionID: sessionId,
-                        initialDeviceStatus: initialDeviceStatus,
-                        client: client,
-                        bleManager: bleManager,
-                        artifactURL: packURL,
-                        activationMayBeInFlight: &activationMayBeInFlight
-                    )
-                case .stream(let artifact, _):
-                    activationMayBeInFlight = true
-                    let retryProgressFloor = resumeProgressFloor
-                    try await client.uploadStreamInBackground(
-                        artifact: artifact,
-                        sessionId: sessionId,
-                        descriptor: BackgroundMapUploadDescriptor(
-                            mapID: expectedMapId,
-                            sessionID: sessionId,
-                            protocolVersion: 2,
-                            streamFormatVersion: 1,
-                            artifactFilename: packURL.lastPathComponent,
-                            accessPointSSID: transferSession.accessPointSSID
-                        ),
-                        onTaskStarted: { taskID in
-                            self.recordBackgroundUploadTask(
-                                taskID,
-                                mapID: expectedMapId
-                            )
-                        }
-                    ) { completedBytes, totalBytes in
-                        self.transferProgress = totalBytes == 0 ? 0 :
-                            Double(completedBytes) / Double(totalBytes)
-                        let percent = MapUploadProgressReconciler.percentage(
-                            retryTransportPercentage:
-                                Int((self.transferProgress * 100).rounded()),
-                            durableDevicePercentage: retryProgressFloor
-                        ) ?? 0
-                        self.activationProgress = MapActivationProgressPresentation(
-                            step: 1,
-                            stepCount: 3,
-                            percentage: percent
+                        protocolVersion: 2,
+                        streamFormatVersion: 1,
+                        artifactFilename: packURL.lastPathComponent,
+                        accessPointSSID: transferSession.accessPointSSID,
+                        tlsCertificateSHA256:
+                            transferSession.tlsCertificateSHA256
+                    ),
+                    onTaskStarted: { taskID in
+                        self.recordBackgroundUploadTask(
+                            taskID,
+                            mapID: expectedMapId
                         )
                     }
-                    transferProgress = 1
-                    try await confirmStreamActivation(
-                        expectedMapID: expectedMapId,
-                        sessionID: sessionId,
-                        initialDeviceStatus: initialDeviceStatus,
-                        client: client,
-                        bleManager: bleManager,
-                        artifactURL: packURL
+                ) { completedBytes, totalBytes in
+                    self.transferProgress = totalBytes == 0 ? 0 :
+                        Double(completedBytes) / Double(totalBytes)
+                    let percent = MapUploadProgressReconciler.percentage(
+                        retryTransportPercentage:
+                            Int((self.transferProgress * 100).rounded()),
+                        durableDevicePercentage: retryProgressFloor
+                    ) ?? 0
+                    self.activationProgress = MapActivationProgressPresentation(
+                        step: 1,
+                        stepCount: 3,
+                        percentage: percent
                     )
                 }
+                transferProgress = 1
+                try await confirmStreamActivation(
+                    expectedMapID: expectedMapId,
+                    sessionID: sessionId,
+                    initialDeviceStatus: initialDeviceStatus,
+                    client: client,
+                    bleManager: bleManager,
+                    artifactURL: packURL
+                )
                 bleManager.requestMapTransferStatus()
             }
-        } catch MapTransferControl.legacyArtifactRequired(let metadata) {
-            let legacyURL = try await materializeLegacyFallback(for: metadata)
-            try await transferPack(at: legacyURL, bleManager: bleManager)
         } catch {
             let outcome = MapTransferOutcomePolicy.outcome(
                 after: error,
@@ -5263,99 +5142,6 @@ final class OfflineMapManager: ObservableObject {
                 errorMessage = nil
                 startActivationReconciliationMonitor(bleManager: bleManager)
                 return
-            }
-            throw error
-        }
-    }
-
-    private func materializeLegacyFallback(
-        for metadata: SavedMapArtifactMetadata
-    ) async throws -> URL {
-        guard let artifact = metadata.legacyArtifact,
-              artifact.isStoredZip,
-              let jobID = metadata.jobID,
-              let serverURLString = metadata.serverURLString,
-              let ownerInstallationID = metadata.clientInstallationID else {
-            throw OfflineMapPlatformError.firmwareMapStreamUnsupported
-        }
-        let client = try makeClient(serverURLString: serverURLString)
-        guard client.clientInstallationId == ownerInstallationID,
-              client.clientInstallationToken?.isEmpty == false else {
-            throw OfflineMapPlatformError.firmwareMapStreamUnsupported
-        }
-        let directory = try cachedPackDirectory()
-            .appendingPathComponent("Compatibility", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let destination = directory.appendingPathComponent(
-            "\(metadata.mapID)-\(artifact.sha256.prefix(12)).zip"
-        )
-        if FileManager.default.fileExists(atPath: destination.path) {
-            do {
-                try await validateLegacyArtifact(
-                    at: destination,
-                    artifact: artifact,
-                    expectedMapID: metadata.mapID
-                )
-                return destination
-            } catch {
-                try? FileManager.default.removeItem(at: destination)
-                try? SavedMapArtifactMetadataStore.delete(for: destination)
-            }
-        }
-
-        statusMessage = "downloading compatible map for this device"
-        let url = try await client.artifactDownloadURL(
-            mapId: metadata.mapID,
-            jobId: jobID,
-            artifact: artifact
-        )
-        var temporaryURL: URL?
-        do {
-            let constraints = try OfflineMapDownloadConstraints.mapArtifact(artifact)
-            let downloaded = try await packDownload(url, constraints, { [weak self] progress in
-                self?.downloadProgress = progress
-            }, { [weak self] byteProgress in
-                self?.downloadByteProgress = byteProgress
-            })
-            temporaryURL = downloaded
-            try await validateLegacyArtifact(
-                at: downloaded,
-                artifact: artifact,
-                expectedMapID: metadata.mapID
-            )
-            try FileManager.default.moveItem(at: downloaded, to: destination)
-            let fallbackMetadata = SavedMapArtifactMetadata(
-                schemaVersion: SavedMapArtifactMetadata.currentSchemaVersion,
-                mapID: metadata.mapID,
-                displayName: metadata.displayName,
-                localArtifactFilename: destination.lastPathComponent,
-                streamFormatVersion: nil,
-                rendererFormatVersion: metadata.rendererFormatVersion,
-                jobID: jobID,
-                serverURLString: serverURLString,
-                clientInstallationID: ownerInstallationID,
-                primaryArtifact: artifact,
-                legacyArtifact: nil,
-                lastTransferProtocol: 1,
-                lastTransferStreamFormat: nil,
-                lastTransferSessionID: nil,
-                lastBackgroundTaskID: nil,
-                lastDeviceSequence: nil,
-                lastDeviceState: nil,
-                lastDeviceStep: nil,
-                lastDeviceStepCount: nil,
-                lastDeviceProgress: nil,
-                expectedActiveMapID: metadata.mapID,
-                expectedActiveSessionID: nil,
-                lastTransferOutcome: nil
-            )
-            try SavedMapArtifactMetadataStore.save(fallbackMetadata, for: destination)
-            downloadProgress = 1
-            downloadByteProgress = nil
-            return destination
-        } catch {
-            if let temporaryURL {
-                try? FileManager.default.removeItem(at: temporaryURL)
             }
             throw error
         }
@@ -5424,88 +5210,6 @@ final class OfflineMapManager: ObservableObject {
         case .upload:
             break
         }
-    }
-
-    private func validateLegacyArtifact(
-        at url: URL,
-        artifact: OfflineMapArtifact,
-        expectedMapID: String
-    ) async throws {
-        let task = Task.detached(priority: .userInitiated) {
-            try OfflineMapArtifactFileValidator.validate(url: url, artifact: artifact)
-            let archive = try OfflineMapPackArchive(url: url)
-            try archive.validate(expectedMapId: expectedMapID)
-        }
-        try await withTaskCancellationHandler {
-            try await task.value
-        } onCancel: {
-            task.cancel()
-        }
-    }
-
-    private func beginLegacyActivationAndConfirm(
-        expectedMapID: String,
-        sessionID: String,
-        initialDeviceStatus: MapTransferDeviceStatus,
-        client: MapTransferDeviceClient,
-        bleManager: BLEManager,
-        artifactURL: URL,
-        activationMayBeInFlight: inout Bool
-    ) async throws {
-        let statusBeforeActivation = try? await client.status()
-        if let statusBeforeActivation {
-            bleManager.applyAuthenticatedMapTransferStatus(statusBeforeActivation)
-        }
-        let activationAlreadyStarted = statusBeforeActivation?.activation?.sessionId == sessionID
-        let previousMapID = statusBeforeActivation?.activeMapId ??
-            initialDeviceStatus.activeMapId ?? bleManager.mapTransferActiveMapId
-        let previousSessionID = statusBeforeActivation?.activeSessionId ??
-            initialDeviceStatus.activeSessionId ?? bleManager.mapTransferActiveSessionId
-        let previousSequence = activationAlreadyStarted
-            ? bleManager.mapTransferActivationSequence
-            : statusBeforeActivation?.activation?.sequence ??
-                initialDeviceStatus.activation?.sequence ??
-                bleManager.mapTransferActivationSequence
-        recordTransfer(
-            mapId: expectedMapID,
-            sessionId: sessionID,
-            previousMapId: previousMapID,
-            previousSessionId: previousSessionID,
-            previousSequence: previousSequence,
-            outcome: "activating",
-            protocolVersion: 1,
-            artifactURL: artifactURL
-        )
-        statusMessage = "activating \(displayName(forMapId: expectedMapID))"
-        activationProgress = nil
-        bleManager.resetMapTransferActivationObservation()
-        var acceptedSequence = activationAlreadyStarted
-            ? statusBeforeActivation?.activation?.sequence
-            : nil
-        activationMayBeInFlight = true
-        do {
-            if let sequence = try await client.activate(sessionId: sessionID) {
-                acceptedSequence = sequence
-            }
-            if let acceptedSequence {
-                defaults.set(
-                    Int(acceptedSequence),
-                    forKey: OfflineMapDefaults.lastTransferAcceptedSequenceKey
-                )
-            }
-        } catch {
-            guard MapActivationTransport.isAmbiguousResponseError(error) else { throw error }
-        }
-        try await finishActivationConfirmation(
-            expectedMapID: expectedMapID,
-            sessionID: sessionID,
-            previousMapID: previousMapID,
-            previousSessionID: previousSessionID,
-            previousSequence: previousSequence,
-            acceptedSequence: acceptedSequence,
-            client: client,
-            bleManager: bleManager
-        )
     }
 
     private func confirmStreamActivation(

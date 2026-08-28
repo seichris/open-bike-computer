@@ -5,9 +5,13 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
+import hmac
+import http.client
 import json
 import os
 from pathlib import Path
+import ssl
 import stat
 import struct
 import sys
@@ -18,6 +22,7 @@ import zlib
 
 
 TOKEN_ENV = "BICINO_DEVICE_DEBUG_TOKEN"
+TLS_SHA256_ENV = "BICINO_DEVICE_DEBUG_TLS_SHA256"
 TOKEN_HEADER = "X-BikeComputer-Transfer-Token"
 FRAME_HEADER = struct.Struct("<4sHHIIHHHBBII")
 TARGET_DIMENSIONS = {
@@ -51,7 +56,18 @@ def _load_session(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _session_values(args: argparse.Namespace) -> tuple[str, str]:
+def _normalized_sha256(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.lower()
+    if len(normalized) != 64 or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        return None
+    return normalized
+
+
+def _session_values(args: argparse.Namespace) -> tuple[str, str, str]:
     stored: dict[str, Any] = {}
     if args.session_file:
         stored = _load_session(args.session_file)
@@ -60,32 +76,131 @@ def _session_values(args: argparse.Namespace) -> tuple[str, str]:
         raise DebugClientError("provide --base-url or a session file with baseUrl")
     parsed = parse.urlsplit(base_url)
     if (
-        parsed.scheme != "http"
+        parsed.scheme != "https"
         or not parsed.netloc
         or parsed.username is not None
         or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in ("", "/")
     ):
-        raise DebugClientError("base URL must be an absolute http URL without credentials")
-    base_url = parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        raise DebugClientError(
+            "base URL must be an HTTPS origin without credentials, query, or fragment"
+        )
+    base_url = parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
     token = os.environ.get(TOKEN_ENV) or stored.get("token")
     if token is None:
         token = getpass.getpass("Transfer token: ")
-    if not isinstance(token, str) or not token or any(character.isspace() for character in token):
+    if (
+        not isinstance(token, str)
+        or len(token) != 32
+        or any(character not in "0123456789abcdef" for character in token)
+    ):
         raise DebugClientError("transfer token is missing or invalid")
-    return base_url.rstrip("/"), token
+    certificate_sha256 = _normalized_sha256(
+        getattr(args, "tls_sha256", None)
+        or os.environ.get(TLS_SHA256_ENV)
+        or stored.get("tlsCertificateSha256")
+    )
+    if certificate_sha256 is None:
+        raise DebugClientError(
+            "provide --tls-sha256 or a session file with tlsCertificateSha256"
+        )
+    return base_url.rstrip("/"), token, certificate_sha256
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(
+        self,
+        host: str,
+        *,
+        certificate_sha256: str,
+        **kwargs: Any,
+    ) -> None:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        super().__init__(host, context=context, **kwargs)
+        self._certificate_sha256 = certificate_sha256
+
+    def connect(self) -> None:
+        super().connect()
+        certificate = (
+            self.sock.getpeercert(binary_form=True)
+            if self.sock is not None
+            else None
+        )
+        actual = hashlib.sha256(certificate or b"").hexdigest()
+        if not certificate or not hmac.compare_digest(
+            actual, self._certificate_sha256
+        ):
+            self.close()
+            raise ssl.SSLError("device TLS certificate fingerprint mismatch")
+
+
+class _PinnedHTTPSHandler(request.HTTPSHandler):
+    def __init__(self, certificate_sha256: str) -> None:
+        super().__init__()
+        self._certificate_sha256 = certificate_sha256
+
+    def https_open(self, outgoing: request.Request):
+        return self.do_open(
+            lambda host, **kwargs: _PinnedHTTPSConnection(
+                host,
+                certificate_sha256=self._certificate_sha256,
+                **kwargs,
+            ),
+            outgoing,
+        )
+
+
+class _NoRedirectHandler(request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class DebugClient:
-    def __init__(self, base_url: str, token: str, timeout: float = 8.0) -> None:
-        self.base_url = base_url
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        certificate_sha256: str,
+        timeout: float = 8.0,
+    ) -> None:
+        parsed = parse.urlsplit(base_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in ("", "/")
+        ):
+            raise DebugClientError("debug client requires a clean HTTPS origin")
+        if len(token) != 32 or any(
+            character not in "0123456789abcdef" for character in token
+        ):
+            raise DebugClientError("debug client token is invalid")
+        normalized_sha256 = _normalized_sha256(certificate_sha256)
+        if normalized_sha256 is None:
+            raise DebugClientError("debug client TLS fingerprint is invalid")
+        self.base_url = parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, "", "", "")
+        )
         self.token = token
+        self.certificate_sha256 = normalized_sha256
         self.timeout = timeout
         self._event_sequence = 0
         self._event_sequence_initialized = False
         self.identity: dict[str, Any] | None = None
         # Accessory credentials must never be forwarded through a developer's
         # ambient HTTP(S)_PROXY configuration.
-        self._opener = request.build_opener(request.ProxyHandler({}))
+        self._opener = request.build_opener(
+            request.ProxyHandler({}),
+            _PinnedHTTPSHandler(normalized_sha256),
+            _NoRedirectHandler(),
+        )
 
     def _request(
         self,
@@ -476,6 +591,10 @@ def _run(args: argparse.Namespace, client: DebugClient) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", help="device transfer base URL (token excluded)")
+    parser.add_argument(
+        "--tls-sha256",
+        help="lowercase SHA-256 of the device TLS leaf certificate",
+    )
     parser.add_argument("--session-file", type=Path, help="mode-0600 JSON session file")
     parser.add_argument("--timeout", type=float, default=8.0)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -518,10 +637,18 @@ def main() -> int:
     args = _parser().parse_args()
     token = ""
     try:
-        base_url, token = _session_values(args)
+        base_url, token, certificate_sha256 = _session_values(args)
         if args.timeout <= 0:
             raise DebugClientError("timeout must be positive")
-        _run(args, DebugClient(base_url, token, args.timeout))
+        _run(
+            args,
+            DebugClient(
+                base_url,
+                token,
+                certificate_sha256,
+                args.timeout,
+            ),
+        )
         return 0
     except (DebugClientError, OSError, ValueError, EOFError) as exc:
         print(f"device_debug: {_redact(str(exc), token)}", file=sys.stderr)

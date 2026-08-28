@@ -35,3 +35,6 @@ map-platform = "map_platform.cli:main"
 
 [tool.setuptools]
 packages = ["map_platform"]
+
+[tool.setuptools.package-data]
+map_platform = ["data/*.pem"]
