@@ -256,6 +256,46 @@ final class OfflineMapTestURLProtocol: URLProtocol {
 }
 
 @MainActor
+final class TestOfflineMapAppAttestService: OfflineMapAppAttestServicing {
+    let keyID: String
+    let attestationObject: Data
+    let assertionObject: Data
+    private(set) var generatedKeyCount = 0
+    private(set) var attestationHashes: [Data] = []
+    private(set) var assertionHashes: [Data] = []
+
+    init(
+        keyID: String,
+        attestationObject: Data = Data("test-attestation".utf8),
+        assertionObject: Data = Data("test-assertion".utf8)
+    ) {
+        self.keyID = keyID
+        self.attestationObject = attestationObject
+        self.assertionObject = assertionObject
+    }
+
+    var isSupported: Bool { true }
+
+    func generateKey() async throws -> String {
+        generatedKeyCount += 1
+        return keyID
+    }
+
+    func attestKey(_: String, clientDataHash: Data) async throws -> Data {
+        attestationHashes.append(clientDataHash)
+        return attestationObject
+    }
+
+    func generateAssertion(
+        _: String,
+        clientDataHash: Data
+    ) async throws -> Data {
+        assertionHashes.append(clientDataHash)
+        return assertionObject
+    }
+}
+
+@MainActor
 final class TestDeviceDiagnosticsSessionController:
     DeviceDiagnosticsSessionControlling
 {
@@ -795,6 +835,8 @@ struct NavigationProtocolTests {
         await testDeviceDiagnosticsRecordsEntryFailure()
         await testDeviceDiagnosticsDownloadEndToEnd()
         await testOfflineMapInstallationCredentialClient()
+        testOfflineMapAppAttestGoldenVector()
+        await testManagedOfflineMapAppAttestContract()
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
         testOfflineMapJobPhaseOnlyProgressDecoding()
@@ -2822,6 +2864,321 @@ struct NavigationProtocolTests {
             )
         } catch {
             assert(false, "installation credential client contract succeeds: \(error)")
+        }
+    }
+
+    @MainActor
+    static func testManagedOfflineMapAppAttestContract() async {
+        let suite = "OfflineMapAppAttestTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            OfflineMapTestURLProtocol.reset()
+        }
+
+        let baseURL = URL(string: "https://maps.example.com")!
+        let rawAttestationChallenge = Data((0..<32).map(UInt8.init))
+        let rawAssertionChallenge = Data((32..<64).map(UInt8.init))
+        let rawAssertionRetryChallenge = Data((64..<96).map(UInt8.init))
+        func base64URL(_ data: Data) -> String {
+            data.base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "=", with: "")
+        }
+        let attestationChallenge = OfflineMapAppAttestChallenge(
+            challengeId: String(repeating: "a", count: 32),
+            challenge: base64URL(rawAttestationChallenge),
+            purpose: "attestation",
+            expiresAt: Int64(Date().timeIntervalSince1970) + 300,
+            keyId: nil
+        )
+        let keyID = Data(repeating: 0x42, count: 32).base64EncodedString()
+        let assertionChallenge = OfflineMapAppAttestChallenge(
+            challengeId: String(repeating: "b", count: 32),
+            challenge: base64URL(rawAssertionChallenge),
+            purpose: "map-create",
+            expiresAt: Int64(Date().timeIntervalSince1970) + 300,
+            keyId: keyID
+        )
+        let assertionRetryChallenge = OfflineMapAppAttestChallenge(
+            challengeId: String(repeating: "c", count: 32),
+            challenge: base64URL(rawAssertionRetryChallenge),
+            purpose: "map-create",
+            expiresAt: Int64(Date().timeIntervalSince1970) + 300,
+            keyId: keyID
+        )
+        let credential = OfflineMapInstallationCredential(
+            clientInstallationId:
+                "inst_v2_1234567890abcdef1234567890abcdef",
+            clientInstallationToken:
+                "v1." + String(repeating: "A", count: 43),
+            appAttestKeyId: keyID
+        )
+        let appAttestService = TestOfflineMapAppAttestService(keyID: keyID)
+        let managedClient = ManagedOfflineMapAppAttestClient(
+            defaults: defaults,
+            session: session,
+            service: appAttestService,
+            appBuild: "123"
+        )
+        var challengeCount = 0
+        var mapCreateCount = 0
+        OfflineMapTestURLProtocol.configure { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/installations/app-attest/challenges"):
+                challengeCount += 1
+                let body = try! JSONSerialization.jsonObject(
+                    with: OfflineMapTestURLProtocol.bodyData(from: request)
+                ) as! [String: Any]
+                if challengeCount == 1 {
+                    assertEqual(
+                        body["purpose"] as? String,
+                        "attestation",
+                        "initial registration requests an attestation challenge"
+                    )
+                    assert(
+                        request.value(forHTTPHeaderField: "X-Installation-Token") == nil,
+                        "initial attestation challenge is not authenticated by an unproven identity"
+                    )
+                    return (
+                        200,
+                        try! JSONEncoder().encode(attestationChallenge)
+                    )
+                }
+                assertEqual(
+                    body["purpose"] as? String,
+                    "map-create",
+                    "map creation requests a single-use assertion challenge"
+                )
+                assertEqual(
+                    body["clientInstallationId"] as? String,
+                    credential.clientInstallationId,
+                    "assertion challenge is scoped to the attested installation"
+                )
+                assertEqual(
+                    request.value(forHTTPHeaderField: "X-Installation-Token"),
+                    credential.clientInstallationToken,
+                    "assertion challenge uses the installation credential"
+                )
+                let challenge = challengeCount == 2
+                    ? assertionChallenge
+                    : assertionRetryChallenge
+                return (200, try! JSONEncoder().encode(challenge))
+            case ("POST", "/v1/installations"):
+                let body = try! JSONSerialization.jsonObject(
+                    with: OfflineMapTestURLProtocol.bodyData(from: request)
+                ) as! [String: Any]
+                let attestation = body["appAttest"] as! [String: Any]
+                assertEqual(
+                    attestation["challengeId"] as? String,
+                    attestationChallenge.challengeId,
+                    "registration binds the server-issued challenge"
+                )
+                assertEqual(
+                    attestation["keyId"] as? String,
+                    keyID,
+                    "registration submits the generated App Attest key"
+                )
+                assertEqual(
+                    attestation["attestationObject"] as? String,
+                    appAttestService.attestationObject.base64EncodedString(),
+                    "registration submits Apple's opaque attestation object"
+                )
+                assertEqual(
+                    attestation["appBuild"] as? String,
+                    "123",
+                    "registration binds the installed app build"
+                )
+                return (201, try! JSONEncoder().encode(credential))
+            case ("POST", "/v1/map-jobs"):
+                mapCreateCount += 1
+                let expectedChallenge = mapCreateCount == 1
+                    ? assertionChallenge
+                    : assertionRetryChallenge
+                assertEqual(
+                    request.value(forHTTPHeaderField:
+                        "X-App-Attest-Challenge-Id"),
+                    expectedChallenge.challengeId,
+                    "map creation carries the assertion challenge identity"
+                )
+                assertEqual(
+                    request.value(forHTTPHeaderField: "X-App-Attest-Key-Id"),
+                    keyID,
+                    "map creation carries the enrolled App Attest key"
+                )
+                assertEqual(
+                    request.value(forHTTPHeaderField: "X-App-Attest-Assertion"),
+                    appAttestService.assertionObject.base64EncodedString(),
+                    "map creation carries the generated assertion"
+                )
+                assertEqual(
+                    request.value(forHTTPHeaderField: "X-App-Attest-App-Build"),
+                    "123",
+                    "map creation binds the same app build"
+                )
+                if mapCreateCount == 1 {
+                    return (
+                        401,
+                        Data(
+                            #"{"detail":{"code":"app_attest_counter_replay","message":"App Attest assertion was replayed"}}"#.utf8
+                        )
+                    )
+                }
+                return (201, Data(#"{"jobId":"job-attested","status":"queued"}"#.utf8))
+            default:
+                assert(false, "unexpected App Attest request \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+
+        do {
+            let enrolled = try await managedClient.enroll(baseURL: baseURL)
+            assertEqual(enrolled, credential, "App Attest enrollment returns its bound identity")
+            assert(
+                managedClient.hasKey(keyID, serverURLString: baseURL.absoluteString),
+                "the device-only key identifier is retained for later assertions"
+            )
+            assertEqual(
+                appAttestService.attestationHashes,
+                [Data(SHA256.hash(data: rawAttestationChallenge))],
+                "Apple attestation hashes the exact server challenge"
+            )
+
+            let jobRequest = OfflineMapJobRequest.customBBox(
+                OfflineMapBounds(
+                    minLon: 103.75,
+                    minLat: 1.24,
+                    maxLon: 103.93,
+                    maxLat: 1.37
+                )
+            ).identified(
+                clientInstallationId: credential.clientInstallationId,
+                clientRequestId: "request-app-attest-123",
+                installOnDevice: true
+            )
+            let client = OfflineMapPlatformClient(
+                baseURL: baseURL,
+                clientInstallationId: credential.clientInstallationId,
+                clientInstallationToken: credential.clientInstallationToken,
+                clientAppAttestKeyId: keyID,
+                mapStreamTrustCapabilities: nil,
+                mapStreamAppBuildIdentity: nil,
+                managedAppAttestClient: managedClient,
+                session: session
+            )
+            let job = try await client.createJob(jobRequest)
+            assertEqual(job.jobId, "job-attested", "attested map creation decodes normally")
+
+            let unsignedRequest = try OfflineMapPlatformClient
+                .makeCreateJobURLRequest(
+                    baseURL: baseURL,
+                    jobRequest: jobRequest
+                )
+            let expectedClientData = try OfflineMapAppAttestClientData.mapCreate(
+                challenge: assertionChallenge,
+                clientInstallationID: credential.clientInstallationId,
+                appBuild: "123",
+                request: unsignedRequest,
+                jobRequest: jobRequest
+            )
+            let expectedRetryClientData = try OfflineMapAppAttestClientData.mapCreate(
+                challenge: assertionRetryChallenge,
+                clientInstallationID: credential.clientInstallationId,
+                appBuild: "123",
+                request: unsignedRequest,
+                jobRequest: jobRequest
+            )
+            assertEqual(
+                appAttestService.assertionHashes,
+                [
+                    Data(SHA256.hash(data: expectedClientData)),
+                    Data(SHA256.hash(data: expectedRetryClientData)),
+                ],
+                "the assertion binds the request and a replay rejection gets one fresh challenge"
+            )
+        } catch {
+            assert(false, "managed App Attest client contract succeeds: \(error)")
+        }
+    }
+
+    static func testOfflineMapAppAttestGoldenVector() {
+        let fixtureURL = URL(
+            fileURLWithPath:
+                "map-platform/backend/tests/fixtures/app_attest_map_create_v1.json"
+        )
+        guard let fixtureData = try? Data(contentsOf: fixtureURL),
+              let fixture = try? JSONSerialization.jsonObject(
+                  with: fixtureData
+              ) as? [String: String],
+              let challengeID = fixture["challengeId"],
+              let challenge = fixture["challenge"],
+              let installationID = fixture["clientInstallationId"],
+              let appBuild = fixture["appBuild"],
+              let requestBody = fixture["requestBody"]?.data(using: .utf8),
+              let expectedClientData = fixture["expectedClientData"],
+              let expectedHash = fixture["expectedClientDataSha256"] else {
+            assert(false, "App Attest golden vector is readable")
+            return
+        }
+        let challengeDocument = OfflineMapAppAttestChallenge(
+            challengeId: challengeID,
+            challenge: challenge,
+            purpose: "map-create",
+            expiresAt: 1_800_000_000,
+            keyId: nil
+        )
+        let jobRequest = OfflineMapJobRequest(
+            mode: "custom_bbox",
+            bbox: [103.75, 1.24, 103.93, 1.37],
+            geometry: nil,
+            route: nil,
+            corridorWidthM: nil,
+            clientInstallationId: installationID,
+            clientRequestId: "request-golden-123",
+            installOnDevice: nil,
+            target: .init(
+                renderer: "esp32-fmb",
+                rendererFormatVersion: 3,
+                firmwareVersion: nil
+            ),
+            labels: .init(
+                profileVersion: 1,
+                preferredLanguages: [],
+                internationalFallback: "en"
+            )
+        )
+        var request = URLRequest(
+            url: URL(string: "https://maps.example.com/v1/map-jobs")!
+        )
+        request.httpBody = requestBody
+        do {
+            let clientData = try OfflineMapAppAttestClientData.mapCreate(
+                challenge: challengeDocument,
+                clientInstallationID: installationID,
+                appBuild: appBuild,
+                request: request,
+                jobRequest: jobRequest
+            )
+            assertEqual(
+                String(data: clientData, encoding: .utf8),
+                expectedClientData,
+                "Swift and backend canonical App Attest client data match"
+            )
+            let clientDataHash = SHA256.hash(data: clientData)
+                .map { String(format: "%02x", $0) }
+                .joined()
+            assertEqual(
+                clientDataHash,
+                expectedHash,
+                "Swift and backend App Attest client-data hashes match"
+            )
+        } catch {
+            assert(false, "App Attest golden vector validates: \(error)")
         }
     }
 

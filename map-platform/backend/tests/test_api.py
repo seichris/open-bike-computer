@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 
+from app_attest_support import AppAttestTestClient
 import map_platform.api as api_module
 from map_platform.api import create_app
 from map_platform.downloads import DownloadSigner
@@ -229,7 +230,10 @@ class MapJobRunAPITests(unittest.TestCase):
             clear=False,
         )
         self.environment.start()
-        self.client = TestClient(create_app())
+        self.app_attest = AppAttestTestClient()
+        self.client = TestClient(
+            create_app(app_attest_verifier=self.app_attest.verifier)
+        )
         self.client.headers["X-Map-Stream-Trust"] = self.stream_trust_header
         self.client.headers["X-Map-Stream-App-Build"] = "100"
         self.client.headers["X-Map-Stream-App-Git-Sha"] = self.ios_git_sha
@@ -243,7 +247,9 @@ class MapJobRunAPITests(unittest.TestCase):
         self.tmp.cleanup()
 
     def issue_installation(self, client: TestClient) -> dict[str, str]:
-        response = client.post("/v1/installations")
+        response = self.app_attest.issue_installation(client)
+        if not hasattr(response, "status_code"):
+            return response
         self.assertEqual(response.status_code, 200)
         return response.json()
 
@@ -286,12 +292,11 @@ class MapJobRunAPITests(unittest.TestCase):
             "clientRequestId",
             f"request-test-{self.job_request_sequence:08d}",
         )
-        request_headers = self.installation_headers(request_credential)
-        request_headers.update(headers or {})
-        return (client or self.client).post(
-            "/v1/map-jobs",
-            json=request_payload,
-            headers=request_headers,
+        return self.app_attest.post_map_job(
+            client or self.client,
+            credential=request_credential,
+            payload=request_payload,
+            headers=headers,
         )
 
     def create_job(self) -> str:
@@ -494,14 +499,18 @@ class MapJobRunAPITests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                client = TestClient(create_app())
+                client = TestClient(
+                    create_app(app_attest_verifier=self.app_attest.verifier)
+                )
                 try:
+                    credential = self.issue_installation(client)
                     response = self.post_map_job(
                         {
                             "mode": "custom_bbox",
                             "bbox": [103.75, 1.24, 103.93, 1.37],
                         },
                         client=client,
+                        credential=credential,
                     )
                     self.assertEqual(response.status_code, 200)
                     payload = response.json()
@@ -536,7 +545,7 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(enabled.status_code, 200)
 
     def test_target_three_is_globally_available_after_production_promotion(self):
-        credential = self.client.post("/v1/installations").json()
+        credential = self.issue_installation(self.client)
         payload = {
             "mode": "custom_bbox",
             "bbox": [103.75, 1.24, 103.93, 1.37],
@@ -553,10 +562,10 @@ class MapJobRunAPITests(unittest.TestCase):
             "clientInstallationId": credential["clientInstallationId"],
             "clientRequestId": "request-target3-global",
         }
-        response = self.client.post(
-            "/v1/map-jobs",
-            headers={"X-Installation-Token": credential["clientInstallationToken"]},
-            json=payload,
+        response = self.app_attest.post_map_job(
+            self.client,
+            credential=credential,
+            payload=payload,
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
@@ -566,7 +575,7 @@ class MapJobRunAPITests(unittest.TestCase):
         )
 
     def test_capabilities_are_authenticated_and_channel_scoped(self):
-        credential = self.client.post("/v1/installations").json()
+        credential = self.issue_installation(self.client)
         params = {
             "clientInstallationId": credential["clientInstallationId"],
         }
@@ -603,7 +612,9 @@ class MapJobRunAPITests(unittest.TestCase):
             },
             clear=False,
         ):
-            canary_client = TestClient(create_app())
+            canary_client = TestClient(
+                create_app(app_attest_verifier=self.app_attest.verifier)
+            )
             try:
                 canary = canary_client.get(
                     "/v1/capabilities",
@@ -633,11 +644,13 @@ class MapJobRunAPITests(unittest.TestCase):
             },
             clear=False,
         ):
-            development_client = TestClient(create_app())
+            development_client = TestClient(
+                create_app(app_attest_verifier=self.app_attest.verifier)
+            )
             try:
-                development_credential = development_client.post(
-                    "/v1/installations"
-                ).json()
+                development_credential = self.issue_installation(
+                    development_client
+                )
                 development = development_client.get(
                     "/v1/capabilities",
                     params={
@@ -669,7 +682,7 @@ class MapJobRunAPITests(unittest.TestCase):
         job.update(values)
         self.client.app.state.job_store.save(MapJob.from_dict(job))
 
-    def test_installation_issuance_is_public_but_rate_limited(self):
+    def test_installation_attestation_challenge_is_public_but_rate_limited(self):
         limited_root = Path(self.tmp.name) / "installation-limit"
         with patch.dict(
             os.environ,
@@ -679,25 +692,107 @@ class MapJobRunAPITests(unittest.TestCase):
             },
             clear=False,
         ):
-            client = TestClient(create_app())
+            client = TestClient(
+                create_app(app_attest_verifier=self.app_attest.verifier)
+            )
             try:
-                first = client.post("/v1/installations")
-                blocked = client.post("/v1/installations")
+                first = self.app_attest.issue_installation(client)
+                blocked = self.app_attest.issue_installation(client)
             finally:
                 client.close()
 
-        self.assertEqual(first.status_code, 200)
+        self.assertIsInstance(first, dict)
         self.assertEqual(blocked.status_code, 429)
         self.assertEqual(blocked.json()["detail"], "request rate limit exceeded")
         self.assertGreater(int(blocked.headers["Retry-After"]), 0)
+
+    def test_installation_issuance_requires_app_attest(self):
+        response = self.client.post("/v1/installations")
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "installation_attestation_required",
+        )
+        self.assertEqual(response.headers["Cache-Control"], "private, no-store")
+
+    def test_new_map_work_requires_assertion_but_idempotent_replay_does_not(self):
+        payload = {
+            "mode": "custom_bbox",
+            "bbox": [103.75, 1.24, 103.93, 1.37],
+            "clientInstallationId": self.installation["clientInstallationId"],
+            "clientRequestId": "request-app-attest-gate",
+        }
+        missing_assertion = self.client.post(
+            "/v1/map-jobs",
+            headers=self.installation_headers(self.installation),
+            json=payload,
+        )
+        created = self.app_attest.post_map_job(
+            self.client,
+            credential=self.installation,
+            payload=payload,
+        )
+        replay = self.client.post(
+            "/v1/map-jobs",
+            headers=self.installation_headers(self.installation),
+            json=payload,
+        )
+
+        self.assertEqual(missing_assertion.status_code, 401)
+        self.assertEqual(
+            missing_assertion.json()["detail"]["code"],
+            "app_attest_assertion_required",
+        )
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(replay.json()["jobId"], created.json()["jobId"])
+
+    def test_unattested_stateless_credential_cannot_request_map_challenge(self):
+        from map_platform.installations import InstallationCredentialStore
+
+        installation_id, token = InstallationCredentialStore(
+            "test-installation-secret-32-bytes-minimum"
+        ).issue()
+        response = self.client.post(
+            "/v1/installations/app-attest/challenges",
+            headers={"X-Installation-Token": token},
+            json={
+                "purpose": "map-create",
+                "clientInstallationId": installation_id,
+            },
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "installation_attestation_required",
+        )
 
     def test_installation_token_refresh_preserves_identity_across_rotation(self):
         from map_platform.installations import InstallationCredentialStore
 
         old_secret = "old-installation-secret-at-least-32-bytes"
         new_secret = "new-installation-secret-at-least-32-bytes"
-        installation_id, old_token = InstallationCredentialStore(old_secret).issue()
         rotated_root = Path(self.tmp.name) / "installation-rotation"
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_DATA_ROOT": str(rotated_root),
+                "MAP_PLATFORM_INSTALLATION_SECRET": old_secret,
+                "MAP_PLATFORM_INSTALLATION_PREVIOUS_SECRETS": "",
+                "MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY": "10000",
+            },
+            clear=False,
+        ):
+            old_client = TestClient(
+                create_app(app_attest_verifier=self.app_attest.verifier)
+            )
+            try:
+                original = self.issue_installation(old_client)
+            finally:
+                old_client.close()
+
         with patch.dict(
             os.environ,
             {
@@ -708,24 +803,39 @@ class MapJobRunAPITests(unittest.TestCase):
             },
             clear=False,
         ):
-            client = TestClient(create_app())
+            client = TestClient(
+                create_app(app_attest_verifier=self.app_attest.verifier)
+            )
             try:
                 refreshed = client.post(
                     "/v1/installations",
-                    params={"clientInstallationId": installation_id},
-                    headers={"X-Installation-Token": old_token},
+                    params={
+                        "clientInstallationId": original[
+                            "clientInstallationId"
+                        ]
+                    },
+                    headers={
+                        "X-Installation-Token": original[
+                            "clientInstallationToken"
+                        ]
+                    },
                 )
-                newly_issued = client.post("/v1/installations")
-                blocked_new_issue = client.post("/v1/installations")
+                newly_issued = self.app_attest.issue_installation(client)
+                blocked_new_issue = self.app_attest.issue_installation(client)
             finally:
                 client.close()
 
         self.assertEqual(refreshed.status_code, 200)
-        self.assertEqual(refreshed.json()["clientInstallationId"], installation_id)
+        self.assertEqual(
+            refreshed.json()["clientInstallationId"],
+            original["clientInstallationId"],
+        )
         refreshed_token = refreshed.json()["clientInstallationToken"]
-        self.assertNotEqual(refreshed_token, old_token)
-        InstallationCredentialStore(new_secret).verify(installation_id, refreshed_token)
-        self.assertEqual(newly_issued.status_code, 200)
+        self.assertNotEqual(refreshed_token, original["clientInstallationToken"])
+        InstallationCredentialStore(new_secret).verify(
+            original["clientInstallationId"], refreshed_token
+        )
+        self.assertIsInstance(newly_issued, dict)
         self.assertEqual(blocked_new_issue.status_code, 429)
 
     def test_map_creation_is_limited_by_installation(self):
@@ -738,9 +848,11 @@ class MapJobRunAPITests(unittest.TestCase):
             },
             clear=False,
         ):
-            client = TestClient(create_app())
+            client = TestClient(
+                create_app(app_attest_verifier=self.app_attest.verifier)
+            )
             try:
-                credential = client.post("/v1/installations").json()
+                credential = self.issue_installation(client)
                 headers = {
                     "X-Installation-Token": credential["clientInstallationToken"]
                 }
@@ -750,10 +862,18 @@ class MapJobRunAPITests(unittest.TestCase):
                     "clientInstallationId": credential["clientInstallationId"],
                     "clientRequestId": "rate-limit-request-1",
                 }
-                first = client.post("/v1/map-jobs", headers=headers, json=payload)
+                first = self.app_attest.post_map_job(
+                    client,
+                    credential=credential,
+                    payload=payload,
+                )
                 replay = client.post("/v1/map-jobs", headers=headers, json=payload)
                 payload["clientRequestId"] = "rate-limit-request-2"
-                blocked = client.post("/v1/map-jobs", headers=headers, json=payload)
+                blocked = self.app_attest.post_map_job(
+                    client,
+                    credential=credential,
+                    payload=payload,
+                )
             finally:
                 client.close()
 
@@ -774,13 +894,10 @@ class MapJobRunAPITests(unittest.TestCase):
             },
             clear=False,
         ):
-            app = create_app()
+            app = create_app(app_attest_verifier=self.app_attest.verifier)
             clients = [TestClient(app), TestClient(app)]
             try:
-                credential = clients[0].post("/v1/installations").json()
-                headers = {
-                    "X-Installation-Token": credential["clientInstallationToken"]
-                }
+                credential = self.issue_installation(clients[0])
                 payload = {
                     "mode": "custom_bbox",
                     "bbox": [103.75, 1.24, 103.93, 1.37],
@@ -791,14 +908,21 @@ class MapJobRunAPITests(unittest.TestCase):
 
                 def create(client):
                     barrier.wait(timeout=5)
-                    return client.post("/v1/map-jobs", headers=headers, json=payload)
+                    return self.app_attest.post_map_job(
+                        client,
+                        credential=credential,
+                        payload=payload,
+                    )
 
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     responses = list(executor.map(create, clients))
-                blocked = clients[0].post(
-                    "/v1/map-jobs",
-                    headers=headers,
-                    json={**payload, "clientRequestId": "new-rate-request"},
+                blocked = self.app_attest.post_map_job(
+                    clients[0],
+                    credential=credential,
+                    payload={
+                        **payload,
+                        "clientRequestId": "new-rate-request",
+                    },
                 )
             finally:
                 for client in clients:
@@ -827,16 +951,18 @@ class MapJobRunAPITests(unittest.TestCase):
             },
             clear=False,
         ):
-            client = TestClient(create_app())
+            client = TestClient(
+                create_app(app_attest_verifier=self.app_attest.verifier)
+            )
             try:
-                credential = client.post("/v1/installations").json()
+                credential = self.issue_installation(client)
                 headers = {
                     "X-Installation-Token": credential["clientInstallationToken"]
                 }
-                created = client.post(
-                    "/v1/map-jobs",
-                    headers=headers,
-                    json={
+                created = self.app_attest.post_map_job(
+                    client,
+                    credential=credential,
+                    payload={
                         "mode": "custom_bbox",
                         "bbox": [103.75, 1.24, 103.93, 1.37],
                         "clientInstallationId": credential["clientInstallationId"],
@@ -884,7 +1010,9 @@ class MapJobRunAPITests(unittest.TestCase):
             },
             clear=False,
         ):
-            client = TestClient(create_app())
+            client = TestClient(
+                create_app(app_attest_verifier=self.app_attest.verifier)
+            )
             try:
                 payload = {
                     "mode": "custom_bbox",
@@ -927,7 +1055,9 @@ class MapJobRunAPITests(unittest.TestCase):
             },
             clear=False,
         ):
-            client = TestClient(create_app())
+            client = TestClient(
+                create_app(app_attest_verifier=self.app_attest.verifier)
+            )
             try:
                 oversized = client.post(
                     "/v1/map-jobs",
@@ -970,7 +1100,9 @@ class MapJobRunAPITests(unittest.TestCase):
             },
             clear=False,
         ):
-            client = TestClient(create_app())
+            client = TestClient(
+                create_app(app_attest_verifier=self.app_attest.verifier)
+            )
             try:
                 public = client.get("/v1/source-regions")
                 run = client.post("/v1/map-jobs/missing-job/run")
@@ -983,7 +1115,7 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(cache.status_code, 401)
 
     def test_legacy_global_bearer_does_not_replace_installation_credential(self):
-        credential = self.client.post("/v1/installations").json()
+        credential = self.issue_installation(self.client)
         response = self.client.post(
             "/v1/map-jobs",
             headers={"Authorization": "Bearer previously-embedded-token"},
@@ -998,15 +1130,15 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(response.json()["detail"], "installation credential is required")
 
     def test_download_inventory_records_real_receipts_names_and_redacts_installations(self):
-        credential = self.client.post("/v1/installations").json()
+        credential = self.issue_installation(self.client)
         installation_id = credential["clientInstallationId"]
         installation_headers = {
             "X-Installation-Token": credential["clientInstallationToken"]
         }
-        created = self.client.post(
-            "/v1/map-jobs",
-            headers=installation_headers,
-            json={
+        created = self.app_attest.post_map_job(
+            self.client,
+            credential=credential,
+            payload={
                 "mode": "custom_bbox",
                 "bbox": [103.75, 1.24, 103.93, 1.37],
                 "clientInstallationId": installation_id,
@@ -1120,12 +1252,12 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(document["byRendererFormat"]["1"]["runs"]["count"], 1)
 
     def test_inventory_mutations_require_the_owning_registered_installation(self):
-        owner = self.client.post("/v1/installations").json()
-        stranger = self.client.post("/v1/installations").json()
-        created = self.client.post(
-            "/v1/map-jobs",
-            headers={"X-Installation-Token": owner["clientInstallationToken"]},
-            json={
+        owner = self.issue_installation(self.client)
+        stranger = self.issue_installation(self.client)
+        created = self.app_attest.post_map_job(
+            self.client,
+            credential=owner,
+            payload={
                 "mode": "custom_bbox",
                 "bbox": [103.75, 1.24, 103.93, 1.37],
                 "clientInstallationId": owner["clientInstallationId"],
@@ -1181,7 +1313,9 @@ class MapJobRunAPITests(unittest.TestCase):
             },
             clear=False,
         ):
-            client = TestClient(create_app())
+            client = TestClient(
+                create_app(app_attest_verifier=self.app_attest.verifier)
+            )
             try:
                 created = self.post_map_job(
                     {
@@ -1226,7 +1360,9 @@ class MapJobRunAPITests(unittest.TestCase):
                     },
                     clear=False,
                 ):
-                    client = TestClient(create_app())
+                    client = TestClient(
+                        create_app(app_attest_verifier=self.app_attest.verifier)
+                    )
                     try:
                         self.assertEqual(client.get("/healthz").status_code, 200)
                     finally:
@@ -1301,13 +1437,14 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertNotEqual(pack_paths[0], pack_paths[1])
 
     def test_artifact_url_refresh_is_identity_bound_and_downloads_immutable_object(self):
-        installation = self.client.post("/v1/installations").json()
+        installation = self.issue_installation(self.client)
         installation_id = installation["clientInstallationId"]
         installation_token = installation["clientInstallationToken"]
         installation_headers = {"X-Installation-Token": installation_token}
-        response = self.client.post(
-            "/v1/map-jobs",
-            json={
+        response = self.app_attest.post_map_job(
+            self.client,
+            credential=installation,
+            payload={
                 "mode": "custom_bbox",
                 "bbox": [103.75, 1.24, 103.93, 1.37],
                 "clientInstallationId": installation_id,
@@ -1449,8 +1586,8 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(missing_identity.status_code, 400)
 
     def test_stream_artifacts_are_hidden_outside_the_rollout_cohort(self):
-        allowed = self.client.post("/v1/installations").json()
-        blocked = self.client.post("/v1/installations").json()
+        allowed = self.issue_installation(self.client)
+        blocked = self.issue_installation(self.client)
         with patch.dict(
             os.environ,
             {
@@ -1464,7 +1601,9 @@ class MapJobRunAPITests(unittest.TestCase):
             },
             clear=False,
         ):
-            rollout_client = TestClient(create_app())
+            rollout_client = TestClient(
+                create_app(app_attest_verifier=self.app_attest.verifier)
+            )
             rollout_client.headers["X-Map-Stream-Trust"] = self.stream_trust_header
             rollout_client.headers["X-Map-Stream-App-Build"] = "100"
             rollout_client.headers["X-Map-Stream-App-Git-Sha"] = self.ios_git_sha
@@ -1477,16 +1616,14 @@ class MapJobRunAPITests(unittest.TestCase):
                 (allowed, "request-rollout-allowed"),
                 (blocked, "request-rollout-blocked"),
             ):
-                response = rollout_client.post(
-                    "/v1/map-jobs",
-                    json={
+                response = self.app_attest.post_map_job(
+                    rollout_client,
+                    credential=owner,
+                    payload={
                         "mode": "custom_bbox",
                         "bbox": [103.75, 1.24, 103.93, 1.37],
                         "clientInstallationId": owner["clientInstallationId"],
                         "clientRequestId": request_id,
-                    },
-                    headers={
-                        "X-Installation-Token": owner["clientInstallationToken"]
                     },
                 )
                 self.assertEqual(response.status_code, 200)
@@ -1667,7 +1804,7 @@ class MapJobRunAPITests(unittest.TestCase):
             "queued",
         )
 
-        installation = self.client.post("/v1/installations").json()
+        installation = self.issue_installation(self.client)
         malformed_empty_list = self.client.get(
             "/v1/map-jobs",
             params={"clientInstallationId": installation["clientInstallationId"]},
@@ -1690,25 +1827,27 @@ class MapJobRunAPITests(unittest.TestCase):
             "map_platform.api.create_artifact_store_from_environment",
             return_value=PresigningStore(),
         ):
-            client = TestClient(create_app())
+            client = TestClient(
+                create_app(app_attest_verifier=self.app_attest.verifier)
+            )
             client.headers["X-Map-Stream-Trust"] = self.stream_trust_header
             client.headers["X-Map-Stream-App-Build"] = "100"
             client.headers["X-Map-Stream-App-Git-Sha"] = self.ios_git_sha
             client.headers["X-Map-Stream-App-Build-Sha256"] = self.ios_build_sha256
         try:
-            installation = client.post("/v1/installations").json()
+            installation = self.issue_installation(client)
             headers = {
                 "X-Installation-Token": installation["clientInstallationToken"]
             }
-            created = client.post(
-                "/v1/map-jobs",
-                json={
+            created = self.app_attest.post_map_job(
+                client,
+                credential=installation,
+                payload={
                     "mode": "custom_bbox",
                     "bbox": [103.75, 1.24, 103.93, 1.37],
                     "clientInstallationId": installation["clientInstallationId"],
                     "clientRequestId": "request-presign-123",
                 },
-                headers=headers,
             ).json()
             receipt = "6" * 64
             self.update_job(
@@ -2044,11 +2183,18 @@ class MapJobRunAPITests(unittest.TestCase):
 
         for payload in invalid_payloads:
             with self.subTest(payload=payload):
-                response = self.client.post(
-                    "/v1/map-jobs",
-                    json=payload,
-                    headers=self.installation_headers(self.installation),
-                )
+                if payload.get("clientRequestId"):
+                    response = self.app_attest.post_map_job(
+                        self.client,
+                        credential=self.installation,
+                        payload=payload,
+                    )
+                else:
+                    response = self.client.post(
+                        "/v1/map-jobs",
+                        json=payload,
+                        headers=self.installation_headers(self.installation),
+                    )
                 self.assertEqual(response.status_code, 400)
                 self.assertTrue(response.json()["detail"])
 

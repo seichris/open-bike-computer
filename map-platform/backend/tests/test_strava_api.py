@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from app_attest_support import AppAttestTestClient
 from map_platform.api import create_app
 from map_platform.strava_client import StravaHTTPResponse
 
@@ -87,8 +88,15 @@ class StravaAPITests(unittest.TestCase):
             clear=True,
         )
         self.environment.start()
-        self.client = TestClient(create_app(strava_transport=self.transport))
-        self.credential = self.client.post("/v1/installations").json()
+        self.app_attest = AppAttestTestClient()
+        self.client = TestClient(
+            create_app(
+                strava_transport=self.transport,
+                app_attest_verifier=self.app_attest.verifier,
+            )
+        )
+        self.credential = self.app_attest.issue_installation(self.client)
+        self.assertIsInstance(self.credential, dict)
         self.params = {
             "clientInstallationId": self.credential["clientInstallationId"]
         }

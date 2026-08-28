@@ -13,6 +13,10 @@ contract and operating procedure.
   download-URL issuance. Every public installation-owned request requires the
   server-issued installation ID and matching `X-Installation-Token`; legacy
   unowned jobs are available only through admin operations.
+- Apple App Attest enrollment for every new managed installation and a fresh,
+  single-use App Attest assertion for every non-idempotent map creation. The
+  assertion binds the exact request body, installation, idempotency key,
+  renderer/profile identity, and app build.
 - Source-region resolution from `map-platform/backend/config/source-regions.json`,
   with a cached Geofabrik catalog fallback for any requested area covered by
   Geofabrik.
@@ -51,25 +55,17 @@ export MAP_PLATFORM_INSTALLATION_SECRET='replace-with-at-least-32-random-bytes'
 uvicorn --factory map_platform.api:create_app --reload --port 8080
 ```
 
-Create a custom bbox job:
-
-```sh
-credential="$(curl -s -X POST http://localhost:8080/v1/installations)"
-installation_id="$(printf '%s' "$credential" | python -c 'import json,sys; print(json.load(sys.stdin)["clientInstallationId"])')"
-installation_token="$(printf '%s' "$credential" | python -c 'import json,sys; print(json.load(sys.stdin)["clientInstallationToken"])')"
-curl -s http://localhost:8080/v1/map-jobs \
-  -H 'content-type: application/json' \
-  -H "x-installation-token: $installation_token" \
-  -d '{
-    "mode": "custom_bbox",
-    "displayName": "Singapore central",
-    "bbox": [103.75, 1.24, 103.93, 1.37],
-    "clientInstallationId": "'"$installation_id"'",
-    "clientRequestId": "request-12345678",
-    "installOnDevice": false,
-    "target": { "renderer": "esp32-fmb", "firmwareVersion": "0.0.0" }
-  }'
-```
+Installation issuance and new map creation intentionally cannot be exercised
+with an anonymous `curl` request. A genuine iOS client obtains an
+`attestation` challenge from
+`POST /v1/installations/app-attest/challenges`, submits the Apple attestation
+object to `POST /v1/installations`, then obtains a `map-create` challenge and
+adds `X-App-Attest-Challenge-Id`, `X-App-Attest-Key-Id`,
+`X-App-Attest-Assertion`, and `X-App-Attest-App-Build` to
+`POST /v1/map-jobs`. Exact idempotent replays remain readable with the
+installation credential and do not consume a second assertion. There is no
+runtime test-verifier or disable switch; backend tests inject their verifier
+directly through `create_app`.
 
 ### Strava route import
 
@@ -238,13 +234,21 @@ Required Coolify secrets:
 
 The public iOS app contains no server-wide credential. It requests a unique
 installation credential from `POST /v1/installations`, stores it in the
-Keychain, and presents it only for installation-owned resources. Issuance,
+Keychain, and presents it only for installation-owned resources. Managed
+installation issuance is accepted only after Apple App Attest validates the
+app identity, environment, key, certificate chain, nonce, and (when present)
+launch-validation extensions. New map work additionally requires a monotonic,
+body-bound assertion. App Attest challenges, key bindings, receipts, and
+counters live in `/data/app-attest.sqlite3`; that database must use the same
+persistent volume and backup policy as the other control-plane state. Issuance,
 map creation, download-URL creation, and the general public API are protected
 by persistent limits in `/data/rate-limits.sqlite3`. Defaults are intentionally
 conservative and can be tuned with:
 
 - `MAP_PLATFORM_PUBLIC_REQUEST_LIMIT_PER_MINUTE` (default `240` per IP)
 - `MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY` (default `3` per IP)
+- `MAP_PLATFORM_APP_ATTEST_CHALLENGE_TTL_SECONDS` (default `300`; allowed
+  range `30` through `900`)
 - `MAP_PLATFORM_MAP_CREATE_LIMIT_PER_HOUR` (default `4` per installation)
 - `MAP_PLATFORM_MAP_CREATE_IP_LIMIT_PER_DAY` (default `20` per IP)
 - `MAP_PLATFORM_DOWNLOAD_URL_LIMIT_PER_HOUR` (default `30` per installation)
@@ -368,6 +372,15 @@ can merge. Coolify then deploys the reviewed immutable references without
 selecting an image tag at runtime. See
 `docs/map-stream-rollout-runbook.md` for commissioning, hardware acceptance,
 promotion, rollback, retention, and rotation.
+
+Before releasing either iOS channel, enable App Attest for its App ID and
+signing profile. Development builds use the `development` entitlement and
+`4H5PK8686H.LetItRide.BikeComputer.dev`; Production/TestFlight/App Store builds
+use the `production` entitlement and
+`4H5PK8686H.LetItRide.BikeComputer`. Deploy the backend before the App Attest
+client build. Existing pre-attestation installations may continue reading
+their owned resources, but the app creates a new attested installation before
+it can submit new map work.
 
 Useful production environment variables:
 
