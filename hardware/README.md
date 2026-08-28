@@ -759,6 +759,19 @@ and
 examples use native one-bit SDMMC. The migration changes the transport, not
 the isolation invariant.
 
+The transport transition has one unavoidable power-state boundary. An SD card
+that entered SPI mode under older HSPI firmware cannot return to native SD mode
+until the card itself loses power; `ESP.restart()` and SDMMC teardown do not
+remove that power. The first boot across the HSPI-to-SDMMC transition can
+therefore fall back to FFat until all power sources keeping the card slot alive
+are removed and the device is started again. Bounded mount retries remain useful
+for native-controller lifecycle failures, but they cannot change the card's bus
+mode. The first OTA release containing this migration must either ship a tested
+compatibility path or give the rider an explicit one-time full-power-cycle step;
+it must not be described as a seamless warm-reboot migration. See the
+[SD Association Physical Layer Simplified Specification](https://www.sdcard.org/cms/wp-content/themes/sdcard-org/dl.php?f=Part1_Physical_Layer_Simplified_Specification_Ver5.10.pdf),
+section 7.2.1.
+
 Firmware defaults:
 - `WAVESHARE_SDMMC_FREQ_KHZ` default: `SDMMC_FREQ_DEFAULT` (20 MHz)
 - `WAVESHARE_SD_LIST_ROOT` disabled by default
@@ -785,6 +798,24 @@ health check; failure retains the existing FFat fallback. `MAPIO:` timing is
 verbose and must remain opt-in because redraw logging can add USB CDC pressure
 during normal app-driven map use.
 
+Validation recorded on 2026-08-28 for the 1.75-inch developer target at exact
+Git SHA `059348754cce2c9712ff85f9a752bc2d5a7c8788`:
+
+- a warm flash from the older HSPI firmware failed all three native SDMMC mount
+  attempts, as expected for a still-powered card in SPI mode;
+- after complete card power removal, the same card mounted on the first attempt
+  at 20 MHz and reported type `SD` and 1914 MB capacity;
+- subsequent resets while already running the SDMMC firmware mounted on the
+  first attempt; and
+- the 36,964,418-byte `Shanghai large` map was uploaded with SHA-256
+  `24274f0641dee5614ae41955676320d9cada9680f3ba788dadb9b251021ac0cc`,
+  installed, activated, read from the card, and visibly rendered on the device.
+
+This is one board/card and one developer-profile result. It does not qualify
+the 2.06-inch target, the production profiles, no-card fallback, runtime
+remount, the multi-card matrix, or the current merged integration head without
+a new physical run.
+
 ---
 
 ## I2C Device Scan Reference
@@ -802,13 +833,13 @@ When scanning the I2C bus, you should find:
 
 ---
 
-## Status (Verified 2026-07-02)
+## Status (Verified 2026-08-28)
 
 | Feature | Status | Notes |
 |---|---|---|
 | Display | ✅ Working | CO5300 QSPI via Arduino_GFX; vendor 466x466 + 6px X gap; 90-degree hardware rotation disabled |
 | Touch | ✅ Working | CST9217 @ 0x5A, TCA9554 P0 reset, GPIO21 hint + throttled fallback polling |
-| SD Card | ⚠️ SDMMC validation pending | Former HSPI path and pins were verified; native one-bit SDMMC on GPIO2/1/3 requires cold/warm/reset, read/write, and representative-card acceptance |
+| SD Card | ⚠️ Working / qualification incomplete | One 1.75-inch board/card passed cold mount, subsequent reset, map write/install/read/render on exact SHA `059348754cce2c9712ff85f9a752bc2d5a7c8788`; the HSPI-to-SDMMC warm transition requires one full card power cycle, and the remaining target/card/fallback matrix is open |
 | RTC | ✅ Integrated | PCF85063 @ 0x51; invalid/voltage-low values rejected; BLE sync and warm-reset restore verified with battery present; full USB-removal retention still needs final battery retest |
 | IMU | ✅ Diagnostic | QMI8658 @ 0x6B primary / 0x6A fallback; low-rate diagnostic accel/gyro sampling only |
 | I/O Expander | ✅ Working | TCA9554 @ 0x20 controls touch reset; can be missed early but recovered by shared I2C retry/recovery |

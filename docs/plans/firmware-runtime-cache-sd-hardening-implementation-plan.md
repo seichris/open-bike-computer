@@ -23,13 +23,22 @@ vendor-native ESP32-S3 one-bit `SD_MMC` path on GPIO2/1/3 for both Waveshare
 boards. HSPI-specific text below has been replaced; the bounded recovery,
 health-check, FFat fallback, diagnostics, and physical acceptance gates remain.
 
+Validation amendment (2026-08-28): the 1.75-inch developer target mounted and
+rendered an uploaded map after a true card power cycle, and subsequent resets
+mounted on the first attempt. The initial warm transition from HSPI firmware did
+not mount because the still-powered card remained in SPI mode. This is an SD
+protocol constraint, not a retry-policy failure: the rollout must include a
+one-time full-card-power-cycle step or a separately tested compatibility path.
+Steady-state SDMMC warm-reset acceptance and the remaining hardware matrix stay
+as gates.
+
 The retained scope is deliberately limited to the earlier recommendations:
 
 1. replace ambient/global PlatformIO with a repository-owned, content-pinned
    host runtime;
 2. separate reusable custom-core identity from firmware source identity;
 3. move Waveshare storage to native one-bit SDMMC and recover safely from
-   warm-reset card state;
+   steady-state warm-reset controller state;
 4. make speaker teardown idempotent and add a local device-name registry.
 
 The following recommendations are explicitly excluded and must not be smuggled
@@ -136,6 +145,14 @@ Waveshare's maintained Arduino examples for both supported boards use native
 one-bit `SD_MMC` on GPIO2 CLK, GPIO1 CMD, and GPIO3 D0. The accepted revision
 follows that path at the standard 20 MHz frequency, keeps bounded teardown and
 retries, and does not add a hand-written SD command implementation.
+
+The old-to-new transport transition is different from a steady-state SDMMC
+restart. Once the old firmware has selected SPI mode, the card cannot return to
+native SD mode while powered. A software or OTA restart alone therefore cannot
+make that first native mount succeed. The rollout must surface a one-time full
+card power cycle or add and physically validate an explicit compatibility path;
+the three-attempt policy below must not be represented as solving bus-mode
+migration.
 
 ### Speaker cleanup
 
@@ -607,7 +624,7 @@ application compile, link, and attestation. On the same host and target:
 The observed roughly five-minute cold rebuild versus roughly 50-second
 application rebuild is motivation, not a hardcoded universal timing claim.
 
-## Workstream C: native Waveshare SDMMC with bounded warm-reset recovery
+## Workstream C: native Waveshare SDMMC with bounded steady-state recovery
 
 ### C1. Use the vendor-native peripheral and pins
 
@@ -646,6 +663,10 @@ Each attempt must:
 After all attempts fail, end SDMMC once more and retain the current FFat
 fallback. Do not format removable media, loop forever, reboot automatically,
 or toggle a PMIC rail.
+
+These retries recover bounded native-controller lifecycle failures. They cannot
+move a still-powered card from SPI mode back to native SD mode; that transition
+requires card power removal or a separately accepted compatibility design.
 
 ### C3. Re-mount and stable-backend behavior
 
@@ -713,7 +734,8 @@ checksummed file; for one writable test card, perform a temporary write,
 Acceptance requires:
 
 - 100% success for inserted known-good cards in the matrix;
-- zero required cable or battery power cycles after warm resets;
+- after the one-time HSPI-to-SDMMC migration boundary, zero required cable or
+  battery power cycles for steady-state warm resets;
 - no Guru Meditation, watchdog, or repeated boot;
 - no filesystem corruption or leaked file handles;
 - final-failure latency no greater than six seconds before FFat fallback; and
@@ -939,7 +961,8 @@ The retained plan is complete only when all of these are true:
 8. Dirty builds may consume but cannot publish cache entries or upload.
 9. Cross-worktree core reuse is enabled only with recorded relocatability and
    immutable-hydration evidence.
-10. Warm reset, software restart, and upload reset meet the SD matrix without a
+10. After the explicitly handled one-time HSPI-to-SDMMC migration boundary,
+    warm reset, software restart, and upload reset meet the SD matrix without a
     manual power cycle on every available supported board/card.
 11. Missing-card failure is bounded and falls back once to FFat.
 12. SD map-block and sequential-read throughput remains within the stated

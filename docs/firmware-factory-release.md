@@ -78,6 +78,17 @@ physical screen-switch/render-ahead validation from
 speaker soak is an accepted non-blocking risk documented in
 [`hardware/README.md`](../hardware/README.md).
 
+The first OTA release that changes Waveshare storage from HSPI/Arduino `SD` to
+native `SD_MMC` has an additional migration gate. A card selected into SPI mode
+cannot return to native SD mode without losing card power, while the OTA
+finalizer performs only a warm `ESP.restart()`. Before publishing that release,
+either ship and physically validate a compatibility path or make the required
+one-time full-card-power-cycle action explicit to the rider and record the
+maintainer's residual-risk acceptance. Post-reboot firmware identity alone does
+not prove that removable storage or installed maps are available. The exact
+observed behavior and remaining matrix are recorded in
+[`hardware/README.md`](../hardware/README.md#8-sd-card--map-io).
+
 ## Release outputs
 
 For each production target, the candidate and protected publisher together
