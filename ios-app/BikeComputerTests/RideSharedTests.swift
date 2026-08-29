@@ -1790,6 +1790,34 @@ enum RideSharedTests {
             WatchRouteSyncMessageV1(propertyList: message.propertyList) == message,
             "route transfer metadata round-trips through property-list values"
         )
+        expect(
+            WatchRouteSyncMessageV1.isInstallTransfer(
+                message.propertyList,
+                matching: identity
+            ),
+            "the exact queued install is cancellable"
+        )
+        expect(
+            !WatchRouteSyncMessageV1.isInstallTransfer(
+                WatchRouteSyncMessageV1(
+                    operation: .delete,
+                    identity: identity
+                ).propertyList,
+                matching: identity
+            ),
+            "a queued deletion cannot be cancelled as an install"
+        )
+        expect(
+            !WatchRouteSyncMessageV1.isInstallTransfer(
+                message.propertyList,
+                matching: WatchRouteIdentityV1(
+                    routeID: UUID(),
+                    revision: identity.revision,
+                    contentHash: identity.contentHash
+                )
+            ),
+            "route cancellation is bound to the exact identity"
+        )
         let renamedEntry = try WatchRouteDisplayNameV1(
             identity: identity,
             name: "  Morning Loop  "
