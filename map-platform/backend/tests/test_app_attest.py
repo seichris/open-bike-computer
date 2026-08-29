@@ -410,6 +410,7 @@ class AppAttestStoreTests(unittest.TestCase):
         extensions=None,
         extension_data_flag=True,
         attested_credential_data_flag=False,
+        prehashed_nonce=False,
     ) -> bytes:
         client_data = canonical_map_create_client_data(
             challenge_id=challenge.challenge_id,
@@ -436,11 +437,52 @@ class AppAttestStoreTests(unittest.TestCase):
         ).digest()
         signature = private_key.sign(
             nonce,
-            ec.ECDSA(utils.Prehashed(hashes.SHA256())),
+            (
+                ec.ECDSA(utils.Prehashed(hashes.SHA256()))
+                if prehashed_nonce
+                else ec.ECDSA(hashes.SHA256())
+            ),
         )
         return encode_cbor(
             {"signature": signature, "authenticatorData": auth_data}
         )
+
+    def test_assertion_rejects_single_hash_synthetic_signature(self):
+        installation_id = "inst_v2_" + "4" * 32
+        private_key, key_id = self.enroll(installation_id)
+        payload = {
+            "mode": "custom_bbox",
+            "bbox": [103.75, 1.24, 103.93, 1.37],
+            "clientInstallationId": installation_id,
+            "clientRequestId": "request-single-hash-1",
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        challenge = self.store.issue_challenge(
+            purpose=APP_ATTEST_MAP_CREATE_PURPOSE,
+            installation_id=installation_id,
+        )
+        assertion = self.assertion(
+            private_key=private_key,
+            challenge=challenge,
+            installation_id=installation_id,
+            payload=payload,
+            body=body,
+            counter=1,
+            prehashed_nonce=True,
+        )
+
+        with self.assertRaises(AppAttestError) as raised:
+            self.store.verify_map_create_assertion(
+                installation_id=installation_id,
+                challenge_id=challenge.challenge_id,
+                key_id=key_id,
+                assertion_object=assertion,
+                request_body=body,
+                payload=payload,
+                app_build=TEST_APP_BUILD,
+            )
+
+        self.assertEqual(raised.exception.code, "app_attest_invalid_signature")
 
     def test_assertion_allows_signed_app_upgrade_and_rejects_wrong_category(self):
         installation_id = "inst_v2_" + "e" * 32
