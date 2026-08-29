@@ -37,58 +37,50 @@ A sleek, Garmin-mounted bike computer.
     </td>
   </tr>
 
-  <!-- Second row: 4 images -->
+  <!-- Second row: 3 centered images -->
   <tr>
-    <td align="center" valign="top" colspan="5">
+    <td colspan="1">&nbsp;</td>
+    <td align="center" valign="top" colspan="6">
       <img src="docs/images/readme/6.jpg" width="170" alt="On the Garmin mount">
       <br>
       <sub><b>On the Garmin mount</b></sub>
     </td>
-    <td align="center" valign="top" colspan="5">
-      <img src="docs/images/readme/7.jpg" width="170" alt="Detailed maps">
+    <td align="center" valign="top" colspan="6">
+      <img src="docs/images/readme/7.jpg" width="170" alt="Bicino protection sleeve">
       <br>
-      <sub><b>Detailed maps</b></sub>
+      <sub><b>Bicino protection<br>sleeve</b></sub>
     </td>
-    <td align="center" valign="top" colspan="5">
-      <img src="docs/images/readme/8.jpg" width="170" alt="3D map navigation">
-      <br>
-      <sub><b>3D map navigation</b></sub>
-    </td>
-    <td align="center" valign="top" colspan="5">
-      <img src="docs/images/readme/9.jpg" width="170" alt="Open-source hardware">
+    <td align="center" valign="top" colspan="6">
+      <img src="docs/images/readme/8.jpg" width="170" alt="Open-source hardware">
       <br>
       <sub><b>Open-source hardware</b></sub>
     </td>
+    <td colspan="1">&nbsp;</td>
   </tr>
 
-  <!-- Third row: 2 app images and 2 placeholders -->
+  <!-- Third row: 3 app images and 2 Apple Watch images -->
   <tr>
-    <td align="center" valign="top" colspan="5">
+    <td align="center" valign="top" colspan="4">
       <img src="docs/images/readme/app1.jpg" width="170" alt="Apple Workout">
       <br>
       <sub><b>Apple Workout</b></sub>
     </td>
-    <td align="center" valign="top" colspan="5">
+    <td align="center" valign="top" colspan="4">
       <img src="docs/images/readme/app2.jpg" width="170" alt="Apple Maps Navigation">
       <br>
       <sub><b>Apple Maps Navigation</b></sub>
     </td>
-    <td align="center" valign="top" colspan="5">
-      &nbsp;
+    <td align="center" valign="top" colspan="4">
+      <img src="docs/images/readme/app3.jpg" width="170" alt="Strava route import">
+      <br>
+      <sub><b>Strava route import</b></sub>
     </td>
-    <td align="center" valign="top" colspan="5">
-      &nbsp;
-    </td>
-  </tr>
-
-  <!-- Fourth row: 2 Apple Watch images -->
-  <tr>
-    <td align="center" valign="top" colspan="10">
+    <td align="center" valign="top" colspan="4">
       <img src="docs/images/readme/watch1.jpg" width="170" alt="Start your workout with one tap">
       <br>
-      <sub><b>Start your workout with one tap</b></sub>
+      <sub><b>Start your workout<br>with one tap</b></sub>
     </td>
-    <td align="center" valign="top" colspan="10">
+    <td align="center" valign="top" colspan="4">
       <img src="docs/images/readme/watch2.jpg" width="170" alt="Automatically save rides to Apple Health">
       <br>
       <sub><b>Automatically save rides<br>to Apple Health</b></sub>
