@@ -94,6 +94,24 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
             ]
             self.assertNotIn(forbidden, diagnostic_block)
 
+        status_snapshot = HTTP_SOURCE[
+            HTTP_SOURCE.index(
+                "HttpTransferStatus HttpTransferServer::status() const"
+            ) :
+            HTTP_SOURCE.index("bool HttpTransferServer::isRequestAuthorized")
+        ]
+        self.assertIn("result.errorSequence = errorSequence", status_snapshot)
+
+        ble_source = (
+            ROOT / "lib/ble_navigation/ble_navigation.cpp"
+        ).read_text(encoding="utf-8")
+        transfer_status = ble_source[
+            ble_source.index("static std::string genericTransferStatusJson()") :
+            ble_source.index("static void notifyMapTransferStatus")
+        ]
+        self.assertIn('\\"sequence\\":', transfer_status)
+        self.assertIn("transferStatus.errorSequence", transfer_status)
+
     def test_tls_psram_hole_is_reserved_before_renderer_and_leased_only_to_tls(self):
         self.assertIn(
             "TLS_HANDSHAKE_PSRAM_RESERVE_BYTES = 64U * 1024U", TLS_HEADER
