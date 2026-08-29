@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <esp_system.h>
 #include <sstream>
 
@@ -700,8 +701,35 @@ void HttpTransferServer::runWorker() {
       const TransferTlsIdentity tlsIdentity = tlsIdentityStore_.active();
       unlockTlsIdentity();
       if (!client.begin(acceptedClient, tlsIdentity)) {
-        Serial.println(
-            "DEVICE_TRANSFER_HTTP: rejected client before secure request");
+        const TransferTlsHandshakeDiagnostics &diagnostics =
+            client.handshakeDiagnostics();
+        char message[384] = {};
+        std::snprintf(
+            message, sizeof(message),
+            "stage=%s result=%ld lastEsp=0x%08lx tls=0x%08lx "
+            "flags=0x%08lx internalBefore=%lu internalLargestBefore=%lu "
+            "internalAfter=%lu internalLargestAfter=%lu dmaBefore=%lu "
+            "dmaLargestBefore=%lu dmaAfter=%lu dmaLargestAfter=%lu",
+            transferTlsFailureStageName(diagnostics.stage),
+            static_cast<long>(diagnostics.sessionResult),
+            static_cast<unsigned long>(
+                static_cast<uint32_t>(diagnostics.lastEspError)),
+            static_cast<unsigned long>(
+                static_cast<uint32_t>(diagnostics.tlsErrorCode)),
+            static_cast<unsigned long>(
+                static_cast<uint32_t>(diagnostics.tlsFlags)),
+            static_cast<unsigned long>(diagnostics.before.internalFree),
+            static_cast<unsigned long>(diagnostics.before.internalLargest),
+            static_cast<unsigned long>(diagnostics.after.internalFree),
+            static_cast<unsigned long>(diagnostics.after.internalLargest),
+            static_cast<unsigned long>(diagnostics.before.dmaFree),
+            static_cast<unsigned long>(diagnostics.before.dmaLargest),
+            static_cast<unsigned long>(diagnostics.after.dmaFree),
+            static_cast<unsigned long>(diagnostics.after.dmaLargest));
+        setLastError(transferTlsFailureCode(diagnostics), message);
+        Serial.printf(
+            "DEVICE_TRANSFER_HTTP: rejected client before secure request %s\n",
+            message);
         vTaskDelay(pdMS_TO_TICKS(2));
         continue;
       }

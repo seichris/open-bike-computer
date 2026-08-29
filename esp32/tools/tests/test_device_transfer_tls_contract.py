@@ -41,6 +41,46 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
         self.assertIn("WiFiClient socketOwner_;", TLS_HEADER)
         self.assertIn("TransferClient &client", HTTP_HEADER)
 
+    def test_tls_handshake_failures_preserve_safe_error_and_heap_evidence(self):
+        begin = TLS_SOURCE[
+            TLS_SOURCE.index("bool TransferClient::begin") :
+            TLS_SOURCE.index("int TransferClient::available")
+        ]
+        self.assertIn("esp_tls_get_error_handle", begin)
+        self.assertIn("esp_tls_get_and_clear_last_error", begin)
+        self.assertLess(
+            begin.index("esp_tls_get_and_clear_last_error"),
+            begin.index("esp_tls_server_session_delete"),
+        )
+        self.assertIn("heap_caps_get_free_size(kInternalCaps)", TLS_SOURCE)
+        self.assertIn("heap_caps_get_largest_free_block(kInternalCaps)", TLS_SOURCE)
+        self.assertIn("heap_caps_get_free_size(MALLOC_CAP_DMA)", TLS_SOURCE)
+        self.assertIn("heap_caps_get_largest_free_block(MALLOC_CAP_DMA)", TLS_SOURCE)
+        for code in (
+            "tls_context_allocation_failed",
+            "tls_handshake_timeout",
+            "tls_handshake_allocation_failed",
+            "tls_handshake_failed",
+        ):
+            self.assertIn(code, TLS_SOURCE)
+        worker = HTTP_SOURCE[
+            HTTP_SOURCE.index("void HttpTransferServer::runWorker()") :
+            HTTP_SOURCE.index("void HttpTransferServer::workerTaskThunk")
+        ]
+        self.assertIn("client.handshakeDiagnostics()", worker)
+        self.assertIn("setLastError(transferTlsFailureCode(diagnostics), message)", worker)
+        for forbidden in (
+            "certificatePem",
+            "privateKeyPem",
+            "sessionToken",
+            "apPassphrase",
+        ):
+            diagnostic_block = worker[
+                worker.index("const TransferTlsHandshakeDiagnostics") :
+                worker.index("vTaskDelay(pdMS_TO_TICKS(2))")
+            ]
+            self.assertNotIn(forbidden, diagnostic_block)
+
     def test_leaf_fingerprint_is_sha256_over_certificate_der(self):
         fingerprint = TLS_SOURCE[
             TLS_SOURCE.index("bool certificateFingerprint") :
