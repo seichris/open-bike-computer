@@ -16107,6 +16107,14 @@ struct NavigationProtocolTests {
             domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
             code: 7
         ), "user denial never triggers a second join prompt")
+        assert(
+            DeviceNetworkJoinPolicy.hasAnotherAssociationAttempt(after: 0),
+            "an accepted but unreachable first association receives one retry"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.hasAnotherAssociationAttempt(after: 1),
+            "device Wi-Fi association remains bounded to two attempts"
+        )
         assert(DeviceNetworkJoinPolicy.reachabilityTimeout >= 30,
                "an accepted local-only accessory network gets a stable association window")
         assertEqual(DeviceNetworkJoinPolicy.diagnosticMessage(

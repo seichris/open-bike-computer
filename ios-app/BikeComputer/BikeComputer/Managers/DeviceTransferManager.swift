@@ -375,9 +375,9 @@ enum DeviceNetworkJoinPolicy {
     static let applyAttemptCount = 2
     static let configurationSettleDelayNanoseconds: UInt64 = 500_000_000
     // iOS can take more than the hotspot configuration callback to move from
-    // an internet-connected network to a local-only accessory AP. Keep one
-    // accepted configuration stable while that association settles; removing
-    // and reapplying it here can restart the switch indefinitely.
+    // an internet-connected network to a local-only accessory AP. Give each
+    // accepted configuration a complete stable association window before the
+    // one bounded reapplication; never restart the switch indefinitely.
     static let reachabilityTimeout: TimeInterval = 30
     static let reachabilityRetryNanoseconds: UInt64 = 250_000_000
     static let hotspotErrorDomain = "NEHotspotConfigurationErrorDomain"
@@ -397,6 +397,10 @@ enum DeviceNetworkJoinPolicy {
         // public NEHotspotConfiguration error contract. User/policy/validation
         // failures require intervention and must not show a second join prompt.
         return code == 8 || code == 9 || code == 11
+    }
+
+    static func hasAnotherAssociationAttempt(after attempt: Int) -> Bool {
+        attempt + 1 < applyAttemptCount
     }
 
     static func diagnosticMessage(
@@ -1006,11 +1010,12 @@ final class DeviceTransferManager {
 
         status("joining device Wi-Fi")
         var lastApplyError: NSError?
-        var associationAccepted = false
 
-        // Clear a saved configuration once before joining. After iOS accepts
-        // the replacement, leave it installed until the transfer finishes so
-        // the system has one uninterrupted local-only association window.
+        // Clear a saved configuration before the first bounded association
+        // attempt. An accepted configuration gets the full reachability window
+        // before one fresh application is allowed; this recovers the observed
+        // iOS state where apply succeeds but the phone remains on its previous
+        // network. Never re-prompt after user, policy, or validation denial.
         Self.removeAccessoryNetworkConfiguration(ssid: ssid)
         try await Task.sleep(
             nanoseconds:
@@ -1031,10 +1036,7 @@ final class DeviceTransferManager {
 
             let applyError = await apply(configuration: configuration)
             lastApplyError = applyError
-            if applyError == nil {
-                associationAccepted = true
-                break
-            }
+            var associationAccepted = applyError == nil
 
             if let applyError {
                 print(
@@ -1053,21 +1055,22 @@ final class DeviceTransferManager {
                     )
                 if alreadyAssociated {
                     associationAccepted = true
-                    break
                 }
 
                 // A configuration error can race with a successful
                 // association. Preserve a server that is already reachable
                 // instead of tearing its network configuration back down.
-                if await isTransferServerReachable(
+                if !associationAccepted,
+                   await isTransferServerReachable(
                     session: session,
                     statusPath: statusPath
-                ) {
-                    associationAccepted = true
-                    break
+                   ) {
+                    joinedAccessPointSSID = ssid
+                    return
                 }
 
-                if !DeviceNetworkJoinPolicy.shouldRetry(
+                if !associationAccepted,
+                   !DeviceNetworkJoinPolicy.shouldRetry(
                        domain: applyError.domain,
                        code: applyError.code
                    ) {
@@ -1075,25 +1078,33 @@ final class DeviceTransferManager {
                 }
             }
 
-            if attempt + 1 < DeviceNetworkJoinPolicy.applyAttemptCount {
+            if associationAccepted {
+                joinedAccessPointSSID = ssid
+                status("waiting for device transfer server")
+                if try await waitForTransferServer(
+                    session: session,
+                    statusPath: statusPath
+                ) {
+                    print("Device Wi-Fi ready: \(ssid)")
+                    return
+                }
+                lastApplyError = nil
+                print(
+                    "Device Wi-Fi server unreachable after accepted " +
+                    "configuration: \(ssid)"
+                )
+            }
+
+            if DeviceNetworkJoinPolicy.hasAnotherAssociationAttempt(
+                after: attempt
+            ) {
                 status("retrying device Wi-Fi")
                 Self.removeAccessoryNetworkConfiguration(ssid: ssid)
+                joinedAccessPointSSID = nil
                 try await Task.sleep(
                     nanoseconds:
                         DeviceNetworkJoinPolicy.configurationSettleDelayNanoseconds
                 )
-            }
-        }
-
-        if associationAccepted {
-            joinedAccessPointSSID = ssid
-            status("waiting for device transfer server")
-            if try await waitForTransferServer(
-                session: session,
-                statusPath: statusPath
-            ) {
-                print("Device Wi-Fi ready: \(ssid)")
-                return
             }
         }
 
