@@ -1720,9 +1720,15 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             return
         }
 
-        setupState = Self.resolveSetupState(
-            requiredShareStatuses: requiredShareStatuses
-        ) ?? .failed
+        do {
+            let requestStatus = try await authorizationRequestStatus()
+            setupState = Self.resolveSetupState(
+                requiredShareStatuses: requiredShareStatuses,
+                requestStatus: requestStatus
+            ) ?? .failed
+        } catch {
+            setupState = .failed
+        }
     }
 
     private func authorizeHealthKit() async {
@@ -6608,6 +6614,23 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         )
     }
 
+    private func authorizationRequestStatus() async throws ->
+        HKAuthorizationRequestStatus {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<HKAuthorizationRequestStatus, Error>) in
+            healthStore.getRequestStatusForAuthorization(
+                toShare: Self.typesToShare,
+                read: Self.typesToRead
+            ) { status, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: status)
+                }
+            }
+        }
+    }
+
     private func recoverActiveWorkoutSession() async -> (
         session: HKWorkoutSession?,
         error: Error?
@@ -6778,13 +6801,18 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     }
 
     static func resolveSetupState(
-        requiredShareStatuses: [HKAuthorizationStatus]
+        requiredShareStatuses: [HKAuthorizationStatus],
+        requestStatus: HKAuthorizationRequestStatus? = nil
     ) -> WatchWorkoutSetupState? {
         guard !requiredShareStatuses.isEmpty else { return nil }
         if requiredShareStatuses.contains(.sharingDenied) {
             return .denied
         }
         if requiredShareStatuses.contains(.notDetermined) {
+            return .needsAuthorization
+        }
+        if let requestStatus,
+           requestStatus != .unnecessary {
             return .needsAuthorization
         }
         if requiredShareStatuses.allSatisfy({

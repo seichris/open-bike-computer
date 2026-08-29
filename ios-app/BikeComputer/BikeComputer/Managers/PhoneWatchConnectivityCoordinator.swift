@@ -492,7 +492,7 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         } else {
             watchMetadata = nil
         }
-        if watchAppInstalled,
+        if paired,
            let data = session.receivedApplicationContext[
                WorkoutHealthSetupSnapshotV1.applicationContextKey
            ] as? Data {

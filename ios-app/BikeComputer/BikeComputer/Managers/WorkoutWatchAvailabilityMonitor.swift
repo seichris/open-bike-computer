@@ -241,22 +241,23 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
                 isCompanionAppInstalled: state.isWatchAppInstalled,
                 isReachable: state.isReachable
             )
-            healthSetupSnapshot = state.isWatchAppInstalled
+            healthSetupSnapshot = state.isPaired
                 ? state.healthSetupSnapshot
                 : nil
         } else if let session {
             let isActivated = session.activationState == .activated
+            let isPaired = isActivated && session.isPaired
             let isWatchAppInstalled = isActivated
                 && session.isWatchAppInstalled
             availability = WorkoutWatchAvailabilityPolicyV1.resolve(
                 isSupported: true,
                 isActivated: isActivated,
                 activationFailed: activationFailed,
-                isPaired: isActivated ? session.isPaired : false,
+                isPaired: isPaired,
                 isCompanionAppInstalled: isWatchAppInstalled,
                 isReachable: isActivated ? session.isReachable : false
             )
-            healthSetupSnapshot = isWatchAppInstalled
+            healthSetupSnapshot = isPaired
                 ? Self.healthSetupSnapshot(
                     from: session.receivedApplicationContext
                 )

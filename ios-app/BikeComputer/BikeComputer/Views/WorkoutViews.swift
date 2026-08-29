@@ -139,6 +139,16 @@ struct WorkoutStartButton<Label: View>: View {
                 secondaryButton: .cancel()
             )
         }
+        if alert == .healthAccessDenied {
+            return Alert(
+                title: Text(alert.title),
+                message: Text(alert.message),
+                primaryButton: .default(Text("Check Again")) {
+                    action()
+                },
+                secondaryButton: .cancel()
+            )
+        }
         return Alert(
             title: Text(alert.title),
             message: Text(alert.message),

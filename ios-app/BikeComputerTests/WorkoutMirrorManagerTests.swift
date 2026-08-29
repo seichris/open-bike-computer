@@ -139,6 +139,50 @@ final class WorkoutWatchAvailabilityMonitorProductionTests: XCTestCase {
             healthSetupSnapshot: healthSetup
         )
         XCTAssertEqual(monitor.healthSetupSnapshot, healthSetup)
+
+        coordinator.workoutState = WorkoutWatchConnectivityStateV1(
+            isSupported: true,
+            isActivated: true,
+            isPaired: true,
+            isWatchAppInstalled: false,
+            isReachable: false,
+            healthSetupSnapshot: healthSetup
+        )
+        XCTAssertEqual(
+            monitor.healthSetupSnapshot,
+            healthSetup,
+            "a lagging install catalogue must not hide a fresh Watch snapshot"
+        )
+    }
+
+    func testDirectSessionRetainsSnapshotWhenInstallFlagLags() throws {
+        let suiteName = "WorkoutWatchAvailabilityMonitorSnapshotTests"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let healthSetup = WorkoutHealthSetupSnapshotV1(
+            state: .ready,
+            canWriteWorkoutRoute: false
+        )
+        let session = FakeWorkoutWatchConnectivitySession()
+        session.activationState = .activated
+        session.isPaired = true
+        session.isWatchAppInstalled = false
+        session.receivedApplicationContext = [
+            WorkoutHealthSetupSnapshotV1.applicationContextKey:
+                try healthSetup.encoded(),
+        ]
+        let scheduler = ManualWorkoutWatchSyncRetryScheduler()
+        let monitor = WorkoutWatchAvailabilityMonitor(
+            heartRateZoneDefaults: defaults,
+            session: session,
+            syncRetryScheduler: scheduler.schedule
+        )
+
+        monitor.activate()
+
+        XCTAssertEqual(monitor.availability, .companionAppNotInstalled)
+        XCTAssertEqual(monitor.healthSetupSnapshot, healthSetup)
     }
 
     func testPersistedMaximumHeartRatePublishesAfterActivationAndInstall() async throws {

@@ -2772,7 +2772,8 @@ final class WatchWorkoutManagerTests: XCTestCase {
     func testRequiredWorkoutAuthorizationFailsClosedWithoutBlockingOnRoute() {
         XCTAssertEqual(
             WatchWorkoutManager.resolveSetupState(
-                requiredShareStatuses: [.sharingDenied]
+                requiredShareStatuses: [.sharingDenied],
+                requestStatus: .shouldRequest
             ),
             .denied
         )
@@ -2787,6 +2788,21 @@ final class WatchWorkoutManagerTests: XCTestCase {
                 requiredShareStatuses: [.notDetermined]
             ),
             .needsAuthorization
+        )
+        XCTAssertEqual(
+            WatchWorkoutManager.resolveSetupState(
+                requiredShareStatuses: [.sharingAuthorized],
+                requestStatus: .shouldRequest
+            ),
+            .needsAuthorization,
+            "new optional or read types must still get a permission sheet"
+        )
+        XCTAssertEqual(
+            WatchWorkoutManager.resolveSetupState(
+                requiredShareStatuses: [.sharingAuthorized],
+                requestStatus: .unnecessary
+            ),
+            .ready
         )
         XCTAssertNil(
             WatchWorkoutManager.resolveSetupState(

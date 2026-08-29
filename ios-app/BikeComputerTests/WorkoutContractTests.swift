@@ -6795,8 +6795,14 @@ private struct WorkoutContractTestSuite {
                 )
                 && iPhoneConfirmationComponent.contains(
                     "case .healthAccessDenied:\n            pendingStart = false\n            presentedAlert = .healthAccessDenied"
+                )
+                && iPhoneConfirmationComponent.contains(
+                    "primaryButton: .default(Text(\"Check Again\"))"
+                )
+                && iPhoneConfirmationComponent.contains(
+                    "primaryButton: .default(Text(\"Check Again\")) {\n                    action()"
                 ),
-            "the iPhone component must use Watch Health setup before launching"
+            "the iPhone component must gate launch on Watch Health setup and provide an explicit denied-state recheck"
         )
         expect(
             compactIPhoneConfirmation.contains(
