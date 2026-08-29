@@ -11,6 +11,8 @@ import WatchConnectivity
 final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     PhoneWatchControllerTransporting, WorkoutWatchConnectivityCoordinating {
     @Published private(set) var state: PhoneWatchConnectivityStateV1
+    @Published private(set) var workoutHealthSetupSnapshot:
+        WorkoutHealthSetupSnapshotV1?
 
     var onRouteAcknowledgement: ((WatchRouteSyncMessageV1) -> Void)?
     var onDirectRidePreparationRequest:
@@ -42,21 +44,23 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             activationFailed: state.activationFailed,
             isPaired: state.isPaired,
             isWatchAppInstalled: state.isWatchAppInstalled,
-            isReachable: state.isReachable
+            isReachable: state.isReachable,
+            healthSetupSnapshot: workoutHealthSetupSnapshot
         )
     }
 
     var workoutStatePublisher:
         AnyPublisher<WorkoutWatchConnectivityStateV1, Never> {
-        $state
-            .map { state in
+        Publishers.CombineLatest($state, $workoutHealthSetupSnapshot)
+            .map { state, healthSetupSnapshot in
                 WorkoutWatchConnectivityStateV1(
                     isSupported: state.isSupported,
                     isActivated: state.isActivated,
                     activationFailed: state.activationFailed,
                     isPaired: state.isPaired,
                     isWatchAppInstalled: state.isWatchAppInstalled,
-                    isReachable: state.isReachable
+                    isReachable: state.isReachable,
+                    healthSetupSnapshot: healthSetupSnapshot
                 )
             }
             .eraseToAnyPublisher()
@@ -72,6 +76,7 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     init(session: WCSession?, defaults: UserDefaults = .standard) {
         self.session = session
         self.defaults = defaults
+        workoutHealthSetupSnapshot = nil
         state = PhoneWatchConnectivityStateV1(
             isSupported: session != nil
         )
@@ -471,6 +476,7 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
 
     fileprivate func refreshState(activationFailed: Bool? = nil) {
         guard let session else {
+            workoutHealthSetupSnapshot = nil
             state = PhoneWatchConnectivityStateV1()
             return
         }
@@ -485,6 +491,15 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             watchMetadata = try? WatchDeviceMetadataV1.decode(data)
         } else {
             watchMetadata = nil
+        }
+        if paired,
+           let data = session.receivedApplicationContext[
+               WorkoutHealthSetupSnapshotV1.applicationContextKey
+           ] as? Data {
+            workoutHealthSetupSnapshot = try?
+                WorkoutHealthSetupSnapshotV1.decode(data)
+        } else {
+            workoutHealthSetupSnapshot = nil
         }
         state = PhoneWatchConnectivityStateV1(
             isSupported: true,

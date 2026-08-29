@@ -8,6 +8,7 @@ protocol WorkoutWatchConnectivitySession: AnyObject {
     var isPaired: Bool { get }
     var isWatchAppInstalled: Bool { get }
     var isReachable: Bool { get }
+    var receivedApplicationContext: [String: Any] { get }
 
     func activate()
     func updateApplicationContext(
@@ -24,6 +25,7 @@ struct WorkoutWatchConnectivityStateV1: Equatable {
     var isPaired = false
     var isWatchAppInstalled = false
     var isReachable = false
+    var healthSetupSnapshot: WorkoutHealthSetupSnapshotV1?
 }
 
 @MainActor
@@ -46,6 +48,8 @@ protocol WorkoutWatchConnectivityCoordinating: AnyObject {
 @MainActor
 final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
     @Published private(set) var availability: WorkoutWatchAvailabilityV1
+    @Published private(set) var healthSetupSnapshot:
+        WorkoutHealthSetupSnapshotV1?
     @Published private(set) var maximumHeartRateBPM: Int
 
     private let session: WorkoutWatchConnectivitySession?
@@ -139,6 +143,8 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
         self.syncRetryScheduler = syncRetryScheduler
         maximumHeartRateBPM = WorkoutHeartRateZoneSettings
             .maximumHeartRateBPM(from: heartRateZoneDefaults)
+        healthSetupSnapshot = connectivityCoordinator?.workoutState
+            .healthSetupSnapshot
         availability = WorkoutWatchAvailabilityPolicyV1.resolve(
             isSupported: session != nil,
             isActivated: false,
@@ -157,9 +163,8 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
             }
             .store(in: &cancellables)
         connectivityCoordinator?.workoutStatePublisher
-            .sink { [weak self] _ in
-                guard let self else { return }
-                self.refreshSessionState()
+            .sink { [weak self] state in
+                self?.refreshSessionState(coordinatorState: state)
             }
             .store(in: &cancellables)
     }
@@ -220,10 +225,14 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
         syncApplicationContextToWatch()
     }
 
-    private func publishAvailability() {
+    private func publishAvailability(
+        coordinatorState: WorkoutWatchConnectivityStateV1? = nil
+    ) {
         let availability: WorkoutWatchAvailabilityV1
+        let healthSetupSnapshot: WorkoutHealthSetupSnapshotV1?
         if let connectivityCoordinator {
-            let state = connectivityCoordinator.workoutState
+            let state = coordinatorState
+                ?? connectivityCoordinator.workoutState
             availability = WorkoutWatchAvailabilityPolicyV1.resolve(
                 isSupported: state.isSupported,
                 isActivated: state.isActivated,
@@ -232,34 +241,59 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
                 isCompanionAppInstalled: state.isWatchAppInstalled,
                 isReachable: state.isReachable
             )
+            healthSetupSnapshot = state.isPaired
+                ? state.healthSetupSnapshot
+                : nil
         } else if let session {
             let isActivated = session.activationState == .activated
+            let isPaired = isActivated && session.isPaired
+            let isWatchAppInstalled = isActivated
+                && session.isWatchAppInstalled
             availability = WorkoutWatchAvailabilityPolicyV1.resolve(
                 isSupported: true,
                 isActivated: isActivated,
                 activationFailed: activationFailed,
-                isPaired: isActivated ? session.isPaired : false,
-                isCompanionAppInstalled: isActivated
-                    ? session.isWatchAppInstalled
-                    : false,
+                isPaired: isPaired,
+                isCompanionAppInstalled: isWatchAppInstalled,
                 isReachable: isActivated ? session.isReachable : false
             )
+            healthSetupSnapshot = isPaired
+                ? Self.healthSetupSnapshot(
+                    from: session.receivedApplicationContext
+                )
+                : nil
         } else {
             availability = .unsupported
+            healthSetupSnapshot = nil
         }
 
+        self.healthSetupSnapshot = healthSetupSnapshot
         self.availability = availability
     }
 
+    private static func healthSetupSnapshot(
+        from applicationContext: [String: Any]
+    ) -> WorkoutHealthSetupSnapshotV1? {
+        guard let data = applicationContext[
+            WorkoutHealthSetupSnapshotV1.applicationContextKey
+        ] as? Data else {
+            return nil
+        }
+        return try? WorkoutHealthSetupSnapshotV1.decode(data)
+    }
+
     @discardableResult
-    private func syncApplicationContextToWatch() -> Bool {
+    private func syncApplicationContextToWatch(
+        coordinatorState: WorkoutWatchConnectivityStateV1? = nil
+    ) -> Bool {
         guard maximumHeartRateSyncPending || rideDetectionSyncPending
                 || automaticStartSyncPending,
               let context = pendingApplicationContext() else {
             return false
         }
         if let connectivityCoordinator {
-            let state = connectivityCoordinator.workoutState
+            let state = coordinatorState
+                ?? connectivityCoordinator.workoutState
             guard state.isActivated,
                   state.isPaired,
                   state.isWatchAppInstalled else {
@@ -363,15 +397,16 @@ final class WorkoutWatchAvailabilityMonitor: NSObject, ObservableObject {
     }
 
     private func refreshSessionState(
-        activationFailed: Bool? = nil
+        activationFailed: Bool? = nil,
+        coordinatorState: WorkoutWatchConnectivityStateV1? = nil
     ) {
         if let activationFailed {
             self.activationFailed = activationFailed
         }
         maximumHeartRateSyncPending = true
         rideDetectionSyncPending = true
-        publishAvailability()
-        syncApplicationContextToWatch()
+        publishAvailability(coordinatorState: coordinatorState)
+        syncApplicationContextToWatch(coordinatorState: coordinatorState)
     }
 }
 
@@ -409,6 +444,15 @@ extension WorkoutWatchAvailabilityMonitor: WCSessionDelegate {
     }
 
     nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
+        Task { @MainActor [weak self] in
+            self?.refreshSessionState()
+        }
+    }
+
+    nonisolated func session(
+        _ session: WCSession,
+        didReceiveApplicationContext applicationContext: [String: Any]
+    ) {
         Task { @MainActor [weak self] in
             self?.refreshSessionState()
         }

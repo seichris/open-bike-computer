@@ -371,6 +371,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             }
         }
     }
+    @Published private(set) var canWriteWorkoutRoute = false
     @Published private(set) var snapshot = WorkoutSnapshotV1(state: .idle)
     @Published private(set) var latestEnvelope: WorkoutEnvelopeV1?
     @Published private(set) var summary: WatchWorkoutSummary?
@@ -1696,26 +1697,34 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         if let injectedAuthorizationRefreshOperation {
             await injectedAuthorizationRefreshOperation()
             if let injectedAuthorizationRefreshState {
+                canWriteWorkoutRoute =
+                    injectedAuthorizationRefreshState == .ready
                 setupState = injectedAuthorizationRefreshState
             }
             return
         }
         guard HKHealthStore.isHealthDataAvailable() else {
+            canWriteWorkoutRoute = false
             setupState = .unavailable
             return
         }
 
-        let shareStatuses = Self.typesToShare.map(healthStore.authorizationStatus(for:))
-        if shareStatuses.contains(.sharingDenied) {
+        canWriteWorkoutRoute = healthStore.authorizationStatus(
+            for: HKSeriesType.workoutRoute()
+        ) == .sharingAuthorized
+        let requiredShareStatuses = Self.requiredTypesToShare.map(
+            healthStore.authorizationStatus(for:)
+        )
+        if requiredShareStatuses.contains(.sharingDenied) {
             setupState = .denied
             return
         }
 
         do {
-            let status = try await authorizationRequestStatus()
+            let requestStatus = try await authorizationRequestStatus()
             setupState = Self.resolveSetupState(
-                shareStatuses: shareStatuses,
-                requestStatus: status
+                requiredShareStatuses: requiredShareStatuses,
+                requestStatus: requestStatus
             ) ?? .failed
         } catch {
             setupState = .failed
@@ -1855,9 +1864,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 from: builder,
                 workoutStart: startDate
             )
-            let routeBuilder = builder.seriesBuilder(
-                for: HKSeriesType.workoutRoute()
-            ) as? HKWorkoutRouteBuilder
+            let routeBuilder = canWriteWorkoutRoute
+                ? builder.seriesBuilder(
+                    for: HKSeriesType.workoutRoute()
+                ) as? HKWorkoutRouteBuilder
+                : nil
             routeRecorder.begin(
                 routeBuilder: routeBuilder,
                 startDate: startDate
@@ -6603,7 +6614,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         )
     }
 
-    private func authorizationRequestStatus() async throws -> HKAuthorizationRequestStatus {
+    private func authorizationRequestStatus() async throws ->
+        HKAuthorizationRequestStatus {
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<HKAuthorizationRequestStatus, Error>) in
             healthStore.getRequestStatusForAuthorization(
@@ -6732,8 +6744,16 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
     }
 
+    private static var requiredTypesToShare: Set<HKSampleType> {
+        [HKObjectType.workoutType()]
+    }
+
+    private static var optionalTypesToShare: Set<HKSampleType> {
+        [HKSeriesType.workoutRoute()]
+    }
+
     private static var typesToShare: Set<HKSampleType> {
-        [HKObjectType.workoutType(), HKSeriesType.workoutRoute()]
+        requiredTypesToShare.union(optionalTypesToShare)
     }
 
     private static var typesToRead: Set<HKObjectType> {
@@ -6781,22 +6801,26 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     }
 
     static func resolveSetupState(
-        shareStatuses: [HKAuthorizationStatus],
-        requestStatus: HKAuthorizationRequestStatus?
+        requiredShareStatuses: [HKAuthorizationStatus],
+        requestStatus: HKAuthorizationRequestStatus? = nil
     ) -> WatchWorkoutSetupState? {
-        if shareStatuses.contains(.sharingDenied) {
+        guard !requiredShareStatuses.isEmpty else { return nil }
+        if requiredShareStatuses.contains(.sharingDenied) {
             return .denied
+        }
+        if requiredShareStatuses.contains(.notDetermined) {
+            return .needsAuthorization
         }
         if let requestStatus,
            requestStatus != .unnecessary {
             return .needsAuthorization
         }
-        if !shareStatuses.isEmpty,
-           shareStatuses.allSatisfy({ $0 == .sharingAuthorized }) {
+        if requiredShareStatuses.allSatisfy({
+            $0 == .sharingAuthorized
+        }) {
             return .ready
         }
-        guard let requestStatus else { return nil }
-        return requestStatus == .unnecessary ? .ready : .needsAuthorization
+        return nil
     }
 
     static func workoutIdentityMetadata(sessionID: UUID) -> [String: Any] {
