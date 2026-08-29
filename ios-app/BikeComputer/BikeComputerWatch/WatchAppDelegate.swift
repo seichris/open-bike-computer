@@ -1,3 +1,4 @@
+import Combine
 import HealthKit
 import WatchKit
 
@@ -16,6 +17,7 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
         WatchHeartRateZoneSettingsReceiver
     private let workoutDeviceBridge: WatchWorkoutDeviceBridge
     private let rideAutomationCoordinator: WatchRideAutomationCoordinator
+    private var cancellables = Set<AnyCancellable>()
 
     override init() {
         let locationService = WatchLocationService()
@@ -108,6 +110,19 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
                 preparationID: preparationID
             )
         }
+        workoutManager.$setupState
+            .sink { [weak workoutManager, weak connectivityCoordinator]
+                setupState in
+                guard let workoutManager else { return }
+                connectivityCoordinator?.publishWorkoutHealthSetup(
+                    WorkoutHealthSetupSnapshotV1(
+                        state: setupState.connectivityState,
+                        canWriteWorkoutRoute:
+                            workoutManager.canWriteWorkoutRoute
+                    )
+                )
+            }
+            .store(in: &cancellables)
         connectivityCoordinator.activate()
         navigationManager.recoverIfNeeded()
     }
@@ -123,5 +138,24 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
 
     func handle(_ workoutConfiguration: HKWorkoutConfiguration) {
         workoutManager.handleWorkoutConfiguration(workoutConfiguration)
+    }
+}
+
+private extension WatchWorkoutSetupState {
+    var connectivityState: WorkoutHealthSetupStateV1 {
+        switch self {
+        case .checking, .authorizing:
+            return .checking
+        case .needsAuthorization:
+            return .needsAuthorization
+        case .ready:
+            return .ready
+        case .denied:
+            return .denied
+        case .unavailable:
+            return .unavailable
+        case .failed:
+            return .failed
+        }
     }
 }

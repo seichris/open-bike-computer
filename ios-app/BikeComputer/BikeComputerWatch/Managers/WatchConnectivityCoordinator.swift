@@ -15,6 +15,8 @@ final class WatchConnectivityCoordinator: NSObject {
     private let routeLibrary: WatchRouteLibrary
     private let controllerCredentialStore: WatchControllerCredentialStore
     private var hasActivated = false
+    private var workoutHealthSetupSnapshot:
+        WorkoutHealthSetupSnapshotV1?
 
     init(
         routeLibrary: WatchRouteLibrary,
@@ -41,6 +43,15 @@ final class WatchConnectivityCoordinator: NSObject {
     }
 
     func refreshDeviceMetadata() {
+        guard let session,
+              session.activationState == .activated else { return }
+        publishDeviceMetadata(using: session)
+    }
+
+    func publishWorkoutHealthSetup(
+        _ snapshot: WorkoutHealthSetupSnapshotV1
+    ) {
+        workoutHealthSetupSnapshot = snapshot
         guard let session,
               session.activationState == .activated else { return }
         publishDeviceMetadata(using: session)
@@ -105,6 +116,11 @@ final class WatchConnectivityCoordinator: NSObject {
         ), let data = try? metadata.encoded() else { return }
         var merged = session.applicationContext
         merged[WatchDeviceMetadataV1.applicationContextKey] = data
+        if let workoutHealthSetupSnapshot,
+           let healthData = try? workoutHealthSetupSnapshot.encoded() {
+            merged[WorkoutHealthSetupSnapshotV1.applicationContextKey] =
+                healthData
+        }
         try? session.updateApplicationContext(merged)
     }
 
