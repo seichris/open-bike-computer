@@ -46,6 +46,9 @@ TransferTlsMemorySnapshot captureTlsMemory() {
       static_cast<uint32_t>(heap_caps_get_largest_free_block(kInternalCaps)),
       static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_DMA)),
       static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_DMA)),
+      static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+      static_cast<uint32_t>(
+          heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),
   };
 }
 

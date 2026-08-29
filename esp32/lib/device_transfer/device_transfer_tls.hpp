@@ -13,6 +13,12 @@ namespace device_transfer {
 
 constexpr uint32_t TLS_IDENTITY_SCHEMA_VERSION = 1;
 constexpr size_t TLS_CERTIFICATE_SHA256_HEX_BYTES = 64;
+// The effective firmware config gives mbedTLS two 16 KiB record buffers. Keep
+// one larger contiguous PSRAM region available for those buffers plus framing
+// and handshake allocations across normal renderer activity. It is released
+// only while a device-local TLS client owns that memory, then restored before
+// other post-transfer work may fragment the hole.
+constexpr size_t TLS_HANDSHAKE_PSRAM_RESERVE_BYTES = 64U * 1024U;
 
 bool validTlsCertificateSha256(const std::string &value);
 
@@ -38,6 +44,8 @@ struct TransferTlsMemorySnapshot {
   uint32_t internalLargest = 0;
   uint32_t dmaFree = 0;
   uint32_t dmaLargest = 0;
+  uint32_t psramFree = 0;
+  uint32_t psramLargest = 0;
 };
 
 // Captures only non-secret failure metadata. Certificate/key bytes, the
