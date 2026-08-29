@@ -442,6 +442,29 @@ enum DeviceNetworkJoinPolicy {
 #endif
 }
 
+struct DeviceTransferFreshFailure: Equatable {
+    let code: String
+    let message: String
+}
+
+enum DeviceTransferFreshFailurePolicy {
+    static func failure(
+        after initialSequence: UInt32,
+        currentSequence: UInt32,
+        code: String?,
+        message: String?
+    ) -> DeviceTransferFreshFailure? {
+        guard currentSequence != 0,
+              currentSequence != initialSequence,
+              let code,
+              !code.isEmpty else { return nil }
+        return DeviceTransferFreshFailure(
+            code: code,
+            message: message.flatMap { $0.isEmpty ? nil : $0 } ?? code
+        )
+    }
+}
+
 @MainActor
 final class DeviceTransferManager {
     weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
@@ -644,17 +667,16 @@ final class DeviceTransferManager {
         after initialErrorSequence: UInt32,
         bleManager: BLEManager
     ) -> OfflineMapPlatformError? {
-        let sequence = bleManager.deviceTransferLastErrorSequence
-        guard sequence != 0,
-              sequence != initialErrorSequence,
-              let code = bleManager.deviceTransferLastErrorCode,
-              !code.isEmpty else { return nil }
-        if code == "sd_unavailable" {
+        guard let failure = DeviceTransferFreshFailurePolicy.failure(
+            after: initialErrorSequence,
+            currentSequence: bleManager.deviceTransferLastErrorSequence,
+            code: bleManager.deviceTransferLastErrorCode,
+            message: bleManager.deviceTransferLastErrorMessage
+        ) else { return nil }
+        if failure.code == "sd_unavailable" {
             return .deviceSDCardUnavailable
         }
-        let message = bleManager.deviceTransferLastErrorMessage
-            .flatMap { $0.isEmpty ? nil : $0 } ?? code
-        return .deviceMapTransferRejected(message)
+        return .deviceMapTransferRejected(failure.message)
     }
 
     func exitMapTransfer(bleManager: BLEManager) async {

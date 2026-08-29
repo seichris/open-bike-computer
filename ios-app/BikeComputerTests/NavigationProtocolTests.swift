@@ -16122,6 +16122,52 @@ struct NavigationProtocolTests {
             "accessory network joined but its transfer server was unreachable",
             "the fresh firmware error override applies only to endpoint reachability"
         )
+        assertEqual(
+            DeviceTransferFreshFailurePolicy.failure(
+                after: 17,
+                currentSequence: 17,
+                code: "tls_handshake_allocation_failed",
+                message: "non-secret allocator telemetry"
+            ),
+            nil,
+            "retained transfer history never replaces a new network failure"
+        )
+        assertEqual(
+            DeviceTransferFreshFailurePolicy.failure(
+                after: 0,
+                currentSequence: 0,
+                code: "legacy_error",
+                message: "legacy firmware has no sequence"
+            ),
+            nil,
+            "legacy firmware keeps the generic endpoint diagnostic"
+        )
+        assertEqual(
+            DeviceTransferFreshFailurePolicy.failure(
+                after: 17,
+                currentSequence: 18,
+                code: "tls_handshake_allocation_failed",
+                message: "non-secret allocator telemetry"
+            ),
+            DeviceTransferFreshFailure(
+                code: "tls_handshake_allocation_failed",
+                message: "non-secret allocator telemetry"
+            ),
+            "a new authenticated sequence surfaces its device-side rejection"
+        )
+        assertEqual(
+            DeviceTransferFreshFailurePolicy.failure(
+                after: UInt32.max,
+                currentSequence: 1,
+                code: "sd_unavailable",
+                message: ""
+            ),
+            DeviceTransferFreshFailure(
+                code: "sd_unavailable",
+                message: "sd_unavailable"
+            ),
+            "sequence wrap and empty messages retain the classified failure"
+        )
         assertEqual(DeviceNetworkJoinPolicy.diagnosticMessage(
             domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
             code: 17,
