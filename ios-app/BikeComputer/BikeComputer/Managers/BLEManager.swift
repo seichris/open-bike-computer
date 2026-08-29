@@ -898,6 +898,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceTransferLegacyArchivePolicy: String?
     @Published private(set) var deviceTransferLastErrorCode: String?
     @Published private(set) var deviceTransferLastErrorMessage: String?
+    @Published private(set) var deviceTransferLastErrorSequence: UInt32 = 0
     @Published private(set) var deviceTransferStatusRevision: UInt64 = 0
     @Published private(set) var deviceStorageBackend: String?
     @Published private(set) var deviceStoragePowerCycleRequired: Bool?
@@ -5330,6 +5331,7 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferLegacyArchivePolicy = nil
         deviceTransferLastErrorCode = nil
         deviceTransferLastErrorMessage = nil
+        deviceTransferLastErrorSequence = 0
         deviceTransferStatusRevision = 0
         deviceStorageBackend = nil
         deviceStoragePowerCycleRequired = nil
@@ -8434,10 +8436,24 @@ extension BLEManager: CBPeripheralDelegate {
         if let lastError = object["lastError"] as? [String: Any] {
             deviceTransferLastErrorCode = lastError["code"] as? String
             deviceTransferLastErrorMessage = lastError["message"] as? String
+            deviceTransferLastErrorSequence =
+                (lastError["sequence"] as? NSNumber)?.uint32Value ?? 0
         } else {
             deviceTransferLastErrorCode = nil
             deviceTransferLastErrorMessage = nil
+            deviceTransferLastErrorSequence = 0
         }
+#if DEBUG
+        if let code = deviceTransferLastErrorCode, !code.isEmpty {
+            // Firmware limits this authenticated status field to non-secret
+            // failure classification and memory telemetry. Transfer tokens,
+            // hotspot credentials, and TLS identity material are never part
+            // of the retained error message.
+            let message = deviceTransferLastErrorMessage
+                .flatMap { $0.isEmpty ? nil : $0 }
+            log("Device transfer error: \(message.map { "\(code): \($0)" } ?? code)")
+        }
+#endif
         if let storage = object["storage"] as? [String: Any] {
             deviceStorageBackend = storage["backend"] as? String
             deviceStoragePowerCycleRequired =

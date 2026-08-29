@@ -374,6 +374,8 @@ enum DeviceTransferServerProbePolicy {
 enum DeviceNetworkJoinPolicy {
     static let applyAttemptCount = 2
     static let configurationSettleDelayNanoseconds: UInt64 = 500_000_000
+    static let serverUnreachableDiagnostic =
+        "accessory network joined but its transfer server was unreachable"
     // iOS can take more than the hotspot configuration callback to move from
     // an internet-connected network to a local-only accessory AP. Give each
     // accepted configuration a complete stable association window before the
@@ -529,6 +531,8 @@ final class DeviceTransferManager {
         }
         let initialDeviceTransferStatusRevision =
             bleManager.deviceTransferStatusRevision
+        let initialDeviceTransferErrorSequence =
+            bleManager.deviceTransferLastErrorSequence
 
         // DTRN enter is the authoritative handshake: current firmware applies
         // map mode and publishes the token-bearing DSTS response from this one
@@ -555,8 +559,13 @@ final class DeviceTransferManager {
                         status: status
                     )
                 } catch {
+                    let freshDeviceError = await freshMapTransferRejection(
+                        after: initialDeviceTransferErrorSequence,
+                        networkError: error,
+                        bleManager: bleManager
+                    )
                     await exitMapTransfer(bleManager: bleManager)
-                    throw error
+                    throw freshDeviceError ?? error
                 }
                 record(
                     mode: .map,
@@ -593,6 +602,59 @@ final class DeviceTransferManager {
             throw OfflineMapPlatformError.deviceMapTransferRejected(message)
         }
         throw OfflineMapPlatformError.missingTransferBaseURL
+    }
+
+    private func freshMapTransferRejection(
+        after initialErrorSequence: UInt32,
+        networkError: Error,
+        bleManager: BLEManager
+    ) async -> OfflineMapPlatformError? {
+        guard let platformError = networkError as? OfflineMapPlatformError,
+              case let .transferWiFiJoinFailed(_, diagnostic) = platformError,
+              diagnostic == DeviceNetworkJoinPolicy.serverUnreachableDiagnostic
+        else { return nil }
+
+        if let rejection = currentMapTransferRejection(
+            after: initialErrorSequence,
+            bleManager: bleManager
+        ) {
+            return rejection
+        }
+
+        let initialStatusRevision = bleManager.deviceTransferStatusRevision
+        guard bleManager.requestDeviceTransferStatus() else { return nil }
+        for _ in 0..<8 {
+            try? await Task.sleep(
+                nanoseconds:
+                    DeviceTransferHandshakePolicy.retryIntervalNanoseconds
+            )
+            if bleManager.deviceTransferStatusRevision !=
+                    initialStatusRevision,
+               let rejection = currentMapTransferRejection(
+                    after: initialErrorSequence,
+                    bleManager: bleManager
+               ) {
+                return rejection
+            }
+        }
+        return nil
+    }
+
+    private func currentMapTransferRejection(
+        after initialErrorSequence: UInt32,
+        bleManager: BLEManager
+    ) -> OfflineMapPlatformError? {
+        let sequence = bleManager.deviceTransferLastErrorSequence
+        guard sequence != 0,
+              sequence != initialErrorSequence,
+              let code = bleManager.deviceTransferLastErrorCode,
+              !code.isEmpty else { return nil }
+        if code == "sd_unavailable" {
+            return .deviceSDCardUnavailable
+        }
+        let message = bleManager.deviceTransferLastErrorMessage
+            .flatMap { $0.isEmpty ? nil : $0 } ?? code
+        return .deviceMapTransferRejected(message)
     }
 
     func exitMapTransfer(bleManager: BLEManager) async {
@@ -1116,7 +1178,7 @@ final class DeviceTransferManager {
                 code: $0.code,
                 message: $0.localizedDescription
             )
-        } ?? "accessory network joined but its transfer server was unreachable"
+        } ?? DeviceNetworkJoinPolicy.serverUnreachableDiagnostic
         print("Device Wi-Fi unavailable: \(ssid): \(diagnostic)")
         throw OfflineMapPlatformError.transferWiFiJoinFailed(ssid, diagnostic)
 #endif

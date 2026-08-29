@@ -16117,6 +16117,11 @@ struct NavigationProtocolTests {
         )
         assert(DeviceNetworkJoinPolicy.reachabilityTimeout >= 30,
                "an accepted local-only accessory network gets a stable association window")
+        assertEqual(
+            DeviceNetworkJoinPolicy.serverUnreachableDiagnostic,
+            "accessory network joined but its transfer server was unreachable",
+            "the fresh firmware error override applies only to endpoint reachability"
+        )
         assertEqual(DeviceNetworkJoinPolicy.diagnosticMessage(
             domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
             code: 17,
@@ -20260,7 +20265,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","lastError":{"code":"transfer_busy","message":"another transfer mode is active"},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","lastError":{"code":"transfer_busy","message":"another transfer mode is active","sequence":17},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -20278,6 +20283,8 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceTransferSessionToken, "abc123", "status parser exposes session token")
         assertEqual(manager.deviceTransferLastErrorCode, "transfer_busy", "status parser exposes transfer error code")
         assertEqual(manager.deviceTransferLastErrorMessage, "another transfer mode is active", "status parser exposes transfer error message")
+        assertEqual(manager.deviceTransferLastErrorSequence, 17,
+                    "status parser exposes the monotonic transfer error sequence")
         assertEqual(manager.deviceStorageBackend,
                     "legacy_spi_migration",
                     "status parser exposes the active storage backend")
@@ -20291,6 +20298,13 @@ struct NavigationProtocolTests {
         assertEqual(manager.firmwareUpdateReceivedBytes, 1024, "status parser exposes received bytes")
         assertEqual(manager.firmwareUpdateTotalBytes, 2048, "status parser exposes total bytes")
         assertEqual(manager.firmwareUpdateLastError, "previous: previous update failed", "status parser exposes firmware error")
+
+        let clearedPacket = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+            Data("{\"enabled\":false}".utf8)
+        assert(manager.handleDeviceTransferStatusNotification(clearedPacket),
+               "a status without lastError is consumed")
+        assertEqual(manager.deviceTransferLastErrorSequence, 0,
+                    "legacy or clear status resets the optional error sequence")
 
         let invalidPacket = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data("{".utf8)
         assert(manager.handleDeviceTransferStatusNotification(invalidPacket), "invalid DSTS notification should be consumed")
