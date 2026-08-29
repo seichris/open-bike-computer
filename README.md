@@ -98,6 +98,7 @@ A sleek, Garmin-mounted bike computer. Get yours at [Bicino.com](https://bicino.
 1. **Buy your bike computer including Garmin mount at [bicino.com](https://bicino.com)** or get a generic [Waveshare 1.75"](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31262), or a [Waveshare 2.06"](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm).
 2. **Download** [**the Bicino iPhone and Apple Watch app**](https://geo.itunes.apple.com/app/id6788977349) and pair your bike computer.
 3. **Ride.** Track your workout and check your live ride statistics on your bike computer.
+4. **Analyze.** Check your ride stats and GPS track in Apple Fitness and Strava.
 
 ## Contributing
 
