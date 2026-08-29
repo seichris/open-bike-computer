@@ -18,7 +18,7 @@ from typing import Any, Protocol
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, utils
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtensionOID, ObjectIdentifier
 
 
@@ -355,6 +355,7 @@ class ParsedAuthenticatorData:
     credential_id: bytes | None
     public_key_x963: bytes | None
     extensions: dict[Any, Any] | None
+    assertion_at_flag: bool
 
 
 def parse_authenticator_data(
@@ -376,7 +377,8 @@ def parse_authenticator_data(
 
     has_attested_data = bool(flags & 0x40)
     has_extensions = bool(flags & 0x80)
-    if attestation != has_attested_data:
+    assertion_at_flag = not attestation and has_attested_data
+    if attestation and not has_attested_data:
         raise AppAttestError(
             "app_attest_invalid_authenticator", "authenticator flags are invalid"
         )
@@ -425,7 +427,15 @@ def parse_authenticator_data(
                 "app_attest_wrong_environment", "App Attest environment is invalid"
             )
 
-    if has_extensions:
+    # Apple's App Attest objects append launch-validation extensions to both
+    # attestations and assertions even when their authenticator flags do not
+    # set ED. A live Apple App Attest assertion has also set AT without
+    # including WebAuthn attested credential data or an appended extension
+    # map. This parser is App Attest-specific: treat AT as an assertion
+    # compatibility flag and, when bytes remain, still require exactly one
+    # bounded CBOR extension map. The signature verifier binds the complete
+    # authenticator data to the attested key, challenge, and request.
+    if has_extensions or offset < len(auth_data):
         decoder = BoundedCBORDecoder(auth_data[offset:])
         decoded_extensions = decoder.decode_one()
         if not isinstance(decoded_extensions, dict):
@@ -446,6 +456,7 @@ def parse_authenticator_data(
         credential_id=credential_id,
         public_key_x963=public_key_x963,
         extensions=extensions,
+        assertion_at_flag=assertion_at_flag,
     )
 
 
@@ -1194,6 +1205,15 @@ class AppAttestStore:
         validation_category, bundle_version = _assertion_extension_values(
             parsed.extensions
         )
+        if (
+            parsed.assertion_at_flag
+            and parsed.extensions is not None
+            and validation_category is None
+        ):
+            raise AppAttestError(
+                "app_attest_invalid_extensions",
+                "App Attest assertion identity is invalid",
+            )
         if validation_category is not None:
             allowed_validation_categories = (
                 {2, 4} if environment == "production" else {3}
@@ -1215,7 +1235,7 @@ class AppAttestStore:
             public_key.verify(
                 signature,
                 nonce,
-                ec.ECDSA(utils.Prehashed(hashes.SHA256())),
+                ec.ECDSA(hashes.SHA256()),
             )
         except (ValueError, InvalidSignature) as exc:
             raise AppAttestError(

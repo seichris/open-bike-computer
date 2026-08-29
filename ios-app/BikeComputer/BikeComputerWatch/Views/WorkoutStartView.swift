@@ -87,7 +87,7 @@ struct WorkoutStartView: View {
             ProgressView("Checking Health access…")
                 .font(.caption)
         case .needsAuthorization:
-            Text("Allow Health access to record this cycling workout and route.")
+            Text("Allow Health access to save your workouts.")
                 .font(.caption)
                 .multilineTextAlignment(.center)
             Button("Set Up Health") {
@@ -98,21 +98,29 @@ struct WorkoutStartView: View {
             ProgressView("Finish setup…")
                 .font(.caption)
         case .ready:
-            Button {
-                manager.startOutdoorCycling()
-            } label: {
-                Label("Start Ride", systemImage: "play.fill")
-                    .frame(maxWidth: .infinity, minHeight: 52)
+            VStack(spacing: 6) {
+                Button {
+                    manager.startOutdoorCycling()
+                } label: {
+                    Label("Start Ride", systemImage: "play.fill")
+                        .frame(maxWidth: .infinity, minHeight: 52)
+                }
+                .tint(.green)
+                .disabled(manager.state == .failed)
+
+                if !manager.canWriteWorkoutRoute {
+                    Label("Route won’t be saved", systemImage: "map.slash")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
-            .tint(.green)
-            .disabled(manager.state == .failed)
         case .denied:
             VStack(spacing: 6) {
-                Text("Bicino can’t start a workout without permission to save workouts in Health.")
+                Text("Allow Workouts in Health to start a ride.")
                     .font(.caption)
                     .multilineTextAlignment(.center)
                 Text(
-                    "On Apple Watch, open Settings > Health > Apps > Bicino and enable Workouts and Workout Routes, then return here."
+                    "Watch Settings › Health › Apps › Bicino"
                 )
                     .font(.caption2)
                     .foregroundStyle(.secondary)

@@ -2031,7 +2031,8 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
   if (!transferStatus.lastErrorCode.empty() &&
       !mapTransferHttp.activationHasError()) {
     body += ",\"lastError\":{\"code\":\"" +
-            jsonEscape(transferStatus.lastErrorCode) + "\"}";
+            jsonEscape(transferStatus.lastErrorCode) + "\",\"sequence\":" +
+            std::to_string(transferStatus.errorSequence) + "}";
   }
 
   body += "}";
@@ -2104,7 +2105,9 @@ static std::string genericTransferStatusJson() {
   if (!transferStatus.lastErrorCode.empty()) {
     body += ",\"lastError\":{\"code\":\"" +
             jsonEscape(transferStatus.lastErrorCode) + "\",\"message\":\"" +
-            jsonEscape(transferStatus.lastErrorMessage) + "\"}";
+            jsonEscape(transferStatus.lastErrorMessage) +
+            "\",\"sequence\":" +
+            std::to_string(transferStatus.errorSequence) + "}";
   }
   body += ",\"storage\":{\"backend\":\"" +
           jsonEscape(storage.storageBackendName()) +
