@@ -11,27 +11,27 @@ A sleek, Garmin-mounted bike computer.
   <!-- First row: 5 images -->
   <tr>
     <td align="center" valign="top" colspan="6">
-      <img src="docs/images/readme/1.jpg" width="170" alt="Apple Workout">
+      <img src="docs/images/readme/1.jpg" height="255" alt="Apple Workout">
       <br>
       <sub><b>Apple Workout</b></sub>
     </td>
     <td align="center" valign="top" colspan="6">
-      <img src="docs/images/readme/2.jpg" width="170" alt="Apple Maps & Navigation">
+      <img src="docs/images/readme/2.jpg" height="255" alt="Apple Maps & Navigation">
       <br>
       <sub><b>Apple Maps & Navigation</b></sub>
     </td>
     <td align="center" valign="top" colspan="6">
-      <img src="docs/images/readme/3.jpg" width="170" alt="Global 3D maps">
+      <img src="docs/images/readme/3.jpg" height="255" alt="Global 3D maps">
       <br>
       <sub><b>Global 3D maps</b></sub>
     </td>
     <td align="center" valign="top" colspan="6">
-      <img src="docs/images/readme/4.jpg" width="170" alt="2D maps and global street names">
+      <img src="docs/images/readme/4.jpg" height="255" alt="2D maps and global street names">
       <br>
       <sub><b>2D maps and global<br>street names</b></sub>
     </td>
     <td align="center" valign="top" colspan="6">
-      <img src="docs/images/readme/5.jpg" width="170" alt="Connect your bike sensors">
+      <img src="docs/images/readme/5.jpg" height="255" alt="Connect your bike sensors">
       <br>
       <sub><b>Connect your<br>bike sensors</b></sub>
     </td>
@@ -40,48 +40,53 @@ A sleek, Garmin-mounted bike computer.
   <!-- Second row: 3 images -->
   <tr>
     <td align="center" valign="top" colspan="10">
-      <img src="docs/images/readme/6.jpg" width="170" alt="Mounted on a bike">
+      <img src="docs/images/readme/6.jpg" height="170" alt="Mounted on a bike">
       <br>
       <sub><b>Mounted on a bike</b></sub>
     </td>
     <td align="center" valign="top" colspan="10">
-      <img src="docs/images/readme/7.jpg" width="170" alt="Bicino protection sleeve">
+      <img src="docs/images/readme/7.jpg" height="170" alt="Bicino protection sleeve">
       <br>
       <sub><b>Bicino protection<br>sleeve</b></sub>
     </td>
     <td align="center" valign="top" colspan="10">
-      <img src="docs/images/readme/8.jpg" width="170" alt="Open-source hardware and custom Garmin mount">
+      <img src="docs/images/readme/8.jpg" height="170" alt="Open-source hardware and custom Garmin mount">
       <br>
       <sub><b>Open-source hardware<br>and custom Garmin mount</b></sub>
     </td>
   </tr>
 
-  <!-- Third row: 3 app images and 2 Apple Watch images -->
+  <!-- Third row: 4 app images and 2 Apple Watch images -->
   <tr>
-    <td align="center" valign="top" colspan="6">
-      <img src="docs/images/readme/app1.jpg" width="170" alt="iPhone app: Apple Workout">
+    <td align="center" valign="top" colspan="5">
+      <img src="docs/images/readme/app1.jpg" height="300" alt="iPhone app: Apple Workout">
       <br>
       <sub>iPhone app: <b>Apple Workout</b></sub>
     </td>
-    <td align="center" valign="top" colspan="6">
-      <img src="docs/images/readme/app2.jpg" width="170" alt="iPhone app: Navigation">
+    <td align="center" valign="top" colspan="5">
+      <img src="docs/images/readme/app2.jpg" height="300" alt="iPhone app: Navigation">
       <br>
       <sub>iPhone app: Navigation</sub>
     </td>
-    <td align="center" valign="top" colspan="6">
-      <img src="docs/images/readme/app3.jpg" width="170" alt="Strava route import">
+    <td align="center" valign="top" colspan="5">
+      <img src="docs/images/readme/app3.jpg" height="300" alt="Strava route import">
       <br>
       <sub><b>Strava route import</b></sub>
     </td>
-    <td align="center" valign="top" colspan="6">
-      <img src="docs/images/readme/watch1.jpg" width="170" alt="Start your workout on your Apple Watch">
+    <td align="center" valign="top" colspan="5">
+      <img src="docs/images/readme/app4.jpg" height="300" alt="Automatically save rides to Apple Fitness">
+      <br>
+      <sub><b>Automatically save rides<br>to Apple Fitness</b></sub>
+    </td>
+    <td align="center" valign="top" colspan="5">
+      <img src="docs/images/readme/watch1.jpg" height="300" alt="Start your workout on your Apple Watch">
       <br>
       <sub><b>Start your workout<br>on your Apple Watch</b></sub>
     </td>
-    <td align="center" valign="top" colspan="6">
-      <img src="docs/images/readme/watch2.jpg" width="170" alt="Automatically save rides to Apple Health">
+    <td align="center" valign="top" colspan="5">
+      <img src="docs/images/readme/watch2.jpg" height="300" alt="Apple Watch Live Workout Stats">
       <br>
-      <sub><b>Automatically save rides<br>to Apple Health</b></sub>
+      <sub><b>Apple Watch Live Workout<br>Stats</b></sub>
     </td>
   </tr>
 </table>
