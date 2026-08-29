@@ -8,7 +8,9 @@ from shapely import (
     Polygon,
     geometry,
     intersection,
+    set_precision,
 )
+from shapely.errors import GEOSException
 from shapely.ops import triangulate, unary_union
 import PIL.ImageDraw as ImageDraw
 import PIL.Image as Image
@@ -22,6 +24,8 @@ MAX_GENERIC_POLYGON_PIECES_PER_SOURCE = 2048
 MAX_GENERIC_POLYGON_PIECES_PER_BLOCK = 32768
 _GEOMETRY_EQUIVALENCE_RELATIVE_TOLERANCE = 1e-9
 _GEOMETRY_EQUIVALENCE_ABSOLUTE_TOLERANCE = 1e-7
+_FMB_COORDINATE_GRID_SIZE = 1.0
+_FMB_MAX_VERTEX_DISPLACEMENT = math.sqrt(0.5 ** 2 + 0.5 ** 2)
 
 
 class GenericGeometryError(ValueError):
@@ -374,6 +378,53 @@ def _equivalence_tolerance(polygon):
     )
 
 
+def _quantized_equivalence_tolerance(source, encoded):
+    """Bound area changes caused by rounding polygon vertices to the FMB grid.
+
+    FMB stores metre-relative integer coordinates.  Moving a vertex to its
+    nearest grid point can displace the boundary by at most half a grid-cell
+    on each axis.  The perimeter term is the corresponding boundary strip;
+    the disk term covers corners.  This is deliberately separate from the
+    near-exact floating-point decomposition check above.
+    """
+
+    radius = _FMB_MAX_VERTEX_DISPLACEMENT
+    return max(
+        _GEOMETRY_EQUIVALENCE_ABSOLUTE_TOLERANCE,
+        ((source.length + encoded.length) * radius / 2.0)
+        + (math.pi * radius * radius),
+    )
+
+
+def _snap_to_fmb_precision(polygon):
+    """Return the valid polygonal area representable by FMB coordinates.
+
+    Directly rounding each ring can collapse a narrow edge or make a hole
+    touch its shell.  GEOS' valid-output precision model performs the same
+    one-metre reduction while repairing those topology changes before the
+    hole-free decomposition is generated.
+    """
+
+    try:
+        snapped = set_precision(
+            polygon,
+            grid_size=_FMB_COORDINATE_GRID_SIZE,
+            mode="valid_output",
+        )
+    except (GEOSException, ValueError) as exc:
+        raise GenericGeometryError(
+            "generic polygon could not be reduced to FMB coordinate precision"
+        ) from exc
+
+    parts = [
+        _canonicalize_shapely_polygon(part)
+        for part in _polygonal_parts(snapped)
+        if not part.is_empty and part.area > 0
+    ]
+    parts.sort(key=_polygon_sort_key)
+    return parts
+
+
 def _decompose_hole_free(polygon, remaining_piece_budget):
     if not polygon.interiors:
         return [_canonicalize_shapely_polygon(polygon)]
@@ -431,7 +482,7 @@ def _validate_quantized_decomposition(source, pieces, min_x, min_y):
     quantized_source = _quantized_polygon(source, min_x, min_y)
     quantized_pieces = [_quantized_polygon(piece, min_x, min_y) for piece in pieces]
     merged = unary_union(quantized_pieces)
-    tolerance = _equivalence_tolerance(quantized_source)
+    tolerance = _quantized_equivalence_tolerance(quantized_source, merged)
     if quantized_source.symmetric_difference(merged).area > tolerance:
         raise GenericGeometryError(
             "generic polygon decomposition changes area at FMB coordinate precision"
@@ -468,8 +519,8 @@ def clip_polygons(
             _canonicalize_shapely_polygon(part)
             for part in _polygonal_parts(parts)
         ]
-        for part in sorted(polygonal_parts, key=_polygon_sort_key):
-            if part.is_valid and not part.is_empty:
+        for clipped_part in sorted(polygonal_parts, key=_polygon_sort_key):
+            for part in _snap_to_fmb_precision(clipped_part):
                 source_count = source_piece_counts.get(source_key, 0)
                 remaining_source = max_pieces_per_source - source_count
                 remaining_block = max_pieces_per_block - len(clipped)

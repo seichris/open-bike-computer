@@ -66,7 +66,7 @@ class ChangedComponentsTests(unittest.TestCase):
 
     def test_shared_fmb_fixture_selects_every_consumer(self) -> None:
         selected = changed_components.classify_paths(
-            ["test-fixtures/fmb/golden_blocks.txt"]
+            ["tools/tests/fixtures/fmb/golden_blocks.txt"]
         )
 
         self.assertEqual(

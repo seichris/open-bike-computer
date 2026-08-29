@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, utils
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from map_platform.app_attest import (
     APP_ATTEST_ATTESTATION_PURPOSE,
@@ -236,7 +236,7 @@ class AppAttestTestClient:
         ).digest()
         signature = installation.private_key.sign(
             nonce,
-            ec.ECDSA(utils.Prehashed(hashes.SHA256())),
+            ec.ECDSA(hashes.SHA256()),
         )
         assertion = encode_cbor(
             {
