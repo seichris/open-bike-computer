@@ -6462,28 +6462,48 @@ private struct WorkoutContractTestSuite {
             "WatchConnectivity's reported companion-install state must remain available for non-start uses"
         )
         expect(
-            WorkoutStartAvailabilityPolicyV1.resolve(.activating)
+            WorkoutStartAvailabilityPolicyV1.resolve(
+                .activating,
+                healthSetup: nil
+            )
                 == .waitForActivation,
             "the start flow must wait for WatchConnectivity activation before deciding"
         )
         expect(
-            WorkoutStartAvailabilityPolicyV1.resolve(.unsupported)
+            WorkoutStartAvailabilityPolicyV1.resolve(
+                .unsupported,
+                healthSetup: nil
+            )
                 == .unsupported,
             "unsupported iPhones must remain blocked"
         )
         expect(
-            WorkoutStartAvailabilityPolicyV1.resolve(.activationFailed)
+            WorkoutStartAvailabilityPolicyV1.resolve(
+                .activationFailed,
+                healthSetup: nil
+            )
                 == .activationFailed,
             "WatchConnectivity activation failures must remain recoverable"
         )
         expect(
-            WorkoutStartAvailabilityPolicyV1.resolve(.noPairedWatch)
+            WorkoutStartAvailabilityPolicyV1.resolve(
+                .noPairedWatch,
+                healthSetup: nil
+            )
                 == .noPairedWatch,
             "an iPhone without a paired Watch must remain blocked"
         )
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let readyHealthSetup = WorkoutHealthSetupSnapshotV1(
+            state: .ready,
+            canWriteWorkoutRoute: false,
+            updatedAt: now
+        )
         expect(
             WorkoutStartAvailabilityPolicyV1.resolve(
-                .companionAppNotInstalled
+                .companionAppNotInstalled,
+                healthSetup: readyHealthSetup,
+                now: now
             ) == .attemptHealthKitLaunch,
             "a negative WatchConnectivity install flag must still attempt the authoritative HealthKit launch"
         )
@@ -6500,11 +6520,76 @@ private struct WorkoutContractTestSuite {
                 "an installed companion must be start-ready regardless of immediate messaging reachability"
             )
             expect(
-                WorkoutStartAvailabilityPolicyV1.resolve(availability)
+                WorkoutStartAvailabilityPolicyV1.resolve(
+                    availability,
+                    healthSetup: readyHealthSetup,
+                    now: now
+                )
                     == .attemptHealthKitLaunch,
                 "a ready Watch must attempt the HealthKit launch regardless of reachability"
             )
+            expect(
+                WorkoutStartAvailabilityPolicyV1.resolve(
+                    availability,
+                    healthSetup: nil,
+                    now: now
+                ) == .continueSetupOnWatch,
+                "unknown Watch Health setup must open the Watch setup path"
+            )
         }
+
+        let deniedHealthSetup = WorkoutHealthSetupSnapshotV1(
+            state: .denied,
+            canWriteWorkoutRoute: true,
+            updatedAt: now
+        )
+        expect(
+            WorkoutStartAvailabilityPolicyV1.resolve(
+                .ready(isReachable: false),
+                healthSetup: deniedHealthSetup,
+                now: now
+            ) == .healthAccessDenied,
+            "a fresh workout-write denial must fail immediately without another prompt"
+        )
+        let unavailableHealthSetup = WorkoutHealthSetupSnapshotV1(
+            state: .unavailable,
+            canWriteWorkoutRoute: false,
+            updatedAt: now
+        )
+        expect(
+            WorkoutStartAvailabilityPolicyV1.resolve(
+                .ready(isReachable: true),
+                healthSetup: unavailableHealthSetup,
+                now: now
+            ) == .healthUnavailable,
+            "an unavailable Watch Health store must fail immediately"
+        )
+        let staleHealthSetup = WorkoutHealthSetupSnapshotV1(
+            state: .ready,
+            canWriteWorkoutRoute: true,
+            updatedAt: now.addingTimeInterval(
+                -WorkoutHealthSetupSnapshotV1.defaultFreshnessInterval - 1
+            )
+        )
+        expect(
+            WorkoutStartAvailabilityPolicyV1.resolve(
+                .ready(isReachable: true),
+                healthSetup: staleHealthSetup,
+                now: now
+            ) == .continueSetupOnWatch,
+            "stale Watch Health setup must be refreshed on Watch"
+        )
+
+        guard let encodedHealthSetup = try? deniedHealthSetup.encoded(),
+              let decodedHealthSetup = try?
+                WorkoutHealthSetupSnapshotV1.decode(encodedHealthSetup) else {
+            expect(false, "Watch Health setup snapshot must encode")
+            return
+        }
+        expect(
+            decodedHealthSetup == deniedHealthSetup,
+            "Watch Health setup snapshot must round trip without sensitive data"
+        )
     }
 
     private mutating func testDiscardedWorkoutSummaryDismissalPolicy() {
@@ -6703,12 +6788,15 @@ private struct WorkoutContractTestSuite {
         }
         expect(
             iPhoneConfirmationComponent.contains(
-                "switch WorkoutStartAvailabilityPolicyV1.resolve(availability)"
+                "healthSetup: watchAvailability.healthSetupSnapshot"
             )
                 && iPhoneConfirmationComponent.contains(
                     "case .attemptHealthKitLaunch:\n            pendingStart = false\n            action()"
+                )
+                && iPhoneConfirmationComponent.contains(
+                    "case .healthAccessDenied:\n            pendingStart = false\n            presentedAlert = .healthAccessDenied"
                 ),
-            "the iPhone component must let the start policy reach the authoritative HealthKit launch"
+            "the iPhone component must use Watch Health setup before launching"
         )
         expect(
             compactIPhoneConfirmation.contains(

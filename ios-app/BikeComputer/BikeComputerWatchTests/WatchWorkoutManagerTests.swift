@@ -2769,54 +2769,29 @@ final class WatchWorkoutManagerTests: XCTestCase {
         }
     }
 
-    func testAuthorizationPoliciesFailClosedWithoutInventingPermission() {
+    func testRequiredWorkoutAuthorizationFailsClosedWithoutBlockingOnRoute() {
         XCTAssertEqual(
             WatchWorkoutManager.resolveSetupState(
-                shareStatuses: [.sharingDenied, .notDetermined],
-                requestStatus: nil
+                requiredShareStatuses: [.sharingDenied]
             ),
             .denied
         )
         XCTAssertEqual(
             WatchWorkoutManager.resolveSetupState(
-                shareStatuses: [.sharingAuthorized, .sharingAuthorized],
-                requestStatus: nil
+                requiredShareStatuses: [.sharingAuthorized]
             ),
             .ready
         )
         XCTAssertEqual(
             WatchWorkoutManager.resolveSetupState(
-                shareStatuses: [.sharingAuthorized, .sharingAuthorized],
-                requestStatus: .shouldRequest
+                requiredShareStatuses: [.notDetermined]
             ),
             .needsAuthorization
-        )
-        XCTAssertEqual(
-            WatchWorkoutManager.resolveSetupState(
-                shareStatuses: [.sharingAuthorized, .sharingAuthorized],
-                requestStatus: .unnecessary
-            ),
-            .ready
         )
         XCTAssertNil(
             WatchWorkoutManager.resolveSetupState(
-                shareStatuses: [.notDetermined],
-                requestStatus: nil
+                requiredShareStatuses: []
             )
-        )
-        XCTAssertEqual(
-            WatchWorkoutManager.resolveSetupState(
-                shareStatuses: [.notDetermined],
-                requestStatus: .shouldRequest
-            ),
-            .needsAuthorization
-        )
-        XCTAssertEqual(
-            WatchWorkoutManager.resolveSetupState(
-                shareStatuses: [.notDetermined],
-                requestStatus: .unnecessary
-            ),
-            .ready
         )
 
         XCTAssertEqual(WatchRouteRecorder.mapAuthorization(.denied), .denied)

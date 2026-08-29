@@ -5,6 +5,9 @@ private enum WorkoutStartAvailabilityAlert: String, Identifiable {
     case unsupported
     case activationFailed
     case noPairedWatch
+    case continueOnWatch
+    case healthAccessDenied
+    case healthUnavailable
 
     var id: String { rawValue }
 
@@ -14,6 +17,12 @@ private enum WorkoutStartAvailabilityAlert: String, Identifiable {
             return "Apple Watch Required"
         case .activationFailed:
             return "Unable to Check Apple Watch"
+        case .continueOnWatch:
+            return "Continue on Apple Watch"
+        case .healthAccessDenied:
+            return "Health Access Needed"
+        case .healthUnavailable:
+            return "Health Unavailable"
         }
     }
 
@@ -25,6 +34,12 @@ private enum WorkoutStartAvailabilityAlert: String, Identifiable {
             return "Bicino couldn’t check your Apple Watch. Make sure Bluetooth and Wi-Fi are on, then try again."
         case .noPairedWatch:
             return "You need the Bicino app on an Apple Watch to start tracking your workout. Pair an Apple Watch with this iPhone first."
+        case .continueOnWatch:
+            return "Finish Health setup in Bicino on your Watch."
+        case .healthAccessDenied:
+            return "On Apple Watch, open Settings › Health › Apps › Bicino and allow Workouts."
+        case .healthUnavailable:
+            return "Health isn’t available on this Apple Watch."
         }
     }
 }
@@ -50,6 +65,9 @@ struct WorkoutStartButton<Label: View>: View {
             guard pendingStart else { return }
             handle(availability)
         }
+        .onChange(of: watchAvailability.healthSetupSnapshot) { _ in
+            refreshSetupAlert()
+        }
     }
 
     private func requestStart() {
@@ -57,13 +75,26 @@ struct WorkoutStartButton<Label: View>: View {
     }
 
     private func handle(_ availability: WorkoutWatchAvailabilityV1) {
-        switch WorkoutStartAvailabilityPolicyV1.resolve(availability) {
+        switch WorkoutStartAvailabilityPolicyV1.resolve(
+            availability,
+            healthSetup: watchAvailability.healthSetupSnapshot
+        ) {
         case .waitForActivation:
             pendingStart = true
             watchAvailability.activate()
         case .attemptHealthKitLaunch:
             pendingStart = false
             action()
+        case .continueSetupOnWatch:
+            pendingStart = false
+            action()
+            presentedAlert = .continueOnWatch
+        case .healthAccessDenied:
+            pendingStart = false
+            presentedAlert = .healthAccessDenied
+        case .healthUnavailable:
+            pendingStart = false
+            presentedAlert = .healthUnavailable
         case .unsupported:
             pendingStart = false
             presentedAlert = .unsupported
@@ -73,6 +104,24 @@ struct WorkoutStartButton<Label: View>: View {
         case .noPairedWatch:
             pendingStart = false
             presentedAlert = .noPairedWatch
+        }
+    }
+
+    private func refreshSetupAlert() {
+        guard presentedAlert == .continueOnWatch else { return }
+        switch WorkoutStartAvailabilityPolicyV1.resolve(
+            watchAvailability.availability,
+            healthSetup: watchAvailability.healthSetupSnapshot
+        ) {
+        case .attemptHealthKitLaunch:
+            presentedAlert = nil
+        case .healthAccessDenied:
+            presentedAlert = .healthAccessDenied
+        case .healthUnavailable:
+            presentedAlert = .healthUnavailable
+        case .waitForActivation, .continueSetupOnWatch, .unsupported,
+             .activationFailed, .noPairedWatch:
+            break
         }
     }
 
@@ -789,7 +838,7 @@ struct WorkoutDashboardView: View {
             VStack(spacing: 10) {
                 if presentation.errorCode == .setupRequired
                     || presentation.errorCode == .authorizationDenied {
-                    Text("On Apple Watch, open Bicino and tap Set Up Health. If needed, use Watch Settings › Health › Apps › Bicino.")
+                    Text("Open Bicino on Apple Watch and set up Health.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)

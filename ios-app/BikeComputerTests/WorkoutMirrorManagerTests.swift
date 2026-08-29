@@ -15,6 +15,7 @@ private final class FakeWorkoutWatchConnectivitySession:
     var isPaired = true
     var isWatchAppInstalled = true
     var isReachable = false
+    var receivedApplicationContext: [String: Any] = [:]
     var activationCount = 0
     var remainingUpdateFailures = 0
     var applicationContexts: [[String: Any]] = []
@@ -124,6 +125,20 @@ final class WorkoutWatchAvailabilityMonitorProductionTests: XCTestCase {
             ),
             202
         )
+
+        let healthSetup = WorkoutHealthSetupSnapshotV1(
+            state: .denied,
+            canWriteWorkoutRoute: false
+        )
+        coordinator.workoutState = WorkoutWatchConnectivityStateV1(
+            isSupported: true,
+            isActivated: true,
+            isPaired: true,
+            isWatchAppInstalled: true,
+            isReachable: false,
+            healthSetupSnapshot: healthSetup
+        )
+        XCTAssertEqual(monitor.healthSetupSnapshot, healthSetup)
     }
 
     func testPersistedMaximumHeartRatePublishesAfterActivationAndInstall() async throws {
