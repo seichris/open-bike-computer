@@ -23,7 +23,9 @@ from font_asset import FontFaceSpec, FontPackBuilder
 FONT_PATH = pathlib.Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
 GOLDEN_FIXTURE_PATH = (
     pathlib.Path(__file__).resolve().parents[3]
-    / "test-fixtures"
+    / "tools"
+    / "tests"
+    / "fixtures"
     / "fmb"
     / "golden_blocks.txt"
 )
