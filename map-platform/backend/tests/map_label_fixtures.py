@@ -5,7 +5,9 @@ from pathlib import Path
 
 GOLDEN_FMB_FIXTURE = (
     Path(__file__).resolve().parents[3]
-    / "test-fixtures"
+    / "tools"
+    / "tests"
+    / "fixtures"
     / "fmb"
     / "golden_blocks.txt"
 )
