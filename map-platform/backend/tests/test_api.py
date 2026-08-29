@@ -748,6 +748,32 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(replay.status_code, 200)
         self.assertEqual(replay.json()["jobId"], created.json()["jobId"])
 
+    def test_app_attest_rejection_logs_only_safe_diagnostics(self):
+        secret_assertion = "not-valid-secret-assertion"
+
+        with self.assertLogs("map_platform.api", level="WARNING") as captured:
+            response = self.post_map_job(
+                headers={"X-App-Attest-Assertion": secret_assertion}
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "app_attest_invalid_encoding",
+        )
+        diagnostics = "\n".join(captured.output)
+        self.assertIn(
+            "App Attest rejected path=/v1/map-jobs "
+            "code=app_attest_invalid_encoding "
+            "reason=App Attest assertion is invalid",
+            diagnostics,
+        )
+        self.assertNotIn(secret_assertion, diagnostics)
+        self.assertNotIn(
+            self.installation["clientInstallationToken"],
+            diagnostics,
+        )
+
     def test_unattested_stateless_credential_cannot_request_map_challenge(self):
         from map_platform.installations import InstallationCredentialStore
 
