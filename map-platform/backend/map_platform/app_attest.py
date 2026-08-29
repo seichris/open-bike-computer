@@ -18,7 +18,7 @@ from typing import Any, Protocol
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, utils
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtensionOID, ObjectIdentifier
 
 
@@ -1235,7 +1235,7 @@ class AppAttestStore:
             public_key.verify(
                 signature,
                 nonce,
-                ec.ECDSA(utils.Prehashed(hashes.SHA256())),
+                ec.ECDSA(hashes.SHA256()),
             )
         except (ValueError, InvalidSignature) as exc:
             raise AppAttestError(
