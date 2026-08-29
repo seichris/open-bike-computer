@@ -2,8 +2,7 @@ A sleek, Garmin-mounted bike computer. Get yours at [Bicino.com](https://bicino.
 
 🗺️ Navigation with Apple Maps.\
 🚴 Live Apple Workout stats, on your iPhone, Apple Watch & bike computer.\
-🧭 Auto-save Workouts to Apple Health.\
-🔄 Sync to Strava.\
+🔄 Auto-save workouts to Apple Health and Strava.\
 🛣️ Import bike routes from Strava.\
 📡 Connect your power meter and cadence sensor.
 
@@ -102,13 +101,9 @@ A sleek, Garmin-mounted bike computer. Get yours at [Bicino.com](https://bicino.
 
 ## Contributing
 
-Explore proposed and in-progress features on our
-[open roadmap](https://github.com/seichris/open-bike-computer/issues?q=is%3Aissue%20state%3Aopen%20label%3Afeature).
+Explore proposed and in-progress features on our [open roadmap](https://github.com/seichris/open-bike-computer/issues?q=is%3Aissue%20state%3Aopen%20label%3Afeature). Before starting code contributions, check our [CONTRIBUTING.md](CONTRIBUTING.md) for the best setup, custom device debugging and logging tools, and the [hardware docs](hardware/).
 
-Ideas and feature requests are welcome! [Open an issue](https://github.com/seichris/open-bike-computer/issues/new).
-
-For code contributions, see
-[CONTRIBUTING.md](https://github.com/seichris/open-bike-computer/blob/main/CONTRIBUTING.md).
+Ideas and feature requests are welcome, too! [Open an issue here](https://github.com/seichris/open-bike-computer/issues/new).
 
 ## License
 
