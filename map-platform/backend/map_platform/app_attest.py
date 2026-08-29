@@ -355,6 +355,7 @@ class ParsedAuthenticatorData:
     credential_id: bytes | None
     public_key_x963: bytes | None
     extensions: dict[Any, Any] | None
+    assertion_at_extension_framing: bool
 
 
 def parse_authenticator_data(
@@ -376,7 +377,8 @@ def parse_authenticator_data(
 
     has_attested_data = bool(flags & 0x40)
     has_extensions = bool(flags & 0x80)
-    if attestation != has_attested_data:
+    assertion_at_extension_framing = not attestation and has_attested_data
+    if attestation and not has_attested_data:
         raise AppAttestError(
             "app_attest_invalid_authenticator", "authenticator flags are invalid"
         )
@@ -427,9 +429,12 @@ def parse_authenticator_data(
 
     # Apple's App Attest objects append launch-validation extensions to both
     # attestations and assertions even when their authenticator flags do not
-    # set ED. This parser is App Attest-specific: accept that framing while
-    # still requiring exactly one bounded CBOR map. The caller then applies
-    # the object-specific extension-key and value allowlist.
+    # set ED. A live Apple App Attest assertion has also used AT for this
+    # appended map without including WebAuthn attested credential data. This
+    # parser is App Attest-specific: accept either framing while still
+    # requiring exactly one bounded CBOR map. The assertion verifier below
+    # requires the complete Apple extension identity before accepting the AT
+    # compatibility shape.
     if has_extensions or offset < len(auth_data):
         decoder = BoundedCBORDecoder(auth_data[offset:])
         decoded_extensions = decoder.decode_one()
@@ -439,6 +444,10 @@ def parse_authenticator_data(
             )
         extensions = decoded_extensions
         offset += decoder.offset
+    if assertion_at_extension_framing and extensions is None:
+        raise AppAttestError(
+            "app_attest_invalid_authenticator", "authenticator flags are invalid"
+        )
     if offset != len(auth_data):
         raise AppAttestError(
             "app_attest_invalid_authenticator",
@@ -451,6 +460,7 @@ def parse_authenticator_data(
         credential_id=credential_id,
         public_key_x963=public_key_x963,
         extensions=extensions,
+        assertion_at_extension_framing=assertion_at_extension_framing,
     )
 
 
@@ -1199,6 +1209,14 @@ class AppAttestStore:
         validation_category, bundle_version = _assertion_extension_values(
             parsed.extensions
         )
+        if (
+            parsed.assertion_at_extension_framing
+            and validation_category is None
+        ):
+            raise AppAttestError(
+                "app_attest_invalid_extensions",
+                "App Attest assertion identity is invalid",
+            )
         if validation_category is not None:
             allowed_validation_categories = (
                 {2, 4} if environment == "production" else {3}
