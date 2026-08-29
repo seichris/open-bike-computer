@@ -1,8 +1,10 @@
-A sleek, Garmin-mounted bike computer.
+A sleek, Garmin-mounted bike computer. Get yours at [Bicino.com](https://bicino.com).
 
 🗺️ Navigation with Apple Maps.\
-🚴 Workouts saved to Apple Health.\
-🧭 Ride stats and turn-by-turn directions on your bike computer.\
+🚴 Live Apple Workout stats, on your iPhone, Apple Watch & bike computer.\
+🧭 Auto-save Workouts to Apple Health.\
+🔄 Sync to Strava.\
+🛣️ Import bike routes from Strava.\
 📡 Connect your power meter and cadence sensor.
 
 [![Download Bike Computer 2.0 on the App Store](https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83)](https://geo.itunes.apple.com/app/id6788977349)
@@ -45,9 +47,9 @@ A sleek, Garmin-mounted bike computer.
       <sub><b>Mounted on a bike</b></sub>
     </td>
     <td align="center" valign="top" colspan="10">
-      <img src="docs/images/readme/7.jpg" height="170" alt="Bicino protection sleeve">
+      <img src="docs/images/readme/7.jpg" height="170" alt="Bicino with custom protection sleeve">
       <br>
-      <sub><b>Bicino protection<br>sleeve</b></sub>
+      <sub><b>Bicino with custom<br>protection sleeve</b></sub>
     </td>
     <td align="center" valign="top" colspan="10">
       <img src="docs/images/readme/8.jpg" height="170" alt="Open-source hardware and custom Garmin mount">
