@@ -22,6 +22,10 @@ def load_funcs_module():
     ]:
         setattr(shapely, name, object)
     shapely.intersection = lambda *args, **kwargs: None
+    shapely.set_precision = lambda value, **kwargs: value
+
+    shapely_errors = types.ModuleType("shapely.errors")
+    shapely_errors.GEOSException = type("GEOSException", (Exception,), {})
 
     shapely_ops = types.ModuleType("shapely.ops")
     shapely_ops.triangulate = lambda *args, **kwargs: []
@@ -34,6 +38,7 @@ def load_funcs_module():
     original_modules = {}
     for name, module in [
         ("shapely", shapely),
+        ("shapely.errors", shapely_errors),
         ("shapely.ops", shapely_ops),
         ("PIL", pil),
         ("PIL.ImageDraw", pil_image_draw),
