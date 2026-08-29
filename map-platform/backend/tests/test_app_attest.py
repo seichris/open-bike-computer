@@ -32,6 +32,7 @@ from map_platform.app_attest import (
     base64url_encode,
     canonical_map_create_client_data,
     decode_base64,
+    parse_authenticator_data,
 )
 
 
@@ -89,6 +90,7 @@ def apple_attestation_fixture(
     *,
     challenge: bytes,
     app_build: str = TEST_APP_BUILD,
+    extension_data_flag: bool = True,
 ) -> tuple[bytes, str, x509.Certificate]:
     attested_key = ec.generate_private_key(ec.SECP256R1())
     public_key_x963 = attested_key.public_key().public_bytes(
@@ -114,7 +116,7 @@ def apple_attestation_fixture(
     )
     auth_data = (
         hashlib.sha256(TEST_APP_ID.encode("utf-8")).digest()
-        + b"\xc0"
+        + (b"\xc0" if extension_data_flag else b"\x40")
         + (0).to_bytes(4, "big")
         + APP_ATTEST_PRODUCTION_AAGUID
         + len(key_id_bytes).to_bytes(2, "big")
@@ -192,6 +194,44 @@ class AppleAppAttestVerifierTests(unittest.TestCase):
             hashlib.sha256(verified.public_key_x963).digest(),
             base64.b64decode(key_id),
         )
+
+    def test_accepts_apple_attestation_extensions_without_ed_flag(self):
+        challenge = b"d" * 32
+        attestation, key_id, root = apple_attestation_fixture(
+            challenge=challenge,
+            extension_data_flag=False,
+        )
+        verifier = AppleAppAttestVerifier(
+            allowed_app_ids={TEST_APP_ID},
+            environment="production",
+            root_certificate=root,
+            allowed_validation_categories={4},
+        )
+
+        verified = verifier.verify_attestation(
+            attestation_object=attestation,
+            key_id=key_id,
+            challenge=challenge,
+            app_build=TEST_APP_BUILD,
+        )
+
+        self.assertEqual(verified.validation_category, 4)
+        self.assertEqual(verified.bundle_version, TEST_APP_BUILD)
+        self.assertEqual(
+            hashlib.sha256(verified.public_key_x963).digest(),
+            base64.b64decode(key_id),
+        )
+
+    def test_rejects_assertion_extensions_without_ed_flag(self):
+        auth_data = (
+            hashlib.sha256(TEST_APP_ID.encode("utf-8")).digest()
+            + b"\x00"
+            + (1).to_bytes(4, "big")
+            + encode_cbor({"bundleVersion": TEST_APP_BUILD})
+        )
+
+        with self.assertRaisesRegex(AppAttestError, "trailing bytes"):
+            parse_authenticator_data(auth_data, attestation=False)
 
     def test_rejects_wrong_challenge_and_bundle_version(self):
         challenge = b"c" * 32

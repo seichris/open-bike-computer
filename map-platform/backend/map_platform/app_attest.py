@@ -425,7 +425,11 @@ def parse_authenticator_data(
                 "app_attest_wrong_environment", "App Attest environment is invalid"
             )
 
-    if has_extensions:
+    # Apple's App Attest attestation objects append launch-validation
+    # extensions even though their authenticator flags do not set ED. Keep
+    # that compatibility limited to attestation objects; assertions still
+    # require ED before any trailing extension data is accepted.
+    if has_extensions or (attestation and offset < len(auth_data)):
         decoder = BoundedCBORDecoder(auth_data[offset:])
         decoded_extensions = decoder.decode_one()
         if not isinstance(decoded_extensions, dict):
