@@ -3201,7 +3201,23 @@ private struct RendererBenchmarkReplaySettingsSection: View {
                             "stop.fill" : "lock.shield.fill"
                     )
                 }
-                .disabled(!secureSweep.isRunning && !canStartSecureSweep)
+                .disabled(!secureSweep.isRunning && secureSweepBlocker != nil)
+
+                if !secureSweep.isRunning, let secureSweepBlocker {
+                    Text(secureSweepBlocker.message)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+
+                    Button(action: refreshSecureSweepReadiness) {
+                        Label(
+                            "Refresh Sweep Readiness",
+                            systemImage: "arrow.clockwise"
+                        )
+                    }
+                    .disabled(
+                        !bleManager.isNavigationReady || replay.isRunning
+                    )
+                }
 
                 if let exportURL = secureSweep.exportURL {
                     ShareLink(item: exportURL) {
@@ -3301,9 +3317,15 @@ private struct RendererBenchmarkReplaySettingsSection: View {
         .onChange(of: bleManager.deviceTransferSessionToken) { _ in
             if activeSession == nil { secureSweep.stop() }
         }
+        .onChange(of: bleManager.deviceTransferMode) { mode in
+            if mode == DeviceTransferSession.Mode.debug.rawValue {
+                refreshSecureSweepReadiness()
+            }
+        }
         .onChange(of: bleManager.activeDeviceMap) { _ in
             if secureSweep.isRunning { secureSweep.stop() }
         }
+        .onAppear(perform: refreshSecureSweepReadiness)
         .onDisappear {
             secureSweep.stop()
             if !secureSweep.isRunning { replay.stop() }
@@ -3323,14 +3345,31 @@ private struct RendererBenchmarkReplaySettingsSection: View {
         RemoteDeviceDebugSessionPolicy.activeSession(bleManager: bleManager)
     }
 
-    private var canStartSecureSweep: Bool {
-        canStartReplay &&
-            activeSession != nil &&
-            bleManager.activeDeviceMap?.manifestReceipt != nil &&
-            bleManager.activeDeviceMap?.bounds != nil &&
-            bleManager.deviceStorageBackend == "sdmmc" &&
-            bleManager.deviceStoragePowerCycleRequired == false &&
-            !replay.isRunning
+    private var secureSweepBlocker: SecureRendererBenchmarkReadinessBlocker? {
+        SecureRendererBenchmarkReadiness.blocker(
+            for: SecureRendererBenchmarkReadinessInputs(
+                isConnected: bleManager.isConnected,
+                isNavigationReady: bleManager.isNavigationReady,
+                supportsRendererDiagnostics:
+                    bleManager.supportsRendererDiagnostics,
+                isNavigationActive: isNavigationActive,
+                hasSecureSession: activeSession != nil,
+                hasActiveMap: bleManager.activeDeviceMap != nil,
+                hasManifestReceipt:
+                    bleManager.activeDeviceMap?.manifestReceipt != nil,
+                hasMapBounds: bleManager.activeDeviceMap?.bounds != nil,
+                storageBackend: bleManager.deviceStorageBackend,
+                storagePowerCycleRequired:
+                    bleManager.deviceStoragePowerCycleRequired,
+                manualReplayIsRunning: replay.isRunning
+            )
+        )
+    }
+
+    private func refreshSecureSweepReadiness() {
+        guard bleManager.isNavigationReady else { return }
+        _ = bleManager.requestDeviceTransferStatus()
+        _ = bleManager.requestMapTransferStatus()
     }
 }
 #endif

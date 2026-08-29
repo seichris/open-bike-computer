@@ -97,6 +97,14 @@ few minutes; budget roughly half an hour and keep both screens awake and near
 each other. Tap **Stop Secure Full Sweep** to request a checked `current`-profile
 cleanup before the replay ends.
 
+The section refreshes device-transfer and active-map readiness over
+authenticated BLE when it appears and when remote debugging starts. If the run
+button remains disabled, the orange readiness message identifies the exact
+missing gate; **Refresh Sweep Readiness** retries both status requests without
+copying session credentials. A map that lacks a verified receipt or validated
+bounds must be reinstalled from Saved Maps rather than bypassing that identity
+check.
+
 The in-app acceptance path is deliberately full-only: it has no shortened-run,
 profile-subset, no-soak, or screenshot-skip switch. When it finishes, tap
 **Share Benchmark Evidence ZIP**. The stored ZIP contains:

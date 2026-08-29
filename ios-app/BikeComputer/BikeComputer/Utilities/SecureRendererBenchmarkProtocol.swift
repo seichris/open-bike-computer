@@ -190,6 +190,92 @@ nonisolated struct RendererBenchmarkRunPlanItem: Equatable, Sendable {
     let repeatNumber: Int
 }
 
+nonisolated struct SecureRendererBenchmarkReadinessInputs: Equatable, Sendable {
+    let isConnected: Bool
+    let isNavigationReady: Bool
+    let supportsRendererDiagnostics: Bool
+    let isNavigationActive: Bool
+    let hasSecureSession: Bool
+    let hasActiveMap: Bool
+    let hasManifestReceipt: Bool
+    let hasMapBounds: Bool
+    let storageBackend: String?
+    let storagePowerCycleRequired: Bool?
+    let manualReplayIsRunning: Bool
+}
+
+nonisolated enum SecureRendererBenchmarkReadinessBlocker: Equatable, Sendable {
+    case deviceDisconnected
+    case navigationNotReady
+    case rendererDiagnosticsUnsupported
+    case navigationActive
+    case manualReplayRunning
+    case secureSessionUnavailable
+    case activeMapUnavailable
+    case manifestReceiptUnavailable
+    case mapBoundsUnavailable
+    case storageStatusUnavailable
+    case nativeSDMMCRequired
+
+    var message: String {
+        switch self {
+        case .deviceDisconnected:
+            return "Connect the bike computer before running the secure sweep."
+        case .navigationNotReady:
+            return "Wait for authenticated BLE navigation to become ready."
+        case .rendererDiagnosticsUnsupported:
+            return "The connected firmware does not expose renderer diagnostics."
+        case .navigationActive:
+            return "Stop navigation before running the renderer benchmark."
+        case .manualReplayRunning:
+            return "Stop the manual pinned replay before starting the full sweep."
+        case .secureSessionUnavailable:
+            return "Start Remote Device Debugging and wait for its pinned HTTPS session."
+        case .activeMapUnavailable:
+            return "The active-map status is unavailable. Refresh sweep readiness over BLE."
+        case .manifestReceiptUnavailable:
+            return "The active map lacks a verified manifest receipt. Reinstall it from Saved Maps before benchmarking."
+        case .mapBoundsUnavailable:
+            return "The active map lacks validated bounds. Reinstall it from Saved Maps before benchmarking."
+        case .storageStatusUnavailable:
+            return "The storage status is unavailable. Refresh sweep readiness over BLE."
+        case .nativeSDMMCRequired:
+            return "Fully power-cycle the device and confirm native SDMMC storage before benchmarking."
+        }
+    }
+}
+
+nonisolated enum SecureRendererBenchmarkReadiness {
+    static func blocker(
+        for inputs: SecureRendererBenchmarkReadinessInputs
+    ) -> SecureRendererBenchmarkReadinessBlocker? {
+        guard inputs.isConnected else { return .deviceDisconnected }
+        guard inputs.isNavigationReady else { return .navigationNotReady }
+        guard inputs.supportsRendererDiagnostics else {
+            return .rendererDiagnosticsUnsupported
+        }
+        guard !inputs.isNavigationActive else { return .navigationActive }
+        guard !inputs.manualReplayIsRunning else {
+            return .manualReplayRunning
+        }
+        guard inputs.hasSecureSession else { return .secureSessionUnavailable }
+        guard inputs.hasActiveMap else { return .activeMapUnavailable }
+        guard inputs.hasManifestReceipt else {
+            return .manifestReceiptUnavailable
+        }
+        guard inputs.hasMapBounds else { return .mapBoundsUnavailable }
+        guard inputs.storageBackend != nil,
+              inputs.storagePowerCycleRequired != nil else {
+            return .storageStatusUnavailable
+        }
+        guard inputs.storageBackend == "sdmmc",
+              inputs.storagePowerCycleRequired == false else {
+            return .nativeSDMMCRequired
+        }
+        return nil
+    }
+}
+
 nonisolated enum SecureRendererBenchmarkPlan {
     static let comparisonRepeats = 3
     static let soakDurationSeconds = 300

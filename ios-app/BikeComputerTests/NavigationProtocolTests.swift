@@ -723,6 +723,7 @@ struct NavigationProtocolTests {
         testNavigationWriteQueue()
         testGPSQueuePolicy()
         testRendererBenchmarkProtocol()
+        testSecureRendererBenchmarkReadiness()
         testSecureRendererBenchmarkProtocol()
         testDeviceBLEProtocolConstants()
         testWorkoutDeviceFrameVectors()
@@ -14379,6 +14380,80 @@ struct NavigationProtocolTests {
                 jsonData: Data(#"{"baseURL":"https://device"}"#.utf8)
             ),
             "benchmark evidence rejects device session origins"
+        )
+    }
+
+    static func testSecureRendererBenchmarkReadiness() {
+        func blocker(
+            isConnected: Bool = true,
+            isNavigationReady: Bool = true,
+            supportsRendererDiagnostics: Bool = true,
+            isNavigationActive: Bool = false,
+            hasSecureSession: Bool = true,
+            hasActiveMap: Bool = true,
+            hasManifestReceipt: Bool = true,
+            hasMapBounds: Bool = true,
+            storageBackend: String? = "sdmmc",
+            storagePowerCycleRequired: Bool? = false,
+            manualReplayIsRunning: Bool = false
+        ) -> SecureRendererBenchmarkReadinessBlocker? {
+            SecureRendererBenchmarkReadiness.blocker(
+                for: SecureRendererBenchmarkReadinessInputs(
+                    isConnected: isConnected,
+                    isNavigationReady: isNavigationReady,
+                    supportsRendererDiagnostics: supportsRendererDiagnostics,
+                    isNavigationActive: isNavigationActive,
+                    hasSecureSession: hasSecureSession,
+                    hasActiveMap: hasActiveMap,
+                    hasManifestReceipt: hasManifestReceipt,
+                    hasMapBounds: hasMapBounds,
+                    storageBackend: storageBackend,
+                    storagePowerCycleRequired: storagePowerCycleRequired,
+                    manualReplayIsRunning: manualReplayIsRunning
+                )
+            )
+        }
+
+        assertEqual(blocker(), nil, "complete secure sweep state is ready")
+        assertEqual(
+            blocker(hasSecureSession: false),
+            .secureSessionUnavailable,
+            "secure sweep requires the in-memory pinned HTTPS session"
+        )
+        assertEqual(
+            blocker(hasActiveMap: false),
+            .activeMapUnavailable,
+            "secure sweep reports missing active-map status"
+        )
+        assertEqual(
+            blocker(hasManifestReceipt: false),
+            .manifestReceiptUnavailable,
+            "secure sweep requires the active manifest receipt"
+        )
+        assertEqual(
+            blocker(hasMapBounds: false),
+            .mapBoundsUnavailable,
+            "secure sweep requires validated active-map bounds"
+        )
+        assertEqual(
+            blocker(storageBackend: nil),
+            .storageStatusUnavailable,
+            "secure sweep distinguishes missing storage status"
+        )
+        assertEqual(
+            blocker(storageBackend: "legacy_spi_migration"),
+            .nativeSDMMCRequired,
+            "secure sweep rejects the migration storage fallback"
+        )
+        assertEqual(
+            blocker(storagePowerCycleRequired: true),
+            .nativeSDMMCRequired,
+            "secure sweep retains the full-power-cycle SDMMC gate"
+        )
+        assertEqual(
+            blocker(manualReplayIsRunning: true),
+            .manualReplayRunning,
+            "secure sweep cannot overlap the manual replay"
         )
     }
 

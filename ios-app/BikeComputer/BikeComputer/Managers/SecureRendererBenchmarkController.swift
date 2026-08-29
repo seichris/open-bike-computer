@@ -277,30 +277,38 @@ final class SecureRendererBenchmarkController: ObservableObject {
         bundle: Bundle = .main
     ) {
         guard !isRunning else { return }
-        guard !isNavigationActive else {
-            failStart("Stop navigation before running the renderer benchmark.")
+        let deviceSession = RemoteDeviceDebugSessionPolicy.activeSession(
+            bleManager: bleManager
+        )
+        let map = bleManager.activeDeviceMap
+        let readiness = SecureRendererBenchmarkReadiness.blocker(
+            for: SecureRendererBenchmarkReadinessInputs(
+                isConnected: bleManager.isConnected,
+                isNavigationReady: bleManager.isNavigationReady,
+                supportsRendererDiagnostics:
+                    bleManager.supportsRendererDiagnostics,
+                isNavigationActive: isNavigationActive,
+                hasSecureSession: deviceSession != nil,
+                hasActiveMap: map != nil,
+                hasManifestReceipt: map?.manifestReceipt != nil,
+                hasMapBounds: map?.bounds != nil,
+                storageBackend: bleManager.deviceStorageBackend,
+                storagePowerCycleRequired:
+                    bleManager.deviceStoragePowerCycleRequired,
+                manualReplayIsRunning: replay.isRunning
+            )
+        )
+        if let readiness {
+            failStart(readiness.message)
             return
         }
-        guard let deviceSession = RemoteDeviceDebugSessionPolicy.activeSession(
-            bleManager: bleManager
-        ),
-              let map = bleManager.activeDeviceMap,
+        guard let deviceSession,
+              let map,
               let mapReceipt = map.manifestReceipt,
               let mapBounds = map.bounds else {
             failStart(
-                "Start a secure remote-debug session with an installed signed map first."
+                "The secure sweep readiness changed before it could start. Refresh and try again."
             )
-            return
-        }
-        guard bleManager.deviceStorageBackend == "sdmmc",
-              bleManager.deviceStoragePowerCycleRequired == false else {
-            failStart(
-                "Fully power-cycle the device and confirm native SDMMC storage before benchmarking."
-            )
-            return
-        }
-        guard !replay.isRunning else {
-            failStart("Stop the manual pinned replay before starting the full sweep.")
             return
         }
         guard let client = SecureRendererBenchmarkHTTPClient(
