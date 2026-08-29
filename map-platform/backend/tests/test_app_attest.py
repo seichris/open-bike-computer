@@ -222,15 +222,74 @@ class AppleAppAttestVerifierTests(unittest.TestCase):
             base64.b64decode(key_id),
         )
 
-    def test_rejects_assertion_extensions_without_ed_flag(self):
+    def test_accepts_assertion_extensions_without_ed_flag(self):
+        extensions = {"bundleVersion": TEST_APP_BUILD}
         auth_data = (
             hashlib.sha256(TEST_APP_ID.encode("utf-8")).digest()
             + b"\x00"
             + (1).to_bytes(4, "big")
-            + encode_cbor({"bundleVersion": TEST_APP_BUILD})
+            + encode_cbor(extensions)
         )
 
-        with self.assertRaisesRegex(AppAttestError, "trailing bytes"):
+        parsed = parse_authenticator_data(auth_data, attestation=False)
+
+        self.assertEqual(parsed.extensions, extensions)
+        self.assertFalse(parsed.assertion_at_extension_framing)
+
+    def test_accepts_assertion_extensions_with_at_flag(self):
+        extensions = {
+            "validationCategory": (4).to_bytes(4, "little"),
+            "bundleVersion": TEST_APP_BUILD,
+        }
+        for flags in (b"\x40", b"\xc0"):
+            with self.subTest(flags=flags.hex()):
+                auth_data = (
+                    hashlib.sha256(TEST_APP_ID.encode("utf-8")).digest()
+                    + flags
+                    + (1).to_bytes(4, "big")
+                    + encode_cbor(extensions)
+                )
+
+                parsed = parse_authenticator_data(
+                    auth_data,
+                    attestation=False,
+                )
+
+                self.assertEqual(parsed.extensions, extensions)
+                self.assertTrue(parsed.assertion_at_extension_framing)
+
+    def test_rejects_assertion_at_flag_without_extensions(self):
+        auth_data = (
+            hashlib.sha256(TEST_APP_ID.encode("utf-8")).digest()
+            + b"\x40"
+            + (1).to_bytes(4, "big")
+        )
+
+        with self.assertRaisesRegex(AppAttestError, "flags"):
+            parse_authenticator_data(auth_data, attestation=False)
+
+    def test_rejects_assertion_at_flag_with_attested_credential_data(self):
+        auth_data = (
+            hashlib.sha256(TEST_APP_ID.encode("utf-8")).digest()
+            + b"\x40"
+            + (1).to_bytes(4, "big")
+            + APP_ATTEST_PRODUCTION_AAGUID
+            + (32).to_bytes(2, "big")
+            + (b"k" * 32)
+        )
+
+        with self.assertRaisesRegex(AppAttestError, "extensions"):
+            parse_authenticator_data(auth_data, attestation=False)
+
+    def test_rejects_non_map_assertion_trailing_data(self):
+        auth_data = (
+            hashlib.sha256(TEST_APP_ID.encode("utf-8")).digest()
+            + b"\x00"
+            + (1).to_bytes(4, "big")
+            + encode_cbor(["not", "extensions"])
+        )
+
+        with self.assertRaisesRegex(AppAttestError, "extensions"):
             parse_authenticator_data(auth_data, attestation=False)
 
     def test_rejects_wrong_challenge_and_bundle_version(self):
@@ -347,6 +406,8 @@ class AppAttestStoreTests(unittest.TestCase):
         counter,
         app_build=TEST_APP_BUILD,
         extensions=None,
+        extension_data_flag=True,
+        attested_credential_data_flag=False,
     ) -> bytes:
         client_data = canonical_map_create_client_data(
             challenge_id=challenge.challenge_id,
@@ -356,9 +417,14 @@ class AppAttestStoreTests(unittest.TestCase):
             payload=payload,
             app_build=app_build,
         )
+        flags = 0
+        if extensions is not None and extension_data_flag:
+            flags |= 0x80
+        if attested_credential_data_flag:
+            flags |= 0x40
         auth_data = (
             hashlib.sha256(TEST_APP_ID.encode()).digest()
-            + (b"\x80" if extensions is not None else b"\x00")
+            + bytes([flags])
             + counter.to_bytes(4, "big")
         )
         if extensions is not None:
@@ -440,6 +506,162 @@ class AppAttestStoreTests(unittest.TestCase):
                 request_body=body,
                 payload=payload,
                 app_build="101",
+            )
+
+    def test_assertion_accepts_extensions_without_ed_flag(self):
+        installation_id = "inst_v2_" + "f" * 32
+        private_key, key_id = self.enroll(installation_id)
+        payload = {
+            "mode": "custom_bbox",
+            "bbox": [103.75, 1.24, 103.93, 1.37],
+            "clientInstallationId": installation_id,
+            "clientRequestId": "request-flagless-extensions-1",
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        challenge = self.store.issue_challenge(
+            purpose=APP_ATTEST_MAP_CREATE_PURPOSE,
+            installation_id=installation_id,
+        )
+        assertion = self.assertion(
+            private_key=private_key,
+            challenge=challenge,
+            installation_id=installation_id,
+            payload=payload,
+            body=body,
+            counter=1,
+            extensions={
+                "validationCategory": (4).to_bytes(4, "little"),
+                "bundleVersion": TEST_APP_BUILD,
+            },
+            extension_data_flag=False,
+        )
+
+        self.assertEqual(
+            self.store.verify_map_create_assertion(
+                installation_id=installation_id,
+                challenge_id=challenge.challenge_id,
+                key_id=key_id,
+                assertion_object=assertion,
+                request_body=body,
+                payload=payload,
+                app_build=TEST_APP_BUILD,
+            ),
+            1,
+        )
+
+    def test_assertion_accepts_apple_at_extension_framing(self):
+        installation_id = "inst_v2_" + "1" * 32
+        private_key, key_id = self.enroll(installation_id)
+        payload = {
+            "mode": "custom_bbox",
+            "bbox": [103.75, 1.24, 103.93, 1.37],
+            "clientInstallationId": installation_id,
+            "clientRequestId": "request-at-extensions-1",
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        challenge = self.store.issue_challenge(
+            purpose=APP_ATTEST_MAP_CREATE_PURPOSE,
+            installation_id=installation_id,
+        )
+        assertion = self.assertion(
+            private_key=private_key,
+            challenge=challenge,
+            installation_id=installation_id,
+            payload=payload,
+            body=body,
+            counter=1,
+            extensions={
+                "validationCategory": (4).to_bytes(4, "little"),
+                "bundleVersion": TEST_APP_BUILD,
+            },
+            extension_data_flag=False,
+            attested_credential_data_flag=True,
+        )
+
+        self.assertEqual(
+            self.store.verify_map_create_assertion(
+                installation_id=installation_id,
+                challenge_id=challenge.challenge_id,
+                key_id=key_id,
+                assertion_object=assertion,
+                request_body=body,
+                payload=payload,
+                app_build=TEST_APP_BUILD,
+            ),
+            1,
+        )
+
+    def test_assertion_at_framing_requires_complete_apple_identity(self):
+        installation_id = "inst_v2_" + "2" * 32
+        private_key, key_id = self.enroll(installation_id)
+        payload = {
+            "mode": "custom_bbox",
+            "bbox": [103.75, 1.24, 103.93, 1.37],
+            "clientInstallationId": installation_id,
+            "clientRequestId": "request-at-incomplete-1",
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        challenge = self.store.issue_challenge(
+            purpose=APP_ATTEST_MAP_CREATE_PURPOSE,
+            installation_id=installation_id,
+        )
+        assertion = self.assertion(
+            private_key=private_key,
+            challenge=challenge,
+            installation_id=installation_id,
+            payload=payload,
+            body=body,
+            counter=1,
+            extensions={},
+            extension_data_flag=False,
+            attested_credential_data_flag=True,
+        )
+
+        with self.assertRaisesRegex(AppAttestError, "identity"):
+            self.store.verify_map_create_assertion(
+                installation_id=installation_id,
+                challenge_id=challenge.challenge_id,
+                key_id=key_id,
+                assertion_object=assertion,
+                request_body=body,
+                payload=payload,
+                app_build=TEST_APP_BUILD,
+            )
+
+    def test_assertion_rejects_unknown_extensions_without_ed_flag(self):
+        installation_id = "inst_v2_" + "0" * 32
+        private_key, key_id = self.enroll(installation_id)
+        payload = {
+            "mode": "custom_bbox",
+            "bbox": [103.75, 1.24, 103.93, 1.37],
+            "clientInstallationId": installation_id,
+            "clientRequestId": "request-unknown-extensions-1",
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        challenge = self.store.issue_challenge(
+            purpose=APP_ATTEST_MAP_CREATE_PURPOSE,
+            installation_id=installation_id,
+        )
+        assertion = self.assertion(
+            private_key=private_key,
+            challenge=challenge,
+            installation_id=installation_id,
+            payload=payload,
+            body=body,
+            counter=1,
+            extensions={"unexpected": True},
+            extension_data_flag=False,
+        )
+
+        with self.assertRaisesRegex(AppAttestError, "extensions"):
+            self.store.verify_map_create_assertion(
+                installation_id=installation_id,
+                challenge_id=challenge.challenge_id,
+                key_id=key_id,
+                assertion_object=assertion,
+                request_body=body,
+                payload=payload,
+                app_build=TEST_APP_BUILD,
             )
 
     def test_assertion_is_bound_to_body_challenge_and_monotonic_counter(self):
