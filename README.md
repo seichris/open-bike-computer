@@ -1,4 +1,91 @@
-<img width="4168" height="1054" alt="Bike Computer devices and companion apps" src="docs/images/bike_header.jpg" />
+<table width="100%">
+  <!-- First row: 5 images -->
+  <tr>
+    <td align="center" valign="top" colspan="4">
+      <img src="docs/images/readme/1.jpg" width="170" alt="Apple Workout">
+      <br>
+      <sub><b>Apple Workout</b></sub>
+    </td>
+    <td align="center" valign="top" colspan="4">
+      <img src="docs/images/readme/2.jpg" width="170" alt="Apple Maps Navigation">
+      <br>
+      <sub><b>Apple Maps Navigation</b></sub>
+    </td>
+    <td align="center" valign="top" colspan="4">
+      <img src="docs/images/readme/3.jpg" width="170" alt="Global 3D maps">
+      <br>
+      <sub><b>Global 3D maps</b></sub>
+    </td>
+    <td align="center" valign="top" colspan="4">
+      <img src="docs/images/readme/4.jpg" width="170" alt="Street names in any language">
+      <br>
+      <sub><b>Street names<br>(any language)</b></sub>
+    </td>
+    <td align="center" valign="top" colspan="4">
+      <img src="docs/images/readme/5.jpg" width="170" alt="Connect your bike sensors">
+      <br>
+      <sub><b>Connect your<br>bike sensors</b></sub>
+    </td>
+  </tr>
+
+  <!-- Second row: 4 images -->
+  <tr>
+    <td align="center" valign="top" colspan="5">
+      <img src="docs/images/readme/6.jpg" width="170" alt="On the Garmin mount">
+      <br>
+      <sub><b>On the Garmin mount</b></sub>
+    </td>
+    <td align="center" valign="top" colspan="5">
+      <img src="docs/images/readme/7.jpg" width="170" alt="Detailed maps">
+      <br>
+      <sub><b>Detailed maps</b></sub>
+    </td>
+    <td align="center" valign="top" colspan="5">
+      <img src="docs/images/readme/8.jpg" width="170" alt="3D map navigation">
+      <br>
+      <sub><b>3D map navigation</b></sub>
+    </td>
+    <td align="center" valign="top" colspan="5">
+      <img src="docs/images/readme/9.jpg" width="170" alt="Open-source hardware">
+      <br>
+      <sub><b>Open-source hardware</b></sub>
+    </td>
+  </tr>
+
+  <!-- Third row: 2 app images and 2 placeholders -->
+  <tr>
+    <td align="center" valign="top" colspan="5">
+      <img src="docs/images/readme/app1.jpg" width="170" alt="Apple Workout">
+      <br>
+      <sub><b>Apple Workout</b></sub>
+    </td>
+    <td align="center" valign="top" colspan="5">
+      <img src="docs/images/readme/app2.jpg" width="170" alt="Apple Maps Navigation">
+      <br>
+      <sub><b>Apple Maps Navigation</b></sub>
+    </td>
+    <td align="center" valign="top" colspan="5">
+      &nbsp;
+    </td>
+    <td align="center" valign="top" colspan="5">
+      &nbsp;
+    </td>
+  </tr>
+
+  <!-- Fourth row: 2 Apple Watch images -->
+  <tr>
+    <td align="center" valign="top" colspan="10">
+      <img src="docs/images/readme/watch1.jpg" width="170" alt="Start your workout with one tap">
+      <br>
+      <sub><b>Start your workout with one tap</b></sub>
+    </td>
+    <td align="center" valign="top" colspan="10">
+      <img src="docs/images/readme/watch2.jpg" width="170" alt="Automatically save rides to Apple Health">
+      <br>
+      <sub><b>Automatically save rides<br>to Apple Health</b></sub>
+    </td>
+  </tr>
+</table>
 
 A sleek, Garmin-mounted bike computer.
 
