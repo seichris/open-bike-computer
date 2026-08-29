@@ -1,3 +1,12 @@
+A sleek, Garmin-mounted bike computer.
+
+🗺️ Navigation with Apple Maps.\
+🚴 Workouts saved to Apple Health.\
+🧭 Ride stats and turn-by-turn directions on your bike computer.\
+📡 Connect your power meter and cadence sensor.
+
+[![Download Bike Computer 2.0 on the App Store](https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83)](https://geo.itunes.apple.com/app/id6788977349)
+
 <table width="100%">
   <!-- First row: 5 images -->
   <tr>
@@ -86,15 +95,6 @@
     </td>
   </tr>
 </table>
-
-A sleek, Garmin-mounted bike computer.
-
-🗺️ Navigation with Apple Maps.\
-🚴 Workouts saved to Apple Health.\
-🧭 Ride stats and turn-by-turn directions on your bike computer.\
-📡 Connect your power meter and cadence sensor.
-
-[![Download Bike Computer 2.0 on the App Store](https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83)](https://geo.itunes.apple.com/app/id6788977349)
 
 ## Get started
 
