@@ -425,7 +425,12 @@ def parse_authenticator_data(
                 "app_attest_wrong_environment", "App Attest environment is invalid"
             )
 
-    if has_extensions:
+    # Apple's App Attest objects append launch-validation extensions to both
+    # attestations and assertions even when their authenticator flags do not
+    # set ED. This parser is App Attest-specific: accept that framing while
+    # still requiring exactly one bounded CBOR map. The caller then applies
+    # the object-specific extension-key and value allowlist.
+    if has_extensions or offset < len(auth_data):
         decoder = BoundedCBORDecoder(auth_data[offset:])
         decoded_extensions = decoder.decode_one()
         if not isinstance(decoded_extensions, dict):
