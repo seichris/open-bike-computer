@@ -234,7 +234,7 @@ class AppleAppAttestVerifierTests(unittest.TestCase):
         parsed = parse_authenticator_data(auth_data, attestation=False)
 
         self.assertEqual(parsed.extensions, extensions)
-        self.assertFalse(parsed.assertion_at_extension_framing)
+        self.assertFalse(parsed.assertion_at_flag)
 
     def test_accepts_assertion_extensions_with_at_flag(self):
         extensions = {
@@ -256,17 +256,19 @@ class AppleAppAttestVerifierTests(unittest.TestCase):
                 )
 
                 self.assertEqual(parsed.extensions, extensions)
-                self.assertTrue(parsed.assertion_at_extension_framing)
+                self.assertTrue(parsed.assertion_at_flag)
 
-    def test_rejects_assertion_at_flag_without_extensions(self):
+    def test_accepts_assertion_at_flag_without_extensions(self):
         auth_data = (
             hashlib.sha256(TEST_APP_ID.encode("utf-8")).digest()
             + b"\x40"
             + (1).to_bytes(4, "big")
         )
 
-        with self.assertRaisesRegex(AppAttestError, "flags"):
-            parse_authenticator_data(auth_data, attestation=False)
+        parsed = parse_authenticator_data(auth_data, attestation=False)
+
+        self.assertIsNone(parsed.extensions)
+        self.assertTrue(parsed.assertion_at_flag)
 
     def test_rejects_assertion_at_flag_with_attested_credential_data(self):
         auth_data = (
@@ -590,6 +592,67 @@ class AppAttestStoreTests(unittest.TestCase):
             ),
             1,
         )
+
+    def test_assertion_accepts_signed_apple_at_flag_without_extensions(self):
+        installation_id = "inst_v2_" + "3" * 32
+        private_key, key_id = self.enroll(installation_id)
+        payload = {
+            "mode": "custom_bbox",
+            "bbox": [103.75, 1.24, 103.93, 1.37],
+            "clientInstallationId": installation_id,
+            "clientRequestId": "request-at-flag-only-1",
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        challenge = self.store.issue_challenge(
+            purpose=APP_ATTEST_MAP_CREATE_PURPOSE,
+            installation_id=installation_id,
+        )
+        assertion = self.assertion(
+            private_key=private_key,
+            challenge=challenge,
+            installation_id=installation_id,
+            payload=payload,
+            body=body,
+            counter=1,
+            attested_credential_data_flag=True,
+        )
+
+        self.assertEqual(
+            self.store.verify_map_create_assertion(
+                installation_id=installation_id,
+                challenge_id=challenge.challenge_id,
+                key_id=key_id,
+                assertion_object=assertion,
+                request_body=body,
+                payload=payload,
+                app_build=TEST_APP_BUILD,
+            ),
+            1,
+        )
+
+        next_challenge = self.store.issue_challenge(
+            purpose=APP_ATTEST_MAP_CREATE_PURPOSE,
+            installation_id=installation_id,
+        )
+        request_bound_assertion = self.assertion(
+            private_key=private_key,
+            challenge=next_challenge,
+            installation_id=installation_id,
+            payload=payload,
+            body=body,
+            counter=2,
+            attested_credential_data_flag=True,
+        )
+        with self.assertRaisesRegex(AppAttestError, "signature"):
+            self.store.verify_map_create_assertion(
+                installation_id=installation_id,
+                challenge_id=next_challenge.challenge_id,
+                key_id=key_id,
+                assertion_object=request_bound_assertion,
+                request_body=body + b" ",
+                payload=payload,
+                app_build=TEST_APP_BUILD,
+            )
 
     def test_assertion_at_framing_requires_complete_apple_identity(self):
         installation_id = "inst_v2_" + "2" * 32
