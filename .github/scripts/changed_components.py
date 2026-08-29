@@ -69,7 +69,7 @@ IOS_CONTRACT_PATHS = {
     "docs/device-ownership-test-vectors.json",
     "docs/releases/watchos-workout-companion.md",
 }
-SHARED_FMB_FIXTURE_PREFIX = "test-fixtures/fmb/"
+SHARED_FMB_FIXTURE_PREFIX = "tools/tests/fixtures/fmb/"
 SHARED_MAP_STREAM_FIXTURE_PATH = (
     "map-platform/backend/tests/fixtures/map_stream_v1_golden.txt"
 )

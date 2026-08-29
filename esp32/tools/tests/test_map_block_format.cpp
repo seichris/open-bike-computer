@@ -54,7 +54,7 @@ static std::map<std::string, std::vector<uint8_t>> loadGoldenBlocks() {
   for (uint8_t depth = 0; depth < 4; ++depth)
     repository = repository.parent_path();
   const std::filesystem::path fixture =
-      repository / "test-fixtures/fmb/golden_blocks.txt";
+      repository / "tools/tests/fixtures/fmb/golden_blocks.txt";
   std::ifstream input(fixture);
   if (!input)
     throw std::runtime_error("could not open golden FMB fixture: " +
