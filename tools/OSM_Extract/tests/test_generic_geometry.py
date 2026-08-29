@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from PIL import Image
-from shapely import Polygon, box
+from shapely import Polygon, box, set_precision
 from shapely.ops import unary_union
 
 
@@ -15,7 +15,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from funcs import (  # noqa: E402
     BACKGROUND_COLOR,
+    GenericGeometryError,
     GenericGeometryLimitError,
+    _validate_quantized_decomposition,
     clip_polygons,
     get_geoms,
     render_map,
@@ -132,6 +134,100 @@ class GenericGeometryTests(unittest.TestCase):
                 (root / "first.fmb").read_bytes(),
                 (root / "second.fmb").read_bytes(),
             )
+
+    def test_fmb_precision_preserves_representable_real_world_hole(self):
+        # Reduced EPSG:3857 coordinates from an ordinary parking relation that
+        # previously failed after its hole-free pieces were rounded to FMB.
+        source = Polygon(
+            [
+                (552.031362, 2224.15555),
+                (613.379533, 2240.867527),
+                (622.38528, 2209.812423),
+                (613.969526, 2207.378518),
+                (625.902976, 2166.236491),
+                (620.748883, 2164.73971),
+                (610.407303, 2200.376164),
+                (564.076131, 2186.94415),
+                (560.847865, 2196.835942),
+                (558.220725, 2204.931599),
+                (552.031362, 2224.15555),
+            ],
+            [[
+                (575.219212, 2194.558226),
+                (606.711496, 2204.319869),
+                (606.56678, 2209.278786),
+                (608.615059, 2213.365664),
+                (604.96378, 2223.569851),
+                (601.178917, 2224.74125),
+                (569.820216, 2215.552275),
+                (575.219212, 2194.558226),
+            ]],
+        )
+        expected = set_precision(source, 1.0, mode="valid_output")
+        pieces = clip_polygons(
+            [styled_feature(source)],
+            box(0, 0, 4095, 4096),
+        )
+        geometries = [feature["geom"] for feature in pieces]
+        merged = unary_union(geometries)
+
+        self.assertGreater(len(geometries), 1)
+        self.assertTrue(all(not geometry.interiors for geometry in geometries))
+        self.assertLess(expected.symmetric_difference(merged).area, 1e-7)
+        self.assertGreater(expected.area, 1_700)
+        encoded = unary_union(
+            [
+                Polygon(
+                    [(round(x), round(y)) for x, y in geometry.exterior.coords]
+                )
+                for geometry in geometries
+            ]
+        )
+        hole = Polygon(expected.interiors[0])
+        self.assertFalse(encoded.covers(hole.representative_point()))
+
+    def test_fmb_precision_repairs_boundary_and_submetre_slivers(self):
+        sources = (
+            Polygon(
+                [
+                    (256.833672, 84.313821),
+                    (315.064898, 124.343063),
+                    (373.10688, 39.910804),
+                    (314.875655, -0.118164),
+                    (256.833672, 84.313821),
+                ]
+            ),
+            Polygon(
+                [
+                    (1430.786758, 158.878966),
+                    (1430.931474, 157.941692),
+                    (1440.059672, 158.644647),
+                    (1449.032023, 152.955915),
+                    (1449.321453, 153.424552),
+                    (1440.004012, 159.347603),
+                    (1430.786758, 158.878966),
+                ]
+            ),
+        )
+
+        for index, source in enumerate(sources):
+            with self.subTest(index=index):
+                pieces = clip_polygons(
+                    [styled_feature(source, f"precision-{index}")],
+                    box(0, 0, 4095, 4096),
+                )
+                self.assertTrue(pieces)
+                self.assertTrue(all(item["geom"].is_valid for item in pieces))
+
+    def test_fmb_precision_tolerance_still_rejects_filled_holes(self):
+        source = Polygon(
+            [(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)],
+            [[(35, 35), (65, 35), (65, 65), (35, 65), (35, 35)]],
+        )
+        filled = Polygon(source.exterior)
+
+        with self.assertRaises(GenericGeometryError):
+            _validate_quantized_decomposition(source, [filled], 0, 0)
 
     def test_amplification_limit_fails_closed(self):
         source = Polygon(
