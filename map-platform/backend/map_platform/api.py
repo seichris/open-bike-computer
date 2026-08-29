@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import logging
 import os
 import secrets
 import time
@@ -103,6 +104,9 @@ from .strava_integrations import (
     StravaIntegrationService,
 )
 from .worker import MapWorker, cleanup_work_dirs, expire_ready_jobs
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _project_building_progress(
@@ -432,7 +436,12 @@ def create_app(
         request: Request,
         exc: AppAttestError,
     ) -> JSONResponse:
-        del request
+        _LOGGER.warning(
+            "App Attest rejected path=%s code=%s reason=%s",
+            request.url.path,
+            exc.code,
+            exc.safe_message,
+        )
         return JSONResponse(
             status_code=exc.status_code,
             content={
