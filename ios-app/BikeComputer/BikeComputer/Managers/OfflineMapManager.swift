@@ -4247,7 +4247,8 @@ final class OfflineMapManager: ObservableObject {
     ) throws -> OfflineMapPlatformClient {
         let value = serverURLString ?? self.serverURLString
         return try bicinoServiceSession.makeOfflineMapClient(
-            serverURLString: value
+            serverURLString: value,
+            mapStreamTrustCapabilities: mapStreamTrustStore.capabilityHeaderValue
         )
     }
 

@@ -9432,6 +9432,11 @@ struct NavigationProtocolTests {
                     )
                     return (200, try! JSONEncoder().encode(refreshedCredential))
                 case "/v1/map-jobs/\(jobID)":
+                    assertEqual(
+                        request.value(forHTTPHeaderField: "X-Map-Stream-Trust"),
+                        signedTrustStore.capabilityHeaderValue,
+                        "signed recovery advertises the manager's configured trust store"
+                    )
                     return (
                         200,
                         jobData(
