@@ -1,6 +1,7 @@
 #include "device_transfer_tls.hpp"
 
 #include <Preferences.h>
+#include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp_tls.h>
 #include <fcntl.h>
@@ -37,6 +38,19 @@ constexpr char kSlotBPrivateKeyKey[] = "bKey";
 constexpr char kSlotBFingerprintKey[] = "bSha";
 constexpr size_t kMaximumCertificatePemBytes = 2048;
 constexpr size_t kMaximumPrivateKeyPemBytes = 768;
+
+TransferTlsMemorySnapshot captureTlsMemory() {
+  constexpr uint32_t kInternalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  return {
+      static_cast<uint32_t>(heap_caps_get_free_size(kInternalCaps)),
+      static_cast<uint32_t>(heap_caps_get_largest_free_block(kInternalCaps)),
+      static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_DMA)),
+      static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_DMA)),
+      static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+      static_cast<uint32_t>(
+          heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),
+  };
+}
 
 uint16_t encodeSelector(uint8_t activeSlot) {
   return static_cast<uint16_t>(TLS_IDENTITY_SCHEMA_VERSION << 8) |
@@ -167,6 +181,40 @@ bool namespaceContainsIdentityState(Preferences &preferences) {
 }
 
 } // namespace
+
+const char *transferTlsFailureStageName(TransferTlsFailureStage stage) {
+  switch (stage) {
+  case TransferTlsFailureStage::None:
+    return "none";
+  case TransferTlsFailureStage::Input:
+    return "input";
+  case TransferTlsFailureStage::SocketOwnership:
+    return "socket";
+  case TransferTlsFailureStage::ContextAllocation:
+    return "context_allocation";
+  case TransferTlsFailureStage::Handshake:
+    return "handshake";
+  }
+  return "unknown";
+}
+
+const char *transferTlsFailureCode(
+    const TransferTlsHandshakeDiagnostics &diagnostics) {
+  if (diagnostics.stage == TransferTlsFailureStage::ContextAllocation)
+    return "tls_context_allocation_failed";
+  if (diagnostics.stage == TransferTlsFailureStage::Handshake) {
+    if (diagnostics.sessionResult ==
+        ESP_ERR_ESP_TLS_SERVER_HANDSHAKE_TIMEOUT) {
+      return "tls_handshake_timeout";
+    }
+    if (diagnostics.sessionResult == MBEDTLS_ERR_SSL_ALLOC_FAILED ||
+        diagnostics.tlsErrorCode == -MBEDTLS_ERR_SSL_ALLOC_FAILED) {
+      return "tls_handshake_allocation_failed";
+    }
+    return "tls_handshake_failed";
+  }
+  return "tls_session_setup_failed";
+}
 
 bool validTlsCertificateSha256(const std::string &value) {
   return value.size() == TLS_CERTIFICATE_SHA256_HEX_BYTES &&
@@ -464,8 +512,13 @@ bool TransferClient::begin(WiFiClient &accepted,
                            const TransferTlsIdentity &identity,
                            uint32_t handshakeTimeoutMs) {
   stop();
-  if (!identity.valid() || accepted.fd() < 0)
+  handshakeDiagnostics_ = {};
+  handshakeDiagnostics_.before = captureTlsMemory();
+  if (!identity.valid() || accepted.fd() < 0) {
+    handshakeDiagnostics_.stage = TransferTlsFailureStage::Input;
+    handshakeDiagnostics_.after = captureTlsMemory();
     return false;
+  }
   // NetworkClient owns its socket through a shared handle. Retain that handle,
   // then clear the caller without closing it; this is the ESP32 equivalent of
   // transferring the accepted descriptor into the TLS-only adapter.
@@ -473,6 +526,8 @@ bool TransferClient::begin(WiFiClient &accepted,
   socket_ = socketOwner_.fd();
   accepted = WiFiClient();
   if (socket_ < 0) {
+    handshakeDiagnostics_.stage = TransferTlsFailureStage::SocketOwnership;
+    handshakeDiagnostics_.after = captureTlsMemory();
     socketOwner_.stop();
     return false;
   }
@@ -487,6 +542,10 @@ bool TransferClient::begin(WiFiClient &accepted,
 
   tls_ = esp_tls_init();
   if (tls_ == nullptr) {
+    handshakeDiagnostics_.stage =
+        TransferTlsFailureStage::ContextAllocation;
+    handshakeDiagnostics_.lastEspError = ESP_ERR_NO_MEM;
+    handshakeDiagnostics_.after = captureTlsMemory();
     socketOwner_.stop();
     socket_ = -1;
     return false;
@@ -499,7 +558,23 @@ bool TransferClient::begin(WiFiClient &accepted,
       identity.privateKeyPem.data());
   configuration.serverkey_bytes = identity.privateKeyPem.size();
   configuration.tls_handshake_timeout_ms = handshakeTimeoutMs;
-  if (esp_tls_server_session_create(&configuration, socket_, tls_) != 0) {
+  const int sessionResult =
+      esp_tls_server_session_create(&configuration, socket_, tls_);
+  if (sessionResult != 0) {
+    handshakeDiagnostics_.stage = TransferTlsFailureStage::Handshake;
+    handshakeDiagnostics_.sessionResult = sessionResult;
+    esp_tls_error_handle_t errorHandle = nullptr;
+    if (esp_tls_get_error_handle(tls_, &errorHandle) == ESP_OK &&
+        errorHandle != nullptr) {
+      int tlsErrorCode = 0;
+      int tlsFlags = 0;
+      handshakeDiagnostics_.lastEspError =
+          esp_tls_get_and_clear_last_error(errorHandle, &tlsErrorCode,
+                                           &tlsFlags);
+      handshakeDiagnostics_.tlsErrorCode = tlsErrorCode;
+      handshakeDiagnostics_.tlsFlags = tlsFlags;
+    }
+    handshakeDiagnostics_.after = captureTlsMemory();
     esp_tls_server_session_delete(tls_);
     tls_ = nullptr;
     socket_ = -1;

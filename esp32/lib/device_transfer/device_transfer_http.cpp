@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <sstream>
 
@@ -177,15 +179,23 @@ void HttpTransferServer::configure(uint16_t port, std::string apSsid) {
     stateMutex_ = xSemaphoreCreateMutex();
   if (tlsIdentityMutex_ == nullptr)
     tlsIdentityMutex_ = xSemaphoreCreateMutex();
-  configured_ = stateMutex_ != nullptr && tlsIdentityMutex_ != nullptr &&
-                tlsIdentityStore_.begin();
+  const bool locksReady =
+      stateMutex_ != nullptr && tlsIdentityMutex_ != nullptr;
+  const bool identityReady = locksReady && tlsIdentityStore_.begin();
+  const bool reserveReady =
+      identityReady && ensureTlsHandshakeReserve();
+  configured_ = locksReady && identityReady && reserveReady;
   if (!configured_) {
-    rememberError(stateMutex_ == nullptr || tlsIdentityMutex_ == nullptr
-                      ? "transfer_mutex"
-                      : tlsIdentityStore_.lastError(),
-                  stateMutex_ == nullptr || tlsIdentityMutex_ == nullptr
-                      ? "could not allocate transfer state lock"
-                      : "device TLS identity is unavailable");
+    if (!locksReady) {
+      rememberError("transfer_mutex",
+                    "could not allocate transfer state lock");
+    } else if (!identityReady) {
+      rememberError(tlsIdentityStore_.lastError(),
+                    "device TLS identity is unavailable");
+    } else {
+      rememberError("tls_psram_reserve_unavailable",
+                    "could not reserve PSRAM for transfer TLS handshakes");
+    }
   }
 }
 
@@ -379,6 +389,13 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     lockState();
     rememberError("http_worker_stopping",
                   "previous transfer HTTP worker is still stopping");
+    unlockState();
+    return false;
+  }
+  if (enabled && !wasEnabled && !ensureTlsHandshakeReserve()) {
+    lockState();
+    rememberError("tls_psram_reserve_unavailable",
+                  "could not reserve PSRAM for transfer TLS handshakes");
     unlockState();
     return false;
   }
@@ -699,9 +716,57 @@ void HttpTransferServer::runWorker() {
       lockTlsIdentity();
       const TransferTlsIdentity tlsIdentity = tlsIdentityStore_.active();
       unlockTlsIdentity();
-      if (!client.begin(acceptedClient, tlsIdentity)) {
+      // The reserve was acquired before renderer initialization. Release it
+      // only after all small per-client state is ready so mbedTLS receives the
+      // contiguous PSRAM hole immediately, before another subsystem can take
+      // it. A missing reserve fails closed without parsing plaintext HTTP.
+      if (!ensureTlsHandshakeReserve() || !releaseTlsHandshakeReserve()) {
+        acceptedClient.stop();
+        setLastError("tls_psram_reserve_unavailable",
+                     "TLS handshake PSRAM reserve is unavailable");
         Serial.println(
-            "DEVICE_TRANSFER_HTTP: rejected client before secure request");
+            "DEVICE_TRANSFER_HTTP: rejected client without TLS PSRAM reserve");
+        vTaskDelay(pdMS_TO_TICKS(2));
+        continue;
+      }
+      if (!client.begin(acceptedClient, tlsIdentity)) {
+        const TransferTlsHandshakeDiagnostics &diagnostics =
+            client.handshakeDiagnostics();
+        const bool reserveRestored = ensureTlsHandshakeReserve();
+        char message[512] = {};
+        std::snprintf(
+            message, sizeof(message),
+            "stage=%s result=%ld lastEsp=0x%08lx tls=0x%08lx "
+            "flags=0x%08lx internalBefore=%lu internalLargestBefore=%lu "
+            "internalAfter=%lu internalLargestAfter=%lu dmaBefore=%lu "
+            "dmaLargestBefore=%lu dmaAfter=%lu dmaLargestAfter=%lu "
+            "psramBefore=%lu psramLargestBefore=%lu psramAfter=%lu "
+            "psramLargestAfter=%lu reserveRestored=%u",
+            transferTlsFailureStageName(diagnostics.stage),
+            static_cast<long>(diagnostics.sessionResult),
+            static_cast<unsigned long>(
+                static_cast<uint32_t>(diagnostics.lastEspError)),
+            static_cast<unsigned long>(
+                static_cast<uint32_t>(diagnostics.tlsErrorCode)),
+            static_cast<unsigned long>(
+                static_cast<uint32_t>(diagnostics.tlsFlags)),
+            static_cast<unsigned long>(diagnostics.before.internalFree),
+            static_cast<unsigned long>(diagnostics.before.internalLargest),
+            static_cast<unsigned long>(diagnostics.after.internalFree),
+            static_cast<unsigned long>(diagnostics.after.internalLargest),
+            static_cast<unsigned long>(diagnostics.before.dmaFree),
+            static_cast<unsigned long>(diagnostics.before.dmaLargest),
+            static_cast<unsigned long>(diagnostics.after.dmaFree),
+            static_cast<unsigned long>(diagnostics.after.dmaLargest),
+            static_cast<unsigned long>(diagnostics.before.psramFree),
+            static_cast<unsigned long>(diagnostics.before.psramLargest),
+            static_cast<unsigned long>(diagnostics.after.psramFree),
+            static_cast<unsigned long>(diagnostics.after.psramLargest),
+            reserveRestored ? 1U : 0U);
+        setLastError(transferTlsFailureCode(diagnostics), message);
+        Serial.printf(
+            "DEVICE_TRANSFER_HTTP: rejected client before secure request %s\n",
+            message);
         vTaskDelay(pdMS_TO_TICKS(2));
         continue;
       }
@@ -710,7 +775,7 @@ void HttpTransferServer::runWorker() {
       currentRequestAuthorized_ = false;
       unlockState();
       handleClient(client);
-      client.stop();
+      stopClientAndRestoreTlsHandshakeReserve(client);
       lockState();
       if (currentRequestAuthorized_) {
         lastUsefulTrafficMs_ = millis();
@@ -953,7 +1018,7 @@ void HttpTransferServer::handleClient(TransferClient &client) {
         (authorized || shortUnauthenticatedCompletion) &&
         finishHttpResponse(client, authorized ? kHttpResponseCloseTimeoutMs
                                               : 250U);
-    client.stop();
+    stopClientAndRestoreTlsHandshakeReserve(client);
     handler->responseDidComplete(request, peerClosedCleanly);
     return;
   }
@@ -1024,6 +1089,71 @@ void HttpTransferServer::lockTlsIdentity() const {
 void HttpTransferServer::unlockTlsIdentity() const {
   if (tlsIdentityMutex_ != nullptr)
     xSemaphoreGive(tlsIdentityMutex_);
+}
+
+bool HttpTransferServer::ensureTlsHandshakeReserve() {
+  lockState();
+  const bool alreadyReserved = tlsHandshakePsramReserve_ != nullptr;
+  unlockState();
+  if (alreadyReserved)
+    return true;
+
+  const uint32_t freeBefore =
+      heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  const uint32_t largestBefore =
+      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+  void *candidate = heap_caps_malloc(TLS_HANDSHAKE_PSRAM_RESERVE_BYTES,
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (candidate == nullptr) {
+    Serial.printf(
+        "DEVICE_TRANSFER_HTTP: TLS PSRAM reserve allocation failed "
+        "bytes=%lu free=%lu largest=%lu\n",
+        static_cast<unsigned long>(TLS_HANDSHAKE_PSRAM_RESERVE_BYTES),
+        static_cast<unsigned long>(freeBefore),
+        static_cast<unsigned long>(largestBefore));
+    return false;
+  }
+
+  lockState();
+  if (tlsHandshakePsramReserve_ == nullptr) {
+    tlsHandshakePsramReserve_ = candidate;
+    candidate = nullptr;
+  }
+  unlockState();
+  if (candidate != nullptr)
+    heap_caps_free(candidate);
+
+  Serial.printf(
+      "DEVICE_TRANSFER_HTTP: TLS PSRAM reserve ready bytes=%lu "
+      "free_before=%lu largest_before=%lu free_after=%lu largest_after=%lu\n",
+      static_cast<unsigned long>(TLS_HANDSHAKE_PSRAM_RESERVE_BYTES),
+      static_cast<unsigned long>(freeBefore),
+      static_cast<unsigned long>(largestBefore),
+      static_cast<unsigned long>(
+          heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+      static_cast<unsigned long>(
+          heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
+  return true;
+}
+
+bool HttpTransferServer::releaseTlsHandshakeReserve() {
+  lockState();
+  void *reserved = tlsHandshakePsramReserve_;
+  tlsHandshakePsramReserve_ = nullptr;
+  unlockState();
+  if (reserved == nullptr)
+    return false;
+  heap_caps_free(reserved);
+  return true;
+}
+
+void HttpTransferServer::stopClientAndRestoreTlsHandshakeReserve(
+    TransferClient &client) {
+  client.stop();
+  if (!ensureTlsHandshakeReserve()) {
+    setLastError("tls_psram_reserve_unavailable",
+                 "could not restore PSRAM after transfer TLS session");
+  }
 }
 
 bool sendHttpHead(TransferClient &client, int status, uint64_t contentLength,

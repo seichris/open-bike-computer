@@ -100,6 +100,14 @@ pass both `--debug-image-dir <directory>` and `--debug-image-limit <count>`.
 The image directory must be outside the map output folder so previews cannot
 be included in a packaged map.
 
+Generic polygon clipping first reduces valid geometry through GEOS' valid-output
+one-metre precision model, matching the integer coordinate grid stored by FMB.
+Only then are holes decomposed into bounded hole-free pieces. This lets
+unrepresentable sub-metre edges collapse deterministically while retaining
+representable holes. The encoder still rejects decomposition amplification or
+an area change larger than the geometric boundary strip permitted by that
+one-metre quantization.
+
 ## Renderer formats and OSM 3D buildings
 
 `extract_features.py --renderer-format` selects the durable binary output:
