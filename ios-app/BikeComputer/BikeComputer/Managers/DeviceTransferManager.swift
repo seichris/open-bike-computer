@@ -373,10 +373,14 @@ enum DeviceTransferServerProbePolicy {
         configuration.httpShouldSetCookies = false
         // Keep one attempt-scoped, proxy-free session. The device closes each
         // HTTP response, but retaining the session avoids client-side route and
-        // delegate churn while the accepted Wi-Fi configuration settles.
+        // delegate churn while the accepted Wi-Fi configuration settles. The
+        // exact accessory SSID is observed before this session is created, so
+        // start each local request immediately. Waiting for system connectivity
+        // can otherwise consume the full probe window on an accessory AP with
+        // no internet path without starting a network load.
         configuration.connectionProxyDictionary = [:]
         configuration.allowsCellularAccess = false
-        configuration.waitsForConnectivity = true
+        configuration.waitsForConnectivity = false
         configuration.httpMaximumConnectionsPerHost = 1
         configuration.timeoutIntervalForRequest = requestTimeout
         configuration.timeoutIntervalForResource = resourceTimeout
@@ -465,6 +469,9 @@ struct DeviceTransferServerProbeResult: Equatable, Sendable {
                 }
                 if diagnostics.connectCompleted {
                     return "tcp_connected_tls_not_started"
+                }
+                if diagnostics.waitedForConnectivity {
+                    return "connectivity_wait_without_network_load"
                 }
                 return "network_not_started"
             }

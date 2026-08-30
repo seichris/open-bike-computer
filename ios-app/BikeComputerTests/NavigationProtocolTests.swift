@@ -19809,8 +19809,8 @@ struct NavigationProtocolTests {
                "local device probes explicitly bypass configured proxies")
         assert(!configuration.allowsCellularAccess,
                "local device probes stay on the Wi-Fi route")
-        assert(configuration.waitsForConnectivity,
-               "the first local request waits for the accepted Wi-Fi route")
+        assert(!configuration.waitsForConnectivity,
+               "an exact accessory association starts the local request immediately")
         assertEqual(configuration.httpMaximumConnectionsPerHost, 1,
                     "the constrained accessory receives one connection at a time")
         assertEqual(
@@ -19821,7 +19821,7 @@ struct NavigationProtocolTests {
         assertEqual(
             configuration.timeoutIntervalForResource,
             DeviceTransferServerProbePolicy.resourceTimeout,
-            "connectivity waiting remains bounded by the resource timeout"
+            "the complete local request remains bounded by the resource timeout"
         )
         assert(DeviceTransferServerProbePolicy.requestTimeout > 5,
                "iOS must not abandon a handshake before the firmware timeout")
@@ -19871,6 +19871,21 @@ struct NavigationProtocolTests {
                "a pre-pin transport timeout receives a bounded retry")
         assertEqual(timeout.diagnosticCode, "network_not_started",
                     "missing connection metrics retain the earliest known layer")
+
+        let connectivityWait = DeviceTransferServerProbeResult(
+            outcome: .transportError(
+                domain: NSURLErrorDomain,
+                code: NSURLErrorTimedOut
+            ),
+            diagnostics: DeviceTransferPinnedSessionSnapshot(
+                waitedForConnectivity: true
+            )
+        )
+        assertEqual(
+            connectivityWait.diagnosticCode,
+            "connectivity_wait_without_network_load",
+            "a connectivity wait remains distinct from a started network load"
+        )
 
         let pinMismatch = DeviceTransferServerProbeResult(
             outcome: .transportError(
