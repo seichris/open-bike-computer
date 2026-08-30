@@ -21,6 +21,7 @@
 #include <WiFi.h>
 #include <Wire.h>
 #include <esp_bt.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_system.h>
 #include <esp_wifi.h>
@@ -1022,6 +1023,15 @@ static void logSystemDebugHeartbeat() {
   BLEDebugStats bleStats = bleNavServer.getDebugStats();
   const uint32_t gpsAgeMs =
       bleStats.gpsPacketCount != 0 ? now - bleStats.lastGpsPacketMs : 0U;
+  constexpr uint32_t kInternal8BitCaps =
+      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  const uint32_t internal8Free =
+      heap_caps_get_free_size(kInternal8BitCaps);
+  const uint32_t internal8Largest =
+      heap_caps_get_largest_free_block(kInternal8BitCaps);
+  const uint32_t dmaFree = heap_caps_get_free_size(MALLOC_CAP_DMA);
+  const uint32_t dmaLargest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
 #if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)) &&       \
     defined(WAVESHARE_IMU_DIAGNOSTICS)
   const waveshare_board::i2c::Stats &i2cStats = waveshare_board::i2c::stats();
@@ -1063,7 +1073,8 @@ static void logSystemDebugHeartbeat() {
 #endif
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  Serial.printf("SYS: up=%lus heap=%lu psram=%lu screen=%s tile=%s "
+  Serial.printf("SYS: up=%lus heap=%lu heap8=%lu/%lu dma=%lu/%lu psram=%lu "
+                "screen=%s tile=%s "
                 "displayMode=%s "
                 "waitRefresh=%d gpsFromApp=%d pendingMap=%d "
                 "gps[fix=%u heading=%u] routePts=%u mapFound=%d mapBlocks=%u "
@@ -1078,6 +1089,9 @@ static void logSystemDebugHeartbeat() {
                 "rtc[present=%d valid=%d source=%s unix=%lld]\n",
                 (unsigned long)(now / 1000),
                 (unsigned long)ESP.getFreeHeap(),
+                (unsigned long)internal8Free,
+                (unsigned long)internal8Largest, (unsigned long)dmaFree,
+                (unsigned long)dmaLargest,
                 (unsigned long)ESP.getFreePsram(), screenName,
                 debugTileName(activeTile),
                 displayInactivityModeName(currentDisplayMode),
@@ -1119,7 +1133,8 @@ static void logSystemDebugHeartbeat() {
                 waveshare_board::rtc::sourceName(rtcStatus.source),
                 static_cast<long long>(rtcStatus.unixTime));
 #else
-  Serial.printf("SYS: up=%lus heap=%lu psram=%lu screen=%s tile=%s "
+  Serial.printf("SYS: up=%lus heap=%lu heap8=%lu/%lu dma=%lu/%lu psram=%lu "
+                "screen=%s tile=%s "
                 "waitRefresh=%d gpsFromApp=%d pendingMap=%d "
                 "gps[fix=%u heading=%u] routePts=%u mapFound=%d mapBlocks=%u "
                 "mapFlags[pos=%d redraw=%d follow=%d vector=%d zoom=%u] "
@@ -1131,6 +1146,9 @@ static void logSystemDebugHeartbeat() {
                 "gpsGapMs=%lu/%lu]\n",
                 (unsigned long)(now / 1000),
                 (unsigned long)ESP.getFreeHeap(),
+                (unsigned long)internal8Free,
+                (unsigned long)internal8Largest, (unsigned long)dmaFree,
+                (unsigned long)dmaLargest,
                 (unsigned long)ESP.getFreePsram(), screenName,
                 debugTileName(activeTile), waitScreenRefresh,
                 gpsReceivedFromApp, pendingTransitionToMap,
@@ -1411,6 +1429,12 @@ void setup() {
   // HWCDC uses this value as both a timeout and a retry counter. Zero
   // underflows that counter when the USB host stops reading and stalls the UI.
   Serial.setTxTimeoutMs(1);
+#endif
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  // ESP-IDF's hardware-crypto allocation-error path writes through stdout.
+  // Prime its recursive lock while internal RAM is plentiful so a later
+  // recoverable AES allocation failure cannot itself abort while logging.
+  (void)std::fflush(stdout);
 #endif
 #if POWER_METRICS
   if (configuredSerialTxBufferSize != kSerialTxBufferSize) {

@@ -8,3 +8,5 @@ nvs,      data, nvs,     ,      0x5000,
 otadata,  data, ota,     ,      0x2000,
 app0,     app,  ota_0,   ,      0x600000,
 ffat,     data, fat,     ,      0x900000,
+# Retain panic evidence in the otherwise-unused 960 KiB tail of 16 MiB flash.
+coredump, data, coredump,,      0x0F0000,

@@ -2,6 +2,8 @@
 
 #if FIRMWARE_DIAGNOSTICS
 
+#include "../ble_navigation/device_ownership_crypto_resource.hpp"
+
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 
@@ -20,6 +22,8 @@ uint32_t lastPeriodicMemorySampleMs = 0;
 
 MemorySample memorySample() {
   constexpr uint32_t kInternalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  const device_ownership::CryptoResourceDiagnostics crypto =
+      device_ownership::cryptoResourceDiagnostics();
   return {
       static_cast<uint32_t>(heap_caps_get_free_size(kInternalCaps)),
       static_cast<uint32_t>(heap_caps_get_minimum_free_size(kInternalCaps)),
@@ -27,6 +31,13 @@ MemorySample memorySample() {
       static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
       static_cast<uint32_t>(
           heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),
+      static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_DMA)),
+      static_cast<uint32_t>(
+          heap_caps_get_minimum_free_size(MALLOC_CAP_DMA)),
+      static_cast<uint32_t>(
+          heap_caps_get_largest_free_block(MALLOC_CAP_DMA)),
+      crypto.headroomRejections,
+      crypto.operationFailures,
   };
 }
 
@@ -315,7 +326,17 @@ std::string toJson(const Snapshot &value) {
        << ",\"largestBlock\":" << value.memory.psramLargest
        << ",\"windowMinimumFree\":" << value.windowMinimumPsramFree
        << ",\"windowMinimumLargestBlock\":"
-       << value.windowMinimumPsramLargest << "}}"
+       << value.windowMinimumPsramLargest << "}"
+       << ",\"dmaHeap\":{\"free\":" << value.memory.dmaFree
+       << ",\"minimumEverFree\":" << value.memory.dmaMinimumEverFree
+       << ",\"largestBlock\":" << value.memory.dmaLargest
+       << ",\"windowMinimumFree\":" << value.windowMinimumDmaFree
+       << ",\"windowMinimumLargestBlock\":"
+       << value.windowMinimumDmaLargest
+       << ",\"cryptoHeadroomRejections\":"
+       << value.memory.cryptoHeadroomRejections
+       << ",\"cryptoOperationFailures\":"
+       << value.memory.cryptoOperationFailures << "}}"
        << ",\"render\":{\"timings\":{\"total\":";
     appendTiming(body, value.totalRender);
     body << ",\"blockLoad\":";

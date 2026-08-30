@@ -41,6 +41,88 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
         self.assertIn("WiFiClient socketOwner_;", TLS_HEADER)
         self.assertIn("TransferClient &client", HTTP_HEADER)
 
+    def test_tls_handshake_failures_preserve_safe_error_and_heap_evidence(self):
+        begin = TLS_SOURCE[
+            TLS_SOURCE.index("bool TransferClient::begin") :
+            TLS_SOURCE.index("int TransferClient::available")
+        ]
+        self.assertIn("esp_tls_get_error_handle", begin)
+        self.assertIn("esp_tls_get_and_clear_last_error", begin)
+        self.assertLess(
+            begin.index("esp_tls_get_and_clear_last_error"),
+            begin.index("esp_tls_server_session_delete"),
+        )
+        self.assertIn("heap_caps_get_free_size(kInternalCaps)", TLS_SOURCE)
+        self.assertIn("heap_caps_get_largest_free_block(kInternalCaps)", TLS_SOURCE)
+        self.assertIn("heap_caps_get_free_size(MALLOC_CAP_DMA)", TLS_SOURCE)
+        self.assertIn("heap_caps_get_largest_free_block(MALLOC_CAP_DMA)", TLS_SOURCE)
+        self.assertIn("heap_caps_get_free_size(MALLOC_CAP_SPIRAM)", TLS_SOURCE)
+        self.assertIn(
+            "heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)", TLS_SOURCE
+        )
+        for code in (
+            "tls_context_allocation_failed",
+            "tls_setup_allocation_failed",
+            "tls_setup_failed",
+            "tls_handshake_timeout",
+            "tls_handshake_allocation_failed",
+            "tls_handshake_failed",
+        ):
+            self.assertIn(code, TLS_SOURCE)
+        self.assertIn("ESP_ERR_MBEDTLS_SSL_SETUP_FAILED", begin)
+        self.assertLess(
+            begin.index("esp_tls_get_and_clear_last_error"),
+            begin.index("ESP_ERR_MBEDTLS_SSL_SETUP_FAILED"),
+        )
+        worker = HTTP_SOURCE[
+            HTTP_SOURCE.index("void HttpTransferServer::runWorker()") :
+            HTTP_SOURCE.index("void HttpTransferServer::workerTaskThunk")
+        ]
+        self.assertIn("client.handshakeDiagnostics()", worker)
+        self.assertIn("setLastError(transferTlsFailureCode(diagnostics), message)", worker)
+        for field in (
+            "psramBefore=",
+            "psramLargestBefore=",
+            "psramAfter=",
+            "psramLargestAfter=",
+        ):
+            self.assertIn(field, worker)
+        self.assertNotIn("reserveRestored=", worker)
+        for forbidden in (
+            "certificatePem",
+            "privateKeyPem",
+            "sessionToken",
+            "apPassphrase",
+        ):
+            diagnostic_block = worker[
+                worker.index("const TransferTlsHandshakeDiagnostics") :
+                worker.index("vTaskDelay(pdMS_TO_TICKS(2))")
+            ]
+            self.assertNotIn(forbidden, diagnostic_block)
+
+        status_snapshot = HTTP_SOURCE[
+            HTTP_SOURCE.index(
+                "HttpTransferStatus HttpTransferServer::status() const"
+            ) :
+            HTTP_SOURCE.index("bool HttpTransferServer::isRequestAuthorized")
+        ]
+        self.assertIn("result.errorSequence = errorSequence", status_snapshot)
+
+        ble_source = (
+            ROOT / "lib/ble_navigation/ble_navigation.cpp"
+        ).read_text(encoding="utf-8")
+        transfer_status = ble_source[
+            ble_source.index("static std::string genericTransferStatusJson()") :
+            ble_source.index("static void notifyMapTransferStatus")
+        ]
+        self.assertIn('\\"sequence\\":', transfer_status)
+        self.assertIn("transferStatus.errorSequence", transfer_status)
+
+    def test_tls_does_not_claim_a_psram_hole_that_cannot_fix_internal_crypto(self):
+        self.assertNotIn("TLS_HANDSHAKE_PSRAM_RESERVE_BYTES", TLS_HEADER)
+        self.assertNotIn("tlsHandshakePsramReserve_", HTTP_HEADER)
+        self.assertNotIn("ensureTlsHandshakeReserve", HTTP_SOURCE)
+
     def test_leaf_fingerprint_is_sha256_over_certificate_der(self):
         fingerprint = TLS_SOURCE[
             TLS_SOURCE.index("bool certificateFingerprint") :

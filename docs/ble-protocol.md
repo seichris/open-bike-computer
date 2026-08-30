@@ -1099,8 +1099,9 @@ production builds fail closed.
 
 The snapshot is generated from one fixed-size state object: no per-render trace
 is retained on the device. It includes build/boot identity, measurement-window
-identity, active profile and immutable tuning values, internal RAM and PSRAM,
-bounded timing histograms, building selection/reach and limiter counters,
+identity, active profile and immutable tuning values, internal RAM,
+DMA-capable internal RAM, and PSRAM, bounded timing histograms, building
+selection/reach and limiter counters,
 render-job outcomes, UI/display/GPS gaps, prediction state, fixture-marker
 freshness, and remote-debug overhead. It intentionally contains no route
 coordinates, network credentials, or transfer token.
@@ -1438,6 +1439,18 @@ two phase through the `DTRNtls` commands above. `DSTS.pendingTls` exposes only
 the staged version and fingerprint so the authenticated controller can verify
 the exact candidate before commit. No private-key material crosses BLE or
 appears in status/log output.
+
+If the device rejects a connection before secure HTTP parsing, it retains a
+non-secret `DSTS.lastError` classification. Stable codes distinguish TLS
+context allocation, handshake allocation, handshake timeout, other handshake
+failure, and pre-handshake setup failure. Its monotonic `sequence` lets the app
+distinguish a newly observed failure from a retained error belonging to an
+earlier transfer. The message contains only numeric ESP-TLS/mbedTLS results,
+before/after internal, DMA, and PSRAM heap totals/largest blocks; it never
+includes certificate or key bytes, the bearer token, the hotspot password,
+request headers, or request payload. This status is intended to diagnose a
+failed pinned-HTTPS session over the already authenticated BLE channel without
+requiring a serial connection or weakening TLS.
 
 ### Device diagnostics transfer
 

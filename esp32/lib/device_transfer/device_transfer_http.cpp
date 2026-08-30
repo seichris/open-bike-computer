@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <esp_system.h>
 #include <sstream>
 
@@ -177,15 +178,18 @@ void HttpTransferServer::configure(uint16_t port, std::string apSsid) {
     stateMutex_ = xSemaphoreCreateMutex();
   if (tlsIdentityMutex_ == nullptr)
     tlsIdentityMutex_ = xSemaphoreCreateMutex();
-  configured_ = stateMutex_ != nullptr && tlsIdentityMutex_ != nullptr &&
-                tlsIdentityStore_.begin();
+  const bool locksReady =
+      stateMutex_ != nullptr && tlsIdentityMutex_ != nullptr;
+  const bool identityReady = locksReady && tlsIdentityStore_.begin();
+  configured_ = locksReady && identityReady;
   if (!configured_) {
-    rememberError(stateMutex_ == nullptr || tlsIdentityMutex_ == nullptr
-                      ? "transfer_mutex"
-                      : tlsIdentityStore_.lastError(),
-                  stateMutex_ == nullptr || tlsIdentityMutex_ == nullptr
-                      ? "could not allocate transfer state lock"
-                      : "device TLS identity is unavailable");
+    if (!locksReady) {
+      rememberError("transfer_mutex",
+                    "could not allocate transfer state lock");
+    } else if (!identityReady) {
+      rememberError(tlsIdentityStore_.lastError(),
+                    "device TLS identity is unavailable");
+    }
   }
 }
 
@@ -382,7 +386,6 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     unlockState();
     return false;
   }
-
   bool acquiredPowerLock = false;
   if (enabled && !wasEnabled) {
     if (!power_management::acquire(
@@ -700,8 +703,41 @@ void HttpTransferServer::runWorker() {
       const TransferTlsIdentity tlsIdentity = tlsIdentityStore_.active();
       unlockTlsIdentity();
       if (!client.begin(acceptedClient, tlsIdentity)) {
-        Serial.println(
-            "DEVICE_TRANSFER_HTTP: rejected client before secure request");
+        const TransferTlsHandshakeDiagnostics &diagnostics =
+            client.handshakeDiagnostics();
+        char message[512] = {};
+        std::snprintf(
+            message, sizeof(message),
+            "stage=%s result=%ld lastEsp=0x%08lx tls=0x%08lx "
+            "flags=0x%08lx internalBefore=%lu internalLargestBefore=%lu "
+            "internalAfter=%lu internalLargestAfter=%lu dmaBefore=%lu "
+            "dmaLargestBefore=%lu dmaAfter=%lu dmaLargestAfter=%lu "
+            "psramBefore=%lu psramLargestBefore=%lu psramAfter=%lu "
+            "psramLargestAfter=%lu",
+            transferTlsFailureStageName(diagnostics.stage),
+            static_cast<long>(diagnostics.sessionResult),
+            static_cast<unsigned long>(
+                static_cast<uint32_t>(diagnostics.lastEspError)),
+            static_cast<unsigned long>(
+                static_cast<uint32_t>(diagnostics.tlsErrorCode)),
+            static_cast<unsigned long>(
+                static_cast<uint32_t>(diagnostics.tlsFlags)),
+            static_cast<unsigned long>(diagnostics.before.internalFree),
+            static_cast<unsigned long>(diagnostics.before.internalLargest),
+            static_cast<unsigned long>(diagnostics.after.internalFree),
+            static_cast<unsigned long>(diagnostics.after.internalLargest),
+            static_cast<unsigned long>(diagnostics.before.dmaFree),
+            static_cast<unsigned long>(diagnostics.before.dmaLargest),
+            static_cast<unsigned long>(diagnostics.after.dmaFree),
+            static_cast<unsigned long>(diagnostics.after.dmaLargest),
+            static_cast<unsigned long>(diagnostics.before.psramFree),
+            static_cast<unsigned long>(diagnostics.before.psramLargest),
+            static_cast<unsigned long>(diagnostics.after.psramFree),
+            static_cast<unsigned long>(diagnostics.after.psramLargest));
+        setLastError(transferTlsFailureCode(diagnostics), message);
+        Serial.printf(
+            "DEVICE_TRANSFER_HTTP: rejected client before secure request %s\n",
+            message);
         vTaskDelay(pdMS_TO_TICKS(2));
         continue;
       }

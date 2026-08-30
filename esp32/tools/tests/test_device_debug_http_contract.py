@@ -16,6 +16,9 @@ INPUT = (ROOT / "lib/device_debug/device_debug_input.cpp").read_text(
     encoding="utf-8"
 )
 MAIN = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+RENDERER_DIAGNOSTICS = (
+    ROOT / "lib/renderer_diagnostics/renderer_diagnostics.cpp"
+).read_text(encoding="utf-8")
 IOS_TRANSFER_MANAGER = (
     ROOT.parent
     / "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift"
@@ -115,6 +118,15 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             window.index("server_->isRequestAuthorized(request)"),
             window.index("xQueueOverwrite"),
         )
+
+    def test_renderer_metrics_expose_non_secret_crypto_resource_counters(self):
+        for field in (
+            r'\"cryptoHeadroomRejections\"',
+            r'\"cryptoOperationFailures\"',
+        ):
+            self.assertIn(field, RENDERER_DIAGNOSTICS)
+        self.assertNotIn("sessionToken", RENDERER_DIAGNOSTICS)
+        self.assertNotIn("apPassphrase", RENDERER_DIAGNOSTICS)
 
     def test_renderer_windows_bind_the_active_map_before_profile_change(self):
         active_identity = MAIN[

@@ -406,6 +406,10 @@ def load_gates(path: Path) -> dict[str, Any]:
         "minimumInternalLargestBlockBytes",
         "minimumPsramFreeBytes",
         "minimumPsramLargestBlockBytes",
+        "minimumDmaFreeBytes",
+        "minimumDmaLargestBlockBytes",
+        "maximumCryptoHeadroomRejections",
+        "maximumCryptoOperationFailures",
         "maximumRenderP95Ms",
         "maximumUiGapMs",
         "maximumFlushP95Ms",
@@ -425,14 +429,18 @@ def load_gates(path: Path) -> dict[str, Any]:
         "internalLargestAllowedDeclineBytes",
         "psramFreeAllowedDeclineBytes",
         "psramLargestAllowedDeclineBytes",
+        "dmaFreeAllowedDeclineBytes",
+        "dmaLargestAllowedDeclineBytes",
         "crossRunInternalAllowedDeclineBytes",
         "crossRunPsramAllowedDeclineBytes",
+        "crossRunDmaAllowedDeclineBytes",
     }
     relative_keys = {
         "maximumRenderP95Multiplier",
         "maximumUiGapMultiplier",
         "maximumInternalHeadroomLossBytes",
         "maximumPsramHeadroomLossBytes",
+        "maximumDmaHeadroomLossBytes",
         "minimumReachGainFraction",
     }
     absolute = gates.get("absolute")
@@ -720,6 +728,8 @@ def compact_sample(snapshot: dict[str, Any], elapsed: float) -> dict[str, Any]:
         "internalLargest": nested(memory, "internalHeap", "largestBlock"),
         "psramFree": nested(memory, "psram", "free"),
         "psramLargest": nested(memory, "psram", "largestBlock"),
+        "dmaFree": nested(memory, "dmaHeap", "free"),
+        "dmaLargest": nested(memory, "dmaHeap", "largestBlock"),
         "renderCount": nested(render, "timings", "total", "count"),
         "buildings": nested(render, "buildings"),
         "routeReplay": nested(snapshot, "routeReplay"),
@@ -773,6 +783,16 @@ def summarize_run(
         "minimumPsramFree": nested(memory, "psram", "windowMinimumFree"),
         "minimumPsramLargest": nested(
             memory, "psram", "windowMinimumLargestBlock"
+        ),
+        "minimumDmaFree": nested(memory, "dmaHeap", "windowMinimumFree"),
+        "minimumDmaLargest": nested(
+            memory, "dmaHeap", "windowMinimumLargestBlock"
+        ),
+        "cryptoHeadroomRejections": nested(
+            memory, "dmaHeap", "cryptoHeadroomRejections"
+        ),
+        "cryptoOperationFailures": nested(
+            memory, "dmaHeap", "cryptoOperationFailures"
         ),
         "candidateBuildings": building_median("candidates"),
         "selectedBuildings": building_median("selected"),
@@ -881,6 +901,25 @@ def evaluate_run(
             "minimumPsramLargestBlockBytes",
             "psram_largest_floor",
             False,
+        ),
+        ("minimumDmaFree", "minimumDmaFreeBytes", "dma_free_floor", False),
+        (
+            "minimumDmaLargest",
+            "minimumDmaLargestBlockBytes",
+            "dma_largest_floor",
+            False,
+        ),
+        (
+            "cryptoHeadroomRejections",
+            "maximumCryptoHeadroomRejections",
+            "crypto_headroom_rejections",
+            True,
+        ),
+        (
+            "cryptoOperationFailures",
+            "maximumCryptoOperationFailures",
+            "crypto_operation_failures",
+            True,
         ),
         ("renderP95Ms", "maximumRenderP95Ms", "render_p95", True),
         ("uiMaximumGapMs", "maximumUiGapMs", "ui_gap", True),
@@ -1040,6 +1079,12 @@ def evaluate_run(
             "psramLargestAllowedDeclineBytes",
             "psram_largest_decline",
         ),
+        ("dmaFree", "dmaFreeAllowedDeclineBytes", "dma_free_decline"),
+        (
+            "dmaLargest",
+            "dmaLargestAllowedDeclineBytes",
+            "dma_largest_decline",
+        ),
     )
     if len(samples) < trend["minimumSamples"]:
         failures.append(
@@ -1081,6 +1126,16 @@ def apply_cross_run_memory_gates(
             "crossRunPsramAllowedDeclineBytes",
             "cross_run_psram_largest_decline",
         ),
+        (
+            "minimumDmaFree",
+            "crossRunDmaAllowedDeclineBytes",
+            "cross_run_dma_decline",
+        ),
+        (
+            "minimumDmaLargest",
+            "crossRunDmaAllowedDeclineBytes",
+            "cross_run_dma_largest_decline",
+        ),
     )
     for profile in PROFILES:
         profile_runs = [run for run in runs if run["profile"] == profile]
@@ -1108,6 +1163,10 @@ def aggregate_profiles(runs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         "minimumInternalLargest",
         "minimumPsramFree",
         "minimumPsramLargest",
+        "minimumDmaFree",
+        "minimumDmaLargest",
+        "cryptoHeadroomRejections",
+        "cryptoOperationFailures",
         "candidateBuildings",
         "selectedBuildings",
         "extrudedBuildings",
@@ -1170,6 +1229,11 @@ def choose_pareto_candidate(
                 - relative["maximumPsramHeadroomLossBytes"]
             ):
                 reasons.append("PSRAM headroom loss exceeded")
+            if value["minimumDmaFree"] < (
+                current["minimumDmaFree"]
+                - relative["maximumDmaHeadroomLossBytes"]
+            ):
+                reasons.append("DMA headroom loss exceeded")
             if profile != "current":
                 reach_gain = max(
                     value["extrudedBuildings"]
@@ -1213,6 +1277,7 @@ def choose_pareto_candidate(
             value["uiMaximumGapMs"],
             -value["minimumInternalFree"],
             -value["minimumPsramFree"],
+            -value["minimumDmaFree"],
         )
 
     frontier: list[str] = []
@@ -1732,6 +1797,10 @@ def write_reports(report: dict[str, Any], output: Path) -> None:
         "minimumInternalLargest",
         "minimumPsramFree",
         "minimumPsramLargest",
+        "minimumDmaFree",
+        "minimumDmaLargest",
+        "cryptoHeadroomRejections",
+        "cryptoOperationFailures",
         "candidateBuildings",
         "selectedBuildings",
         "extrudedBuildings",
@@ -1783,8 +1852,8 @@ def write_reports(report: dict[str, Any], output: Path) -> None:
         "",
         "## Comparison runs",
         "",
-        "| Profile | Repeat | Pass | Render p95 | Building p95 | UI max | Flush p95 | Internal min | PSRAM min | Candidates | Selected | Extruded | Flat | Deferred | Reach p90/farthest |",
-        "|---|---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Profile | Repeat | Pass | Render p95 | Building p95 | UI max | Flush p95 | Internal min | DMA min | Crypto reject/fail | PSRAM min | Candidates | Selected | Extruded | Flat | Deferred | Reach p90/farthest |",
+        "|---|---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for run in report["runs"]:
         summary = run["summary"]
@@ -1792,7 +1861,10 @@ def write_reports(report: dict[str, Any], output: Path) -> None:
             f"| {run['profile']} | {run['repeat']} | {'yes' if run['passed'] else 'no'} | "
             f"{summary['renderP95Ms']} ms | {summary['buildingP95Ms']} ms | "
             f"{summary['uiMaximumGapMs']} ms | {summary['flushP95Ms']} ms | "
-            f"{summary['minimumInternalFree']} | {summary['minimumPsramFree']} | "
+            f"{summary['minimumInternalFree']} | {summary['minimumDmaFree']} | "
+            f"{summary['cryptoHeadroomRejections']}/"
+            f"{summary['cryptoOperationFailures']} | "
+            f"{summary['minimumPsramFree']} | "
             f"{summary['candidateBuildings']:.1f} | {summary['selectedBuildings']:.1f} | "
             f"{summary['extrudedBuildings']:.1f} | {summary['flatBuildings']:.1f} | "
             f"{summary['deferredBuildings']:.1f} | "
@@ -1808,7 +1880,8 @@ def write_reports(report: dict[str, Any], output: Path) -> None:
             f"`{soak['profile']}` ran for {soak['durationSeconds']} seconds: "
             f"**{'PASS' if soak['passed'] else 'FAIL'}**; render p95 "
             f"{soak_summary['renderP95Ms']} ms, internal minimum "
-            f"{soak_summary['minimumInternalFree']} bytes, PSRAM minimum "
+            f"{soak_summary['minimumInternalFree']} bytes, DMA minimum "
+            f"{soak_summary['minimumDmaFree']} bytes, PSRAM minimum "
             f"{soak_summary['minimumPsramFree']} bytes."
         )
     failed = [run for run in rows if not run["passed"]]
@@ -2294,6 +2367,11 @@ def write_ordinary_report(report: dict[str, Any], output: Path) -> None:
         f"{summary['minimumInternalLargest']} bytes",
         f"- PSRAM minimum/largest: {summary['minimumPsramFree']} / "
         f"{summary['minimumPsramLargest']} bytes",
+        f"- DMA-capable heap minimum/largest: {summary['minimumDmaFree']} / "
+        f"{summary['minimumDmaLargest']} bytes",
+        f"- Crypto headroom rejections/operation failures: "
+        f"{summary['cryptoHeadroomRejections']} / "
+        f"{summary['cryptoOperationFailures']}",
         f"- Buildings candidate/selected/extruded/flat/deferred: "
         f"{summary['candidateBuildings']:.1f} / "
         f"{summary['selectedBuildings']:.1f} / "

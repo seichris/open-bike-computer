@@ -64,6 +64,11 @@ struct MemorySample {
   uint32_t internalLargest = 0;
   uint32_t psramFree = 0;
   uint32_t psramLargest = 0;
+  uint32_t dmaFree = 0;
+  uint32_t dmaMinimumEverFree = 0;
+  uint32_t dmaLargest = 0;
+  uint32_t cryptoHeadroomRejections = 0;
+  uint32_t cryptoOperationFailures = 0;
 };
 
 struct TimingSummary {
@@ -216,6 +221,8 @@ struct Snapshot {
   uint32_t windowMinimumInternalLargest = 0;
   uint32_t windowMinimumPsramFree = 0;
   uint32_t windowMinimumPsramLargest = 0;
+  uint32_t windowMinimumDmaFree = 0;
+  uint32_t windowMinimumDmaLargest = 0;
   TimingSummary totalRender{};
   TimingSummary blockLoad{};
   TimingSummary draw{};
@@ -292,6 +299,8 @@ public:
       windowMinimumInternalLargest_ = sample.internalLargest;
       windowMinimumPsramFree_ = sample.psramFree;
       windowMinimumPsramLargest_ = sample.psramLargest;
+      windowMinimumDmaFree_ = sample.dmaFree;
+      windowMinimumDmaLargest_ = sample.dmaLargest;
       memoryObserved_ = true;
       return;
     }
@@ -303,6 +312,10 @@ public:
         std::min(windowMinimumPsramFree_, sample.psramFree);
     windowMinimumPsramLargest_ =
         std::min(windowMinimumPsramLargest_, sample.psramLargest);
+    windowMinimumDmaFree_ =
+        std::min(windowMinimumDmaFree_, sample.dmaFree);
+    windowMinimumDmaLargest_ =
+        std::min(windowMinimumDmaLargest_, sample.dmaLargest);
   }
 
   bool noteRenderForWindow(uint32_t windowId,
@@ -389,6 +402,8 @@ public:
     result.windowMinimumInternalLargest = windowMinimumInternalLargest_;
     result.windowMinimumPsramFree = windowMinimumPsramFree_;
     result.windowMinimumPsramLargest = windowMinimumPsramLargest_;
+    result.windowMinimumDmaFree = windowMinimumDmaFree_;
+    result.windowMinimumDmaLargest = windowMinimumDmaLargest_;
     result.totalRender = totalRender_.summary();
     result.blockLoad = blockLoad_.summary();
     result.draw = draw_.summary();
@@ -489,6 +504,8 @@ private:
     windowMinimumInternalLargest_ = 0;
     windowMinimumPsramFree_ = 0;
     windowMinimumPsramLargest_ = 0;
+    windowMinimumDmaFree_ = 0;
+    windowMinimumDmaLargest_ = 0;
     totalRender_.reset();
     blockLoad_.reset();
     draw_.reset();
@@ -527,6 +544,8 @@ private:
   uint32_t windowMinimumInternalLargest_ = 0;
   uint32_t windowMinimumPsramFree_ = 0;
   uint32_t windowMinimumPsramLargest_ = 0;
+  uint32_t windowMinimumDmaFree_ = 0;
+  uint32_t windowMinimumDmaLargest_ = 0;
   TimingHistogram totalRender_{};
   TimingHistogram blockLoad_{};
   TimingHistogram draw_{};

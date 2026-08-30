@@ -211,6 +211,61 @@ class BuildError(RuntimeError):
     """Raised when a deterministic real-target build cannot be confirmed."""
 
 
+DYNAMIC_TLS_LINK_MARKERS = (
+    "esp_mbedtls_dynamic_impl.c.o",
+    "esp_ssl_srv.c.o",
+    "esp_ssl_tls.c.o",
+    "__wrap_mbedtls_ssl_handshake_server_step",
+    "__wrap_mbedtls_ssl_setup",
+)
+
+
+def _require_dynamic_tls_link(project_dir: Path, environment: str) -> None:
+    """Prove an enabled dynamic-buffer config reached the linked firmware.
+
+    pioarduino's custom-core build can generate a matching sdkconfig while
+    silently retaining a stock nested MbedTLS archive. Inspect the final map so
+    such a header/binary mismatch can never produce an upload-eligible image.
+    """
+    sdkconfig = project_dir / f"sdkconfig.{environment}"
+    if sdkconfig.is_symlink() or not sdkconfig.is_file():
+        raise BuildError(
+            "dynamic TLS link verification requires the generated environment "
+            f"SDK configuration: {sdkconfig}"
+        )
+    try:
+        with sdkconfig.open(encoding="utf-8") as stream:
+            dynamic_enabled = any(
+                line.strip() == "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y"
+                for line in stream
+            )
+    except (OSError, UnicodeError) as error:
+        raise BuildError("could not read the generated SDK configuration") from error
+    if not dynamic_enabled:
+        return
+
+    firmware_map = project_dir / ".pio" / "build" / environment / "firmware.map"
+    if firmware_map.is_symlink() or not firmware_map.is_file():
+        raise BuildError(
+            "dynamic TLS link verification requires the final firmware map"
+        )
+    missing = set(DYNAMIC_TLS_LINK_MARKERS)
+    try:
+        with firmware_map.open(encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                missing.difference_update(
+                    marker for marker in tuple(missing) if marker in line
+                )
+                if not missing:
+                    return
+    except OSError as error:
+        raise BuildError("could not read the final firmware map") from error
+    raise BuildError(
+        "dynamic TLS configuration did not reach the linked firmware: missing "
+        + ", ".join(sorted(missing))
+    )
+
+
 def _resolved_device_port(
     project_dir: Path,
     manifest: dict[str, object],
@@ -1783,6 +1838,8 @@ def build_firmware(
                     raise BuildError(
                         "firmware source identity changed during the deterministic build"
                     )
+                if environment.startswith("WAVESHARE_AMOLED_"):
+                    _require_dynamic_tls_link(project_dir, environment)
 
                 attestation_started = time.monotonic()
                 try:
