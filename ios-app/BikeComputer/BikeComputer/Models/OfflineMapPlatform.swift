@@ -1102,6 +1102,7 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
     case backgroundMapUploadInProgress
     case mapActivationFailed(String)
     case transferWiFiJoinFailed(String, String)
+    case transferServerProbeFailed(String, String)
     case invalidPack(String)
     case unsupportedPackCompression(String)
     case invalidResponse
@@ -1139,6 +1140,8 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             return "Map activation failed: \(message)"
         case .transferWiFiJoinFailed(let ssid, let message):
             return "Could not join device Wi-Fi \(ssid): \(message)"
+        case .transferServerProbeFailed(let ssid, let message):
+            return "Device transfer over \(ssid) failed: \(message)"
         case .invalidPack(let message):
             return "Invalid map pack: \(message)"
         case .unsupportedPackCompression(let path):
