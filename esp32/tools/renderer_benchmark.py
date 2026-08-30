@@ -1555,12 +1555,16 @@ class BenchmarkRunner:
             f"-sample-{sample_index:03d}.png"
         )
         path = self.output / "screenshots" / filename
-        deadline = time.monotonic() + 4
+        # The firmware can reject a stale buffered frame with a cheap 204 and
+        # capture a marker-bound successor. Leave room for that request plus
+        # the measured 4.4-5.9 second pinned frame response.
+        deadline = time.monotonic() + 10
         last_error: Exception | None = None
         while time.monotonic() < deadline:
             try:
                 metadata, pixels = self.client.frame(
-                    after=self.last_frame_sequence
+                    after=self.last_frame_sequence,
+                    captured_at_or_after=marker_received_at_ms,
                 )
                 self.last_frame_sequence = metadata["sequence"]
                 capture_lag_ms = _uint32_forward_delta(
@@ -1685,8 +1689,7 @@ class BenchmarkRunner:
             samples.append(compact_sample(snapshot, elapsed))
             return nested(snapshot, "routeReplay")
 
-        while time.monotonic() < deadline:
-            replay = record_snapshot(self._metrics())
+        def capture_replay_checkpoints(replay: dict[str, Any]) -> None:
             sample_index = replay.get("sampleIndex")
             sample_count = replay.get("sampleCount")
             marker_received_at_ms = replay.get("receivedAtMs")
@@ -1727,6 +1730,9 @@ class BenchmarkRunner:
                                 }
                             )
                         pending_checkpoints.remove(checkpoint)
+
+        while time.monotonic() < deadline:
+            capture_replay_checkpoints(record_snapshot(self._metrics()))
             sleep_seconds = min(
                 self.poll_interval_seconds,
                 max(0, deadline - time.monotonic()),
@@ -1734,9 +1740,14 @@ class BenchmarkRunner:
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)
 
-        # A blocking checkpoint frame can cross the deadline. Capture one
-        # terminal metrics response so final counters cover the whole window.
-        record_snapshot(self._metrics())
+        # A blocking checkpoint frame can cross the deadline. Let the terminal
+        # snapshot satisfy a pending checkpoint, then collect one more metrics
+        # response if that frame extended the measurement interval.
+        pending_before_terminal_snapshot = len(pending_checkpoints)
+        terminal_replay = record_snapshot(self._metrics())
+        capture_replay_checkpoints(terminal_replay)
+        if len(pending_checkpoints) < pending_before_terminal_snapshot:
+            record_snapshot(self._metrics())
         if not snapshots:
             raise BenchmarkError("measurement window produced no metrics")
         summary = summarize_run(snapshots, samples)

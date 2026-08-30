@@ -681,13 +681,15 @@ class RendererBenchmarkTests(unittest.TestCase):
         class FrameClient:
             def __init__(self):
                 self.after = []
+                self.capture_floors = []
                 self.frames = [
                     ({"sequence": 1, "capturedAtMs": 1005,
                       "width": 1, "height": 1, "stride": 2}, b"\0\0"),
                 ]
 
-            def frame(self, *, after=0):
+            def frame(self, *, after=0, captured_at_or_after=None):
                 self.after.append(after)
+                self.capture_floors.append(captured_at_or_after)
                 return self.frames.pop(0)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -718,6 +720,7 @@ class RendererBenchmarkTests(unittest.TestCase):
             )
 
         self.assertEqual(client.after, [0])
+        self.assertEqual(client.capture_floors, [1000])
         self.assertEqual(result["frameSequence"], 1)
         self.assertEqual(result["markerReceivedAtMs"], 1000)
         self.assertEqual(result["captureLagMs"], 5)
@@ -730,6 +733,7 @@ class RendererBenchmarkTests(unittest.TestCase):
         class FrameClient:
             def __init__(self):
                 self.after = []
+                self.capture_floors = []
                 self.frames = [
                     ({"sequence": 1, "capturedAtMs": 995,
                       "width": 1, "height": 1, "stride": 2}, b"\0\0"),
@@ -737,8 +741,9 @@ class RendererBenchmarkTests(unittest.TestCase):
                       "width": 1, "height": 1, "stride": 2}, b"\0\0"),
                 ]
 
-            def frame(self, *, after=0):
+            def frame(self, *, after=0, captured_at_or_after=None):
                 self.after.append(after)
+                self.capture_floors.append(captured_at_or_after)
                 return self.frames.pop(0)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -769,6 +774,7 @@ class RendererBenchmarkTests(unittest.TestCase):
             )
 
         self.assertEqual(client.after, [0, 1])
+        self.assertEqual(client.capture_floors, [1000, 1000])
         self.assertEqual(result["frameSequence"], 2)
         self.assertEqual(result["captureLagMs"], 10)
 
