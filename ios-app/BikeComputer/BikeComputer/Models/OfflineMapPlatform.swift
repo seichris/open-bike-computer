@@ -1136,7 +1136,7 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
         case .firmwareMapStreamUnsupported:
             return "This saved map cannot be installed securely. Update the device firmware and regenerate the map as a signed stream."
         case .mapStreamCompatibilityRejected(let rejection):
-            return "This saved map cannot be installed securely (\(rejection.rawValue)). Update the device firmware and regenerate the map as a signed stream."
+            return "This saved map cannot be installed securely (\(rejection.rawValue)). Regenerate it with this app or use compatible device firmware."
         case .backgroundMapUploadInProgress:
             return "Another map upload is already in progress. Wait for it to finish before transferring a different map."
         case .mapActivationFailed(let message):
