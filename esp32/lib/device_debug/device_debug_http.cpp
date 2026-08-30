@@ -458,17 +458,18 @@ bool DeviceDebugHttp::handleRendererWindow(
 
 bool DeviceDebugHttp::handleFrame(
     const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
-  uint32_t afterSequence = 0;
-  if (!parseFrameAfterPath(request.path, afterSequence))
-    return device_transfer::sendHttpError(client, 400, "invalid_after",
-                                          "after must be a uint32 sequence");
+  FrameRequestQuery query;
+  if (!parseFrameRequestPath(request.path, query))
+    return device_transfer::sendHttpError(
+        client, 400, "invalid_frame_query",
+        "after and capturedAtOrAfter must be uint32 values");
   const uint32_t nowMs = millis();
   if (lastFrameResponseMs_ != 0 &&
       !intervalElapsed(nowMs, lastFrameResponseMs_,
                        kFrameResponseMinimumIntervalMs))
     return device_transfer::sendHttpError(client, 429, "frame_rate_limited",
                                           "frame requests are too frequent");
-  if (frameStore().currentSequence() == afterSequence) {
+  if (frameStore().currentSequence() == query.afterSequence) {
     frameStore().requestNextFrame();
     const bool sent = device_transfer::sendHttpHead(client, 204, 0);
     if (sent)
@@ -477,10 +478,20 @@ bool DeviceDebugHttp::handleFrame(
   }
 
   FrameSnapshot snapshot;
-  if (!frameStore().acquireSnapshot(afterSequence, snapshot)) {
+  if (!frameStore().acquireSnapshot(query.afterSequence, snapshot)) {
     frameStore().requestNextFrame();
     return device_transfer::sendHttpError(client, 503, "frame_unavailable",
                                           "no complete frame is available yet");
+  }
+  if (query.hasCapturedAtOrAfter &&
+      !timestampAtOrAfter(snapshot.capturedAtMs,
+                          query.capturedAtOrAfterMs)) {
+    frameStore().releaseSnapshot();
+    frameStore().requestNextFrame();
+    const bool sent = device_transfer::sendHttpHead(client, 204, 0);
+    if (sent)
+      lastFrameResponseMs_ = nowMs;
+    return sent;
   }
   const uint32_t responseStartedMs = millis();
   const uint32_t checksum = crc32(snapshot.pixels, snapshot.payloadBytes);
