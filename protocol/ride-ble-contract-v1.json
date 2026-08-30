@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "service_uuid": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800",
+  "characteristics": {
+    "navigation": "2A6E",
+    "route": "2A6F",
+    "gps": "2A72",
+    "settings": "2A73",
+    "auth": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002",
+    "workout": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
+    "ride_automation": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004"
+  },
+  "protected_frame_overhead": 22,
+  "protected_channels": {
+    "auth": 1,
+    "navigation": 2,
+    "route": 3,
+    "gps": 4,
+    "settings": 5,
+    "workout": 6,
+    "ride_automation": 7
+  },
+  "controller_roles": {
+    "none": 0,
+    "owner": 1,
+    "watch_ride": 2
+  },
+  "capabilities": {
+    "request_magic": "CAPS",
+    "response_magic": "CAP2",
+    "response_schema_version": 1,
+    "current_client_version": 20,
+    "features": {
+      "device_sounds": {"bit": 0, "minimum_client_version": 1},
+      "power_button_honk": {"bit": 1, "minimum_client_version": 1},
+      "power_button_honk_ack": {"bit": 2, "minimum_client_version": 1},
+      "independent_map_profiles": {"bit": 3, "minimum_client_version": 1},
+      "extended_map_visibility": {"bit": 4, "minimum_client_version": 1},
+      "battery_status_screen": {"bit": 5, "minimum_client_version": 1},
+      "destination_picker": {"bit": 6, "minimum_client_version": 1},
+      "workout_telemetry": {"bit": 7, "minimum_client_version": 1},
+      "street_labels": {"bit": 8, "minimum_client_version": 10},
+      "birds_eye_map_navigation": {"bit": 9, "minimum_client_version": 10},
+      "birds_eye_perspective": {"bit": 10, "minimum_client_version": 10},
+      "birds_eye_stronger_perspective": {"bit": 11, "minimum_client_version": 10},
+      "osm_3d_buildings": {"bit": 12, "minimum_client_version": 10},
+      "explicit_invalid_gps_heading": {"bit": 13, "minimum_client_version": 11},
+      "scoped_watch_controller": {"bit": 14, "minimum_client_version": 12},
+      "ride_automation_v2": {"bit": 15, "minimum_client_version": 13},
+      "remote_device_debug": {"bit": 16, "minimum_client_version": 14},
+      "gps_position_quality_v1": {"bit": 17, "minimum_client_version": 15},
+      "renderer_diagnostics": {"bit": 18, "minimum_client_version": 16},
+      "automatic_display_off": {"bit": 19, "minimum_client_version": 16},
+      "ride_diagnostics": {"bit": 20, "minimum_client_version": 18},
+      "detailed_ride_diagnostics": {"bit": 21, "minimum_client_version": 19},
+      "ride_delivery_ack": {"bit": 22, "minimum_client_version": 20}
+    }
+  },
+  "device_requests": {
+    "workout_start_magic": "WREQ",
+    "destination_magic": "DREQ"
+  },
+  "application_delivery": {
+    "command_magic": "RCM1",
+    "ack_magic": "RAK1",
+    "version": 1,
+    "command_header_bytes": 28,
+    "ack_bytes": 32,
+    "maximum_group_members": 8,
+    "completed_replay_window": 8,
+    "command_types": {
+      "navigation_clear": 1,
+      "workout_state": 2
+    },
+    "results": {
+      "success": 0,
+      "stale": 1,
+      "busy": 2,
+      "unauthorized": 3,
+      "malformed": 4,
+      "resource_rejected": 5
+    },
+    "golden": {
+      "command_hex": "52434d310102010300112233445566778899aabbccddeeff78563412aabb",
+      "ack_hex": "52414b310102000000112233445566778899aabbccddeeff7856341209000000"
+    }
+  }
+}

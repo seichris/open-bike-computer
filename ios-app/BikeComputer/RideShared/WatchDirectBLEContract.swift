@@ -2,30 +2,32 @@ import CryptoKit
 import Foundation
 
 enum WatchDirectBLEProtocolV1 {
-    static let serviceUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800"
-    static let navigationUUID = "2A6E"
-    static let routeUUID = "2A6F"
-    static let gpsUUID = "2A72"
-    static let authUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002"
-    static let workoutUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003"
-    static let rideAutomationUUID =
-        "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004"
-    static let capabilityClientVersion: UInt8 = 15
-    static let scopedControllerFeature: UInt32 = 1 << 14
-    static let workoutTelemetryFeature: UInt32 = 1 << 7
-    static let rideAutomationFeature: UInt32 = 1 << 15
-    static let gpsPositionQualityV1Feature: UInt32 = 1 << 17
-    static let protectedFrameOverhead = 22
+    static let serviceUUID = RideBLEGeneratedProtocolV1.serviceUUID
+    static let navigationUUID = RideBLEGeneratedProtocolV1.navigationUUID
+    static let routeUUID = RideBLEGeneratedProtocolV1.routeUUID
+    static let gpsUUID = RideBLEGeneratedProtocolV1.gpsUUID
+    static let authUUID = RideBLEGeneratedProtocolV1.authUUID
+    static let workoutUUID = RideBLEGeneratedProtocolV1.workoutUUID
+    static let rideAutomationUUID = RideBLEGeneratedProtocolV1
+        .rideAutomationUUID
+    static let capabilityClientVersion = RideBLEGeneratedProtocolV1
+        .currentClientVersion
+    static let scopedControllerFeature = RideBLEGeneratedProtocolV1
+        .scopedWatchControllerFeature
+    static let workoutTelemetryFeature = RideBLEGeneratedProtocolV1
+        .workoutTelemetryFeature
+    static let rideAutomationFeature = RideBLEGeneratedProtocolV1
+        .rideAutomationV2Feature
+    static let gpsPositionQualityV1Feature = RideBLEGeneratedProtocolV1
+        .gpsPositionQualityV1Feature
+    static let rideDeliveryAcknowledgementFeature =
+        RideBLEGeneratedProtocolV1.rideDeliveryAckFeature
+    static let protectedFrameOverhead = RideBLEGeneratedProtocolV1
+        .protectedFrameOverhead
 }
 
-enum WatchAuthenticatedBLEChannelV1: UInt8, Sendable {
-    case auth = 1
-    case navigation = 2
-    case route = 3
-    case gps = 4
-    case workout = 6
-    case rideAutomation = 7
-}
+typealias WatchAuthenticatedBLEChannelV1 =
+    RideBLEGeneratedProtectedChannelV1
 
 enum WatchScopedAuthenticationErrorV1: Error, Equatable {
     case invalidNonce
@@ -307,6 +309,11 @@ struct WatchDeviceCapabilitiesV1: Equatable {
         featureFlags & WatchDirectBLEProtocolV1.gpsPositionQualityV1Feature != 0
     }
 
+    var supportsRideDeliveryAcknowledgement: Bool {
+        featureFlags &
+            WatchDirectBLEProtocolV1.rideDeliveryAcknowledgementFeature != 0
+    }
+
     static func decode(_ data: Data) -> Self? {
         guard data.count >= 9,
               data.prefix(4) == Data("CAP2".utf8),
@@ -331,6 +338,189 @@ struct WatchDeviceCapabilitiesV1: Equatable {
     }
 }
 
+struct RideBLEApplicationCommandEnvelopeV1: Equatable, Sendable {
+    static let prefix = Data(
+        RideBLEGeneratedProtocolV1.applicationCommandMagic.utf8
+    )
+    static let version = RideBLEGeneratedProtocolV1
+        .applicationDeliveryVersion
+    static let headerLength = RideBLEGeneratedProtocolV1
+        .applicationCommandHeaderBytes
+
+    let commandType: RideBLEApplicationCommandTypeV1
+    let memberIndex: UInt8
+    let memberCount: UInt8
+    let commandID: UUID
+    let stateGeneration: UInt32
+    let payload: Data
+
+    func encoded() -> Data? {
+        guard memberCount > 0,
+              memberCount <= UInt8(
+                RideBLEGeneratedProtocolV1.maximumApplicationGroupMembers
+              ),
+              memberIndex < memberCount,
+              Self.isNonzero(commandID),
+              stateGeneration != 0 else { return nil }
+        var result = Self.prefix
+        result.append(Self.version)
+        result.append(commandType.rawValue)
+        result.append(memberIndex)
+        result.append(memberCount)
+        result.append(contentsOf: Self.uuidBytes(commandID))
+        result.appendUInt32LE(stateGeneration)
+        result.append(payload)
+        return result
+    }
+
+    static func decode(_ data: Data) -> Self? {
+        guard data.count >= headerLength,
+              data.prefix(4) == prefix,
+              data[4] == version,
+              let commandType = RideBLEApplicationCommandTypeV1(
+                rawValue: data[5]
+              ), data[7] > 0,
+              data[7] <= UInt8(
+                RideBLEGeneratedProtocolV1.maximumApplicationGroupMembers
+              ),
+              data[6] < data[7],
+              let commandID = uuid(from: data[8..<24]),
+              isNonzero(commandID),
+              data.uint32LE(at: 24) != 0 else { return nil }
+        return Self(
+            commandType: commandType,
+            memberIndex: data[6],
+            memberCount: data[7],
+            commandID: commandID,
+            stateGeneration: data.uint32LE(at: 24),
+            payload: Data(data.dropFirst(headerLength))
+        )
+    }
+
+    fileprivate static func uuidBytes(_ value: UUID) -> [UInt8] {
+        withUnsafeBytes(of: value.uuid) { Array($0) }
+    }
+
+    private static let zeroUUID = UUID(
+        uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+
+    fileprivate static func isNonzero(_ value: UUID) -> Bool {
+        value != zeroUUID
+    }
+
+    fileprivate static func uuid(from data: Data.SubSequence) -> UUID? {
+        let bytes = Array(data)
+        guard bytes.count == 16 else { return nil }
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
+    }
+}
+
+struct RideBLEApplicationAcknowledgementV1: Equatable, Sendable {
+    static let prefix = Data(
+        RideBLEGeneratedProtocolV1.applicationAcknowledgementMagic.utf8
+    )
+    static let version = RideBLEGeneratedProtocolV1
+        .applicationDeliveryVersion
+    static let encodedLength = RideBLEGeneratedProtocolV1
+        .applicationAcknowledgementBytes
+
+    let commandType: RideBLEApplicationCommandTypeV1
+    let result: RideBLEApplicationResultV1
+    let commandID: UUID
+    let stateGeneration: UInt32
+    let leaseGeneration: UInt32
+
+    func encoded() -> Data {
+        var data = Self.prefix
+        data.append(Self.version)
+        data.append(commandType.rawValue)
+        data.append(result.rawValue)
+        data.append(0)
+        data.append(contentsOf:
+            RideBLEApplicationCommandEnvelopeV1.uuidBytes(commandID))
+        data.appendUInt32LE(stateGeneration)
+        data.appendUInt32LE(leaseGeneration)
+        return data
+    }
+
+    static func decode(_ data: Data) -> Self? {
+        guard data.count == encodedLength,
+              data.prefix(4) == prefix,
+              data[4] == version,
+              data[7] == 0,
+              let commandType = RideBLEApplicationCommandTypeV1(
+                rawValue: data[5]
+              ), let result = RideBLEApplicationResultV1(rawValue: data[6]),
+              let commandID = RideBLEApplicationCommandEnvelopeV1.uuid(
+                from: data[8..<24]
+              ), RideBLEApplicationCommandEnvelopeV1.isNonzero(commandID),
+              data.uint32LE(at: 24) != 0 else { return nil }
+        return Self(
+            commandType: commandType,
+            result: result,
+            commandID: commandID,
+            stateGeneration: data.uint32LE(at: 24),
+            leaseGeneration: data.uint32LE(at: 28)
+        )
+    }
+}
+
+struct RideBLEApplicationPendingIdentityV1: Equatable, Sendable {
+    let commandType: RideBLEApplicationCommandTypeV1
+    let commandID: UUID
+    let stateGeneration: UInt32
+}
+
+enum RideBLEApplicationAcknowledgementDispositionV1: Equatable, Sendable {
+    case ignored
+    case completed(result: RideBLEApplicationResultV1)
+    case rejected(result: RideBLEApplicationResultV1)
+    case invalidLeaseGeneration
+}
+
+enum RideBLEApplicationAcknowledgementPolicyV1 {
+    static func disposition(
+        pending: RideBLEApplicationPendingIdentityV1,
+        acknowledgement: RideBLEApplicationAcknowledgementV1
+    ) -> RideBLEApplicationAcknowledgementDispositionV1 {
+        guard pending.commandID == acknowledgement.commandID,
+              pending.commandType == acknowledgement.commandType,
+              pending.stateGeneration == acknowledgement.stateGeneration else {
+            return .ignored
+        }
+        guard acknowledgement.leaseGeneration != 0 else {
+            return .invalidLeaseGeneration
+        }
+        switch acknowledgement.result {
+        case .success, .stale:
+            return .completed(result: acknowledgement.result)
+        case .busy, .unauthorized, .malformed, .resourceRejected:
+            return .rejected(result: acknowledgement.result)
+        }
+    }
+}
+
+enum RideBLEApplicationTimeoutActionV1: Equatable, Sendable {
+    case retry
+    case recoverTransport
+}
+
+enum RideBLEApplicationRetryPolicyV1 {
+    static let maximumRetries = 1
+
+    static func timeoutAction(
+        completedRetries: Int
+    ) -> RideBLEApplicationTimeoutActionV1 {
+        completedRetries < maximumRetries ? .retry : .recoverTransport
+    }
+}
+
 enum WatchNavigationNotificationV1: Equatable {
     case capabilities(WatchDeviceCapabilitiesV1)
     case ignoredDeviceRequest
@@ -343,9 +533,11 @@ enum WatchNavigationNotificationV1: Equatable {
             }
             return .capabilities(capabilities)
         }
-        // Destination-picker and future owner-only requests share 2A6E. A
-        // scoped Watch must ignore them without tearing down its ride link.
-        if data.count == 10, data.prefix(4) == Data("DREQ".utf8) {
+        // Destination-picker, workout-launch, and future owner-only requests
+        // share 2A6E. A scoped Watch must ignore their exact canonical shapes
+        // without accepting malformed variants or tearing down its ride link.
+        if (data.count == 10 && data.prefix(4) == Data("DREQ".utf8)) ||
+            data == Data("WREQ".utf8) {
             return .ignoredDeviceRequest
         }
         return .invalidCapabilities
@@ -353,6 +545,7 @@ enum WatchNavigationNotificationV1: Equatable {
 }
 
 enum WatchBLEOutboundTargetV1: Equatable, Sendable {
+    case auth
     case navigation
     case route
     case gps
@@ -361,6 +554,7 @@ enum WatchBLEOutboundTargetV1: Equatable, Sendable {
 
     var channel: WatchAuthenticatedBLEChannelV1 {
         switch self {
+        case .auth: .auth
         case .navigation: .navigation
         case .route: .route
         case .gps: .gps
@@ -368,6 +562,11 @@ enum WatchBLEOutboundTargetV1: Equatable, Sendable {
         case .rideAutomation: .rideAutomation
         }
     }
+}
+
+enum WatchBLEOutboundProtectionV1: Equatable, Sendable {
+    case raw
+    case protected
 }
 
 struct WatchRideAutomationTransportPayloadV1: Equatable, Sendable {
@@ -456,86 +655,387 @@ struct WatchRideDemandStateV1: Equatable, Sendable {
 struct WatchBLEOutboundWriteV1: Equatable, Sendable {
     let target: WatchBLEOutboundTargetV1
     let payload: Data
-    let priority: UInt8
-    let coalescingKey: String?
     let gpsSampleTimestamp: Date?
-    fileprivate let sequence: UInt64
+    let protection: WatchBLEOutboundProtectionV1
 
     init(
         target: WatchBLEOutboundTargetV1,
         payload: Data,
-        priority: UInt8,
-        coalescingKey: String? = nil,
         gpsSampleTimestamp: Date? = nil,
-        sequence: UInt64 = 0
+        protection: WatchBLEOutboundProtectionV1 = .protected
     ) {
         self.target = target
         self.payload = payload
-        self.priority = priority
-        self.coalescingKey = coalescingKey
         self.gpsSampleTimestamp = gpsSampleTimestamp
-        self.sequence = sequence
+        self.protection = protection
     }
 }
 
+enum RideBLECommandPriorityV1: UInt8, Comparable, Sendable {
+    case control = 0
+    case terminalWorkout = 1
+    case navigationBoundary = 2
+    case liveWorkout = 3
+    case livePosition = 4
+    case diagnostics = 5
+
+    static func < (lhs: Self, rhs: Self) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+}
+
+enum RideBLECommandDispositionV1: Equatable, Sendable {
+    case critical
+    case replaceable
+}
+
+enum WatchBLETransportDiagnosticKindV1: String, Codable, Sendable {
+    case transportTransition
+    case queueAdmission
+    case attCompleted
+    case attTimeout
+    case applicationAcknowledged
+    case applicationTimeout
+    case recovery
+}
+
+/// Privacy-bounded Watch evidence forwarded through queued WatchConnectivity.
+/// It deliberately contains no device identifier, BLE payload, GPS, workout
+/// value, owner/controller key material, nonce, or route instruction.
+struct WatchBLETransportDiagnosticEventV1: Codable, Equatable, Sendable {
+    static let schema = 1
+
+    let attemptID: UUID
+    let sequence: UInt32
+    let kind: WatchBLETransportDiagnosticKindV1
+    let phase: String
+    let reason: String?
+    let connectionGeneration: UInt64
+    let queueDepth: Int
+    let queueHighWater: Int
+    let queueBytes: Int?
+    let queueHighWaterBytes: Int?
+    let replacedGroups: Int
+    let rejectedGroups: Int
+    let uptimeMs: Int
+    let latencyMs: Int?
+}
+
+struct WatchBLETransportDiagnosticBatchV1: Codable, Equatable, Sendable {
+    static let schemaVersion = 1
+    static let userInfoPayloadKey = "watchBLETransportDiagnosticsV1"
+    static let maximumEvents = 64
+
+    let schema: Int
+    let events: [WatchBLETransportDiagnosticEventV1]
+
+    init(events: [WatchBLETransportDiagnosticEventV1]) {
+        schema = Self.schemaVersion
+        self.events = Array(events.suffix(Self.maximumEvents))
+    }
+
+    func encoded() throws -> Data {
+        try JSONEncoder().encode(self)
+    }
+
+    static func decode(_ data: Data) -> Self? {
+        guard data.count <= 64 * 1024,
+              let batch = try? JSONDecoder().decode(Self.self, from: data),
+              batch.schema == Self.schemaVersion,
+              !batch.events.isEmpty,
+              batch.events.count <= maximumEvents,
+              batch.events.allSatisfy({ event in
+                  event.sequence != 0 &&
+                      event.connectionGeneration != 0 &&
+                      event.queueDepth >= 0 && event.queueDepth <= 64 &&
+                      event.queueHighWater >= 0 &&
+                        event.queueHighWater <= 64 &&
+                      (event.queueBytes.map {
+                          $0 >= 0 && $0 <= 64 *
+                            WatchBLEOutboundQueueV1.maximumFrameBytes
+                      } ?? true) &&
+                      (event.queueHighWaterBytes.map {
+                          $0 >= 0 && $0 <= 64 *
+                            WatchBLEOutboundQueueV1.maximumFrameBytes
+                      } ?? true) &&
+                      event.replacedGroups >= 0 &&
+                      event.rejectedGroups >= 0 &&
+                      event.uptimeMs >= 0 &&
+                      (event.latencyMs.map { $0 >= 0 } ?? true) &&
+                      event.phase.utf8.count <= 24 &&
+                      (event.reason?.utf8.count ?? 0) <= 48
+              }) else { return nil }
+        return batch
+    }
+}
+
+struct WatchBLEOutboundGroupV1: Equatable, Sendable {
+    let commandID: UUID
+    let connectionGeneration: UInt64
+    let stateGeneration: UInt32
+    let priority: RideBLECommandPriorityV1
+    let disposition: RideBLECommandDispositionV1
+    let applicationCommandType: RideBLEApplicationCommandTypeV1?
+    let coalescingKey: String?
+    let writes: [WatchBLEOutboundWriteV1]
+
+    init(
+        commandID: UUID = UUID(),
+        connectionGeneration: UInt64,
+        stateGeneration: UInt32,
+        priority: RideBLECommandPriorityV1,
+        disposition: RideBLECommandDispositionV1,
+        applicationCommandType: RideBLEApplicationCommandTypeV1? = nil,
+        coalescingKey: String? = nil,
+        writes: [WatchBLEOutboundWriteV1]
+    ) {
+        self.commandID = commandID
+        self.connectionGeneration = connectionGeneration
+        self.stateGeneration = stateGeneration
+        self.priority = priority
+        self.disposition = disposition
+        self.applicationCommandType = applicationCommandType
+        self.coalescingKey = coalescingKey
+        self.writes = writes
+    }
+}
+
+enum WatchBLEGroupAdmissionV1: Equatable, Sendable {
+    case admitted
+    case replaced(replacedGroups: Int, evictedGroups: Int)
+    case rejectedReplaceable
+    case criticalWaiting
+
+    var admitted: Bool {
+        switch self {
+        case .admitted, .replaced: true
+        case .rejectedReplaceable, .criticalWaiting: false
+        }
+    }
+}
+
+struct WatchBLEOutboundQueueMetricsV1: Equatable, Sendable {
+    var highWaterFrames = 0
+    var highWaterBytes = 0
+    var replacedGroups = 0
+    var evictedGroups = 0
+    var rejectedGroups = 0
+    var criticalWaits = 0
+}
+
 struct WatchBLEOutboundQueueV1: Equatable {
+    static let maximumFrameBytes = 576
+
+    private struct Entry: Equatable {
+        let group: WatchBLEOutboundGroupV1
+        let sequence: UInt64
+    }
+
     let capacity: Int
-    private(set) var writes: [WatchBLEOutboundWriteV1] = []
+    let reservedCriticalFrames: Int
+    let byteCapacity: Int
+    let reservedCriticalBytes: Int
+    private var entries: [Entry] = []
     private var nextSequence: UInt64 = 0
+    private(set) var metrics = WatchBLEOutboundQueueMetricsV1()
 
-    var isEmpty: Bool { writes.isEmpty }
+    var isEmpty: Bool { entries.isEmpty }
+    var pendingFrameCount: Int {
+        entries.reduce(0) { $0 + $1.group.writes.count }
+    }
+    var pendingByteCount: Int {
+        entries.reduce(0) { total, entry in
+            total + entry.group.writes.reduce(0) {
+                $0 + $1.payload.count
+            }
+        }
+    }
 
-    init(capacity: Int = 32) {
-        self.capacity = max(capacity, 1)
+    init(
+        capacity: Int = 32,
+        reservedCriticalFrames: Int = 3,
+        byteCapacity: Int? = nil,
+        reservedCriticalBytes: Int? = nil
+    ) {
+        let normalizedCapacity = max(capacity, 1)
+        let normalizedReservedFrames = min(
+            max(reservedCriticalFrames, 1),
+            normalizedCapacity
+        )
+        let normalizedByteCapacity = max(
+            byteCapacity ?? normalizedCapacity * Self.maximumFrameBytes,
+            1
+        )
+        self.capacity = normalizedCapacity
+        self.reservedCriticalFrames = min(
+            normalizedReservedFrames,
+            normalizedCapacity
+        )
+        self.byteCapacity = normalizedByteCapacity
+        self.reservedCriticalBytes = min(
+            max(
+                reservedCriticalBytes ??
+                    normalizedReservedFrames * Self.maximumFrameBytes,
+                1
+            ),
+            normalizedByteCapacity
+        )
     }
 
     @discardableResult
-    mutating func enqueue(_ write: WatchBLEOutboundWriteV1) -> Bool {
+    mutating func enqueue(
+        _ group: WatchBLEOutboundGroupV1
+    ) -> WatchBLEGroupAdmissionV1 {
+        let groupByteCount = group.writes.reduce(0) {
+            $0 + $1.payload.count
+        }
+        guard !group.writes.isEmpty,
+              group.writes.count <= capacity,
+              group.writes.allSatisfy({
+                  $0.payload.count <= Self.maximumFrameBytes
+              }),
+              groupByteCount <= byteCapacity else {
+            return reject(group)
+        }
+
+        var candidate = entries
+        var replaced = 0
+        var evicted = 0
+        if let key = group.coalescingKey, !key.isEmpty {
+            if group.disposition == .replaceable,
+               candidate.contains(where: {
+                   $0.group.coalescingKey == key &&
+                       $0.group.disposition == .critical
+               }) {
+                // A replaceable snapshot must never supersede a retained
+                // terminal/control boundary that happens to share a key.
+                return reject(group)
+            }
+            let oldCount = candidate.count
+            candidate.removeAll {
+                $0.group.coalescingKey == key &&
+                    (group.disposition == .critical ||
+                     $0.group.disposition == .replaceable)
+            }
+            replaced = oldCount - candidate.count
+        }
+
+        func frameCount(_ values: [Entry]) -> Int {
+            values.reduce(0) { $0 + $1.group.writes.count }
+        }
+        func criticalFrameCount(_ values: [Entry]) -> Int {
+            values.reduce(0) { result, entry in
+                result + (entry.group.disposition == .critical
+                    ? entry.group.writes.count : 0)
+            }
+        }
+        func byteCount(_ values: [Entry]) -> Int {
+            values.reduce(0) { total, entry in
+                total + entry.group.writes.reduce(0) {
+                    $0 + $1.payload.count
+                }
+            }
+        }
+        func criticalByteCount(_ values: [Entry]) -> Int {
+            values.reduce(0) { total, entry in
+                guard entry.group.disposition == .critical else {
+                    return total
+                }
+                return total + entry.group.writes.reduce(0) {
+                    $0 + $1.payload.count
+                }
+            }
+        }
+
+        while true {
+            let used = frameCount(candidate)
+            let usedBytes = byteCount(candidate)
+            let maximumFramesAfterAdmission: Int
+            let maximumBytesAfterAdmission: Int
+            if group.disposition == .critical {
+                maximumFramesAfterAdmission = capacity
+                maximumBytesAfterAdmission = byteCapacity
+            } else {
+                let remainingFrameReserve = max(
+                    reservedCriticalFrames - criticalFrameCount(candidate),
+                    0
+                )
+                let remainingByteReserve = max(
+                    reservedCriticalBytes - criticalByteCount(candidate),
+                    0
+                )
+                maximumFramesAfterAdmission =
+                    capacity - remainingFrameReserve
+                maximumBytesAfterAdmission =
+                    byteCapacity - remainingByteReserve
+            }
+            if used + group.writes.count <= maximumFramesAfterAdmission,
+               usedBytes + groupByteCount <= maximumBytesAfterAdmission {
+                break
+            }
+
+            let evictable = candidate.indices.filter { index in
+                let existing = candidate[index].group
+                guard existing.disposition == .replaceable else {
+                    return false
+                }
+                return group.disposition == .critical ||
+                    existing.priority >= group.priority
+            }
+            guard let index = evictable.max(by: { left, right in
+                let lhs = candidate[left]
+                let rhs = candidate[right]
+                if lhs.group.priority != rhs.group.priority {
+                    return lhs.group.priority < rhs.group.priority
+                }
+                return lhs.sequence > rhs.sequence
+            }) else {
+                return reject(group)
+            }
+            candidate.remove(at: index)
+            evicted += 1
+        }
+
         nextSequence &+= 1
-        let sequenced = WatchBLEOutboundWriteV1(
-            target: write.target,
-            payload: write.payload,
-            priority: write.priority,
-            coalescingKey: write.coalescingKey,
-            gpsSampleTimestamp: write.gpsSampleTimestamp,
-            sequence: nextSequence
+        candidate.append(Entry(group: group, sequence: nextSequence))
+        entries = candidate
+        metrics.replacedGroups += replaced
+        metrics.evictedGroups += evicted
+        metrics.highWaterFrames = max(
+            metrics.highWaterFrames,
+            pendingFrameCount
         )
-        if let key = sequenced.coalescingKey,
-           let index = writes.firstIndex(where: {
-               $0.coalescingKey == key
-           }) {
-            writes[index] = sequenced
-            return true
-        }
-        if writes.count >= capacity,
-           let replaceable = writes.indices
-               .filter({ writes[$0].coalescingKey != nil })
-               .min(by: { writes[$0].sequence < writes[$1].sequence }) {
-            writes.remove(at: replaceable)
-        }
-        guard writes.count < capacity else { return false }
-        writes.append(sequenced)
-        return true
+        metrics.highWaterBytes = max(metrics.highWaterBytes, pendingByteCount)
+        return replaced == 0 && evicted == 0
+            ? .admitted
+            : .replaced(replacedGroups: replaced, evictedGroups: evicted)
     }
 
-    mutating func dequeue() -> WatchBLEOutboundWriteV1? {
-        guard let index = writes.indices.min(by: { left, right in
-            let lhs = writes[left]
-            let rhs = writes[right]
-            if lhs.priority != rhs.priority {
-                return lhs.priority < rhs.priority
+    mutating func dequeueGroup() -> WatchBLEOutboundGroupV1? {
+        guard let index = entries.indices.min(by: { left, right in
+            let lhs = entries[left]
+            let rhs = entries[right]
+            if lhs.group.priority != rhs.group.priority {
+                return lhs.group.priority < rhs.group.priority
             }
             return lhs.sequence < rhs.sequence
         }) else { return nil }
-        return writes.remove(at: index)
+        return entries.remove(at: index).group
     }
 
     mutating func removeAll() {
-        writes.removeAll(keepingCapacity: true)
+        entries.removeAll(keepingCapacity: true)
     }
 
-    mutating func removeAll(target: WatchBLEOutboundTargetV1) {
-        writes.removeAll { $0.target == target }
+    private mutating func reject(
+        _ group: WatchBLEOutboundGroupV1
+    ) -> WatchBLEGroupAdmissionV1 {
+        metrics.rejectedGroups += 1
+        if group.disposition == .critical {
+            metrics.criticalWaits += 1
+            return .criticalWaiting
+        }
+        return .rejectedReplaceable
     }
 }
 
@@ -657,6 +1157,13 @@ enum WatchRidePacketEncoderV1 {
 }
 
 private extension Data {
+    func uint32LE(at offset: Int) -> UInt32 {
+        UInt32(self[offset]) |
+            (UInt32(self[offset + 1]) << 8) |
+            (UInt32(self[offset + 2]) << 16) |
+            (UInt32(self[offset + 3]) << 24)
+    }
+
     mutating func appendUInt16LE(_ value: UInt16) {
         Swift.withUnsafeBytes(of: value.littleEndian) {
             append(contentsOf: $0)

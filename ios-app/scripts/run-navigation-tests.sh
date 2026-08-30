@@ -50,6 +50,9 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/NavigationGeometry.swift \
   ios-app/BikeComputer/RideShared/NavigationRuntime.swift \
   ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
+  ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
+  ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
@@ -172,6 +175,9 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/NavigationGeometry.swift \
   ios-app/BikeComputer/RideShared/NavigationRuntime.swift \
   ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
+  ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
+  ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputerTests/SavedMapPreviewCatalystTests.swift
 
 "${PREVIEW_CATALYST_OUT}"
