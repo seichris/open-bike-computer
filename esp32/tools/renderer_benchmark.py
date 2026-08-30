@@ -44,9 +44,9 @@ DEFAULT_ROUTE_FIXTURE = (
     / "renderer-benchmark-shanghai-v1.json"
 )
 DEFAULT_GATES = Path(__file__).with_name("renderer_benchmark_gates.json")
-PINNED_ROUTE_ID = "shanghai-center-renderer-v1"
+PINNED_ROUTE_ID = "shanghai-jingan-renderer-v1"
 PINNED_ROUTE_SHA256 = (
-    "d5171f6b30478a09948381bbdb86da33752bc646fa6077153f69a4bd840eb36e"
+    "bf3ad5176e188cb56ecdcedd9dea740dfa57487ea36eb50d2280668a96b7f0c9"
 )
 
 

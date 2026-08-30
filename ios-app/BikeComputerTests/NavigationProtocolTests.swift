@@ -14140,12 +14140,20 @@ struct NavigationProtocolTests {
             assert(false, "checked-in renderer benchmark fixture decodes")
             return
         }
-        assertEqual(fixture.id, "shanghai-center-renderer-v1",
+        assertEqual(fixture.id, "shanghai-jingan-renderer-v1",
                     "renderer benchmark keeps its pinned fixture identity")
         assertEqual(fixture.cadenceHz, 1,
                     "renderer benchmark fixture stays at exactly 1 Hz")
         assertEqual(fixture.points.count, 120,
                     "renderer benchmark fixture retains the full Shanghai loop")
+        assertEqual(fixture.points.map(\.latitude).min(), 31.2245400,
+                    "renderer benchmark loop stays south of Jing'an Temple")
+        assertEqual(fixture.points.map(\.latitude).max(), 31.2258900,
+                    "renderer benchmark loop stays north of Jing'an Temple")
+        assertEqual(fixture.points.map(\.longitude).min(), 121.4394173,
+                    "renderer benchmark loop stays west of Jing'an Temple")
+        assertEqual(fixture.points.map(\.longitude).max(), 121.4421673,
+                    "renderer benchmark loop stays east of Jing'an Temple")
         let shortFixture = Data(
             #"{"schema":1,"id":"short","cadenceHz":1,"nominalSpeedMetersPerSecond":4,"points":[{"latitude":31.2,"longitude":121.4},{"latitude":31.2001,"longitude":121.4001}]}"#.utf8
         )
@@ -14157,7 +14165,7 @@ struct NavigationProtocolTests {
         let fixtureHash = Data(SHA256.hash(data: fixtureData))
         assertEqual(
             fixtureHash.map { String(format: "%02x", $0) }.joined(),
-            "d5171f6b30478a09948381bbdb86da33752bc646fa6077153f69a4bd840eb36e",
+            "bf3ad5176e188cb56ecdcedd9dea740dfa57487ea36eb50d2280668a96b7f0c9",
             "fixture edits require an explicit pinned-hash update"
         )
         guard let geometry = RendererBenchmarkRouteGeometry.data(

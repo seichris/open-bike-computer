@@ -374,11 +374,11 @@ final class SecureRendererBenchmarkController: ObservableObject {
             let routeLoaded = try RendererBenchmarkFixture.load(bundle: bundle)
             let gatesLoaded = try RendererBenchmarkGates.load(bundle: bundle)
             let routeHash = Self.sha256Hex(routeLoaded.sha256)
-            guard routeLoaded.fixture.id == "shanghai-center-renderer-v1",
+            guard routeLoaded.fixture.id == "shanghai-jingan-renderer-v1",
                   routeLoaded.fixture.cadenceHz == 1,
                   routeLoaded.fixture.points.count == 120,
                   routeHash ==
-                    "d5171f6b30478a09948381bbdb86da33752bc646fa6077153f69a4bd840eb36e"
+                    "bf3ad5176e188cb56ecdcedd9dea740dfa57487ea36eb50d2280668a96b7f0c9"
             else {
                 throw SecureRendererBenchmarkControllerError.unavailable(
                     "The checked-in Shanghai renderer fixture identity changed."
