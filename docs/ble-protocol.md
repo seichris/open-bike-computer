@@ -1105,6 +1105,10 @@ selection/reach and limiter counters,
 render-job outcomes, UI/display/GPS gaps, prediction state, fixture-marker
 freshness, and remote-debug overhead. It intentionally contains no route
 coordinates, network credentials, or transfer token.
+The DMA-crypto rejection and operation-failure fields are deltas from the
+counter baseline captured at the start of the active measurement window; the
+DMA object identifies that contract as `cryptoCountersScope: "window"`. The
+separate authenticated device-status diagnostics retain their lifetime scope.
 
 The checked-in benchmark replay marks every exact 1 Hz GPS sample with:
 

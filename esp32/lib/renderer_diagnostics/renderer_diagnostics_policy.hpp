@@ -295,6 +295,8 @@ public:
   void noteMemory(const MemorySample &sample) {
     memory_ = sample;
     if (!memoryObserved_) {
+      cryptoHeadroomRejectionsBaseline_ = sample.cryptoHeadroomRejections;
+      cryptoOperationFailuresBaseline_ = sample.cryptoOperationFailures;
       windowMinimumInternalFree_ = sample.internalFree;
       windowMinimumInternalLargest_ = sample.internalLargest;
       windowMinimumPsramFree_ = sample.psramFree;
@@ -398,6 +400,11 @@ public:
     result.profile = profile_;
     result.tuning = renderer_tuning::definition(profile_);
     result.memory = memory_;
+    result.memory.cryptoHeadroomRejections = subtract(
+        memory_.cryptoHeadroomRejections,
+        cryptoHeadroomRejectionsBaseline_);
+    result.memory.cryptoOperationFailures = subtract(
+        memory_.cryptoOperationFailures, cryptoOperationFailuresBaseline_);
     result.windowMinimumInternalFree = windowMinimumInternalFree_;
     result.windowMinimumInternalLargest = windowMinimumInternalLargest_;
     result.windowMinimumPsramFree = windowMinimumPsramFree_;
@@ -500,6 +507,8 @@ private:
     run_ = {};
     memory_ = {};
     memoryObserved_ = false;
+    cryptoHeadroomRejectionsBaseline_ = 0;
+    cryptoOperationFailuresBaseline_ = 0;
     windowMinimumInternalFree_ = 0;
     windowMinimumInternalLargest_ = 0;
     windowMinimumPsramFree_ = 0;
@@ -540,6 +549,8 @@ private:
   renderer_tuning::Profile profile_ = renderer_tuning::Profile::Current;
   MemorySample memory_{};
   bool memoryObserved_ = false;
+  uint32_t cryptoHeadroomRejectionsBaseline_ = 0;
+  uint32_t cryptoOperationFailuresBaseline_ = 0;
   uint32_t windowMinimumInternalFree_ = 0;
   uint32_t windowMinimumInternalLargest_ = 0;
   uint32_t windowMinimumPsramFree_ = 0;

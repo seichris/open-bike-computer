@@ -16,7 +16,8 @@ candidate selection, not permission to change the default profile.
   over BLE-pinned HTTPS or BLE;
 - internal RAM, DMA-capable internal RAM, and PSRAM free/largest-block floors
   and monotonic-decline checks;
-- zero tolerated BLE-crypto low-DMA rejections or operation failures;
+- zero tolerated measurement-window BLE-crypto low-DMA rejections or
+  operation failures;
 - render/building/display timings, UI and GPS gaps, render job outcomes,
   building selection/reach, quota limiters, allocation fallback, GPS packet
   cadence, route-marker freshness, reset identity, and remote-debug capture
@@ -130,7 +131,9 @@ The checked-in gate file is
 DMA-capable block, and 1.5 MB free/750 KiB largest PSRAM block. The DMA floor
 protects task-stack and hardware-crypto allocations that cannot fall back to
 PSRAM; any crypto headroom rejection or operation failure also rejects the
-run. It requires a dense view (at least 40 median candidates, 24
+run. Firmware baselines the lifetime diagnostics when each window begins, so a
+prior run cannot be attributed to every later profile. It requires a dense view
+(at least 40 median candidates, 24
 selected buildings, and 16 extrusions in every non-flat profile), so a wrong
 map, screen, or disabled-3D setup cannot pass as a useful baseline. It also
 rejects monotonic memory loss, allocation fallback,

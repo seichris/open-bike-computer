@@ -121,6 +121,7 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
 
     def test_renderer_metrics_expose_non_secret_crypto_resource_counters(self):
         for field in (
+            r'\"cryptoCountersScope\":\"window\"',
             r'\"cryptoHeadroomRejections\"',
             r'\"cryptoOperationFailures\"',
         ):
