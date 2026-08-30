@@ -1145,6 +1145,14 @@ struct NavigationProtocolTests {
         ])
         let streamURL = directory.appendingPathComponent("golden-map.bmap")
         try! stream.write(to: streamURL)
+        let catalogReaderRequirements = OfflineMapReaderRequirements(
+            schemaVersion: 1,
+            streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+            manifestSchemaVersion: 1,
+            renderer: "esp32-fmb",
+            rendererFormatVersion: 1,
+            requiredFeatures: []
+        )
         do {
             let verified = try BikeMapStreamArtifactValidator.validate(
                 url: streamURL,
@@ -1160,18 +1168,15 @@ struct NavigationProtocolTests {
                 fixture["signed_manifest_receipt"],
                 "stream validator preserves stable session identity"
             )
+            assertEqual(
+                verified.readerRequirements,
+                catalogReaderRequirements,
+                "an app-bound stream derives reader compatibility from its signed manifest"
+            )
         } catch {
             assert(false, "valid complete map stream is accepted: \(error)")
         }
 
-        let catalogReaderRequirements = OfflineMapReaderRequirements(
-            schemaVersion: 1,
-            streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
-            manifestSchemaVersion: 1,
-            renderer: "esp32-fmb",
-            rendererFormatVersion: 1,
-            requiredFeatures: []
-        )
         let catalogArtifact = artifact(
             bytes: stream,
             includesRequiredAppIdentity: false
@@ -1774,6 +1779,26 @@ struct NavigationProtocolTests {
             ),
             .streamV2,
             "a verified catalog reader contract selects stream v2 without app-build binding"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.select(
+                isBikeMapStream: true,
+                signatureTrustCapability:
+                    "map-prod-1=" + String(repeating: "5", count: 64),
+                requiredIosBuild: stream.requiredIosBuild,
+                requiredIosGitSha: stream.requiredIosGitSha,
+                requiredIosBuildSha256: stream.requiredIosBuildSha256,
+                currentIosBuild: "101",
+                currentIosGitSha: String(repeating: "8", count: 40),
+                currentIosBuildSha256: String(repeating: "9", count: 64),
+                readerRequirements: catalogReaderRequirements,
+                requiredFirmwareVersion: stream.requiredFirmwareVersion,
+                requiredFirmwareBuild: stream.requiredFirmwareBuild,
+                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
+                deviceStatus: v2Status
+            ),
+            .streamV2,
+            "a signed reader contract supersedes stale app audit identity"
         )
         assertEqual(
             MapInstallProtocolSelector.select(
