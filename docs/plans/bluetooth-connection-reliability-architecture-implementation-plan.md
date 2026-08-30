@@ -2,7 +2,8 @@
 
 ## Status and baseline
 
-Status: **proposed; planning only**.
+Status: **source implementation complete; host and simulator verification
+passed; GitHub CI, post-merge rebase, and physical validation pending**.
 
 This plan turns the 2026-08-30 review of iPhone-to-Bicino and
 Apple-Watch-to-Bicino Bluetooth behavior into an implementation and acceptance
@@ -10,11 +11,15 @@ contract. The planning branch starts from freshly fetched GitHub `main` at
 commit `149b7589a2193f29bb3f34c67b08580d0f846d51`. The ordinary working checkout
 was intentionally not used as the source baseline.
 
-The implementation must begin from a freshly fetched and clean `origin/main`,
-not from this historical SHA. In particular, [PR #339, Guard and measure DMA
+Implementation began in a separate clean worktree by applying the reviewed
+[PR #339, Guard and measure DMA
 headroom for BLE crypto](https://github.com/seichris/open-bike-computer/pull/339),
-is expected to merge soon. Its reviewed head at the time this plan was written
-is `53ab44c6495dd30bbb6dec6d2c98de35b8ac8cf0`, based on the same `main` SHA.
+head `53ab44c6495dd30bbb6dec6d2c98de35b8ac8cf0` on top of the freshly fetched
+`origin/main` baseline. This preserves its exact allocator, crypto-headroom,
+TLS-diagnostics, and retained-error contracts while GitHub merge is pending.
+The implementation branch must still be rebased onto the final GitHub merge
+commit before release validation; the stacked PR head is an integration
+baseline, not evidence that PR #339 has merged.
 
 After PR #339 merges:
 
@@ -663,6 +668,71 @@ and validate a separate manufacturing profile for:
 
 These eFuse and key-management operations are manufacturing decisions. They
 must not be enabled incidentally by the Bluetooth implementation.
+
+## Implementation record — 2026-08-30
+
+The source implementation now closes BLE-001 through BLE-007 on the stacked
+PR #339 integration baseline. It includes:
+
+- a persisted, idempotent Watch-to-iPhone preparation intent with bounded
+  retry, activation/reachability recovery, durable release delivery, and
+  released-preparation tombstones;
+- one shared workout-to-device mapper that retains direct-Watch ending,
+  ended, and failed state until an explicit idle boundary;
+- role-aware firmware presentation of device workout requests and harmless
+  handling of exact legacy owner requests by a scoped Watch;
+- bounded atomic iPhone and Watch write queues with frame and byte ceilings,
+  critical reserve, coalescing, watchdogs, generation checks, and one physical
+  CoreBluetooth writer per controller;
+- capability-gated `RCM1` command groups and protected `RAK1` application
+  acknowledgements for navigation clear and terminal workout state, including
+  firmware replay, interleaving rejection, UI-application boundaries, and
+  stale mailbox generation rejection;
+- one pure transport reducer used by both iPhone and Watch adapters;
+- a generated JSON-to-Swift/C++ BLE contract with CI drift checking; and
+- privacy-bounded Watch forwarding and iPhone/firmware diagnostics for queue,
+  ATT, application acknowledgement, lease, recovery, and PR #339 resource
+  evidence classes.
+
+Live GitHub integration status at the verification point:
+
+- `origin/main`: `149b7589a2193f29bb3f34c67b08580d0f846d51`;
+- PR #339: open, clean, mergeable, head
+  `53ab44c6495dd30bbb6dec6d2c98de35b8ac8cf0`;
+- PR #339's current CI Gate and selected firmware/host checks: successful; and
+- this branch remains intentionally stacked on that exact PR head. It must be
+  rebased onto the eventual GitHub merge commit before release validation.
+
+Exact-worktree source evidence passed:
+
+```text
+python3 tools/generate_ride_ble_contract.py --check
+python3 -m unittest discover -s .github/scripts/tests -p test_changed_components.py
+ios-app/scripts/run-navigation-tests.sh
+ios-app/scripts/run-workout-contract-tests.sh
+ios-app/scripts/run-ride-shared-tests.sh
+ios-app/scripts/run-watch-source-typecheck.sh
+ios-app/scripts/run-watch-online-navigation-tests.sh
+ios-app/scripts/run-watch-offline-navigation-tests.sh
+ios-app/scripts/run-ride-diagnostics-tests.sh
+ios-app/scripts/run-workout-platform-tests.sh ios
+ios-app/scripts/run-workout-platform-tests.sh watchos
+PYTHONPATH=tools python -m unittest discover -s tools/tests  # 403 tests
+```
+
+CI-shaped C++ host binaries also passed for device capabilities, controller
+lease, scoped-Watch payload policy, ride delivery, workout telemetry protocol
+and state, ride-automation policy and protocol, and ownership state/crypto,
+all with `-Wall -Wextra -Werror` where the workflow requires it.
+
+This evidence does **not** include a repository exact-head PlatformIO firmware
+build, a GitHub CI run for this branch, installation, flashing, radio traffic,
+or the physical matrix. The repository requires connected-device identity
+before a PlatformIO build or device action, and no device identity or physical
+write authorization was requested for this implementation run. Both Waveshare
+environments, real iPhone/Watch handoff and background behavior, PR #339's
+physical resource gate, battery, and thermal behavior therefore remain release
+gates rather than inferred passes.
 
 ## Definition of done
 

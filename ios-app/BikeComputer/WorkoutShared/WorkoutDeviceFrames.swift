@@ -104,6 +104,156 @@ nonisolated struct WorkoutDeviceTelemetrySample: Equatable, Sendable {
     }
 }
 
+/// Canonical, platform-neutral translation from a validated workout snapshot
+/// to the three device telemetry frames. Callers decide whether the snapshot
+/// is current and whether its numerics remain live; metric validation, source
+/// attribution, and terminal-value preservation live here for both iPhone and
+/// Watch direct-BLE paths.
+nonisolated enum WorkoutDeviceTelemetrySampleMapperV1 {
+    static func directWatchSample(
+        snapshot: WorkoutSnapshotV1,
+        sessionToken: UInt16,
+        sessionID: UUID
+    ) -> WorkoutDeviceTelemetrySample? {
+        let state = WorkoutDeviceSessionState(snapshot.state)
+        return sample(
+            snapshot: snapshot,
+            state: state,
+            sessionToken: sessionToken,
+            sessionID: sessionID,
+            hasLiveNumerics: state != .ending && state != .failed,
+            isCurrentSnapshot: true
+        )
+    }
+
+    static func sample(
+        snapshot: WorkoutSnapshotV1?,
+        provenanceSnapshot: WorkoutSnapshotV1? = nil,
+        state: WorkoutDeviceSessionState,
+        sessionToken: UInt16,
+        sessionID: UUID?,
+        hasLiveNumerics: Bool,
+        isCurrentSnapshot: Bool
+    ) -> WorkoutDeviceTelemetrySample? {
+        guard state != .idle, sessionToken != 0 else { return nil }
+        guard hasLiveNumerics else {
+            return emptySample(
+                state: state,
+                sessionToken: sessionToken,
+                isCurrentSnapshot: isCurrentSnapshot
+            )
+        }
+        guard let snapshot else { return nil }
+
+        var flags: WorkoutDeviceSourceFlags = []
+        switch snapshot.currentSpeed?.source {
+        case .pairedCyclingSensor:
+            flags.insert(.pairedSpeedSensor)
+        case .watchLocation:
+            flags.insert(.watchSpeed)
+        default:
+            break
+        }
+        if snapshot.cyclingDistance?.source == .healthKit {
+            flags.insert(.healthKitDistance)
+        }
+
+        let provenance = provenanceSnapshot ?? snapshot
+        if provenance.availability.contains(.altitude),
+           provenance.location?.altitude != nil {
+            flags.insert(.watchAltitude)
+        }
+        if provenance.availability.contains(.heartRateZone),
+           provenance.currentHeartRateZone != nil,
+           provenance.heartRateZoneCount != nil {
+            flags.insert(.liveHeartRateZone)
+        }
+
+        return WorkoutDeviceTelemetrySample(
+            state: state,
+            sessionToken: sessionToken,
+            hasLiveNumerics: true,
+            isCurrentSnapshot: isCurrentSnapshot,
+            elapsedSeconds: metric(snapshot.elapsedTime, unit: .seconds),
+            distanceMeters: metric(
+                snapshot.cyclingDistance,
+                unit: .meters
+            ),
+            speedMetersPerSecond: metric(
+                snapshot.currentSpeed,
+                unit: .metersPerSecond
+            ),
+            currentHeartRateBPM: metric(
+                snapshot.currentHeartRate,
+                unit: .beatsPerMinute
+            ),
+            averageHeartRateBPM: metric(
+                snapshot.averageHeartRate,
+                unit: .beatsPerMinute
+            ),
+            activeEnergyKilocalories: metric(
+                snapshot.activeEnergy,
+                unit: .kilocalories
+            ),
+            cyclingPowerWatts: metric(snapshot.cyclingPower, unit: .watts),
+            cyclingCadenceRPM: metric(
+                snapshot.cyclingCadence,
+                unit: .revolutionsPerMinute
+            ),
+            currentHeartRateZone: snapshot.currentHeartRateZone,
+            altitudeMeters: snapshot.location?.altitude,
+            heartRateZoneCount: snapshot.heartRateZoneCount,
+            sourceFlags: flags,
+            pauseOrigin: snapshot.pauseOrigin,
+            wallElapsedSeconds: metric(
+                snapshot.wallElapsedTime,
+                unit: .seconds
+            ),
+            sessionID: sessionID,
+            detectorProfileVersion: snapshot.detectorProfileVersion,
+            lastTransitionOrigin: snapshot.lastTransitionOrigin
+        )
+    }
+
+    static func emptySample(
+        state: WorkoutDeviceSessionState,
+        sessionToken: UInt16,
+        isCurrentSnapshot: Bool = false
+    ) -> WorkoutDeviceTelemetrySample {
+        WorkoutDeviceTelemetrySample(
+            state: state,
+            sessionToken: sessionToken,
+            hasLiveNumerics: false,
+            isCurrentSnapshot: isCurrentSnapshot,
+            elapsedSeconds: nil,
+            distanceMeters: nil,
+            speedMetersPerSecond: nil,
+            currentHeartRateBPM: nil,
+            averageHeartRateBPM: nil,
+            activeEnergyKilocalories: nil,
+            cyclingPowerWatts: nil,
+            cyclingCadenceRPM: nil,
+            currentHeartRateZone: nil,
+            altitudeMeters: nil,
+            heartRateZoneCount: nil,
+            sourceFlags: [],
+            pauseOrigin: nil,
+            wallElapsedSeconds: nil,
+            sessionID: nil,
+            detectorProfileVersion: nil,
+            lastTransitionOrigin: nil
+        )
+    }
+
+    private static func metric(
+        _ metric: WorkoutMetricV1?,
+        unit: WorkoutMetricUnitV1
+    ) -> Double? {
+        guard let metric, metric.unit == unit else { return nil }
+        return metric.value
+    }
+}
+
 nonisolated struct WorkoutDeviceGPSUpdate: Equatable, Sendable {
     let latitude: Double
     let longitude: Double
@@ -129,6 +279,46 @@ nonisolated struct WorkoutDeviceFrames: Equatable, Sendable {
     let origin: Data
     let originAvailable: Bool
     let identity: Identity
+}
+
+nonisolated enum WorkoutDeviceForwardingDecisionV1: Equatable, Sendable {
+    case ignore
+    case forward(
+        snapshot: WorkoutSnapshotV1,
+        sessionID: UUID,
+        sessionToken: UInt16
+    )
+    case clear
+}
+
+/// Drives the direct-Watch device relay from versioned workout envelopes.
+/// Terminal snapshots remain forwarded until the manager publishes an
+/// explicit idle boundary (represented by clearing its latest envelope).
+nonisolated struct WorkoutDeviceForwardingStateV1: Sendable {
+    private(set) var forwardedSessionID: UUID?
+
+    mutating func receive(
+        _ envelope: WorkoutEnvelopeV1?
+    ) -> WorkoutDeviceForwardingDecisionV1 {
+        guard let envelope else {
+            guard forwardedSessionID != nil else { return .ignore }
+            forwardedSessionID = nil
+            return .clear
+        }
+        guard envelope.kind == .snapshot,
+              let snapshot = envelope.snapshot else { return .ignore }
+        guard snapshot.state != .idle else {
+            guard forwardedSessionID != nil else { return .ignore }
+            forwardedSessionID = nil
+            return .clear
+        }
+        forwardedSessionID = envelope.sessionID
+        return .forward(
+            snapshot: snapshot,
+            sessionID: envelope.sessionID,
+            sessionToken: envelope.sessionToken
+        )
+    }
 }
 
 nonisolated enum WorkoutDeviceFrameBuilder {

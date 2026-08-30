@@ -270,6 +270,92 @@ cancel a newer preparation. This coordination does not grant write authority:
 the authenticated firmware lease remains final. A persisted iPhone yield
 expires after 24 hours if its release never arrives.
 
+### Application-confirmed critical ride delivery
+
+Client version `20` requests capability bit `22` (`0x00400000`). When that bit
+is present, an authenticated owner iPhone or scoped Watch wraps critical ride
+state in a version-1 logical command envelope. This distinguishes physical ATT
+acceptance from firmware acceptance. Peers without bit `22` continue to use the
+existing unwrapped compatibility path.
+
+The machine-readable source for these constants is
+`protocol/ride-ble-contract-v1.json`. Running
+`tools/generate_ride_ble_contract.py` produces the checked-in Swift and C++
+constants; `tools/generate_ride_ble_contract.py --check` is a CI drift gate.
+The lifecycle and compatibility rules in this document remain authoritative
+human-readable protocol text.
+
+An `RCM1` command member has this binary layout:
+
+```text
+Offset  Size  Field
+0       4     ASCII "RCM1"
+4       1     Version = 1
+5       1     CommandType
+6       1     MemberIndex, zero based
+7       1     MemberCount, 1...8
+8       16    CommandID, UUID bytes in network/display order
+24      4     StateGeneration, UInt32 little-endian, non-zero
+28      ...   Existing characteristic payload for this member
+```
+
+Command type `1` is `navigationClear`; type `2` is `workoutState`. A navigation
+clear is one owner member (empty route) or two Watch members (empty route plus
+the canonical `1|0|Navigation idle` maneuver). A workout group contains the
+canonical core, extended, and optional origin frames in their existing order.
+Only terminal/idle workout state and explicit navigation clear require this
+application acknowledgement; replaceable GPS, route windows, maneuvers, and
+ordinary live workout snapshots retain latest-state resynchronization semantics.
+
+Firmware accepts every member of a group under the same authenticated role,
+lease, command ID, state generation, type, and member count. It emits no
+success acknowledgement for a partial group. When the complete operation has
+been validated and retained by the corresponding firmware state owner, it
+notifies the controller on protected navigation channel `2` with exactly 32
+bytes:
+
+```text
+Offset  Size  Field
+0       4     ASCII "RAK1"
+4       1     Version = 1
+5       1     CommandType
+6       1     Result
+7       1     Reserved = 0
+8       16    CommandID
+24      4     StateGeneration, UInt32 little-endian
+28      4     Current lease generation, UInt32 little-endian, non-zero
+```
+
+Results are `0=success`, `1=stale`, `2=busy`, `3=unauthorized`,
+`4=malformed`, and `5=resource-rejected`. `success` and an exactly matching
+`stale` result complete the logical command. Other results are typed failures;
+in particular `resource-rejected` is not reported as a radio timeout. Clients
+match type, command ID, state generation, current connection generation, and a
+non-zero lease generation before completing a command. Delayed, duplicate, or
+old-generation acknowledgements cannot complete newer work.
+
+Firmware retains the eight most recent completed command results and replays
+the matching `RAK1` for a duplicate command ID without applying the state
+twice. A client may retry one application-ack timeout with the same command ID
+and state generation, but it creates a new protected `S2` frame and sequence.
+Disconnect discards encrypted transport bytes; the controller reconnects,
+reauthenticates, reacquires its lease, and regenerates a complete latest-state
+resynchronization from logical state. Critical groups are admitted atomically
+and cannot be evicted by replaceable telemetry.
+
+Golden vectors (command payload bytes `aa bb`):
+
+```text
+RCM1 workout member 1/3, command 00112233-4455-6677-8899-aabbccddeeff,
+state generation 0x12345678:
+52 43 4d 31 01 02 01 03 00 11 22 33 44 55 66 77
+88 99 aa bb cc dd ee ff 78 56 34 12 aa bb
+
+RAK1 success for the same command/state, lease generation 9:
+52 41 4b 31 01 02 00 00 00 11 22 33 44 55 66 77
+88 99 aa bb cc dd ee ff 78 56 34 12 09 00 00 00
+```
+
 ### Rename, deregistration, and recovery
 
 Inside protected `S2` frames, iOS can rename with `NAME|<UTF8NameHex>`; ESP32
@@ -1001,13 +1087,15 @@ renderer diagnostics. Bit `19` reports
 connected-display automatic inactivity control (setting ID `36`), and bit `20`
 negotiates persistent, privacy-bounded ride diagnostics and the authenticated
 device-log transfer mode. Bit `21` reports support for the optional detailed
-one-Hz ride-automation trace. Client version `11` requests bit `13`, version `12` requests
+one-Hz ride-automation trace. Bit `22` reports the application-confirmed
+critical ride-delivery contract described above. Client version `11` requests
+bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
 without the newer features. Client version `16` requests bits `18` and `19`,
 including the authenticated renderer-diagnostics contract and the already
-released automatic-display setting. Version `18` requests bit `20`, and
-version `19` requests bit `21`.
+released automatic-display setting. Version `18` requests bit `20`, version
+`19` requests bit `21`, and version `20` requests bit `22`.
 Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
@@ -1062,6 +1150,9 @@ Persistent ride diagnostics, CAP2 schema 1, only feature bit 20:
 
 Detailed ride diagnostics, CAP2 schema 1, only feature bit 21:
 43 41 50 32 01 00 00 20 00
+
+Application-confirmed ride delivery, CAP2 schema 1, only feature bit 22:
+43 41 50 32 01 00 00 40 00
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -1256,15 +1347,22 @@ retries.
 
 ### Device workout start request
 
-When Ride Stats has no active workout, its **Start Workout** button notifies the
-authenticated iPhone app on `2A6E`:
+When Ride Stats has no active workout, an authenticated owner session shows an
+enabled **Start Workout** button and notifies the iPhone app on `2A6E`:
 
 ```text
 "WREQ"
 ```
 
-The request is ownership-v2 protected on the navigation channel. iOS accepts
-only the exact four-byte payload after the BLE session is authenticated, then
+The request is ownership-v2 protected on the navigation channel. Firmware
+emits it only for a role it can read as owner. A scoped Watch session instead
+shows disabled **Start on Apple Watch** guidance and emits no `WREQ`; an
+unreadable or unavailable role fails closed with a disabled control. Watch
+also treats an exact legacy `WREQ` as a harmless ignored owner notification so
+a cached/older firmware behavior cannot tear down Watch navigation, while
+malformed or unknown notification data still fails closed.
+
+iOS accepts only the exact four-byte payload after the BLE session is authenticated, then
 uses the same Watch-owned outdoor-cycling launch flow as the app's Start Workout
 controls. Older apps safely ignore the unknown notification. `WREQ` remains the
 manual button fallback when either peer does not advertise RAUT; detected ride

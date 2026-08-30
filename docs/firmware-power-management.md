@@ -301,7 +301,8 @@ high-frequency trace. It covers:
 - active power-lock domains; and
 - configured and observed wake sources.
 
-Debug iOS builds emit the corresponding `PWRMET_IOS v=2` queue metrics.
+Debug iOS builds emit the corresponding `PWRMET_IOS v=3` queue metrics,
+including bounded pending-frame and pending-byte high-water marks.
 `esp32/tools/power_trace_summary.py` validates and summarizes captured traces.
 
 The characterization harness also supports controlled BLE transmit-power,

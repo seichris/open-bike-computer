@@ -681,8 +681,8 @@ final class TestLocationManagerClient: LocationManagerClient {
 }
 
 @main
+@MainActor
 struct NavigationProtocolTests {
-    @MainActor
     static func main() async {
         testIconMapping()
         testRouteEndpointExtraction()
@@ -735,6 +735,7 @@ struct NavigationProtocolTests {
         testDeviceTransferHandshakePolicy()
         testDeviceSoundProtocol()
         testDeviceCapabilitiesProtocol()
+        testWatchTransportDiagnosticFieldPolicy()
         testBatteryStatusScreenCapabilityNegotiation()
         testMapProfileCapabilityNegotiation()
         testDeviceCapabilitySynchronizesPowerButtonHonkOnce()
@@ -746,6 +747,7 @@ struct NavigationProtocolTests {
         testBLEManagerDiscoveryLifecycleTransitions()
         testDeviceOwnershipProtocol()
         testBLEManagerRequiresNavigationReadinessForWrites()
+        testRideApplicationAcknowledgementWaitsForATTCallback()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsSeparateMapProfileSettings()
         testBLEManagerFoldsExtendedVisibilityForLegacyFirmware()
@@ -901,6 +903,21 @@ struct NavigationProtocolTests {
         testFirmwareDeviceClientSendsSignedBeginRequest()
         await testOfflineMapRecoveryRoutes()
         print("NavigationProtocolTests passed")
+    }
+
+    static func testWatchTransportDiagnosticFieldPolicy() {
+        let watchTransportFields: Set<String> = [
+            "attemptId", "connectionGeneration", "controllerRole",
+            "highWater", "highWaterBytes", "latencyMs", "origin", "outcome", "phase",
+            "queueBytes", "queueDepth", "reason", "rejectedCount", "replacedCount",
+            "watchSequence", "watchUptimeMs",
+        ]
+        assert(
+            watchTransportFields.isSubset(
+                of: RideDiagnosticsFieldPolicy.allowedKeys
+            ),
+            "every Watch transport diagnostic field is admitted by the privacy policy"
+        )
     }
 
     static func testBikeMapStreamGoldenVector() {
@@ -5214,12 +5231,15 @@ struct NavigationProtocolTests {
             Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8),
             write: { concurrentTransferWrites.append($0) }
         ), "unacknowledged transfer control is admitted during an acknowledged write")
-        assertEqual(concurrentTransferWrites.count, 1,
-                    "transfer control bypasses an unrelated response callback")
+        assertEqual(concurrentTransferWrites.count, 0,
+                    "the unified writer holds transfer control behind an unidentified response callback")
         concurrentTransportReady = true
         concurrentManager.completeNavigationWriteForTesting(
             error: simulatedWriteError
         )
+        assert(waitForMainLoop(timeout: 1) {
+            concurrentTransferWrites.count == 1
+        }, "the unified writer releases transfer control after the matching callback")
         assert(waitForMainLoop(timeout: 3) {
             concurrentStatusWrites.count == 2
         }, "concurrent transfer control preserves the acknowledged write failure callback")
@@ -13316,10 +13336,12 @@ struct NavigationProtocolTests {
         }
     }
 
-    static func runAsyncTest(_ operation: @escaping () async throws -> Void) {
+    nonisolated static func runAsyncTest(
+        _ operation: @escaping @Sendable () async throws -> Void
+    ) {
         let semaphore = DispatchSemaphore(value: 0)
         var failure: Error?
-        Task {
+        Task.detached {
             do {
                 try await operation()
             } catch {
@@ -13661,7 +13683,7 @@ struct NavigationProtocolTests {
         metricsQueue.removeAll()
 
         let queueMetrics = metricsQueue.snapshotMetricsAndReset()
-        assertEqual(NavigationWriteQueueMetrics.schemaVersion, 2,
+        assertEqual(NavigationWriteQueueMetrics.schemaVersion, 3,
                     "queue metrics schema is explicitly versioned")
         assertEqual(queueMetrics.enqueuedFrames, 3,
                     "queue metrics distinguish accepted frames")
@@ -13685,6 +13707,28 @@ struct NavigationProtocolTests {
                     "queue interval metrics reset after a snapshot")
         assertEqual(metricsQueue.metrics.maxDepth, 0,
                     "an empty queue starts the next interval at zero depth")
+
+        var byteQueue = NavigationWriteQueue(
+            maxCount: 4,
+            priorityMaxCount: 2,
+            maxPendingBytes: 4,
+            priorityMaxPendingBytes: 3
+        )
+        assert(byteQueue.enqueueAtomically([
+            NavigationWrite(data: Data([1, 2]), label: "byte-1"),
+            NavigationWrite(data: Data([3, 4]), label: "byte-2"),
+        ]), "an atomic batch may fill the regular byte ceiling")
+        assert(!byteQueue.enqueueAtomically([
+            NavigationWrite(data: Data([5]), label: "byte-overflow")
+        ]), "regular byte overflow rejects the entire new batch")
+        assert(byteQueue.enqueuePrioritizedAtomically([
+            NavigationWrite(data: Data([6, 7, 8]), label: "priority-bytes")
+        ]), "the independent priority byte lane admits its exact ceiling")
+        assert(!byteQueue.enqueuePrioritizedAtomically([
+            NavigationWrite(data: Data([9]), label: "priority-overflow")
+        ]), "priority byte overflow is rejected without eviction")
+        assertEqual(byteQueue.pendingByteCount, 7,
+                    "queue exposes the combined bounded byte footprint")
 
         var boundaryQueue = NavigationWriteQueue(maxCount: 3)
         boundaryQueue.enqueue(NavigationWrite(data: Data([6]), label: "pending-1"))
@@ -14248,8 +14292,9 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.automaticDisplayOffCapabilityMask, 1 << 19, "CAP2 bit 19 advertises automatic display-off")
         assertEqual(DeviceBLEProtocol.rideDiagnosticsCapabilityMask, 1 << 20, "CAP2 bit 20 advertises persistent ride diagnostics")
         assertEqual(DeviceBLEProtocol.detailedRideDiagnosticsCapabilityMask, 1 << 21, "CAP2 bit 21 advertises detailed ride diagnostics")
+        assertEqual(DeviceBLEProtocol.rideDeliveryAcknowledgementCapabilityMask, 1 << 22, "CAP2 bit 22 advertises reliable ride delivery")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 19, "capability version negotiates detailed ride diagnostics")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 20, "capability version negotiates reliable ride delivery")
         assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
         assertEqual(DeviceBLEProtocol.rendererMetricsResponsePrefix, "RDMT", "renderer metrics responses use RDMT")
         assertEqual(DeviceBLEProtocol.rendererMetricsChunkPrefix, "RDMC", "renderer metrics chunks use RDMC")
@@ -18217,6 +18262,46 @@ struct NavigationProtocolTests {
                "persistent no-response backpressure triggers bounded recovery")
         assert(!noResponseWatchdogManager.isNavigationReady,
                "no-response recovery closes the wedged navigation session")
+    }
+
+    static func testRideApplicationAcknowledgementWaitsForATTCallback() {
+        let manager = BLEManager()
+        let commandID = UUID(
+            uuidString: "44444444-4444-4444-4444-444444444444"
+        )!
+        var completions = 0
+        manager.installRideApplicationAcknowledgementRaceForTesting(
+            commandID: commandID,
+            commandType: .navigationClear,
+            stateGeneration: 7,
+            completion: { completions += 1 }
+        )
+        manager.handleRideApplicationAcknowledgementForTesting(.init(
+            commandType: .navigationClear,
+            result: .success,
+            commandID: commandID,
+            stateGeneration: 7,
+            leaseGeneration: 1
+        ))
+        assertEqual(completions, 1,
+                    "application ACK completes the logical command once")
+        assert(!manager.hasPendingRideApplicationDeliveryForTesting,
+               "application ACK retires the logical delivery")
+        assert(manager.hasPendingATTWriteForTesting,
+               "application ACK cannot retire an unidentified ATT callback slot")
+
+        manager.completeNavigationWriteForTesting(error: nil)
+        assert(!manager.hasPendingATTWriteForTesting,
+               "the matching ATT callback independently releases its slot")
+        manager.handleRideApplicationAcknowledgementForTesting(.init(
+            commandType: .navigationClear,
+            result: .success,
+            commandID: commandID,
+            stateGeneration: 7,
+            leaseGeneration: 1
+        ))
+        assertEqual(completions, 1,
+                    "a duplicated late application ACK remains idempotent")
     }
 
     static func testBLEManagerSendsFallbackMapSettings() {

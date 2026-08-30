@@ -30,6 +30,7 @@
 #include "workout_telemetry_runtime.hpp"
 #include "ride_automation_protocol.hpp"
 #include "ride_automation_runtime.hpp"
+#include "ride_delivery_protocol.hpp"
 #include "authenticated_workout_telemetry.hpp"
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
@@ -120,6 +121,15 @@ static bool bleSessionSupports3DBuildings = false;
 static std::atomic<bool> bleSessionSupportsExplicitInvalidGpsHeading{false};
 static std::atomic<bool> bleSessionSupportsRendererDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRideDiagnostics{false};
+static std::atomic<bool> bleSessionSupportsRideDeliveryAck{false};
+// Captured while the ownership mutex is held by the accepted ride write. The
+// application ACK path runs in the same NimBLE callback and must never fall
+// back to lease generation zero merely because another task briefly owns the
+// mutex.
+static std::atomic<uint32_t> rideDeliveryLeaseGenerationSnapshot{0};
+static std::atomic<uint32_t> ridePayloadGeneration{1};
+static ride_delivery_protocol::GroupTracker rideDeliveryTracker;
+static portMUX_TYPE rideDeliveryTrackerMux = portMUX_INITIALIZER_UNLOCKED;
 static std::atomic<uint32_t> lastRendererMetricsRequestMs{0};
 static std::atomic<uint32_t> lastRendererWindowRequestMs{0};
 static std::atomic<uint8_t> lastRendererWindowRequestProfile{
@@ -628,17 +638,18 @@ static bool destinationCatalogContains(uint32_t generation, uint16_t token) {
   return found;
 }
 
-static bool isScopedWatchRideSession() {
+static scoped_watch_payload_policy::RequestSessionRole
+currentRequestSessionRole() {
   if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
       xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-    // Destination requests are owner-only. If role state cannot be read,
-    // suppress the request instead of sending an owner command to an
-    // unverified or scoped session.
-    return true;
+    // Owner-only requests fail closed when role state cannot be read.
+    return scoped_watch_payload_policy::RequestSessionRole::Unreadable;
   }
   const bool scopedWatch = deviceOwnership.isWatchRideSession();
   xSemaphoreGive(deviceOwnershipMutex);
-  return scopedWatch;
+  return scopedWatch
+             ? scoped_watch_payload_policy::RequestSessionRole::ScopedWatch
+             : scoped_watch_payload_policy::RequestSessionRole::Owner;
 }
 
 bool requestDestinationRoute(uint32_t generation, uint16_t token) {
@@ -653,7 +664,8 @@ bool requestDestinationRoute(uint32_t generation, uint16_t token) {
                                token, "Open app to start navigation");
     return false;
   }
-  if (isScopedWatchRideSession()) {
+  if (currentRequestSessionRole() !=
+      scoped_watch_payload_policy::RequestSessionRole::Owner) {
     setDestinationPickerStatus(DestinationPickerStatusCode::Failed, generation,
                                token, "Open iPhone to start navigation");
     return false;
@@ -680,8 +692,26 @@ bool requestDestinationRoute(uint32_t generation, uint16_t token) {
 }
 
 bool BLENavigationServer::canRequestWorkoutStart() const {
-  return connected && bleSessionAuthenticated &&
-         mapTransferStatusCharacteristic != nullptr;
+  return workoutStartRequestPresentation() ==
+         WorkoutStartRequestPresentation::StartOnIPhone;
+}
+
+WorkoutStartRequestPresentation
+BLENavigationServer::workoutStartRequestPresentation() const {
+  using PolicyPresentation =
+      scoped_watch_payload_policy::OwnerOnlyRequestPresentation;
+  switch (scoped_watch_payload_policy::ownerOnlyRequestPresentation(
+      connected, bleSessionAuthenticated,
+      mapTransferStatusCharacteristic != nullptr,
+      currentRequestSessionRole())) {
+  case PolicyPresentation::OwnerAction:
+    return WorkoutStartRequestPresentation::StartOnIPhone;
+  case PolicyPresentation::ScopedWatchAction:
+    return WorkoutStartRequestPresentation::StartOnAppleWatch;
+  case PolicyPresentation::Unavailable:
+    return WorkoutStartRequestPresentation::Unavailable;
+  }
+  return WorkoutStartRequestPresentation::Unavailable;
 }
 
 bool BLENavigationServer::requestWorkoutStart() {
@@ -759,11 +789,42 @@ struct PendingMapInput {
   uint16_t length = 0;
   bool fallback = false;
   bool pending = false;
+  uint32_t payloadGeneration = 0;
   uint8_t *data = nullptr;
   gps_input_freshness::ArrivalBatch gpsArrivals{};
 };
+struct PendingRouteRideDelivery {
+  bool pending = false;
+  ride_delivery_protocol::CommandType type =
+      ride_delivery_protocol::CommandType::NavigationClear;
+  uint8_t memberIndex = 0;
+  uint8_t memberCount = 0;
+  ride_delivery_protocol::CommandId commandId{};
+  uint32_t stateGeneration = 0;
+  uint32_t leaseGeneration = 0;
+  ride_delivery_protocol::Result result =
+      ride_delivery_protocol::Result::Success;
+
+  bool sameIdentity(const PendingRouteRideDelivery &other) const {
+    return pending && other.pending && type == other.type &&
+           commandId == other.commandId &&
+           stateGeneration == other.stateGeneration &&
+           leaseGeneration == other.leaseGeneration;
+  }
+
+  ride_delivery_protocol::CommandMember member() const {
+    ride_delivery_protocol::CommandMember value{};
+    value.type = type;
+    value.memberIndex = memberIndex;
+    value.memberCount = memberCount;
+    value.commandId = commandId;
+    value.stateGeneration = stateGeneration;
+    return value;
+  }
+};
 static SemaphoreHandle_t pendingMapInputMutex = nullptr;
 static PendingMapInput pendingRouteInput;
+static PendingRouteRideDelivery pendingRouteRideDelivery;
 static PendingMapInput pendingGpsInput;
 static constexpr size_t MAP_SETTING_SLOT_COUNT = 256;
 static constexpr size_t MAP_SETTING_MASK_BYTES = MAP_SETTING_SLOT_COUNT / 8;
@@ -771,8 +832,53 @@ static PendingMapInput pendingSettingInputs[MAP_SETTING_SLOT_COUNT];
 static uint8_t pendingSettingMask[MAP_SETTING_MASK_BYTES] = {0};
 static std::atomic<uint16_t> pendingMapInputCount{0};
 
+static void noteRideDeliveryMember(
+    const ride_delivery_protocol::CommandMember &member,
+    ride_delivery_protocol::Result result,
+    uint32_t expectedLeaseGeneration = 0);
+
+static bool pendingRouteDeliveryMatchesCurrentLease(
+    const PendingRouteRideDelivery &delivery) {
+  return delivery.pending && delivery.leaseGeneration != 0 &&
+         delivery.leaseGeneration == rideDeliveryLeaseGenerationSnapshot.load(
+                                         std::memory_order_acquire);
+}
+
+static void resetRideDeliveryTracking() {
+  portENTER_CRITICAL(&rideDeliveryTrackerMux);
+  rideDeliveryTracker.reset();
+  portEXIT_CRITICAL(&rideDeliveryTrackerMux);
+  if (pendingMapInputMutex != nullptr &&
+      xSemaphoreTake(pendingMapInputMutex, portMAX_DELAY) == pdTRUE) {
+    auto clearInput = [](PendingMapInput &input) {
+      free(input.data);
+      input = {};
+    };
+    clearInput(pendingRouteInput);
+    clearInput(pendingGpsInput);
+    for (PendingMapInput &input : pendingSettingInputs)
+      clearInput(input);
+    memset(pendingSettingMask, 0, sizeof(pendingSettingMask));
+    pendingMapInputCount.store(0, std::memory_order_release);
+    pendingRouteRideDelivery = {};
+    xSemaphoreGive(pendingMapInputMutex);
+  }
+}
+
+static void advanceRidePayloadGeneration() {
+  uint32_t next = ridePayloadGeneration.fetch_add(
+      1, std::memory_order_acq_rel) + 1U;
+  if (next == 0) {
+    ridePayloadGeneration.store(1, std::memory_order_release);
+  }
+}
+
 static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
-                          size_t len, const char *source) {
+                          size_t len, const char *source,
+                          const ride_delivery_protocol::CommandMember
+                              *rideDeliveryMember = nullptr,
+                          ride_delivery_protocol::Result rideDeliveryResult =
+                              ride_delivery_protocol::Result::Success) {
   if (pendingMapInputMutex == nullptr || len > MAX_PENDING_MAP_INPUT_BYTES ||
       (len > 0 && data == nullptr)) {
     Serial.printf("BLE: rejected queued map input type=%u len=%u\n",
@@ -796,6 +902,8 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
   input.length = static_cast<uint16_t>(len);
   input.fallback = source != nullptr && strcmp(source, "fallback") == 0;
   input.pending = true;
+  input.payloadGeneration =
+      ridePayloadGeneration.load(std::memory_order_acquire);
   if (len > 0) {
     input.data = static_cast<uint8_t *>(malloc(len));
     if (input.data == nullptr) {
@@ -828,6 +936,26 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
     return false;
   }
   PendingMapInput replaced = *slot;
+  PendingRouteRideDelivery replacedRouteDelivery{};
+  bool rejectedReplacedRouteDelivery = false;
+  if (type == PendingMapInputType::Route) {
+    replacedRouteDelivery = pendingRouteRideDelivery;
+    pendingRouteRideDelivery = {};
+    if (rideDeliveryMember != nullptr) {
+      pendingRouteRideDelivery.pending = true;
+      pendingRouteRideDelivery.type = rideDeliveryMember->type;
+      pendingRouteRideDelivery.memberIndex = rideDeliveryMember->memberIndex;
+      pendingRouteRideDelivery.memberCount = rideDeliveryMember->memberCount;
+      pendingRouteRideDelivery.commandId = rideDeliveryMember->commandId;
+      pendingRouteRideDelivery.stateGeneration =
+          rideDeliveryMember->stateGeneration;
+      pendingRouteRideDelivery.leaseGeneration =
+          rideDeliveryLeaseGenerationSnapshot.load(std::memory_order_acquire);
+      pendingRouteRideDelivery.result = rideDeliveryResult;
+    }
+    rejectedReplacedRouteDelivery = replacedRouteDelivery.pending &&
+        !replacedRouteDelivery.sameIdentity(pendingRouteRideDelivery);
+  }
   if (type == PendingMapInputType::Gps) {
     input.gpsArrivals = replaced.gpsArrivals;
     input.gpsArrivals.observe(gpsReceivedAtMs);
@@ -845,6 +973,13 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
   // Latest-state mailboxes make periodic GPS and repeated route/settings
   // updates bounded without ever dropping the newest authoritative value.
   free(replaced.data);
+  if (rejectedReplacedRouteDelivery &&
+      pendingRouteDeliveryMatchesCurrentLease(replacedRouteDelivery)) {
+    noteRideDeliveryMember(
+        replacedRouteDelivery.member(),
+        ride_delivery_protocol::Result::ResourceRejected,
+        replacedRouteDelivery.leaseGeneration);
+  }
   ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
   return true;
 }
@@ -1021,11 +1156,18 @@ static bool unwrapOwnerAuthenticatedPayload(
       !authenticationStateDiverged &&
       (!requiresFrame ||
        deviceOwnership.unwrapAuthenticatedPayload(channel, frame, payload));
+  const uint32_t nowMs = millis();
   const bool accepted =
       validFrame &&
       (!requiresFrame ||
        channel == device_ownership::AuthenticatedChannel::Auth ||
-       deviceOwnership.authorizeRideWrite(channel, millis()));
+       deviceOwnership.authorizeRideWrite(channel, nowMs));
+  if (accepted && requiresFrame &&
+      channel != device_ownership::AuthenticatedChannel::Auth) {
+    rideDeliveryLeaseGenerationSnapshot.store(
+        deviceOwnership.authenticatedRideLeaseGeneration(nowMs),
+        std::memory_order_release);
+  }
   if (accepted && wasScopedWatchSession != nullptr) {
     *wasScopedWatchSession = deviceOwnership.isWatchRideSession();
   }
@@ -1382,6 +1524,89 @@ static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
       data, length, "navigation");
 }
 
+static uint32_t currentRideLeaseGeneration() {
+  return rideDeliveryLeaseGenerationSnapshot.load(std::memory_order_acquire);
+}
+
+static void notifyRideDeliveryAcknowledgement(
+    const ride_delivery_protocol::Acknowledgement &acknowledgement) {
+  uint8_t payload[ride_delivery_protocol::ACK_SIZE]{};
+  const size_t length = ride_delivery_protocol::encodeAcknowledgement(
+      acknowledgement, payload, sizeof(payload));
+  if (length == 0 ||
+      !notifyAuthenticatedNavigation(mapTransferStatusCharacteristic, payload,
+                                     length)) {
+    Serial.println("BLE Ride Delivery: acknowledgement queue failed");
+  }
+}
+
+static void noteRideDeliveryMember(
+    const ride_delivery_protocol::CommandMember &member,
+    ride_delivery_protocol::Result result,
+    uint32_t expectedLeaseGeneration) {
+  ride_delivery_protocol::Acknowledgement acknowledgement{};
+  ride_delivery_protocol::TrackingResult tracking =
+      ride_delivery_protocol::TrackingResult::Rejected;
+  portENTER_CRITICAL(&rideDeliveryTrackerMux);
+  const uint32_t leaseGeneration = currentRideLeaseGeneration();
+  if (leaseGeneration != 0 &&
+      (expectedLeaseGeneration == 0 ||
+       expectedLeaseGeneration == leaseGeneration)) {
+    tracking = rideDeliveryTracker.note(member, result, leaseGeneration,
+                                        acknowledgement);
+  }
+  portEXIT_CRITICAL(&rideDeliveryTrackerMux);
+  if (tracking == ride_delivery_protocol::TrackingResult::Complete ||
+      tracking == ride_delivery_protocol::TrackingResult::DuplicateComplete ||
+      tracking == ride_delivery_protocol::TrackingResult::Immediate) {
+    char fields[160] = {};
+    snprintf(fields, sizeof(fields),
+             "{\"commandClass\":%u,\"result\":%u,\"members\":%u,"
+             "\"leaseGeneration\":%lu,\"outcome\":\"%s\"}",
+             static_cast<unsigned>(acknowledgement.type),
+             static_cast<unsigned>(acknowledgement.result),
+             static_cast<unsigned>(member.memberCount),
+             static_cast<unsigned long>(acknowledgement.leaseGeneration),
+             tracking == ride_delivery_protocol::TrackingResult::Complete
+                 ? "applied"
+             : tracking ==
+                       ride_delivery_protocol::TrackingResult::DuplicateComplete
+                 ? "duplicate"
+                 : "rejected");
+    (void)ride_diagnostics::record(
+        acknowledgement.result == ride_delivery_protocol::Result::Success ||
+                acknowledgement.result == ride_delivery_protocol::Result::Stale
+            ? ride_diagnostics::Level::Info
+            : ride_diagnostics::Level::Warning,
+        "ble", "ride_command_acknowledged", fields);
+    notifyRideDeliveryAcknowledgement(acknowledgement);
+  }
+}
+
+enum class RideDeliveryDecodeResult : uint8_t {
+  NotWrapped,
+  Decoded,
+  Rejected,
+};
+
+static RideDeliveryDecodeResult decodeRideDeliveryPayload(
+    const std::string &value, ride_delivery_protocol::CommandType expectedType,
+    ride_delivery_protocol::CommandMember &member) {
+  if (value.size() < 4 || std::memcmp(value.data(),
+                                     ride_delivery_protocol::COMMAND_PREFIX,
+                                     4) != 0)
+    return RideDeliveryDecodeResult::NotWrapped;
+  if (!bleSessionSupportsRideDeliveryAck.load(std::memory_order_acquire) ||
+      !ride_delivery_protocol::decodeCommand(
+          reinterpret_cast<const uint8_t *>(value.data()), value.size(),
+          member) ||
+      member.type != expectedType) {
+    Serial.println("BLE Ride Delivery: rejected malformed command envelope");
+    return RideDeliveryDecodeResult::Rejected;
+  }
+  return RideDeliveryDecodeResult::Decoded;
+}
+
 bool BLENavigationServer::notifyRideAutomationFrame(const uint8_t *data,
                                                     size_t length) {
   if (data == nullptr || length != ride_automation_protocol::FRAME_SIZE)
@@ -1603,6 +1828,12 @@ static void handleAuthPayload(const std::string &frame) {
                                                 std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
+    bleSessionSupportsRideDeliveryAck.store(false,
+                                             std::memory_order_release);
+    rideDeliveryLeaseGenerationSnapshot.store(0,
+                                               std::memory_order_release);
+    advanceRidePayloadGeneration();
+    resetRideDeliveryTracking();
     lastRendererMetricsRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestProfile.store(
@@ -2971,6 +3202,11 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
     }
 #endif
 #endif
+    if (clientVersion >= device_capabilities_protocol::
+                             RIDE_DELIVERY_ACK_CLIENT_VERSION) {
+      featureFlags |=
+          device_capabilities_protocol::RIDE_DELIVERY_ACK_FEATURE;
+    }
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
@@ -3039,6 +3275,10 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
     bleSessionSupportsStreetLabels =
         clientVersion >= device_capabilities_protocol::CAP2_CLIENT_VERSION;
     bleSessionSupports3DBuildings = bleSessionSupportsStreetLabels;
+    bleSessionSupportsRideDeliveryAck.store(
+        clientVersion >=
+            device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION,
+        std::memory_order_release);
     bleSessionSupportsExplicitInvalidGpsHeading.store(
         clientVersion >=
             device_capabilities_protocol::EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION,
@@ -3730,11 +3970,12 @@ static void handleGpsPayload(
   // vector-map background crossed its time/movement/heading thresholds.
 }
 
-static void handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
-                                          const char *source) {
+static workout_telemetry::ApplyResult
+handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
+                              const char *source) {
   power_metrics::noteBlePacket(power_metrics::BlePacketClass::Workout);
   if (!requireAuthenticated("workout telemetry")) {
-    return;
+    return workout_telemetry::ApplyResult::RejectedUnauthenticated;
   }
   const workout_telemetry::ApplyResult result =
       workout_telemetry_runtime::ingestFrame(data, len, millis(), true);
@@ -3763,12 +4004,12 @@ static void handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
   case workout_telemetry::ApplyResult::Cleared:
     // Health metrics remain RAM-only and are intentionally absent from logs.
     ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
-    return;
+    return result;
   default:
     Serial.printf("BLE Workout: rejected %s frame (%s)\n",
                   source == nullptr ? "unknown" : source,
                   workout_telemetry::applyResultName(result));
-    return;
+    return result;
   }
 }
 
@@ -4177,7 +4418,12 @@ static void processPendingMapInputs() {
 
   auto processInput = [](PendingMapInput input) {
     if (!input.pending) {
-      return;
+      return false;
+    }
+    if (input.payloadGeneration !=
+        ridePayloadGeneration.load(std::memory_order_acquire)) {
+      free(input.data);
+      return false;
     }
 
     const char *source = input.fallback ? "fallback" : "native";
@@ -4193,9 +4439,36 @@ static void processPendingMapInputs() {
       break;
     }
     free(input.data);
+    return true;
   };
 
-  processInput(takeSlot(pendingRouteInput));
+  struct PendingRouteWork {
+    PendingMapInput input{};
+    PendingRouteRideDelivery delivery{};
+  };
+  auto takeRoute = []() {
+    PendingRouteWork work{};
+    if (xSemaphoreTake(pendingMapInputMutex, portMAX_DELAY) != pdTRUE) {
+      return work;
+    }
+    if (pendingRouteInput.pending) {
+      work.input = pendingRouteInput;
+      work.delivery = pendingRouteRideDelivery;
+      pendingRouteInput = {};
+      pendingRouteRideDelivery = {};
+      pendingMapInputCount.fetch_sub(1, std::memory_order_release);
+    }
+    xSemaphoreGive(pendingMapInputMutex);
+    return work;
+  };
+
+  const PendingRouteWork route = takeRoute();
+  const bool routeApplied = processInput(route.input);
+  if (routeApplied &&
+      pendingRouteDeliveryMatchesCurrentLease(route.delivery)) {
+    noteRideDeliveryMember(route.delivery.member(), route.delivery.result,
+                           route.delivery.leaseGeneration);
+  }
   processInput(takeSlot(pendingGpsInput));
   while (true) {
     PendingMapInput input{};
@@ -4339,6 +4612,12 @@ public:
                                                 std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
+    bleSessionSupportsRideDeliveryAck.store(false,
+                                             std::memory_order_release);
+    rideDeliveryLeaseGenerationSnapshot.store(0,
+                                               std::memory_order_release);
+    advanceRidePayloadGeneration();
+    resetRideDeliveryTracking();
     lastRendererMetricsRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestProfile.store(
@@ -4415,6 +4694,12 @@ public:
                                                 std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
+    bleSessionSupportsRideDeliveryAck.store(false,
+                                             std::memory_order_release);
+    rideDeliveryLeaseGenerationSnapshot.store(0,
+                                               std::memory_order_release);
+    advanceRidePayloadGeneration();
+    resetRideDeliveryTracking();
     lastRendererMetricsRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestMs.store(0, std::memory_order_release);
     lastRendererWindowRequestProfile.store(
@@ -4479,6 +4764,29 @@ public:
             device_ownership::AuthenticatedChannel::Navigation, frame, value,
             "navigation characteristic", &scopedWatchSession)) {
       return;
+    }
+
+    ride_delivery_protocol::CommandMember deliveryMember{};
+    const RideDeliveryDecodeResult deliveryDecode = decodeRideDeliveryPayload(
+        value, ride_delivery_protocol::CommandType::NavigationClear,
+        deliveryMember);
+    if (deliveryDecode == RideDeliveryDecodeResult::Rejected)
+      return;
+    const bool hasDeliveryMember =
+        deliveryDecode == RideDeliveryDecodeResult::Decoded;
+    if (hasDeliveryMember) {
+      static constexpr char kNavigationIdle[] = "1|0|Navigation idle";
+      if (deliveryMember.memberCount != 2 ||
+          deliveryMember.memberIndex != 1 ||
+          deliveryMember.payloadLength != sizeof(kNavigationIdle) - 1 ||
+          std::memcmp(deliveryMember.payload, kNavigationIdle,
+                      sizeof(kNavigationIdle) - 1) != 0) {
+        noteRideDeliveryMember(
+            deliveryMember, ride_delivery_protocol::Result::Malformed);
+        return;
+      }
+      value.assign(reinterpret_cast<const char *>(deliveryMember.payload),
+                   deliveryMember.payloadLength);
     }
 
     if (scopedWatchSession &&
@@ -4623,6 +4931,10 @@ public:
     bleDebugStats.navPacketCount++;
     bleDebugStats.lastNavPacketMs = millis();
     parseNavigationData(value);
+    if (hasDeliveryMember) {
+      noteRideDeliveryMember(deliveryMember,
+                             ride_delivery_protocol::Result::Success);
+    }
   }
 };
 
@@ -4641,9 +4953,38 @@ public:
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Route);
       return;
     }
+    ride_delivery_protocol::CommandMember deliveryMember{};
+    const RideDeliveryDecodeResult deliveryDecode = decodeRideDeliveryPayload(
+        value, ride_delivery_protocol::CommandType::NavigationClear,
+        deliveryMember);
+    if (deliveryDecode == RideDeliveryDecodeResult::Rejected)
+      return;
+    const bool hasDeliveryMember =
+        deliveryDecode == RideDeliveryDecodeResult::Decoded;
+    if (hasDeliveryMember &&
+        ((deliveryMember.memberCount != 1 &&
+          deliveryMember.memberCount != 2) ||
+         deliveryMember.memberIndex != 0 ||
+         deliveryMember.payloadLength != 0)) {
+      noteRideDeliveryMember(deliveryMember,
+                             ride_delivery_protocol::Result::Malformed);
+      return;
+    }
 
-    queueMapInput(PendingMapInputType::Route,
-                  (const uint8_t *)value.data(), value.length(), "native");
+    const uint8_t *payload = hasDeliveryMember
+                                 ? deliveryMember.payload
+                                 : reinterpret_cast<const uint8_t *>(
+                                       value.data());
+    const size_t payloadLength = hasDeliveryMember
+                                     ? deliveryMember.payloadLength
+                                     : value.length();
+    const bool accepted = queueMapInput(
+        PendingMapInputType::Route, payload, payloadLength, "native",
+        hasDeliveryMember ? &deliveryMember : nullptr);
+    if (hasDeliveryMember && !accepted) {
+      noteRideDeliveryMember(
+          deliveryMember, ride_delivery_protocol::Result::ResourceRejected);
+    }
   }
 };
 
@@ -4682,7 +5023,61 @@ public:
               protectedFrame, payload, "workout telemetry characteristic");
         },
         [](const uint8_t *payload, std::size_t length) {
-          handleWorkoutTelemetryPayload(payload, length, "native");
+          std::string value(reinterpret_cast<const char *>(payload), length);
+          ride_delivery_protocol::CommandMember deliveryMember{};
+          const RideDeliveryDecodeResult deliveryDecode =
+              decodeRideDeliveryPayload(
+                  value, ride_delivery_protocol::CommandType::WorkoutState,
+                  deliveryMember);
+          if (deliveryDecode == RideDeliveryDecodeResult::Rejected)
+            return;
+          const bool hasDeliveryMember =
+              deliveryDecode == RideDeliveryDecodeResult::Decoded;
+          if (hasDeliveryMember) {
+            const bool canonicalMember =
+                deliveryMember.payloadLength > 0 &&
+                deliveryMember.memberCount <= 3 &&
+                deliveryMember.memberIndex < deliveryMember.memberCount &&
+                deliveryMember.payload[0] ==
+                    static_cast<uint8_t>(deliveryMember.memberIndex + 1);
+            if (!canonicalMember) {
+              noteRideDeliveryMember(
+                  deliveryMember, ride_delivery_protocol::Result::Malformed);
+              return;
+            }
+            payload = deliveryMember.payload;
+            length = deliveryMember.payloadLength;
+          }
+          const workout_telemetry::ApplyResult result =
+              handleWorkoutTelemetryPayload(payload, length, "native");
+          if (!hasDeliveryMember)
+            return;
+          using ApplyResult = workout_telemetry::ApplyResult;
+          ride_delivery_protocol::Result deliveryResult =
+              ride_delivery_protocol::Result::ResourceRejected;
+          switch (result) {
+          case ApplyResult::Applied:
+          case ApplyResult::Cleared:
+            deliveryResult = ride_delivery_protocol::Result::Success;
+            break;
+          case ApplyResult::IgnoredToken:
+          case ApplyResult::IgnoredPair:
+          case ApplyResult::IgnoredStateRegression:
+            deliveryResult = ride_delivery_protocol::Result::Stale;
+            break;
+          case ApplyResult::RejectedUnauthenticated:
+            deliveryResult = ride_delivery_protocol::Result::Unauthorized;
+            break;
+          case ApplyResult::RejectedLength:
+          case ApplyResult::RejectedKind:
+          case ApplyResult::RejectedState:
+          case ApplyResult::RejectedToken:
+          case ApplyResult::RejectedFlags:
+          case ApplyResult::RejectedMetric:
+            deliveryResult = ride_delivery_protocol::Result::Malformed;
+            break;
+          }
+          noteRideDeliveryMember(deliveryMember, deliveryResult);
         });
   }
 };

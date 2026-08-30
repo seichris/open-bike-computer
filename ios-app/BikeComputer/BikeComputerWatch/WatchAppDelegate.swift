@@ -101,6 +101,16 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
                 response: response
             )
         }
+        connectivityCoordinator.onDirectRidePreparationSubmissionFailure = {
+            [weak deviceLink] request in
+            deviceLink?.directRidePreparationSubmissionDidFail(
+                request: request
+            )
+        }
+        connectivityCoordinator.onDirectRidePreparationAvailabilityChanged = {
+            [weak deviceLink] in
+            deviceLink?.directRidePreparationAvailabilityDidChange()
+        }
         deviceLink.onDirectRidePreparationChange = {
             [weak connectivityCoordinator] operation, deviceID,
                 preparationID in
@@ -108,7 +118,11 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
                 operation: operation,
                 deviceID: deviceID,
                 preparationID: preparationID
-            )
+            ) ?? .transportUnavailable
+        }
+        deviceLink.onTransportDiagnostic = {
+            [weak connectivityCoordinator] event in
+            connectivityCoordinator?.recordTransportDiagnostic(event)
         }
         workoutManager.$setupState
             .sink { [weak workoutManager, weak connectivityCoordinator]

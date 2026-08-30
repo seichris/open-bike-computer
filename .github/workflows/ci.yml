@@ -76,6 +76,8 @@ jobs:
           args: -shellcheck=
       - name: Test CI component routing
         run: python3 -m unittest discover -s .github/scripts/tests
+      - name: Verify generated ride BLE contract
+        run: python3 tools/generate_ride_ble_contract.py --check
       - id: policy
         name: Select CI cost policy
         env:
@@ -252,6 +254,9 @@ jobs:
         working-directory: ios-app
       - name: Run shared route and Watch BLE contract tests
         run: ./scripts/run-ride-shared-tests.sh
+        working-directory: ios-app
+      - name: Type-check the complete Watch source graph
+        run: ./scripts/run-watch-source-typecheck.sh
         working-directory: ios-app
       - name: Run Watch offline navigation persistence tests
         run: ./scripts/run-watch-offline-navigation-tests.sh
@@ -546,6 +551,10 @@ jobs:
             tools/tests/test_scoped_watch_payload_policy.cpp \
             -o /tmp/test_scoped_watch_payload_policy
           /tmp/test_scoped_watch_payload_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_ride_delivery_protocol.cpp \
+            -o /tmp/test_ride_delivery_protocol
+          /tmp/test_ride_delivery_protocol
       - name: Remote device debug host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \
