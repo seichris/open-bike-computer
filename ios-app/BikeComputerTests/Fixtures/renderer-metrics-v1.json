@@ -22,7 +22,7 @@
     },
     "routeFixture": {
       "id": "shanghai-jingan-renderer-v1",
-      "sha256": "bf3ad5176e188cb56ecdcedd9dea740dfa57487ea36eb50d2280668a96b7f0c9",
+      "sha256": "0fec6228e89cdb6841b971226c5fdedcc5e711dcb9b0e72bcaf95da4f6452f64",
       "mode": "ios-fixture-1hz"
     }
   },
@@ -118,7 +118,7 @@
   },
   "routeReplay": {
     "valid": true,
-    "fixtureSha256": "bf3ad5176e188cb56ecdcedd9dea740dfa57487ea36eb50d2280668a96b7f0c9",
+    "fixtureSha256": "0fec6228e89cdb6841b971226c5fdedcc5e711dcb9b0e72bcaf95da4f6452f64",
     "fixtureMatches": true,
     "sampleIndex": 42,
     "sampleCount": 120,

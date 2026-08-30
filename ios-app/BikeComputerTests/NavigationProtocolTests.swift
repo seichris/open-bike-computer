@@ -14150,12 +14150,12 @@ struct NavigationProtocolTests {
                     "renderer benchmark loop stays south of Jing'an Temple")
         assertEqual(fixture.points.map(\.latitude).max(), 31.2258900,
                     "renderer benchmark loop stays north of Jing'an Temple")
-        assertEqual(fixture.points.map(\.longitude).min(), 121.4394173,
-                    "renderer benchmark loop stays west of Jing'an Temple")
-        assertEqual(fixture.points.map(\.longitude).max(), 121.4421673,
-                    "renderer benchmark loop stays east of Jing'an Temple")
+        assertEqual(fixture.points.map(\.longitude).min(), 121.4409173,
+                    "renderer benchmark loop starts just east of Jing'an Temple")
+        assertEqual(fixture.points.map(\.longitude).max(), 121.4436673,
+                    "renderer benchmark loop stays in the Jing'an neighborhood")
         guard let broadMapBounds = OfflineMapPreviewBounds(coordinates: [
-            120.90, 30.70, 121.95, 31.55,
+            121.4403621, 31.2158861, 121.4743744, 31.2449696,
         ]),
         let broadCoverage = RendererBenchmarkRouteCoverage(
             fixture: fixture,
@@ -14165,12 +14165,12 @@ struct NavigationProtocolTests {
             return
         }
         assert(broadCoverage.coversEntireRoute,
-               "Shanghai map bounds cover the Jing'an Temple fixture")
+               "signed benchmark map bounds cover the Jing'an Temple fixture")
         assertEqual(broadCoverage.firstOutsidePointIndex, nil,
                     "covered fixture has no rejected sample")
 
         guard let narrowMapBounds = OfflineMapPreviewBounds(coordinates: [
-            121.4400, 31.2248, 121.4410, 31.2254,
+            121.4410, 31.2248, 121.4420, 31.2254,
         ]),
         let narrowCoverage = RendererBenchmarkRouteCoverage(
             fixture: fixture,
@@ -14186,9 +14186,9 @@ struct NavigationProtocolTests {
         assertEqual(
             narrowCoverage.failureDescription(mapBounds: narrowMapBounds),
             "The active signed map does not cover the pinned Shanghai route. " +
-                "map=[121.4400000,31.2248000,121.4410000,31.2254000] " +
-                "route=[121.4394173,31.2245400,121.4421673,31.2258900] " +
-                "firstOutside=0:(121.4394173,31.2250400)",
+                "map=[121.4410000,31.2248000,121.4420000,31.2254000] " +
+                "route=[121.4409173,31.2245400,121.4436673,31.2258900] " +
+                "firstOutside=0:(121.4409173,31.2250400)",
             "coverage failure exposes only bounded map and route coordinates"
         )
         let shortFixture = Data(
@@ -14202,7 +14202,7 @@ struct NavigationProtocolTests {
         let fixtureHash = Data(SHA256.hash(data: fixtureData))
         assertEqual(
             fixtureHash.map { String(format: "%02x", $0) }.joined(),
-            "bf3ad5176e188cb56ecdcedd9dea740dfa57487ea36eb50d2280668a96b7f0c9",
+            "0fec6228e89cdb6841b971226c5fdedcc5e711dcb9b0e72bcaf95da4f6452f64",
             "fixture edits require an explicit pinned-hash update"
         )
         guard let geometry = RendererBenchmarkRouteGeometry.data(

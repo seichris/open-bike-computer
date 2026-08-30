@@ -378,7 +378,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
                   routeLoaded.fixture.cadenceHz == 1,
                   routeLoaded.fixture.points.count == 120,
                   routeHash ==
-                    "bf3ad5176e188cb56ecdcedd9dea740dfa57487ea36eb50d2280668a96b7f0c9"
+                    "0fec6228e89cdb6841b971226c5fdedcc5e711dcb9b0e72bcaf95da4f6452f64"
             else {
                 throw SecureRendererBenchmarkControllerError.unavailable(
                     "The checked-in Shanghai renderer fixture identity changed."

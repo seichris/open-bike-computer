@@ -85,10 +85,12 @@ values. Ending BLE or remote debug revokes the run.
 The built-in route fixture is
 `ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-shanghai-v1.json`.
 Its ID is `shanghai-jingan-renderer-v1`; its SHA-256 is
-`bf3ad5176e188cb56ecdcedd9dea740dfa57487ea36eb50d2280668a96b7f0c9`.
-The deterministic loop is centered on Jing'an Temple and spans
+`0fec6228e89cdb6841b971226c5fdedcc5e711dcb9b0e72bcaf95da4f6452f64`.
+The deterministic loop passes just east of Jing'an Temple and spans
 `31.2245400...31.2258900` latitude and
-`121.4394173...121.4421673` longitude.
+`121.4409173...121.4436673` longitude. It preserves the original shape and
+cadence while keeping more than 50 metres inside the signed benchmark map's
+western boundary.
 
 ## Run the automated sweep
 
