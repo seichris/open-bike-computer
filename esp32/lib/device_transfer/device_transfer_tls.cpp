@@ -192,6 +192,8 @@ const char *transferTlsFailureStageName(TransferTlsFailureStage stage) {
     return "socket";
   case TransferTlsFailureStage::ContextAllocation:
     return "context_allocation";
+  case TransferTlsFailureStage::Setup:
+    return "setup";
   case TransferTlsFailureStage::Handshake:
     return "handshake";
   }
@@ -202,6 +204,13 @@ const char *transferTlsFailureCode(
     const TransferTlsHandshakeDiagnostics &diagnostics) {
   if (diagnostics.stage == TransferTlsFailureStage::ContextAllocation)
     return "tls_context_allocation_failed";
+  if (diagnostics.stage == TransferTlsFailureStage::Setup) {
+    if (diagnostics.sessionResult == MBEDTLS_ERR_SSL_ALLOC_FAILED ||
+        diagnostics.tlsErrorCode == -MBEDTLS_ERR_SSL_ALLOC_FAILED) {
+      return "tls_setup_allocation_failed";
+    }
+    return "tls_setup_failed";
+  }
   if (diagnostics.stage == TransferTlsFailureStage::Handshake) {
     if (diagnostics.sessionResult ==
         ESP_ERR_ESP_TLS_SERVER_HANDSHAKE_TIMEOUT) {
@@ -573,6 +582,10 @@ bool TransferClient::begin(WiFiClient &accepted,
                                            &tlsFlags);
       handshakeDiagnostics_.tlsErrorCode = tlsErrorCode;
       handshakeDiagnostics_.tlsFlags = tlsFlags;
+    }
+    if (handshakeDiagnostics_.lastEspError ==
+        ESP_ERR_MBEDTLS_SSL_SETUP_FAILED) {
+      handshakeDiagnostics_.stage = TransferTlsFailureStage::Setup;
     }
     handshakeDiagnostics_.after = captureTlsMemory();
     esp_tls_server_session_delete(tls_);

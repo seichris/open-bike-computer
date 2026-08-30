@@ -30,6 +30,7 @@ enum class TransferTlsFailureStage : uint8_t {
   Input,
   SocketOwnership,
   ContextAllocation,
+  Setup,
   Handshake,
 };
 

@@ -62,11 +62,18 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
         )
         for code in (
             "tls_context_allocation_failed",
+            "tls_setup_allocation_failed",
+            "tls_setup_failed",
             "tls_handshake_timeout",
             "tls_handshake_allocation_failed",
             "tls_handshake_failed",
         ):
             self.assertIn(code, TLS_SOURCE)
+        self.assertIn("ESP_ERR_MBEDTLS_SSL_SETUP_FAILED", begin)
+        self.assertLess(
+            begin.index("esp_tls_get_and_clear_last_error"),
+            begin.index("ESP_ERR_MBEDTLS_SSL_SETUP_FAILED"),
+        )
         worker = HTTP_SOURCE[
             HTTP_SOURCE.index("void HttpTransferServer::runWorker()") :
             HTTP_SOURCE.index("void HttpTransferServer::workerTaskThunk")
