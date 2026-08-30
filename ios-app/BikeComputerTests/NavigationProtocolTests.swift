@@ -14154,6 +14154,43 @@ struct NavigationProtocolTests {
                     "renderer benchmark loop stays west of Jing'an Temple")
         assertEqual(fixture.points.map(\.longitude).max(), 121.4421673,
                     "renderer benchmark loop stays east of Jing'an Temple")
+        guard let broadMapBounds = OfflineMapPreviewBounds(coordinates: [
+            120.90, 30.70, 121.95, 31.55,
+        ]),
+        let broadCoverage = RendererBenchmarkRouteCoverage(
+            fixture: fixture,
+            mapBounds: broadMapBounds
+        ) else {
+            assert(false, "renderer benchmark evaluates valid map coverage")
+            return
+        }
+        assert(broadCoverage.coversEntireRoute,
+               "Shanghai map bounds cover the Jing'an Temple fixture")
+        assertEqual(broadCoverage.firstOutsidePointIndex, nil,
+                    "covered fixture has no rejected sample")
+
+        guard let narrowMapBounds = OfflineMapPreviewBounds(coordinates: [
+            121.4400, 31.2248, 121.4410, 31.2254,
+        ]),
+        let narrowCoverage = RendererBenchmarkRouteCoverage(
+            fixture: fixture,
+            mapBounds: narrowMapBounds
+        ) else {
+            assert(false, "renderer benchmark evaluates narrow map coverage")
+            return
+        }
+        assert(!narrowCoverage.coversEntireRoute,
+               "narrow map bounds reject the full Jing'an Temple fixture")
+        assertEqual(narrowCoverage.firstOutsidePointIndex, 0,
+                    "coverage reports the first rejected fixture sample")
+        assertEqual(
+            narrowCoverage.failureDescription(mapBounds: narrowMapBounds),
+            "The active signed map does not cover the pinned Shanghai route. " +
+                "map=[121.4400000,31.2248000,121.4410000,31.2254000] " +
+                "route=[121.4394173,31.2245400,121.4421673,31.2258900] " +
+                "firstOutside=0:(121.4394173,31.2250400)",
+            "coverage failure exposes only bounded map and route coordinates"
+        )
         let shortFixture = Data(
             #"{"schema":1,"id":"short","cadenceHz":1,"nominalSpeedMetersPerSecond":4,"points":[{"latitude":31.2,"longitude":121.4},{"latitude":31.2001,"longitude":121.4001}]}"#.utf8
         )

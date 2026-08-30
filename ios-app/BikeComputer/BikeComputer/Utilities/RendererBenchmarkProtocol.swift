@@ -72,6 +72,75 @@ struct RendererBenchmarkFixture: Codable, Equatable {
     }
 }
 
+struct RendererBenchmarkRouteCoverage: Equatable {
+    let routeBounds: OfflineMapPreviewBounds
+    let firstOutsidePointIndex: Int?
+    let firstOutsidePoint: RendererBenchmarkPoint?
+
+    var coversEntireRoute: Bool {
+        firstOutsidePointIndex == nil
+    }
+
+    init?(
+        fixture: RendererBenchmarkFixture,
+        mapBounds: OfflineMapPreviewBounds
+    ) {
+        guard let minimumLongitude = fixture.points.map(\.longitude).min(),
+              let minimumLatitude = fixture.points.map(\.latitude).min(),
+              let maximumLongitude = fixture.points.map(\.longitude).max(),
+              let maximumLatitude = fixture.points.map(\.latitude).max(),
+              let routeBounds = OfflineMapPreviewBounds(coordinates: [
+                minimumLongitude,
+                minimumLatitude,
+                maximumLongitude,
+                maximumLatitude,
+              ]) else {
+            return nil
+        }
+        self.routeBounds = routeBounds
+        firstOutsidePointIndex = fixture.points.firstIndex { point in
+            point.longitude < mapBounds.minLongitude ||
+                point.longitude > mapBounds.maxLongitude ||
+                point.latitude < mapBounds.minLatitude ||
+                point.latitude > mapBounds.maxLatitude
+        }
+        firstOutsidePoint = firstOutsidePointIndex.map { fixture.points[$0] }
+    }
+
+    func failureDescription(mapBounds: OfflineMapPreviewBounds) -> String {
+        let mapDescription = Self.boundsDescription(mapBounds)
+        let routeDescription = Self.boundsDescription(routeBounds)
+        let sampleDescription: String
+        if let firstOutsidePointIndex, let firstOutsidePoint {
+            sampleDescription = String(
+                format: " firstOutside=%d:(%.7f,%.7f)",
+                locale: Locale(identifier: "en_US_POSIX"),
+                firstOutsidePointIndex,
+                firstOutsidePoint.longitude,
+                firstOutsidePoint.latitude
+            )
+        } else {
+            sampleDescription = ""
+        }
+        return "The active signed map does not cover the pinned Shanghai route. " +
+            "map=[\(mapDescription)] route=[\(routeDescription)]" +
+            sampleDescription
+    }
+
+    private static func boundsDescription(
+        _ bounds: OfflineMapPreviewBounds
+    ) -> String {
+        String(
+            format: "%.7f,%.7f,%.7f,%.7f",
+            locale: Locale(identifier: "en_US_POSIX"),
+            bounds.minLongitude,
+            bounds.minLatitude,
+            bounds.maxLongitude,
+            bounds.maxLatitude
+        )
+    }
+}
+
 enum RendererBenchmarkProfile: UInt8, CaseIterable, Identifiable {
     case flat = 0
     case current = 1

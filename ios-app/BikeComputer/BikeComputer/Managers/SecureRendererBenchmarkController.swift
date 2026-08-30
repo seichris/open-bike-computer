@@ -384,14 +384,17 @@ final class SecureRendererBenchmarkController: ObservableObject {
                     "The checked-in Shanghai renderer fixture identity changed."
                 )
             }
-            guard routeLoaded.fixture.points.allSatisfy({ point in
-                point.longitude >= mapBounds.minLongitude &&
-                    point.longitude <= mapBounds.maxLongitude &&
-                    point.latitude >= mapBounds.minLatitude &&
-                    point.latitude <= mapBounds.maxLatitude
-            }) else {
+            guard let routeCoverage = RendererBenchmarkRouteCoverage(
+                fixture: routeLoaded.fixture,
+                mapBounds: mapBounds
+            ) else {
                 throw SecureRendererBenchmarkControllerError.unavailable(
-                    "The active signed map does not cover the pinned Shanghai route."
+                    "The checked-in Shanghai renderer fixture has invalid bounds."
+                )
+            }
+            guard routeCoverage.coversEntireRoute else {
+                throw SecureRendererBenchmarkControllerError.unavailable(
+                    routeCoverage.failureDescription(mapBounds: mapBounds)
                 )
             }
             let routeFixture = RendererBenchmarkRouteFixtureIdentity(
