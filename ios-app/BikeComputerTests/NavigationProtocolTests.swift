@@ -1803,6 +1803,24 @@ struct NavigationProtocolTests {
             .legacyArtifactRequired,
             "unknown catalog reader contracts fail closed during install selection"
         )
+        assertEqual(
+            MapInstallProtocolSelector.evaluate(
+                isBikeMapStream: true,
+                signatureTrustCapability:
+                    "map-prod-1=" + String(repeating: "5", count: 64),
+                readerRequirements: OfflineMapReaderRequirements(
+                    schemaVersion: 2,
+                    streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+                    manifestSchemaVersion: 1,
+                    renderer: "esp32-fmb",
+                    rendererFormatVersion: 1,
+                    requiredFeatures: []
+                ),
+                deviceStatus: v2Status
+            ).rejection,
+            .readerRequirementsUnsupported,
+            "selector diagnostics classify unsupported reader requirements"
+        )
         let wrongFirmwareStatus = MapTransferDeviceStatus(
             enabled: true,
             activeMapId: nil,
@@ -1834,6 +1852,20 @@ struct NavigationProtocolTests {
             "a later firmware build cannot reuse a hardware approval for another binary"
         )
         assertEqual(
+            MapInstallProtocolSelector.evaluate(
+                isBikeMapStream: true,
+                signatureTrustCapability:
+                    "map-prod-1=" + String(repeating: "5", count: 64),
+                readerRequirements: catalogReaderRequirements,
+                requiredFirmwareVersion: stream.requiredFirmwareVersion,
+                requiredFirmwareBuild: stream.requiredFirmwareBuild,
+                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
+                deviceStatus: wrongFirmwareStatus
+            ).rejection,
+            .firmwareIdentityMismatch,
+            "selector diagnostics classify an exact firmware mismatch"
+        )
+        assertEqual(
             MapInstallProtocolSelector.select(
                 isBikeMapStream: true,
                 signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
@@ -1850,6 +1882,25 @@ struct NavigationProtocolTests {
             ),
             .legacyArtifactRequired,
             "a later same-key app build cannot reuse an older hardware approval"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.evaluate(
+                isBikeMapStream: true,
+                signatureTrustCapability:
+                    "map-prod-1=" + String(repeating: "5", count: 64),
+                requiredIosBuild: stream.requiredIosBuild,
+                requiredIosGitSha: stream.requiredIosGitSha,
+                requiredIosBuildSha256: stream.requiredIosBuildSha256,
+                currentIosBuild: "101",
+                currentIosGitSha: String(repeating: "8", count: 40),
+                currentIosBuildSha256: String(repeating: "9", count: 64),
+                requiredFirmwareVersion: stream.requiredFirmwareVersion,
+                requiredFirmwareBuild: stream.requiredFirmwareBuild,
+                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
+                deviceStatus: v2Status
+            ).rejection,
+            .appIdentityMismatch,
+            "selector diagnostics classify an exact app mismatch"
         )
         assertEqual(
             MapInstallProtocolSelector.select(
@@ -1951,6 +2002,16 @@ struct NavigationProtocolTests {
             .legacyArtifactRequired,
             "stream artifact requires a durable legacy artifact on v1 firmware"
         )
+        assertEqual(
+            MapInstallProtocolSelector.evaluate(
+                isBikeMapStream: true,
+                signatureTrustCapability:
+                    "map-prod-1=" + String(repeating: "5", count: 64),
+                deviceStatus: v1Status
+            ).rejection,
+            .deviceProtocolUnsupported,
+            "selector diagnostics classify a device protocol mismatch"
+        )
         let wrongKeyStatus = MapTransferDeviceStatus(
             enabled: true,
             activeMapId: nil,
@@ -1971,6 +2032,16 @@ struct NavigationProtocolTests {
             ),
             .legacyArtifactRequired,
             "v2 requires the device to trust the artifact's exact public key material"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.evaluate(
+                isBikeMapStream: true,
+                signatureTrustCapability:
+                    "map-prod-1=" + String(repeating: "5", count: 64),
+                deviceStatus: wrongKeyStatus
+            ).rejection,
+            .signingKeyNotTrusted,
+            "selector diagnostics classify an exact signing-key mismatch"
         )
         assertEqual(
             MapInstallProtocolSelector.select(isBikeMapStream: false, deviceStatus: v2Status),

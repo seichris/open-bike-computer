@@ -5017,7 +5017,7 @@ final class OfflineMapManager: ObservableObject {
                     )
                 }
                 let artifact = prepared.artifact
-                if MapInstallProtocolSelector.select(
+                let protocolEvaluation = MapInstallProtocolSelector.evaluate(
                        isBikeMapStream: true,
                        signatureTrustCapability:
                            "\(artifact.signatureKeyID)=\(artifact.signatureKeySHA256)",
@@ -5036,8 +5036,11 @@ final class OfflineMapManager: ObservableObject {
                        requiredFirmwareBuild: artifact.requiredFirmwareBuild,
                        requiredFirmwareGitSha: artifact.requiredFirmwareGitSHA,
                        deviceStatus: initialDeviceStatus
-                   ) == .legacyArtifactRequired {
-                    throw OfflineMapPlatformError.firmwareMapStreamUnsupported
+                   )
+                if let rejection = protocolEvaluation.rejection {
+                    throw OfflineMapPlatformError.mapStreamCompatibilityRejected(
+                        rejection
+                    )
                 }
                 let disposition = ExistingMapStreamAttemptDisposition.evaluate(
                     expectedSessionID: sessionId,
