@@ -57,6 +57,10 @@ assert "CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=n" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=n" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_CUSTOM_MEM_ALLOC=n" in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y" in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384" in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096" in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" not in waveshare_sdkconfig
 waveshare_unflags = config.get("waveshare_amoled_common", "build_unflags")
 assert "-Wl,--wrap=log_printf" in waveshare_unflags
 waveshare_flags = config.get("waveshare_amoled_common", "build_flags")
@@ -216,6 +220,10 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=n" in sdkconfig
     assert "CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y" in sdkconfig
     assert "CONFIG_MBEDTLS_CUSTOM_MEM_ALLOC=n" in sdkconfig
+    assert "CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y" in sdkconfig
+    assert "CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384" in sdkconfig
+    assert "CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096" in sdkconfig
+    assert "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" not in sdkconfig
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
     assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" in flags
