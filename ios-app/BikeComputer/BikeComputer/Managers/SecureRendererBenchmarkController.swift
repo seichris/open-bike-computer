@@ -648,7 +648,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
             mapFixture: mapFixture,
             routeFixture: routeFixture
         )
-        _ = try await waitForWindow(
+        let initialSnapshot = try await waitForWindow(
             client: client,
             windowID: windowID,
             runID: runID,
@@ -665,12 +665,13 @@ final class SecureRendererBenchmarkController: ObservableObject {
         var snapshots: [RendererBenchmarkMetricsSnapshot] = []
         var samples: [RendererBenchmarkEvidenceSample] = []
         var failures: [String] = []
-        var previousSequence: UInt32?
-        var previousTimestamp: UInt32?
+        var previousSequence: UInt32? = initialSnapshot.sequence
+        var previousTimestamp: UInt32? = initialSnapshot.timestampMs
         let started = Date()
-        while Date().timeIntervalSince(started) < Double(durationSeconds) {
-            try checkContinuity()
-            let snapshot = try await metricsWithRetry(client: client)
+        func record(
+            _ snapshot: RendererBenchmarkMetricsSnapshot,
+            captureCheckpoints: Bool = true
+        ) async throws {
             let identityFailures = RendererBenchmarkEvaluator.identityFailures(
                 snapshot: snapshot,
                 baseline: baseline,
@@ -710,7 +711,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
                 snapshot: snapshot,
                 elapsedSeconds: elapsed
             ))
-            if snapshot.routeReplay.valid,
+            if captureCheckpoints,
+               snapshot.routeReplay.valid,
                snapshot.routeReplay.fixtureMatches,
                snapshot.routeReplay.sampleCount == expectedRouteSampleCount {
                 for checkpoint in pending.sorted() where
@@ -738,6 +740,10 @@ final class SecureRendererBenchmarkController: ObservableObject {
                     pending.remove(checkpoint)
                 }
             }
+        }
+        while Date().timeIntervalSince(started) < Double(durationSeconds) {
+            try checkContinuity()
+            try await record(try await metricsWithRetry(client: client))
             let remaining = Double(durationSeconds) -
                 Date().timeIntervalSince(started)
             if remaining > 0 {
@@ -746,6 +752,14 @@ final class SecureRendererBenchmarkController: ObservableObject {
                 )
             }
         }
+        // A blocking checkpoint-frame response can cross the window deadline.
+        // Always collect one terminal snapshot so cadence, job, memory, and
+        // crypto counters include the complete measurement interval.
+        try checkContinuity()
+        try await record(
+            try await metricsWithRetry(client: client),
+            captureCheckpoints: false
+        )
         guard let summary = RendererBenchmarkEvaluator.summary(
             snapshots: snapshots,
             samples: samples
@@ -906,7 +920,6 @@ final class SecureRendererBenchmarkController: ObservableObject {
             ? (width: 466, height: 466, rotation: 1)
             : (width: 410, height: 502, rotation: 0)
         let deadline = Date().addingTimeInterval(4)
-        var consumedCachedFrame = false
         var lastError: Error?
         while Date() < deadline {
             try checkContinuity()
@@ -922,41 +935,43 @@ final class SecureRendererBenchmarkController: ObservableObject {
                     rotationQuarters: geometry.rotation
                 )
                 lastFrameSequence = decoded.sequence
-                if !consumedCachedFrame {
-                    consumedCachedFrame = true
+                switch RendererBenchmarkCheckpointFramePolicy.decision(
+                    capturedAtMs: decoded.capturedAtMs,
+                    markerReceivedAtMs: routeReplay.receivedAtMs,
+                    maximumAgeMs: gates.absolute.maximumRouteMarkerAgeMs
+                ) {
+                case .beforeMarker:
                     continue
-                }
-                let lag = decoded.capturedAtMs &- routeReplay.receivedAtMs
-                guard lag < 0x8000_0000,
-                      lag <= gates.absolute.maximumRouteMarkerAgeMs else {
+                case .tooLate:
                     throw SecureRendererBenchmarkControllerError.invalidResponse(
                         "A checkpoint frame missed its route-marker window."
                     )
-                }
-                guard let png = Self.pngData(decoded) else {
-                    throw SecureRendererBenchmarkControllerError.invalidResponse(
-                        "A checkpoint frame could not be encoded as PNG."
+                case .accept(let lag):
+                    guard let png = Self.pngData(decoded) else {
+                        throw SecureRendererBenchmarkControllerError.invalidResponse(
+                            "A checkpoint frame could not be encoded as PNG."
+                        )
+                    }
+                    let path = String(format:
+                        "screenshots/%@-repeat-%02d-checkpoint-%03d-sample-%03d.png",
+                        profile.wireName,
+                        repeatNumber,
+                        checkpoint,
+                        routeReplay.sampleIndex
+                    )
+                    screenshotEntries.append((path, png))
+                    return RendererBenchmarkScreenshotEvidence(
+                        checkpointSampleIndex: checkpoint,
+                        observedSampleIndex: routeReplay.sampleIndex,
+                        frameSequence: decoded.sequence,
+                        capturedAtMs: decoded.capturedAtMs,
+                        markerReceivedAtMs: routeReplay.receivedAtMs,
+                        captureLagMs: lag,
+                        path: path,
+                        bytes: png.count,
+                        sha256: Self.sha256Hex(Data(SHA256.hash(data: png)))
                     )
                 }
-                let path = String(format:
-                    "screenshots/%@-repeat-%02d-checkpoint-%03d-sample-%03d.png",
-                    profile.wireName,
-                    repeatNumber,
-                    checkpoint,
-                    routeReplay.sampleIndex
-                )
-                screenshotEntries.append((path, png))
-                return RendererBenchmarkScreenshotEvidence(
-                    checkpointSampleIndex: checkpoint,
-                    observedSampleIndex: routeReplay.sampleIndex,
-                    frameSequence: decoded.sequence,
-                    capturedAtMs: decoded.capturedAtMs,
-                    markerReceivedAtMs: routeReplay.receivedAtMs,
-                    captureLagMs: lag,
-                    path: path,
-                    bytes: png.count,
-                    sha256: Self.sha256Hex(Data(SHA256.hash(data: png)))
-                )
             } catch {
                 lastError = error
                 try await pause(seconds: 0.25)

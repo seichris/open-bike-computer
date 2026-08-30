@@ -14414,6 +14414,11 @@ struct NavigationProtocolTests {
             "the in-app sweep uses the exact firmware benchmark gate contract"
         )
         assertEqual(gates.schema, 1, "secure benchmark gates retain schema 1")
+        assertEqual(
+            gates.absolute.minimumMetricsSampleFraction,
+            0.3,
+            "secure benchmark sampling reflects serialized pinned HTTPS frames"
+        )
 
         let mapFixture = RendererBenchmarkMapFixtureIdentity(
             id: "shanghai-map",
@@ -14595,6 +14600,41 @@ struct NavigationProtocolTests {
             [],
             "secure benchmark accepts an exact window/build/fixture identity"
         )
+        if var legacyMetricsObject = try? JSONSerialization.jsonObject(
+            with: metricsData
+        ) as? [String: Any],
+           var memory = legacyMetricsObject["memory"] as? [String: Any],
+           var dmaHeap = memory["dmaHeap"] as? [String: Any] {
+            dmaHeap.removeValue(forKey: "cryptoCountersScope")
+            memory["dmaHeap"] = dmaHeap
+            legacyMetricsObject["memory"] = memory
+            if let legacyMetricsData = try? JSONSerialization.data(
+                withJSONObject: legacyMetricsObject
+            ),
+               let legacyMetrics = try? JSONDecoder().decode(
+                RendererBenchmarkMetricsSnapshot.self,
+                from: legacyMetricsData
+               ) {
+                assertEqual(
+                    RendererBenchmarkEvaluator.identityFailures(
+                        snapshot: legacyMetrics,
+                        baseline: baseline,
+                        profile: .medium,
+                        runId: legacyMetrics.window.runId,
+                        repeatNumber: legacyMetrics.window.repeatNumber,
+                        mapFixture: legacyMetrics.identity.mapFixture,
+                        routeFixture: legacyMetrics.identity.routeFixture,
+                        windowId: legacyMetrics.window.id
+                    ),
+                    ["stale_identity:crypto_counter_scope"],
+                    "secure benchmark reports old cumulative crypto counters"
+                )
+            } else {
+                assert(false, "secure benchmark decodes the legacy crypto-counter shape")
+            }
+        } else {
+            assert(false, "secure benchmark constructs a legacy crypto-counter fixture")
+        }
 
         let pixels = Data([0x00, 0xf8, 0xe0, 0x07])
         var frame = Data("BCF1".utf8)
@@ -14625,6 +14665,33 @@ struct NavigationProtocolTests {
             Array(decoded.rgba),
             [0, 255, 0, 255, 255, 0, 0, 255],
             "RGB565 frames are rotated and converted to RGBA deterministically"
+        )
+        assertEqual(
+            RendererBenchmarkCheckpointFramePolicy.decision(
+                capturedAtMs: 1_005,
+                markerReceivedAtMs: 1_000,
+                maximumAgeMs: 2_500
+            ),
+            .accept(lagMs: 5),
+            "the first timestamp-bound checkpoint frame is accepted"
+        )
+        assertEqual(
+            RendererBenchmarkCheckpointFramePolicy.decision(
+                capturedAtMs: 999,
+                markerReceivedAtMs: 1_000,
+                maximumAgeMs: 2_500
+            ),
+            .beforeMarker,
+            "a cached frame from before the marker is consumed but rejected"
+        )
+        assertEqual(
+            RendererBenchmarkCheckpointFramePolicy.decision(
+                capturedAtMs: 3_501,
+                markerReceivedAtMs: 1_000,
+                maximumAgeMs: 2_500
+            ),
+            .tooLate(lagMs: 2_501),
+            "a checkpoint frame outside the marker-age gate is rejected"
         )
         var corruptFrame = frame
         corruptFrame[corruptFrame.count - 1] ^= 0xff

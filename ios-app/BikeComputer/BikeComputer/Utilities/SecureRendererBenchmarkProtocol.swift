@@ -509,6 +509,7 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
         let largestBlock: UInt32
         let windowMinimumFree: UInt32
         let windowMinimumLargestBlock: UInt32
+        let cryptoCountersScope: String?
         let cryptoHeadroomRejections: UInt32
         let cryptoOperationFailures: UInt32
     }
@@ -761,6 +762,25 @@ nonisolated struct RendererBenchmarkScreenshotEvidence: Codable,
     let path: String
     let bytes: Int
     let sha256: String
+}
+
+nonisolated enum RendererBenchmarkCheckpointFramePolicy {
+    enum Decision: Equatable, Sendable {
+        case beforeMarker
+        case accept(lagMs: UInt32)
+        case tooLate(lagMs: UInt32)
+    }
+
+    static func decision(
+        capturedAtMs: UInt32,
+        markerReceivedAtMs: UInt32,
+        maximumAgeMs: UInt32
+    ) -> Decision {
+        let lag = capturedAtMs &- markerReceivedAtMs
+        guard lag < 0x8000_0000 else { return .beforeMarker }
+        guard lag <= maximumAgeMs else { return .tooLate(lagMs: lag) }
+        return .accept(lagMs: lag)
+    }
 }
 
 nonisolated struct RendererBenchmarkRunEvidence: Codable, Equatable, Sendable {
@@ -1038,6 +1058,9 @@ nonisolated enum RendererBenchmarkEvaluator {
         }
         if snapshot.tuning.fingerprint != profile.expectedTuningFingerprint {
             failures.append("stale_tuning:fingerprint")
+        }
+        if snapshot.memory.dmaHeap.cryptoCountersScope != "window" {
+            failures.append("stale_identity:crypto_counter_scope")
         }
         if identity.mapFixture != mapFixture {
             failures.append("stale_identity:map_fixture")

@@ -704,6 +704,8 @@ def validate_snapshot_identity(
         failures.append("stale_tuning:minimum_area")
     if tuning.get("fingerprint") != expected_tuning_fingerprint(profile):
         failures.append("stale_tuning:fingerprint")
+    if nested(snapshot, "memory", "dmaHeap").get("cryptoCountersScope") != "window":
+        failures.append("stale_identity:crypto_counter_scope")
     map_fixture = identity.get("mapFixture")
     route_fixture = identity.get("routeFixture")
     if map_fixture != {"id": map_fixture_id, "sha256": map_fixture_sha256}:
@@ -1555,27 +1557,19 @@ class BenchmarkRunner:
         path = self.output / "screenshots" / filename
         deadline = time.monotonic() + 4
         last_error: Exception | None = None
-        checkpoint_frame_consumed = False
         while time.monotonic() < deadline:
             try:
                 metadata, pixels = self.client.frame(
                     after=self.last_frame_sequence
                 )
                 self.last_frame_sequence = metadata["sequence"]
-                if not checkpoint_frame_consumed:
-                    # Even a timestamp-newer cached frame may have been
-                    # captured by another browser request before this metrics
-                    # sample was observed. Consume one frame, then force the
-                    # endpoint to capture a checkpoint-specific successor.
-                    checkpoint_frame_consumed = True
-                    continue
                 capture_lag_ms = _uint32_forward_delta(
                     metadata["capturedAtMs"], marker_received_at_ms
                 )
                 if capture_lag_ms >= 0x80000000:
-                    # The frame store can still contain a valid image captured
-                    # before this checkpoint. Consume it, then request a newer
-                    # panel frame on the next attempt.
+                    # The frame predates the observed route marker. Consuming
+                    # it advances the `after` sequence and asks the endpoint
+                    # for a checkpoint-specific successor.
                     continue
                 if (
                     capture_lag_ms
@@ -1646,10 +1640,11 @@ class BenchmarkRunner:
         samples: list[dict[str, Any]] = []
         started = time.monotonic()
         deadline = started + duration_seconds
-        previous_sequence: int | None = None
-        previous_timestamp: int | None = None
-        while time.monotonic() < deadline:
-            snapshot = self._metrics()
+        previous_sequence: int | None = first["sequence"]
+        previous_timestamp: int | None = first["timestampMs"]
+
+        def record_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+            nonlocal previous_sequence, previous_timestamp
             identity_failures = validate_snapshot_identity(
                 snapshot,
                 baseline=self.baseline_identity,
@@ -1688,8 +1683,10 @@ class BenchmarkRunner:
             elapsed = time.monotonic() - started
             snapshots.append(snapshot)
             samples.append(compact_sample(snapshot, elapsed))
+            return nested(snapshot, "routeReplay")
 
-            replay = nested(snapshot, "routeReplay")
+        while time.monotonic() < deadline:
+            replay = record_snapshot(self._metrics())
             sample_index = replay.get("sampleIndex")
             sample_count = replay.get("sampleCount")
             marker_received_at_ms = replay.get("receivedAtMs")
@@ -1737,6 +1734,9 @@ class BenchmarkRunner:
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)
 
+        # A blocking checkpoint frame can cross the deadline. Capture one
+        # terminal metrics response so final counters cover the whole window.
+        record_snapshot(self._metrics())
         if not snapshots:
             raise BenchmarkError("measurement window produced no metrics")
         summary = summarize_run(snapshots, samples)

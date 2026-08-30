@@ -61,6 +61,7 @@
       "largestBlock": 12000,
       "windowMinimumFree": 20000,
       "windowMinimumLargestBlock": 10000,
+      "cryptoCountersScope": "window",
       "cryptoHeadroomRejections": 0,
       "cryptoOperationFailures": 0
     }
