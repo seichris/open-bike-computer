@@ -1555,10 +1555,15 @@ Status responses should include:
   verification key is compiled into firmware. Version `1` is never advertised.
 - `streamFormatVersions`: accepted device-native stream versions when protocol
   v2 is available.
-- `streamTrust`: exact production verification capabilities, each encoded as
-  `keyId=SHA256(X9.63 public key)`. iOS selects v2 only when the artifact's key
-  identity matches one of these entries; a device with an older or rotated-out
-  trust set rejects installation until firmware or the artifact is updated.
+- `streamTrust`: exact verification capabilities compiled into the running
+  profile, each encoded as `keyId=SHA256(X9.63 public key)`. Ordinary and
+  production firmware advertise only the production registry. Opt-in
+  `*_REMOTE_DEBUG` profiles additionally advertise the Bicino Dev public signer
+  so development-signed streams can be tested on dedicated hardware; release
+  workflows never build those profiles. iOS selects v2 only when the artifact's
+  key identity matches one of these entries; a device with an older or
+  rotated-out trust set rejects installation until firmware or the artifact is
+  updated.
 - `baseUrl`: temporary HTTPS base URL when transfer mode is enabled.
 - `transferGeneration`: nonzero boot-local authorization generation. BLE
   disconnect, exit, or mode replacement increments it so in-flight requests
