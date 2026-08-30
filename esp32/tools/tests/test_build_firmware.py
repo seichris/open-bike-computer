@@ -23,6 +23,7 @@ from build_firmware import (
     _resolved_device_port,
     _custom_core_project_text,
     _consume_link_timing,
+    _require_dynamic_tls_link,
     _verified_platformio_project_config,
     _seed_pinned_scons_package,
     _print_provenance,
@@ -50,6 +51,7 @@ from record_flash_plan import record_flash_plan
 from pioarduino_custom_core import (
     IDF_EXACT_REQUIREMENTS,
     UPSTREAM_AMBIENT_UV_FALLBACK,
+    UPSTREAM_COMPONENT_ARCHIVE_COPY,
     UPSTREAM_EDITABLE_ESPTOOL,
     UPSTREAM_ESPTOOL_MATCH,
     UPSTREAM_EXTERNAL_UV_INSTALL,
@@ -121,6 +123,58 @@ RUNTIME_PROVENANCE = json.dumps(
 )
 
 
+class DynamicTlsLinkProofTests(unittest.TestCase):
+    environment = "WAVESHARE_AMOLED_175_REMOTE_DEBUG"
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.project_dir = Path(self.temp_dir.name)
+
+    def write_sdkconfig(self, dynamic: bool) -> None:
+        value = "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y\n" if dynamic else ""
+        (self.project_dir / f"sdkconfig.{self.environment}").write_text(
+            value, encoding="utf-8"
+        )
+
+    def write_map(self, contents: str) -> None:
+        path = (
+            self.project_dir
+            / ".pio"
+            / "build"
+            / self.environment
+            / "firmware.map"
+        )
+        path.parent.mkdir(parents=True)
+        path.write_text(contents, encoding="utf-8")
+
+    def test_accepts_complete_dynamic_link_evidence(self):
+        self.write_sdkconfig(dynamic=True)
+        self.write_map(
+            "\n".join(
+                (
+                    "esp_mbedtls_dynamic_impl.c.o",
+                    "esp_ssl_srv.c.o __wrap_mbedtls_ssl_handshake_server_step",
+                    "esp_ssl_tls.c.o __wrap_mbedtls_ssl_setup",
+                )
+            )
+        )
+
+        _require_dynamic_tls_link(self.project_dir, self.environment)
+
+    def test_rejects_header_binary_mismatch(self):
+        self.write_sdkconfig(dynamic=True)
+        self.write_map("mbedtls_ssl_setup\n")
+
+        with self.assertRaisesRegex(BuildError, "did not reach the linked firmware"):
+            _require_dynamic_tls_link(self.project_dir, self.environment)
+
+    def test_skips_link_proof_when_dynamic_buffers_are_disabled(self):
+        self.write_sdkconfig(dynamic=False)
+
+        _require_dynamic_tls_link(self.project_dir, self.environment)
+
+
 def platform_archive_bytes() -> bytes:
     output = io.BytesIO()
     penv_source = "\n".join(
@@ -146,6 +200,7 @@ def platform_archive_bytes() -> bytes:
                 (
                     "before",
                     UPSTREAM_NESTED_PIO_BLOCK,
+                    UPSTREAM_COMPONENT_ARCHIVE_COPY,
                     UPSTREAM_GENERATED_PROJECT_CLEANUP,
                     *(stale for stale, _ in IDF_EXACT_REQUIREMENTS),
                     UPSTREAM_IDF_INSTALL_COMMAND,
@@ -272,6 +327,9 @@ class FirmwareBuildTests(unittest.TestCase):
         firmware.write_bytes(b"real firmware")
         firmware.with_suffix(".bin").write_bytes(b"real flash image")
         (firmware.parent / "bootloader.bin").write_bytes(b"real bootloader")
+        (self.project_dir / f"sdkconfig.{environment}").write_text(
+            GENERATED_CONFIG, encoding="utf-8"
+        )
         self.write_partition_table(environment)
         self.write_flash_plan(environment)
         if os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD") == "1":
@@ -1530,6 +1588,7 @@ build_src_filter =
         current = self.project_dir / f"sdkconfig.{self.environment}"
         defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
         self.write_firmware()
+        current.unlink()
 
         with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
             record_generated_sdkconfig_defaults(

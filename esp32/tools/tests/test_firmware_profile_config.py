@@ -60,10 +60,33 @@ assert "CONFIG_MBEDTLS_CUSTOM_MEM_ALLOC=n" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096" in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_SSL_PROTO_DTLS=n" in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y" in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA" not in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT" not in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" not in waveshare_sdkconfig
 waveshare_unflags = config.get("waveshare_amoled_common", "build_unflags")
 assert "-Wl,--wrap=log_printf" in waveshare_unflags
 waveshare_flags = config.get("waveshare_amoled_common", "build_flags")
+expected_dynamic_tls_wrappers = {
+    "mbedtls_ssl_write_client_hello",
+    "mbedtls_ssl_handshake_client_step",
+    "mbedtls_ssl_tls13_handshake_client_step",
+    "mbedtls_ssl_handshake_server_step",
+    "mbedtls_ssl_read",
+    "mbedtls_ssl_write",
+    "mbedtls_ssl_session_reset",
+    "mbedtls_ssl_free",
+    "mbedtls_ssl_setup",
+    "mbedtls_ssl_send_alert_message",
+    "mbedtls_ssl_close_notify",
+}
+waveshare_flag_lines = {line.strip() for line in waveshare_flags.splitlines()}
+for wrapper in expected_dynamic_tls_wrappers:
+    assert f"-Wl,--wrap={wrapper}" in waveshare_flag_lines
+assert sum(
+    line.startswith("-Wl,--wrap=mbedtls_ssl_") for line in waveshare_flag_lines
+) == len(expected_dynamic_tls_wrappers)
 assert "-DDEBUG=1" not in waveshare_flags
 assert "-DCORE_DEBUG_LEVEL=" not in waveshare_flags
 assert "-DFIRMWARE_DIAGNOSTICS=" not in waveshare_flags
@@ -223,6 +246,10 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y" in sdkconfig
     assert "CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384" in sdkconfig
     assert "CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096" in sdkconfig
+    assert "CONFIG_MBEDTLS_SSL_PROTO_DTLS=n" in sdkconfig
+    assert "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y" in sdkconfig
+    assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA" not in sdkconfig
+    assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT" not in sdkconfig
     assert "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" not in sdkconfig
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
