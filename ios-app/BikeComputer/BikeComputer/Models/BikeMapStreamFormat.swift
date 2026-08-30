@@ -411,7 +411,8 @@ nonisolated enum BikeMapStreamArtifactValidator {
         artifact: OfflineMapArtifact,
         expectedMapID: String,
         trustStore: BikeMapStreamTrustStore,
-        readerRequirements: OfflineMapReaderRequirements? = nil
+        readerRequirements: OfflineMapReaderRequirements? = nil,
+        deriveReaderRequirementsFromSignedManifest: Bool = false
     ) throws -> VerifiedBikeMapArtifact {
         guard artifact.isBikeMapStream else {
             throw BikeMapStreamFormatError.invalidArtifactMetadata("unexpected artifact format")
@@ -611,7 +612,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
             rendererFormatVersion: manifest.target.formatVersion,
             requiredFeatures: manifestFeatures.sorted()
         )
-        let verifiedReaderRequirements: OfflineMapReaderRequirements
+        let verifiedReaderRequirements: OfflineMapReaderRequirements?
         if let readerRequirements {
             guard readerRequirements.manifestSchemaVersion == manifest.schemaVersion,
                   readerRequirements.renderer == manifest.target.renderer,
@@ -623,7 +624,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
                 )
             }
             verifiedReaderRequirements = readerRequirements
-        } else {
+        } else if deriveReaderRequirementsFromSignedManifest {
             guard OfflineMapReaderCompatibilityPolicy.supports(
                 derivedReaderRequirements
             ) else {
@@ -632,6 +633,8 @@ nonisolated enum BikeMapStreamArtifactValidator {
                 )
             }
             verifiedReaderRequirements = derivedReaderRequirements
+        } else {
+            verifiedReaderRequirements = nil
         }
         for file in manifest.files {
             var fileHasher = SHA256()
