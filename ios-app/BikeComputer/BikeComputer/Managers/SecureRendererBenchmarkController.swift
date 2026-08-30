@@ -26,27 +26,6 @@ private enum SecureRendererBenchmarkControllerError: LocalizedError {
     }
 }
 
-private struct RendererBenchmarkWindowRequest: Encodable {
-    let schema = 1
-    let profile: String
-    let runId: String
-    let repeatNumber: Int
-    let mapFixture: RendererBenchmarkMapFixtureIdentity
-    let routeFixture: RendererBenchmarkRouteFixtureIdentity
-    let routeMode: String
-
-    enum CodingKeys: String, CodingKey {
-        case schema, profile, runId, mapFixture, routeFixture, routeMode
-        case repeatNumber = "repeat"
-    }
-}
-
-private struct RendererBenchmarkWindowResponse: Decodable {
-    let ok: Bool
-    let schema: Int
-    let requestId: UInt32
-}
-
 private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
     private static let tokenHeader = "X-BikeComputer-Transfer-Token"
     private let baseURL: URL
@@ -115,30 +94,30 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
         mapFixture: RendererBenchmarkMapFixtureIdentity,
         routeFixture: RendererBenchmarkRouteFixtureIdentity
     ) async throws -> UInt32 {
-        let body = try JSONEncoder().encode(RendererBenchmarkWindowRequest(
+        let body = try RendererBenchmarkWindowWireContract.requestData(
             profile: profile.wireName,
             runId: runId,
             repeatNumber: repeatNumber,
             mapFixture: mapFixture,
-            routeFixture: routeFixture,
-            routeMode: SecureRendererBenchmarkPlan.routeMode
-        ))
-        let response = try await decodeJSON(
-            RendererBenchmarkWindowResponse.self,
-            data: request(
-                path: "device-debug/v1/metrics/window",
-                method: "POST",
-                body: body
-            ),
-            maximumBytes: 4_096,
-            invalidMessage: "The device returned an invalid benchmark-window response."
+            routeFixture: routeFixture
         )
-        guard response.ok, response.schema == 1, response.requestId != 0 else {
+        let response = try await request(
+            path: "device-debug/v1/metrics/window",
+            method: "POST",
+            body: body,
+            acceptedStatusCode:
+                RendererBenchmarkWindowWireContract.acceptedStatusCode,
+            maximumBytes: 4_096
+        )
+        guard let response,
+              let requestID = RendererBenchmarkWindowWireContract.requestID(
+                from: response
+              ) else {
             throw SecureRendererBenchmarkControllerError.invalidResponse(
-                "The device rejected the benchmark-window identity."
+                "The device returned an invalid benchmark-window response."
             )
         }
-        return response.requestId
+        return requestID
     }
 
     func frame(after sequence: UInt32) async throws -> Data? {
@@ -173,6 +152,7 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
         method: String = "GET",
         body: Data? = nil,
         allowNoContent: Bool = false,
+        acceptedStatusCode: Int = 200,
         maximumBytes: Int = 262_144
     ) async throws -> Data? {
         var components = URLComponents(
@@ -206,7 +186,7 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
                 )
             }
             if allowNoContent, response.statusCode == 204 { return nil }
-            guard response.statusCode == 200 else {
+            guard response.statusCode == acceptedStatusCode else {
                 throw SecureRendererBenchmarkControllerError.httpStatus(
                     response.statusCode,
                     Self.safeErrorCode(data)
@@ -264,6 +244,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
     private var lastFrameSequence: UInt32 = 0
     private var screenshotEntries: [(String, Data)] = []
     private var previousIdleTimerDisabled: Bool?
+    private var profileMayNeedRestoration = false
 
     var progressDescription: String {
         guard isRunning else { return status }
@@ -332,6 +313,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
         errorMessage = nil
         exportURL = nil
         automatedPassed = nil
+        profileMayNeedRestoration = false
         previousIdleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
         UIApplication.shared.isIdleTimerDisabled = true
         isRunning = true
@@ -554,7 +536,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
             errorMessage = passed ? nil :
                 "One or more automated gates failed; review the exported report."
         } catch {
-            if !cleanupRestoredCurrent {
+            if profileMayNeedRestoration {
                 status = "Restoring Current profile"
                 cleanupRestoredCurrent = await restoreCurrentProfile(
                     client: client,
@@ -567,8 +549,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
             automatedPassed = false
             let message = (error as? LocalizedError)?.errorDescription ??
                 "The secure renderer benchmark failed."
-            errorMessage = cleanupRestoredCurrent ? message :
-                message + " Current-profile cleanup was not confirmed."
+            errorMessage = profileMayNeedRestoration ?
+                message + " Current-profile cleanup was not confirmed." : message
             status = stopRequested ? "Stopped" : "Failed"
         }
         client.invalidate()
@@ -579,6 +561,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
         task = nil
         isRunning = false
         stopRequested = false
+        profileMayNeedRestoration = false
     }
 
     private func validatePreflight(
@@ -657,7 +640,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
             routeFixture: routeFixture,
             gates: gates
         )
-        let windowID = try await client.beginWindow(
+        let windowID = try await beginTrackedWindow(
+            client: client,
             profile: profile,
             runId: runID,
             repeatNumber: repeatNumber,
@@ -813,7 +797,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
         routeFixture: RendererBenchmarkRouteFixtureIdentity,
         gates: RendererBenchmarkGates
     ) async throws {
-        let windowID = try await client.beginWindow(
+        let windowID = try await beginTrackedWindow(
+            client: client,
             profile: profile,
             runId: runID,
             repeatNumber: repeatNumber,
@@ -1009,12 +994,45 @@ final class SecureRendererBenchmarkController: ObservableObject {
                     timeoutSeconds: 1.5,
                     enforceContinuity: false
                 )
+                profileMayNeedRestoration = false
                 return true
             } catch {
                 try? await Task.sleep(nanoseconds: 400_000_000)
             }
         }
         return false
+    }
+
+    private func beginTrackedWindow(
+        client: SecureRendererBenchmarkHTTPClient,
+        profile: RendererBenchmarkProfile,
+        runId: String,
+        repeatNumber: Int,
+        mapFixture: RendererBenchmarkMapFixtureIdentity,
+        routeFixture: RendererBenchmarkRouteFixtureIdentity
+    ) async throws -> UInt32 {
+        let restorationWasAlreadyNeeded = profileMayNeedRestoration
+        do {
+            let requestID = try await client.beginWindow(
+                profile: profile,
+                runId: runId,
+                repeatNumber: repeatNumber,
+                mapFixture: mapFixture,
+                routeFixture: routeFixture
+            )
+            profileMayNeedRestoration = true
+            return requestID
+        } catch let error as SecureRendererBenchmarkControllerError {
+            if case .httpStatus = error {
+                profileMayNeedRestoration = restorationWasAlreadyNeeded
+            } else {
+                profileMayNeedRestoration = true
+            }
+            throw error
+        } catch {
+            profileMayNeedRestoration = true
+            throw error
+        }
     }
 
     private func checkContinuity() throws {

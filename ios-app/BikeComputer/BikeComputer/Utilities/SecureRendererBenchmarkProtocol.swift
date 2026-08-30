@@ -400,6 +400,65 @@ nonisolated struct RendererBenchmarkRouteFixtureIdentity: Codable,
     let mode: String
 }
 
+nonisolated enum RendererBenchmarkWindowWireContract {
+    static let acceptedStatusCode = 202
+
+    private struct Fixture: Encodable {
+        let id: String
+        let sha256: String
+    }
+
+    private struct Request: Encodable {
+        let schema = 1
+        let profile: String
+        let runId: String
+        let repeatNumber: Int
+        let mapFixture: Fixture
+        let routeFixture: Fixture
+        let routeMode: String
+
+        enum CodingKeys: String, CodingKey {
+            case schema, profile, runId, mapFixture, routeFixture, routeMode
+            case repeatNumber = "repeat"
+        }
+    }
+
+    private struct Response: Decodable {
+        let ok: Bool
+        let requestId: UInt32
+    }
+
+    static func requestData(
+        profile: String,
+        runId: String,
+        repeatNumber: Int,
+        mapFixture: RendererBenchmarkMapFixtureIdentity,
+        routeFixture: RendererBenchmarkRouteFixtureIdentity
+    ) throws -> Data {
+        try JSONEncoder().encode(Request(
+            profile: profile,
+            runId: runId,
+            repeatNumber: repeatNumber,
+            mapFixture: Fixture(
+                id: mapFixture.id,
+                sha256: mapFixture.sha256
+            ),
+            routeFixture: Fixture(
+                id: routeFixture.id,
+                sha256: routeFixture.sha256
+            ),
+            routeMode: routeFixture.mode
+        ))
+    }
+
+    static func requestID(from data: Data) -> UInt32? {
+        guard let response = try? JSONDecoder().decode(Response.self, from: data),
+              response.ok,
+              response.requestId != 0 else { return nil }
+        return response.requestId
+    }
+}
+
 nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
                                                             Equatable,
                                                             Sendable {

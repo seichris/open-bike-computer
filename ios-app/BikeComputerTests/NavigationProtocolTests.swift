@@ -14415,6 +14415,92 @@ struct NavigationProtocolTests {
         )
         assertEqual(gates.schema, 1, "secure benchmark gates retain schema 1")
 
+        let mapFixture = RendererBenchmarkMapFixtureIdentity(
+            id: "shanghai-map",
+            sha256: String(repeating: "a", count: 64)
+        )
+        let routeFixture = RendererBenchmarkRouteFixtureIdentity(
+            id: "shanghai-jingan-renderer-v1",
+            sha256: String(repeating: "b", count: 64),
+            mode: "ios-fixture-1hz"
+        )
+        guard let windowRequestData = try?
+                RendererBenchmarkWindowWireContract.requestData(
+                    profile: "current",
+                    runId: "test-run",
+                    repeatNumber: 2,
+                    mapFixture: mapFixture,
+                    routeFixture: routeFixture
+                ),
+              let windowRequest = try? JSONSerialization.jsonObject(
+                with: windowRequestData
+              ) as? [String: Any],
+              let encodedMapFixture = windowRequest["mapFixture"]
+                as? [String: Any],
+              let encodedRouteFixture = windowRequest["routeFixture"]
+                as? [String: Any] else {
+            assert(false, "secure benchmark encodes the renderer-window request")
+            return
+        }
+        assertEqual(
+            windowRequest.keys.sorted(),
+            [
+                "mapFixture", "profile", "repeat", "routeFixture",
+                "routeMode", "runId", "schema",
+            ],
+            "renderer-window request has exactly the firmware top-level fields"
+        )
+        assertEqual(
+            encodedMapFixture.keys.sorted(),
+            ["id", "sha256"],
+            "renderer-window map identity has exactly two fields"
+        )
+        assertEqual(
+            encodedRouteFixture.keys.sorted(),
+            ["id", "sha256"],
+            "renderer-window route identity excludes the evidence-only mode field"
+        )
+        assertEqual(
+            windowRequest["routeMode"] as? String,
+            routeFixture.mode,
+            "renderer-window route mode remains a top-level firmware field"
+        )
+        assertEqual(
+            windowRequest["repeat"] as? Int,
+            2,
+            "renderer-window repeat uses the firmware field name"
+        )
+        assertEqual(
+            RendererBenchmarkWindowWireContract.acceptedStatusCode,
+            202,
+            "renderer-window requests accept the firmware asynchronous status"
+        )
+        assertEqual(
+            RendererBenchmarkWindowWireContract.requestID(
+                from: Data(#"{"ok":true,"requestId":17}"#.utf8)
+            ),
+            17,
+            "renderer-window response decodes the firmware 202 body"
+        )
+        assert(
+            RendererBenchmarkWindowWireContract.requestID(
+                from: Data(#"{"ok":true,"requestId":0}"#.utf8)
+            ) == nil,
+            "renderer-window response rejects request ID zero"
+        )
+        assert(
+            RendererBenchmarkWindowWireContract.requestID(
+                from: Data(#"{"ok":false,"requestId":17}"#.utf8)
+            ) == nil,
+            "renderer-window response rejects a negative acknowledgement"
+        )
+        assert(
+            RendererBenchmarkWindowWireContract.requestID(
+                from: Data(#"{"ok":true}"#.utf8)
+            ) == nil,
+            "renderer-window response rejects a missing request ID"
+        )
+
         let schedule = SecureRendererBenchmarkPlan.balancedSchedule().map {
             $0.map(\.wireName)
         }
