@@ -836,12 +836,14 @@ static void noteRideDeliveryMember(
     const ride_delivery_protocol::CommandMember &member,
     ride_delivery_protocol::Result result,
     uint32_t expectedLeaseGeneration = 0);
+static uint32_t currentAuthoritativeRideLeaseGeneration(
+    TickType_t waitTicks = pdMS_TO_TICKS(100));
 
 static bool pendingRouteDeliveryMatchesCurrentLease(
     const PendingRouteRideDelivery &delivery) {
-  return delivery.pending && delivery.leaseGeneration != 0 &&
-         delivery.leaseGeneration == rideDeliveryLeaseGenerationSnapshot.load(
-                                         std::memory_order_acquire);
+  return delivery.pending && ride_delivery_protocol::leaseMatches(
+                                 delivery.leaseGeneration,
+                                 currentAuthoritativeRideLeaseGeneration());
 }
 
 static void resetRideDeliveryTracking() {
@@ -877,6 +879,7 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
                           size_t len, const char *source,
                           const ride_delivery_protocol::CommandMember
                               *rideDeliveryMember = nullptr,
+                          uint32_t rideDeliveryLeaseGeneration = 0,
                           ride_delivery_protocol::Result rideDeliveryResult =
                               ride_delivery_protocol::Result::Success) {
   if (pendingMapInputMutex == nullptr || len > MAX_PENDING_MAP_INPUT_BYTES ||
@@ -950,7 +953,7 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
       pendingRouteRideDelivery.stateGeneration =
           rideDeliveryMember->stateGeneration;
       pendingRouteRideDelivery.leaseGeneration =
-          rideDeliveryLeaseGenerationSnapshot.load(std::memory_order_acquire);
+          rideDeliveryLeaseGeneration;
       pendingRouteRideDelivery.result = rideDeliveryResult;
     }
     rejectedReplacedRouteDelivery = replacedRouteDelivery.pending &&
@@ -1162,11 +1165,16 @@ static bool unwrapOwnerAuthenticatedPayload(
       (!requiresFrame ||
        channel == device_ownership::AuthenticatedChannel::Auth ||
        deviceOwnership.authorizeRideWrite(channel, nowMs));
-  if (accepted && requiresFrame &&
+  bool rideLeaseGenerationChanged = false;
+  if (validFrame && requiresFrame &&
       channel != device_ownership::AuthenticatedChannel::Auth) {
-    rideDeliveryLeaseGenerationSnapshot.store(
-        deviceOwnership.authenticatedRideLeaseGeneration(nowMs),
-        std::memory_order_release);
+    const uint32_t leaseGeneration =
+        deviceOwnership.authenticatedRideLeaseGeneration(nowMs);
+    const uint32_t previousLeaseGeneration =
+        rideDeliveryLeaseGenerationSnapshot.exchange(
+            leaseGeneration, std::memory_order_acq_rel);
+    rideLeaseGenerationChanged =
+        previousLeaseGeneration != leaseGeneration;
   }
   if (accepted && wasScopedWatchSession != nullptr) {
     *wasScopedWatchSession = deviceOwnership.isWatchRideSession();
@@ -1175,6 +1183,12 @@ static bool unwrapOwnerAuthenticatedPayload(
     payload = frame;
   }
   xSemaphoreGive(deviceOwnershipMutex);
+  if (rideLeaseGenerationChanged) {
+    // A retained mailbox or application-command replay belongs to exactly one
+    // controller lease. Drop it before the newly accepted write is admitted.
+    advanceRidePayloadGeneration();
+    resetRideDeliveryTracking();
+  }
   if (authenticationStateDiverged) {
     bleSessionAuthenticated = false;
     clearAuthenticatedBleGpsRideObservation();
@@ -1524,8 +1538,16 @@ static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
       data, length, "navigation");
 }
 
-static uint32_t currentRideLeaseGeneration() {
-  return rideDeliveryLeaseGenerationSnapshot.load(std::memory_order_acquire);
+static uint32_t currentAuthoritativeRideLeaseGeneration(
+    TickType_t waitTicks) {
+  if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
+      xSemaphoreTake(deviceOwnershipMutex, waitTicks) != pdTRUE) {
+    return 0;
+  }
+  const uint32_t leaseGeneration =
+      deviceOwnership.authenticatedRideLeaseGeneration(millis());
+  xSemaphoreGive(deviceOwnershipMutex);
+  return leaseGeneration;
 }
 
 static void notifyRideDeliveryAcknowledgement(
@@ -1540,6 +1562,59 @@ static void notifyRideDeliveryAcknowledgement(
   }
 }
 
+static void emitRideDeliveryAcknowledgement(
+    const ride_delivery_protocol::CommandMember &member,
+    ride_delivery_protocol::TrackingResult tracking,
+    const ride_delivery_protocol::Acknowledgement &acknowledgement) {
+  if (tracking != ride_delivery_protocol::TrackingResult::Complete &&
+      tracking != ride_delivery_protocol::TrackingResult::DuplicateComplete &&
+      tracking != ride_delivery_protocol::TrackingResult::Immediate) {
+    return;
+  }
+  char fields[160] = {};
+  snprintf(fields, sizeof(fields),
+           "{\"commandClass\":%u,\"result\":\"%u\",\"members\":%u,"
+           "\"leaseGeneration\":%lu,\"outcome\":\"%s\"}",
+           static_cast<unsigned>(acknowledgement.type),
+           static_cast<unsigned>(acknowledgement.result),
+           static_cast<unsigned>(member.memberCount),
+           static_cast<unsigned long>(acknowledgement.leaseGeneration),
+           tracking == ride_delivery_protocol::TrackingResult::Complete
+               ? "applied"
+           : tracking ==
+                     ride_delivery_protocol::TrackingResult::DuplicateComplete
+               ? "duplicate"
+               : "rejected");
+  (void)ride_diagnostics::record(
+      acknowledgement.result == ride_delivery_protocol::Result::Success ||
+              acknowledgement.result == ride_delivery_protocol::Result::Stale
+          ? ride_diagnostics::Level::Info
+          : ride_diagnostics::Level::Warning,
+      "ble", "ride_command_acknowledged", fields);
+  notifyRideDeliveryAcknowledgement(acknowledgement);
+}
+
+static bool admitRideDeliveryMember(
+    const ride_delivery_protocol::CommandMember &member,
+    uint32_t &admittedLeaseGeneration) {
+  admittedLeaseGeneration = currentAuthoritativeRideLeaseGeneration();
+  if (!ride_delivery_protocol::leaseMatches(
+          admittedLeaseGeneration,
+          rideDeliveryLeaseGenerationSnapshot.load(
+              std::memory_order_acquire))) {
+    return false;
+  }
+
+  ride_delivery_protocol::Acknowledgement acknowledgement{};
+  portENTER_CRITICAL(&rideDeliveryTrackerMux);
+  const ride_delivery_protocol::TrackingResult tracking =
+      rideDeliveryTracker.admit(member, admittedLeaseGeneration,
+                                acknowledgement);
+  portEXIT_CRITICAL(&rideDeliveryTrackerMux);
+  emitRideDeliveryAcknowledgement(member, tracking, acknowledgement);
+  return tracking == ride_delivery_protocol::TrackingResult::Admitted;
+}
+
 static void noteRideDeliveryMember(
     const ride_delivery_protocol::CommandMember &member,
     ride_delivery_protocol::Result result,
@@ -1547,40 +1622,18 @@ static void noteRideDeliveryMember(
   ride_delivery_protocol::Acknowledgement acknowledgement{};
   ride_delivery_protocol::TrackingResult tracking =
       ride_delivery_protocol::TrackingResult::Rejected;
+  const uint32_t leaseGeneration =
+      currentAuthoritativeRideLeaseGeneration(portMAX_DELAY);
   portENTER_CRITICAL(&rideDeliveryTrackerMux);
-  const uint32_t leaseGeneration = currentRideLeaseGeneration();
-  if (leaseGeneration != 0 &&
-      (expectedLeaseGeneration == 0 ||
-       expectedLeaseGeneration == leaseGeneration)) {
+  if (ride_delivery_protocol::leaseMatches(
+          expectedLeaseGeneration == 0 ? leaseGeneration
+                                       : expectedLeaseGeneration,
+          leaseGeneration)) {
     tracking = rideDeliveryTracker.note(member, result, leaseGeneration,
                                         acknowledgement);
   }
   portEXIT_CRITICAL(&rideDeliveryTrackerMux);
-  if (tracking == ride_delivery_protocol::TrackingResult::Complete ||
-      tracking == ride_delivery_protocol::TrackingResult::DuplicateComplete ||
-      tracking == ride_delivery_protocol::TrackingResult::Immediate) {
-    char fields[160] = {};
-    snprintf(fields, sizeof(fields),
-             "{\"commandClass\":%u,\"result\":%u,\"members\":%u,"
-             "\"leaseGeneration\":%lu,\"outcome\":\"%s\"}",
-             static_cast<unsigned>(acknowledgement.type),
-             static_cast<unsigned>(acknowledgement.result),
-             static_cast<unsigned>(member.memberCount),
-             static_cast<unsigned long>(acknowledgement.leaseGeneration),
-             tracking == ride_delivery_protocol::TrackingResult::Complete
-                 ? "applied"
-             : tracking ==
-                       ride_delivery_protocol::TrackingResult::DuplicateComplete
-                 ? "duplicate"
-                 : "rejected");
-    (void)ride_diagnostics::record(
-        acknowledgement.result == ride_delivery_protocol::Result::Success ||
-                acknowledgement.result == ride_delivery_protocol::Result::Stale
-            ? ride_diagnostics::Level::Info
-            : ride_diagnostics::Level::Warning,
-        "ble", "ride_command_acknowledged", fields);
-    notifyRideDeliveryAcknowledgement(acknowledgement);
-  }
+  emitRideDeliveryAcknowledgement(member, tracking, acknowledgement);
 }
 
 enum class RideDeliveryDecodeResult : uint8_t {
@@ -1742,6 +1795,10 @@ static void handleAuthPayload(const std::string &frame) {
                 break;
               case device_ownership::Event::LeaseReleased:
                 clearAuthenticatedBleGpsRideObservation();
+                rideDeliveryLeaseGenerationSnapshot.store(
+                    0, std::memory_order_release);
+                advanceRidePayloadGeneration();
+                resetRideDeliveryTracking();
                 Serial.println("BLE: Controller lease released; GPS evidence cleared");
                 break;
               case device_ownership::Event::Renamed:
@@ -4463,9 +4520,28 @@ static void processPendingMapInputs() {
   };
 
   const PendingRouteWork route = takeRoute();
-  const bool routeApplied = processInput(route.input);
-  if (routeApplied &&
-      pendingRouteDeliveryMatchesCurrentLease(route.delivery)) {
+  bool routeApplied = false;
+  if (!route.delivery.pending) {
+    routeApplied = processInput(route.input);
+  } else if (route.input.pending && deviceOwnershipReady &&
+             deviceOwnershipMutex != nullptr &&
+             xSemaphoreTake(deviceOwnershipMutex, portMAX_DELAY) == pdTRUE) {
+    // Serialize the final lease check and the empty-route mutation against
+    // lease release or transfer. Once this lock is released, a later release
+    // is ordered after the accepted clear rather than racing ahead of it.
+    const uint32_t leaseGeneration =
+        deviceOwnership.authenticatedRideLeaseGeneration(millis());
+    if (ride_delivery_protocol::leaseMatches(
+            route.delivery.leaseGeneration, leaseGeneration)) {
+      routeApplied = processInput(route.input);
+    } else {
+      free(route.input.data);
+    }
+    xSemaphoreGive(deviceOwnershipMutex);
+  } else if (route.input.pending) {
+    free(route.input.data);
+  }
+  if (routeApplied && route.delivery.pending) {
     noteRideDeliveryMember(route.delivery.member(), route.delivery.result,
                            route.delivery.leaseGeneration);
   }
@@ -4774,6 +4850,12 @@ public:
       return;
     const bool hasDeliveryMember =
         deliveryDecode == RideDeliveryDecodeResult::Decoded;
+    uint32_t deliveryLeaseGeneration = 0;
+    if (hasDeliveryMember &&
+        !admitRideDeliveryMember(deliveryMember,
+                                 deliveryLeaseGeneration)) {
+      return;
+    }
     if (hasDeliveryMember) {
       static constexpr char kNavigationIdle[] = "1|0|Navigation idle";
       if (deliveryMember.memberCount != 2 ||
@@ -4782,7 +4864,8 @@ public:
           std::memcmp(deliveryMember.payload, kNavigationIdle,
                       sizeof(kNavigationIdle) - 1) != 0) {
         noteRideDeliveryMember(
-            deliveryMember, ride_delivery_protocol::Result::Malformed);
+            deliveryMember, ride_delivery_protocol::Result::Malformed,
+            deliveryLeaseGeneration);
         return;
       }
       value.assign(reinterpret_cast<const char *>(deliveryMember.payload),
@@ -4796,6 +4879,11 @@ public:
       bleDebugStats.lastRejectedUnauthenticatedMs = millis();
       Serial.println(
           "BLE: Rejected privileged multiplexed command from scoped Watch");
+      if (hasDeliveryMember) {
+        noteRideDeliveryMember(
+            deliveryMember, ride_delivery_protocol::Result::Unauthorized,
+            deliveryLeaseGeneration);
+      }
       return;
     }
 
@@ -4933,7 +5021,8 @@ public:
     parseNavigationData(value);
     if (hasDeliveryMember) {
       noteRideDeliveryMember(deliveryMember,
-                             ride_delivery_protocol::Result::Success);
+                             ride_delivery_protocol::Result::Success,
+                             deliveryLeaseGeneration);
     }
   }
 };
@@ -4961,13 +5050,20 @@ public:
       return;
     const bool hasDeliveryMember =
         deliveryDecode == RideDeliveryDecodeResult::Decoded;
+    uint32_t deliveryLeaseGeneration = 0;
+    if (hasDeliveryMember &&
+        !admitRideDeliveryMember(deliveryMember,
+                                 deliveryLeaseGeneration)) {
+      return;
+    }
     if (hasDeliveryMember &&
         ((deliveryMember.memberCount != 1 &&
           deliveryMember.memberCount != 2) ||
          deliveryMember.memberIndex != 0 ||
          deliveryMember.payloadLength != 0)) {
       noteRideDeliveryMember(deliveryMember,
-                             ride_delivery_protocol::Result::Malformed);
+                             ride_delivery_protocol::Result::Malformed,
+                             deliveryLeaseGeneration);
       return;
     }
 
@@ -4980,10 +5076,12 @@ public:
                                      : value.length();
     const bool accepted = queueMapInput(
         PendingMapInputType::Route, payload, payloadLength, "native",
-        hasDeliveryMember ? &deliveryMember : nullptr);
+        hasDeliveryMember ? &deliveryMember : nullptr,
+        deliveryLeaseGeneration);
     if (hasDeliveryMember && !accepted) {
       noteRideDeliveryMember(
-          deliveryMember, ride_delivery_protocol::Result::ResourceRejected);
+          deliveryMember, ride_delivery_protocol::Result::ResourceRejected,
+          deliveryLeaseGeneration);
     }
   }
 };
@@ -5033,6 +5131,12 @@ public:
             return;
           const bool hasDeliveryMember =
               deliveryDecode == RideDeliveryDecodeResult::Decoded;
+          uint32_t deliveryLeaseGeneration = 0;
+          if (hasDeliveryMember &&
+              !admitRideDeliveryMember(deliveryMember,
+                                       deliveryLeaseGeneration)) {
+            return;
+          }
           if (hasDeliveryMember) {
             const bool canonicalMember =
                 deliveryMember.payloadLength > 0 &&
@@ -5042,7 +5146,8 @@ public:
                     static_cast<uint8_t>(deliveryMember.memberIndex + 1);
             if (!canonicalMember) {
               noteRideDeliveryMember(
-                  deliveryMember, ride_delivery_protocol::Result::Malformed);
+                  deliveryMember, ride_delivery_protocol::Result::Malformed,
+                  deliveryLeaseGeneration);
               return;
             }
             payload = deliveryMember.payload;
@@ -5077,7 +5182,8 @@ public:
             deliveryResult = ride_delivery_protocol::Result::Malformed;
             break;
           }
-          noteRideDeliveryMember(deliveryMember, deliveryResult);
+          noteRideDeliveryMember(deliveryMember, deliveryResult,
+                                 deliveryLeaseGeneration);
         });
   }
 };

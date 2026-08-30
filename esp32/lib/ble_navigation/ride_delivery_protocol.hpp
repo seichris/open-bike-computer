@@ -9,7 +9,7 @@
 
 namespace ride_delivery_protocol {
 
-constexpr uint8_t VERSION =
+constexpr uint8_t PROTOCOL_VERSION =
     ride_ble_protocol_generated::APPLICATION_DELIVERY_VERSION;
 constexpr std::size_t COMMAND_HEADER_SIZE =
     ride_ble_protocol_generated::APPLICATION_COMMAND_HEADER_BYTES;
@@ -59,6 +59,12 @@ inline void writeUInt32LE(uint32_t value, uint8_t *data) {
     data[index] = static_cast<uint8_t>(value >> (index * 8U));
 }
 
+inline bool leaseMatches(uint32_t admittedLeaseGeneration,
+                         uint32_t currentLeaseGeneration) {
+  return admittedLeaseGeneration != 0 &&
+         admittedLeaseGeneration == currentLeaseGeneration;
+}
+
 inline bool validCommandType(uint8_t raw) {
   return raw == static_cast<uint8_t>(CommandType::NavigationClear) ||
          raw == static_cast<uint8_t>(CommandType::WorkoutState);
@@ -78,7 +84,8 @@ inline bool nonzeroCommandId(const uint8_t *data) {
 inline bool decodeCommand(const uint8_t *data, std::size_t length,
                           CommandMember &out) {
   if (data == nullptr || length < COMMAND_HEADER_SIZE ||
-      std::memcmp(data, COMMAND_PREFIX, 4) != 0 || data[4] != VERSION ||
+      std::memcmp(data, COMMAND_PREFIX, 4) != 0 ||
+      data[4] != PROTOCOL_VERSION ||
       !validCommandType(data[5]) || data[7] == 0 ||
       data[7] > MAX_GROUP_MEMBERS || data[6] >= data[7] ||
       !nonzeroCommandId(data + 8) || readUInt32LE(data + 24) == 0)
@@ -104,7 +111,7 @@ inline std::size_t encodeAcknowledgement(const Acknowledgement &value,
       value.stateGeneration == 0)
     return 0;
   std::memcpy(output, ACK_PREFIX, 4);
-  output[4] = VERSION;
+  output[4] = PROTOCOL_VERSION;
   output[5] = static_cast<uint8_t>(value.type);
   output[6] = static_cast<uint8_t>(value.result);
   output[7] = 0;
@@ -117,7 +124,8 @@ inline std::size_t encodeAcknowledgement(const Acknowledgement &value,
 inline bool decodeAcknowledgement(const uint8_t *data, std::size_t length,
                                   Acknowledgement &out) {
   if (data == nullptr || length != ACK_SIZE ||
-      std::memcmp(data, ACK_PREFIX, 4) != 0 || data[4] != VERSION ||
+      std::memcmp(data, ACK_PREFIX, 4) != 0 ||
+      data[4] != PROTOCOL_VERSION ||
       !validCommandType(data[5]) || !validResult(data[6]) || data[7] != 0 ||
       !nonzeroCommandId(data + 8) || readUInt32LE(data + 24) == 0)
     return false;
@@ -131,8 +139,10 @@ inline bool decodeAcknowledgement(const uint8_t *data, std::size_t length,
 }
 
 enum class TrackingResult : uint8_t {
+  Admitted,
   Pending,
   Complete,
+  DuplicatePending,
   DuplicateComplete,
   Immediate,
   Rejected,
@@ -140,17 +150,26 @@ enum class TrackingResult : uint8_t {
 
 class GroupTracker {
 public:
-  TrackingResult note(const CommandMember &member, Result memberResult,
-                      uint32_t leaseGeneration, Acknowledgement &out) {
+  // Admission must happen before a callback mutates retained ride state. It
+  // suppresses both completed replays and retries of an in-flight member, and
+  // rejects an interleaved command before that second command can apply.
+  TrackingResult admit(const CommandMember &member, uint32_t leaseGeneration,
+                       Acknowledgement &out) {
     if (member.memberCount == 0 || member.memberCount > MAX_GROUP_MEMBERS ||
-        member.memberIndex >= member.memberCount)
+        member.memberIndex >= member.memberCount || leaseGeneration == 0)
       return TrackingResult::Rejected;
 
     for (std::size_t index = 0; index < completedCount_; ++index) {
       const Acknowledgement &completed = completed_[index];
       if (completed.type == member.type &&
           completed.commandId == member.commandId &&
-          completed.stateGeneration == member.stateGeneration) {
+          completed.stateGeneration == member.stateGeneration &&
+          completed.leaseGeneration == leaseGeneration) {
+        if (completedMemberCounts_[index] != member.memberCount) {
+          out = {member.type, Result::Malformed, member.commandId,
+                 member.stateGeneration, leaseGeneration};
+          return TrackingResult::Immediate;
+        }
         out = completed;
         return TrackingResult::DuplicateComplete;
       }
@@ -159,7 +178,8 @@ public:
     if (pendingValid_ &&
         (pendingType_ != member.type ||
          pendingCommandId_ != member.commandId ||
-         pendingStateGeneration_ != member.stateGeneration)) {
+         pendingStateGeneration_ != member.stateGeneration ||
+         pendingLeaseGeneration_ != leaseGeneration)) {
       out = {member.type, Result::Busy, member.commandId,
              member.stateGeneration, leaseGeneration};
       return TrackingResult::Immediate;
@@ -170,7 +190,9 @@ public:
       pendingType_ = member.type;
       pendingCommandId_ = member.commandId;
       pendingStateGeneration_ = member.stateGeneration;
+      pendingLeaseGeneration_ = leaseGeneration;
       pendingMemberCount_ = member.memberCount;
+      pendingAdmittedMask_ = 0;
       pendingMask_ = 0;
       pendingResult_ = Result::Success;
     }
@@ -180,7 +202,31 @@ public:
       return TrackingResult::Immediate;
     }
 
-    pendingMask_ |= static_cast<uint8_t>(1U << member.memberIndex);
+    const uint8_t memberBit =
+        static_cast<uint8_t>(1U << member.memberIndex);
+    if ((pendingAdmittedMask_ & memberBit) != 0)
+      return TrackingResult::DuplicatePending;
+    pendingAdmittedMask_ |= memberBit;
+    return TrackingResult::Admitted;
+  }
+
+  TrackingResult note(const CommandMember &member, Result memberResult,
+                      uint32_t leaseGeneration, Acknowledgement &out) {
+    if (!pendingValid_ || pendingType_ != member.type ||
+        pendingCommandId_ != member.commandId ||
+        pendingStateGeneration_ != member.stateGeneration ||
+        pendingLeaseGeneration_ != leaseGeneration ||
+        pendingMemberCount_ != member.memberCount ||
+        member.memberIndex >= pendingMemberCount_)
+      return TrackingResult::Rejected;
+
+    const uint8_t memberBit =
+        static_cast<uint8_t>(1U << member.memberIndex);
+    if ((pendingAdmittedMask_ & memberBit) == 0 ||
+        (pendingMask_ & memberBit) != 0)
+      return TrackingResult::Rejected;
+
+    pendingMask_ |= memberBit;
     if (memberResult != Result::Success && pendingResult_ == Result::Success)
       pendingResult_ = memberResult;
     const uint8_t completeMask = static_cast<uint8_t>(
@@ -192,20 +238,27 @@ public:
         pendingType_, pendingResult_, pendingCommandId_,
         pendingStateGeneration_, leaseGeneration};
     if (completedCount_ < completed_.size()) {
-      completed_[completedCount_++] = completed;
+      completed_[completedCount_] = completed;
+      completedMemberCounts_[completedCount_] = pendingMemberCount_;
+      ++completedCount_;
     } else {
       completed_[completedCursor_] = completed;
+      completedMemberCounts_[completedCursor_] = pendingMemberCount_;
       completedCursor_ = (completedCursor_ + 1U) % completed_.size();
     }
     pendingValid_ = false;
+    pendingAdmittedMask_ = 0;
     out = completed;
     return TrackingResult::Complete;
   }
 
   void reset() {
     pendingValid_ = false;
+    pendingLeaseGeneration_ = 0;
+    pendingMemberCount_ = 0;
     completedCount_ = 0;
     completedCursor_ = 0;
+    pendingAdmittedMask_ = 0;
     pendingMask_ = 0;
   }
 
@@ -214,10 +267,13 @@ private:
   CommandType pendingType_ = CommandType::NavigationClear;
   CommandId pendingCommandId_{};
   uint32_t pendingStateGeneration_ = 0;
+  uint32_t pendingLeaseGeneration_ = 0;
   uint8_t pendingMemberCount_ = 0;
+  uint8_t pendingAdmittedMask_ = 0;
   uint8_t pendingMask_ = 0;
   Result pendingResult_ = Result::Success;
   std::array<Acknowledgement, COMPLETED_REPLAY_WINDOW> completed_{};
+  std::array<uint8_t, COMPLETED_REPLAY_WINDOW> completedMemberCounts_{};
   std::size_t completedCount_ = 0;
   std::size_t completedCursor_ = 0;
 };

@@ -137,6 +137,10 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private var phonePreparationAttempt = 0
     private var phonePreparationRetryTask: Task<Void, Never>?
     private var phonePreparationResponseTimeoutTask: Task<Void, Never>?
+    private var phonePreparationRestorationGate =
+        WatchDirectRidePreparationRestorationGateV1(
+            restoredOperation: nil
+        )
 
     private let peripheralMapKey =
         "watchDeviceLink.peripheralByDeviceID.v1"
@@ -161,6 +165,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             preparedPhoneDeviceID = intent.deviceID
             preparedPhonePreparationID = intent.preparationID
             phonePreparationReleasePending = intent.operation == .release
+            phonePreparationRestorationGate = .init(
+                restoredOperation: intent.operation
+            )
         }
         super.init()
     }
@@ -391,6 +398,19 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             requestPhonePreparationIfNeeded()
         } else if phonePreparationReleasePending {
             releasePhonePreparationIfNeeded()
+        }
+    }
+
+    func completeInitialDemandRestoration() {
+        switch phonePreparationRestorationGate.complete(
+            hasRecoveredDemand: hasDemand
+        ) {
+        case .retain:
+            requestPhonePreparationIfNeeded()
+        case .release:
+            releasePhonePreparationIfNeeded()
+        case .none:
+            break
         }
     }
 

@@ -418,6 +418,30 @@ enum WatchDirectRidePreparationPolicyV1 {
     }
 }
 
+enum WatchDirectRidePreparationRestorationDecisionV1: Equatable, Sendable {
+    case none
+    case retain
+    case release
+}
+
+/// Defers resolution of a restored prepare until navigation and HealthKit
+/// workout recovery have both had a chance to restore direct-ride demand.
+struct WatchDirectRidePreparationRestorationGateV1: Sendable {
+    private(set) var isPending: Bool
+
+    init(restoredOperation: WatchDirectRidePreparationOperationV1?) {
+        isPending = restoredOperation == .prepare
+    }
+
+    mutating func complete(
+        hasRecoveredDemand: Bool
+    ) -> WatchDirectRidePreparationRestorationDecisionV1 {
+        guard isPending else { return .none }
+        isPending = false
+        return hasRecoveredDemand ? .retain : .release
+    }
+}
+
 struct WatchDeviceMetadataV1: Codable, Equatable, Sendable {
     static let schemaVersion = 1
     static let applicationContextKey = "watchDeviceMetadataV1"

@@ -13556,6 +13556,46 @@ struct NavigationProtocolTests {
         assertEqual(fullProtectedCoalescingQueue.count, 2,
                     "coalescing rejection preserves the full atomic batch")
 
+        var retainedReplacementWasDropped = false
+        var transactionalReplacementQueue = NavigationWriteQueue(
+            maxCount: 2,
+            maxPendingBytes: 5
+        )
+        assert(transactionalReplacementQueue.enqueueAtomically([
+            NavigationWrite(
+                data: Data([1, 2, 3]),
+                label: "protected-batch"
+            )
+        ]), "a protected batch leaves one small replaceable slot")
+        assert(transactionalReplacementQueue.enqueueCoalescing(
+            NavigationWrite(
+                data: Data([4]),
+                label: "retained-state",
+                onDrop: { retainedReplacementWasDropped = true },
+                coalescingKey: "latest-state"
+            ),
+            prioritized: false
+        ), "the first small replaceable state is admitted")
+        assert(!transactionalReplacementQueue.enqueueCoalescing(
+            NavigationWrite(
+                data: Data([5, 6, 7]),
+                label: "oversized-replacement",
+                coalescingKey: "latest-state"
+            ),
+            prioritized: false
+        ), "a larger replacement rejects transactionally at the byte ceiling")
+        assert(!retainedReplacementWasDropped,
+               "rejected replacement preserves the prior authoritative state")
+        var transactionalReplacementWrites: [Data] = []
+        transactionalReplacementQueue.flush(canSend: { true }) {
+            transactionalReplacementWrites.append($0.data)
+        }
+        assertEqual(
+            transactionalReplacementWrites,
+            [Data([1, 2, 3]), Data([4])],
+            "transactional rejection leaves the protected batch and old state intact"
+        )
+
         var prioritizedQueue = NavigationWriteQueue(maxCount: 3)
         var droppedRegularWrite = false
         prioritizedQueue.enqueue(NavigationWrite(

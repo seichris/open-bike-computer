@@ -351,6 +351,50 @@ struct NavigationWriteQueue {
             return true
         }
 
+        guard write.data.count <= Self.maximumFrameBytes else {
+            recordRejectedFrames(1)
+            return false
+        }
+        if prioritized {
+            let retainedPriorityWrites = pendingPriorityWrites.filter {
+                $0.coalescingKey != key
+            }
+            guard retainedPriorityWrites.count + 1 <= priorityMaxCount,
+                  retainedPriorityWrites.reduce(0, {
+                      $0 + $1.data.count
+                  }) + write.data.count <= priorityMaxPendingBytes else {
+                recordRejectedFrames(1)
+                return false
+            }
+        } else {
+            var admissionCandidate = pendingWrites.filter {
+                $0.coalescingKey != key
+            }
+            admissionCandidate.append(write)
+            var newWriteSurvives = true
+            while admissionCandidate.count > maxCount ||
+                    admissionCandidate.reduce(0, {
+                        $0 + $1.data.count
+                    }) > maxPendingBytes {
+                let droppedIndex = admissionCandidate.firstIndex {
+                    !$0.protectedFromEviction
+                } ?? admissionCandidate.startIndex
+                if droppedIndex == admissionCandidate.index(
+                    before: admissionCandidate.endIndex
+                ) {
+                    newWriteSurvives = false
+                }
+                admissionCandidate.remove(at: droppedIndex)
+            }
+            guard newWriteSurvives else {
+                // Replacement is transactional: a rejected larger value must
+                // not erase the last admitted value for the same state key.
+                recordRejectedFrames(1)
+                return false
+            }
+        }
+
+        beginEnqueueIfEmpty()
         removePendingWrites(
             withCoalescingKey: key,
             resetRetryWhenEmpty: false

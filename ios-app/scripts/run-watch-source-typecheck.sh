@@ -16,11 +16,11 @@ case "${ARCH}" in
 esac
 
 cd "${REPO_DIR}"
-rg --files \
+find \
   ios-app/BikeComputer/BikeComputerWatch \
   ios-app/BikeComputer/RideShared \
   ios-app/BikeComputer/WorkoutShared \
-  -g '*.swift' -0 | \
+  -type f -name '*.swift' -print0 | \
   xargs -0 xcrun swiftc \
     -typecheck \
     -parse-as-library \

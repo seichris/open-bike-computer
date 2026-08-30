@@ -85,69 +85,117 @@ int main() {
 
   GroupTracker tracker;
   Acknowledgement completed{};
+  assert(tracker.admit(decoded, 0, completed) == TrackingResult::Rejected);
+  int appliedMembers = 0;
+  auto admitAndApply = [&](const CommandMember &member, Result result,
+                           uint32_t leaseGeneration) {
+    const TrackingResult admission =
+        tracker.admit(member, leaseGeneration, completed);
+    if (admission != TrackingResult::Admitted)
+      return admission;
+    ++appliedMembers;
+    return tracker.note(member, result, leaseGeneration, completed);
+  };
   for (uint8_t index = 0; index < 3; ++index) {
     CommandMember member = decoded;
     member.memberIndex = index;
-    assert(tracker.note(member, Result::Success, 9, completed) ==
+    assert(admitAndApply(member, Result::Success, 9) ==
            (index == 2 ? TrackingResult::Complete
                        : TrackingResult::Pending));
   }
+  assert(appliedMembers == 3);
   assert(completed.result == Result::Success &&
          completed.leaseGeneration == 9);
-  assert(tracker.note(decoded, Result::Success, 10, completed) ==
+  assert(tracker.admit(decoded, 9, completed) ==
          TrackingResult::DuplicateComplete);
+  assert(appliedMembers == 3);
   assert(completed.leaseGeneration == 9);
+  CommandMember completedMismatchedCount = decoded;
+  completedMismatchedCount.memberCount = 4;
+  assert(tracker.admit(completedMismatchedCount, 9, completed) ==
+         TrackingResult::Immediate);
+  assert(completed.result == Result::Malformed);
+
+  // A new controller lease is a new application boundary even when a client
+  // happens to reuse a command ID and state generation.
+  assert(tracker.admit(decoded, 10, completed) == TrackingResult::Admitted);
+  assert(tracker.note(decoded, Result::Success, 10, completed) ==
+         TrackingResult::Pending);
+  tracker.reset();
 
   tracker.reset();
+  appliedMembers = 0;
   CommandMember first = decoded;
   first.memberIndex = 0;
-  assert(tracker.note(first, Result::Success, 11, completed) ==
+  assert(admitAndApply(first, Result::Success, 11) ==
          TrackingResult::Pending);
   CommandMember second = decoded;
   second.memberIndex = 1;
-  assert(tracker.note(second, Result::ResourceRejected, 11, completed) ==
+  assert(admitAndApply(second, Result::ResourceRejected, 11) ==
          TrackingResult::Pending);
   CommandMember third = decoded;
   third.memberIndex = 2;
-  assert(tracker.note(third, Result::Success, 11, completed) ==
+  assert(admitAndApply(third, Result::Success, 11) ==
          TrackingResult::Complete);
   assert(completed.result == Result::ResourceRejected);
 
   tracker.reset();
-  assert(tracker.note(first, Result::Success, 12, completed) ==
+  appliedMembers = 0;
+  assert(admitAndApply(first, Result::Success, 12) ==
          TrackingResult::Pending);
   CommandMember interleaved = decoded;
   interleaved.memberIndex = 0;
   interleaved.memberCount = 1;
   interleaved.commandId[15] ^= 0x80;
   interleaved.stateGeneration += 1;
-  assert(tracker.note(interleaved, Result::Success, 12, completed) ==
+  assert(tracker.admit(interleaved, 12, completed) ==
          TrackingResult::Immediate);
+  assert(appliedMembers == 1);
   assert(completed.commandId == interleaved.commandId &&
          completed.result == Result::Busy &&
          completed.leaseGeneration == 12);
-  assert(tracker.note(second, Result::Success, 12, completed) ==
+  assert(admitAndApply(second, Result::Success, 12) ==
          TrackingResult::Pending);
-  assert(tracker.note(third, Result::Success, 12, completed) ==
+  assert(admitAndApply(third, Result::Success, 12) ==
          TrackingResult::Complete);
   assert(completed.commandId == decoded.commandId &&
          completed.result == Result::Success);
 
   tracker.reset();
-  assert(tracker.note(first, Result::Success, 13, completed) ==
+  appliedMembers = 0;
+  assert(admitAndApply(first, Result::Success, 13) ==
          TrackingResult::Pending);
   CommandMember mismatchedCount = second;
   mismatchedCount.memberCount = 2;
-  assert(tracker.note(mismatchedCount, Result::Success, 13, completed) ==
+  assert(tracker.admit(mismatchedCount, 13, completed) ==
          TrackingResult::Immediate);
+  assert(appliedMembers == 1);
   assert(completed.commandId == decoded.commandId &&
          completed.result == Result::Malformed);
-  assert(tracker.note(second, Result::Success, 13, completed) ==
+  assert(admitAndApply(second, Result::Success, 13) ==
          TrackingResult::Pending);
-  assert(tracker.note(third, Result::Success, 13, completed) ==
+  assert(admitAndApply(third, Result::Success, 13) ==
          TrackingResult::Complete);
 
   tracker.reset();
+  appliedMembers = 0;
+  assert(tracker.admit(first, 14, completed) == TrackingResult::Admitted);
+  ++appliedMembers;
+  assert(tracker.admit(first, 15, completed) == TrackingResult::Immediate);
+  assert(completed.result == Result::Busy &&
+         completed.leaseGeneration == 15);
+  assert(tracker.admit(first, 14, completed) ==
+         TrackingResult::DuplicatePending);
+  assert(appliedMembers == 1);
+  assert(tracker.note(first, Result::Success, 14, completed) ==
+         TrackingResult::Pending);
+  assert(admitAndApply(second, Result::Success, 14) ==
+         TrackingResult::Pending);
+  assert(admitAndApply(third, Result::Success, 14) ==
+         TrackingResult::Complete);
+
+  tracker.reset();
+  appliedMembers = 0;
   std::array<CommandMember, COMPLETED_REPLAY_WINDOW> retained{};
   for (std::size_t index = 0; index < retained.size(); ++index) {
     retained[index] = decoded;
@@ -155,13 +203,19 @@ int main() {
     retained[index].memberCount = 1;
     retained[index].commandId[15] = static_cast<uint8_t>(index + 1);
     retained[index].stateGeneration = static_cast<uint32_t>(index + 1);
-    assert(tracker.note(retained[index], Result::Success,
-                        static_cast<uint32_t>(20 + index), completed) ==
+    assert(admitAndApply(retained[index], Result::Success,
+                         static_cast<uint32_t>(20 + index)) ==
            TrackingResult::Complete);
   }
-  assert(tracker.note(retained.front(), Result::Success, 99, completed) ==
+  assert(tracker.admit(retained.front(), 20, completed) ==
          TrackingResult::DuplicateComplete);
   assert(completed.leaseGeneration == 20);
+  assert(tracker.admit(retained.front(), 99, completed) ==
+         TrackingResult::Admitted);
+
+  assert(leaseMatches(9, 9));
+  assert(!leaseMatches(9, 0));
+  assert(!leaseMatches(9, 10));
 
   std::cout << "ride delivery protocol tests passed\n";
   return 0;

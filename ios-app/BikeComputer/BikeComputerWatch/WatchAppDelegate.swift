@@ -139,6 +139,14 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
             .store(in: &cancellables)
         connectivityCoordinator.activate()
         navigationManager.recoverIfNeeded()
+        workoutManager.$isRecovering
+            .removeDuplicates()
+            .filter { !$0 }
+            .prefix(1)
+            .sink { [weak deviceLink] _ in
+                deviceLink?.completeInitialDemandRestoration()
+            }
+            .store(in: &cancellables)
     }
 
     func handleActiveWorkoutRecovery() {

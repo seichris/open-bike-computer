@@ -551,7 +551,7 @@ jobs:
             tools/tests/test_scoped_watch_payload_policy.cpp \
             -o /tmp/test_scoped_watch_payload_policy
           /tmp/test_scoped_watch_payload_policy
-          g++ -std=c++17 -Wall -Wextra -Werror \
+          g++ -std=c++17 -Wall -Wextra -Werror -DVERSION=\"ci-host\" \
             tools/tests/test_ride_delivery_protocol.cpp \
             -o /tmp/test_ride_delivery_protocol
           /tmp/test_ride_delivery_protocol

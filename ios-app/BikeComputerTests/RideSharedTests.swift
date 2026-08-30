@@ -1567,6 +1567,39 @@ enum RideSharedTests {
                 firstPreparationAttempt.deviceID == deviceID,
             "Watch preparation retries preserve their logical identity"
         )
+        var restoredPreparationGate =
+            WatchDirectRidePreparationRestorationGateV1(
+                restoredOperation: .prepare
+            )
+        expect(
+            restoredPreparationGate.complete(
+                hasRecoveredDemand: true
+            ) == .retain &&
+                restoredPreparationGate.complete(
+                    hasRecoveredDemand: false
+                ) == .none,
+            "a restored active ride retains preparation exactly once"
+        )
+        var abandonedPreparationGate =
+            WatchDirectRidePreparationRestorationGateV1(
+                restoredOperation: .prepare
+            )
+        expect(
+            abandonedPreparationGate.complete(
+                hasRecoveredDemand: false
+            ) == .release,
+            "a relaunch without recovered ride demand releases preparation"
+        )
+        var restoredReleaseGate =
+            WatchDirectRidePreparationRestorationGateV1(
+                restoredOperation: .release
+            )
+        expect(
+            restoredReleaseGate.complete(
+                hasRecoveredDemand: false
+            ) == .none,
+            "an already durable release is not reclassified as preparation"
+        )
         expect(
             WatchDirectRidePreparationRetryPolicyV1.delaySeconds(
                 afterAttempt: 1

@@ -307,10 +307,17 @@ Only terminal/idle workout state and explicit navigation clear require this
 application acknowledgement; replaceable GPS, route windows, maneuvers, and
 ordinary live workout snapshots retain latest-state resynchronization semantics.
 
-Firmware accepts every member of a group under the same authenticated role,
-lease, command ID, state generation, type, and member count. It emits no
-success acknowledgement for a partial group. When the complete operation has
-been validated and retained by the corresponding firmware state owner, it
+Firmware validates and admits each member under the same authenticated role,
+lease, command ID, state generation, type, and member count before mutating
+that member's retained state. The tracker serializes one group at a time;
+completed duplicates, in-flight duplicates, and interleaved groups are rejected
+or replayed at admission, so a member cannot apply state a second time. Members
+can become visible one by one while a group is arriving, but an interrupted
+group remains pending and the controller retries or resynchronizes the complete
+logical state. Firmware emits no success acknowledgement for a partial group.
+It revalidates the authoritative controller lease immediately before a queued
+route is retained. When the complete operation has been validated and retained
+by the corresponding firmware state owner, it
 notifies the controller on protected navigation channel `2` with exactly 32
 bytes:
 
@@ -330,9 +337,12 @@ Results are `0=success`, `1=stale`, `2=busy`, `3=unauthorized`,
 `4=malformed`, and `5=resource-rejected`. `success` and an exactly matching
 `stale` result complete the logical command. Other results are typed failures;
 in particular `resource-rejected` is not reported as a radio timeout. Clients
-match type, command ID, state generation, current connection generation, and a
-non-zero lease generation before completing a command. Delayed, duplicate, or
-old-generation acknowledgements cannot complete newer work.
+match type, command ID, state generation, their local connection generation,
+and a non-zero firmware lease proof before completing a command. The numeric
+lease generation is firmware-owned: current authentication and lease responses
+do not expose that generation to clients for an equality comparison. Protected
+notification sequencing plus command and connection identity prevent delayed,
+duplicate, or old-connection acknowledgements from completing newer work.
 
 Firmware retains the eight most recent completed command results and replays
 the matching `RAK1` for a duplicate command ID without applying the state
@@ -340,8 +350,9 @@ twice. A client may retry one application-ack timeout with the same command ID
 and state generation, but it creates a new protected `S2` frame and sequence.
 Disconnect discards encrypted transport bytes; the controller reconnects,
 reauthenticates, reacquires its lease, and regenerates a complete latest-state
-resynchronization from logical state. Critical groups are admitted atomically
-and cannot be evicted by replaceable telemetry.
+resynchronization from logical state. Each client admits a critical group to its
+outbound queue atomically, and replaceable telemetry cannot evict it; firmware
+then serializes and tracks its individual members through completion.
 
 Golden vectors (command payload bytes `aa bb`):
 
