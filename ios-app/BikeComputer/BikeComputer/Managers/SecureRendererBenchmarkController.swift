@@ -120,10 +120,19 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
         return requestID
     }
 
-    func frame(after sequence: UInt32) async throws -> Data? {
+    func frame(
+        after sequence: UInt32,
+        capturedAtOrAfter timestampMs: UInt32
+    ) async throws -> Data? {
         try await request(
             path: "device-debug/v1/frame",
-            queryItems: [URLQueryItem(name: "after", value: String(sequence))],
+            queryItems: [
+                URLQueryItem(name: "after", value: String(sequence)),
+                URLQueryItem(
+                    name: "capturedAtOrAfter",
+                    value: String(timestampMs)
+                ),
+            ],
             allowNoContent: true,
             maximumBytes: 1_048_576
         )
@@ -756,10 +765,17 @@ final class SecureRendererBenchmarkController: ObservableObject {
         // Always collect one terminal snapshot so cadence, job, memory, and
         // crypto counters include the complete measurement interval.
         try checkContinuity()
-        try await record(
-            try await metricsWithRetry(client: client),
-            captureCheckpoints: false
-        )
+        let pendingBeforeTerminalSnapshot = pending.count
+        try await record(try await metricsWithRetry(client: client))
+        if pending.count < pendingBeforeTerminalSnapshot {
+            // A terminal checkpoint frame extends the window. Capture final
+            // cadence, memory, job, and crypto counters after that response.
+            try checkContinuity()
+            try await record(
+                try await metricsWithRetry(client: client),
+                captureCheckpoints: false
+            )
+        }
         guard let summary = RendererBenchmarkEvaluator.summary(
             snapshots: snapshots,
             samples: samples
@@ -919,12 +935,18 @@ final class SecureRendererBenchmarkController: ObservableObject {
         let geometry = baseline.board == "WAVESHARE_AMOLED_175"
             ? (width: 466, height: 466, rotation: 1)
             : (width: 410, height: 502, rotation: 0)
-        let deadline = Date().addingTimeInterval(4)
+        // A stale buffered frame is rejected cheaply by the firmware with
+        // HTTP 204 before it captures the marker-bound successor. Leave room
+        // for that pinned request plus the measured 4.4-5.9 second frame body.
+        let deadline = Date().addingTimeInterval(10)
         var lastError: Error?
         while Date() < deadline {
             try checkContinuity()
             do {
-                guard let data = try await client.frame(after: lastFrameSequence) else {
+                guard let data = try await client.frame(
+                    after: lastFrameSequence,
+                    capturedAtOrAfter: routeReplay.receivedAtMs
+                ) else {
                     try await pause(seconds: 0.25)
                     continue
                 }
