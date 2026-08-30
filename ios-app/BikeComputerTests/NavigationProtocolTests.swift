@@ -16134,8 +16134,8 @@ struct NavigationProtocolTests {
         )
         assertEqual(
             DeviceTransferFreshFailurePolicy.failure(
-                after: 0,
-                currentSequence: 0,
+                after: nil,
+                currentSequence: nil,
                 code: "legacy_error",
                 message: "legacy firmware has no sequence"
             ),
@@ -16157,7 +16157,7 @@ struct NavigationProtocolTests {
         )
         assertEqual(
             DeviceTransferFreshFailurePolicy.failure(
-                after: UInt32.max,
+                after: UInt64(UInt32.max),
                 currentSequence: 1,
                 code: "sd_unavailable",
                 message: ""
@@ -20349,7 +20349,7 @@ struct NavigationProtocolTests {
             Data("{\"enabled\":false}".utf8)
         assert(manager.handleDeviceTransferStatusNotification(clearedPacket),
                "a status without lastError is consumed")
-        assertEqual(manager.deviceTransferLastErrorSequence, 0,
+        assertEqual(manager.deviceTransferLastErrorSequence, nil,
                     "legacy or clear status resets the optional error sequence")
 
         let invalidPacket = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data("{".utf8)

@@ -449,12 +449,13 @@ struct DeviceTransferFreshFailure: Equatable {
 
 enum DeviceTransferFreshFailurePolicy {
     static func failure(
-        after initialSequence: UInt32,
-        currentSequence: UInt32,
+        after initialSequence: UInt64?,
+        currentSequence: UInt64?,
         code: String?,
         message: String?
     ) -> DeviceTransferFreshFailure? {
-        guard currentSequence != 0,
+        guard let currentSequence,
+              currentSequence != 0,
               currentSequence != initialSequence,
               let code,
               !code.isEmpty else { return nil }
@@ -628,7 +629,7 @@ final class DeviceTransferManager {
     }
 
     private func freshMapTransferRejection(
-        after initialErrorSequence: UInt32,
+        after initialErrorSequence: UInt64?,
         networkError: Error,
         bleManager: BLEManager
     ) async -> OfflineMapPlatformError? {
@@ -664,7 +665,7 @@ final class DeviceTransferManager {
     }
 
     private func currentMapTransferRejection(
-        after initialErrorSequence: UInt32,
+        after initialErrorSequence: UInt64?,
         bleManager: BLEManager
     ) -> OfflineMapPlatformError? {
         guard let failure = DeviceTransferFreshFailurePolicy.failure(

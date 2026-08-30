@@ -1446,12 +1446,11 @@ context allocation, handshake allocation, handshake timeout, other handshake
 failure, and pre-handshake setup failure. Its monotonic `sequence` lets the app
 distinguish a newly observed failure from a retained error belonging to an
 earlier transfer. The message contains only numeric ESP-TLS/mbedTLS results,
-before/after internal, DMA, and PSRAM heap totals/largest blocks, and whether
-the PSRAM handshake reserve was restored; it never includes certificate or key
-bytes, the bearer token, the hotspot password, request headers, or request
-payload. This status is intended to diagnose a failed pinned-HTTPS session over
-the already authenticated BLE channel without requiring a serial connection or
-weakening TLS.
+before/after internal, DMA, and PSRAM heap totals/largest blocks; it never
+includes certificate or key bytes, the bearer token, the hotspot password,
+request headers, or request payload. This status is intended to diagnose a
+failed pinned-HTTPS session over the already authenticated BLE channel without
+requiring a serial connection or weakening TLS.
 
 ### Device diagnostics transfer
 

@@ -51,7 +51,7 @@ assert "CONFIG_PM_PROFILING=n" in waveshare_sdkconfig
 assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n" in waveshare_sdkconfig
 assert "CONFIG_ARDUINO_LOOP_STACK_SIZE=16384" in waveshare_sdkconfig
 assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in waveshare_sdkconfig
-assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768" in waveshare_sdkconfig
+assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536" in waveshare_sdkconfig
 assert "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL" not in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=n" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=n" in waveshare_sdkconfig
@@ -210,7 +210,7 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y" in sdkconfig
     assert "CONFIG_ARDUINO_LOOP_STACK_SIZE=16384" in sdkconfig
     assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in sdkconfig
-    assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768" in sdkconfig
+    assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536" in sdkconfig
     assert "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL" not in sdkconfig
     assert "CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=n" in sdkconfig
     assert "CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=n" in sdkconfig
