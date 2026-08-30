@@ -240,6 +240,9 @@ class RendererBenchmarkTests(unittest.TestCase):
         gates = renderer_benchmark.load_gates(
             TOOLS / "renderer_benchmark_gates.json"
         )
+        self.assertEqual(
+            gates["absolute"]["minimumMetricsSampleFraction"], 0.3
+        )
         renderer_benchmark.validate_acceptance_inputs(
             route_fixture=route,
             route_fixture_sha256=renderer_benchmark.PINNED_ROUTE_SHA256,

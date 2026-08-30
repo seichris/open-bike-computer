@@ -14414,6 +14414,12 @@ struct NavigationProtocolTests {
             "the in-app sweep uses the exact firmware benchmark gate contract"
         )
         assertEqual(gates.schema, 1, "secure benchmark gates retain schema 1")
+        assertEqual(
+            gates.absolute.minimumMetricsSampleFraction,
+            0.3,
+            "secure benchmark sampling reflects serialized pinned HTTPS frames"
+        )
+
         let mapFixture = RendererBenchmarkMapFixtureIdentity(
             id: "shanghai-map",
             sha256: String(repeating: "a", count: 64)
