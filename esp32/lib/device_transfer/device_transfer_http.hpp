@@ -125,7 +125,6 @@ private:
   std::array<HandlerRegistration, 4> handlers_{};
   size_t handlerCount_ = 0;
   TaskHandle_t workerTask_ = nullptr;
-  void *tlsHandshakePsramReserve_ = nullptr;
 
   void handleClient(TransferClient &client);
   void runWorker();
@@ -141,9 +140,6 @@ private:
   void unlockState() const;
   void lockTlsIdentity() const;
   void unlockTlsIdentity() const;
-  bool ensureTlsHandshakeReserve();
-  bool releaseTlsHandshakeReserve();
-  void stopClientAndRestoreTlsHandshakeReserve(TransferClient &client);
 };
 
 struct HttpResponseHeader {

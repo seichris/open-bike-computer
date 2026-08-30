@@ -15,7 +15,6 @@ HTTP_SOURCE = (
 HTTP_HEADER = (
     ROOT / "lib/device_transfer/device_transfer_http.hpp"
 ).read_text(encoding="utf-8")
-MAIN_SOURCE = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
 
 
 class DeviceTransferTLSContractTests(unittest.TestCase):
@@ -79,9 +78,9 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
             "psramLargestBefore=",
             "psramAfter=",
             "psramLargestAfter=",
-            "reserveRestored=",
         ):
             self.assertIn(field, worker)
+        self.assertNotIn("reserveRestored=", worker)
         for forbidden in (
             "certificatePem",
             "privateKeyPem",
@@ -112,59 +111,10 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
         self.assertIn('\\"sequence\\":', transfer_status)
         self.assertIn("transferStatus.errorSequence", transfer_status)
 
-    def test_tls_psram_hole_is_reserved_before_renderer_and_leased_only_to_tls(self):
-        self.assertIn(
-            "TLS_HANDSHAKE_PSRAM_RESERVE_BYTES = 64U * 1024U", TLS_HEADER
-        )
-        self.assertIn("void *tlsHandshakePsramReserve_ = nullptr;", HTTP_HEADER)
-        configure = HTTP_SOURCE[
-            HTTP_SOURCE.index("void HttpTransferServer::configure(uint16_t") :
-            HTTP_SOURCE.index("bool HttpTransferServer::registerHandler")
-        ]
-        self.assertIn("ensureTlsHandshakeReserve()", configure)
-        self.assertLess(
-            MAIN_SOURCE.index("deviceTransferHttp.configure("),
-            MAIN_SOURCE.index("mapView.initMap("),
-        )
-        self.assertLess(
-            MAIN_SOURCE.index("deviceTransferHttp.configure("),
-            MAIN_SOURCE.index("initLVGL();"),
-        )
-
-        enable = HTTP_SOURCE[
-            HTTP_SOURCE.index("bool HttpTransferServer::setEnabled(bool enabled,") :
-            HTTP_SOURCE.index("void HttpTransferServer::setLastError")
-        ]
-        self.assertLess(
-            enable.index("waitUntilStopped(2000)"),
-            enable.index("!ensureTlsHandshakeReserve()"),
-        )
-
-        worker = HTTP_SOURCE[
-            HTTP_SOURCE.index("void HttpTransferServer::runWorker()") :
-            HTTP_SOURCE.index("void HttpTransferServer::workerTaskThunk")
-        ]
-        self.assertLess(
-            worker.index("releaseTlsHandshakeReserve()"),
-            worker.index("client.begin("),
-        )
-        self.assertIn(
-            "!ensureTlsHandshakeReserve() || !releaseTlsHandshakeReserve()",
-            worker,
-        )
-        self.assertIn(
-            "const bool reserveRestored = ensureTlsHandshakeReserve()", worker
-        )
-        self.assertIn("stopClientAndRestoreTlsHandshakeReserve(client)", worker)
-
-        handler = HTTP_SOURCE[
-            HTTP_SOURCE.index("void HttpTransferServer::handleClient") :
-            HTTP_SOURCE.index("HttpRequestHandler *\nHttpTransferServer::handlerForPath")
-        ]
-        self.assertLess(
-            handler.index("stopClientAndRestoreTlsHandshakeReserve(client)"),
-            handler.index("handler->responseDidComplete"),
-        )
+    def test_tls_does_not_claim_a_psram_hole_that_cannot_fix_internal_crypto(self):
+        self.assertNotIn("TLS_HANDSHAKE_PSRAM_RESERVE_BYTES", TLS_HEADER)
+        self.assertNotIn("tlsHandshakePsramReserve_", HTTP_HEADER)
+        self.assertNotIn("ensureTlsHandshakeReserve", HTTP_SOURCE)
 
     def test_leaf_fingerprint_is_sha256_over_certificate_der(self):
         fingerprint = TLS_SOURCE[
