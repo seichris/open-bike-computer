@@ -19872,6 +19872,40 @@ struct NavigationProtocolTests {
         assertEqual(timeout.diagnosticCode, "network_not_started",
                     "missing connection metrics retain the earliest known layer")
 
+        let secureConnectionFailure = DeviceTransferServerProbeResult(
+            outcome: .transportError(
+                domain: NSURLErrorDomain,
+                code: NSURLErrorSecureConnectionFailed
+            ),
+            diagnostics: DeviceTransferPinnedSessionSnapshot()
+        )
+        assertEqual(
+            secureConnectionFailure.diagnosticCode,
+            "tls_secure_connection_failed_before_challenge",
+            "a secure-connection error is not mislabeled as an unstarted network"
+        )
+        let underlyingDiagnostics = DeviceTransferPinnedSessionDiagnostics()
+        underlyingDiagnostics.record(error: NSError(
+            domain: NSURLErrorDomain,
+            code: NSURLErrorSecureConnectionFailed,
+            userInfo: [
+                NSUnderlyingErrorKey: NSError(
+                    domain: "kCFErrorDomainCFNetwork",
+                    code: -9806
+                ),
+            ]
+        ))
+        assertEqual(
+            underlyingDiagnostics.snapshot().underlyingErrorDomain,
+            "kCFErrorDomainCFNetwork",
+            "only the underlying transport error domain is retained"
+        )
+        assertEqual(
+            underlyingDiagnostics.snapshot().underlyingErrorCode,
+            -9806,
+            "only the underlying transport error code is retained"
+        )
+
         let connectivityWait = DeviceTransferServerProbeResult(
             outcome: .transportError(
                 domain: NSURLErrorDomain,
@@ -19925,6 +19959,41 @@ struct NavigationProtocolTests {
                safeFields["sessionToken"] == nil &&
                safeFields["hotspotPassphrase"] == nil,
                "credentials and certificate material are never diagnostic fields")
+
+        let completeSafeFields = DeviceTransferPinnedSessionSnapshot(
+            tlsChallengeOutcome: .accepted,
+            waitedForConnectivity: true,
+            connectStarted: true,
+            connectCompleted: true,
+            tlsStarted: true,
+            tlsCompleted: true,
+            connectDurationMilliseconds: 12,
+            tlsDurationMilliseconds: 34,
+            remoteEndpointMatched: true,
+            localAddressInAccessorySubnet: true,
+            networkProtocolName: "http/1.1",
+            reusedConnection: false,
+            proxyConnection: false,
+            underlyingErrorDomain: "kCFErrorDomainCFNetwork",
+            underlyingErrorCode: -9806
+        ).diagnosticFields
+        assert(
+            completeSafeFields.keys.allSatisfy(
+                RideDiagnosticsFieldPolicy.isAllowed
+            ),
+            "the privacy allowlist must preserve every non-secret probe field"
+        )
+        let transferEnvelopeFields = [
+            "attempt", "networkObservation", "outcome", "httpStatus",
+            "errorDomain", "errorCode", "applyResult", "applyErrorDomain",
+            "applyErrorCode",
+        ]
+        assert(
+            transferEnvelopeFields.allSatisfy(
+                RideDiagnosticsFieldPolicy.isAllowed
+            ),
+            "the privacy allowlist must preserve transfer envelope fields"
+        )
 
         assert(
             OfflineMapPlatformError.transferWiFiJoinFailed(

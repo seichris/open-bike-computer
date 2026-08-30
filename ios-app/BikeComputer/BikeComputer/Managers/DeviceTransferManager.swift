@@ -442,7 +442,7 @@ struct DeviceTransferServerProbeResult: Equatable, Sendable {
             return "invalid_http_response"
         case .httpStatus(let status):
             return "http_\(status)"
-        case .transportError:
+        case .transportError(let domain, let code):
             switch diagnostics.tlsChallengeOutcome {
             case .hostMismatch:
                 return "tls_host_mismatch"
@@ -469,6 +469,10 @@ struct DeviceTransferServerProbeResult: Equatable, Sendable {
                 }
                 if diagnostics.connectCompleted {
                     return "tcp_connected_tls_not_started"
+                }
+                if domain == NSURLErrorDomain &&
+                    code == NSURLErrorSecureConnectionFailed {
+                    return "tls_secure_connection_failed_before_challenge"
                 }
                 if diagnostics.waitedForConnectivity {
                     return "connectivity_wait_without_network_load"
@@ -771,11 +775,23 @@ final class DeviceTransferManager {
             after: initialErrorSequence,
             bleManager: bleManager
         ) {
+            recordMapTransferStatusProbe(
+                result: "fresh_error",
+                includeCurrentError: true,
+                bleManager: bleManager
+            )
             return rejection
         }
 
         let initialStatusRevision = bleManager.deviceTransferStatusRevision
-        guard bleManager.requestDeviceTransferStatus() else { return nil }
+        guard bleManager.requestDeviceTransferStatus() else {
+            recordMapTransferStatusProbe(
+                result: "request_not_queued",
+                bleManager: bleManager
+            )
+            return nil
+        }
+        var observedStatusResponse = false
         for _ in 0..<8 {
             if Task.isCancelled { return nil }
             try? await Task.sleep(
@@ -788,10 +804,39 @@ final class DeviceTransferManager {
                     after: initialErrorSequence,
                     bleManager: bleManager
                ) {
+                recordMapTransferStatusProbe(
+                    result: "fresh_error",
+                    includeCurrentError: true,
+                    bleManager: bleManager
+                )
                 return rejection
             }
+            observedStatusResponse =
+                observedStatusResponse ||
+                bleManager.deviceTransferStatusRevision != initialStatusRevision
         }
+        recordMapTransferStatusProbe(
+            result: observedStatusResponse ? "no_fresh_error" : "no_response",
+            bleManager: bleManager
+        )
         return nil
+    }
+
+    private func recordMapTransferStatusProbe(
+        result: String,
+        includeCurrentError: Bool = false,
+        bleManager: BLEManager
+    ) {
+        var fields = ["result": result]
+        if includeCurrentError {
+            if let code = bleManager.deviceTransferLastErrorCode, !code.isEmpty {
+                fields["code"] = code
+            }
+            if let sequence = bleManager.deviceTransferLastErrorSequence {
+                fields["sequence"] = String(sequence)
+            }
+        }
+        record(mode: .map, event: "device_status_probe", fields: fields)
     }
 
     private func currentMapTransferRejection(
@@ -1564,6 +1609,7 @@ final class DeviceTransferManager {
         } catch {
             try Task.checkCancellation()
             let error = error as NSError
+            diagnostics.record(error: error)
             return DeviceTransferServerProbeResult(
                 outcome: .transportError(
                     domain: error.domain,

@@ -38,6 +38,8 @@ nonisolated struct DeviceTransferPinnedSessionSnapshot: Equatable, Sendable {
     var networkProtocolName: String? = nil
     var reusedConnection = false
     var proxyConnection = false
+    var underlyingErrorDomain: String? = nil
+    var underlyingErrorCode: Int? = nil
 
     var diagnosticFields: [String: String] {
         var fields = [
@@ -65,6 +67,12 @@ nonisolated struct DeviceTransferPinnedSessionSnapshot: Equatable, Sendable {
         }
         if let networkProtocolName, !networkProtocolName.isEmpty {
             fields["networkProtocol"] = networkProtocolName
+        }
+        if let underlyingErrorDomain, !underlyingErrorDomain.isEmpty {
+            fields["underlyingErrorDomain"] = underlyingErrorDomain
+        }
+        if let underlyingErrorCode {
+            fields["underlyingErrorCode"] = String(underlyingErrorCode)
         }
         return fields
     }
@@ -98,6 +106,14 @@ nonisolated final class DeviceTransferPinnedSessionDiagnostics:
     func recordWaitingForConnectivity() {
         lock.lock()
         current.waitedForConnectivity = true
+        lock.unlock()
+    }
+
+    func record(error: NSError) {
+        let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError
+        lock.lock()
+        current.underlyingErrorDomain = underlying?.domain
+        current.underlyingErrorCode = underlying?.code
         lock.unlock()
     }
 
@@ -370,6 +386,16 @@ final class DeviceTransferPinnedSessionDelegate: NSObject,
             expectedHost: expectedHost,
             expectedPort: expectedPort
         )
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        if let error {
+            diagnostics?.record(error: error as NSError)
+        }
     }
 
     func urlSession(
