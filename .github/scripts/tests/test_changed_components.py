@@ -215,6 +215,14 @@ class ChangedComponentsTests(unittest.TestCase):
         self.assertTrue(selected["firmware_host"])
         self.assertFalse(selected["ios"])
 
+    def test_shared_ride_ble_contract_selects_both_platforms(self) -> None:
+        selected = changed_components.classify_paths([
+            "protocol/ride-ble-contract-v1.json"
+        ])
+        self.assertTrue(selected["firmware_build"])
+        self.assertTrue(selected["firmware_host"])
+        self.assertTrue(selected["ios"])
+
     def test_ci_router_change_runs_every_component(self) -> None:
         selected = changed_components.classify_paths(
             [".github/scripts/changed_components.py"]

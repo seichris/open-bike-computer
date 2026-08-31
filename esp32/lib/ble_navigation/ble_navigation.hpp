@@ -18,6 +18,7 @@
 #include "destination_picker_protocol.hpp"
 #include "map_profile_protocol.hpp"
 #include "renderer_diagnostics_ble_protocol.hpp"
+#include "ride_ble_protocol.generated.hpp"
 
 // Forward declarations - actual NimBLE includes only in .cpp
 class NimBLEServer;
@@ -31,6 +32,12 @@ struct NavigationData {
   uint8_t iconID;
   uint16_t distance;
   char instruction[64];
+};
+
+enum class WorkoutStartRequestPresentation : uint8_t {
+  Unavailable = 0,
+  StartOnIPhone = 1,
+  StartOnAppleWatch = 2,
 };
 
 /**
@@ -265,6 +272,7 @@ public:
   /** Notify the authenticated iPhone app that the device requested a workout. */
   bool requestWorkoutStart();
   bool canRequestWorkoutStart() const;
+  WorkoutStartRequestPresentation workoutStartRequestPresentation() const;
   bool notifyRideAutomationFrame(const uint8_t *data, size_t length);
 
   BLEDebugStats getDebugStats() const;
@@ -285,20 +293,21 @@ private:
 
   // BLE UUIDs (matching iOS app)
   static constexpr const char *SERVICE_UUID =
-      "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800";
+      ride_ble_protocol_generated::SERVICE_UUID;
   static constexpr const char *NAV_CHAR_UUID =
-      "2A6E"; // Navigation instructions
-  static constexpr const char *ROUTE_CHAR_UUID = "2A6F"; // Route geometry
+      ride_ble_protocol_generated::NAVIGATION_UUID; // Navigation instructions
+  static constexpr const char *ROUTE_CHAR_UUID =
+      ride_ble_protocol_generated::ROUTE_UUID; // Route geometry
   static constexpr const char *GPS_CHAR_UUID =
-      "2A72"; // GPS Position (Location and Speed)
+      ride_ble_protocol_generated::GPS_UUID; // GPS Position
   static constexpr const char *SETTINGS_CHAR_UUID =
-      "2A73"; // Map Settings (runtime configuration)
+      ride_ble_protocol_generated::SETTINGS_UUID; // Map Settings
   static constexpr const char *AUTH_CHAR_UUID =
-      "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002";
+      ride_ble_protocol_generated::AUTH_UUID;
   static constexpr const char *WORKOUT_TELEMETRY_CHAR_UUID =
-      "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003";
+      ride_ble_protocol_generated::WORKOUT_UUID;
   static constexpr const char *RIDE_AUTOMATION_CHAR_UUID =
-      "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004";
+      ride_ble_protocol_generated::RIDE_AUTOMATION_UUID;
 
   NimBLEServer *pServer = nullptr;
   NimBLECharacteristic *pNavCharacteristic = nullptr;
