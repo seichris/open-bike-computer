@@ -1213,6 +1213,13 @@ bool DeviceOwnership::authorizeRideWrite(AuthenticatedChannel channel,
   return false;
 }
 
+uint32_t DeviceOwnership::authenticatedRideLeaseGeneration(uint32_t nowMs) {
+  if (!sessionAuthenticated_ ||
+      !rideLease_.allows(currentControllerIdentity(), nowMs))
+    return 0;
+  return rideLease_.generation();
+}
+
 void DeviceOwnership::clearStagedWatchControllerMemory() {
   stagedWatchControllerId_.fill(0);
   stagedWatchControllerKey_.fill(0);

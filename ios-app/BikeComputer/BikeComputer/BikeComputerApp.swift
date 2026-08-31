@@ -170,6 +170,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         _ = rideAutomationCoordinator
         let bleManager = coordinator.bleManager
         bleManager.diagnosticsRecorder = rideDiagnosticsRecorder
+        watchConnectivityCoordinator.diagnosticsRecorder =
+            rideDiagnosticsRecorder
         locationManager.diagnosticsRecorder = rideDiagnosticsRecorder
         coordinator.diagnosticsRecorder = rideDiagnosticsRecorder
         workoutMirrorManager.store.diagnosticsRecorder = rideDiagnosticsRecorder

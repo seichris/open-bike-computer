@@ -8,12 +8,129 @@ enum RideSharedTests {
         try testRuntimeProgressDeviationAndReplacement()
         try testRouteFileStoreAndSyncContract()
         try testWatchControllerContract()
+        try testRideBLETransportStateMachine()
+        try testRideBLEATTWatchdogPolicy()
         try testWatchDirectBLEContract()
         try testFavoriteSyncPolicyAndCoordinateNormalization()
         try testGPXImport()
         try testStravaAthleteRoutePages()
         try testStravaRouteContractAndReloadBookmarks()
         print("RideSharedTests passed")
+    }
+
+    private static func testRideBLETransportStateMachine() throws {
+        for role in [
+            RideBLEControllerRoleV1.ownerPhone,
+            .scopedWatch,
+        ] {
+            var transport = RideBLETransportStateMachineV1(role: role)
+            expect(
+                transport.reduce(.beginConnection) == .applied &&
+                    transport.generation == 1 &&
+                    transport.phase == .connecting,
+                "\(role.rawValue) begins one generation-scoped connection"
+            )
+            expect(
+                transport.reduce(.linkConnected(generation: 0)) ==
+                    .ignoredStaleGeneration &&
+                    transport.phase == .connecting,
+                "\(role.rawValue) ignores a late callback from an old connection"
+            )
+            expect(
+                transport.reduce(.linkConnected(generation: 1)) == .applied &&
+                    transport.reduce(.authenticated(generation: 1)) == .applied,
+                "\(role.rawValue) advances through link and authentication"
+            )
+            expect(
+                transport.reduce(.capabilitiesAccepted(
+                    generation: 1,
+                    schemaVersion: 20
+                )) == .rejectedInvalidTransition,
+                "\(role.rawValue) cannot report Ready before its firmware lease"
+            )
+            expect(
+                transport.reduce(.leaseAccepted(
+                    generation: 1,
+                    leaseGeneration: 7
+                )) == .applied &&
+                    transport.reduce(.capabilitiesAccepted(
+                        generation: 1,
+                        schemaVersion: 20
+                    )) == .becameReady &&
+                    transport.isReady,
+                "\(role.rawValue) becomes Ready only after auth, lease, and capabilities"
+            )
+            let commandID = UUID()
+            expect(
+                transport.reduce(.writerChanged(
+                    generation: 1,
+                    state: .waitingForApplicationAcknowledgement(
+                        commandID: commandID
+                    )
+                )) == .applied && transport.isReady,
+                "\(role.rawValue) remains authenticated while one critical ACK is pending"
+            )
+            expect(
+                transport.reduce(.failed(
+                    generation: 1,
+                    reason: .applicationTimeout
+                )) == .leftReady &&
+                    !transport.isReady &&
+                    transport.lastFailure == .applicationTimeout,
+                "\(role.rawValue) cannot stay Ready after writer recovery begins"
+            )
+            expect(
+                transport.reduce(.disconnected(generation: 1)) == .applied &&
+                    transport.generation == 2 &&
+                    transport.phase == .idle &&
+                    transport.leaseGeneration == nil,
+                "\(role.rawValue) discards connection-scoped authority on disconnect"
+            )
+        }
+
+        var stopping = RideBLETransportStateMachineV1(role: .scopedWatch)
+        _ = stopping.reduce(.beginConnection)
+        _ = stopping.reduce(.linkConnected(generation: 1))
+        _ = stopping.reduce(.authenticated(generation: 1))
+        _ = stopping.reduce(.leaseAccepted(
+            generation: 1,
+            leaseGeneration: 11
+        ))
+        _ = stopping.reduce(.capabilitiesAccepted(
+            generation: 1,
+            schemaVersion: 20
+        ))
+        expect(
+            stopping.reduce(.stopRequested(generation: 1)) == .leftReady &&
+                stopping.reduce(.leaseReleased(generation: 1)) == .applied &&
+                stopping.leaseGeneration == nil,
+            "a Watch stop cannot remain Ready while its lease is releasing"
+        )
+    }
+
+    private static func testRideBLEATTWatchdogPolicy() throws {
+        expect(
+            RideBLEATTWatchdogPolicyV1.minimumTimeoutSeconds == 5 &&
+                RideBLEATTWatchdogPolicyV1.maximumTimeoutSeconds == 15,
+            "ATT watchdog production bounds remain explicit"
+        )
+        expect(
+            RideBLEATTWatchdogPolicyV1.timeoutSeconds(
+                for: .criticalApplication
+            ) == 8 &&
+                RideBLEATTWatchdogPolicyV1.timeoutSeconds(
+                    for: .transferControl
+                ) == 15,
+            "critical state and transfer control use bounded class-aware waits"
+        )
+        expect(
+            RideBLEATTWatchdogPolicyV1.recovery(for: .authentication) ==
+                .restartAuthentication &&
+                RideBLEATTWatchdogPolicyV1.recovery(
+                    for: .replaceableSnapshot
+                ) == .reconnectAndResynchronize,
+            "timeouts never request a blind same-generation write retry"
+        )
     }
 
     private static func testStravaAthleteRoutePages() throws {
@@ -771,16 +888,19 @@ enum RideSharedTests {
         var cap2 = Data("CAP2".utf8)
         cap2.append(1)
         expect(
-            WatchDirectBLEProtocolV1.capabilityClientVersion == 15 &&
+            WatchDirectBLEProtocolV1.capabilityClientVersion == 20 &&
                 WatchDirectBLEProtocolV1.scopedControllerFeature == 1 << 14 &&
                 WatchDirectBLEProtocolV1.rideAutomationFeature == 1 << 15 &&
-                WatchDirectBLEProtocolV1.gpsPositionQualityV1Feature == 1 << 17,
-            "Watch requests GPS quality v1 without moving existing capabilities"
+                WatchDirectBLEProtocolV1.gpsPositionQualityV1Feature == 1 << 17 &&
+                WatchDirectBLEProtocolV1.rideDeliveryAcknowledgementFeature ==
+                    1 << 22,
+            "Watch requests reliable ride delivery without moving existing capabilities"
         )
         let flags = WatchDirectBLEProtocolV1.scopedControllerFeature |
             WatchDirectBLEProtocolV1.workoutTelemetryFeature |
             WatchDirectBLEProtocolV1.rideAutomationFeature |
-            WatchDirectBLEProtocolV1.gpsPositionQualityV1Feature
+            WatchDirectBLEProtocolV1.gpsPositionQualityV1Feature |
+            WatchDirectBLEProtocolV1.rideDeliveryAcknowledgementFeature
         cap2.append(UInt8(flags & 0xFF))
         cap2.append(UInt8((flags >> 8) & 0xFF))
         cap2.append(UInt8((flags >> 16) & 0xFF))
@@ -790,8 +910,120 @@ enum RideSharedTests {
             capabilities?.supportsScopedController == true &&
                 capabilities?.supportsWorkoutTelemetry == true &&
                 capabilities?.supportsRideAutomation == true &&
-                capabilities?.supportsGPSPositionQualityV1 == true,
-            "Watch recognizes direct-controller, workout, ride-automation, and GPS-quality capabilities"
+                capabilities?.supportsGPSPositionQualityV1 == true &&
+                capabilities?.supportsRideDeliveryAcknowledgement == true,
+            "Watch recognizes direct-controller, workout, ride-automation, GPS-quality, and delivery-ack capabilities"
+        )
+        let deliveryCommandID = UUID(
+            uuidString: "00112233-4455-6677-8899-aabbccddeeff"
+        )!
+        let deliveryEnvelope = RideBLEApplicationCommandEnvelopeV1(
+            commandType: .workoutState,
+            memberIndex: 1,
+            memberCount: 3,
+            commandID: deliveryCommandID,
+            stateGeneration: 0x1234_5678,
+            payload: Data([0xAA, 0xBB])
+        )
+        let deliveryBytes = deliveryEnvelope.encoded()
+        expect(
+            deliveryBytes?.map { String(format: "%02x", $0) }.joined() ==
+                RideBLEGeneratedProtocolV1.applicationCommandGoldenHex &&
+                deliveryBytes.flatMap(
+                    RideBLEApplicationCommandEnvelopeV1.decode
+                ) == deliveryEnvelope,
+            "ride command envelope matches the shared golden vector"
+        )
+        let deliveryAck = RideBLEApplicationAcknowledgementV1(
+            commandType: .workoutState,
+            result: .success,
+            commandID: deliveryCommandID,
+            stateGeneration: 0x1234_5678,
+            leaseGeneration: 9
+        )
+        expect(
+            deliveryAck.encoded().map {
+                String(format: "%02x", $0)
+            }.joined() ==
+                RideBLEGeneratedProtocolV1
+                    .applicationAcknowledgementGoldenHex &&
+                RideBLEApplicationAcknowledgementV1.decode(
+                    deliveryAck.encoded()
+                ) == deliveryAck,
+            "ride acknowledgement matches the shared golden vector"
+        )
+        let deliveryIdentity = RideBLEApplicationPendingIdentityV1(
+            commandType: .workoutState,
+            commandID: deliveryCommandID,
+            stateGeneration: 0x1234_5678
+        )
+        expect(
+            RideBLEApplicationAcknowledgementPolicyV1.disposition(
+                pending: deliveryIdentity,
+                acknowledgement: deliveryAck
+            ) == .completed(result: .success),
+            "a matching application acknowledgement completes one logical group"
+        )
+        expect(
+            RideBLEApplicationAcknowledgementPolicyV1.disposition(
+                pending: deliveryIdentity,
+                acknowledgement: .init(
+                    commandType: .workoutState,
+                    result: .success,
+                    commandID: UUID(),
+                    stateGeneration: 0x1234_5678,
+                    leaseGeneration: 9
+                )
+            ) == .ignored,
+            "a delayed acknowledgement for another command cannot complete current state"
+        )
+        expect(
+            RideBLEApplicationAcknowledgementPolicyV1.disposition(
+                pending: deliveryIdentity,
+                acknowledgement: .init(
+                    commandType: .workoutState,
+                    result: .success,
+                    commandID: deliveryCommandID,
+                    stateGeneration: 0x1234_5679,
+                    leaseGeneration: 9
+                )
+            ) == .ignored,
+            "a reordered acknowledgement for another state generation is ignored"
+        )
+        expect(
+            RideBLEApplicationAcknowledgementPolicyV1.disposition(
+                pending: deliveryIdentity,
+                acknowledgement: .init(
+                    commandType: .workoutState,
+                    result: .resourceRejected,
+                    commandID: deliveryCommandID,
+                    stateGeneration: 0x1234_5678,
+                    leaseGeneration: 9
+                )
+            ) == .rejected(result: .resourceRejected),
+            "firmware resource rejection remains a typed application outcome"
+        )
+        expect(
+            RideBLEApplicationAcknowledgementPolicyV1.disposition(
+                pending: deliveryIdentity,
+                acknowledgement: .init(
+                    commandType: .workoutState,
+                    result: .success,
+                    commandID: deliveryCommandID,
+                    stateGeneration: 0x1234_5678,
+                    leaseGeneration: 0
+                )
+            ) == .invalidLeaseGeneration,
+            "an acknowledgement without authenticated lease identity fails closed"
+        )
+        expect(
+            RideBLEApplicationRetryPolicyV1.timeoutAction(
+                completedRetries: 0
+            ) == .retry &&
+                RideBLEApplicationRetryPolicyV1.timeoutAction(
+                    completedRetries: 1
+                ) == .recoverTransport,
+            "lost application acknowledgements receive one bounded retry"
         )
         var malformed = cap2
         malformed.append(contentsOf: [1, 4, 0, 0, 0])
@@ -808,6 +1040,16 @@ enum RideSharedTests {
             WatchNavigationNotificationV1.decode(Data("DREQ".utf8) +
                 Data(repeating: 0, count: 6)) == .ignoredDeviceRequest,
             "an owner-only destination request cannot tear down a Watch ride"
+        )
+        expect(
+            WatchNavigationNotificationV1.decode(Data("WREQ".utf8)) ==
+                .ignoredDeviceRequest,
+            "an owner-only workout request cannot tear down a Watch ride"
+        )
+        expect(
+            WatchNavigationNotificationV1.decode(Data("WREQ\0".utf8)) ==
+                .invalidCapabilities,
+            "a malformed owner-only workout request still fails closed"
         )
         expect(
             WatchNavigationNotificationV1.decode(Data("CAP2".utf8)) ==
@@ -885,35 +1127,165 @@ enum RideSharedTests {
             "new navigation supersedes an undelivered stale clear"
         )
 
-        var queue = WatchBLEOutboundQueueV1(capacity: 3)
-        expect(queue.enqueue(.init(
-            target: .route,
-            payload: Data([1]),
-            priority: 2,
-            coalescingKey: "route"
-        )), "route is queued")
-        expect(queue.enqueue(.init(
-            target: .gps,
-            payload: Data([2]),
-            priority: 1,
-            coalescingKey: "gps"
-        )), "GPS is queued")
-        expect(queue.enqueue(.init(
-            target: .gps,
-            payload: Data([3]),
-            priority: 1,
-            coalescingKey: "gps"
-        )), "new GPS coalesces")
-        expect(queue.enqueue(.init(
-            target: .navigation,
-            payload: Data([4]),
-            priority: 3
-        )), "ordered maneuver is queued")
+        func group(
+            _ payloads: [UInt8],
+            priority: RideBLECommandPriorityV1,
+            disposition: RideBLECommandDispositionV1 = .replaceable,
+            key: String? = nil
+        ) -> WatchBLEOutboundGroupV1 {
+            WatchBLEOutboundGroupV1(
+                connectionGeneration: 1,
+                stateGeneration: UInt32(payloads.first ?? 0),
+                priority: priority,
+                disposition: disposition,
+                coalescingKey: key,
+                writes: payloads.map {
+                    .init(target: .navigation, payload: Data([$0]))
+                }
+            )
+        }
+        var queue = WatchBLEOutboundQueueV1(
+            capacity: 6,
+            reservedCriticalFrames: 3
+        )
+        expect(queue.enqueue(group(
+            [1], priority: .livePosition, key: "route"
+        )).admitted, "route is queued")
+        expect(queue.enqueue(group(
+            [2], priority: .livePosition, key: "gps"
+        )).admitted, "GPS is queued")
+        expect(queue.enqueue(group(
+            [3], priority: .livePosition, key: "gps"
+        )).admitted, "new GPS coalesces atomically")
+        expect(queue.enqueue(group(
+            [4], priority: .navigationBoundary, key: "maneuver"
+        )).admitted, "latest maneuver is queued")
         expect(
-            queue.dequeue()?.payload == Data([3]) &&
-                queue.dequeue()?.payload == Data([1]) &&
-                queue.dequeue()?.payload == Data([4]),
-            "priority order is stable and only replaceable writes coalesce"
+            queue.dequeueGroup()?.writes.first?.payload == Data([4]) &&
+                queue.dequeueGroup()?.writes.first?.payload == Data([1]) &&
+                queue.dequeueGroup()?.writes.first?.payload == Data([3]),
+            "group priority is stable and replaceable state coalesces"
+        )
+
+        for capacity in 1...5 {
+            var boundaryQueue = WatchBLEOutboundQueueV1(
+                capacity: capacity,
+                reservedCriticalFrames: min(3, capacity)
+            )
+            let admission = boundaryQueue.enqueue(group(
+                [10, 11, 12],
+                priority: .terminalWorkout,
+                disposition: .critical,
+                key: "workout"
+            ))
+            expect(
+                admission.admitted == (capacity >= 3) &&
+                    boundaryQueue.pendingFrameCount ==
+                        (capacity >= 3 ? 3 : 0),
+                "a three-frame terminal group is admitted entirely or not at capacity \(capacity)"
+            )
+        }
+        var saturated = WatchBLEOutboundQueueV1(
+            capacity: 5,
+            reservedCriticalFrames: 2
+        )
+        expect(
+            saturated.enqueue(group(
+                [20, 21, 22], priority: .livePosition, key: "bulk"
+            )).admitted &&
+                saturated.enqueue(group(
+                    [23], priority: .diagnostics, key: "extra"
+                )) == .rejectedReplaceable,
+            "replaceable traffic cannot consume critical reserve"
+        )
+        let criticalAdmission = saturated.enqueue(group(
+            [30, 31, 32],
+            priority: .control,
+            disposition: .critical,
+            key: "clear"
+        ))
+        expect(
+            criticalAdmission.admitted &&
+                saturated.pendingFrameCount == 3 &&
+                saturated.dequeueGroup()?.writes.map(\.payload) == [
+                    Data([30]), Data([31]), Data([32]),
+                ],
+            "a critical group atomically evicts replaceable saturation"
+        )
+        var boundaryRetention = WatchBLEOutboundQueueV1(
+            capacity: 4,
+            reservedCriticalFrames: 2
+        )
+        expect(
+            boundaryRetention.enqueue(group(
+                [40],
+                priority: .terminalWorkout,
+                disposition: .critical,
+                key: "workout"
+            )).admitted &&
+                boundaryRetention.enqueue(group(
+                    [41],
+                    priority: .livePosition,
+                    key: "workout"
+                )) == .rejectedReplaceable &&
+                boundaryRetention.dequeueGroup()?.writes.first?.payload ==
+                    Data([40]),
+            "replaceable state cannot supersede a queued critical boundary"
+        )
+
+        var byteBounded = WatchBLEOutboundQueueV1(
+            capacity: 4,
+            reservedCriticalFrames: 1,
+            byteCapacity: 8,
+            reservedCriticalBytes: 4
+        )
+        let replaceableBytes = WatchBLEOutboundGroupV1(
+            connectionGeneration: 1,
+            stateGeneration: 1,
+            priority: .livePosition,
+            disposition: .replaceable,
+            coalescingKey: "byte-state",
+            writes: [.init(
+                target: .navigation,
+                payload: Data(repeating: 1, count: 4)
+            )]
+        )
+        let criticalBytes = WatchBLEOutboundGroupV1(
+            connectionGeneration: 1,
+            stateGeneration: 2,
+            priority: .control,
+            disposition: .critical,
+            coalescingKey: "byte-boundary",
+            writes: [.init(
+                target: .navigation,
+                payload: Data(repeating: 2, count: 4)
+            )]
+        )
+        expect(
+            byteBounded.enqueue(replaceableBytes).admitted &&
+                byteBounded.pendingByteCount == 4 &&
+                byteBounded.enqueue(criticalBytes).admitted &&
+                byteBounded.pendingByteCount == 8 &&
+                byteBounded.metrics.highWaterBytes == 8,
+            "queue byte ceiling preserves an explicit critical reserve"
+        )
+        let oversizedFrame = WatchBLEOutboundGroupV1(
+            connectionGeneration: 1,
+            stateGeneration: 3,
+            priority: .livePosition,
+            disposition: .replaceable,
+            writes: [.init(
+                target: .navigation,
+                payload: Data(
+                    repeating: 3,
+                    count: WatchBLEOutboundQueueV1.maximumFrameBytes + 1
+                )
+            )]
+        )
+        expect(
+            byteBounded.enqueue(oversizedFrame) == .rejectedReplaceable &&
+                byteBounded.pendingByteCount == 8,
+            "an oversized frame is rejected without disturbing admitted groups"
         )
 
         let location = sample(latitude: 1, longitude: 2, altitude: 3)
@@ -980,6 +1352,32 @@ enum RideSharedTests {
             invalidCoursePacket[8] == 0xFF &&
                 invalidCoursePacket[9] == 0xFF,
             "Watch GPS uses the version-11 explicit invalid-heading sentinel"
+        )
+
+        let diagnostic = WatchBLETransportDiagnosticEventV1(
+            attemptID: UUID(),
+            sequence: 1,
+            kind: .attTimeout,
+            phase: RideBLETransportPhaseV1.recovering.rawValue,
+            reason: RideBLETransportFailureReasonV1.attTimeout.rawValue,
+            connectionGeneration: 4,
+            queueDepth: 3,
+            queueHighWater: 8,
+            queueBytes: 512,
+            queueHighWaterBytes: 2_048,
+            replacedGroups: 2,
+            rejectedGroups: 1,
+            uptimeMs: 12_345,
+            latencyMs: 8_000
+        )
+        let diagnosticBatch = WatchBLETransportDiagnosticBatchV1(
+            events: [diagnostic]
+        )
+        try expect(
+            WatchBLETransportDiagnosticBatchV1.decode(
+                try diagnosticBatch.encoded()
+            ) == diagnosticBatch,
+            "Watch transport diagnostics round-trip without ride payload data"
         )
     }
 
@@ -1140,6 +1538,79 @@ enum RideSharedTests {
                 preparationRequest.encoded()
             ) == preparationRequest,
             "Watch-direct preparation requests are exact and versioned"
+        )
+        let preparationIntent = try WatchDirectRidePreparationIntentV1(
+            preparationID: preparationRequest.preparationID,
+            operation: .prepare,
+            deviceID: deviceID.uppercased()
+        )
+        let restoredPreparationIntent = try
+            WatchDirectRidePreparationIntentV1.decode(
+                preparationIntent.encoded()
+            )
+        let firstPreparationAttempt = try restoredPreparationIntent.request(
+            requestID: UUID(
+                uuidString: "10000000-0000-0000-0000-000000000001"
+            )!
+        )
+        let retryPreparationAttempt = try restoredPreparationIntent.request(
+            requestID: UUID(
+                uuidString: "10000000-0000-0000-0000-000000000002"
+            )!
+        )
+        expect(
+            restoredPreparationIntent == preparationIntent &&
+                firstPreparationAttempt.requestID !=
+                    retryPreparationAttempt.requestID &&
+                firstPreparationAttempt.preparationID ==
+                    retryPreparationAttempt.preparationID &&
+                firstPreparationAttempt.deviceID == deviceID,
+            "Watch preparation retries preserve their logical identity"
+        )
+        var restoredPreparationGate =
+            WatchDirectRidePreparationRestorationGateV1(
+                restoredOperation: .prepare
+            )
+        expect(
+            restoredPreparationGate.complete(
+                hasRecoveredDemand: true
+            ) == .retain &&
+                restoredPreparationGate.complete(
+                    hasRecoveredDemand: false
+                ) == .none,
+            "a restored active ride retains preparation exactly once"
+        )
+        var abandonedPreparationGate =
+            WatchDirectRidePreparationRestorationGateV1(
+                restoredOperation: .prepare
+            )
+        expect(
+            abandonedPreparationGate.complete(
+                hasRecoveredDemand: false
+            ) == .release,
+            "a relaunch without recovered ride demand releases preparation"
+        )
+        var restoredReleaseGate =
+            WatchDirectRidePreparationRestorationGateV1(
+                restoredOperation: .release
+            )
+        expect(
+            restoredReleaseGate.complete(
+                hasRecoveredDemand: false
+            ) == .none,
+            "an already durable release is not reclassified as preparation"
+        )
+        expect(
+            WatchDirectRidePreparationRetryPolicyV1.delaySeconds(
+                afterAttempt: 1
+            ) == 1 &&
+                WatchDirectRidePreparationRetryPolicyV1.delaySeconds(
+                    afterAttempt: 6
+                ) == 30 &&
+                WatchDirectRidePreparationRetryPolicyV1.delaySeconds(
+                    afterAttempt: 100
+                ) == 30,
+            "Watch preparation retry backoff is bounded"
         )
         let preparationResponse = WatchDirectRidePreparationResponseV1(
             requestID: preparationRequest.requestID,
