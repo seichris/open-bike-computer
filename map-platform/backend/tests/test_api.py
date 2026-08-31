@@ -673,7 +673,7 @@ class MapJobRunAPITests(unittest.TestCase):
                 profile["rendererFormatVersion"]
                 for profile in development.json()["generationProfiles"]
             ],
-            [3, 2, 1],
+            [4, 3, 2, 1],
         )
 
     def update_job(self, job_id: str, **values) -> None:

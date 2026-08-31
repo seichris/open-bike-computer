@@ -128,8 +128,8 @@ class GenericGeometryTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
-            write_fmb(root / "first.fmb", first, [], 0, 0)
-            write_fmb(root / "second.fmb", second, [], 0, 0)
+            write_fmb(root / "first.fmb", first, [], 0, 0, renderer_target=1)
+            write_fmb(root / "second.fmb", second, [], 0, 0, renderer_target=1)
             self.assertEqual(
                 (root / "first.fmb").read_bytes(),
                 (root / "second.fmb").read_bytes(),

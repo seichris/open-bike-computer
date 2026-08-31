@@ -29,7 +29,7 @@ class GenerationProfilePolicyTests(unittest.TestCase):
                 profile.renderer_format_version
                 for profile in policy.available_profiles("development")
             ],
-            [3, 2, 1],
+            [4, 3, 2, 1],
         )
         self.assertEqual(
             [
@@ -43,10 +43,10 @@ class GenerationProfilePolicyTests(unittest.TestCase):
                 profile.renderer_format_version
                 for profile in policy.available_profiles(
                     "production",
-                    canary_profile_ids=frozenset({"buildings-3d-v1"}),
+                    canary_profile_ids=frozenset({"map-pois-v1"}),
                 )
             ],
-            [3, 2, 1],
+            [4, 3, 2, 1],
         )
 
     def test_invalid_or_ambiguous_policy_fails_closed(self):

@@ -70,6 +70,7 @@ def renderer_features(job: MapJob) -> tuple[str, int, list[str]]:
         1: [],
         2: ["street-labels"],
         3: ["3d-buildings", "street-labels"],
+        4: ["street-labels", "3d-buildings", "map-pois"],
     }
     try:
         features = features_by_format[format_version]
