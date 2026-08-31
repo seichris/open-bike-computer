@@ -52,6 +52,7 @@ public:
     bool haveFiles = false;
     bool haveTarget = false;
     bool haveBuildings = false;
+    bool havePois = false;
     uint64_t schema = 0;
     skipWhitespace();
     if (!consume('{'))
@@ -82,6 +83,10 @@ public:
         if (haveBuildings || !parseBuildings(manifest))
           return false;
         haveBuildings = true;
+      } else if (key == "pois") {
+        if (havePois || !parsePois(manifest))
+          return false;
+        havePois = true;
       } else if (key == "target") {
         if (haveTarget || !parseTarget(manifest))
           return false;
@@ -101,8 +106,9 @@ public:
         !haveFiles || !haveTarget || schema != 1 ||
         manifest.renderer != "esp32-fmb" ||
         (manifest.formatVersion != 1 && manifest.formatVersion != 2 &&
-         manifest.formatVersion != 3) ||
-        (manifest.formatVersion == 3) != haveBuildings) {
+         manifest.formatVersion != 3 && manifest.formatVersion != 4) ||
+        (manifest.formatVersion >= 3) != haveBuildings ||
+        (manifest.formatVersion == 4) != havePois) {
       return false;
     }
     manifest.schemaVersion = static_cast<uint32_t>(schema);
@@ -375,6 +381,52 @@ private:
     return total == manifest.buildingRecordCount;
   }
 
+  bool parsePois(MapManifest &manifest) {
+    skipWhitespace();
+    if (!consume('{'))
+      return false;
+    bool seen[6] = {false, false, false, false, false, false};
+    static constexpr const char *keys[6] = {
+        "bicycleServicesCount", "gasStationsCount", "publicToiletsCount",
+        "recordCount", "restaurantsAndCafesCount", "shopsCount"};
+    static constexpr uint8_t categoryIndex[6] = {4, 3, 2, 255, 1, 0};
+    skipWhitespace();
+    std::string previousKey;
+    while (true) {
+      std::string key;
+      uint64_t value = 0;
+      if (!parseString(key) || (!previousKey.empty() && key <= previousKey) ||
+          !consumeAfterWhitespace(':') || !parseUnsigned(value) ||
+          value > UINT32_MAX)
+        return false;
+      previousKey = key;
+      size_t index = 0;
+      while (index < 6 && key != keys[index])
+        ++index;
+      if (index == 6 || seen[index])
+        return false;
+      seen[index] = true;
+      if (categoryIndex[index] == 255)
+        manifest.poiRecordCount = static_cast<uint32_t>(value);
+      else
+        manifest.poiCategoryCounts[categoryIndex[index]] =
+            static_cast<uint32_t>(value);
+      skipWhitespace();
+      if (consume('}'))
+        break;
+      if (!consume(','))
+        return false;
+      skipWhitespace();
+    }
+    uint64_t total = 0;
+    for (bool value : seen)
+      if (!value)
+        return false;
+    for (uint32_t count : manifest.poiCategoryCounts)
+      total += count;
+    return total == manifest.poiRecordCount;
+  }
+
   bool parseFiles(MapStreamFileTable &files) {
     skipWhitespace();
     if (!consume('['))
@@ -452,6 +504,7 @@ private:
     bool haveLabelProfile = false;
     bool haveLanguages = false;
     bool haveFallback = false;
+    bool havePoiProfile = false;
     skipWhitespace();
     if (consume('}'))
       return false;
@@ -498,6 +551,12 @@ private:
             !parseString(manifest.minimumFirmwareVersion))
           return false;
         haveMinimumFirmware = true;
+      } else if (key == "poiProfileVersion") {
+        uint64_t value = 0;
+        if (havePoiProfile || !parseUnsigned(value) || value > UINT32_MAX)
+          return false;
+        manifest.poiProfileVersion = static_cast<uint32_t>(value);
+        havePoiProfile = true;
       } else if (!skipValue(0)) {
         return false;
       }
@@ -506,13 +565,16 @@ private:
         return haveRenderer && haveFormat && haveMinimumFirmware &&
                (manifest.formatVersion == 1
                     ? (!haveBuildingProfile && !haveLabelProfile &&
-                       !haveLanguages && !haveFallback)
+                       !haveLanguages && !haveFallback && !havePoiProfile)
                     : (haveLabelProfile && haveLanguages && haveFallback &&
                        manifest.labelProfileVersion == 1 &&
-                       (manifest.formatVersion == 3
+                       (manifest.formatVersion >= 3
                             ? haveBuildingProfile &&
                                   manifest.buildingProfileVersion == 1
-                            : !haveBuildingProfile)));
+                            : !haveBuildingProfile) &&
+                       (manifest.formatVersion == 4
+                            ? havePoiProfile && manifest.poiProfileVersion == 1
+                            : !havePoiProfile)));
       if (!consume(','))
         return false;
       skipWhitespace();
@@ -966,7 +1028,8 @@ bool parseMapStreamManifest(std::string_view manifestText,
     previousPath = path;
   }
   if (((parsed.metadata.formatVersion == 2 ||
-        parsed.metadata.formatVersion == 3) &&
+        parsed.metadata.formatVersion == 3 ||
+        parsed.metadata.formatVersion == 4) &&
        (fontAssetCount != 1 || legacyTextBlockCount != 0)) ||
       (parsed.metadata.formatVersion == 1 && fontAssetCount != 0)) {
     return false;

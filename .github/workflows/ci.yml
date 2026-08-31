@@ -651,6 +651,7 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror \
             lib/maps/src/mapBlockFormat.cpp \
             lib/maps/src/mapBuildingBlock.cpp \
+            lib/maps/src/mapPoiBlock.cpp \
             tools/tests/test_map_block_format.cpp \
             -o /tmp/test_map_block_format
           /tmp/test_map_block_format
@@ -661,7 +662,9 @@ jobs:
           /tmp/test_map_font_asset_format
           g++ -std=c++17 -Wall -Wextra -Werror \
             lib/maps/src/mapBlockFormat.cpp \
+            lib/maps/src/mapBuildingBlock.cpp \
             lib/maps/src/mapLabelBlock.cpp \
+            lib/maps/src/mapPoiBlock.cpp \
             tools/tests/test_map_label_block.cpp \
             -o /tmp/test_map_label_block
           /tmp/test_map_label_block
@@ -677,6 +680,11 @@ jobs:
             -o /tmp/test_map_label_layout
           /tmp/test_map_label_layout
           g++ -std=c++17 -Wall -Wextra -Werror \
+            lib/maps/src/mapPoiLayout.cpp \
+            tools/tests/test_map_poi_layout.cpp \
+            -o /tmp/test_map_poi_layout
+          /tmp/test_map_poi_layout
+          g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_map_label_rasterizer.cpp \
             -o /tmp/test_map_label_rasterizer
           /tmp/test_map_label_rasterizer
@@ -689,7 +697,9 @@ jobs:
           g++ -std=c++17 \
             lib/map_transfer/map_transfer.cpp \
             lib/maps/src/mapBlockFormat.cpp \
+            lib/maps/src/mapBuildingBlock.cpp \
             lib/maps/src/mapLabelBlock.cpp \
+            lib/maps/src/mapPoiBlock.cpp \
             lib/maps/src/mapFontAsset.cpp \
             lib/maps/src/mapFontAssetFormat.cpp \
             tools/tests/test_map_transfer.cpp \
@@ -700,7 +710,9 @@ jobs:
           g++ -std=c++17 \
             lib/map_transfer/map_transfer.cpp \
             lib/maps/src/mapBlockFormat.cpp \
+            lib/maps/src/mapBuildingBlock.cpp \
             lib/maps/src/mapLabelBlock.cpp \
+            lib/maps/src/mapPoiBlock.cpp \
             lib/maps/src/mapFontAsset.cpp \
             lib/maps/src/mapFontAssetFormat.cpp \
             lib/map_transfer/map_stream_format.cpp \
@@ -723,7 +735,9 @@ jobs:
             lib/map_transfer/map_stream_receiver.cpp \
             lib/map_transfer/map_stream_compiled_trust.cpp \
             lib/maps/src/mapBlockFormat.cpp \
+            lib/maps/src/mapBuildingBlock.cpp \
             lib/maps/src/mapLabelBlock.cpp \
+            lib/maps/src/mapPoiBlock.cpp \
             lib/maps/src/mapFontAsset.cpp \
             lib/maps/src/mapFontAssetFormat.cpp \
             tools/tests/test_map_stream_install.cpp \

@@ -40,7 +40,7 @@ bool take(size_t amount, size_t size, size_t &offset) {
 
 bool baseEnd(const uint8_t *data, size_t size, size_t &offset,
              uint16_t &actualPolylineCount) {
-  if (size < 6 || (data[3] != 3 && data[3] != 4))
+  if (size < 6 || (data[3] != 3 && data[3] != 4 && data[3] != 5))
     return false;
   offset = 4;
   const uint16_t polygonCount = le16(data + offset);
@@ -149,7 +149,7 @@ bool decode(const uint8_t *data, size_t size, uint16_t polylineCount,
     return fail(error, "invalid FMB header");
   if (data[3] < 3)
     return true;
-  if ((data[3] != 3 && data[3] != 4) ||
+  if ((data[3] != 3 && data[3] != 4 && data[3] != 5) ||
       !map_block_format::validate(data, size))
     return fail(error, "invalid label-aware FMB block");
 

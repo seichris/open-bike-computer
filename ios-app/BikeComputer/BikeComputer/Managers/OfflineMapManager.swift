@@ -1545,7 +1545,8 @@ nonisolated enum SavedMapRendererCompatibilityPolicy {
     static func isCompatible(
         rendererFormatVersion: Int?,
         supportsStreetLabels: Bool,
-        supports3DBuildings: Bool
+        supports3DBuildings: Bool,
+        supportsMapPois: Bool
     ) -> Bool {
         switch rendererFormatVersion {
         case nil, 1:
@@ -1553,7 +1554,9 @@ nonisolated enum SavedMapRendererCompatibilityPolicy {
         case 2:
             return supportsStreetLabels
         case 3:
-            return supports3DBuildings
+            return supportsStreetLabels && supports3DBuildings
+        case 4:
+            return supportsStreetLabels && supports3DBuildings && supportsMapPois
         default:
             return false
         }
@@ -4828,7 +4831,8 @@ final class OfflineMapManager: ObservableObject {
            !SavedMapRendererCompatibilityPolicy.isCompatible(
                rendererFormatVersion: metadata.rendererFormatVersion,
                supportsStreetLabels: bleManager.supportsStreetLabels,
-               supports3DBuildings: bleManager.supports3DBuildings
+               supports3DBuildings: bleManager.supports3DBuildings,
+               supportsMapPois: bleManager.supportsMapPois
            ) {
             throw OfflineMapPlatformError.invalidPack(
                 "This saved map is not compatible with the connected device. Regenerate it for this firmware."
@@ -4878,7 +4882,8 @@ final class OfflineMapManager: ObservableObject {
         if !SavedMapRendererCompatibilityPolicy.isCompatible(
                rendererFormatVersion: prepared.artifact.rendererFormatVersion,
                supportsStreetLabels: bleManager.supportsStreetLabels,
-               supports3DBuildings: bleManager.supports3DBuildings
+               supports3DBuildings: bleManager.supports3DBuildings,
+               supportsMapPois: bleManager.supportsMapPois
            ) {
             throw OfflineMapPlatformError.invalidPack(
                 "This saved map is not compatible with the connected device. Regenerate it for this firmware."

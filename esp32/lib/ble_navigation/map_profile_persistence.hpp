@@ -68,7 +68,8 @@ inline void load(Store &store, Profile &mapStyle,
   mapStyle.positionMarkerScale = store.getUChar("markerScale", 2);
   mapStyle.zoomLevel = store.getUChar(
       "zoomLevel", map_profile_protocol::MAP_DEFAULT_ZOOM_LEVEL);
-  const uint32_t storedMapVisibility = store.getUInt("visMask", 0x3FF);
+  const uint32_t storedMapVisibility = store.getUInt(
+      "visMask", map_profile_protocol::MAP_DEFAULT_PERSISTED_VISIBILITY_MASK);
   mapStyle.visibilityMask =
       map_profile_protocol::normalizedFeatureVisibilityMask(storedMapVisibility);
   mapStyle.labelDensity = static_cast<uint8_t>(map_profile_protocol::clampValue(

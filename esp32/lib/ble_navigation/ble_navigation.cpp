@@ -2307,6 +2307,11 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
                       mapView.debugStreetLabelFontHealthy()
                   ? "true"
                   : "false";
+      if (activeMap.target.formatVersion >= 4) {
+        body += ",\"poiProfileVersion\":" +
+                std::to_string(activeMap.target.poiProfileVersion) +
+                ",\"poiDataHealthy\":true";
+      }
     }
   } else {
     body += ",\"activeError\":{\"code\":\"" +
@@ -3263,6 +3268,10 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
                              RIDE_DELIVERY_ACK_CLIENT_VERSION) {
       featureFlags |=
           device_capabilities_protocol::RIDE_DELIVERY_ACK_FEATURE;
+    }
+    if (clientVersion >=
+        device_capabilities_protocol::MAP_POIS_CLIENT_VERSION) {
+      featureFlags |= device_capabilities_protocol::MAP_POIS_FEATURE;
     }
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,

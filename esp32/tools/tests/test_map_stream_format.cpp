@@ -727,6 +727,36 @@ int main() {
     assert(parsed.metadata.buildingProfileVersion == 1);
     assert(parsed.metadata.buildingRecordCount == 1);
     assert(parsed.metadata.buildingProvenanceCounts[0] == 1);
+    const std::string poiManifest =
+        std::string("{\"buildings\":{\"classDefaultHeightCount\":0,") +
+        "\"explicitHeightCount\":1,\"inheritedHeightCount\":0," +
+        "\"levelsHeightCount\":0,\"localMedianHeightCount\":0," +
+        "\"recordCount\":1},\"files\":[{\"bytes\":1,\"path\":\"" +
+        first + "\",\"sha256\":\"" + sha +
+        "\"},{\"bytes\":2,\"path\":\"VECTMAP/map/assets/street-labels.fma\"," +
+        "\"sha256\":\"" + sha +
+        "\"}],\"mapId\":\"map\",\"pois\":{\"bicycleServicesCount\":1," +
+        "\"gasStationsCount\":0,\"publicToiletsCount\":0,\"recordCount\":2," +
+        "\"restaurantsAndCafesCount\":1,\"shopsCount\":0}," +
+        "\"schemaVersion\":1,\"target\":{\"buildingProfileVersion\":1," +
+        "\"formatVersion\":4,\"internationalFallback\":\"en\"," +
+        "\"labelLanguages\":[\"en\"],\"labelProfileVersion\":1," +
+        "\"minFirmwareVersion\":\"0.0.0\",\"poiProfileVersion\":1," +
+        "\"renderer\":\"esp32-fmb\"}}";
+    assert(parseMapStreamManifest(poiManifest, manifestHeader, parsed));
+    assert(parsed.metadata.formatVersion == 4);
+    assert(parsed.metadata.poiProfileVersion == 1);
+    assert(parsed.metadata.poiRecordCount == 2);
+    assert(parsed.metadata.poiCategoryCounts[1] == 1);
+    assert(parsed.metadata.poiCategoryCounts[4] == 1);
+    auto mismatchedPoiSummary = poiManifest;
+    const size_t bicycleCount =
+        mismatchedPoiSummary.find("\"bicycleServicesCount\":1");
+    assert(bicycleCount != std::string::npos);
+    mismatchedPoiSummary[
+        mismatchedPoiSummary.find(':', bicycleCount) + 1U] = '0';
+    assert(!parseMapStreamManifest(mismatchedPoiSummary, manifestHeader,
+                                   parsed));
     auto mismatchedBuildingSummary = buildingManifest;
     const size_t explicitCount =
         mismatchedBuildingSummary.find("\"explicitHeightCount\":1");

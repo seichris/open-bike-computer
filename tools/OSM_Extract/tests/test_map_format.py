@@ -140,7 +140,9 @@ def golden_features():
 class BinaryMapFormatTests(unittest.TestCase):
     def test_shared_golden_blocks_match_producer_bytes(self):
         fixtures = golden_fmb_blocks()
-        self.assertEqual(set(fixtures), {"fmb_v1", "fmb_v2", "fmb_v3", "fmb_v4"})
+        self.assertEqual(
+            set(fixtures), {"fmb_v1", "fmb_v2", "fmb_v3", "fmb_v4", "fmb_v5"}
+        )
         self.assertEqual(fixtures["fmb_v1"][:4], b"FMB\x01")
 
         polygon, road, building = golden_features()
@@ -169,14 +171,48 @@ class BinaryMapFormatTests(unittest.TestCase):
                     font_builder=GoldenFontBuilder(),
                     building_records=[building],
                 ),
+                "fmb_v5": write_fmb(
+                    root / "v5.fmb",
+                    [polygon],
+                    [road],
+                    0,
+                    0,
+                    renderer_target=4,
+                    font_builder=GoldenFontBuilder(),
+                    building_records=[building],
+                    poi_records=[
+                        {
+                            "local_x": 12,
+                            "local_y": 34,
+                            "category": 2,
+                            "maximum_zoom": 3,
+                            "rank": 2,
+                            "flags": 0,
+                        },
+                        {
+                            "local_x": 100,
+                            "local_y": 200,
+                            "category": 5,
+                            "maximum_zoom": 3,
+                            "rank": 0,
+                            "flags": 0,
+                        },
+                    ],
+                ),
             }
             generated = {
                 "fmb_v2": (root / "v2.fmb").read_bytes(),
                 "fmb_v3": (root / "v3.fmb").read_bytes(),
                 "fmb_v4": (root / "v4.fmb").read_bytes(),
+                "fmb_v5": (root / "v5.fmb").read_bytes(),
             }
 
-        for name, version in (("fmb_v2", 2), ("fmb_v3", 3), ("fmb_v4", 4)):
+        for name, version in (
+            ("fmb_v2", 2),
+            ("fmb_v3", 3),
+            ("fmb_v4", 4),
+            ("fmb_v5", 5),
+        ):
             self.assertEqual(expected_versions[name]["version"], version)
             self.assertEqual(generated[name], fixtures[name])
 

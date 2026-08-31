@@ -349,6 +349,14 @@ std::string toJson(const Snapshot &value) {
     appendTiming(body, value.buildingDraw);
     body << ",\"buildingTotal\":";
     appendTiming(body, value.buildingTotal);
+    body << ",\"poiGather\":";
+    appendTiming(body, value.poiGather);
+    body << ",\"poiLayout\":";
+    appendTiming(body, value.poiLayout);
+    body << ",\"poiDraw\":";
+    appendTiming(body, value.poiDraw);
+    body << ",\"poiTotal\":";
+    appendTiming(body, value.poiTotal);
     body << "},\"buildings\":{\"candidates\":" << value.buildings.candidates
        << ",\"selected\":" << value.buildings.selected
        << ",\"extruded\":" << value.buildings.extruded
@@ -370,6 +378,18 @@ std::string toJson(const Snapshot &value) {
        << ",\"extrudedRecords\":" << value.limiterPasses[3]
        << ",\"extrudedPoints\":" << value.limiterPasses[4]
        << ",\"extrudedPixels\":" << value.limiterPasses[5] << "}}"
+       << ",\"pois\":{\"candidates\":" << value.pois.candidates
+       << ",\"accepted\":" << value.pois.accepted
+       << ",\"collisionRejected\":" << value.pois.collisionRejected
+       << ",\"offscreen\":" << value.pois.offscreen
+       << ",\"capacityDeferred\":" << value.pois.capacityDeferred
+       << ",\"decodedRecords\":" << value.pois.decodedRecords
+       << ",\"decodedBytes\":" << value.pois.decodedBytes
+       << ",\"acceptedCategories\":[" << value.pois.acceptedCategories[0]
+       << ',' << value.pois.acceptedCategories[1] << ','
+       << value.pois.acceptedCategories[2] << ','
+       << value.pois.acceptedCategories[3] << ','
+       << value.pois.acceptedCategories[4] << "]}"
        << ",\"jobs\":{\"requested\":" << value.jobs.requested
        << ",\"started\":" << value.jobs.started
        << ",\"completed\":" << value.jobs.completed
