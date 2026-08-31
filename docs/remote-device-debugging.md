@@ -68,6 +68,12 @@ the display is off;
 **Wake display** requests the same policy-level activity and full refresh used
 by local wake handling.
 
+The remote-debug HTTP worker keeps its session-long stack in PSRAM so the
+diagnostic service does not consume BLE/TLS internal-DMA headroom. Map and
+firmware transfer workers retain internal stacks because activation and flash
+paths have stricter memory-access requirements; the optimization is therefore
+debug-mode-only and does not change release or update behavior.
+
 **BOOT (short press)** queues one debounced short press through the same
 firmware path as the physical GPIO0 button. It advances screens normally and,
 if an ownership comparison is active, obeys the same fresh-input gate before

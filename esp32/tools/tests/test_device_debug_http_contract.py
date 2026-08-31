@@ -129,6 +129,12 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertNotIn("sessionToken", RENDERER_DIAGNOSTICS)
         self.assertNotIn("apPassphrase", RENDERER_DIAGNOSTICS)
 
+    def test_renderer_metrics_serialize_without_small_internal_stream_buffers(self):
+        self.assertIn("class JsonBuilder", RENDERER_DIAGNOSTICS)
+        self.assertIn("body_.reserve(4096);", RENDERER_DIAGNOSTICS)
+        self.assertIn("std::to_chars", RENDERER_DIAGNOSTICS)
+        self.assertNotIn("std::ostringstream", RENDERER_DIAGNOSTICS)
+
     def test_checkpoint_frame_floor_skips_stale_pixels_before_transfer(self):
         frame = HTTP[
             HTTP.index("bool DeviceDebugHttp::handleFrame") :

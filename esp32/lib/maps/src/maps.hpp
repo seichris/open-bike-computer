@@ -287,6 +287,9 @@ private:
       MapBlock *mblock); // Build spatial grid for polygon culling
   bool fillPolygon(const Polygon &p,
                    map_surface::Rgb565Surface surface);
+  bool fillPolygon(
+      const Polygon &p, map_surface::Rgb565Surface surface,
+      std::vector<int16_t, PsramAllocator<int16_t>> &scanlineNodes);
   bool fillPolygon(const Polygon &p, lv_obj_t *canvas);
   void drawLine(map_surface::Rgb565Surface surface, int16_t x1, int16_t y1,
                 int16_t x2, int16_t y2, uint16_t color, uint8_t width);

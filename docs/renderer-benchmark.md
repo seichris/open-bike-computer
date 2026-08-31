@@ -55,6 +55,13 @@ changes the production default. Firmware likewise restores `current` if a
 queued window cannot be applied because its session or active-map identity is
 no longer valid.
 
+The total quotas remain authoritative even in dense scenes. Firmware sorts the
+bounded bounds-based candidate set by rider distance and stops exact ring
+projection once those same record/point/pixel quotas are full; farther records
+cannot affect nearest-first admission. Polygon scanline workspace is reused for
+the frame. These are output-preserving latency controls, not hidden profile or
+gate changes.
+
 ## Prerequisites
 
 1. Identify whether the connected device is the 1.75-inch or 2.06-inch board.

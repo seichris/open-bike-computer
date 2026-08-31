@@ -9,9 +9,11 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstdio>
 #include <new>
-#include <sstream>
+#include <string_view>
+#include <type_traits>
 
 namespace renderer_diagnostics {
 namespace {
@@ -19,6 +21,52 @@ namespace {
 portMUX_TYPE diagnosticsMux = portMUX_INITIALIZER_UNLOCKED;
 State diagnosticsState;
 uint32_t lastPeriodicMemorySampleMs = 0;
+
+// Renderer snapshots are a little over 3 KiB. Reserving above Arduino's
+// ALWAYSINTERNAL threshold gives the returned std::string one stable PSRAM
+// allocation instead of several small internal stream-buffer allocations and
+// a final copy.
+class JsonBuilder {
+public:
+  JsonBuilder() { body_.reserve(4096); }
+
+  JsonBuilder &operator<<(const char *value) {
+    if (value != nullptr)
+      body_.append(value);
+    return *this;
+  }
+
+  JsonBuilder &operator<<(const std::string &value) {
+    body_.append(value);
+    return *this;
+  }
+
+  JsonBuilder &operator<<(std::string_view value) {
+    body_.append(value.data(), value.size());
+    return *this;
+  }
+
+  JsonBuilder &operator<<(char value) {
+    body_.push_back(value);
+    return *this;
+  }
+
+  template <typename Integer,
+            typename = std::enable_if_t<std::is_integral_v<Integer> &&
+                                        !std::is_same_v<Integer, bool>>>
+  JsonBuilder &operator<<(Integer value) {
+    char digits[32] = {};
+    const auto converted = std::to_chars(digits, digits + sizeof(digits), value);
+    if (converted.ec == std::errc())
+      body_.append(digits, converted.ptr);
+    return *this;
+  }
+
+  std::string take() { return std::move(body_); }
+
+private:
+  std::string body_;
+};
 
 MemorySample memorySample() {
   constexpr uint32_t kInternalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
@@ -89,7 +137,7 @@ std::string jsonEscape(const char *value) {
   return result;
 }
 
-void appendTiming(std::ostringstream &body, const TimingSummary &value) {
+void appendTiming(JsonBuilder &body, const TimingSummary &value) {
   body << "{\"count\":" << value.count << ",\"lastMs\":" << value.lastMs
        << ",\"p50Ms\":" << value.p50Ms << ",\"p95Ms\":" << value.p95Ms
        << ",\"maximumMs\":" << value.maximumMs << "}";
@@ -276,7 +324,7 @@ Snapshot snapshot(uint32_t nowMs) {
 std::string toJson(const Snapshot &value) {
   try {
     const renderer_tuning::BuildingQuotas &quotas = value.tuning.buildings;
-    std::ostringstream body;
+    JsonBuilder body;
     body << "{\"ok\":true,\"schema\":" << static_cast<unsigned>(value.schema)
        << ",\"sequence\":" << value.sequence
        << ",\"timestampMs\":" << value.timestampMs
@@ -420,7 +468,7 @@ std::string toJson(const Snapshot &value) {
        << value.remoteDebug.freeAfterAllocate
        << ",\"largestAfterAllocate\":"
        << value.remoteDebug.largestAfterAllocate << "}}";
-    return body.str();
+    return body.take();
   } catch (const std::bad_alloc &) {
     return {};
   }

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <sstream>
 
@@ -452,13 +453,24 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     const uint32_t workerStackBytes =
         requestedMode == "debug" ? kDebugHttpWorkerStackBytes
                                   : kTransferHttpWorkerStackBytes;
+    // The debug service is RAM-only and never performs firmware flash writes
+    // or map activation. Keep its long-lived 16 KiB stack in PSRAM so the
+    // pinned-TLS session cannot consume the internal/DMA headroom that BLE
+    // authentication needs. Transfer/firmware modes retain an internal stack
+    // because their activation and flash paths may execute while external RAM
+    // is unavailable. Both variants use the capability-aware task API so the
+    // worker has one matching destruction path.
+    const UBaseType_t workerStackCaps =
+        requestedMode == "debug"
+            ? static_cast<UBaseType_t>(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+            : static_cast<UBaseType_t>(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     // Publish the worker handle and persistent power-lock ownership before the
     // new task can observe state. Holding the mutex across xTaskCreate makes
     // an immediately scheduled worker wait until both fields are coherent.
     lockState();
-    const BaseType_t created =
-        xTaskCreate(workerTaskThunk, "device_http", workerStackBytes, this, 1,
-                    &worker);
+    const BaseType_t created = xTaskCreateWithCaps(
+        workerTaskThunk, "device_http", workerStackBytes, this, 1, &worker,
+        workerStackCaps);
     if (created == pdPASS) {
       workerTask_ = worker;
       powerLockHeld_ = acquiredPowerLock;
@@ -466,9 +478,10 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     unlockState();
     Serial.printf(
         "DEVICE_TRANSFER_HTTP: worker create result=%ld handle=%p "
-        "stack_bytes=%u free_heap=%u\n",
+        "stack_bytes=%u stack_caps=%s free_heap=%u\n",
         static_cast<long>(created), static_cast<void *>(worker),
         static_cast<unsigned>(workerStackBytes),
+        requestedMode == "debug" ? "psram" : "internal",
         static_cast<unsigned>(ESP.getFreeHeap()));
     if (created != pdPASS) {
       server_.stop();
@@ -780,7 +793,7 @@ void HttpTransferServer::workerTaskThunk(void *arg) {
   auto *server = static_cast<HttpTransferServer *>(arg);
   if (server != nullptr)
     server->runWorker();
-  vTaskDelete(nullptr);
+  vTaskDeleteWithCaps(nullptr);
 }
 
 HttpTransferStatus HttpTransferServer::status() const {

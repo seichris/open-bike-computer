@@ -1831,6 +1831,13 @@ bool Maps::buildPolygonGrid(MapBlock *mblock) {
  */
 bool Maps::fillPolygon(const Polygon &p,
                        map_surface::Rgb565Surface surface) {
+  std::vector<int16_t, PsramAllocator<int16_t>> scanlineNodes;
+  return fillPolygon(p, surface, scanlineNodes);
+}
+
+bool Maps::fillPolygon(
+    const Polygon &p, map_surface::Rgb565Surface surface,
+    std::vector<int16_t, PsramAllocator<int16_t>> &scanlineNodes) {
   if (!surface.valid() || p.points.size() < 2)
     return true;
 
@@ -1839,9 +1846,9 @@ bool Maps::fillPolygon(const Polygon &p,
   if (minY >= maxY)
     return true;
 
-  std::vector<int16_t, PsramAllocator<int16_t>> nodeX;
   try {
-    nodeX.resize(p.points.size());
+    if (scanlineNodes.size() < p.points.size())
+      scanlineNodes.resize(p.points.size());
   } catch (const std::bad_alloc &) {
     return false;
   }
@@ -1857,21 +1864,22 @@ bool Maps::fillPolygon(const Polygon &p,
       const Point16 &end = p.points[index + 1];
       if ((start.y < pixelY && end.y >= pixelY) ||
           (start.y >= pixelY && end.y < pixelY)) {
-        if (nodes >= static_cast<int16_t>(nodeX.size()))
+        if (nodes >= static_cast<int16_t>(scanlineNodes.size()))
           return false;
-        nodeX[nodes++] = static_cast<int16_t>(
+        scanlineNodes[nodes++] = static_cast<int16_t>(
             start.x + static_cast<double>(pixelY - start.y) /
                           static_cast<double>(end.y - start.y) *
                           static_cast<double>(end.x - start.x));
       }
     }
-    std::sort(nodeX.begin(), nodeX.begin() + nodes);
+    std::sort(scanlineNodes.begin(), scanlineNodes.begin() + nodes);
     uint16_t *row = surface.row(pixelY);
     if (row == nullptr)
       continue;
     for (int16_t index = 0; index + 1 < nodes; index += 2) {
-      int32_t startX = std::max<int32_t>(0, nodeX[index]);
-      int32_t endX = std::min<int32_t>(surface.width, nodeX[index + 1]);
+      int32_t startX = std::max<int32_t>(0, scanlineNodes[index]);
+      int32_t endX =
+          std::min<int32_t>(surface.width, scanlineNodes[index + 1]);
       if (startX >= endX)
         continue;
       std::fill(row + startX, row + endX, p.color);
@@ -2524,6 +2532,7 @@ bool Maps::readVectorMap(
   }
 
   Polygon projectedPolygon;
+  std::vector<int16_t, PsramAllocator<int16_t>> polygonScanlineNodes;
   std::vector<map_projection::GroundPoint> groundPolygon;
   std::vector<map_projection::GroundPoint> clippedGroundPolygon;
   uint32_t projectionClippedCount = 0;
@@ -2630,7 +2639,7 @@ bool Maps::readVectorMap(
           area < static_cast<int32_t>(minimumSize) * minimumSize) {
         return true;
       }
-      return fillPolygon(projectedPolygon, surface);
+      return fillPolygon(projectedPolygon, surface, polygonScanlineNodes);
     };
 
     if (!block->polygonGrid.empty()) {
@@ -2944,7 +2953,8 @@ bool Maps::readVectorMap(
                 // A false result can mean cancellation or a small workspace
                 // allocation failure. Cancellation aborts the job; otherwise
                 // skip this footprint and preserve the rest of the flat city.
-                const bool filled = fillPolygon(buildingPolygon, surface);
+                const bool filled = fillPolygon(
+                    buildingPolygon, surface, polygonScanlineNodes);
                 drewFootprint = drewFootprint || filled;
                 return filled || !shouldCancelMapRenderWork();
               },
@@ -3087,14 +3097,24 @@ bool Maps::readVectorMap(
       }
       buildingProjectionMs = millis() - projectionStartMs;
 
-      // Exact ring projection is deliberately after nearest retention. At
-      // most kMaximumCandidateMetadata records can reach this phase, no matter
-      // how many building records intersect the loaded blocks.
+      // Exact ring projection is deliberately after nearest retention. Sort
+      // the inexpensive bounds-based candidates first, then stop projecting
+      // as soon as the total admission budget is full. Any farther record is
+      // guaranteed to lose the same nearest-first selection, so projecting all
+      // 384 retained candidates only adds latency without changing a pixel.
+      std::sort(candidates.begin(), candidates.end(),
+                [](const auto &left, const auto &right) {
+                  return map_building_admission::nearer(left.key, right.key);
+                });
+      const map_building_admission::Quotas &quotas = context.tuning.buildings;
       MapBuildingVector<map_projection::GroundPoint> areaGround;
       MapBuildingVector<map_projection::GroundPoint> areaClipped;
       size_t usefulCandidateCount = 0;
+      map_building_admission::BaseQuotaUsage provisionalUsage;
       for (size_t candidateIndex = 0; candidateIndex < candidates.size();
            ++candidateIndex) {
+        if (provisionalUsage.full(quotas))
+          break;
         if (shouldCancelMapRenderWork())
           return false;
         auto candidate = candidates[candidateIndex];
@@ -3130,22 +3150,20 @@ bool Maps::readVectorMap(
             map_building_renderer::eligibleExtrusionZoom(zoom) &&
             projectedArea >=
                 context.tuning.minimumExtrusionAreaPixels;
+        const auto baseFit = provisionalUsage.fit(candidate, quotas);
+        if (baseFit.accepted())
+          provisionalUsage.admit(candidate);
         candidates[usefulCandidateCount++] = candidate;
       }
       candidates.resize(usefulCandidateCount);
       buildingProjectionMs = millis() - projectionStartMs;
 
-      std::sort(candidates.begin(), candidates.end(),
-                [](const auto &left, const auto &right) {
-                  return map_building_admission::nearer(left.key, right.key);
-                });
       for (size_t index = 0; index < candidates.size(); ++index)
         candidates[index].sourceIndex = index;
 
       // The profile is copied into the immutable render request. A debug
       // session can therefore cancel and replace a job between bounded units,
       // but can never change its admission limits halfway through a pass.
-      const map_building_admission::Quotas &quotas = context.tuning.buildings;
       const auto decisions = map_building_admission::select(
           candidates, quotas, &admissionDiagnostics);
       candidateBuildings = visibleRecords;
@@ -3153,6 +3171,11 @@ bool Maps::readVectorMap(
           visibleRecords > candidates.size() ? visibleRecords - candidates.size()
                                              : 0U;
       metadataDeferredBuildings = static_cast<uint32_t>(metadataDeferred);
+      if (metadataDeferred != 0 &&
+          admissionDiagnostics.selected >= quotas.maximumRecords) {
+        admissionDiagnostics.limiterFlags |=
+            map_building_admission::LimiterRecords;
+      }
       std::vector<uint8_t> admission(candidates.size(), 0);
 #if FIRMWARE_DIAGNOSTICS
       std::array<uint32_t, 96> extrudedDistancesPx{};
@@ -3395,7 +3418,8 @@ bool Maps::readVectorMap(
               buildingPolygon.color = color;
               buildingPolygon.bbox.min = Point16(minX, minY);
               buildingPolygon.bbox.max = Point16(maxX, maxY);
-              const bool filled = fillPolygon(buildingPolygon, surface);
+              const bool filled = fillPolygon(
+                  buildingPolygon, surface, polygonScanlineNodes);
               if (!filled && !shouldCancelMapRenderWork()) {
                 // fillPolygon uses a bounded PSRAM node workspace and reports
                 // allocation failure as false. Promote that result into the
