@@ -2748,6 +2748,35 @@ private struct RemoteDeviceDebugWebView: UIViewRepresentable {
     }
 }
 
+private struct RemoteDeviceDebugConsoleView: View {
+    @EnvironmentObject private var bleManager: BLEManager
+    @Environment(\.dismiss) private var dismiss
+    let session: DeviceTransferSession
+
+    var body: some View {
+        RemoteDeviceDebugWebView(session: session)
+            .navigationTitle("Device Debug Console")
+            .navigationBarTitleDisplayMode(.inline)
+            .onAppear(perform: dismissIfAuthorizationChanged)
+            .onChange(of: sessionIsAuthorized) { authorized in
+                if !authorized { dismiss() }
+            }
+    }
+
+    private var sessionIsAuthorized: Bool {
+        RemoteDeviceDebugSessionPolicy.hasSameAuthorizationIdentity(
+            RemoteDeviceDebugSessionPolicy.activeSession(
+                bleManager: bleManager
+            ),
+            as: session
+        )
+    }
+
+    private func dismissIfAuthorizationChanged() {
+        if !sessionIsAuthorized { dismiss() }
+    }
+}
+
 @MainActor
 private struct RemoteDeviceDebugSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
@@ -2755,7 +2784,6 @@ private struct RemoteDeviceDebugSettingsSection: View {
     @State private var isWorking = false
     @State private var statusMessage = "Idle"
     @State private var errorMessage: String?
-    @State private var showsDebugConsole = false
     @State private var copiedHotspotPassphrase: String?
     @State private var revealsHotspotPassphrase = false
     @State private var lanSSID = ""
@@ -2826,15 +2854,15 @@ private struct RemoteDeviceDebugSettingsSection: View {
                         .textSelection(.enabled)
                 }
 
-                Button {
-                    showsDebugConsole = true
+                NavigationLink {
+                    RemoteDeviceDebugConsoleView(session: session)
                 } label: {
                     Label(
                         "Open Secure Debug Console",
                         systemImage: "lock.rectangle"
                     )
                 }
-                .disabled(isWorking || pageURL == nil)
+                .disabled(isWorking)
 
                 Button(action: copySessionDetails) {
                     Label("Copy Session Details", systemImage: "doc.on.doc")
@@ -2901,33 +2929,11 @@ private struct RemoteDeviceDebugSettingsSection: View {
         .onAppear(perform: loadLANCredentialsIfNeeded)
         .onChange(of: bleManager.deviceTransferMode) { mode in
             if mode != DeviceTransferSession.Mode.debug.rawValue {
-                showsDebugConsole = false
                 clearCopiedHotspotPassphraseIfOwned()
                 revealsHotspotPassphrase = false
                 if !isWorking {
                     statusMessage = "Idle"
                     errorMessage = nil
-                }
-            }
-        }
-        .onChange(of: bleManager.deviceTransferSessionToken) { _ in
-            if activeSession == nil {
-                showsDebugConsole = false
-            }
-        }
-        .sheet(isPresented: $showsDebugConsole) {
-            if let session = activeSession {
-                NavigationStack {
-                    RemoteDeviceDebugWebView(session: session)
-                        .navigationTitle("Device Debug Console")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("Done") {
-                                    showsDebugConsole = false
-                                }
-                            }
-                        }
                 }
             }
         }
@@ -2948,48 +2954,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
     }
 
     private var activeSession: DeviceTransferSession? {
-        guard bleManager.deviceTransferMode == DeviceTransferSession.Mode.debug.rawValue,
-              let baseURL = bleManager.deviceTransferBaseURL,
-              let rawToken = bleManager.deviceTransferSessionToken,
-              let token = DeviceTransferSecurityPolicy
-                .normalizedTransferToken(rawToken),
-              let certificateSHA256 =
-                bleManager.deviceTransferTLSCertificateSHA256,
-              DeviceTransferSecurityPolicy.validate(
-                baseURL: baseURL,
-                certificateSHA256: certificateSHA256,
-                identityVersion:
-                    bleManager.deviceTransferTLSIdentityVersion,
-                transferGeneration: bleManager.deviceTransferGeneration,
-                secureTransferV1:
-                    bleManager.supportsSecureDeviceTransferV1
-              ) else { return nil }
-        return DeviceTransferSession(
-            mode: .debug,
-            baseURL: baseURL,
-            accessPointSSID: bleManager.deviceTransferAccessPointSSID,
-            accessPointPassphrase: bleManager.deviceTransferAccessPointPassphrase,
-            sessionToken: token,
-            networkTransport: bleManager.deviceTransferNetworkTransport,
-            networkSSID: bleManager.deviceTransferNetworkSSID,
-            hotspotFallback: bleManager.deviceTransferUsedHotspotFallback,
-            hotspotFallbackReason:
-                bleManager.deviceTransferHotspotFallbackReason,
-            tlsCertificateSHA256: certificateSHA256,
-            tlsIdentityVersion:
-                bleManager.deviceTransferTLSIdentityVersion,
-            transferGeneration: bleManager.deviceTransferGeneration,
-            secureTransferV1: bleManager.supportsSecureDeviceTransferV1,
-            signedMapStreamV1: bleManager.supportsSignedMapStreamV1,
-            legacyArchivePolicy:
-                bleManager.deviceTransferLegacyArchivePolicy ?? ""
-        )
-    }
-
-    private var pageURL: URL? {
-        activeSession.flatMap {
-            RemoteDeviceDebugSessionPolicy.pageURL(for: $0)
-        }
+        RemoteDeviceDebugSessionPolicy.activeSession(bleManager: bleManager)
     }
 
     private var debugModeIsActive: Bool {
@@ -3160,7 +3125,6 @@ private struct RemoteDeviceDebugSettingsSection: View {
                 try await DeviceTransferManager().exitRemoteDebug(
                     bleManager: bleManager
                 )
-                showsDebugConsole = false
                 clearCopiedHotspotPassphraseIfOwned()
                 revealsHotspotPassphrase = false
                 statusMessage = "Session ended"

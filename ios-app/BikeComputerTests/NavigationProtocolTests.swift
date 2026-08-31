@@ -11157,6 +11157,25 @@ struct NavigationProtocolTests {
                 !routesSource.contains(".sheet("),
             "Saved Routes requests presentation without owning a transient sheet"
         )
+        guard let remoteStart = settingsSource.range(
+            of: "private struct RemoteDeviceDebugSettingsSection"
+        )?.lowerBound,
+        let replayStart = settingsSource.range(
+            of: "private struct RendererBenchmarkReplaySettingsSection",
+            range: remoteStart..<settingsSource.endIndex
+        )?.lowerBound else {
+            assert(false, "remote-debug settings source should be available")
+            return
+        }
+        let remoteSource = String(settingsSource[remoteStart..<replayStart])
+        assert(
+            remoteSource.contains("NavigationLink {") &&
+                remoteSource.contains(
+                    "RemoteDeviceDebugConsoleView(session: session)"
+                ) &&
+                !remoteSource.contains(".sheet("),
+            "the secure console stays in Settings navigation instead of presenting a nested sheet"
+        )
     }
 
     static func testStravaRouteCatalogUIWiring() {
@@ -18980,6 +18999,43 @@ struct NavigationProtocolTests {
                "copyable session details redact the hotspot password")
         assert(details.contains("Fallback reason: endpoint_unreachable"),
                "secret-free diagnostics retain the firmware fallback reason")
+        let refreshedSession = DeviceTransferSession(
+            mode: .debug,
+            baseURL: session.baseURL,
+            accessPointSSID: nil,
+            sessionToken: session.sessionToken,
+            networkTransport: "lan",
+            networkSSID: "trusted-network",
+            hotspotFallback: false,
+            tlsCertificateSHA256: session.tlsCertificateSHA256,
+            tlsIdentityVersion: session.tlsIdentityVersion,
+            transferGeneration: session.transferGeneration,
+            secureTransferV1: true
+        )
+        assert(
+            RemoteDeviceDebugSessionPolicy.hasSameAuthorizationIdentity(
+                refreshedSession,
+                as: session
+            ),
+            "non-secret network status refreshes retain the debug authorization"
+        )
+        let replacedSession = DeviceTransferSession(
+            mode: .debug,
+            baseURL: session.baseURL,
+            accessPointSSID: session.accessPointSSID,
+            sessionToken: String(repeating: "c", count: 32),
+            tlsCertificateSHA256: session.tlsCertificateSHA256,
+            tlsIdentityVersion: session.tlsIdentityVersion,
+            transferGeneration: session.transferGeneration,
+            secureTransferV1: true
+        )
+        assert(
+            !RemoteDeviceDebugSessionPolicy.hasSameAuthorizationIdentity(
+                replacedSession,
+                as: session
+            ),
+            "a replaced transfer token invalidates the open debug console"
+        )
 
         let shortEndpointManager = BLEManager()
         shortEndpointManager.isConnected = true

@@ -257,6 +257,46 @@ enum RemoteDeviceDebugError: LocalizedError, Equatable {
 }
 
 enum RemoteDeviceDebugSessionPolicy {
+    @MainActor
+    static func activeSession(bleManager: BLEManager) -> DeviceTransferSession? {
+        guard bleManager.deviceTransferMode == DeviceTransferSession.Mode.debug.rawValue,
+              let baseURL = bleManager.deviceTransferBaseURL,
+              let rawToken = bleManager.deviceTransferSessionToken,
+              let token = DeviceTransferSecurityPolicy
+                .normalizedTransferToken(rawToken),
+              let certificateSHA256 =
+                bleManager.deviceTransferTLSCertificateSHA256,
+              DeviceTransferSecurityPolicy.validate(
+                baseURL: baseURL,
+                certificateSHA256: certificateSHA256,
+                identityVersion:
+                    bleManager.deviceTransferTLSIdentityVersion,
+                transferGeneration: bleManager.deviceTransferGeneration,
+                secureTransferV1:
+                    bleManager.supportsSecureDeviceTransferV1
+              ) else { return nil }
+        return DeviceTransferSession(
+            mode: .debug,
+            baseURL: baseURL,
+            accessPointSSID: bleManager.deviceTransferAccessPointSSID,
+            accessPointPassphrase: bleManager.deviceTransferAccessPointPassphrase,
+            sessionToken: token,
+            networkTransport: bleManager.deviceTransferNetworkTransport,
+            networkSSID: bleManager.deviceTransferNetworkSSID,
+            hotspotFallback: bleManager.deviceTransferUsedHotspotFallback,
+            hotspotFallbackReason:
+                bleManager.deviceTransferHotspotFallbackReason,
+            tlsCertificateSHA256: certificateSHA256,
+            tlsIdentityVersion:
+                bleManager.deviceTransferTLSIdentityVersion,
+            transferGeneration: bleManager.deviceTransferGeneration,
+            secureTransferV1: bleManager.supportsSecureDeviceTransferV1,
+            signedMapStreamV1: bleManager.supportsSignedMapStreamV1,
+            legacyArchivePolicy:
+                bleManager.deviceTransferLegacyArchivePolicy ?? ""
+        )
+    }
+
     static func pageURL(for session: DeviceTransferSession) -> URL? {
         guard session.mode == .debug,
               session.secureTransferV1,
@@ -269,6 +309,34 @@ enum RemoteDeviceDebugSessionPolicy {
               ) else { return nil }
         return session.baseURL
             .appendingPathComponent("device-debug", isDirectory: true)
+    }
+
+    static func hasSameAuthorizationIdentity(
+        _ candidate: DeviceTransferSession?,
+        as expected: DeviceTransferSession
+    ) -> Bool {
+        guard let candidate,
+              candidate.mode == .debug,
+              expected.mode == .debug,
+              let candidateToken = candidate.sessionToken,
+              let expectedToken = expected.sessionToken,
+              DeviceTransferSecurityPolicy.normalizedTransferToken(
+                candidateToken
+              ) == candidateToken,
+              DeviceTransferSecurityPolicy.normalizedTransferToken(
+                expectedToken
+              ) == expectedToken,
+              pageURL(for: candidate) != nil,
+              pageURL(for: expected) != nil else {
+            return false
+        }
+        return candidate.baseURL == expected.baseURL &&
+            candidateToken == expectedToken &&
+            candidate.tlsCertificateSHA256 ==
+                expected.tlsCertificateSHA256 &&
+            candidate.tlsIdentityVersion == expected.tlsIdentityVersion &&
+            candidate.transferGeneration == expected.transferGeneration &&
+            candidate.secureTransferV1 == expected.secureTransferV1
     }
 
     static func sessionDetails(
