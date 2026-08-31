@@ -159,6 +159,14 @@ enum RendererBenchmarkProfile: UInt8, CaseIterable, Identifiable {
     }
 }
 
+enum RendererBenchmarkCleanupPolicy {
+    static func requiresCurrentProfileRestore(
+        after profile: RendererBenchmarkProfile
+    ) -> Bool {
+        profile != .current
+    }
+}
+
 enum RendererBenchmarkRouteGeometry {
     static let maximumPointCount = 40
 

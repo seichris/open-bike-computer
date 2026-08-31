@@ -14154,6 +14154,21 @@ struct NavigationProtocolTests {
                     "renderer benchmark loop starts just east of Jing'an Temple")
         assertEqual(fixture.points.map(\.longitude).max(), 121.4436673,
                     "renderer benchmark loop stays in the Jing'an neighborhood")
+        assert(
+            !RendererBenchmarkCleanupPolicy.requiresCurrentProfileRestore(
+                after: .current
+            ),
+            "an already-current ordinary replay does not queue redundant cleanup"
+        )
+        for profile in RendererBenchmarkProfile.allCases
+            where profile != .current {
+            assert(
+                RendererBenchmarkCleanupPolicy.requiresCurrentProfileRestore(
+                    after: profile
+                ),
+                "a non-current ordinary replay restores the production profile"
+            )
+        }
         guard let broadMapBounds = OfflineMapPreviewBounds(coordinates: [
             121.4403621, 31.2158861, 121.4743744, 31.2449696,
         ]),

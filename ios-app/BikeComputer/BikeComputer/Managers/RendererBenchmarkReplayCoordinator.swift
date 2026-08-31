@@ -282,6 +282,9 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
         guard isRunning,
               let bleManager,
               !bleManager.supportsRemoteDeviceDebug,
+              RendererBenchmarkCleanupPolicy.requiresCurrentProfileRestore(
+                after: selectedOrdinaryProfile
+              ),
               fixture != nil,
               fixtureSHA256.count == 32,
               !fixtureID.isEmpty else {
