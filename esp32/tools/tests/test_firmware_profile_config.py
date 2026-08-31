@@ -94,6 +94,7 @@ assert "-DARDUINO_USB_CDC_ON_BOOT=" not in waveshare_flags
 assert "-DBLE_RADIO_CHARACTERIZATION=1" not in waveshare_flags
 assert "-DBLE_TX_POWER_DBM=" not in waveshare_flags
 assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" not in waveshare_flags
+assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in waveshare_flags
 waveshare_dependencies = config.get("waveshare_amoled_common", "lib_deps")
 assert waveshare_dependencies.count("https://github.com/jgauchia/NeoGPS.git") == 1
 assert (
@@ -128,6 +129,7 @@ for environment, (base, board_define) in diagnostic_profiles.items():
     assert "-DRIDE_AUTOMATION_SHADOW=1" in flags
     assert "-DRIDE_AUTOMATION_INTERNAL_CONTROL=1" in flags
     assert "-DRIDE_AUTOMATION_AUTOMATIC_START=1" not in flags
+    assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in flags
     assert (
         inherited_option(environment, "board_build.partitions")
         == "partitions_remote_debug.csv"
@@ -165,6 +167,7 @@ for environment, target in expected_targets.items():
     assert "${waveshare_amoled_common.build_unflags}" in unflags
     assert "-DDEBUG=1" not in unflags
     assert "-DDEVICE_REMOTE_DEBUG=1" not in flags
+    assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in flags
     assert (
         inherited_option(environment, "board_build.partitions")
         == "partitions.csv"
@@ -186,6 +189,16 @@ for environment, (base, target) in remote_debug_profiles.items():
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
     assert "-DDEVICE_REMOTE_DEBUG=1" in flags
+    assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" in flags
+
+for environment in config.sections():
+    if not environment.startswith("env:") or environment in remote_debug_profiles:
+        continue
+    assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in config.get(
+        environment,
+        "build_flags",
+        fallback="",
+    )
 
 large_diagnostic_profiles = (
     *remote_debug_profiles,
