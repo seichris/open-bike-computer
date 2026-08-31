@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "ride_ble_protocol.generated.hpp"
+
 class Preferences;
 
 namespace device_ownership {
@@ -16,17 +18,10 @@ namespace device_ownership {
 constexpr uint8_t PROTOCOL_VERSION = 2;
 constexpr size_t MAX_DEVICE_NAME_BYTES = 24;
 constexpr uint32_t PAIRING_SESSION_TIMEOUT_MS = 120000;
-constexpr size_t AUTHENTICATED_FRAME_OVERHEAD = 22;
+constexpr size_t AUTHENTICATED_FRAME_OVERHEAD =
+    ride_ble_protocol_generated::PROTECTED_FRAME_OVERHEAD;
 
-enum class AuthenticatedChannel : uint8_t {
-  Auth = 1,
-  Navigation = 2,
-  Route = 3,
-  Gps = 4,
-  Settings = 5,
-  Workout = 6,
-  RideAutomation = 7,
-};
+using AuthenticatedChannel = ride_ble_protocol_generated::ProtectedChannel;
 
 enum class Event {
   None,
@@ -41,11 +36,7 @@ enum class Event {
   LeaseReleased,
 };
 
-enum class SessionRole : uint8_t {
-  None = 0,
-  Owner = 1,
-  WatchRide = 2,
-};
+using SessionRole = ride_ble_protocol_generated::ControllerRole;
 
 struct CommandResult {
   bool matched = false;
@@ -70,6 +61,7 @@ public:
                                    const std::string &payload,
                                    std::string &frame);
   bool authorizeRideWrite(AuthenticatedChannel channel, uint32_t nowMs);
+  uint32_t authenticatedRideLeaseGeneration(uint32_t nowMs);
   bool isOwnerSession() const {
     return sessionAuthenticated_ && sessionRole_ == SessionRole::Owner;
   }

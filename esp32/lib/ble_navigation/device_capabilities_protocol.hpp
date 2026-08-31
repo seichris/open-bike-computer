@@ -1,39 +1,74 @@
 #pragma once
 
+#include "ride_ble_protocol.generated.hpp"
+
 #include <stddef.h>
 #include <stdint.h>
 
 namespace device_capabilities_protocol {
 
-constexpr uint8_t CAP2_CLIENT_VERSION = 10;
-constexpr uint8_t EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION = 11;
-constexpr uint8_t SCOPED_WATCH_CONTROLLER_CLIENT_VERSION = 12;
-constexpr uint8_t RIDE_AUTOMATION_V2_CLIENT_VERSION = 13;
-constexpr uint8_t REMOTE_DEVICE_DEBUG_CLIENT_VERSION = 14;
-constexpr uint8_t GPS_POSITION_QUALITY_V1_CLIENT_VERSION = 15;
-constexpr uint8_t RENDERER_DIAGNOSTICS_CLIENT_VERSION = 16;
-constexpr uint8_t AUTOMATIC_DISPLAY_OFF_CLIENT_VERSION = 16;
-constexpr uint8_t RIDE_DIAGNOSTICS_CLIENT_VERSION = 18;
-constexpr uint8_t DETAILED_RIDE_DIAGNOSTICS_CLIENT_VERSION = 19;
-constexpr uint8_t CAP2_SCHEMA_VERSION = 1;
-constexpr uint32_t STREET_LABELS_FEATURE = 1UL << 8;
-constexpr uint32_t BIRDS_EYE_MAP_NAVIGATION_FEATURE = 1UL << 9;
-constexpr uint32_t BIRDS_EYE_PERSPECTIVE_FEATURE = 1UL << 10;
-constexpr uint32_t BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE = 1UL << 11;
-constexpr uint32_t OSM_3D_BUILDINGS_FEATURE = 1UL << 12;
-constexpr uint32_t EXPLICIT_INVALID_GPS_HEADING_FEATURE = 1UL << 13;
+constexpr uint8_t CAP2_CLIENT_VERSION =
+    ride_ble_protocol_generated::STREET_LABELS_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION =
+    ride_ble_protocol_generated::
+        EXPLICIT_INVALID_GPS_HEADING_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t SCOPED_WATCH_CONTROLLER_CLIENT_VERSION =
+    ride_ble_protocol_generated::
+        SCOPED_WATCH_CONTROLLER_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t RIDE_AUTOMATION_V2_CLIENT_VERSION =
+    ride_ble_protocol_generated::RIDE_AUTOMATION_V2_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t REMOTE_DEVICE_DEBUG_CLIENT_VERSION =
+    ride_ble_protocol_generated::REMOTE_DEVICE_DEBUG_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t GPS_POSITION_QUALITY_V1_CLIENT_VERSION =
+    ride_ble_protocol_generated::
+        GPS_POSITION_QUALITY_V1_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t RENDERER_DIAGNOSTICS_CLIENT_VERSION =
+    ride_ble_protocol_generated::RENDERER_DIAGNOSTICS_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t AUTOMATIC_DISPLAY_OFF_CLIENT_VERSION =
+    ride_ble_protocol_generated::AUTOMATIC_DISPLAY_OFF_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t RIDE_DIAGNOSTICS_CLIENT_VERSION =
+    ride_ble_protocol_generated::RIDE_DIAGNOSTICS_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t DETAILED_RIDE_DIAGNOSTICS_CLIENT_VERSION =
+    ride_ble_protocol_generated::
+        DETAILED_RIDE_DIAGNOSTICS_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t RIDE_DELIVERY_ACK_CLIENT_VERSION =
+    ride_ble_protocol_generated::RIDE_DELIVERY_ACK_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t CAP2_SCHEMA_VERSION =
+    ride_ble_protocol_generated::CAPABILITY_SCHEMA_VERSION;
+constexpr uint32_t STREET_LABELS_FEATURE =
+    ride_ble_protocol_generated::STREET_LABELS_FEATURE;
+constexpr uint32_t BIRDS_EYE_MAP_NAVIGATION_FEATURE =
+    ride_ble_protocol_generated::BIRDS_EYE_MAP_NAVIGATION_FEATURE;
+constexpr uint32_t BIRDS_EYE_PERSPECTIVE_FEATURE =
+    ride_ble_protocol_generated::BIRDS_EYE_PERSPECTIVE_FEATURE;
+constexpr uint32_t BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE =
+    ride_ble_protocol_generated::BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE;
+constexpr uint32_t OSM_3D_BUILDINGS_FEATURE =
+    ride_ble_protocol_generated::OSM_3D_BUILDINGS_FEATURE;
+constexpr uint32_t EXPLICIT_INVALID_GPS_HEADING_FEATURE =
+    ride_ble_protocol_generated::EXPLICIT_INVALID_GPS_HEADING_FEATURE;
 // Complete scoped Watch-controller authentication and exclusive writer-lease
 // contract. Runtime capability encoding keeps this bit clear if the durable
 // controller store does not boot cleanly.
-constexpr uint32_t SCOPED_WATCH_CONTROLLER_FEATURE = 1UL << 14;
-constexpr uint32_t RIDE_AUTOMATION_V2_FEATURE = 1UL << 15;
-constexpr uint32_t REMOTE_DEVICE_DEBUG_FEATURE = 1UL << 16;
-constexpr uint32_t GPS_POSITION_QUALITY_V1_FEATURE = 1UL << 17;
-constexpr uint32_t RENDERER_DIAGNOSTICS_FEATURE = 1UL << 18;
+constexpr uint32_t SCOPED_WATCH_CONTROLLER_FEATURE =
+    ride_ble_protocol_generated::SCOPED_WATCH_CONTROLLER_FEATURE;
+constexpr uint32_t RIDE_AUTOMATION_V2_FEATURE =
+    ride_ble_protocol_generated::RIDE_AUTOMATION_V2_FEATURE;
+constexpr uint32_t REMOTE_DEVICE_DEBUG_FEATURE =
+    ride_ble_protocol_generated::REMOTE_DEVICE_DEBUG_FEATURE;
+constexpr uint32_t GPS_POSITION_QUALITY_V1_FEATURE =
+    ride_ble_protocol_generated::GPS_POSITION_QUALITY_V1_FEATURE;
+constexpr uint32_t RENDERER_DIAGNOSTICS_FEATURE =
+    ride_ble_protocol_generated::RENDERER_DIAGNOSTICS_FEATURE;
 // Connected-display inactivity control (setting ID 36).
-constexpr uint32_t AUTOMATIC_DISPLAY_OFF_FEATURE = 1UL << 19;
-constexpr uint32_t RIDE_DIAGNOSTICS_FEATURE = 1UL << 20;
-constexpr uint32_t DETAILED_RIDE_DIAGNOSTICS_FEATURE = 1UL << 21;
+constexpr uint32_t AUTOMATIC_DISPLAY_OFF_FEATURE =
+    ride_ble_protocol_generated::AUTOMATIC_DISPLAY_OFF_FEATURE;
+constexpr uint32_t RIDE_DIAGNOSTICS_FEATURE =
+    ride_ble_protocol_generated::RIDE_DIAGNOSTICS_FEATURE;
+constexpr uint32_t DETAILED_RIDE_DIAGNOSTICS_FEATURE =
+    ride_ble_protocol_generated::DETAILED_RIDE_DIAGNOSTICS_FEATURE;
+constexpr uint32_t RIDE_DELIVERY_ACK_FEATURE =
+    ride_ble_protocol_generated::RIDE_DELIVERY_ACK_FEATURE;
 constexpr uint8_t POWER_BUTTON_CONFIG_TLV = 1;
 constexpr size_t POWER_BUTTON_CONFIG_BYTES = 3;
 constexpr size_t CAP2_BASE_BYTES = 9;

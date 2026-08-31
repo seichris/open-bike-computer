@@ -8,6 +8,7 @@ struct NavigationRouteRequestV1: Equatable {
     let requestAlternatives: Bool
 }
 
+@MainActor
 protocol NavigationRouteProvider: AnyObject {
     var metadata: RouteProviderMetadataV1 { get }
     func routes(for request: NavigationRouteRequestV1) async throws -> [NavigationRouteV1]
