@@ -228,6 +228,84 @@ enum WatchDirectRidePreparationOperationV1: String, Codable, Equatable,
     case release
 }
 
+/// Synchronous admission result for a Watch-to-iPhone preparation message.
+/// A caller must not treat invoking a callback as delivery: only `submitted`
+/// means WatchConnectivity accepted the message or a durable local release.
+enum WatchDirectRidePreparationSubmissionDispositionV1: Equatable, Sendable {
+    case submitted
+    case transportUnavailable
+    case activationPending
+    case counterpartUnreachable
+    case encodingFailed
+}
+
+/// The logical handoff identity survives retries and Watch relaunches. Each
+/// transport attempt gets a fresh request ID, while `preparationID` remains
+/// stable so both peers can make prepare/release idempotent.
+struct WatchDirectRidePreparationIntentV1: Codable, Equatable, Sendable {
+    static let schemaVersion = 1
+
+    let schema: Int
+    let preparationID: UUID
+    let operation: WatchDirectRidePreparationOperationV1
+    let deviceID: String
+
+    init(
+        preparationID: UUID,
+        operation: WatchDirectRidePreparationOperationV1,
+        deviceID: String
+    ) throws {
+        let request = try WatchDirectRidePreparationRequestV1(
+            preparationID: preparationID,
+            operation: operation,
+            deviceID: deviceID
+        )
+        schema = Self.schemaVersion
+        self.preparationID = request.preparationID
+        self.operation = request.operation
+        self.deviceID = request.deviceID
+    }
+
+    func validated() throws -> Self {
+        guard schema == Self.schemaVersion else {
+            throw WatchControllerContractError.invalidEnvelope
+        }
+        return try Self(
+            preparationID: preparationID,
+            operation: operation,
+            deviceID: deviceID
+        )
+    }
+
+    func request(requestID: UUID = UUID()) throws
+        -> WatchDirectRidePreparationRequestV1 {
+        let validated = try validated()
+        return try WatchDirectRidePreparationRequestV1(
+            requestID: requestID,
+            preparationID: validated.preparationID,
+            operation: validated.operation,
+            deviceID: validated.deviceID
+        )
+    }
+
+    func encoded() throws -> Data {
+        try PropertyListEncoder().encode(validated())
+    }
+
+    static func decode(_ data: Data) throws -> Self {
+        try PropertyListDecoder().decode(Self.self, from: data).validated()
+    }
+}
+
+enum WatchDirectRidePreparationRetryPolicyV1 {
+    static let responseTimeoutSeconds: Double = 5
+
+    static func delaySeconds(afterAttempt attempt: Int) -> Double {
+        let normalizedAttempt = max(1, min(attempt, 6))
+        return min(pow(2, Double(normalizedAttempt - 1)), 30)
+    }
+}
+
 struct WatchDirectRidePreparationRequestV1: Codable, Equatable, Sendable {
     static let schemaVersion = 1
     static let userInfoPayloadKey = "watchDirectRidePreparationRequestV1"
@@ -337,6 +415,30 @@ enum WatchDirectRidePreparationPolicyV1 {
         request.operation == .release &&
             preparedDeviceID == request.deviceID &&
             preparedPreparationID == request.preparationID
+    }
+}
+
+enum WatchDirectRidePreparationRestorationDecisionV1: Equatable, Sendable {
+    case none
+    case retain
+    case release
+}
+
+/// Defers resolution of a restored prepare until navigation and HealthKit
+/// workout recovery have both had a chance to restore direct-ride demand.
+struct WatchDirectRidePreparationRestorationGateV1: Sendable {
+    private(set) var isPending: Bool
+
+    init(restoredOperation: WatchDirectRidePreparationOperationV1?) {
+        isPending = restoredOperation == .prepare
+    }
+
+    mutating func complete(
+        hasRecoveredDemand: Bool
+    ) -> WatchDirectRidePreparationRestorationDecisionV1 {
+        guard isPending else { return .none }
+        isPending = false
+        return hasRecoveredDemand ? .retain : .release
     }
 }
 

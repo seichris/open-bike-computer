@@ -46,6 +46,7 @@ int8_t displayedZoneIndex = -2;
 MetricLabels rideBottomLeft{};
 MetricLabels rideBottomRight{};
 lv_obj_t *rideStartWorkoutButton = nullptr;
+lv_obj_t *rideStartWorkoutLabel = nullptr;
 lv_obj_t *rideDetectionWaitingMessage = nullptr;
 lv_obj_t *rideAutomationPanel = nullptr;
 lv_obj_t *rideAutomationTitle = nullptr;
@@ -803,14 +804,14 @@ void rideTelemetryScr(_lv_obj_t *screen) {
           ? ride_telemetry_layout::kRoundStartWorkoutIconSize
           : ride_telemetry_layout::kStartWorkoutIconSize,
       0x000000);
-  lv_obj_t *startWorkoutLabel = lv_label_create(rideStartWorkoutButton);
+  rideStartWorkoutLabel = lv_label_create(rideStartWorkoutButton);
   lv_obj_set_style_text_font(
-      startWorkoutLabel,
+      rideStartWorkoutLabel,
       useRoundStartWorkoutContent ? &lv_font_montserrat_24
                                   : &lv_font_montserrat_18,
       0);
-  lv_obj_set_style_text_color(startWorkoutLabel, lv_color_black(), 0);
-  lv_label_set_text_static(startWorkoutLabel, "Start Workout");
+  lv_obj_set_style_text_color(rideStartWorkoutLabel, lv_color_black(), 0);
+  lv_label_set_text_static(rideStartWorkoutLabel, "Start Workout");
 
   rideDetectionWaitingMessage = lv_label_create(ridePage);
   lv_obj_set_style_text_font(
@@ -837,10 +838,19 @@ void updateRideTelemetryEvent(lv_event_t *) {
   const ride_telemetry_presenter::ViewModel model = currentViewModel();
   updateMetricLayout(model);
   if (rideMetricPlacement.showStartWorkoutButton) {
-    if (bleNavServer.canRequestWorkoutStart()) {
+    switch (bleNavServer.workoutStartRequestPresentation()) {
+    case WorkoutStartRequestPresentation::StartOnIPhone:
+      setLabelIfChanged(rideStartWorkoutLabel, "Start Workout");
       lv_obj_clear_state(rideStartWorkoutButton, LV_STATE_DISABLED);
-    } else {
+      break;
+    case WorkoutStartRequestPresentation::StartOnAppleWatch:
+      setLabelIfChanged(rideStartWorkoutLabel, "Start on Apple Watch");
       lv_obj_add_state(rideStartWorkoutButton, LV_STATE_DISABLED);
+      break;
+    case WorkoutStartRequestPresentation::Unavailable:
+      setLabelIfChanged(rideStartWorkoutLabel, "Start Workout");
+      lv_obj_add_state(rideStartWorkoutButton, LV_STATE_DISABLED);
+      break;
     }
   }
   updateStatusLabel(rideStatus, model);
