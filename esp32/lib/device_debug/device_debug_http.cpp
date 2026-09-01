@@ -202,9 +202,11 @@ bool DeviceDebugHttp::handleRequest(
   if (!authorize(request, client))
     return true;
   // Every request remains independently token- and generation-authenticated.
-  // Reusing the pinned TLS channel only removes handshake churn. Session exit
-  // deliberately retains Connection: close as its durable teardown boundary.
-  if (!request.connectionClose &&
+  // Only the app's serial secure-sweep client explicitly opts into reuse.
+  // WebKit can open parallel/speculative sockets that would otherwise retain
+  // this single worker. Session exit deliberately retains Connection: close
+  // as its durable teardown boundary.
+  if (request.connectionReuseRequested && !request.connectionClose &&
       !(request.method == "POST" &&
         request.path == "/device-debug/v1/session/exit")) {
     client.requestHttpResponseKeepAlive();

@@ -15,6 +15,9 @@ HTTP_SOURCE = (
 HTTP_HEADER = (
     ROOT / "lib/device_transfer/device_transfer_http.hpp"
 ).read_text(encoding="utf-8")
+HTTP_LIMITS_HEADER = (
+    ROOT / "lib/device_transfer/device_transfer_http_limits.hpp"
+).read_text(encoding="utf-8")
 DEBUG_HTTP_SOURCE = (
     ROOT / "lib/device_debug/device_debug_http.cpp"
 ).read_text(encoding="utf-8")
@@ -187,6 +190,8 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
         self.assertIn("client.httpResponseKeepAlive()", HTTP_SOURCE)
         self.assertIn("client.httpResponseConnectionValue()", HTTP_SOURCE)
         self.assertIn("client.requestHttpResponseKeepAlive();", DEBUG_HTTP_SOURCE)
+        self.assertIn("request.connectionReuseRequested", DEBUG_HTTP_SOURCE)
+        self.assertIn("x-bikecomputer-connection-reuse", HTTP_LIMITS_HEADER)
         self.assertIn("server_->isRequestAuthorized(request)", DEBUG_HTTP_SOURCE)
         exit_policy = DEBUG_HTTP_SOURCE[
             DEBUG_HTTP_SOURCE.index("// Every request remains independently") :
@@ -207,6 +212,12 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
             handle_client,
         )
         self.assertIn("headerBudget.totalBytes == 0", handle_client)
+        timeout_block = handle_client[
+            handle_client.index("requestLineResult == ReadLineResult::Timeout") :
+            handle_client.index("requestLineResult == ReadLineResult::TooLarge")
+        ]
+        self.assertIn("headerBudget.totalBytes != 0", timeout_block)
+        self.assertNotIn("requestIndex == 0", timeout_block)
         self.assertLess(
             handle_client.index("headerBudget.totalBytes == 0"),
             handle_client.index('sendError(client, 400, "bad_request"'),

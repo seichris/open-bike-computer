@@ -50,6 +50,7 @@ struct HttpRequest {
   uint64_t contentLength = 0;
   bool hasContentLength = false;
   bool connectionClose = false;
+  bool connectionReuseRequested = false;
   uint32_t transferGeneration = 0;
 };
 

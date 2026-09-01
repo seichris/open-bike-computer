@@ -27,8 +27,10 @@ int main() {
       device_transfer::HTTP_REQUEST_HEADER_TIMEOUT_MS));
   assert(device_transfer::HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS <
          device_transfer::HTTP_REQUEST_HEADER_TIMEOUT_MS);
-  assert(device_transfer::httpRequestLineTimeoutMs(0) ==
+  assert(device_transfer::HTTP_INITIAL_REQUEST_IDLE_TIMEOUT_MS <
          device_transfer::HTTP_REQUEST_HEADER_TIMEOUT_MS);
+  assert(device_transfer::httpRequestLineTimeoutMs(0) ==
+         device_transfer::HTTP_INITIAL_REQUEST_IDLE_TIMEOUT_MS);
   assert(device_transfer::httpRequestLineTimeoutMs(1) ==
          device_transfer::HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS);
   assert(device_transfer::httpRequestLineTimeoutMs(
@@ -107,6 +109,16 @@ int main() {
   duplicateConnectionHeaders.accept("connection", "keep-alive");
   duplicateConnectionHeaders.accept("connection", "keep-alive");
   assert(duplicateConnectionHeaders.connectionClose);
+  device_transfer::HttpSecurityHeaders reuseHeaders;
+  reuseHeaders.accept("x-bikecomputer-connection-reuse", "1");
+  assert(reuseHeaders.connectionReuseRequested);
+  device_transfer::HttpSecurityHeaders invalidReuseHeaders;
+  invalidReuseHeaders.accept("x-bikecomputer-connection-reuse", "true");
+  assert(!invalidReuseHeaders.connectionReuseRequested);
+  device_transfer::HttpSecurityHeaders duplicateReuseHeaders;
+  duplicateReuseHeaders.accept("x-bikecomputer-connection-reuse", "1");
+  duplicateReuseHeaders.accept("x-bikecomputer-connection-reuse", "1");
+  assert(!duplicateReuseHeaders.connectionReuseRequested);
   assert(device_transfer::HTTP_MAX_REQUESTS_PER_TLS_CONNECTION >= 512);
 
   std::cout << "device transfer HTTP limit tests passed\n";

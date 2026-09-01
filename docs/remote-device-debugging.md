@@ -74,18 +74,20 @@ firmware transfer workers retain internal stacks because activation and flash
 paths have stricter memory-access requirements; the optimization is therefore
 debug-mode-only and does not change release or update behavior.
 
-Authorized HTTP/1.1 debug requests may reuse one bounded pinned-TLS connection;
-each request still carries and independently validates the in-memory transfer
-token and current session generation. This avoids repeated handshake allocation
-and CPU churn during renderer sweeps. Token-free, malformed, revoked, and
-explicit `Connection: close` requests close after one response, as does session
-exit so its TLS close-notify remains the teardown boundary. A BLE disconnect or
-mode revocation interrupts the active socket immediately rather than waiting
-for the persistent connection's header timeout. An authenticated connection
-that becomes idle after a response is released after two seconds, before the
-app's request deadline, so closing the console can hand the single worker to
-the secure-sweep URL session without retaining the old web-view socket. A clean
-peer disconnect during that handoff is not reported as a malformed request.
+The app's serial secure-sweep client may explicitly opt into one bounded
+pinned-TLS connection; every request still carries and independently validates
+the in-memory transfer token and current session generation. Browser console
+requests close after each response because WebKit may create parallel or
+speculative sockets that cannot share the single HTTP worker. This preserves
+handshake reuse during renderer sweeps without letting the console retain the
+worker. Token-free, malformed, revoked, and explicit `Connection: close`
+requests also close after one response, as does session exit so its TLS
+close-notify remains the teardown boundary. A BLE disconnect or mode revocation
+interrupts the active socket immediately. An opted-in connection that becomes
+idle after a response is released after two seconds, and a TLS client that
+sends no first-request bytes is released after one second, both before the
+app's request deadline. Zero-byte idle sockets and clean peer disconnects are
+closed silently rather than reported as device-transfer errors.
 Map installation, diagnostics delivery, and firmware update modes retain their
 one-request close-and-commit semantics.
 

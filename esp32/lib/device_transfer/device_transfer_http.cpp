@@ -939,10 +939,11 @@ bool HttpTransferServer::handleClient(TransferClient &client,
       readLine(client, requestLine, headerBudget, requestStartedMs,
                httpRequestLineTimeoutMs(requestIndex));
   if (requestLineResult == ReadLineResult::Timeout) {
-    // A reused HTTP/1.1 connection may simply have gone idle after a complete
-    // response. Close it silently so a future request can establish a fresh
-    // pinned TLS session; partial first lines still receive an explicit 408.
-    if (requestIndex == 0 || headerBudget.totalBytes != 0)
+    // A reused connection or a WebKit preconnection may go idle without ever
+    // sending another request. Close a zero-byte socket silently so a future
+    // pinned client can take the single worker; partial first lines still
+    // receive an explicit 408 and remain covered by the header deadline.
+    if (headerBudget.totalBytes != 0)
       sendError(client, 408, "timeout", "request timed out");
     return false;
   }
@@ -1019,6 +1020,8 @@ bool HttpTransferServer::handleClient(TransferClient &client,
   request.contentLength = securityHeaders.contentLength;
   request.hasContentLength = securityHeaders.hasContentLength;
   request.connectionClose = securityHeaders.connectionClose;
+  request.connectionReuseRequested =
+      securityHeaders.connectionReuseRequested;
   client.setHttpRequestBodyLength(request.hasContentLength
                                       ? request.contentLength
                                       : 0);

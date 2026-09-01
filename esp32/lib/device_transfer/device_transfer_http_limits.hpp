@@ -10,6 +10,12 @@ constexpr size_t HTTP_MAX_LINE_BYTES = 512;
 constexpr size_t HTTP_MAX_HEADER_BYTES = 8192;
 constexpr size_t HTTP_MAX_HEADER_LINES = 64;
 constexpr uint32_t HTTP_REQUEST_HEADER_TIMEOUT_MS = 5000;
+// A TLS client that completes its handshake but sends no HTTP bytes is a
+// speculative/preconnection socket, not useful debug traffic. Release it
+// quickly enough that the single worker can still serve the app's pinned
+// request before its five-second deadline. The normal header deadline still
+// bounds the remaining header lines after a complete request line arrives.
+constexpr uint32_t HTTP_INITIAL_REQUEST_IDLE_TIMEOUT_MS = 1000;
 // The transfer server has one TLS/HTTP worker. A completed authenticated
 // request may reuse that worker, but an idle persistent client must release it
 // well before the iOS client's five-second request deadline so a different
@@ -19,7 +25,7 @@ constexpr uint32_t HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS = 2000;
 constexpr size_t HTTP_MAX_REQUESTS_PER_TLS_CONNECTION = 4096;
 
 inline uint32_t httpRequestLineTimeoutMs(size_t requestIndex) {
-  return requestIndex == 0 ? HTTP_REQUEST_HEADER_TIMEOUT_MS
+  return requestIndex == 0 ? HTTP_INITIAL_REQUEST_IDLE_TIMEOUT_MS
                            : HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS;
 }
 
@@ -133,6 +139,8 @@ struct HttpSecurityHeaders {
   bool transferEncodingSeen = false;
   bool connectionSeen = false;
   bool connectionClose = false;
+  bool connectionReuseSeen = false;
+  bool connectionReuseRequested = false;
 
   static bool containsConnectionToken(const std::string &value,
                                       const char *expected) {
@@ -190,6 +198,13 @@ struct HttpSecurityHeaders {
       connectionClose = connectionClose || connectionSeen ||
                         containsConnectionToken(value, "close");
       connectionSeen = true;
+    } else if (name == "x-bikecomputer-connection-reuse") {
+      // Persistence is an explicit app-client capability. WebKit may open
+      // parallel or speculative connections for the secure console, which
+      // cannot safely share this single HTTP worker. Duplicate or unexpected
+      // values fail closed to one response per TLS connection.
+      connectionReuseRequested = !connectionReuseSeen && value == "1";
+      connectionReuseSeen = true;
     }
   }
 
