@@ -57,6 +57,15 @@ int main() {
   assert(timing.p95Ms == 11001);
   assert(timing.maximumMs == 11001);
 
+  TimingHistogram gateAlignedHistogram;
+  for (uint32_t index = 0; index < 19; ++index)
+    gateAlignedHistogram.note(1249);
+  gateAlignedHistogram.note(1300);
+  assert(gateAlignedHistogram.summary().p95Ms == 1250);
+  TimingHistogram aboveGateHistogram;
+  aboveGateHistogram.note(1251);
+  assert(aboveGateHistogram.summary().p95Ms == 1500);
+
   State state;
   BuildIdentity build;
   assert(build.deviceId.assign("0123456789abcdef"));

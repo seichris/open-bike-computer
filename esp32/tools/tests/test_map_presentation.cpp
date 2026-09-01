@@ -39,6 +39,21 @@ int main() {
   assert(!frameCoversViewport(658.0, 658.0, 466.0, 466.0,
                               {329.0, 329.0}, {233.0, 233.0}, kPi / 4.0,
                               16.0));
+  // The round 1.75-inch window has no visible square corners. Its complete
+  // physical circle remains covered through rotation, including with the
+  // shorter centered viewport used when the map toolbar is visible.
+  assert(frameCoversViewport(658.0, 658.0, 466.0, 466.0,
+                             {329.0, 329.0}, {233.0, 233.0}, kPi / 4.0,
+                             16.0, true));
+  assert(frameCoversViewport(658.0, 658.0, 466.0, 366.0,
+                             {329.0, 329.0}, {233.0, 183.0}, kPi / 2.0,
+                             16.0, true));
+  assert(frameCoversViewport(658.0, 658.0, 466.0, 466.0,
+                             {409.0, 329.0}, {233.0, 233.0}, kPi / 2.0,
+                             16.0, true));
+  assert(!frameCoversViewport(658.0, 658.0, 466.0, 466.0,
+                              {410.0, 329.0}, {233.0, 233.0}, kPi / 2.0,
+                              16.0, true));
 
   HeadingResolver resolver;
   double heading = -1.0;

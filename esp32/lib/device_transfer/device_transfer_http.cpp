@@ -965,11 +965,13 @@ bool HttpTransferServer::handleClient(TransferClient &client,
   }
 
   HttpRequest request;
-  std::stringstream requestStream(requestLine);
   std::string version;
-  requestStream >> request.method >> request.path >> version;
   std::string requestLineTrailing;
-  requestStream >> requestLineTrailing;
+  {
+    std::stringstream requestStream(requestLine);
+    requestStream >> request.method >> request.path >> version;
+    requestStream >> requestLineTrailing;
+  }
   if (request.method.empty() || request.path.empty() ||
       version != "HTTP/1.1" || !requestLineTrailing.empty()) {
     sendError(client, 400, "bad_request", "invalid request line");
@@ -1022,6 +1024,13 @@ bool HttpTransferServer::handleClient(TransferClient &client,
   request.connectionClose = securityHeaders.connectionClose;
   request.connectionReuseRequested =
       securityHeaders.connectionReuseRequested;
+  // Parsing storage is not needed by the endpoint handler. Release it before
+  // renderer metrics take their heap sample or build a response so a short
+  // request line/header cannot overlap those bounded allocations.
+  std::string().swap(requestLine);
+  std::string().swap(version);
+  std::string().swap(requestLineTrailing);
+  std::string().swap(line);
   client.setHttpRequestBodyLength(request.hasContentLength
                                       ? request.contentLength
                                       : 0);
@@ -1191,14 +1200,15 @@ bool writeHttpBytes(TransferClient &client, const uint8_t *data, size_t length,
 }
 
 bool sendHttpJson(TransferClient &client, int status, const std::string &body) {
-  const std::string response =
-      std::string("HTTP/1.1 ") + std::to_string(status) + " " +
-      httpReason(status) +
-      "\r\nContent-Type: application/json\r\nConnection: " +
-      client.httpResponseConnectionValue() +
-      "\r\nCache-Control: no-store\r\nPragma: no-cache\r\nContent-Length: " +
-      std::to_string(body.size()) + "\r\n\r\n" + body;
-  return writeHttpResponse(client, response);
+  // Keep the bounded JSON allocation owned by the caller and stream it after
+  // the small response head. Concatenating both into one std::string briefly
+  // retained several growing internal-heap buffers before the final payload
+  // crossed Arduino's external-allocation threshold.
+  if (!sendHttpHead(client, status, body.size(), "application/json"))
+    return false;
+  return writeHttpBytes(client,
+                        reinterpret_cast<const uint8_t *>(body.data()),
+                        body.size());
 }
 
 bool sendHttpError(TransferClient &client, int status, const std::string &code,

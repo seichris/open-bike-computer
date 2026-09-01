@@ -201,6 +201,19 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
         ]
         self.assertIn('/device-debug/v1/session/exit', exit_policy)
 
+    def test_json_response_streams_body_without_rebuilding_it(self):
+        send_json = HTTP_SOURCE[
+            HTTP_SOURCE.index("bool sendHttpJson") :
+            HTTP_SOURCE.index("bool sendHttpError")
+        ]
+        self.assertIn("sendHttpHead(client, status, body.size()", send_json)
+        self.assertIn("writeHttpBytes(client", send_json)
+        self.assertNotIn("+ body", send_json)
+        self.assertLess(
+            send_json.index("sendHttpHead(client"),
+            send_json.index("writeHttpBytes(client"),
+        )
+
     def test_idle_reused_connection_cannot_starve_a_new_pinned_client(self):
         handle_client = HTTP_SOURCE[
             HTTP_SOURCE.index("bool HttpTransferServer::handleClient") :

@@ -4586,7 +4586,8 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
                  readyRenderResult.overscanPixels,
              readyRenderResult.projection.anchorY() -
                  readyRenderResult.overscanPixels},
-            rotationDelta, MAP_RENDER_SAFETY_PIXELS);
+            rotationDelta, MAP_RENDER_SAFETY_PIXELS,
+            MAP_RENDER_ROUND_VIEWPORT);
     if (!covered) {
       renderJobs.rejectReadyAsStale();
       readyRenderResultValid = false;
@@ -4808,7 +4809,8 @@ void Maps::updatePresentedFrameTransform() {
       {projected.x, projected.y},
       {static_cast<double>(screenAnchorX),
        static_cast<double>(screenAnchorY)},
-      rotationDelta, MAP_RENDER_SAFETY_PIXELS);
+      rotationDelta, MAP_RENDER_SAFETY_PIXELS,
+      MAP_RENDER_ROUND_VIEWPORT);
 
   RenderRequest latestRequestSnapshot;
   bool latestRequestSnapshotValid = false;
@@ -4842,7 +4844,8 @@ void Maps::updatePresentedFrameTransform() {
                latestRequestSnapshot.overscanPixels,
            latestProjection.anchorY() -
                latestRequestSnapshot.overscanPixels},
-          latestRotationDelta, MAP_RENDER_SAFETY_PIXELS);
+          latestRotationDelta, MAP_RENDER_SAFETY_PIXELS,
+          MAP_RENDER_ROUND_VIEWPORT);
     }
   }
   if (!visibleCoversPose && !latestCoversPose) {

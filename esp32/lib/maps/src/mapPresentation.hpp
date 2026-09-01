@@ -74,13 +74,33 @@ inline bool frameCoversViewport(double renderWidth, double renderHeight,
                                 ScreenPoint projectedPivot,
                                 ScreenPoint screenAnchor,
                                 double rotationDeltaRad,
-                                double safetyPixels) {
+                                double safetyPixels,
+                                bool roundViewport = false) {
   if (!(renderWidth > 0.0 && renderHeight > 0.0 && viewportWidth > 0.0 &&
         viewportHeight > 0.0 && safetyPixels >= 0.0)) {
     return false;
   }
   const double cosine = std::cos(rotationDeltaRad);
   const double sine = std::sin(rotationDeltaRad);
+  if (roundViewport) {
+    // The 1.75-inch panel exposes a circular 466 px window. Its map viewport
+    // can be shorter when the toolbar is visible, but it remains centered in
+    // that physical circle. Prove a conservative full-screen circle so every
+    // physically visible pixel is covered without requiring the invisible
+    // square corners. A circle is rotation-invariant, which also prevents an
+    // ordinary course-up turn from rejecting an otherwise complete frame.
+    const double radius = std::max(viewportWidth, viewportHeight) * 0.5;
+    const double centerDx = viewportWidth * 0.5 - screenAnchor.x;
+    const double centerDy = viewportHeight * 0.5 - screenAnchor.y;
+    const double sourceCenterX =
+        projectedPivot.x + cosine * centerDx + sine * centerDy;
+    const double sourceCenterY =
+        projectedPivot.y - sine * centerDx + cosine * centerDy;
+    return sourceCenterX - radius >= safetyPixels &&
+           sourceCenterY - radius >= safetyPixels &&
+           sourceCenterX + radius <= renderWidth - safetyPixels &&
+           sourceCenterY + radius <= renderHeight - safetyPixels;
+  }
   const ScreenPoint corners[] = {{0.0, 0.0},
                                  {viewportWidth, 0.0},
                                  {viewportWidth, viewportHeight},

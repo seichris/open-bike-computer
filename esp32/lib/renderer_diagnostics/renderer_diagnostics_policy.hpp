@@ -106,10 +106,10 @@ public:
   }
 
 private:
-  static constexpr std::array<uint32_t, 27> kUpperBoundsMs{{
+  static constexpr std::array<uint32_t, 28> kUpperBoundsMs{{
       1,    2,    4,    8,    12,   16,   24,   32,   48,
       64,   80,   100,  125,  150,  200,  250,  350,  500,
-      750,  1000, 1500, 2000, 3000, 5000, 7500, 10000,
+      750,  1000, 1250, 1500, 2000, 3000, 5000, 7500, 10000,
       std::numeric_limits<uint32_t>::max(),
   }};
 
