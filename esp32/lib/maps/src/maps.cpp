@@ -1928,7 +1928,7 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
   }
 
   // 1. Identify all required block offsets for the current viewport
-  std::vector<Point32> requiredOffsets;
+  std::vector<Point32, PsramAllocator<Point32>> requiredOffsets;
   const int32_t minBlockX = bbox.min.x & (~MAPBLOCK_MASK);
   const int32_t maxBlockX = bbox.max.x & (~MAPBLOCK_MASK);
   const int32_t minBlockY = bbox.min.y & (~MAPBLOCK_MASK);
@@ -2533,8 +2533,12 @@ bool Maps::readVectorMap(
 
   Polygon projectedPolygon;
   std::vector<int16_t, PsramAllocator<int16_t>> polygonScanlineNodes;
-  std::vector<map_projection::GroundPoint> groundPolygon;
-  std::vector<map_projection::GroundPoint> clippedGroundPolygon;
+  std::vector<map_projection::GroundPoint,
+              PsramAllocator<map_projection::GroundPoint>>
+      groundPolygon;
+  std::vector<map_projection::GroundPoint,
+              PsramAllocator<map_projection::GroundPoint>>
+      clippedGroundPolygon;
   uint32_t projectionClippedCount = 0;
   uint32_t projectionRejectedCount = 0;
 
@@ -2555,7 +2559,7 @@ bool Maps::readVectorMap(
     };
 
     const size_t polygonCount = block->polygons.size();
-    std::vector<bool> visited(polygonCount, false);
+    std::vector<uint8_t, PsramAllocator<uint8_t>> visited(polygonCount, 0);
     const int minCellX =
         std::max(0, static_cast<int>(localViewport.min.x >> CELL_SHIFT));
     const int maxCellX = std::min(
@@ -3176,7 +3180,8 @@ bool Maps::readVectorMap(
         admissionDiagnostics.limiterFlags |=
             map_building_admission::LimiterRecords;
       }
-      std::vector<uint8_t> admission(candidates.size(), 0);
+      std::vector<uint8_t, PsramAllocator<uint8_t>> admission(
+          candidates.size(), 0);
 #if FIRMWARE_DIAGNOSTICS
       std::array<uint32_t, 96> extrudedDistancesPx{};
       size_t extrudedDistanceCount = 0;

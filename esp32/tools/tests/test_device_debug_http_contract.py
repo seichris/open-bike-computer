@@ -133,6 +133,8 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertIn("class JsonBuilder", RENDERER_DIAGNOSTICS)
         self.assertIn("body_.reserve(4096);", RENDERER_DIAGNOSTICS)
         self.assertIn("std::to_chars", RENDERER_DIAGNOSTICS)
+        self.assertIn("struct EscapedText", RENDERER_DIAGNOSTICS)
+        self.assertNotIn("std::string jsonEscape", RENDERER_DIAGNOSTICS)
         self.assertNotIn("std::ostringstream", RENDERER_DIAGNOSTICS)
 
     def test_checkpoint_frame_floor_skips_stale_pixels_before_transfer(self):

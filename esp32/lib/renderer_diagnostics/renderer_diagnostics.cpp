@@ -51,6 +51,50 @@ public:
     return *this;
   }
 
+  struct EscapedText {
+    const char *value = nullptr;
+  };
+
+  JsonBuilder &operator<<(EscapedText escaped) {
+    if (escaped.value == nullptr)
+      return *this;
+    for (const unsigned char character : std::string_view(escaped.value)) {
+      switch (character) {
+      case '"':
+        body_.append("\\\"");
+        break;
+      case '\\':
+        body_.append("\\\\");
+        break;
+      case '\b':
+        body_.append("\\b");
+        break;
+      case '\f':
+        body_.append("\\f");
+        break;
+      case '\n':
+        body_.append("\\n");
+        break;
+      case '\r':
+        body_.append("\\r");
+        break;
+      case '\t':
+        body_.append("\\t");
+        break;
+      default:
+        if (character < 0x20) {
+          char encoded[7] = {};
+          std::snprintf(encoded, sizeof(encoded), "\\u%04x", character);
+          body_.append(encoded);
+        } else {
+          body_.push_back(static_cast<char>(character));
+        }
+        break;
+      }
+    }
+    return *this;
+  }
+
   template <typename Integer,
             typename = std::enable_if_t<std::is_integral_v<Integer> &&
                                         !std::is_same_v<Integer, bool>>>
@@ -96,45 +140,8 @@ void noteCurrentMemory() {
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
-std::string jsonEscape(const char *value) {
-  std::string result;
-  if (value == nullptr)
-    return result;
-  for (const unsigned char character : std::string(value)) {
-    switch (character) {
-    case '"':
-      result += "\\\"";
-      break;
-    case '\\':
-      result += "\\\\";
-      break;
-    case '\b':
-      result += "\\b";
-      break;
-    case '\f':
-      result += "\\f";
-      break;
-    case '\n':
-      result += "\\n";
-      break;
-    case '\r':
-      result += "\\r";
-      break;
-    case '\t':
-      result += "\\t";
-      break;
-    default:
-      if (character < 0x20) {
-        char escaped[7] = {};
-        std::snprintf(escaped, sizeof(escaped), "\\u%04x", character);
-        result += escaped;
-      } else {
-        result.push_back(static_cast<char>(character));
-      }
-      break;
-    }
-  }
-  return result;
+JsonBuilder::EscapedText jsonEscape(const char *value) {
+  return {value};
 }
 
 void appendTiming(JsonBuilder &body, const TimingSummary &value) {
