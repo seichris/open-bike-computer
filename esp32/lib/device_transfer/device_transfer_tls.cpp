@@ -660,6 +660,21 @@ uint8_t TransferClient::connected() {
   return connected_ ? 1 : 0;
 }
 
+void TransferClient::resetHttpResponsePolicy(bool persistenceAllowed) {
+  responsePersistenceAllowed_ = persistenceAllowed;
+  responseKeepAlive_ = false;
+  requestBodyConsumed_ = true;
+}
+
+void TransferClient::requestHttpResponseKeepAlive() {
+  responseKeepAlive_ = responsePersistenceAllowed_;
+}
+
+void TransferClient::interruptSocket() const {
+  if (socket_ >= 0)
+    ::shutdown(socket_, SHUT_RDWR);
+}
+
 bool TransferClient::finishResponse(uint32_t timeoutMs) {
   if (!connected_ || tls_ == nullptr)
     return false;
@@ -717,6 +732,9 @@ bool TransferClient::finishResponse(uint32_t timeoutMs) {
 
 void TransferClient::stop() {
   connected_ = false;
+  responsePersistenceAllowed_ = false;
+  responseKeepAlive_ = false;
+  requestBodyConsumed_ = true;
   if (tls_ != nullptr) {
     esp_tls_server_session_delete(tls_);
     tls_ = nullptr;

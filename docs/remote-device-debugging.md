@@ -74,6 +74,17 @@ firmware transfer workers retain internal stacks because activation and flash
 paths have stricter memory-access requirements; the optimization is therefore
 debug-mode-only and does not change release or update behavior.
 
+Authorized HTTP/1.1 debug requests may reuse one bounded pinned-TLS connection;
+each request still carries and independently validates the in-memory transfer
+token and current session generation. This avoids repeated handshake allocation
+and CPU churn during renderer sweeps. Token-free, malformed, revoked, and
+explicit `Connection: close` requests close after one response, as does session
+exit so its TLS close-notify remains the teardown boundary. A BLE disconnect or
+mode revocation interrupts the active socket immediately rather than waiting
+for the persistent connection's header timeout. Map installation, diagnostics
+delivery, and firmware update modes retain their one-request close-and-commit
+semantics.
+
 **BOOT (short press)** queues one debounced short press through the same
 firmware path as the physical GPIO0 button. It advances screens normally and,
 if an ownership comparison is active, obeys the same fresh-input gate before

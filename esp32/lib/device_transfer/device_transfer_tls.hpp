@@ -109,6 +109,20 @@ public:
   const TransferTlsHandshakeDiagnostics &handshakeDiagnostics() const {
     return handshakeDiagnostics_;
   }
+  void resetHttpResponsePolicy(bool persistenceAllowed);
+  void setHttpRequestBodyLength(uint64_t contentLength) {
+    requestBodyConsumed_ = contentLength == 0;
+  }
+  void markHttpRequestBodyConsumed() { requestBodyConsumed_ = true; }
+  void requestHttpResponseKeepAlive();
+  void requestHttpResponseClose() { responseKeepAlive_ = false; }
+  bool httpResponseKeepAlive() const {
+    return responseKeepAlive_ && requestBodyConsumed_;
+  }
+  const char *httpResponseConnectionValue() const {
+    return httpResponseKeepAlive() ? "keep-alive" : "close";
+  }
+  void interruptSocket() const;
   bool finishResponse(uint32_t timeoutMs);
   void stop();
   explicit operator bool() { return connected() != 0; }
@@ -118,6 +132,9 @@ private:
   esp_tls *tls_ = nullptr;
   int socket_ = -1;
   bool connected_ = false;
+  bool responsePersistenceAllowed_ = false;
+  bool responseKeepAlive_ = false;
+  bool requestBodyConsumed_ = true;
   TransferTlsHandshakeDiagnostics handshakeDiagnostics_;
 };
 

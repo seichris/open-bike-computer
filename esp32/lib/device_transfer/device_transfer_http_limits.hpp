@@ -10,6 +10,7 @@ constexpr size_t HTTP_MAX_LINE_BYTES = 512;
 constexpr size_t HTTP_MAX_HEADER_BYTES = 8192;
 constexpr size_t HTTP_MAX_HEADER_LINES = 64;
 constexpr uint32_t HTTP_REQUEST_HEADER_TIMEOUT_MS = 5000;
+constexpr size_t HTTP_MAX_REQUESTS_PER_TLS_CONNECTION = 4096;
 
 inline uint32_t nextHttpTransferGeneration(uint32_t current) {
   current++;
@@ -19,6 +20,13 @@ inline uint32_t nextHttpTransferGeneration(uint32_t current) {
 inline bool isHttpTransferGenerationCurrent(bool enabled, uint32_t current,
                                             uint32_t request) {
   return enabled && current != 0 && current == request;
+}
+
+inline bool shouldReuseAuthenticatedHttpConnection(
+    bool authorized, bool generationStillCurrent, bool clientRequestedClose,
+    bool responseKeepAlive, bool connected) {
+  return authorized && generationStillCurrent && !clientRequestedClose &&
+         responseKeepAlive && connected;
 }
 
 struct HttpResponseCompletionToken {
@@ -112,6 +120,42 @@ struct HttpSecurityHeaders {
   bool contentTypeSeen = false;
   bool contentLengthSeen = false;
   bool transferEncodingSeen = false;
+  bool connectionSeen = false;
+  bool connectionClose = false;
+
+  static bool containsConnectionToken(const std::string &value,
+                                      const char *expected) {
+    size_t tokenStart = 0;
+    while (tokenStart <= value.size()) {
+      const size_t comma = value.find(',', tokenStart);
+      size_t begin = tokenStart;
+      size_t end = comma == std::string::npos ? value.size() : comma;
+      while (begin < end && (value[begin] == ' ' || value[begin] == '\t'))
+        begin++;
+      while (end > begin &&
+             (value[end - 1] == ' ' || value[end - 1] == '\t'))
+        end--;
+      const size_t expectedLength = std::char_traits<char>::length(expected);
+      if (end - begin == expectedLength) {
+        bool matches = true;
+        for (size_t index = 0; index < expectedLength; ++index) {
+          char character = value[begin + index];
+          if (character >= 'A' && character <= 'Z')
+            character = static_cast<char>(character - 'A' + 'a');
+          if (character != expected[index]) {
+            matches = false;
+            break;
+          }
+        }
+        if (matches)
+          return true;
+      }
+      if (comma == std::string::npos)
+        break;
+      tokenStart = comma + 1;
+    }
+    return false;
+  }
 
   void accept(const std::string &name, const std::string &value) {
     if (name == "content-length") {
@@ -128,6 +172,13 @@ struct HttpSecurityHeaders {
       transferTokenSeen = true;
     } else if (name == "transfer-encoding") {
       transferEncodingSeen = true;
+    } else if (name == "connection") {
+      // Duplicate Connection fields are unnecessary for the app and make a
+      // persistent-session decision harder to audit. Fail closed to the
+      // one-request behavior without rejecting the otherwise valid request.
+      connectionClose = connectionClose || connectionSeen ||
+                        containsConnectionToken(value, "close");
+      connectionSeen = true;
     }
   }
 

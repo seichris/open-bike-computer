@@ -49,6 +49,7 @@ struct HttpRequest {
   std::string contentType;
   uint64_t contentLength = 0;
   bool hasContentLength = false;
+  bool connectionClose = false;
   uint32_t transferGeneration = 0;
 };
 
@@ -125,8 +126,9 @@ private:
   std::array<HandlerRegistration, 4> handlers_{};
   size_t handlerCount_ = 0;
   TaskHandle_t workerTask_ = nullptr;
+  TransferClient *activeClient_ = nullptr;
 
-  void handleClient(TransferClient &client);
+  bool handleClient(TransferClient &client, size_t requestIndex);
   void runWorker();
   bool startNetwork();
   void stopNetwork();
@@ -140,6 +142,7 @@ private:
   void unlockState() const;
   void lockTlsIdentity() const;
   void unlockTlsIdentity() const;
+  void interruptActiveClientLocked() const;
 };
 
 struct HttpResponseHeader {

@@ -281,6 +281,7 @@ void HttpTransferServer::clearAuthenticatedBleSession() {
   currentRequestAuthorized_ = false;
   if (hadBinding || wasEnabled)
     transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
+  interruptActiveClientLocked();
   unlockState();
   if (wasEnabled)
     server_.stop();
@@ -411,6 +412,7 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     requestedHotspotFallbackReason_.clear();
     sessionToken_.clear();
     transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
+    interruptActiveClientLocked();
     unlockState();
     server_.stop();
   }
@@ -755,18 +757,36 @@ void HttpTransferServer::runWorker() {
         continue;
       }
       lockState();
-      requestInProgress_ = true;
-      currentRequestAuthorized_ = false;
+      activeClient_ = &client;
       unlockState();
-      handleClient(client);
-      client.stop();
-      lockState();
-      if (currentRequestAuthorized_) {
-        lastUsefulTrafficMs_ = millis();
+      for (size_t requestIndex = 0;
+           requestIndex < HTTP_MAX_REQUESTS_PER_TLS_CONNECTION;
+           ++requestIndex) {
+        client.resetHttpResponsePolicy(
+            requestIndex + 1 < HTTP_MAX_REQUESTS_PER_TLS_CONNECTION);
+        lockState();
+        const bool stillEnabled = enabled_;
+        requestInProgress_ = stillEnabled;
+        currentRequestAuthorized_ = false;
+        unlockState();
+        if (!stillEnabled || !handleClient(client, requestIndex))
+          break;
+        lockState();
+        if (currentRequestAuthorized_)
+          lastUsefulTrafficMs_ = millis();
+        requestInProgress_ = false;
+        currentRequestAuthorized_ = false;
+        unlockState();
+        ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
       }
+      lockState();
+      activeClient_ = nullptr;
+      if (currentRequestAuthorized_)
+        lastUsefulTrafficMs_ = millis();
       requestInProgress_ = false;
       currentRequestAuthorized_ = false;
       unlockState();
+      client.stop();
       ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
     } else {
       const uint32_t now = millis();
@@ -908,24 +928,29 @@ bool HttpTransferServer::waitUntilStopped(uint32_t timeoutMs) {
   }
 }
 
-void HttpTransferServer::handleClient(TransferClient &client) {
+bool HttpTransferServer::handleClient(TransferClient &client,
+                                      size_t requestIndex) {
   const uint32_t requestStartedMs = millis();
   HttpHeaderBudget headerBudget;
   std::string requestLine;
   const ReadLineResult requestLineResult =
       readLine(client, requestLine, headerBudget, requestStartedMs);
   if (requestLineResult == ReadLineResult::Timeout) {
-    sendError(client, 408, "timeout", "request timed out");
-    return;
+    // A reused HTTP/1.1 connection may simply have gone idle after a complete
+    // response. Close it silently so a future request can establish a fresh
+    // pinned TLS session; partial first lines still receive an explicit 408.
+    if (requestIndex == 0 || headerBudget.totalBytes != 0)
+      sendError(client, 408, "timeout", "request timed out");
+    return false;
   }
   if (requestLineResult == ReadLineResult::TooLarge) {
     sendError(client, 431, "headers_too_large",
               "request headers exceed device limits");
-    return;
+    return false;
   }
   if (requestLineResult != ReadLineResult::Complete) {
     sendError(client, 400, "bad_request", "request line is incomplete");
-    return;
+    return false;
   }
 
   HttpRequest request;
@@ -937,7 +962,7 @@ void HttpTransferServer::handleClient(TransferClient &client) {
   if (request.method.empty() || request.path.empty() ||
       version != "HTTP/1.1" || !requestLineTrailing.empty()) {
     sendError(client, 400, "bad_request", "invalid request line");
-    return;
+    return false;
   }
 
   std::string line;
@@ -947,42 +972,46 @@ void HttpTransferServer::handleClient(TransferClient &client) {
         readLine(client, line, headerBudget, requestStartedMs);
     if (headerResult == ReadLineResult::Timeout) {
       sendError(client, 408, "timeout", "request headers timed out");
-      return;
+      return false;
     }
     if (headerResult == ReadLineResult::TooLarge) {
       sendError(client, 431, "headers_too_large",
                 "request headers exceed device limits");
-      return;
+      return false;
     }
     if (headerResult != ReadLineResult::Complete) {
       sendError(client, 400, "bad_request", "request headers are incomplete");
-      return;
+      return false;
     }
     if (line.empty())
       break;
     const size_t colon = line.find(':');
     if (colon == std::string::npos || colon == 0) {
       sendError(client, 400, "bad_header", "request header is invalid");
-      return;
+      return false;
     }
     const std::string rawName = line.substr(0, colon);
     std::string name = lower(rawName);
     std::string value = trim(line.substr(colon + 1));
     if (rawName != trim(rawName) || !validHttpHeaderName(name)) {
       sendError(client, 400, "bad_header", "request header name is invalid");
-      return;
+      return false;
     }
     securityHeaders.accept(name, name == "content-type" ? lower(value) : value);
   }
   if (securityHeaders.hasAmbiguousFraming()) {
     sendError(client, 400, "ambiguous_framing",
               "transfer encoding is not supported");
-    return;
+    return false;
   }
   request.transferToken = std::move(securityHeaders.transferToken);
   request.contentType = std::move(securityHeaders.contentType);
   request.contentLength = securityHeaders.contentLength;
   request.hasContentLength = securityHeaders.hasContentLength;
+  request.connectionClose = securityHeaders.connectionClose;
+  client.setHttpRequestBodyLength(request.hasContentLength
+                                      ? request.contentLength
+                                      : 0);
   lockState();
   request.transferGeneration = transferGeneration_;
   unlockState();
@@ -998,16 +1027,29 @@ void HttpTransferServer::handleClient(TransferClient &client) {
     const bool shortUnauthenticatedCompletion =
         !authorized &&
         handler->allowShortUnauthenticatedResponseCompletion(request);
+    lockState();
+    const bool generationStillCurrent =
+        isHttpTransferGenerationCurrent(enabled_, transferGeneration_,
+                                        request.transferGeneration) &&
+        authenticatedBleSessionId_ != 0;
+    unlockState();
+    const bool keepAlive = shouldReuseAuthenticatedHttpConnection(
+        authorized, generationStillCurrent, request.connectionClose,
+        client.httpResponseKeepAlive(), client.connected());
+    if (keepAlive)
+      return true;
     const bool peerClosedCleanly =
         (authorized || shortUnauthenticatedCompletion) &&
         finishHttpResponse(client, authorized ? kHttpResponseCloseTimeoutMs
                                               : 250U);
     client.stop();
     handler->responseDidComplete(request, peerClosedCleanly);
-    return;
+    return false;
   }
 
+  client.requestHttpResponseClose();
   sendError(client, 404, "not_found", "device transfer endpoint not found");
+  return false;
 }
 
 HttpRequestHandler *
@@ -1075,6 +1117,13 @@ void HttpTransferServer::unlockTlsIdentity() const {
     xSemaphoreGive(tlsIdentityMutex_);
 }
 
+void HttpTransferServer::interruptActiveClientLocked() const {
+  // The worker clears this pointer under the same mutex before destroying the
+  // stack-owned client, so a BLE/session revocation cannot target a reused fd.
+  if (activeClient_ != nullptr)
+    activeClient_->interruptSocket();
+}
+
 bool sendHttpHead(TransferClient &client, int status, uint64_t contentLength,
                   const char *contentType,
                   const HttpResponseHeader *additionalHeaders,
@@ -1099,7 +1148,9 @@ bool sendHttpHead(TransferClient &client, int status, uint64_t contentLength,
       return false;
     response += name + ": " + value + "\r\n";
   }
-  response += "Connection: close\r\nContent-Length: " +
+  response += std::string("Connection: ") +
+              client.httpResponseConnectionValue() +
+              "\r\nContent-Length: " +
               std::to_string(contentLength) +
               "\r\nCache-Control: no-store\r\nPragma: no-cache\r\n\r\n";
   return writeHttpResponse(client, response);
@@ -1130,7 +1181,9 @@ bool sendHttpJson(TransferClient &client, int status, const std::string &body) {
   const std::string response =
       std::string("HTTP/1.1 ") + std::to_string(status) + " " +
       httpReason(status) +
-      "\r\nContent-Type: application/json\r\nConnection: close\r\nCache-Control: no-store\r\nPragma: no-cache\r\nContent-Length: " +
+      "\r\nContent-Type: application/json\r\nConnection: " +
+      client.httpResponseConnectionValue() +
+      "\r\nCache-Control: no-store\r\nPragma: no-cache\r\nContent-Length: " +
       std::to_string(body.size()) + "\r\n\r\n" + body;
   return writeHttpResponse(client, response);
 }
@@ -1173,7 +1226,12 @@ bool readHttpBody(TransferClient &client, uint64_t contentLength,
     remaining -= static_cast<uint64_t>(read);
     lastReadMs = millis();
   }
-  return remaining == 0;
+  const bool complete = remaining == 0;
+  if (complete)
+    client.markHttpRequestBodyConsumed();
+  else
+    client.requestHttpResponseClose();
+  return complete;
 }
 
 } // namespace device_transfer

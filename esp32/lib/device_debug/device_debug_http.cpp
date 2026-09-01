@@ -201,6 +201,14 @@ bool DeviceDebugHttp::handleRequest(
   }
   if (!authorize(request, client))
     return true;
+  // Every request remains independently token- and generation-authenticated.
+  // Reusing the pinned TLS channel only removes handshake churn. Session exit
+  // deliberately retains Connection: close as its durable teardown boundary.
+  if (!request.connectionClose &&
+      !(request.method == "POST" &&
+        request.path == "/device-debug/v1/session/exit")) {
+    client.requestHttpResponseKeepAlive();
+  }
   if (request.method == "GET" && request.path == "/device-debug/v1/info")
     return handleInfo(client);
   if (request.method == "GET" &&
@@ -376,9 +384,11 @@ bool DeviceDebugHttp::handleRendererWindow(
     return device_transfer::sendHttpError(
         client, 408, "renderer_window_body_timeout",
         "renderer window body was not received");
-  if (!server_->isRequestAuthorized(request))
+  if (!server_->isRequestAuthorized(request)) {
+    client.requestHttpResponseClose();
     return device_transfer::sendHttpError(client, 401, "session_revoked",
                                           "debug session was revoked");
+  }
 
   JsonDocument document;
   if (deserializeJson(document, body))
@@ -555,9 +565,11 @@ bool DeviceDebugHttp::handlePointer(
                                      kPointerBodyMaximumBytes, body))
     return device_transfer::sendHttpError(client, 408, "pointer_body_timeout",
                                           "pointer body was not received");
-  if (!server_->isRequestAuthorized(request))
+  if (!server_->isRequestAuthorized(request)) {
+    client.requestHttpResponseClose();
     return device_transfer::sendHttpError(client, 401, "session_revoked",
                                           "debug session was revoked");
+  }
   if (displayPowerManager.state() == display_power::State::Off)
     return device_transfer::sendHttpError(client, 409, "display_off",
                                           "wake the display before sending input");
@@ -605,9 +617,11 @@ bool DeviceDebugHttp::handleWake(device_transfer::TransferClient &client) {
 
 bool DeviceDebugHttp::handleBootPress(
     const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
-  if (!server_->isRequestAuthorized(request))
+  if (!server_->isRequestAuthorized(request)) {
+    client.requestHttpResponseClose();
     return device_transfer::sendHttpError(client, 401, "session_revoked",
                                           "debug session was revoked");
+  }
   if (!bootPressRequested_.request())
     return device_transfer::sendHttpError(
         client, 409, "boot_press_pending",

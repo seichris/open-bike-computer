@@ -15,6 +15,9 @@ HTTP_SOURCE = (
 HTTP_HEADER = (
     ROOT / "lib/device_transfer/device_transfer_http.hpp"
 ).read_text(encoding="utf-8")
+DEBUG_HTTP_SOURCE = (
+    ROOT / "lib/device_debug/device_debug_http.cpp"
+).read_text(encoding="utf-8")
 
 
 class DeviceTransferTLSContractTests(unittest.TestCase):
@@ -23,7 +26,10 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
             HTTP_SOURCE.index("void HttpTransferServer::runWorker()") :
             HTTP_SOURCE.index("void HttpTransferServer::workerTaskThunk")
         ]
-        self.assertLess(worker.index("client.begin("), worker.index("handleClient(client)"))
+        self.assertLess(
+            worker.index("client.begin("),
+            worker.index("handleClient(client, requestIndex)"),
+        )
         begin = TLS_SOURCE[
             TLS_SOURCE.index("bool TransferClient::begin") :
             TLS_SOURCE.index("int TransferClient::available")
@@ -168,6 +174,41 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
         self.assertIn("mbedtls_ssl_close_notify", finish)
         self.assertIn("esp_tls_conn_read", finish)
         self.assertIn("client.finishResponse(timeoutMs)", HTTP_SOURCE)
+
+    def test_remote_debug_reuses_only_bounded_authenticated_tls_connections(self):
+        worker = HTTP_SOURCE[
+            HTTP_SOURCE.index("void HttpTransferServer::runWorker()") :
+            HTTP_SOURCE.index("void HttpTransferServer::workerTaskThunk")
+        ]
+        self.assertIn("HTTP_MAX_REQUESTS_PER_TLS_CONNECTION", worker)
+        self.assertIn("client.resetHttpResponsePolicy(", worker)
+        self.assertIn("activeClient_ = &client;", worker)
+        self.assertIn("activeClient_ = nullptr;", worker)
+        self.assertIn("client.httpResponseKeepAlive()", HTTP_SOURCE)
+        self.assertIn("client.httpResponseConnectionValue()", HTTP_SOURCE)
+        self.assertIn("client.requestHttpResponseKeepAlive();", DEBUG_HTTP_SOURCE)
+        self.assertIn("server_->isRequestAuthorized(request)", DEBUG_HTTP_SOURCE)
+        exit_policy = DEBUG_HTTP_SOURCE[
+            DEBUG_HTTP_SOURCE.index("// Every request remains independently") :
+            DEBUG_HTTP_SOURCE.index(
+                'if (request.method == "GET" && request.path == "/device-debug/v1/info")'
+            )
+        ]
+        self.assertIn('/device-debug/v1/session/exit', exit_policy)
+
+    def test_ble_and_mode_revocation_interrupt_the_active_tls_socket(self):
+        clear_ble = HTTP_SOURCE[
+            HTTP_SOURCE.index("void HttpTransferServer::clearAuthenticatedBleSession") :
+            HTTP_SOURCE.index("bool HttpTransferServer::prepareTlsIdentityRotation")
+        ]
+        disable = HTTP_SOURCE[
+            HTTP_SOURCE.index("bool HttpTransferServer::setEnabled(bool enabled, std::string mode)") :
+            HTTP_SOURCE.index("void HttpTransferServer::setLastError")
+        ]
+        self.assertIn("interruptActiveClientLocked();", clear_ble)
+        self.assertIn("interruptActiveClientLocked();", disable)
+        self.assertIn("::shutdown(socket_, SHUT_RDWR);", TLS_SOURCE)
+        self.assertIn("activeClient_->interruptSocket();", HTTP_SOURCE)
 
     def test_all_hotspots_are_protected_and_status_advertises_https(self):
         self.assertIn("apPassphrase_ = generateSessionToken().substr(0, 24);", HTTP_SOURCE)
