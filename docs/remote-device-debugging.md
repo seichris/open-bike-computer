@@ -81,9 +81,13 @@ and CPU churn during renderer sweeps. Token-free, malformed, revoked, and
 explicit `Connection: close` requests close after one response, as does session
 exit so its TLS close-notify remains the teardown boundary. A BLE disconnect or
 mode revocation interrupts the active socket immediately rather than waiting
-for the persistent connection's header timeout. Map installation, diagnostics
-delivery, and firmware update modes retain their one-request close-and-commit
-semantics.
+for the persistent connection's header timeout. An authenticated connection
+that becomes idle after a response is released after two seconds, before the
+app's request deadline, so closing the console can hand the single worker to
+the secure-sweep URL session without retaining the old web-view socket. A clean
+peer disconnect during that handoff is not reported as a malformed request.
+Map installation, diagnostics delivery, and firmware update modes retain their
+one-request close-and-commit semantics.
 
 **BOOT (short press)** queues one debounced short press through the same
 firmware path as the physical GPIO0 button. It advances screens normally and,

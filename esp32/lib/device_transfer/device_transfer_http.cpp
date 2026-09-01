@@ -101,9 +101,11 @@ enum class ReadLineResult { Complete, Timeout, TooLarge, Disconnected };
 
 static ReadLineResult readLine(TransferClient &client, std::string &line,
                                HttpHeaderBudget &budget,
-                               uint32_t requestStartedMs) {
+                               uint32_t requestStartedMs,
+                               uint32_t timeoutMs =
+                                   HTTP_REQUEST_HEADER_TIMEOUT_MS) {
   line.clear();
-  while (!HttpHeaderBudget::timedOut(millis() - requestStartedMs)) {
+  while (millis() - requestStartedMs < timeoutMs) {
     while (client.available()) {
       const int raw = client.read();
       if (raw < 0)
@@ -934,7 +936,8 @@ bool HttpTransferServer::handleClient(TransferClient &client,
   HttpHeaderBudget headerBudget;
   std::string requestLine;
   const ReadLineResult requestLineResult =
-      readLine(client, requestLine, headerBudget, requestStartedMs);
+      readLine(client, requestLine, headerBudget, requestStartedMs,
+               httpRequestLineTimeoutMs(requestIndex));
   if (requestLineResult == ReadLineResult::Timeout) {
     // A reused HTTP/1.1 connection may simply have gone idle after a complete
     // response. Close it silently so a future request can establish a fresh
@@ -946,6 +949,13 @@ bool HttpTransferServer::handleClient(TransferClient &client,
   if (requestLineResult == ReadLineResult::TooLarge) {
     sendError(client, 431, "headers_too_large",
               "request headers exceed device limits");
+    return false;
+  }
+  if (requestLineResult == ReadLineResult::Disconnected &&
+      headerBudget.totalBytes == 0) {
+    // URLSession and WKWebView may retire an otherwise reusable connection
+    // without sending another request. This is an ordinary handoff, not a
+    // malformed request and not a device-transfer error.
     return false;
   }
   if (requestLineResult != ReadLineResult::Complete) {

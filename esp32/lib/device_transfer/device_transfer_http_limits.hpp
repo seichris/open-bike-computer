@@ -10,7 +10,18 @@ constexpr size_t HTTP_MAX_LINE_BYTES = 512;
 constexpr size_t HTTP_MAX_HEADER_BYTES = 8192;
 constexpr size_t HTTP_MAX_HEADER_LINES = 64;
 constexpr uint32_t HTTP_REQUEST_HEADER_TIMEOUT_MS = 5000;
+// The transfer server has one TLS/HTTP worker. A completed authenticated
+// request may reuse that worker, but an idle persistent client must release it
+// well before the iOS client's five-second request deadline so a different
+// pinned URLSession (for example the secure sweep after closing WKWebView) can
+// connect without being starved behind the old socket.
+constexpr uint32_t HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS = 2000;
 constexpr size_t HTTP_MAX_REQUESTS_PER_TLS_CONNECTION = 4096;
+
+inline uint32_t httpRequestLineTimeoutMs(size_t requestIndex) {
+  return requestIndex == 0 ? HTTP_REQUEST_HEADER_TIMEOUT_MS
+                           : HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS;
+}
 
 inline uint32_t nextHttpTransferGeneration(uint32_t current) {
   current++;

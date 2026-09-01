@@ -196,6 +196,22 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
         ]
         self.assertIn('/device-debug/v1/session/exit', exit_policy)
 
+    def test_idle_reused_connection_cannot_starve_a_new_pinned_client(self):
+        handle_client = HTTP_SOURCE[
+            HTTP_SOURCE.index("bool HttpTransferServer::handleClient") :
+            HTTP_SOURCE.index("HttpRequestHandler *\nHttpTransferServer::handlerForPath")
+        ]
+        self.assertIn("httpRequestLineTimeoutMs(requestIndex)", handle_client)
+        self.assertIn(
+            "requestLineResult == ReadLineResult::Disconnected &&",
+            handle_client,
+        )
+        self.assertIn("headerBudget.totalBytes == 0", handle_client)
+        self.assertLess(
+            handle_client.index("headerBudget.totalBytes == 0"),
+            handle_client.index('sendError(client, 400, "bad_request"'),
+        )
+
     def test_ble_and_mode_revocation_interrupt_the_active_tls_socket(self):
         clear_ble = HTTP_SOURCE[
             HTTP_SOURCE.index("void HttpTransferServer::clearAuthenticatedBleSession") :

@@ -25,6 +25,15 @@ int main() {
   assert(!budget.acceptDelimiterByte());
   assert(device_transfer::HttpHeaderBudget::timedOut(
       device_transfer::HTTP_REQUEST_HEADER_TIMEOUT_MS));
+  assert(device_transfer::HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS <
+         device_transfer::HTTP_REQUEST_HEADER_TIMEOUT_MS);
+  assert(device_transfer::httpRequestLineTimeoutMs(0) ==
+         device_transfer::HTTP_REQUEST_HEADER_TIMEOUT_MS);
+  assert(device_transfer::httpRequestLineTimeoutMs(1) ==
+         device_transfer::HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS);
+  assert(device_transfer::httpRequestLineTimeoutMs(
+             device_transfer::HTTP_MAX_REQUESTS_PER_TLS_CONNECTION - 1) ==
+         device_transfer::HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS);
 
   uint32_t generation = device_transfer::nextHttpTransferGeneration(0);
   assert(generation == 1);
