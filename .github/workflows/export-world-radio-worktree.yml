@@ -1,0 +1,27 @@
+name: Export World Radio worktree
+
+on:
+  push:
+    branches:
+      - feature/world-radio-screen
+    paths:
+      - .github/workflows/export-world-radio-worktree.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/world-radio-screen
+      - name: Package worktree
+        run: tar --exclude=.git -czf /tmp/open-bike-computer-worktree.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: open-bike-computer-worktree
+          path: /tmp/open-bike-computer-worktree.tar.gz
+          if-no-files-found: error
+          retention-days: 1
