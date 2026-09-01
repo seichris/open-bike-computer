@@ -10,8 +10,11 @@ enum WatchDirectBLEProtocolV1 {
     static let workoutUUID = RideBLEGeneratedProtocolV1.workoutUUID
     static let rideAutomationUUID = RideBLEGeneratedProtocolV1
         .rideAutomationUUID
+    // Watch direct BLE does not implement the iPhone-hosted World Radio
+    // feature, so keep its negotiated client version at the last capability
+    // it actually understands.
     static let capabilityClientVersion = RideBLEGeneratedProtocolV1
-        .currentClientVersion
+        .rideDeliveryAckMinimumClientVersion
     static let scopedControllerFeature = RideBLEGeneratedProtocolV1
         .scopedWatchControllerFeature
     static let workoutTelemetryFeature = RideBLEGeneratedProtocolV1
