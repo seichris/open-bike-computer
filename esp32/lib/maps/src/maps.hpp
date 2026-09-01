@@ -166,7 +166,7 @@ private:
   static constexpr uint16_t MAP_RENDER_SAFETY_PIXELS = 16;
 #if defined(WAVESHARE_AMOLED_175)
   static constexpr bool MAP_RENDER_ROUND_VIEWPORT = true;
-  static constexpr uint16_t MAP_RENDER_MINIMUM_OVERSCAN_PIXELS = 48;
+  static constexpr uint16_t MAP_RENDER_MINIMUM_OVERSCAN_PIXELS = 64;
 #else
   static constexpr bool MAP_RENDER_ROUND_VIEWPORT = false;
   static constexpr uint16_t MAP_RENDER_MINIMUM_OVERSCAN_PIXELS =

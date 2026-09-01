@@ -43,7 +43,7 @@ invalidations cancel at the next cooperative checkpoint.
 
 The request center is led toward the rider's expected position using speed and
 the most recent render duration. The 1.75-inch round viewport chooses a
-48-96-pixel overscan from that measured demand; square viewports retain the
+64-96-pixel overscan from that measured demand; square viewports retain the
 96-pixel gutter. The 16-pixel safety margin remains reserved. Immediately
 before publication, the physical viewport is inverse-transformed into the
 candidate frame. A frame that no longer covers the translated and rotated

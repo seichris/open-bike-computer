@@ -208,7 +208,7 @@ Navigation-session, style, zoom, screen, semantic recovery, or
 exhausted-overscan requests bypass those ordinary GPS gates. Overscan refresh
 uses measured presented speed, pixels per metre, the most recent render
 duration, and safety pixels. The 1.75-inch round viewport sizes each render
-between a 48-pixel floor and the original 96-pixel ceiling; square viewports
+between a 64-pixel floor and the original 96-pixel ceiling; square viewports
 retain the full 96-pixel gutter. The request center is led by speed times that
 measured duration within the selected overscan and 16-pixel safety budget.
 Publication independently proves the physical viewport remains covered.

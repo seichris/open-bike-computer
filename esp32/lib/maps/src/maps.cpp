@@ -4046,9 +4046,9 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
 
   // A square display needs the full gutter so heading changes cannot expose a
   // corner. The 1.75-inch panel is physically round: size its frame from the
-  // measured speed and the last completed render, while retaining a 48 px
+  // measured speed and the last completed render, while retaining a 64 px
   // minimum and the original 96 px ceiling. This avoids rasterizing roughly a
-  // quarter of a dense 658 x 658 frame at ordinary cycling speed without
+  // fifth of a dense 658 x 658 frame at ordinary cycling speed without
   // spending the safety margin or weakening the publication coverage proof.
   const uint32_t expectedLatencyMs =
       std::max<uint32_t>(250U,
@@ -4256,14 +4256,13 @@ bool Maps::startRenderWorker() {
   // Wi-Fi driver before it has a chance to report an allocation failure. The
   // AMOLED boards have PSRAM and their SDK configuration explicitly permits
   // external task stacks, so reserve internal RAM for radio/driver work.
-  // IDLE0 is the only production TWDT subscriber. The renderer runs above the
-  // priority-1 HTTP/debug worker so a 434 KiB checkpoint transfer cannot double
-  // the tail of an in-flight frame. Its cooperative checkpoints still block
-  // every 10 ms to give IDLE0 a bounded watchdog-feeding window. Wi-Fi, BLE,
-  // FatFs, and SPI work either runs at a higher priority or blocks independently.
+  // IDLE0 is the only production TWDT subscriber. The renderer runs one level
+  // above idle for deterministic progress, while its cooperative checkpoints
+  // block every 10 ms to give IDLE0 a bounded watchdog-feeding window. FatFs
+  // and SPI waits block independently and therefore also release the CPU.
   BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
       renderWorkerTaskThunk, "map_render", MAP_RENDER_WORKER_STACK_BYTES, this,
-      tskIDLE_PRIORITY + 2, &renderWorkerTaskHandle, 0,
+      tskIDLE_PRIORITY + 1, &renderWorkerTaskHandle, 0,
       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (created != pdPASS) {
     renderWorkerTaskHandle = nullptr;

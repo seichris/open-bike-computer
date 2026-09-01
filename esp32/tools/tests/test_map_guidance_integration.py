@@ -125,7 +125,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         request = function_body(
             MAP_RENDERER_SOURCE, "bool Maps::buildRenderRequestForScreen"
         )
-        self.assertIn("MAP_RENDER_MINIMUM_OVERSCAN_PIXELS = 48", MAP_HEADER_SOURCE)
+        self.assertIn("MAP_RENDER_MINIMUM_OVERSCAN_PIXELS = 64", MAP_HEADER_SOURCE)
         self.assertIn("MAP_RENDER_ROUND_VIEWPORT", request)
         self.assertIn("map_presentation::refreshLeadPixels", request)
         self.assertIn("MAP_RENDER_SAFETY_PIXELS + 8U", request)
