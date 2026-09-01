@@ -11302,6 +11302,33 @@ struct NavigationProtocolTests {
                 !remoteSource.contains(".sheet("),
             "the secure console stays in Settings navigation instead of presenting a nested sheet"
         )
+
+        let transferManagerURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift"
+        )
+        guard let transferManagerSource = try? String(
+            contentsOf: transferManagerURL,
+            encoding: .utf8
+        ), let remoteEntryStart = transferManagerSource.range(
+            of: "func enterRemoteDebug("
+        )?.lowerBound,
+        let remoteWaitStart = transferManagerSource.range(
+            of: "private func waitForRemoteDebugSession(",
+            range: remoteEntryStart..<transferManagerSource.endIndex
+        )?.lowerBound else {
+            assert(false, "remote-debug transfer source should be available")
+            return
+        }
+        let remoteEntrySource = String(
+            transferManagerSource[remoteEntryStart..<remoteWaitStart]
+        )
+        assert(
+            remoteEntrySource.contains("try await joinDeviceNetworkIfNeeded(") &&
+                remoteEntrySource.contains(
+                    "statusPath: \"device-debug/v1/info\""
+                ),
+            "hotspot remote debugging joins and probes the pinned device endpoint"
+        )
     }
 
     static func testStravaRouteCatalogUIWiring() {

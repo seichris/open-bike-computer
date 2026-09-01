@@ -1319,6 +1319,11 @@ final class DeviceTransferManager {
                 )
                 return session
             }
+            try await joinDeviceNetworkIfNeeded(
+                session: session,
+                statusPath: "device-debug/v1/info",
+                status: status
+            )
             status(session.hotspotFallback
                 ? "device hotspot fallback ready"
                 : "remote debug session ready")
