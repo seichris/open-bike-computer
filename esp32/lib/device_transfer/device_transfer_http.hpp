@@ -158,7 +158,9 @@ bool sendHttpHead(TransferClient &client, int status,
                   size_t additionalHeaderCount = 0);
 bool writeHttpBytes(TransferClient &client, const uint8_t *data,
                     size_t length,
-                    uint32_t timeoutMs = 5000);
+                    uint32_t timeoutMs = 5000,
+                    size_t maximumChunkBytes = 4096,
+                    uint32_t interChunkDelayMs = 0);
 bool sendHttpJson(TransferClient &client, int status,
                   const std::string &body);
 bool sendHttpError(TransferClient &client, int status,

@@ -21,6 +21,9 @@ namespace device_debug {
 
 namespace {
 
+constexpr size_t kFrameResponseChunkBytes = 1024;
+constexpr uint32_t kFrameResponseInterChunkDelayMs = 1;
+
 constexpr uint32_t kFrameResponseMinimumIntervalMs = 80;
 constexpr uint32_t kMetricsResponseMinimumIntervalMs = 250;
 constexpr uint32_t kRendererWindowMinimumIntervalMs = 1000;
@@ -532,7 +535,9 @@ bool DeviceDebugHttp::handleFrame(
     sent = device_transfer::writeHttpBytes(client, encoded.data(), encoded.size());
   if (sent)
     sent = device_transfer::writeHttpBytes(client, snapshot.pixels,
-                                           snapshot.payloadBytes);
+                                           snapshot.payloadBytes, 5000,
+                                           kFrameResponseChunkBytes,
+                                           kFrameResponseInterChunkDelayMs);
   frameStore().releaseSnapshot();
   frameStore().requestNextFrame();
   const uint32_t responseDurationMs = millis() - responseStartedMs;

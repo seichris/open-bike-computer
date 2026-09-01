@@ -64,6 +64,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstring>
+#include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -74,6 +75,7 @@
 #include <host/ble_hs_mbuf.h>
 #include <nimble/porting/nimble/include/nimble/nimble_port.h>
 #include <mbedtls/md.h>
+#include <new>
 #include <WiFi.h>
 
 #if !defined(CONFIG_BT_NIMBLE_MAX_CONNECTIONS) || \
@@ -832,9 +834,29 @@ static PendingRouteRideDelivery pendingRouteRideDelivery;
 static PendingMapInput pendingGpsInput;
 static constexpr size_t MAP_SETTING_SLOT_COUNT = 256;
 static constexpr size_t MAP_SETTING_MASK_BYTES = MAP_SETTING_SLOT_COUNT / 8;
-static PendingMapInput pendingSettingInputs[MAP_SETTING_SLOT_COUNT];
+// The 256-way table keeps independently queued setting IDs from replacing one
+// another, but its entries contain only mailbox metadata and payload pointers.
+// Keep the actual setting payloads in their existing bounded allocations while
+// placing this non-secret, long-lived table in PSRAM so TLS retains contiguous
+// internal headroom during remote-debug frame responses.
+static PendingMapInput *pendingSettingInputs = nullptr;
 static uint8_t pendingSettingMask[MAP_SETTING_MASK_BYTES] = {0};
 static std::atomic<uint16_t> pendingMapInputCount{0};
+
+static bool ensurePendingSettingInputs() {
+  if (pendingSettingInputs != nullptr)
+    return true;
+  void *storage = heap_caps_malloc(
+      sizeof(PendingMapInput) * MAP_SETTING_SLOT_COUNT,
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (storage == nullptr)
+    return false;
+  auto *inputs = static_cast<PendingMapInput *>(storage);
+  for (size_t index = 0; index < MAP_SETTING_SLOT_COUNT; ++index)
+    new (&inputs[index]) PendingMapInput();
+  pendingSettingInputs = inputs;
+  return true;
+}
 
 static void noteRideDeliveryMember(
     const ride_delivery_protocol::CommandMember &member,
@@ -862,8 +884,10 @@ static void resetRideDeliveryTracking() {
     };
     clearInput(pendingRouteInput);
     clearInput(pendingGpsInput);
-    for (PendingMapInput &input : pendingSettingInputs)
-      clearInput(input);
+    if (pendingSettingInputs != nullptr) {
+      for (size_t index = 0; index < MAP_SETTING_SLOT_COUNT; ++index)
+        clearInput(pendingSettingInputs[index]);
+    }
     memset(pendingSettingMask, 0, sizeof(pendingSettingMask));
     pendingMapInputCount.store(0, std::memory_order_release);
     pendingRouteRideDelivery = {};
@@ -929,8 +953,13 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
     slot = &pendingGpsInput;
     break;
   case PendingMapInputType::Setting:
-    if (len == 0) {
-      Serial.println("BLE: rejected queued map setting without an ID");
+    if (len == 0 || pendingSettingInputs == nullptr) {
+      if (len == 0) {
+        Serial.println("BLE: rejected queued map setting without an ID");
+      } else {
+        Serial.println(
+            "BLE: rejected queued map setting without mailbox storage");
+      }
       free(input.data);
       return false;
     }
@@ -4612,11 +4641,15 @@ static void processPendingMapInputs() {
         break;
       }
     }
-    if (pendingSettingId >= 0) {
+    if (pendingSettingId >= 0 && pendingSettingInputs != nullptr) {
       PendingMapInput &slot = pendingSettingInputs[pendingSettingId];
       input = slot;
       slot = {};
       pendingMapInputCount.fetch_sub(1, std::memory_order_release);
+    } else if (pendingSettingId >= 0) {
+      pendingSettingMask[pendingSettingId / 8] &=
+          static_cast<uint8_t>(~(1U << (pendingSettingId % 8)));
+      pendingSettingId = -1;
     }
     xSemaphoreGive(pendingMapInputMutex);
     if (pendingSettingId < 0) {
@@ -5440,6 +5473,10 @@ void BLENavigationServer::init(const char *deviceName) {
 
   // Load persisted settings from NVS
   loadSettingsFromNVS();
+
+  if (!ensurePendingSettingInputs()) {
+    Serial.println("BLE: failed to allocate map setting mailbox in PSRAM");
+  }
 
   if (pendingMapInputMutex == nullptr) {
     pendingMapInputMutex = xSemaphoreCreateMutex();

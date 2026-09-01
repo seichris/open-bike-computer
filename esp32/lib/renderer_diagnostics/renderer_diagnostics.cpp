@@ -19,8 +19,17 @@ namespace renderer_diagnostics {
 namespace {
 
 portMUX_TYPE diagnosticsMux = portMUX_INITIALIZER_UNLOCKED;
-State diagnosticsState;
+// This state contains only exported benchmark counters and public build/run
+// identity. Keep it out of scarce internal DRAM so pinned TLS retains its
+// security-sensitive buffers there; transfer credentials never enter it.
+State *diagnosticsState = nullptr;
 uint32_t lastPeriodicMemorySampleMs = 0;
+
+State *allocateDiagnosticsState() {
+  void *storage = heap_caps_calloc(
+      1, sizeof(State), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return storage == nullptr ? nullptr : new (storage) State();
+}
 
 // Renderer snapshots are a little over 3 KiB. Reserving above Arduino's
 // ALWAYSINTERNAL threshold gives the returned std::string one stable PSRAM
@@ -136,7 +145,8 @@ MemorySample memorySample() {
 void noteCurrentMemory() {
   const MemorySample sample = memorySample();
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteMemory(sample);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteMemory(sample);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
@@ -167,6 +177,10 @@ std::string routeMarkerHash(const RouteMarker &marker) {
 void configureBuildIdentity(const char *deviceId, const char *firmwareCommit,
                             const char *board, const char *buildProfile,
                             uint32_t bootId, uint32_t resetReason) {
+  if (diagnosticsState == nullptr)
+    diagnosticsState = allocateDiagnosticsState();
+  if (diagnosticsState == nullptr)
+    return;
   BuildIdentity identity;
   if (!identity.deviceId.assign(deviceId) ||
       !identity.firmwareCommit.assign(firmwareCommit) ||
@@ -177,13 +191,14 @@ void configureBuildIdentity(const char *deviceId, const char *firmwareCommit,
   identity.bootId = bootId;
   identity.resetReason = resetReason;
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.configureBuild(identity);
+  diagnosticsState->configureBuild(identity);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
 void beginSession(bool remoteDebugActive, uint32_t nowMs) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.beginSession(remoteDebugActive);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->beginSession(remoteDebugActive);
   lastPeriodicMemorySampleMs = nowMs;
   portEXIT_CRITICAL(&diagnosticsMux);
   noteCurrentMemory();
@@ -191,7 +206,8 @@ void beginSession(bool remoteDebugActive, uint32_t nowMs) {
 
 void endSession(uint32_t nowMs) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.endSession();
+  if (diagnosticsState != nullptr)
+    diagnosticsState->endSession();
   lastPeriodicMemorySampleMs = nowMs;
   portEXIT_CRITICAL(&diagnosticsMux);
   noteCurrentMemory();
@@ -199,7 +215,8 @@ void endSession(uint32_t nowMs) {
 
 bool sessionActive() {
   portENTER_CRITICAL(&diagnosticsMux);
-  const bool active = diagnosticsState.sessionActive();
+  const bool active = diagnosticsState != nullptr &&
+                      diagnosticsState->sessionActive();
   portEXIT_CRITICAL(&diagnosticsMux);
   return active;
 }
@@ -209,9 +226,10 @@ bool beginWindow(uint32_t windowId, const RunIdentity &identity,
                  const JobCounters &currentJobs,
                  uint32_t currentGpsPacketSequence) {
   portENTER_CRITICAL(&diagnosticsMux);
-  const bool accepted = diagnosticsState.beginWindow(
-      windowId, identity, profile, nowMs, currentJobs,
-      currentGpsPacketSequence);
+  const bool accepted = diagnosticsState != nullptr &&
+                        diagnosticsState->beginWindow(
+                            windowId, identity, profile, nowMs, currentJobs,
+                            currentGpsPacketSequence);
   if (accepted)
     lastPeriodicMemorySampleMs = nowMs;
   portEXIT_CRITICAL(&diagnosticsMux);
@@ -222,20 +240,25 @@ bool beginWindow(uint32_t windowId, const RunIdentity &identity,
 
 void setProfile(renderer_tuning::Profile profile) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.setProfile(profile);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->setProfile(profile);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
 renderer_tuning::Profile currentProfile() {
   portENTER_CRITICAL(&diagnosticsMux);
-  const renderer_tuning::Profile profile = diagnosticsState.profile();
+  const renderer_tuning::Profile profile =
+      diagnosticsState == nullptr ? renderer_tuning::Profile::Current
+                                  : diagnosticsState->profile();
   portEXIT_CRITICAL(&diagnosticsMux);
   return profile;
 }
 
 uint32_t currentWindowId() {
   portENTER_CRITICAL(&diagnosticsMux);
-  const uint32_t windowId = diagnosticsState.measurementWindowId();
+  const uint32_t windowId = diagnosticsState == nullptr
+                                ? 0
+                                : diagnosticsState->measurementWindowId();
   portEXIT_CRITICAL(&diagnosticsMux);
   return windowId;
 }
@@ -243,7 +266,8 @@ uint32_t currentWindowId() {
 void noteLoop(uint32_t nowMs, uint32_t gapMs) {
   bool sampleMemory = false;
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteUiLoopGap(gapMs);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteUiLoopGap(gapMs);
   if (lastPeriodicMemorySampleMs == 0 ||
       static_cast<uint32_t>(nowMs - lastPeriodicMemorySampleMs) >= 1000U) {
     lastPeriodicMemorySampleMs = nowMs;
@@ -256,7 +280,8 @@ void noteLoop(uint32_t nowMs, uint32_t gapMs) {
 
 void noteDisplayFlushUs(uint32_t microseconds) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteDisplayFlushUs(microseconds);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteDisplayFlushUs(microseconds);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
@@ -265,41 +290,47 @@ bool noteRenderForWindow(uint32_t windowId,
                          const RenderSample &sample) {
   const MemorySample memory = memorySample();
   portENTER_CRITICAL(&diagnosticsMux);
-  const bool accepted =
-      diagnosticsState.noteRenderForWindow(windowId, profile, sample);
+  const bool accepted = diagnosticsState != nullptr &&
+                        diagnosticsState->noteRenderForWindow(
+                            windowId, profile, sample);
   if (accepted)
-    diagnosticsState.noteMemory(memory);
+    diagnosticsState->noteMemory(memory);
   portEXIT_CRITICAL(&diagnosticsMux);
   return accepted;
 }
 
 void noteJobs(const JobCounters &jobs) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteJobs(jobs);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteJobs(jobs);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
 void noteInterrupted() {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteInterrupted();
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteInterrupted();
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
 void noteCoverageRejected() {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteCoverageRejected();
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteCoverageRejected();
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
 void noteGpsPacket(uint32_t packetSequence, uint32_t packetGapMs) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteGpsPacket(packetSequence, packetGapMs);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteGpsPacket(packetSequence, packetGapMs);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
 void notePrediction(bool graceActive, bool exhausted) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.notePrediction(graceActive, exhausted);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->notePrediction(graceActive, exhausted);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
@@ -307,23 +338,29 @@ bool noteRouteMarker(const uint8_t *fixtureSha256, size_t hashBytes,
                      uint16_t sampleIndex, uint16_t sampleCount, uint32_t loop,
                      uint32_t nowMs) {
   portENTER_CRITICAL(&diagnosticsMux);
-  const bool accepted = diagnosticsState.noteRouteMarker(
-      fixtureSha256, hashBytes, sampleIndex, sampleCount, loop, nowMs);
+  const bool accepted = diagnosticsState != nullptr &&
+                        diagnosticsState->noteRouteMarker(
+                            fixtureSha256, hashBytes, sampleIndex, sampleCount,
+                            loop, nowMs);
   portEXIT_CRITICAL(&diagnosticsMux);
   return accepted;
 }
 
 void noteRemoteDebug(const RemoteDebugOverhead &overhead) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteRemoteDebug(overhead);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteRemoteDebug(overhead);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
 Snapshot snapshot(uint32_t nowMs) {
   const MemorySample memory = memorySample();
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteMemory(memory);
-  Snapshot value = diagnosticsState.snapshot(nowMs);
+  Snapshot value;
+  if (diagnosticsState != nullptr) {
+    diagnosticsState->noteMemory(memory);
+    value = diagnosticsState->snapshot(nowMs);
+  }
   portEXIT_CRITICAL(&diagnosticsMux);
   return value;
 }

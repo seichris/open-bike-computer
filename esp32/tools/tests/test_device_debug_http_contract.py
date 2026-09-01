@@ -19,6 +19,9 @@ MAIN = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
 RENDERER_DIAGNOSTICS = (
     ROOT / "lib/renderer_diagnostics/renderer_diagnostics.cpp"
 ).read_text(encoding="utf-8")
+TRANSFER_HTTP = (
+    ROOT / "lib/device_transfer/device_transfer_http.cpp"
+).read_text(encoding="utf-8")
 IOS_TRANSFER_MANAGER = (
     ROOT.parent
     / "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift"
@@ -152,6 +155,29 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertLess(stale_check, release)
         self.assertLess(release, no_content)
         self.assertLess(no_content, payload)
+
+    def test_checkpoint_frame_stream_yields_between_bounded_tls_writes(self):
+        frame = HTTP[
+            HTTP.index("bool DeviceDebugHttp::handleFrame") :
+            HTTP.index("bool DeviceDebugHttp::handlePointer")
+        ]
+        writer = TRANSFER_HTTP[
+            TRANSFER_HTTP.index("bool writeHttpBytes") :
+            TRANSFER_HTTP.index("bool sendHttpJson")
+        ]
+        self.assertIn("kFrameResponseChunkBytes = 1024", HTTP)
+        self.assertIn("kFrameResponseInterChunkDelayMs = 1", HTTP)
+        self.assertIn("kFrameResponseChunkBytes,", frame)
+        self.assertIn("kFrameResponseInterChunkDelayMs", frame)
+        self.assertIn("std::min(maximumChunkBytes, length - offset)", writer)
+        self.assertIn("vTaskDelay(pdMS_TO_TICKS(interChunkDelayMs))", writer)
+
+    def test_non_secret_benchmark_state_uses_forced_psram(self):
+        self.assertIn("State *diagnosticsState = nullptr;", RENDERER_DIAGNOSTICS)
+        self.assertIn("MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT", RENDERER_DIAGNOSTICS)
+        self.assertIn("transfer credentials never enter it", RENDERER_DIAGNOSTICS)
+        self.assertIn("PendingMapInput *pendingSettingInputs = nullptr;", BLE)
+        self.assertIn("ensurePendingSettingInputs()", BLE)
 
     def test_renderer_windows_bind_the_active_map_before_profile_change(self):
         active_identity = MAIN[

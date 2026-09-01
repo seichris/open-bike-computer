@@ -1179,15 +1179,16 @@ bool sendHttpHead(TransferClient &client, int status, uint64_t contentLength,
 }
 
 bool writeHttpBytes(TransferClient &client, const uint8_t *data, size_t length,
-                    uint32_t timeoutMs) {
-  if (data == nullptr && length != 0)
+                    uint32_t timeoutMs, size_t maximumChunkBytes,
+                    uint32_t interChunkDelayMs) {
+  if ((data == nullptr && length != 0) || maximumChunkBytes == 0)
     return false;
   size_t offset = 0;
   uint32_t lastProgressMs = millis();
   while (offset < length && millis() - lastProgressMs < timeoutMs) {
     if (!client.connected())
       return false;
-    const size_t chunk = std::min<size_t>(4096, length - offset);
+    const size_t chunk = std::min(maximumChunkBytes, length - offset);
     const size_t written = client.write(data + offset, chunk);
     if (written == 0) {
       vTaskDelay(pdMS_TO_TICKS(1));
@@ -1195,6 +1196,8 @@ bool writeHttpBytes(TransferClient &client, const uint8_t *data, size_t length,
     }
     offset += written;
     lastProgressMs = millis();
+    if (offset < length && interChunkDelayMs != 0)
+      vTaskDelay(pdMS_TO_TICKS(interChunkDelayMs));
   }
   return offset == length;
 }
