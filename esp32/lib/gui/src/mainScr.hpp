@@ -9,6 +9,7 @@
 #pragma once
 
 #include "maps.hpp"
+#include "mainScreenTypes.hpp"
 #include "mapRenderPolicy.hpp"
 
 #include "buttonBar.hpp"
@@ -35,15 +36,6 @@ extern bool isScrollingMap; // Flag to indicate if map is scrolling
 extern uint8_t activeTile; // Active Tile in TileView control
 extern int heading;        // Heading value (Compass or GPS)
 
-enum tileName {
-  COMPASS = 0,
-  MAP = 1,
-  NAV = 2,
-  SATTRACK = 3,
-  RIDESTATS = 4,
-  MAP_GUIDANCE = 5,
-  BATTERY_STATUS = 6,
-};
 
 /**
  * @brief Main Screen Tiles
@@ -53,6 +45,7 @@ extern lv_obj_t *compassTile;
 extern lv_obj_t *navTile;
 extern lv_obj_t *rideStatsTile;
 extern lv_obj_t *batteryStatusTile;
+extern lv_obj_t *worldRadioTile;
 extern lv_obj_t *mapTile;
 extern lv_obj_t *satTrackTile;
 extern lv_obj_t *tilesScreen;

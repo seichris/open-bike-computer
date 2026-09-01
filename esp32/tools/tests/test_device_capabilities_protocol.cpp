@@ -63,6 +63,9 @@ int main() {
       (1UL << 21));
   static_assert(
       device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION == 20);
+  static_assert(device_capabilities_protocol::WORLD_RADIO_CLIENT_VERSION == 21);
+  static_assert(device_capabilities_protocol::WORLD_RADIO_FEATURE ==
+                (1UL << 23));
   static_assert(device_capabilities_protocol::RIDE_DELIVERY_ACK_FEATURE ==
                 (1UL << 22));
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};

@@ -85,15 +85,14 @@ constexpr tileName tileForDeviceScreen(uint8_t deviceScreen,
   return screen == nullptr ? fallback : screen->tile;
 }
 
-constexpr bool isEnabled(tileName tile, uint8_t enabledMask) {
-  const Descriptor *screen = descriptorForTile(tile);
-  return screen != nullptr &&
-         (enabledMask & bit(screen->deviceScreen)) != 0;
-}
-
 constexpr uint8_t normalizedMask(uint8_t mask) {
   const uint8_t supported = static_cast<uint8_t>(mask & SUPPORTED_MASK);
   return supported == 0 ? SUPPORTED_MASK : supported;
+}
+
+constexpr bool isEnabled(tileName tile, uint8_t enabledMask) {
+  return (normalizedMask(enabledMask) &
+          bit(static_cast<DeviceScreenId>(deviceScreenForTile(tile)))) != 0;
 }
 
 constexpr uint8_t normalizedDefault(uint8_t requested, uint8_t enabledMask) {
@@ -114,8 +113,10 @@ constexpr uint8_t normalizedDefault(uint8_t requested, uint8_t enabledMask) {
 constexpr tileName nextEnabled(tileName current, uint8_t enabledMask) {
   const uint8_t normalized = normalizedMask(enabledMask);
   std::size_t currentIndex = 0;
+  const uint8_t currentDeviceScreen = deviceScreenForTile(current);
   for (std::size_t index = 0; index < SCREENS.size(); ++index) {
-    if (SCREENS[index].tile == current) {
+    if (static_cast<uint8_t>(SCREENS[index].deviceScreen) ==
+        currentDeviceScreen) {
       currentIndex = index;
       break;
     }
@@ -135,8 +136,10 @@ constexpr bool nextEnabledMapBacked(tileName current, uint8_t enabledMask,
                                     tileName &next) {
   const uint8_t normalized = normalizedMask(enabledMask);
   std::size_t currentIndex = 0;
+  const uint8_t currentDeviceScreen = deviceScreenForTile(current);
   for (std::size_t index = 0; index < SCREENS.size(); ++index) {
-    if (SCREENS[index].tile == current) {
+    if (static_cast<uint8_t>(SCREENS[index].deviceScreen) ==
+        currentDeviceScreen) {
       currentIndex = index;
       break;
     }

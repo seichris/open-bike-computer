@@ -267,7 +267,7 @@ private final class IPhoneWorldRadioPlayer: WorldRadioAudioPlaying {
         player.replaceCurrentItem(with: item)
         itemObservation = item.observe(\.status, options: [.initial, .new]) {
             [weak self] item, _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self, item] in
                 guard let self else { return }
                 switch item.status {
                 case .readyToPlay:
@@ -285,7 +285,7 @@ private final class IPhoneWorldRadioPlayer: WorldRadioAudioPlaying {
         }
         timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) {
             [weak self] player, _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self, player] in
                 guard let self else { return }
                 switch player.timeControlStatus {
                 case .playing:
@@ -328,6 +328,10 @@ private final class IPhoneWorldRadioPlayer: WorldRadioAudioPlaying {
 #if canImport(MediaPlayer)
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
 #endif
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
     }
 
     private func updateNowPlaying(rate: Double) {
@@ -414,6 +418,28 @@ final class WorldRadioService {
             player.stop()
             emit(state: .idle, message: "Stopped")
         }
+    }
+
+    /// Stop all radio work and release the feature's station/player state.
+    /// The coordinator calls this when the World Radio screen is disabled;
+    /// a temporary BLE disconnect deliberately does not call it so phone-side
+    /// playback can continue.
+    func stop() {
+        requestTask?.cancel()
+        requestTask = nil
+        player.stop()
+        candidates = []
+        stationIndex = 0
+        failedStationUUIDs = []
+        requestID = 0
+        currentStatus = nil
+    }
+
+    /// Re-send the last state without restarting discovery or playback after
+    /// the authenticated BLE session comes back.
+    func resendCurrentStatus() {
+        guard let currentStatus else { return }
+        statusSink(currentStatus)
     }
 
     private func startSearch(

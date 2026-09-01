@@ -81,6 +81,7 @@ class BikeComputerCoordinator: ObservableObject {
     private let startServices: Bool
     private let now: () -> Date
     private var workoutDeviceRelay: WorkoutDeviceRelay?
+    private var worldRadioService: WorldRadioService?
 
     weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
 
@@ -199,6 +200,13 @@ class BikeComputerCoordinator: ObservableObject {
     // MARK: - Setup
 
     private func setupManagerBindings() {
+        bleManager.onWorldRadioRequest = { [weak self] request in
+            guard let self,
+                  self.bleManager.enabledDeviceScreensMask & DeviceScreen.worldRadio.bit != 0
+            else { return }
+            self.ensureWorldRadioService().handle(request)
+        }
+
         // Bind BLE manager state
         bleManager.$isConnected
             .assign(to: &$isConnected)
@@ -359,8 +367,41 @@ class BikeComputerCoordinator: ObservableObject {
                     self.bleManager.requestDeviceTransferStatus()
                     self.scheduleFirmwareUpdateCheckAfterDeviceRefresh()
                 }
+        }
+            .store(in: &cancellables)
+
+        bleManager.$enabledDeviceScreensMask
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                // @Published emits from willSet. Reconcile after the saved
+                // mask has committed so disabling World Radio releases its
+                // player, directory actor, task, and candidate cache.
+                DispatchQueue.main.async { [weak self] in
+                    self?.reconcileWorldRadioLifecycle()
+                }
             }
             .store(in: &cancellables)
+
+        Publishers.CombineLatest(
+            bleManager.$isNavigationReady,
+            bleManager.$supportsWorldRadio
+        )
+        .map { isReady, supportsWorldRadio in
+            isReady && supportsWorldRadio
+        }
+        .removeDuplicates()
+        .sink { [weak self] ready in
+            guard ready else { return }
+            // Reconnect must restore the phone's current snapshot on the
+            // device without issuing a new search or restarting playback.
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.bleManager.enabledDeviceScreensMask & DeviceScreen.worldRadio.bit != 0
+                else { return }
+                self.worldRadioService?.resendCurrentStatus()
+            }
+        }
+        .store(in: &cancellables)
 
         bleManager.$connectedDeviceID
             .removeDuplicates()
@@ -458,6 +499,32 @@ class BikeComputerCoordinator: ObservableObject {
             .assign(to: &$locationAccuracyAuthorization)
 
         // Current firmware exposes only the navigation packet characteristic.
+    }
+
+    private func ensureWorldRadioService() -> WorldRadioService {
+        if let worldRadioService {
+            return worldRadioService
+        }
+        let service = WorldRadioService { [weak bleManager] status in
+            _ = bleManager?.sendWorldRadioStatus(status)
+        }
+        worldRadioService = service
+        return service
+    }
+
+    private func reconcileWorldRadioLifecycle() {
+        guard !enabledWorldRadioScreen else { return }
+        stopWorldRadioServiceIfDisabled()
+    }
+
+    private var enabledWorldRadioScreen: Bool {
+        bleManager.enabledDeviceScreensMask & DeviceScreen.worldRadio.bit != 0
+    }
+
+    private func stopWorldRadioServiceIfDisabled() {
+        guard !enabledWorldRadioScreen, let worldRadioService else { return }
+        worldRadioService.stop()
+        self.worldRadioService = nil
     }
 
     private func setupManagers(startServices: Bool) {

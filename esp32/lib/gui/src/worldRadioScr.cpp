@@ -1,5 +1,6 @@
 #include "worldRadioScr.hpp"
 
+#include "../../bicino_style/bicino_visual_style.hpp"
 #include "../../tft/tft.hpp"
 #include "../../world_radio/world_radio_runtime.hpp"
 
@@ -16,7 +17,7 @@ constexpr int16_t WORLD_WIDTH = 720;
 constexpr int16_t WORLD_HEIGHT = 360;
 constexpr int32_t LATITUDE_LIMIT_E7 = 850000000;
 constexpr int32_t LONGITUDE_HALF_E7 = 1800000000;
-constexpr int32_t LONGITUDE_FULL_E7 = 3600000000LL;
+constexpr int64_t LONGITUDE_FULL_E7 = 3600000000LL;
 constexpr uint32_t OCEAN_COLOR = 0x071421;
 constexpr uint32_t GRID_COLOR = 0x173049;
 constexpr uint32_t LAND_COLOR = 0x17453B;
@@ -100,10 +101,7 @@ constexpr GeoPoint ANTARCTICA[] = {
 };
 
 uint16_t canvasColor(uint32_t rgb) {
-  const uint16_t value = static_cast<uint16_t>(
-      ((rgb >> 8) & 0xF800U) | ((rgb >> 5) & 0x07E0U) |
-      ((rgb >> 3) & 0x001FU));
-  return static_cast<uint16_t>((value >> 8) | (value << 8));
+  return bicino_visual_style::rgb888ToRgb565(rgb);
 }
 
 PixelPoint project(const GeoPoint &point) {

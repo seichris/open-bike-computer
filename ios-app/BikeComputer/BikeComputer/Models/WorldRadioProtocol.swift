@@ -163,20 +163,20 @@ nonisolated struct WorldRadioStatus: Equatable, Sendable {
     }
 }
 
-private nonisolated extension Data {
-    func readUInt32LE(at offset: Int) -> UInt32 {
+private extension Data {
+    nonisolated func readUInt32LE(at offset: Int) -> UInt32 {
         UInt32(self[offset]) |
             (UInt32(self[offset + 1]) << 8) |
             (UInt32(self[offset + 2]) << 16) |
             (UInt32(self[offset + 3]) << 24)
     }
 
-    mutating func writeUInt16LE(_ value: UInt16, at offset: Int) {
+    nonisolated mutating func writeUInt16LE(_ value: UInt16, at offset: Int) {
         self[offset] = UInt8(truncatingIfNeeded: value)
         self[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
     }
 
-    mutating func writeUInt32LE(_ value: UInt32, at offset: Int) {
+    nonisolated mutating func writeUInt32LE(_ value: UInt32, at offset: Int) {
         self[offset] = UInt8(truncatingIfNeeded: value)
         self[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
         self[offset + 2] = UInt8(truncatingIfNeeded: value >> 16)
