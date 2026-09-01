@@ -165,7 +165,7 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             TRANSFER_HTTP.index("bool writeHttpBytes") :
             TRANSFER_HTTP.index("bool sendHttpJson")
         ]
-        self.assertIn("kFrameResponseChunkBytes = 1024", HTTP)
+        self.assertIn("kFrameResponseChunkBytes = 2048", HTTP)
         self.assertIn("kFrameResponseInterChunkDelayMs = 1", HTTP)
         self.assertIn("kFrameResponseChunkBytes,", frame)
         self.assertIn("kFrameResponseInterChunkDelayMs", frame)

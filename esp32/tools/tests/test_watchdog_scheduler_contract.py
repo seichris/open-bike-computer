@@ -21,7 +21,7 @@ class WatchdogSchedulerContractTests(unittest.TestCase):
             re.DOTALL,
         )
         self.assertIsNotNone(creation)
-        self.assertIn("tskIDLE_PRIORITY + 1", creation.group(0))
+        self.assertIn("tskIDLE_PRIORITY + 2", creation.group(0))
         self.assertRegex(creation.group(0), r"renderWorkerTaskHandle,\s*0,")
 
     def test_cpu_heavy_rendering_opens_a_bounded_idle_window(self):

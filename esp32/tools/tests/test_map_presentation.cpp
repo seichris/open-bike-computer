@@ -271,5 +271,12 @@ int main() {
   assert(std::fabs(refreshLeadPixels(10.0, 2.0, 1200, 16.0, 32.0, 96.0) -
                    40.0) < 1e-9);
   assert(refreshLeadPixels(100.0, 10.0, 5000, 16.0, 32.0, 96.0) == 96.0);
+  // The round-panel request uses the same bounded lead calculation to select
+  // its gutter. Jing'an replay speed stays at the 48 px floor, while a fast,
+  // close-zoom ride retains the original 96 px ceiling.
+  assert(refreshLeadPixels(6.868, 0.584, 2500, 24.0, 48.0, 96.0) ==
+         48.0);
+  assert(refreshLeadPixels(35.0, 1.75, 2500, 24.0, 48.0, 96.0) ==
+         96.0);
   return 0;
 }

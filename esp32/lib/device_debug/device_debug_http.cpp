@@ -21,7 +21,7 @@ namespace device_debug {
 
 namespace {
 
-constexpr size_t kFrameResponseChunkBytes = 1024;
+constexpr size_t kFrameResponseChunkBytes = 2048;
 constexpr uint32_t kFrameResponseInterChunkDelayMs = 1;
 
 constexpr uint32_t kFrameResponseMinimumIntervalMs = 80;

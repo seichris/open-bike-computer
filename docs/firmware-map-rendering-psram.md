@@ -42,10 +42,12 @@ input; navigation-session, style, map-root, projection, and screen
 invalidations cancel at the next cooperative checkpoint.
 
 The request center is led toward the rider's expected position using speed and
-the most recent render duration, capped by the 96-pixel overscan minus the
-16-pixel safety margin. Immediately before publication, all four viewport
-corners are inverse-transformed into the candidate frame. A frame that no
-longer covers the translated and rotated viewport is rejected and replaced;
+the most recent render duration. The 1.75-inch round viewport chooses a
+48-96-pixel overscan from that measured demand; square viewports retain the
+96-pixel gutter. The 16-pixel safety margin remains reserved. Immediately
+before publication, the physical viewport is inverse-transformed into the
+candidate frame. A frame that no longer covers the translated and rotated
+viewport is rejected and replaced;
 an already-uncovered candidate is never newly published. If later presentation
 motion exhausts a visible frame's margin, it immediately schedules a
 replacement while retaining the last complete frame.
