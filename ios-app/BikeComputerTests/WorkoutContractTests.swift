@@ -108,6 +108,7 @@ private struct WorkoutContractTestSuite {
         testRoutePointFilteringHonorsWorkoutAndAccuracyBounds()
         testRouteTimestampGateRejectsPreWorkoutBatches()
         testPausedRouteMovementFilterPreservesCoastingAndRejectsDrift()
+        testPausedRouteContinuityBreaksOnlyStationaryPauses()
         testRouteSegmentAndQueueBounds()
         testRouteRecoveryDistanceAndAssociatedFinalizationPolicies()
         testRecoverySequenceLeasesNeverReuseReservedValues()
@@ -647,6 +648,38 @@ private struct WorkoutContractTestSuite {
                     hasExplicitManualRequest: false
                 ) == .unknown,
             "automatic, manual, system, and unknown origins must remain distinct"
+        )
+        let systemEventAt = Date(timeIntervalSinceReferenceDate: 900)
+        let systemPauseEvent = WorkoutSystemTransitionEvent(
+            paused: true,
+            capturedAt: systemEventAt
+        )
+        expect(
+            WorkoutSystemTransitionEventPolicy.matches(
+                systemPauseEvent,
+                paused: true,
+                transitionAt: systemEventAt.addingTimeInterval(1),
+                lastManualRequestAt: .distantPast,
+                currentOrigin: .unknown
+            ),
+            "a matching HealthKit motion event should correct unknown provenance to system"
+        )
+        expect(
+            !WorkoutSystemTransitionEventPolicy.matches(
+                systemPauseEvent,
+                paused: true,
+                transitionAt: systemEventAt,
+                lastManualRequestAt: systemEventAt,
+                currentOrigin: .unknown
+            )
+                && !WorkoutSystemTransitionEventPolicy.matches(
+                    systemPauseEvent,
+                    paused: true,
+                    transitionAt: systemEventAt,
+                    lastManualRequestAt: .distantPast,
+                    currentOrigin: .automatic
+                ),
+            "manual requests and correlated Bicino automation must outrank a system event"
         )
         var wrappedStart = start
         wrappedStart.decisionSequence = 1
@@ -4271,6 +4304,26 @@ private struct WorkoutContractTestSuite {
                 interval: nil
             ),
             "poor-quality paused locations must not create route distance"
+        )
+    }
+
+    private mutating func testPausedRouteContinuityBreaksOnlyStationaryPauses() {
+        var stationaryPause = WorkoutPausedRouteContinuity()
+        expect(
+            !stationaryPause.setPaused(true),
+            "entering a pause should retain the current route anchor"
+        )
+        expect(
+            stationaryPause.setPaused(false),
+            "a pause with no accepted movement must break the distance segment"
+        )
+
+        var falsePauseMovement = WorkoutPausedRouteContinuity()
+        _ = falsePauseMovement.setPaused(true)
+        falsePauseMovement.noteAcceptedPoint()
+        expect(
+            !falsePauseMovement.setPaused(false),
+            "accepted paused movement must preserve route continuity"
         )
     }
 

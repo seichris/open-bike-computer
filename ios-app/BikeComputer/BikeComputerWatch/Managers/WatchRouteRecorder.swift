@@ -30,7 +30,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     private var routeBuilder: (any WatchWorkoutRouteBuilding)?
     private var workoutStart: Date?
     private var isWorkoutActive = false
-    private var isPaused = false
+    private var pausedContinuity = WorkoutPausedRouteContinuity()
     private var mayContainExistingRouteData = false
     private var timestampGate: WorkoutRouteTimestampGate?
     private var distanceAccumulator: WorkoutRouteDistanceAccumulator?
@@ -72,7 +72,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         self.workoutStart = startDate
         self.onLocationUpdate = onLocationUpdate
         isWorkoutActive = true
-        isPaused = false
+        pausedContinuity.reset()
         self.mayContainExistingRouteData = mayContainExistingRouteData
         distanceAccumulator = WorkoutRouteDistanceAccumulator(
             mayContainExistingRouteData: mayContainExistingRouteData
@@ -90,11 +90,15 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     }
 
     func setPaused(_ paused: Bool, at _: Date) {
-        isPaused = paused
+        if pausedContinuity.setPaused(paused) {
+            lastDistanceLocation = nil
+            distanceAccumulator?.breakSegment()
+        }
     }
 
     func stopLocationUpdates() {
         isWorkoutActive = false
+        pausedContinuity.reset()
         locationService.setConsumer(.workout, active: false)
         lastDistanceLocation = nil
         distanceAccumulator?.breakSegment()
@@ -201,7 +205,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
                 segmentDistanceFromPrevious = segmentDistance
                 intervalFromPrevious = interval
             }
-            if isPaused,
+            if pausedContinuity.isPaused,
                !WorkoutPausedRoutePointFilter.accepts(
                  reportedSpeedMetersPerSecond: location.speed,
                  horizontalAccuracyMeters: location.horizontalAccuracy,
@@ -216,6 +220,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
             distanceAccumulator?.appendPoint(
                 segmentDistanceFromPrevious: segmentDistanceFromPrevious
             )
+            pausedContinuity.noteAcceptedPoint()
             routeDistanceMeters = distanceAccumulator?.totalMeters
             routeAccepted.append(location)
         }
@@ -299,7 +304,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         timestampGate = nil
         distanceAccumulator = nil
         isWorkoutActive = false
-        isPaused = false
+        pausedContinuity.reset()
         mayContainExistingRouteData = false
         routeQueue.reset()
         latestLocation = nil

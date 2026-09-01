@@ -727,11 +727,8 @@ nonisolated enum WorkoutContractCodec {
                   context.rideGeneration.map({ $0 > 0 }) == true,
                   context.decisionSequence.map({ $0 > 0 }) == true,
                   context.detectorProfileVersion.map({ $0 > 0 }) == true,
-                  context.evidenceMask.map({
-                    $0 & ~RideAutomationFrame.validEvidenceMask == 0
-                  }) ?? true,
                   context.sourceHealthMask.map({
-                    $0 & ~RideAutomationFrame.validSourceHealthMask == 0
+                    $0 & ~UInt16(0x000F) == 0
                   }) ?? true,
                   [
                     context.evidenceMask != nil,

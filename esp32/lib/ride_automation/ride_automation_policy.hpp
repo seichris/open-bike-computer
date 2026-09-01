@@ -284,11 +284,11 @@ private:
   bool pendingEvidenceContradicted(const Normalized &evidence) const {
     switch (pendingTransition_) {
     case Transition::Start:
-      return !hasConfirmedMovingEvidence(evidence);
+      return hasConfirmedStoppedEvidence(evidence);
     case Transition::Pause:
-      return !hasConfirmedStoppedEvidence(evidence);
+      return hasConfirmedMovingEvidence(evidence);
     case Transition::Resume:
-      return !hasConfirmedMovingEvidence(evidence);
+      return hasConfirmedStoppedEvidence(evidence);
     case Transition::None:
       return false;
     }
@@ -593,6 +593,12 @@ private:
       return {};
     }
     if (evidence.cadenceMoving) {
+      pauseLatch_.reset();
+      pausePath_ = PausePath::None;
+      return {};
+    }
+    if (evidence.gpsKnown && evidence.imuKnown &&
+        evidence.gpsResumeMoving && evidence.imuMoving) {
       pauseLatch_.reset();
       pausePath_ = PausePath::None;
       return {};

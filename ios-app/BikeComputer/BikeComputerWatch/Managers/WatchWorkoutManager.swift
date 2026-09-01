@@ -526,6 +526,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var manualTransitionOverrideGeneration: UInt64 = 0
     private var manualTransitionOverrideTimeoutTask: Task<Void, Never>?
     private var lastProcessedManualTransitionRequestAt = Date.distantPast
+    private var pendingSystemTransitionEvent: WorkoutSystemTransitionEvent?
+    private var lastProcessedSystemTransitionAt = Date.distantPast
     private var remoteSegmentControlContext: RemoteSegmentControlContext?
     private var terminalCleanupRetryTask: Task<Void, Never>?
     private var terminalCleanupRetryAttemptCount = 0
@@ -743,7 +745,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                     from: recoveredSaveRuntimeAdapter.builder,
                     workoutStart: workoutStart
                 )
-                seedManualTransitionRequestWatermark(
+                seedTransitionEventWatermarks(
                     from: recoveredSaveRuntimeAdapter.builder,
                     workoutStart: workoutStart
                 )
@@ -1806,6 +1808,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
         clearPendingWorkoutLaunchRequest()
         guard lifecycle.apply(.requestStart) else { return }
+        pendingSystemTransitionEvent = nil
         let automaticStartContext = suppliedConfiguration == nil
             ? nil
             : pendingLaunchAutomaticStartContext
@@ -2068,6 +2071,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         suppliedConfigurationStartOriginPending = false
         localStartOriginPending = false
         activeLaunchAutomaticStartContext = nil
+        pendingSystemTransitionEvent = nil
         finishRequestError = nil
         periodicSnapshotTask?.cancel()
         periodicSnapshotTask = nil
@@ -2307,7 +2311,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             from: recoveredBuilder,
             workoutStart: recoveredIdentity.startDate
         )
-        seedManualTransitionRequestWatermark(
+        seedTransitionEventWatermarks(
             from: recoveredBuilder,
             workoutStart: recoveredIdentity.startDate
         )
@@ -4271,13 +4275,20 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         )
     }
 
-    private func seedManualTransitionRequestWatermark(
+    private func seedTransitionEventWatermarks(
         from builder: HKLiveWorkoutBuilder,
         workoutStart: Date
     ) {
         lastProcessedManualTransitionRequestAt = builder.workoutEvents
             .filter {
                 $0.type == .pauseOrResumeRequest
+                    && $0.dateInterval.start >= workoutStart
+            }
+            .map(\.dateInterval.start)
+            .max() ?? .distantPast
+        lastProcessedSystemTransitionAt = builder.workoutEvents
+            .filter {
+                ($0.type == .motionPaused || $0.type == .motionResumed)
                     && $0.dateInterval.start >= workoutStart
             }
             .map(\.dateInterval.start)
@@ -4421,16 +4432,54 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             }
             return
         }
-        guard let marker,
-              identity?.lastTransitionAt.map({ marker.at >= $0 }) ?? true else {
+        let systemEventType: HKWorkoutEventType = paused
+            ? .motionPaused
+            : .motionResumed
+        let latestSystemEvent = builder.workoutEvents
+            .filter {
+                $0.type == systemEventType
+                    && $0.dateInterval.start >= workoutStart
+            }
+            .map {
+                WorkoutSystemTransitionEvent(
+                    paused: paused,
+                    capturedAt: $0.dateInterval.start
+                )
+            }
+            .max { $0.capturedAt < $1.capturedAt }
+        let recoveredTransition: (
+            origin: WorkoutTransitionOrigin,
+            at: Date,
+            profileVersion: UInt16?
+        )?
+        if let latestSystemEvent,
+           WorkoutSystemTransitionEventPolicy.matches(
+             latestSystemEvent,
+             paused: paused,
+             transitionAt: marker?.at ?? latestSystemEvent.capturedAt,
+             lastManualRequestAt: lastProcessedManualTransitionRequestAt,
+             currentOrigin: marker?.origin
+           ) {
+            recoveredTransition = (
+                .system,
+                latestSystemEvent.capturedAt,
+                nil
+            )
+        } else {
+            recoveredTransition = marker
+        }
+        guard let recoveredTransition,
+              identity?.lastTransitionAt.map({
+                recoveredTransition.at >= $0
+              }) ?? true else {
             return
         }
         do {
             try recoveryStore.confirmRideTransition(
-                origin: marker.origin,
+                origin: recoveredTransition.origin,
                 paused: paused,
-                at: marker.at,
-                detectorProfileVersion: marker.profileVersion
+                at: recoveredTransition.at,
+                detectorProfileVersion: recoveredTransition.profileVersion
             )
             identity = recoveryStore.recoveredIdentity ?? identity
         } catch {
@@ -5664,9 +5713,19 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             : [remoteContext, persistedContext]
                 .compactMap { $0 }
                 .first(where: { $0.origin == .automatic })
+        let systemEvent = pendingSystemTransitionEvent.flatMap { event in
+            WorkoutSystemTransitionEventPolicy.matches(
+                event,
+                paused: paused,
+                transitionAt: date,
+                lastManualRequestAt: lastProcessedManualTransitionRequestAt,
+                currentOrigin: nil
+            ) ? event : nil
+        }
         let origin = WorkoutTransitionOriginPolicy.resolve(
             hasAutomaticContext: automaticContext != nil,
-            hasExplicitManualRequest: manualTransitionOverridePending
+            hasExplicitManualRequest: manualTransitionOverridePending,
+            hasConfirmedSystemRequest: systemEvent != nil
         )
         let profileVersion = automaticContext?.detectorProfileVersion
 
@@ -5752,6 +5811,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             lastErrorCode = .sessionFailed
         }
         clearManualTransitionOverride()
+        pendingSystemTransitionEvent = nil
         if origin == .automatic, transitionPersisted {
             playAutomaticTransitionFeedback()
         }
@@ -6216,6 +6276,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private func beginManualTransitionOverride() throws {
         try recoveryStore.clearPendingAutomaticTransitionForManualRequest()
         identity = recoveryStore.recoveredIdentity ?? identity
+        pendingSystemTransitionEvent = nil
         manualTransitionOverridePending = true
         manualTransitionOverrideGeneration &+= 1
         let generation = manualTransitionOverrideGeneration
@@ -6239,6 +6300,60 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         manualTransitionOverridePending = false
         manualTransitionOverrideTimeoutTask?.cancel()
         manualTransitionOverrideTimeoutTask = nil
+    }
+
+    private func noteSystemPauseOrResumeEvent(
+        _ event: WorkoutSystemTransitionEvent
+    ) async {
+        pendingSystemTransitionEvent = event
+        let stateMatches = event.paused
+            ? lifecycle.state == .paused
+            : lifecycle.state == .running
+        guard stateMatches,
+              let transitionAt = identity?.lastTransitionAt else {
+            return
+        }
+        guard WorkoutSystemTransitionEventPolicy.matches(
+            event,
+            paused: event.paused,
+            transitionAt: transitionAt,
+            lastManualRequestAt: lastProcessedManualTransitionRequestAt,
+            currentOrigin: identity?.lastTransitionOrigin
+        ) else {
+            pendingSystemTransitionEvent = nil
+            return
+        }
+        guard let builder else {
+            lastErrorCode = .sessionFailed
+            return
+        }
+        let marker = makeRideTransitionMarker(
+            paused: event.paused,
+            origin: .system,
+            context: nil,
+            at: event.capturedAt
+        )
+        let outcome = await Self.segmentEventWriteOutcome(
+            marker,
+            to: builder,
+            injectedOperation: injectedRideTransitionEventOperation
+        )
+        guard outcome == .success else {
+            lastErrorCode = .sessionFailed
+            return
+        }
+        do {
+            try recoveryStore.confirmRideTransition(
+                origin: .system,
+                paused: event.paused,
+                at: event.capturedAt,
+                detectorProfileVersion: nil
+            )
+            identity = recoveryStore.recoveredIdentity ?? identity
+            pendingSystemTransitionEvent = nil
+        } catch {
+            lastErrorCode = .sessionFailed
+        }
     }
 
     private func noteManualPauseOrResumeRequest(at date: Date) async {
@@ -7274,6 +7389,22 @@ extension WatchWorkoutManager: HKLiveWorkoutBuilderDelegate {
                     request.dateInterval.start
                 await noteManualPauseOrResumeRequest(
                     at: request.dateInterval.start
+                )
+            }
+            if let event = workoutBuilder.workoutEvents
+                .filter({
+                    $0.type == .motionPaused || $0.type == .motionResumed
+                })
+                .max(by: {
+                    $0.dateInterval.start < $1.dateInterval.start
+                }),
+               event.dateInterval.start > lastProcessedSystemTransitionAt {
+                lastProcessedSystemTransitionAt = event.dateInterval.start
+                await noteSystemPauseOrResumeEvent(
+                    WorkoutSystemTransitionEvent(
+                        paused: event.type == .motionPaused,
+                        capturedAt: event.dateInterval.start
+                    )
                 )
             }
             scheduleCoalescedSnapshot()

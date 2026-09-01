@@ -293,6 +293,21 @@ int main() {
                        ConfirmedLifecycle::Running, ask));
   assert(pause.takePendingCancellation());
 
+  // Losing all evidence after issuing a transition is uncertainty, not a
+  // contradiction. Keep the request pending until the lifecycle confirms it
+  // or trustworthy movement reverses it.
+  RideAutomationPolicy uncertainPendingPause;
+  decision = runSeconds(uncertainPendingPause, 0, 5,
+                        ConfirmedLifecycle::Running, ask, 0.0F);
+  assert(!decision);
+  decision = uncertainPendingPause.update(
+      5'000, wheel(0.0F, 5'000), ConfirmedLifecycle::Running, ask);
+  assert(decision.transition == Transition::Pause);
+  assert(!uncertainPendingPause.update(
+      6'000, {}, ConfirmedLifecycle::Running, ask));
+  assert(!uncertainPendingPause.takePendingCancellation());
+  assert(uncertainPendingPause.pendingTransition() == Transition::Pause);
+
   // Explicit sensor-combination matrix. A stopped wheel is authoritative;
   // cadence zero alone is not, and fresh movement always vetoes pause.
   RideAutomationPolicy speedOnlyStop;
@@ -314,6 +329,16 @@ int main() {
   }
   assert(speedOnlyMoving.lastMotionEvidenceState() ==
          MotionEvidenceState::WheelMoving);
+
+  // Independent trustworthy movement vetoes a stopped wheel reading. A
+  // stuck-at-zero wheel sample must not retain the five-second pause path.
+  RideAutomationPolicy stoppedWheelGpsMoving;
+  for (uint32_t nowMs = 0; nowMs <= 20'000; nowMs += 1'000) {
+    auto observation = gpsImu(6.5F, 0.9F, 100.0F, nowMs);
+    observation.wheelSpeedMetersPerSecond = metric(0.0F, nowMs);
+    assert(!stoppedWheelGpsMoving.update(
+        nowMs, observation, ConfirmedLifecycle::Running, ask));
+  }
 
   RideAutomationPolicy bothTrueStop;
   for (uint32_t nowMs = 0; nowMs < 5'000; nowMs += 1'000) {

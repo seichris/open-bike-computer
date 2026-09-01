@@ -262,6 +262,35 @@ nonisolated enum WorkoutTransitionOriginPolicy {
     }
 }
 
+nonisolated struct WorkoutSystemTransitionEvent: Equatable, Sendable {
+    let paused: Bool
+    let capturedAt: Date
+}
+
+nonisolated enum WorkoutSystemTransitionEventPolicy {
+    static let correlationWindow: TimeInterval = 2
+
+    static func matches(
+        _ event: WorkoutSystemTransitionEvent,
+        paused: Bool,
+        transitionAt: Date,
+        lastManualRequestAt: Date,
+        currentOrigin: WorkoutTransitionOrigin?
+    ) -> Bool {
+        guard event.paused == paused,
+              event.capturedAt.timeIntervalSinceReferenceDate.isFinite,
+              transitionAt.timeIntervalSinceReferenceDate.isFinite,
+              lastManualRequestAt.timeIntervalSinceReferenceDate.isFinite,
+              abs(event.capturedAt.timeIntervalSince(transitionAt))
+                <= correlationWindow,
+              event.capturedAt.timeIntervalSince(lastManualRequestAt)
+                > correlationWindow else {
+            return false
+        }
+        return currentOrigin != .manual && currentOrigin != .automatic
+    }
+}
+
 nonisolated struct WorkoutRoutePointCandidate: Equatable, Sendable {
     let latitude: Double
     let longitude: Double
@@ -351,6 +380,39 @@ nonisolated enum WorkoutPausedRoutePointFilter {
         return segmentDistanceMeters >= uncertaintyBound
             && segmentDistanceMeters / interval
                 >= minimumMovingSpeedMetersPerSecond
+    }
+}
+
+/// Preserves a false-pause movement segment, but breaks the distance anchor
+/// when a pause contains no accepted movement. That prevents the first fix
+/// after a genuine stationary pause from adding accumulated GPS drift.
+nonisolated struct WorkoutPausedRouteContinuity: Equatable, Sendable {
+    private(set) var isPaused = false
+    private(set) var acceptedMovementWhilePaused = false
+
+    /// Returns true when the caller must break its current distance segment.
+    mutating func setPaused(_ paused: Bool) -> Bool {
+        if paused {
+            if !isPaused {
+                acceptedMovementWhilePaused = false
+            }
+            isPaused = true
+            return false
+        }
+        let shouldBreakSegment = isPaused && !acceptedMovementWhilePaused
+        isPaused = false
+        acceptedMovementWhilePaused = false
+        return shouldBreakSegment
+    }
+
+    mutating func noteAcceptedPoint() {
+        if isPaused {
+            acceptedMovementWhilePaused = true
+        }
+    }
+
+    mutating func reset() {
+        self = Self()
     }
 }
 
