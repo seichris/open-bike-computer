@@ -205,6 +205,13 @@ Detection** on iPhone:
   Workout app and does not backdate the workout.
 - **Auto-Pause** requests pause after a sustained stop and resumes only a ride
   that Bicino previously auto-paused. A manual pause stays manually paused.
+- The five-second pause path requires a fresh stopped wheel-speed source.
+  Cadence zero, cadence-only availability, missing sensors, and wheel dropout
+  use the ten-second qualified GPS-plus-IMU fallback; trustworthy movement
+  cancels the stopped candidate.
+- HealthKit cycling speed is displayed as HealthKit data unless its paired
+  sensor provenance is explicitly confirmed. It never silently sets the paired
+  speed source bit.
 - **Start alerts** select sound+haptic, haptic-only, or visual-only feedback.
 
 The Watch remains authoritative. Device/iPhone screens say **Starting**,
@@ -212,6 +219,17 @@ The Watch remains authoritative. Device/iPhone screens say **Starting**,
 change. A confirmed automatic transition is written to Watch recovery metadata
 and a HealthKit marker while standard HealthKit pause/resume events continue to
 define active duration.
+
+Transition provenance is `manual`, `automatic`, `system`, or `unknown`.
+Uncorroborated session callbacks remain unknown and fail closed for automatic
+resume; only an explicit user action is manual. Privacy-safe automatic markers
+also retain the detector profile, evidence/source-health masks, candidate time,
+and decision time so recovery cannot relabel the transition.
+
+Location recording remains active during a reported pause. Quality points that
+prove physical movement preserve the HealthKit route and cycling distance
+through a false pause; stationary drift, delayed points, and regressing points
+are rejected. Pause/resume itself does not break the route segment.
 
 **Elapsed** is wall time since confirmed start, including pauses. **Moving** is
 the existing `HKLiveWorkoutBuilder.elapsedTime`, excluding confirmed pause

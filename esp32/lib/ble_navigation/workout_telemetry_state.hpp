@@ -545,8 +545,8 @@ private:
       return ApplyResult::RejectedToken;
     if (!state_.coreReceived || state_.sessionToken != token)
       return ApplyResult::IgnoredToken;
-    if (rawPauseOrigin > static_cast<uint8_t>(PauseOrigin::Automatic) ||
-        rawLastOrigin > static_cast<uint8_t>(PauseOrigin::Automatic) ||
+    if (rawPauseOrigin > static_cast<uint8_t>(PauseOrigin::Unknown) ||
+        rawLastOrigin > static_cast<uint8_t>(PauseOrigin::Unknown) ||
         flags != 0 || !hasSessionID(sessionID))
       return ApplyResult::RejectedMetric;
     const bool paused = state_.sessionState == SessionState::Paused;

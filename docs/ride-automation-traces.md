@@ -6,8 +6,9 @@ shadow traces and may exercise the gated end-to-end control path.
 
 ## Privacy and schema
 
-New traces use one JSON object per line with `schema: 2` and `profile: 2`.
-Schema 1/profile 1 fixtures remain replayable; their positive HDOP value is
+New traces use one JSON object per line with `schema: 3` and `profile: 3`.
+Schema 1/profile 1 and schema 2/profile 2 fixtures remain replayable; a schema-1
+positive HDOP value is
 converted at the compatibility boundary to the original `HDOP * 5 m`
 horizontal-uncertainty estimate. Traces may contain only
 normalized policy inputs. Do not record coordinates, raw accelerometer samples,
@@ -19,7 +20,7 @@ second check for common private/raw field names.
 Each record has this shape:
 
 ```json
-{"schema":2,"profile":2,"label":"traffic-stop","t_ms":12000,"lifecycle":"running","settings":{"start_mode":"ask","auto_pause":true},"evidence":{"wheel_mps":{"value":0.0,"age_ms":0},"cadence_rpm":0.0,"gps_mps":0.2,"gps_fix_valid":{"value":true,"age_ms":0},"gps_source":2,"gps_horizontal_uncertainty_m":{"value":5.5,"age_ms":0},"gps_stationary":{"value":true,"age_ms":0},"gps_displacement_m":{"value":2.0,"age_ms":0},"imu_motion_score":0.1},"expected":"none"}
+{"schema":3,"profile":3,"label":"traffic-stop","t_ms":12000,"lifecycle":"running","settings":{"start_mode":"ask","auto_pause":true},"evidence":{"wheel_mps":{"value":0.0,"age_ms":0},"cadence_rpm":0.0,"gps_mps":0.2,"gps_fix_valid":{"value":true,"age_ms":0},"gps_source":2,"gps_horizontal_uncertainty_m":{"value":5.5,"age_ms":0},"gps_stationary":{"value":true,"age_ms":0},"gps_displacement_m":{"value":2.0,"age_ms":0},"imu_motion_score":0.1},"expected":"none"}
 ```
 
 Allowed lifecycle values are `idle`, `running`, `auto_paused`,
@@ -55,9 +56,16 @@ The Python wrapper validates privacy/schema rules and compiles the small replay
 driver. The driver executes `RideAutomationPolicy`, so replay does not maintain
 a second detector implementation.
 
+`aug-29-coasting-regression.jsonl` is the privacy-safe regression trace for the
+reported false pause. Its cadence is zero while trustworthy GPS plus IMU still
+show movement, then wheel evidence drops out before a genuine stopped control.
+The pre-profile-3 direct-sensor rule would have paused after five seconds of
+zero cadence; profile 3 keeps the ride running and pauses only after ten
+continuous seconds of qualified GPS-plus-IMU stopped evidence.
+
 ## Physical trace gate
 
-Before profile 2 can control a ride in production, collect and label traces for:
+Before profile 3 can control a ride in production, collect and label traces for:
 
 - genuine starts with no cycling sensor, cadence, wheel speed, and both;
 - short stops and traffic lights of 10, 30, 90, and 180 seconds;

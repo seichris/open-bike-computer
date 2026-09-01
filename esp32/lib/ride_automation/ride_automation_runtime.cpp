@@ -370,19 +370,22 @@ bool workoutContradictsOutstandingDecision(
       workout.state.sessionID != outstandingDecision.sessionID) {
     return true;
   }
+  const auto isConfirmedNonAutomatic = [](PauseOrigin origin) {
+    return origin != PauseOrigin::None && origin != PauseOrigin::Automatic;
+  };
   switch (outstandingDecision.transition) {
   case Transition::Start:
-    return workout.state.lastTransitionOrigin == PauseOrigin::Manual;
+    return isConfirmedNonAutomatic(workout.state.lastTransitionOrigin);
   case Transition::Pause:
     return (state == SessionState::Paused &&
-            workout.state.pauseOrigin == PauseOrigin::Manual) ||
+            isConfirmedNonAutomatic(workout.state.pauseOrigin)) ||
            (state == SessionState::Running &&
-            workout.state.lastTransitionOrigin == PauseOrigin::Manual);
+            isConfirmedNonAutomatic(workout.state.lastTransitionOrigin));
   case Transition::Resume:
     return (state == SessionState::Paused &&
-            workout.state.pauseOrigin == PauseOrigin::Manual) ||
+            isConfirmedNonAutomatic(workout.state.pauseOrigin)) ||
            (state == SessionState::Running &&
-            workout.state.lastTransitionOrigin == PauseOrigin::Manual);
+            isConfirmedNonAutomatic(workout.state.lastTransitionOrigin));
   case Transition::None:
     return false;
   }

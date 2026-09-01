@@ -48,6 +48,33 @@ class RideTraceReplayTests(unittest.TestCase):
         self.assertEqual(summary["pause_latency_ms_total"], 5_000)
         self.assertEqual(summary["resume_latency_ms_total"], 2_000)
 
+    def test_aug_29_coasting_regression_and_true_stop_control(self):
+        # Under profile 2, the cadence-zero rows entered the five-second direct
+        # stop path and produced a false pause while GPS+IMU showed movement.
+        # Profile 3 keeps every coasting/dropout row running, then proves the
+        # independent sustained GPS+IMU true-stop control still pauses.
+        trace = (
+            Path(__file__).parent
+            / "fixtures"
+            / "ride_automation"
+            / "aug-29-coasting-regression.jsonl"
+        )
+        records = replay_module.load_trace(trace)
+        outputs = replay_module.replay(records, self.binary)
+        summary = replay_module.validate_expectations(trace, records, outputs)
+        self.assertEqual(summary["mismatches"], 0)
+        self.assertEqual(summary["decisions"], 1)
+        self.assertEqual(summary["false_pauses"], 0)
+        self.assertEqual(summary["missed_transitions"], 0)
+        self.assertEqual(summary["pause_latency_ms_total"], 10_000)
+        self.assertFalse(
+            replay_module.FORBIDDEN_KEYS.intersection(
+                key
+                for record in records
+                for key in replay_module._walk_keys(record)
+            )
+        )
+
     def test_rejects_private_and_raw_sensor_fields(self):
         for forbidden in sorted(replay_module.FORBIDDEN_KEYS):
             with self.subTest(forbidden=forbidden), tempfile.TemporaryDirectory() as directory:

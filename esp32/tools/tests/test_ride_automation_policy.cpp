@@ -27,6 +27,19 @@ RideEvidenceObservation wheel(float metersPerSecond, uint32_t nowMs) {
   return observation;
 }
 
+RideEvidenceObservation cadence(float rpm, uint32_t nowMs) {
+  RideEvidenceObservation observation;
+  observation.cadenceRpm = metric(rpm, nowMs);
+  return observation;
+}
+
+RideEvidenceObservation wheelAndCadence(float metersPerSecond, float rpm,
+                                        uint32_t nowMs) {
+  auto observation = wheel(metersPerSecond, nowMs);
+  observation.cadenceRpm = metric(rpm, nowMs);
+  return observation;
+}
+
 RideEvidenceObservation gpsImu(float gpsMetersPerSecond, float motionScore,
                                float displacementMeters, uint32_t nowMs,
                                bool stationary = false) {
@@ -143,7 +156,7 @@ int main() {
                               ConfirmedLifecycle::Idle, ask);
   assert(decision.transition == Transition::Start);
   assert(decision.sequence != 0);
-  assert(decision.profileVersion == 2);
+  assert(decision.profileVersion == 3);
   assert(sensorAsk.detectorStatus().phase ==
          DetectorPhase::AwaitingConfirmation);
   assert(sensorAsk.detectorStatus().progressPercent == 100);
@@ -280,6 +293,105 @@ int main() {
                        ConfirmedLifecycle::Running, ask));
   assert(pause.takePendingCancellation());
 
+  // Explicit sensor-combination matrix. A stopped wheel is authoritative;
+  // cadence zero alone is not, and fresh movement always vetoes pause.
+  RideAutomationPolicy speedOnlyStop;
+  assert(speedOnlyStop.update(0, wheel(0.0F, 0),
+                              ConfirmedLifecycle::Running, ask)
+             .transition == Transition::None);
+  assert(speedOnlyStop.lastSensorCombination() ==
+         SensorCombination::SpeedOnly);
+  assert(speedOnlyStop.lastMotionEvidenceState() ==
+         MotionEvidenceState::WheelStopped);
+  decision = speedOnlyStop.update(5'000, wheel(0.0F, 5'000),
+                                  ConfirmedLifecycle::Running, ask);
+  assert(decision.transition == Transition::Pause);
+
+  RideAutomationPolicy speedOnlyMoving;
+  for (uint32_t nowMs = 0; nowMs <= 20'000; nowMs += 1'000) {
+    assert(!speedOnlyMoving.update(nowMs, wheel(6.5F, nowMs),
+                                   ConfirmedLifecycle::Running, ask));
+  }
+  assert(speedOnlyMoving.lastMotionEvidenceState() ==
+         MotionEvidenceState::WheelMoving);
+
+  RideAutomationPolicy bothTrueStop;
+  for (uint32_t nowMs = 0; nowMs < 5'000; nowMs += 1'000) {
+    assert(!bothTrueStop.update(
+        nowMs, wheelAndCadence(0.0F, 0.0F, nowMs),
+        ConfirmedLifecycle::Running, ask));
+  }
+  decision = bothTrueStop.update(
+      5'000, wheelAndCadence(0.0F, 0.0F, 5'000),
+      ConfirmedLifecycle::Running, ask);
+  assert(decision.transition == Transition::Pause);
+
+  RideAutomationPolicy bothCoasting;
+  for (uint32_t nowMs = 0; nowMs <= 20'000; nowMs += 1'000) {
+    assert(!bothCoasting.update(
+        nowMs, wheelAndCadence(6.5F, 0.0F, nowMs),
+        ConfirmedLifecycle::Running, ask));
+  }
+  assert(bothCoasting.lastSensorCombination() ==
+         SensorCombination::SpeedAndCadence);
+  assert(bothCoasting.lastMotionEvidenceState() ==
+         MotionEvidenceState::SourceConflict);
+
+  RideAutomationPolicy slowCrawl;
+  for (uint32_t nowMs = 0; nowMs <= 20'000; nowMs += 1'000) {
+    assert(!slowCrawl.update(nowMs, wheel(0.8F, nowMs),
+                             ConfirmedLifecycle::Running, ask));
+  }
+  assert(slowCrawl.lastMotionEvidenceState() ==
+         MotionEvidenceState::SlowCrawl);
+
+  RideAutomationPolicy cadenceOnlyCoasting;
+  for (uint32_t nowMs = 0; nowMs <= 20'000; nowMs += 1'000) {
+    auto observation = gpsImu(6.5F, 0.9F, 100.0F, nowMs);
+    observation.cadenceRpm = metric(0.0F, nowMs);
+    assert(!cadenceOnlyCoasting.update(
+        nowMs, observation, ConfirmedLifecycle::Running, ask));
+  }
+  assert(cadenceOnlyCoasting.lastSensorCombination() ==
+         SensorCombination::CadenceOnly);
+  assert(cadenceOnlyCoasting.lastMotionEvidenceState() ==
+         MotionEvidenceState::GpsImuMoving);
+
+  RideAutomationPolicy cadenceOnlyTrueStop;
+  for (uint32_t nowMs = 0; nowMs < 10'000; nowMs += 1'000) {
+    auto observation = gpsImu(0.1F, 0.1F, 0.0F, nowMs, true);
+    observation.cadenceRpm = metric(0.0F, nowMs);
+    assert(!cadenceOnlyTrueStop.update(
+        nowMs, observation, ConfirmedLifecycle::Running, ask));
+  }
+  auto cadenceStop = gpsImu(0.1F, 0.1F, 0.0F, 10'000, true);
+  cadenceStop.cadenceRpm = metric(0.0F, 10'000);
+  decision = cadenceOnlyTrueStop.update(
+      10'000, cadenceStop, ConfirmedLifecycle::Running, ask);
+  assert(decision.transition == Transition::Pause);
+
+  RideAutomationPolicy sensorlessTrueStop;
+  for (uint32_t nowMs = 0; nowMs < 10'000; nowMs += 1'000) {
+    assert(!sensorlessTrueStop.update(
+        nowMs, gpsImu(0.1F, 0.1F, 0.0F, nowMs, true),
+        ConfirmedLifecycle::Running, ask));
+  }
+  decision = sensorlessTrueStop.update(
+      10'000, gpsImu(0.1F, 0.1F, 0.0F, 10'000, true),
+      ConfirmedLifecycle::Running, ask);
+  assert(decision.transition == Transition::Pause);
+
+  RideAutomationPolicy sensorlessMoving;
+  for (uint32_t nowMs = 0; nowMs <= 20'000; nowMs += 1'000) {
+    assert(!sensorlessMoving.update(
+        nowMs, gpsImu(6.5F, 0.9F, 100.0F, nowMs),
+        ConfirmedLifecycle::Running, ask));
+  }
+  assert(sensorlessMoving.lastSensorCombination() ==
+         SensorCombination::Neither);
+  assert(sensorlessMoving.lastMotionEvidenceState() ==
+         MotionEvidenceState::GpsImuMoving);
+
   Settings noAutoPause = ask;
   noAutoPause.autoPauseEnabled = false;
   RideAutomationPolicy pauseDisabled;
@@ -322,8 +434,8 @@ int main() {
                                  ConfirmedLifecycle::Running, ask));
   }
 
-  // A GPS/IMU pause freezes during a quality gap and resumes accumulating only
-  // after both sources are trustworthy again.
+  // A GPS/IMU quality gap resets the pause candidate. Uncertainty must not
+  // retain enough old stopped time to create a later false pause.
   RideAutomationPolicy gpsPause;
   for (uint32_t second = 0; second <= 4; ++second) {
     const uint32_t nowMs = second * 1'000;
@@ -332,14 +444,35 @@ int main() {
   }
   for (uint32_t nowMs = 5'000; nowMs <= 20'000; nowMs += 1'000)
     assert(!gpsPause.update(nowMs, {}, ConfirmedLifecycle::Running, ask));
-  for (uint32_t nowMs = 21'000; nowMs < 26'000; nowMs += 1'000)
+  for (uint32_t nowMs = 21'000; nowMs < 31'000; nowMs += 1'000)
     assert(!gpsPause.update(nowMs,
                             gpsImu(0.1F, 0.1F, 0.0F, nowMs, true),
                             ConfirmedLifecycle::Running, ask));
-  decision = gpsPause.update(26'000,
-                             gpsImu(0.1F, 0.1F, 0.0F, 26'000, true),
+  decision = gpsPause.update(31'000,
+                             gpsImu(0.1F, 0.1F, 0.0F, 31'000, true),
                              ConfirmedLifecycle::Running, ask);
   assert(decision.transition == Transition::Pause);
+
+  // A speed-sensor dropout is uncertainty, not a synthetic zero. Cadence zero
+  // falls back to GPS/IMU and a fresh wheel reconnect cancels the candidate.
+  RideAutomationPolicy dropoutReconnect;
+  assert(!dropoutReconnect.update(0, wheel(5.0F, 0),
+                                  ConfirmedLifecycle::Running, ask));
+  assert(!dropoutReconnect.update(4'000, cadence(0.0F, 4'000),
+                                  ConfirmedLifecycle::Running, ask));
+  assert(dropoutReconnect.lastMotionEvidenceState() ==
+         MotionEvidenceState::WheelDropout);
+  for (uint32_t nowMs = 5'000; nowMs < 10'000; nowMs += 1'000) {
+    auto observation = gpsImu(0.1F, 0.1F, 0.0F, nowMs, true);
+    observation.cadenceRpm = metric(0.0F, nowMs);
+    assert(!dropoutReconnect.update(
+        nowMs, observation, ConfirmedLifecycle::Running, ask));
+  }
+  assert(!dropoutReconnect.update(
+      10'000, wheelAndCadence(5.0F, 0.0F, 10'000),
+      ConfirmedLifecycle::Running, ask));
+  assert(dropoutReconnect.lastMotionEvidenceState() ==
+         MotionEvidenceState::SourceConflict);
 
   RideAutomationPolicy resume;
   assert(!runSeconds(resume, 0, 2,
@@ -510,8 +643,8 @@ int main() {
   char json[2'048];
   const int length = formatTraceJsonLine(trace, json, sizeof(json));
   assert(length > 0 && static_cast<std::size_t>(length) < sizeof(json));
-  assert(std::strstr(json, "\"schema\":2") != nullptr);
-  assert(std::strstr(json, "\"profile\":2") != nullptr);
+  assert(std::strstr(json, "\"schema\":3") != nullptr);
+  assert(std::strstr(json, "\"profile\":3") != nullptr);
   assert(std::strstr(json, "\"gps_horizontal_uncertainty_m\"") !=
          nullptr);
   assert(std::strstr(json, "\"lifecycle\":\"idle\"") != nullptr);

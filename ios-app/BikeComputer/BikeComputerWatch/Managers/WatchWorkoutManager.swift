@@ -348,6 +348,14 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             "com.openbikecomputer.workout.rideTransition.decisionSequence"
         static let profileVersion =
             "com.openbikecomputer.workout.rideTransition.profileVersion"
+        static let evidenceMask =
+            "com.openbikecomputer.workout.rideTransition.evidenceMask"
+        static let sourceHealthMask =
+            "com.openbikecomputer.workout.rideTransition.sourceHealthMask"
+        static let candidateBeganSeconds =
+            "com.openbikecomputer.workout.rideTransition.candidateBeganSeconds"
+        static let decidedAtSeconds =
+            "com.openbikecomputer.workout.rideTransition.decidedAtSeconds"
     }
 
     private enum SegmentEventWriteOutcome: Equatable, Sendable {
@@ -536,7 +544,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var averageHeartRate: WorkoutMetricV1?
     private var activeEnergy: WorkoutMetricV1?
     private var healthKitDistance: WorkoutMetricCandidate?
-    private var pairedSensorSpeed: WorkoutMetricCandidate?
+    /// Live workout statistics merge cycling-speed sources. They prove a
+    /// HealthKit speed sample, not a paired wheel sensor capability.
+    private var healthKitSpeed: WorkoutMetricCandidate?
     private var cyclingPower: WorkoutMetricV1?
     private var cyclingCadence: WorkoutMetricV1?
     private var terminalRouteDistance: WorkoutMetricCandidate?
@@ -1031,7 +1041,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             automaticReason: .rideDetection,
             rideGeneration: frame.rideGeneration,
             decisionSequence: frame.decisionSequence,
-            detectorProfileVersion: frame.profileVersion
+            detectorProfileVersion: frame.profileVersion,
+            evidenceMask: frame.evidenceMask,
+            sourceHealthMask: frame.sourceHealthMask,
+            candidateBeganSeconds: frame.candidateBeganSeconds,
+            decidedAtSeconds: frame.monotonicSeconds
         )
         let paused: Bool
         switch frame.transition {
@@ -1134,7 +1148,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             automaticReason: .rideDetection,
             rideGeneration: frame.rideGeneration,
             decisionSequence: frame.decisionSequence,
-            detectorProfileVersion: frame.profileVersion
+            detectorProfileVersion: frame.profileVersion,
+            evidenceMask: frame.evidenceMask,
+            sourceHealthMask: frame.sourceHealthMask,
+            candidateBeganSeconds: frame.candidateBeganSeconds,
+            decidedAtSeconds: frame.monotonicSeconds
         )
         let expectedPaused: Bool
         switch frame.transition {
@@ -4290,10 +4308,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                   let schemaNumber = metadata[
                     RideTransitionMetadataKey.schema
                   ] as? NSNumber,
-                  Self.exactUnsignedMetadata(
+                  let markerSchema = Self.exactUnsignedMetadata(
                     schemaNumber,
                     as: UInt8.self
-                  ) == 1,
+                  ),
+                  markerSchema == 1 || markerSchema == 2,
                   let transition = metadata[
                     RideTransitionMetadataKey.transition
                   ] as? String,
@@ -4307,6 +4326,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             switch originValue {
             case "automatic": origin = .automatic
             case "manual": origin = .manual
+            case "system": origin = .system
+            case "unknown": origin = .unknown
             default: return nil
             }
             let profile = (
@@ -4317,6 +4338,41 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             }
             if origin == .automatic, profile == nil || profile == 0 {
                 return nil
+            }
+            if markerSchema == 2, origin == .automatic {
+                guard let evidenceNumber = metadata[
+                        RideTransitionMetadataKey.evidenceMask
+                      ] as? NSNumber,
+                      let evidenceMask = Self.exactUnsignedMetadata(
+                        evidenceNumber,
+                        as: UInt16.self
+                      ),
+                      evidenceMask & ~RideAutomationFrame.validEvidenceMask == 0,
+                      let sourceHealthNumber = metadata[
+                        RideTransitionMetadataKey.sourceHealthMask
+                      ] as? NSNumber,
+                      let sourceHealthMask = Self.exactUnsignedMetadata(
+                        sourceHealthNumber,
+                        as: UInt16.self
+                      ),
+                      sourceHealthMask
+                        & ~RideAutomationFrame.validSourceHealthMask == 0,
+                      let candidateNumber = metadata[
+                        RideTransitionMetadataKey.candidateBeganSeconds
+                      ] as? NSNumber,
+                      Self.exactUnsignedMetadata(
+                        candidateNumber,
+                        as: UInt32.self
+                      ) != nil,
+                      let decidedNumber = metadata[
+                        RideTransitionMetadataKey.decidedAtSeconds
+                      ] as? NSNumber,
+                      Self.exactUnsignedMetadata(
+                        decidedNumber,
+                        as: UInt32.self
+                      ) != nil else {
+                    return nil
+                }
             }
             return (origin, event.dateInterval.start, profile)
         }.max { $0.at < $1.at }
@@ -4556,10 +4612,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             if let quantity = statistics.mostRecentQuantity() {
                 let unit = HKUnit.meter().unitDivided(by: .second())
                 let date = statistics.mostRecentQuantityDateInterval()?.end ?? capturedAt
-                pairedSensorSpeed = WorkoutMetricCandidate(
+                healthKitSpeed = WorkoutMetricCandidate(
                     value: quantity.doubleValue(for: unit),
                     capturedAt: min(date, capturedAt),
-                    source: .pairedCyclingSensor
+                    source: .healthKit
                 )
             }
         case HKQuantityTypeIdentifier.cyclingPower.rawValue:
@@ -5608,9 +5664,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             : [remoteContext, persistedContext]
                 .compactMap { $0 }
                 .first(where: { $0.origin == .automatic })
-        let origin: WorkoutTransitionOrigin = automaticContext == nil
-            ? .manual
-            : .automatic
+        let origin = WorkoutTransitionOriginPolicy.resolve(
+            hasAutomaticContext: automaticContext != nil,
+            hasExplicitManualRequest: manualTransitionOverridePending
+        )
         let profileVersion = automaticContext?.detectorProfileVersion
 
         if let automaticContext {
@@ -5665,7 +5722,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             }
             let event = makeRideTransitionMarker(
                 paused: paused,
-                origin: .manual,
+                origin: origin,
                 context: nil,
                 at: date
             )
@@ -5708,13 +5765,18 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         at date: Date,
         transition: String? = nil
     ) -> HKWorkoutEvent {
+        let hasCompleteDiagnostics = context?.evidenceMask != nil
+            && context?.sourceHealthMask != nil
+            && context?.candidateBeganSeconds != nil
+            && context?.decidedAtSeconds != nil
         var metadata: [String: Any] = [
             RideTransitionMetadataKey.marker: true,
-            RideTransitionMetadataKey.schema: 1,
+            RideTransitionMetadataKey.schema:
+                origin == .automatic && !hasCompleteDiagnostics ? 1 : 2,
             RideTransitionMetadataKey.transition:
                 transition ?? (paused ? "pause" : "resume"),
             RideTransitionMetadataKey.origin:
-                origin == .automatic ? "automatic" : "manual",
+                rideTransitionOriginName(origin),
         ]
         if let rideGeneration = context?.rideGeneration {
             metadata[RideTransitionMetadataKey.rideGeneration] =
@@ -5728,12 +5790,39 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             metadata[RideTransitionMetadataKey.profileVersion] =
                 NSNumber(value: profileVersion)
         }
+        if let evidenceMask = context?.evidenceMask {
+            metadata[RideTransitionMetadataKey.evidenceMask] =
+                NSNumber(value: evidenceMask)
+        }
+        if let sourceHealthMask = context?.sourceHealthMask {
+            metadata[RideTransitionMetadataKey.sourceHealthMask] =
+                NSNumber(value: sourceHealthMask)
+        }
+        if let candidateBeganSeconds = context?.candidateBeganSeconds {
+            metadata[RideTransitionMetadataKey.candidateBeganSeconds] =
+                NSNumber(value: candidateBeganSeconds)
+        }
+        if let decidedAtSeconds = context?.decidedAtSeconds {
+            metadata[RideTransitionMetadataKey.decidedAtSeconds] =
+                NSNumber(value: decidedAtSeconds)
+        }
         let event = HKWorkoutEvent(
             type: .marker,
             dateInterval: DateInterval(start: date, end: date),
             metadata: metadata
         )
         return event
+    }
+
+    private func rideTransitionOriginName(
+        _ origin: WorkoutTransitionOrigin
+    ) -> String {
+        switch origin {
+        case .manual: "manual"
+        case .automatic: "automatic"
+        case .system: "system"
+        case .unknown: "unknown"
+        }
     }
 
     private func beginAutomaticStartConfirmation(
@@ -5889,7 +5978,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         localStartOriginPending = false
     }
 
-    private func scheduleSuppliedConfigurationManualStart(
+    private func scheduleSuppliedConfigurationUnknownStart(
         at transitionDate: Date
     ) {
         guard suppliedConfigurationStartOriginPending,
@@ -5909,9 +5998,42 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                   identity?.lastTransitionOrigin == nil else { return }
             suppliedConfigurationStartOriginPending = false
             suppliedConfigurationStartOriginTask = nil
-            localStartOriginPending = true
-            await confirmManualStart(at: transitionDate)
+            await confirmUnknownStart(at: transitionDate)
             publishSnapshotImmediately()
+        }
+    }
+
+    private func confirmUnknownStart(at date: Date) async {
+        guard let builder else {
+            lastErrorCode = .sessionFailed
+            return
+        }
+        let event = makeRideTransitionMarker(
+            paused: false,
+            origin: .unknown,
+            context: nil,
+            at: date,
+            transition: "start"
+        )
+        let outcome = await Self.segmentEventWriteOutcome(
+            event,
+            to: builder,
+            injectedOperation: injectedRideTransitionEventOperation
+        )
+        guard outcome == .success else {
+            lastErrorCode = .sessionFailed
+            return
+        }
+        do {
+            try recoveryStore.confirmRideTransition(
+                origin: .unknown,
+                paused: false,
+                at: date,
+                detectorProfileVersion: nil
+            )
+            identity = recoveryStore.recoveredIdentity ?? identity
+        } catch {
+            lastErrorCode = .sessionFailed
         }
     }
 
@@ -5951,10 +6073,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                   let schemaNumber = metadata[
                     RideTransitionMetadataKey.schema
                   ] as? NSNumber,
-                  Self.exactUnsignedMetadata(
+                  let markerSchema = Self.exactUnsignedMetadata(
                     schemaNumber,
                     as: UInt8.self
-                  ) == 1,
+                  ),
+                  markerSchema == 1 || markerSchema == 2,
                   metadata[RideTransitionMetadataKey.transition] as? String
                     == transition,
                   metadata[RideTransitionMetadataKey.origin] as? String
@@ -5980,6 +6103,42 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                     profileNumber,
                     as: UInt16.self
                   ) == context.detectorProfileVersion else {
+                return false
+            }
+            if markerSchema == 1 {
+                return context.evidenceMask == nil
+                    && context.sourceHealthMask == nil
+                    && context.candidateBeganSeconds == nil
+                    && context.decidedAtSeconds == nil
+            }
+            guard let evidenceNumber = metadata[
+                    RideTransitionMetadataKey.evidenceMask
+                  ] as? NSNumber,
+                  Self.exactUnsignedMetadata(
+                    evidenceNumber,
+                    as: UInt16.self
+                  ) == context.evidenceMask,
+                  let sourceHealthNumber = metadata[
+                    RideTransitionMetadataKey.sourceHealthMask
+                  ] as? NSNumber,
+                  Self.exactUnsignedMetadata(
+                    sourceHealthNumber,
+                    as: UInt16.self
+                  ) == context.sourceHealthMask,
+                  let candidateNumber = metadata[
+                    RideTransitionMetadataKey.candidateBeganSeconds
+                  ] as? NSNumber,
+                  Self.exactUnsignedMetadata(
+                    candidateNumber,
+                    as: UInt32.self
+                  ) == context.candidateBeganSeconds,
+                  let decidedNumber = metadata[
+                    RideTransitionMetadataKey.decidedAtSeconds
+                  ] as? NSNumber,
+                  Self.exactUnsignedMetadata(
+                    decidedNumber,
+                    as: UInt32.self
+                  ) == context.decidedAtSeconds else {
                 return false
             }
             return true
@@ -6292,10 +6451,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             )
         }
         let speedCandidate = WorkoutMetricPrecedence.currentSpeed(
-            pairedSensor: WorkoutMetricFreshness.candidate(
-                pairedSensorSpeed,
+            pairedSensor: nil,
+            healthKit: WorkoutMetricFreshness.candidate(
+                healthKitSpeed,
                 now: capturedAt,
-                maximumAge: WorkoutMetricFreshness.pairedCyclingSensorMaximumAge
+                maximumAge: WorkoutMetricFreshness.healthKitSpeedMaximumAge
             ),
             watchLocation: locationSpeed
         )
@@ -6398,7 +6558,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             pauseOrigin: lifecycle.state == .paused
                 ? (hasPendingAutomaticTransition
                     ? .unknown
-                    : identity?.pauseOrigin ?? .manual)
+                    : identity?.pauseOrigin ?? .unknown)
                 : nil,
             lastTransitionOrigin: hasPendingAutomaticTransition
                 ? .unknown
@@ -6575,7 +6735,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         averageHeartRate = nil
         activeEnergy = nil
         healthKitDistance = nil
-        pairedSensorSpeed = nil
+        healthKitSpeed = nil
         cyclingPower = nil
         cyclingCadence = nil
         terminalRouteDistance = nil
@@ -6937,7 +7097,7 @@ extension WatchWorkoutManager: HKWorkoutSessionDelegate {
                             await confirmManualStart(at: date)
                             didConfirmTransition = true
                         } else {
-                            scheduleSuppliedConfigurationManualStart(at: date)
+                            scheduleSuppliedConfigurationUnknownStart(at: date)
                             didConfirmTransition = true
                         }
                     }

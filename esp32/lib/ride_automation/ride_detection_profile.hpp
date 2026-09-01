@@ -8,7 +8,7 @@ namespace ride_automation {
 // the policy that produced them. Profile 2 may control only internal builds;
 // production remains capability-off until the physical trace gates pass.
 struct RideDetectionProfile {
-  uint16_t version = 2;
+  uint16_t version = 3;
 
   uint32_t wheelFreshnessMs = 3'000;
   uint32_t cadenceFreshnessMs = 3'000;

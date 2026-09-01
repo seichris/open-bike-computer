@@ -518,14 +518,13 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         }
         let pauseOrigin: UInt8
         if sample.state == .paused {
-            pauseOrigin = sample.pauseOrigin?.rawValue ?? 0
+            pauseOrigin = encodedOrigin(sample.pauseOrigin)
         } else {
             pauseOrigin = 0
         }
         let profileVersion = sample.detectorProfileVersion ?? 0
-        let lastOrigin = sample.lastTransitionOrigin?.rawValue ?? 0
-        if (pauseOrigin == WorkoutTransitionOrigin.automatic.rawValue
-                || lastOrigin == WorkoutTransitionOrigin.automatic.rawValue),
+        let lastOrigin = encodedOrigin(sample.lastTransitionOrigin)
+        if (pauseOrigin == 2 || lastOrigin == 2),
            profileVersion == 0 {
             return nil
         }
@@ -541,6 +540,20 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         origin.append(0)
         guard origin.count == originFrameLength else { return nil }
         return origin
+    }
+
+    /// Wire zero means absent/pending, so the canonical `.unknown` case needs
+    /// its own value instead of being collapsed with nil.
+    private static func encodedOrigin(
+        _ origin: WorkoutTransitionOrigin?
+    ) -> UInt8 {
+        switch origin {
+        case nil: 0
+        case .manual: 1
+        case .automatic: 2
+        case .system: 3
+        case .unknown: 4
+        }
     }
 
     private static func encodeUInt16(

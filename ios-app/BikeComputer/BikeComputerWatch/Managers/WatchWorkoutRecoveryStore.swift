@@ -711,9 +711,9 @@ nonisolated final class WatchWorkoutRecoveryStore {
         at date: Date,
         detectorProfileVersion: UInt16?
     ) throws {
-        guard origin != .unknown,
-              date.timeIntervalSinceReferenceDate.isFinite,
+        guard date.timeIntervalSinceReferenceDate.isFinite,
               detectorProfileVersion.map({ $0 > 0 }) ?? true,
+              origin != .automatic || detectorProfileVersion != nil,
               var identity else {
             throw RecoveryStoreError.missingOrInvalidIdentity
         }
@@ -1348,8 +1348,6 @@ nonisolated final class WatchWorkoutRecoveryStore {
               identity.startDate.timeIntervalSinceReferenceDate.isFinite,
               identity.remoteControlCheckpoint?.isValid ?? true,
               identity.remoteSegmentIntent?.isValid ?? true,
-              identity.pauseOrigin != .unknown,
-              identity.lastTransitionOrigin != .unknown,
               (identity.lastTransitionOrigin == nil)
                 == (identity.lastTransitionAt == nil),
               identity.lastTransitionAt.map({

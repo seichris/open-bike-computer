@@ -51,6 +51,9 @@ nonisolated enum RideAutomationSerialNumber {
 nonisolated struct RideAutomationFrame: Codable, Equatable, Sendable {
     static let version: UInt8 = 2
     static let byteCount = 52
+    // Evidence bits are intentionally forward compatible across detector
+    // profiles. Consumers interpret known bits and preserve the full field.
+    static let validEvidenceMask: UInt16 = .max
     static let validSourceHealthMask: UInt16 = 0x000F
 
     var kind: RideAutomationKind
@@ -111,6 +114,7 @@ nonisolated struct RideAutomationFrame: Codable, Equatable, Sendable {
 
     func encoded() -> Data? {
         guard rideGeneration != 0, profileVersion != 0, alertMode <= 2,
+              evidenceMask & ~Self.validEvidenceMask == 0,
               sourceHealthMask & ~Self.validSourceHealthMask == 0,
               isSemanticallyValid else {
             return nil
@@ -187,7 +191,8 @@ nonisolated struct RideAutomationFrame: Codable, Equatable, Sendable {
             }
             acknowledgedKind = value
         }
-        guard sourceHealthMask & ~Self.validSourceHealthMask == 0 else {
+        guard evidenceMask & ~Self.validEvidenceMask == 0,
+              sourceHealthMask & ~Self.validSourceHealthMask == 0 else {
             return nil
         }
         guard isSemanticallyValid else { return nil }
@@ -301,6 +306,14 @@ nonisolated enum RideDetectionSyncContext {
         "BikeComputer.rideDetection.automaticStart.decisionSequence.v1"
     static let automaticStartProfileVersionKey =
         "BikeComputer.rideDetection.automaticStart.profileVersion.v1"
+    static let automaticStartEvidenceMaskKey =
+        "BikeComputer.rideDetection.automaticStart.evidenceMask.v1"
+    static let automaticStartSourceHealthMaskKey =
+        "BikeComputer.rideDetection.automaticStart.sourceHealthMask.v1"
+    static let automaticStartCandidateBeganKey =
+        "BikeComputer.rideDetection.automaticStart.candidateBegan.v1"
+    static let automaticStartDecidedAtKey =
+        "BikeComputer.rideDetection.automaticStart.decidedAt.v1"
 
     static func adding(
         settings: RideDetectionSettings,
@@ -354,6 +367,10 @@ nonisolated enum RideDetectionSyncContext {
         result.removeValue(forKey: automaticStartRideGenerationKey)
         result.removeValue(forKey: automaticStartDecisionSequenceKey)
         result.removeValue(forKey: automaticStartProfileVersionKey)
+        result.removeValue(forKey: automaticStartEvidenceMaskKey)
+        result.removeValue(forKey: automaticStartSourceHealthMaskKey)
+        result.removeValue(forKey: automaticStartCandidateBeganKey)
+        result.removeValue(forKey: automaticStartDecidedAtKey)
         guard context?.origin == .automatic,
               context?.automaticReason == .rideDetection,
               let rideGeneration = context?.rideGeneration,
@@ -369,6 +386,19 @@ nonisolated enum RideDetectionSyncContext {
             NSNumber(value: decisionSequence)
         result[automaticStartProfileVersionKey] =
             NSNumber(value: profileVersion)
+        if let evidenceMask = context?.evidenceMask,
+           let sourceHealthMask = context?.sourceHealthMask,
+           let candidateBeganSeconds = context?.candidateBeganSeconds,
+           let decidedAtSeconds = context?.decidedAtSeconds {
+            result[automaticStartEvidenceMaskKey] =
+                NSNumber(value: evidenceMask)
+            result[automaticStartSourceHealthMaskKey] =
+                NSNumber(value: sourceHealthMask)
+            result[automaticStartCandidateBeganKey] =
+                NSNumber(value: candidateBeganSeconds)
+            result[automaticStartDecidedAtKey] =
+                NSNumber(value: decidedAtSeconds)
+        }
         return result
     }
 
@@ -391,12 +421,56 @@ nonisolated enum RideDetectionSyncContext {
               profileVersion > 0 else {
             return nil
         }
+        let evidenceNumber = applicationContext[
+            automaticStartEvidenceMaskKey
+        ] as? NSNumber
+        let sourceHealthNumber = applicationContext[
+            automaticStartSourceHealthMaskKey
+        ] as? NSNumber
+        let candidateNumber = applicationContext[
+            automaticStartCandidateBeganKey
+        ] as? NSNumber
+        let decidedNumber = applicationContext[
+            automaticStartDecidedAtKey
+        ] as? NSNumber
+        let hasDiagnostics = evidenceNumber != nil
+            || sourceHealthNumber != nil
+            || candidateNumber != nil
+            || decidedNumber != nil
+        let diagnostics: (UInt16, UInt16, UInt32, UInt32)?
+        if hasDiagnostics {
+            guard let evidenceNumber,
+                  let sourceHealthNumber,
+                  let candidateNumber,
+                  let decidedNumber,
+                  let evidenceMask = exactUInt16(evidenceNumber),
+                  let sourceHealthMask = exactUInt16(sourceHealthNumber),
+                  let candidateBeganSeconds = exactUInt32(candidateNumber),
+                  let decidedAtSeconds = exactUInt32(decidedNumber),
+                  evidenceMask & ~RideAutomationFrame.validEvidenceMask == 0,
+                  sourceHealthMask
+                    & ~RideAutomationFrame.validSourceHealthMask == 0 else {
+                return nil
+            }
+            diagnostics = (
+                evidenceMask,
+                sourceHealthMask,
+                candidateBeganSeconds,
+                decidedAtSeconds
+            )
+        } else {
+            diagnostics = nil
+        }
         return WorkoutControlContextV1(
             origin: .automatic,
             automaticReason: .rideDetection,
             rideGeneration: rideGeneration,
             decisionSequence: decisionSequence,
-            detectorProfileVersion: profileVersion
+            detectorProfileVersion: profileVersion,
+            evidenceMask: diagnostics?.0,
+            sourceHealthMask: diagnostics?.1,
+            candidateBeganSeconds: diagnostics?.2,
+            decidedAtSeconds: diagnostics?.3
         )
     }
 

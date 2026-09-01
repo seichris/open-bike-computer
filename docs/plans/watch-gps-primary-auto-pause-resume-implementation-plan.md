@@ -1,20 +1,41 @@
 # Watch GPS Primary Auto-Pause and Auto-Resume Implementation Plan
 
+## Profile-3 consistency amendment
+
+This amendment supersedes the earlier five-second Watch-GPS-primary pause and
+paused-route exclusion rules below. Production behavior is now source-aware:
+
+- only a fresh, definitively stopped wheel-speed source qualifies for the
+  five-second short pause path;
+- cadence zero, cadence-only availability, no cycling sensor, and wheel dropout
+  require ten continuous seconds of trustworthy GPS-plus-IMU stopped evidence;
+- trustworthy GPS-plus-IMU movement vetoes a pause and resets a pending stopped
+  window instead of being ignored behind a nominal sensor source;
+- generic HealthKit `cyclingSpeed` remains a visible metric but does not claim
+  paired-sensor provenance unless the source is explicitly confirmed; and
+- while the session reports paused, route points with quality physical movement
+  evidence may continue route and distance recording, while stationary drift is
+  rejected. This repairs a false-pause without creating a route gap.
+
+The old profile-2 trace and timing behavior remains replayable for compatibility
+but is not the current acceptance contract.
+
 ## Outcome
 
-Make fresh Apple Watch GPS speed the primary active-workout signal for Bicino
-automatic pause and automatic resume.
+Make Apple Watch motion evidence, direct cycling sensors, saved route distance,
+and confirmed workout state agree during coasting, sensor dropout, and recovery.
 
 For a confirmed running Watch-owned workout, the bike computer will:
 
-- begin an automatic-pause candidate from qualified Watch GPS speed as soon as
-  that speed is below `0.8 m/s`;
-- request automatic pause after five continuous seconds of qualified low-speed
-  Watch samples;
+- begin the short automatic-pause candidate only from fresh definitive stopped
+  wheel-speed evidence;
+- otherwise request automatic pause only after ten continuous seconds of
+  qualified GPS-plus-IMU stopped evidence;
 - show candidate progress before the pause request and show the existing
   automatic-pause state only after the Watch confirms the transition;
-- continue receiving Watch location evidence while automatically paused,
-  without adding paused locations or distance to the saved HealthKit route;
+- continue receiving Watch location evidence while paused and retain only
+  quality points that prove physical movement, preserving route and distance
+  through a false pause while excluding drift;
 - request automatic resume after qualified Watch GPS speed reaches at least
   `2.0 m/s` for two continuous seconds;
 - never automatically resume a manually paused workout; and
@@ -118,13 +139,14 @@ For a confirmed running workout:
    than the threshold.
 4. A duplicate frame or heartbeat for the same Watch location sample may keep
    transport health current but must not extend the observed sample span.
-5. A fresh wheel speed at or above `1.5 m/s` or cadence at or above `20 rpm`
-   cancels the Watch pause candidate. Positive physical movement wins over a
-   contradictory low Watch speed.
-6. Wheel/cadence absence or a stopped wheel/cadence value does not delay a
-   qualified Watch GPS pause.
-7. IMU movement does not veto the primary Watch pause. It remains diagnostic
-   and continues to participate in the structured GPS fallback.
+5. A fresh wheel speed at or above `1.5 m/s`, cadence at or above `20 rpm`, or
+   trustworthy GPS-plus-IMU movement cancels the pause candidate. Positive
+   physical movement wins over contradictory stopped evidence.
+6. Cadence zero, cadence-only availability, sensor absence, and wheel dropout
+   select the ten-second GPS-plus-IMU fallback. They never manufacture the
+   five-second short-path stop.
+7. IMU movement participates in the fallback and vetoes a stopped decision
+   when the GPS movement evidence is trustworthy.
 8. A stale, malformed, out-of-order, wrong-session, or poor-accuracy Watch
    sample resets the Watch candidate. Do not carry partial time into another
    source path.
@@ -391,17 +413,22 @@ Refactor `WatchRouteRecorder` reception into two stages:
 1. validate and publish the newest motion/location sample while the workout is
    active, using a motion timestamp gate that rejects pre-workout, duplicate,
    and regressing capture times but does not apply the route pause gate; then
-2. only when the workout is running, apply the route timestamp gate, distance
-   accumulation, route batching, and HealthKit insertion.
+2. apply the route timestamp gate, distance accumulation, batching, and
+   HealthKit insertion while running; while paused, apply the stricter
+   quality-movement filter before those same operations.
 
 While automatically paused:
 
 - Core Location updates remain active through the existing workout consumer;
 - fresh accepted locations update the snapshot and motion sample sequence;
-- no paused point enters `HKWorkoutRouteBuilder`;
-- no paused point advances route distance or moving-time-derived values;
-- the first post-resume route point remains a new segment anchor; and
-- delayed paused batches remain excluded by the existing resume timestamp gate.
+- a paused point enters `HKWorkoutRouteBuilder` only when reported speed and
+  horizontal accuracy, or displacement beyond combined uncertainty, prove
+  physical movement;
+- accepted moving points advance route distance continuously across the false
+  pause, while stationary drift does not;
+- pause/resume does not create a route segment break; only an explicit route
+  discontinuity does; and
+- delayed, duplicate, regressing, or poor-quality paused points remain excluded.
 
 Manual pause still cannot auto-resume. It may continue receiving location under
 the current consumer behavior, but its evidence is ignored by firmware policy.
@@ -718,9 +745,10 @@ Cover:
 - new motion replaces only queued motion, never core/extended lifecycle frames;
 - new location motion is priority `0` and structured GPS remains priority `1`;
 - unsupported firmware receives no kind-4 frame;
-- paused location updates publish motion snapshots but insert no route points
-  and add no route distance;
-- resume excludes delayed paused points from the route;
+- paused location updates publish motion snapshots, accept quality physical
+  movement into the route, and reject stationary drift;
+- pause/resume preserves one distance segment and excludes delayed or regressing
+  points;
 - automatic-pause recovery restarts motion evidence; and
 - manual-pause recovery remains auto-resume-ineligible.
 
@@ -747,8 +775,8 @@ Run the accepted matrix on both `WAVESHARE_AMOLED_175` and
 ### Pause timing and false-pause cases
 
 - Stops of 2, 4, 5, 10, 30, 90, and 180 seconds.
-- Slow rolling below `0.8 m/s` for more than five seconds, confirming the
-  intentionally specified pause behavior.
+- Slow rolling and coasting below `0.8 m/s` for more than five seconds,
+  confirming no cadence-only short-path pause and no route-distance gap.
 - Coasting with zero cadence but Watch GPS above the moving threshold.
 - Watch GPS below `0.8 m/s` while a paired wheel sensor reports movement.
 - Stationary bike with GPS drift and good, marginal, and poor accuracy.
@@ -765,11 +793,12 @@ Run the accepted matrix on both `WAVESHARE_AMOLED_175` and
 - Automatically paused workout with direct Watch BLE and with iPhone relay.
 - Manual pause followed by riding: remain manually paused.
 - At least ten repeated pause/resume cycles in one workout.
-- Confirm no paused interval locations enter the HealthKit route.
-- Confirm cycling distance and moving time do not advance from paused Watch GPS
-  evidence.
-- Confirm the first post-resume point begins a new route segment without a jump
-  across the paused interval.
+- Confirm quality movement points from a false paused interval remain in the
+  HealthKit route and cycling distance stays continuous.
+- Confirm stationary GPS drift while paused neither enters the route nor
+  advances cycling distance.
+- Confirm resume continues the existing route segment without a jump across
+  accepted movement and without admitting rejected drift.
 
 ### Stability and power
 

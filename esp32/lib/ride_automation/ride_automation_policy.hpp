@@ -27,6 +27,25 @@ enum class DetectorPhase : uint8_t {
   RestartCooldown,
 };
 
+enum class SensorCombination : uint8_t {
+  Neither = 0,
+  SpeedOnly,
+  CadenceOnly,
+  SpeedAndCadence,
+};
+
+enum class MotionEvidenceState : uint8_t {
+  Uncertain = 0,
+  WheelMoving,
+  WheelStopped,
+  SlowCrawl,
+  CadenceMoving,
+  GpsImuMoving,
+  GpsImuStopped,
+  WheelDropout,
+  SourceConflict,
+};
+
 struct DetectorStatus {
   DetectorPhase phase = DetectorPhase::Quiet;
   uint8_t progressPercent = 0;
@@ -142,6 +161,11 @@ public:
 
     const Normalized evidence = normalize(nowMs, observation);
     lastEvidenceMask_ = evidence.mask;
+    lastSensorCombination_ = evidence.sensorCombination;
+    if (evidence.wheelKnown)
+      hasObservedWheelEvidence_ = true;
+    lastMotionEvidenceState_ =
+        classifyMotionEvidence(evidence, hasObservedWheelEvidence_);
     if (lifecycle == ConfirmedLifecycle::Idle) {
       startSensorWindow_.observe(nowMs, evidence.hasDirect,
                                  evidence.directMoving,
@@ -186,6 +210,12 @@ public:
   const ShadowCounters &counters() const { return counters_; }
   Transition pendingTransition() const { return pendingTransition_; }
   uint16_t lastEvidenceMask() const { return lastEvidenceMask_; }
+  SensorCombination lastSensorCombination() const {
+    return lastSensorCombination_;
+  }
+  MotionEvidenceState lastMotionEvidenceState() const {
+    return lastMotionEvidenceState_;
+  }
   DetectorStatus detectorStatus() const { return detectorStatus_; }
   bool startSuppressionActive() const { return startSuppressionActive_; }
   bool takePendingCancellation() {
@@ -244,6 +274,7 @@ private:
     bool imuKnown = false;
     bool imuMoving = false;
     bool imuStopped = false;
+    SensorCombination sensorCombination = SensorCombination::Neither;
     uint16_t mask = EvidenceNone;
     uint16_t sourceHealthMask = SourceHealthNone;
   };
@@ -253,24 +284,54 @@ private:
   bool pendingEvidenceContradicted(const Normalized &evidence) const {
     switch (pendingTransition_) {
     case Transition::Start:
-      return evidence.hasDirect
-                 ? evidence.allDirectStopped && !evidence.directMoving
-                 : evidence.gpsKnown && evidence.imuKnown &&
-                       evidence.gpsStopped && evidence.imuStopped;
+      return !hasConfirmedMovingEvidence(evidence);
     case Transition::Pause:
-      return evidence.hasDirect
-                 ? evidence.directMoving
-                 : evidence.gpsKnown && evidence.imuKnown &&
-                       evidence.gpsResumeMoving && evidence.imuMoving;
+      return !hasConfirmedStoppedEvidence(evidence);
     case Transition::Resume:
-      return evidence.hasDirect
-                 ? evidence.allDirectStopped && !evidence.directMoving
-                 : evidence.gpsKnown && evidence.imuKnown &&
-                       evidence.gpsStopped && evidence.imuStopped;
+      return !hasConfirmedMovingEvidence(evidence);
     case Transition::None:
       return false;
     }
     return false;
+  }
+
+  static bool hasConfirmedMovingEvidence(const Normalized &evidence) {
+    return evidence.wheelMoving || evidence.cadenceMoving ||
+           (evidence.gpsKnown && evidence.imuKnown &&
+            evidence.gpsResumeMoving && evidence.imuMoving);
+  }
+
+  static bool hasConfirmedStoppedEvidence(const Normalized &evidence) {
+    if (evidence.wheelKnown) {
+      return evidence.wheelStopped &&
+             (!evidence.cadenceKnown || evidence.cadenceStopped);
+    }
+    return !evidence.cadenceMoving && evidence.gpsKnown && evidence.imuKnown &&
+           evidence.gpsStopped && evidence.imuStopped;
+  }
+
+  static MotionEvidenceState
+  classifyMotionEvidence(const Normalized &evidence,
+                         bool hasObservedWheelEvidence) {
+    if (evidence.directConflict)
+      return MotionEvidenceState::SourceConflict;
+    if (evidence.wheelMoving)
+      return MotionEvidenceState::WheelMoving;
+    if (evidence.cadenceMoving)
+      return MotionEvidenceState::CadenceMoving;
+    if (evidence.wheelStopped)
+      return MotionEvidenceState::WheelStopped;
+    if (evidence.wheelKnown)
+      return MotionEvidenceState::SlowCrawl;
+    if (evidence.gpsKnown && evidence.imuKnown &&
+        evidence.gpsResumeMoving && evidence.imuMoving)
+      return MotionEvidenceState::GpsImuMoving;
+    if (evidence.gpsKnown && evidence.imuKnown && evidence.gpsStopped &&
+        evidence.imuStopped)
+      return MotionEvidenceState::GpsImuStopped;
+    if (hasObservedWheelEvidence)
+      return MotionEvidenceState::WheelDropout;
+    return MotionEvidenceState::Uncertain;
   }
 
   static void saturatingIncrement(uint32_t &value) {
@@ -301,11 +362,7 @@ private:
                                const Normalized &evidence) {
     if (!startSuppressionActive_)
       return true;
-    const bool stopped = evidence.hasDirect
-                             ? evidence.allDirectStopped &&
-                                   !evidence.directMoving
-                             : evidence.gpsKnown && evidence.imuKnown &&
-                                   evidence.gpsStopped && evidence.imuStopped;
+    const bool stopped = hasConfirmedStoppedEvidence(evidence);
     const bool stoppedLongEnough = startSuppressionStoppedLatch_.update(
         nowMs, stopped, profile_.startSuppressionStoppedMs);
     if (!stoppedLongEnough &&
@@ -344,6 +401,13 @@ private:
                     profile_.cadenceFreshnessMs) &&
         nonnegativeFinite(observation.cadenceRpm.value);
     result.hasDirect = result.wheelKnown || result.cadenceKnown;
+    if (result.wheelKnown && result.cadenceKnown) {
+      result.sensorCombination = SensorCombination::SpeedAndCadence;
+    } else if (result.wheelKnown) {
+      result.sensorCombination = SensorCombination::SpeedOnly;
+    } else if (result.cadenceKnown) {
+      result.sensorCombination = SensorCombination::CadenceOnly;
+    }
     result.wheelMoving =
         result.wheelKnown && observation.wheelSpeedMetersPerSecond.value >=
                                  profile_.wheelMovingMetersPerSecond;
@@ -518,23 +582,36 @@ private:
     }
     resumeLatch_.reset();
 
+    if (evidence.directConflict) {
+      pauseLatch_.reset();
+      pausePath_ = PausePath::None;
+      return {};
+    }
+    if (evidence.wheelMoving) {
+      pauseLatch_.reset();
+      pausePath_ = PausePath::None;
+      return {};
+    }
+    if (evidence.cadenceMoving) {
+      pauseLatch_.reset();
+      pausePath_ = PausePath::None;
+      return {};
+    }
+
     bool condition = false;
     uint32_t requiredMs = 0;
-    if (evidence.hasDirect) {
+    if (evidence.wheelKnown) {
       if (pausePath_ != PausePath::Direct) {
         pauseLatch_.reset();
         pausePath_ = PausePath::Direct;
       }
-      condition = evidence.allDirectStopped && !evidence.directMoving;
+      condition = evidence.wheelStopped &&
+                  (!evidence.cadenceKnown || evidence.cadenceStopped);
       requiredMs = profile_.sensorPauseMs;
     } else {
       if (!evidence.gpsKnown || !evidence.imuKnown) {
-        if (pausePath_ == PausePath::GpsImu) {
-          pauseLatch_.freeze(nowMs);
-        } else {
-          pauseLatch_.reset();
-          pausePath_ = PausePath::None;
-        }
+        pauseLatch_.reset();
+        pausePath_ = PausePath::None;
         return {};
       }
       if (pausePath_ != PausePath::GpsImu) {
@@ -565,8 +642,8 @@ private:
       return {};
     }
     const bool directPath = evidence.directMoving;
-    const bool gpsPath = !evidence.hasDirect && evidence.gpsResumeMoving &&
-                         evidence.imuMoving;
+    const bool gpsPath = !evidence.wheelKnown && !evidence.cadenceMoving &&
+                         evidence.gpsResumeMoving && evidence.imuMoving;
     const uint32_t requiredMs =
         directPath ? profile_.sensorResumeMs : profile_.gpsImuResumeMs;
     if (!resumeLatch_.update(nowMs, directPath || gpsPath, requiredMs)) {
@@ -625,6 +702,7 @@ private:
     startSensorWindow_.reset();
     startGpsImuWindow_.reset();
     if (lifecycle == ConfirmedLifecycle::Finished) {
+      hasObservedWheelEvidence_ = false;
       beginStartSuppression(nowMs, profile_.finishCooldownMaximumMs);
     }
     if (previous == ConfirmedLifecycle::ManuallyPaused &&
@@ -659,6 +737,10 @@ private:
   uint32_t pauseSuppressedUntilMs_ = 0;
   ShadowCounters counters_{};
   uint16_t lastEvidenceMask_ = EvidenceNone;
+  SensorCombination lastSensorCombination_ = SensorCombination::Neither;
+  MotionEvidenceState lastMotionEvidenceState_ =
+      MotionEvidenceState::Uncertain;
+  bool hasObservedWheelEvidence_ = false;
   DetectorStatus detectorStatus_{};
 };
 

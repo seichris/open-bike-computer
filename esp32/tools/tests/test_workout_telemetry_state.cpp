@@ -299,12 +299,27 @@ int main() {
          ApplyResult::Applied);
   assert(reducer.state().pauseOrigin ==
          workout_telemetry_protocol::PauseOrigin::Automatic);
+  uint8_t systemUnknownOrigin[sizeof(origin)];
+  std::memcpy(systemUnknownOrigin, origin, sizeof(origin));
+  systemUnknownOrigin[1] = static_cast<uint8_t>(
+      workout_telemetry_protocol::PauseOrigin::Unknown);
+  systemUnknownOrigin[26] = static_cast<uint8_t>(
+      workout_telemetry_protocol::PauseOrigin::System);
+  writeUInt16LE(systemUnknownOrigin, 24, 0);
+  assert(reducer.applyFrame(systemUnknownOrigin, sizeof(systemUnknownOrigin),
+                            9003, true) == ApplyResult::Applied);
+  assert(reducer.state().pauseOrigin ==
+         workout_telemetry_protocol::PauseOrigin::Unknown);
+  assert(reducer.state().lastTransitionOrigin ==
+         workout_telemetry_protocol::PauseOrigin::System);
   uint8_t automaticWithoutProfile[sizeof(pausedOrigin)];
   std::memcpy(automaticWithoutProfile, pausedOrigin, sizeof(pausedOrigin));
   writeUInt16LE(automaticWithoutProfile, 24, 0);
   assertResultPreservesState(
       reducer, automaticWithoutProfile, sizeof(automaticWithoutProfile),
-      9003, true, ApplyResult::RejectedMetric);
+      9004, true, ApplyResult::RejectedMetric);
+  assert(reducer.applyFrame(pausedOrigin, sizeof(pausedOrigin), 9005, true) ==
+         ApplyResult::Applied);
   assert(!workout_telemetry::isStale(reducer.state(), 18999));
 
   const ride_telemetry_presenter::LegacyRideTelemetry legacy{

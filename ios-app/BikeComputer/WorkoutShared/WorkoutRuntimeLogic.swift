@@ -148,10 +148,12 @@ nonisolated enum WorkoutMetricPrecedence {
 
     static func currentSpeed(
         pairedSensor: WorkoutMetricCandidate?,
+        healthKit: WorkoutMetricCandidate? = nil,
         watchLocation: WorkoutMetricCandidate?
     ) -> WorkoutMetricCandidate? {
         firstUsable([
             pairedSensor.flatMap { $0.source == .pairedCyclingSensor ? $0 : nil },
+            healthKit.flatMap { $0.source == .healthKit ? $0 : nil },
             watchLocation.flatMap { $0.source == .watchLocation ? $0 : nil },
         ])
     }
@@ -168,6 +170,7 @@ nonisolated enum WorkoutMetricPrecedence {
 /// them with newer totals.
 nonisolated enum WorkoutMetricFreshness {
     static let pairedCyclingSensorMaximumAge: TimeInterval = 5
+    static let healthKitSpeedMaximumAge: TimeInterval = 5
     static let watchLocationMaximumAge: TimeInterval = 10
     static let heartRateMaximumAge: TimeInterval = 30
 
@@ -243,6 +246,22 @@ nonisolated enum WorkoutElapsedTimePolicy {
     }
 }
 
+nonisolated enum WorkoutTransitionOriginPolicy {
+    /// HealthKit's state callback does not itself identify who requested a
+    /// pause or resume. Preserve uncertainty until an explicit rider event,
+    /// detector context, or confirmed system path supplies that provenance.
+    static func resolve(
+        hasAutomaticContext: Bool,
+        hasExplicitManualRequest: Bool,
+        hasConfirmedSystemRequest: Bool = false
+    ) -> WorkoutTransitionOrigin {
+        if hasAutomaticContext { return .automatic }
+        if hasExplicitManualRequest { return .manual }
+        if hasConfirmedSystemRequest { return .system }
+        return .unknown
+    }
+}
+
 nonisolated struct WorkoutRoutePointCandidate: Equatable, Sendable {
     let latitude: Double
     let longitude: Double
@@ -289,6 +308,49 @@ nonisolated enum WorkoutRouteSegmentFilter {
             && maximumSpeed.isFinite
             && maximumSpeed > 0
             && distanceMeters / interval <= maximumSpeed
+    }
+}
+
+/// Timer pauses are not route discontinuities. While paused, accept only
+/// points with strong movement evidence so genuine coasting remains connected
+/// without turning stationary GPS drift into route distance.
+nonisolated enum WorkoutPausedRoutePointFilter {
+    static let minimumMovingSpeedMetersPerSecond = 0.8
+    static let maximumHorizontalAccuracyMeters = 25.0
+    static let minimumDisplacementMeters = 10.0
+
+    static func accepts(
+        reportedSpeedMetersPerSecond: Double,
+        horizontalAccuracyMeters: Double,
+        previousHorizontalAccuracyMeters: Double?,
+        segmentDistanceMeters: Double?,
+        interval: TimeInterval?
+    ) -> Bool {
+        guard reportedSpeedMetersPerSecond.isFinite,
+              horizontalAccuracyMeters.isFinite,
+              horizontalAccuracyMeters >= 0,
+              horizontalAccuracyMeters <= maximumHorizontalAccuracyMeters else {
+            return false
+        }
+        if reportedSpeedMetersPerSecond >= minimumMovingSpeedMetersPerSecond {
+            return true
+        }
+        guard let previousHorizontalAccuracyMeters,
+              previousHorizontalAccuracyMeters.isFinite,
+              previousHorizontalAccuracyMeters >= 0,
+              let segmentDistanceMeters,
+              let interval,
+              interval.isFinite,
+              interval > 0 else {
+            return false
+        }
+        let uncertaintyBound = max(
+            minimumDisplacementMeters,
+            horizontalAccuracyMeters + previousHorizontalAccuracyMeters
+        )
+        return segmentDistanceMeters >= uncertaintyBound
+            && segmentDistanceMeters / interval
+                >= minimumMovingSpeedMetersPerSecond
     }
 }
 

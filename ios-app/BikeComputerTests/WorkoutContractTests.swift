@@ -106,7 +106,8 @@ private struct WorkoutContractTestSuite {
         testInstantaneousMetricFreshnessAndSpeedFallback()
         testBuilderElapsedTimeUsesHealthKitPauseClock()
         testRoutePointFilteringHonorsWorkoutAndAccuracyBounds()
-        testRouteTimestampGateRejectsDelayedPausedBatches()
+        testRouteTimestampGateRejectsPreWorkoutBatches()
+        testPausedRouteMovementFilterPreservesCoastingAndRejectsDrift()
         testRouteSegmentAndQueueBounds()
         testRouteRecoveryDistanceAndAssociatedFinalizationPolicies()
         testRecoverySequenceLeasesNeverReuseReservedValues()
@@ -261,7 +262,11 @@ private struct WorkoutContractTestSuite {
             automaticReason: .rideDetection,
             rideGeneration: 9,
             decisionSequence: 12,
-            detectorProfileVersion: 1
+            detectorProfileVersion: 3,
+            evidenceMask: 0x55AA,
+            sourceHealthMask: 0x000F,
+            candidateBeganSeconds: 88,
+            decidedAtSeconds: 99
         )
         let withAutomaticStart = RideDetectionSyncContext
             .addingPendingAutomaticStart(
@@ -309,6 +314,16 @@ private struct WorkoutContractTestSuite {
                 from: invalidAutomaticStart
             ) == nil,
             "oversized automatic-start identities must not truncate"
+        )
+        invalidAutomaticStart = withAutomaticStart
+        invalidAutomaticStart.removeValue(
+            forKey: RideDetectionSyncContext.automaticStartDecidedAtKey
+        )
+        expect(
+            RideDetectionSyncContext.pendingAutomaticStart(
+                from: invalidAutomaticStart
+            ) == nil,
+            "partial automatic-start diagnostics must fail closed"
         )
         expect(
             RideAutomationSerialNumber.isNewer(2, than: 1)
@@ -612,6 +627,27 @@ private struct WorkoutContractTestSuite {
             ) == .resume,
             "matching automatic pauses may auto-resume"
         )
+        expect(
+            WorkoutTransitionOriginPolicy.resolve(
+                hasAutomaticContext: true,
+                hasExplicitManualRequest: true,
+                hasConfirmedSystemRequest: true
+            ) == .automatic
+                && WorkoutTransitionOriginPolicy.resolve(
+                    hasAutomaticContext: false,
+                    hasExplicitManualRequest: true
+                ) == .manual
+                && WorkoutTransitionOriginPolicy.resolve(
+                    hasAutomaticContext: false,
+                    hasExplicitManualRequest: false,
+                    hasConfirmedSystemRequest: true
+                ) == .system
+                && WorkoutTransitionOriginPolicy.resolve(
+                    hasAutomaticContext: false,
+                    hasExplicitManualRequest: false
+                ) == .unknown,
+            "automatic, manual, system, and unknown origins must remain distinct"
+        )
         var wrappedStart = start
         wrappedStart.decisionSequence = 1
         expect(
@@ -810,6 +846,62 @@ private struct WorkoutContractTestSuite {
             stamped.core[1] & 0x3F == frames.core[1] &&
                 stamped.extended[1] & 0x3F == frames.extended[1],
             "pair stamping preserves state and source bits"
+        )
+
+        let sessionID = UUID(
+            uuidString: "0A78D2E6-CE96-4E2A-B8C4-8CA11C44A21E"
+        )!
+        let originSample = WorkoutDeviceTelemetrySample(
+            state: .paused,
+            sessionToken: 8,
+            hasLiveNumerics: false,
+            isCurrentSnapshot: true,
+            elapsedSeconds: nil,
+            distanceMeters: nil,
+            speedMetersPerSecond: nil,
+            currentHeartRateBPM: nil,
+            averageHeartRateBPM: nil,
+            activeEnergyKilocalories: nil,
+            cyclingPowerWatts: nil,
+            cyclingCadenceRPM: nil,
+            currentHeartRateZone: nil,
+            altitudeMeters: nil,
+            heartRateZoneCount: nil,
+            sourceFlags: [],
+            pauseOrigin: .unknown,
+            wallElapsedSeconds: 42,
+            sessionID: sessionID,
+            lastTransitionOrigin: .system
+        )
+        guard let originFrames = WorkoutDeviceFrameBuilder.frames(
+            for: originSample
+        ) else {
+            expect(false, "unknown/system origin frame should encode")
+            return
+        }
+        expect(
+            originFrames.origin[1] == 4 && originFrames.origin[26] == 3,
+            "wire provenance must not collapse unknown into absent or system into manual"
+        )
+
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_020)
+        let genericSpeedSnapshot = WorkoutSnapshotV1(
+            state: .running,
+            startDate: now.addingTimeInterval(-20),
+            currentSpeed: metric(6.4, .metersPerSecond, now, .healthKit),
+            availability: [.currentSpeed]
+        )
+        let genericSpeedSample = WorkoutDeviceTelemetrySampleMapperV1
+            .directWatchSample(
+                snapshot: genericSpeedSnapshot,
+                sessionToken: 9,
+                sessionID: sessionID
+            )
+        expect(
+            genericSpeedSample?.speedMetersPerSecond == 6.4
+                && genericSpeedSample?.sourceFlags
+                    .contains(.pairedSpeedSensor) == false,
+            "generic HealthKit speed stays visible without asserting paired-wheel capability"
         )
     }
 
@@ -1649,7 +1741,8 @@ private struct WorkoutContractTestSuite {
         }
 
         for source in [
-            WorkoutMetricSourceV1.pairedCyclingSensor,
+            WorkoutMetricSourceV1.healthKit,
+            .pairedCyclingSensor,
             .watchLocation,
             .iPhoneLocation,
         ] {
@@ -1671,8 +1764,7 @@ private struct WorkoutContractTestSuite {
         }
 
         for source in [
-            WorkoutMetricSourceV1.healthKit,
-            .watchRoute,
+            WorkoutMetricSourceV1.watchRoute,
             .iPhoneNavigation,
             .unknown,
         ] {
@@ -1716,7 +1808,7 @@ private struct WorkoutContractTestSuite {
             snapshot: WorkoutSnapshotV1(
                 state: .running,
                 startDate: now.addingTimeInterval(-30),
-                currentSpeed: metric(8.2, .metersPerSecond, now, .healthKit),
+                currentSpeed: metric(8.2, .metersPerSecond, now, .watchRoute),
                 availability: [.currentSpeed]
             )
         )
@@ -3916,12 +4008,25 @@ private struct WorkoutContractTestSuite {
             capturedAt: now,
             source: .watchLocation
         )
+        let healthKitSpeed = WorkoutMetricCandidate(
+            value: 8.1,
+            capturedAt: now,
+            source: .healthKit
+        )
         expect(
             WorkoutMetricPrecedence.currentSpeed(
                 pairedSensor: sensorSpeed,
                 watchLocation: locationSpeed
             ) == sensorSpeed,
             "paired cycling sensor should win over Watch location"
+        )
+        expect(
+            WorkoutMetricPrecedence.currentSpeed(
+                pairedSensor: nil,
+                healthKit: healthKitSpeed,
+                watchLocation: locationSpeed
+            ) == healthKitSpeed,
+            "generic HealthKit speed should remain usable without claiming a paired sensor"
         )
         expect(
             WorkoutMetricPrecedence.currentSpeed(
@@ -3936,10 +4041,11 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             WorkoutMetricPrecedence.currentSpeed(
-                pairedSensor: WorkoutMetricCandidate(
+                pairedSensor: nil,
+                healthKit: WorkoutMetricCandidate(
                     value: 9,
                     capturedAt: now,
-                    source: .healthKit
+                    source: .watchRoute
                 ),
                 watchLocation: nil
             ) == nil,
@@ -4111,25 +4217,60 @@ private struct WorkoutContractTestSuite {
         )
     }
 
-    private mutating func testRouteTimestampGateRejectsDelayedPausedBatches() {
+    private mutating func testRouteTimestampGateRejectsPreWorkoutBatches() {
         let start = Date(timeIntervalSinceReferenceDate: 800_035_000)
-        var gate = WorkoutRouteTimestampGate(workoutStart: start)
+        let gate = WorkoutRouteTimestampGate(workoutStart: start)
         expect(gate.accepts(start), "route timestamp gate should include workout start")
+        expect(
+            !gate.accepts(start.addingTimeInterval(-0.001)),
+            "a pre-workout point must remain rejected"
+        )
+        expect(
+            gate.accepts(start.addingTimeInterval(30)),
+            "timer pauses must not create route timestamp discontinuities"
+        )
+    }
 
-        let resumeDate = start.addingTimeInterval(30)
-        gate.resume(at: resumeDate)
+    private mutating func testPausedRouteMovementFilterPreservesCoastingAndRejectsDrift() {
         expect(
-            !gate.accepts(resumeDate.addingTimeInterval(-0.001)),
-            "a paused point delivered after resume must still be rejected by capture time"
+            WorkoutPausedRoutePointFilter.accepts(
+                reportedSpeedMetersPerSecond: 6.5,
+                horizontalAccuracyMeters: 5,
+                previousHorizontalAccuracyMeters: 5,
+                segmentDistanceMeters: 6.5,
+                interval: 1
+            ),
+            "a quality moving point must preserve coasting distance during a timer pause"
         )
         expect(
-            gate.accepts(resumeDate),
-            "a point captured at the resume boundary should be accepted"
+            !WorkoutPausedRoutePointFilter.accepts(
+                reportedSpeedMetersPerSecond: 0.1,
+                horizontalAccuracyMeters: 8,
+                previousHorizontalAccuracyMeters: 8,
+                segmentDistanceMeters: 5,
+                interval: 1
+            ),
+            "stationary displacement inside the combined accuracy bound is drift"
         )
-        gate.resume(at: start.addingTimeInterval(10))
         expect(
-            gate.minimumAcceptedAt == resumeDate,
-            "an out-of-order resume callback must not move the gate backward"
+            WorkoutPausedRoutePointFilter.accepts(
+                reportedSpeedMetersPerSecond: 0.1,
+                horizontalAccuracyMeters: 4,
+                previousHorizontalAccuracyMeters: 4,
+                segmentDistanceMeters: 12,
+                interval: 2
+            ),
+            "quality displacement beyond uncertainty may prove movement when speed lags"
+        )
+        expect(
+            !WorkoutPausedRoutePointFilter.accepts(
+                reportedSpeedMetersPerSecond: 7,
+                horizontalAccuracyMeters: 26,
+                previousHorizontalAccuracyMeters: nil,
+                segmentDistanceMeters: nil,
+                interval: nil
+            ),
+            "poor-quality paused locations must not create route distance"
         )
     }
 
@@ -4289,16 +4430,16 @@ private struct WorkoutContractTestSuite {
             distance.totalMeters == 150,
             "two internal segments in the first delivered batch must both count"
         )
-        distance.breakSegment()
-        distance.appendPoint(segmentDistanceFromPrevious: nil)
-        expect(
-            distance.totalMeters == 150,
-            "first point after pause must not bridge distance across the pause"
-        )
         distance.appendPoint(segmentDistanceFromPrevious: 25)
         expect(
             distance.totalMeters == 175,
-            "post-resume segments should continue the cumulative total"
+            "movement captured while paused must remain in the continuous cumulative total"
+        )
+        distance.breakSegment()
+        distance.appendPoint(segmentDistanceFromPrevious: nil)
+        expect(
+            distance.totalMeters == 175,
+            "an explicit recorder stop or recovery boundary must not invent a bridge"
         )
 
         var recoveredDistance = WorkoutRouteDistanceAccumulator(

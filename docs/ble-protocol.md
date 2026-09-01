@@ -643,7 +643,7 @@ HealthKit active/moving time.
 | Offset | Size | Field |
 | ---: | ---: | --- |
 | `0` | 1 | frame kind `3` |
-| `1` | 1 | pause origin: `0` none/confirmation pending, `1` manual, `2` automatic |
+| `1` | 1 | pause origin: `0` none/confirmation pending, `1` manual, `2` automatic, `3` system, `4` unknown |
 | `2` | 2 | session token, `UInt16LE` |
 | `4` | 4 | wall elapsed seconds, `UInt32LE`; `0xFFFFFFFF` unavailable |
 | `8` | 16 | authoritative Watch session UUID in RFC 4122 byte order; all zero unavailable |
@@ -653,8 +653,10 @@ HealthKit active/moving time.
 
 Pause origin may be non-zero only for a paused session. A paused snapshot may
 temporarily use zero while Watch-side provenance is being durably confirmed;
-consumers must treat that value conservatively and never auto-resume from it.
-Any automatic origin requires a non-zero detector profile version.
+consumers must treat none, system, and unknown conservatively and never
+auto-resume from them. Only an explicit user action is manual. An uncorroborated
+HealthKit/session callback is unknown, and a system-attributed callback is
+system. Any automatic origin requires a non-zero detector profile version.
 Origin/timing frames
 must match the retained session token and never create a workout on their own.
 iOS queues core, extended, and origin atomically for initial publication,

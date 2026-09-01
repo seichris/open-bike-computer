@@ -89,13 +89,8 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         startLocationUpdatesWhenAuthorized()
     }
 
-    func setPaused(_ paused: Bool, at date: Date) {
+    func setPaused(_ paused: Bool, at _: Date) {
         isPaused = paused
-        lastDistanceLocation = nil
-        distanceAccumulator?.breakSegment()
-        if !paused {
-            timestampGate?.resume(at: date)
-        }
     }
 
     func stopLocationUpdates() {
@@ -170,7 +165,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     }
 
     private func receive(_ locations: [CLLocation]) {
-        guard isWorkoutActive, !isPaused, let workoutStart else { return }
+        guard isWorkoutActive, let workoutStart else { return }
         let now = Date()
         let accepted = locations.filter { [timestampGate] location in
             guard timestampGate?.accepts(location.timestamp) == true else {
@@ -193,6 +188,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         var routeAccepted: [CLLocation] = []
         for location in accepted {
             var segmentDistanceFromPrevious: Double?
+            var intervalFromPrevious: TimeInterval?
             if let previous = lastDistanceLocation {
                 let segmentDistance = location.distance(from: previous)
                 let interval = location.timestamp.timeIntervalSince(previous.timestamp)
@@ -203,6 +199,18 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
                     continue
                 }
                 segmentDistanceFromPrevious = segmentDistance
+                intervalFromPrevious = interval
+            }
+            if isPaused,
+               !WorkoutPausedRoutePointFilter.accepts(
+                 reportedSpeedMetersPerSecond: location.speed,
+                 horizontalAccuracyMeters: location.horizontalAccuracy,
+                 previousHorizontalAccuracyMeters:
+                    lastDistanceLocation?.horizontalAccuracy,
+                 segmentDistanceMeters: segmentDistanceFromPrevious,
+                 interval: intervalFromPrevious
+               ) {
+                continue
             }
             lastDistanceLocation = location
             distanceAccumulator?.appendPoint(

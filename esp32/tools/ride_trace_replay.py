@@ -14,8 +14,8 @@ import tempfile
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 2
-SUPPORTED_SCHEMA_VERSIONS = {1, 2}
+SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSIONS = {1, 2, 3}
 FORBIDDEN_KEYS = {
     "latitude",
     "longitude",
@@ -104,7 +104,7 @@ def load_trace(path: Path) -> list[dict[str, Any]]:
             raise TraceError(
                 f"{path}:{line_number}: expected schema 1 or {SCHEMA_VERSION}"
             )
-        expected_profile = 1 if schema == 1 else 2
+        expected_profile = schema
         if (not _is_uint(record.get("profile"), 0xFFFF)
                 or record["profile"] != expected_profile):
             raise TraceError(f"{path}:{line_number}: unsupported or missing profile")

@@ -44,6 +44,8 @@ enum class PauseOrigin : uint8_t {
   None = 0,
   Manual = 1,
   Automatic = 2,
+  System = 3,
+  Unknown = 4,
 };
 
 enum class SessionState : uint8_t {

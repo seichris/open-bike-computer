@@ -8,7 +8,7 @@
 
 namespace ride_automation {
 
-constexpr uint8_t kRideAutomationTraceSchemaVersion = 2;
+constexpr uint8_t kRideAutomationTraceSchemaVersion = 3;
 
 // One canonical, privacy-safe schema serves both firmware capture and host
 // replay. It contains normalized policy inputs and output, never coordinates or
