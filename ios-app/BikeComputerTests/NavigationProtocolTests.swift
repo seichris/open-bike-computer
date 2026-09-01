@@ -14457,6 +14457,26 @@ struct NavigationProtocolTests {
     }
 
     static func testSecureRendererBenchmarkProtocol() {
+        assertEqual(
+            SecureRendererBenchmarkHTTPPolicy.connectionReuseHeaderName,
+            "X-BikeComputer-Connection-Reuse",
+            "the serial sweep uses the firmware connection-reuse contract"
+        )
+        assertEqual(
+            SecureRendererBenchmarkHTTPPolicy.connectionReuseHeaderValue,
+            "1",
+            "the serial sweep explicitly opts into connection reuse"
+        )
+        var reuseRequest = URLRequest(url: URL(string: "https://device.invalid")!)
+        SecureRendererBenchmarkHTTPPolicy.enableConnectionReuse(
+            on: &reuseRequest
+        )
+        assertEqual(
+            reuseRequest.value(forHTTPHeaderField:
+                SecureRendererBenchmarkHTTPPolicy.connectionReuseHeaderName),
+            "1",
+            "the secure sweep request carries only the non-secret reuse marker"
+        )
         let appGatesURL = URL(fileURLWithPath:
             "ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-gates-v1.json"
         )

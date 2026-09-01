@@ -1,6 +1,22 @@
 #if DEBUG || HOST_TESTING
 import Foundation
 
+nonisolated enum SecureRendererBenchmarkHTTPPolicy {
+    // Only the serial benchmark client opts into firmware connection reuse.
+    // The secure console intentionally omits this header so WebKit's parallel
+    // and speculative sockets cannot retain the device's single HTTP worker.
+    static let connectionReuseHeaderName =
+        "X-BikeComputer-Connection-Reuse"
+    static let connectionReuseHeaderValue = "1"
+
+    static func enableConnectionReuse(on request: inout URLRequest) {
+        request.setValue(
+            connectionReuseHeaderValue,
+            forHTTPHeaderField: connectionReuseHeaderName
+        )
+    }
+}
+
 nonisolated enum SecureRendererBenchmarkProtocolError: LocalizedError,
                                                         Equatable,
                                                         Sendable {

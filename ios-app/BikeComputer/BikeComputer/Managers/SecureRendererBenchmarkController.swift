@@ -184,6 +184,7 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
         request.timeoutInterval = 5
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.setValue(token, forHTTPHeaderField: Self.tokenHeader)
+        SecureRendererBenchmarkHTTPPolicy.enableConnectionReuse(on: &request)
         if body != nil {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
