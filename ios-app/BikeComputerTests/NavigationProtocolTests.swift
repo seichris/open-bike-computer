@@ -14467,6 +14467,25 @@ struct NavigationProtocolTests {
             "1",
             "the serial sweep explicitly opts into connection reuse"
         )
+        assertEqual(
+            SecureRendererBenchmarkHTTPPolicy.controlRequestTimeout,
+            5,
+            "control and metrics requests retain the tight five-second bound"
+        )
+        assertEqual(
+            SecureRendererBenchmarkHTTPPolicy.frameRequestTimeout,
+            8,
+            "large pinned frame bodies receive measured transfer headroom"
+        )
+        assert(
+            SecureRendererBenchmarkHTTPPolicy.frameRequestTimeout > 5.9,
+            "the frame deadline exceeds the measured physical maximum"
+        )
+        assertEqual(
+            SecureRendererBenchmarkHTTPPolicy.resourceTimeout,
+            12,
+            "the session resource ceiling remains bounded above the frame deadline"
+        )
         var reuseRequest = URLRequest(url: URL(string: "https://device.invalid")!)
         SecureRendererBenchmarkHTTPPolicy.enableConnectionReuse(
             on: &reuseRequest

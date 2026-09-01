@@ -8,6 +8,12 @@ nonisolated enum SecureRendererBenchmarkHTTPPolicy {
     static let connectionReuseHeaderName =
         "X-BikeComputer-Connection-Reuse"
     static let connectionReuseHeaderValue = "1"
+    static let controlRequestTimeout: TimeInterval = 5
+    // A full 1.75-inch RGB565 frame is 434,312 bytes. Physical measurements
+    // put the pinned HTTPS body at 4.4-5.9 seconds, so the frame endpoint needs
+    // bounded headroom beyond the deliberately tighter control-request budget.
+    static let frameRequestTimeout: TimeInterval = 8
+    static let resourceTimeout: TimeInterval = 12
 
     static func enableConnectionReuse(on request: inout URLRequest) {
         request.setValue(

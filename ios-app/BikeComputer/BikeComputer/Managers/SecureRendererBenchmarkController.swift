@@ -8,7 +8,7 @@ private enum SecureRendererBenchmarkControllerError: LocalizedError {
     case unavailable(String)
     case invalidResponse(String)
     case httpStatus(Int, String?)
-    case network(String, Int)
+    case network(String, String, Int)
     case stopped
 
     var errorDescription: String? {
@@ -18,8 +18,9 @@ private enum SecureRendererBenchmarkControllerError: LocalizedError {
         case .httpStatus(let status, let code):
             return "The secure device endpoint returned HTTP \(status)" +
                 (code.map { " (\($0))" } ?? "") + "."
-        case .network(let domain, let code):
-            return "The secure device request failed (\(domain) \(code))."
+        case .network(let path, let domain, let code):
+            return "The secure device request failed at /\(path) " +
+                "(\(domain) \(code))."
         case .stopped:
             return "The secure renderer benchmark was stopped."
         }
@@ -51,8 +52,10 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
         configuration.httpShouldSetCookies = false
         configuration.connectionProxyDictionary = [:]
         configuration.httpMaximumConnectionsPerHost = 1
-        configuration.timeoutIntervalForRequest = 5
-        configuration.timeoutIntervalForResource = 8
+        configuration.timeoutIntervalForRequest =
+            SecureRendererBenchmarkHTTPPolicy.controlRequestTimeout
+        configuration.timeoutIntervalForResource =
+            SecureRendererBenchmarkHTTPPolicy.resourceTimeout
         configuration.waitsForConnectivity = false
         configuration.allowsCellularAccess = false
         guard let session = DeviceTransferPinnedSessionFactory.make(
@@ -134,7 +137,9 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
                 ),
             ],
             allowNoContent: true,
-            maximumBytes: 1_048_576
+            maximumBytes: 1_048_576,
+            timeoutInterval:
+                SecureRendererBenchmarkHTTPPolicy.frameRequestTimeout
         )
     }
 
@@ -162,7 +167,9 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
         body: Data? = nil,
         allowNoContent: Bool = false,
         acceptedStatusCode: Int = 200,
-        maximumBytes: Int = 262_144
+        maximumBytes: Int = 262_144,
+        timeoutInterval: TimeInterval =
+            SecureRendererBenchmarkHTTPPolicy.controlRequestTimeout
     ) async throws -> Data? {
         var components = URLComponents(
             url: baseURL.appendingPathComponent(path),
@@ -181,7 +188,7 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
         request.httpMethod = method
         request.httpBody = body
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        request.timeoutInterval = 5
+        request.timeoutInterval = timeoutInterval
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.setValue(token, forHTTPHeaderField: Self.tokenHeader)
         SecureRendererBenchmarkHTTPPolicy.enableConnectionReuse(on: &request)
@@ -213,6 +220,7 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
         } catch {
             let value = error as NSError
             throw SecureRendererBenchmarkControllerError.network(
+                path,
                 value.domain,
                 value.code
             )
