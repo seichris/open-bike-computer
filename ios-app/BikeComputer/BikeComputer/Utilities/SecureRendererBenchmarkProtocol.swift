@@ -10,10 +10,17 @@ nonisolated enum SecureRendererBenchmarkHTTPPolicy {
     static let connectionReuseHeaderValue = "1"
     static let controlRequestTimeout: TimeInterval = 5
     // A full 1.75-inch RGB565 frame is 434,312 bytes. Physical measurements
-    // put the pinned HTTPS body at 4.4-5.9 seconds, so the frame endpoint needs
-    // bounded headroom beyond the deliberately tighter control-request budget.
-    static let frameRequestTimeout: TimeInterval = 8
-    static let resourceTimeout: TimeInterval = 12
+    // initially put the pinned HTTPS body at 4.4-5.9 seconds, while the
+    // loop-three physical sweep exceeded the former eight-second deadline.
+    // Keep a bounded frame-specific budget without relaxing control requests.
+    static let frameRequestTimeout: TimeInterval = 12
+    // A timed-out persistent frame can take the firmware's bounded response
+    // and idle deadlines to release the single TLS worker. Leave room for one
+    // failed control attempt followed by a fresh pinned-session retry.
+    static let metricsRecoveryTimeout: TimeInterval = 12
+    static let screenshotRecoveryTimeout: TimeInterval = 20
+    static let cleanupRecoveryTimeout: TimeInterval = 12
+    static let resourceTimeout: TimeInterval = 20
 
     static func enableConnectionReuse(on request: inout URLRequest) {
         request.setValue(

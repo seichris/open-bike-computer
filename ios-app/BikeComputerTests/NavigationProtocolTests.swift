@@ -14474,16 +14474,31 @@ struct NavigationProtocolTests {
         )
         assertEqual(
             SecureRendererBenchmarkHTTPPolicy.frameRequestTimeout,
-            8,
-            "large pinned frame bodies receive measured transfer headroom"
+            12,
+            "large pinned frame bodies receive physical tail headroom"
         )
         assert(
-            SecureRendererBenchmarkHTTPPolicy.frameRequestTimeout > 5.9,
-            "the frame deadline exceeds the measured physical maximum"
+            SecureRendererBenchmarkHTTPPolicy.frameRequestTimeout > 8,
+            "the frame deadline exceeds the failed physical deadline"
+        )
+        assert(
+            SecureRendererBenchmarkHTTPPolicy.metricsRecoveryTimeout >
+                SecureRendererBenchmarkHTTPPolicy.controlRequestTimeout * 2,
+            "metrics recovery permits a fresh pinned-session retry"
+        )
+        assert(
+            SecureRendererBenchmarkHTTPPolicy.screenshotRecoveryTimeout >
+                SecureRendererBenchmarkHTTPPolicy.frameRequestTimeout,
+            "checkpoint capture can retry after renewing its pinned session"
+        )
+        assert(
+            SecureRendererBenchmarkHTTPPolicy.cleanupRecoveryTimeout >
+                SecureRendererBenchmarkHTTPPolicy.controlRequestTimeout * 2,
+            "Current cleanup can recover after a poisoned persistent socket"
         )
         assertEqual(
             SecureRendererBenchmarkHTTPPolicy.resourceTimeout,
-            12,
+            20,
             "the session resource ceiling remains bounded above the frame deadline"
         )
         var reuseRequest = URLRequest(url: URL(string: "https://device.invalid")!)

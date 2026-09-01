@@ -31,7 +31,8 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
     private static let tokenHeader = "X-BikeComputer-Transfer-Token"
     private let baseURL: URL
     private let token: String
-    private let session: URLSession
+    private let certificateSHA256: String
+    private var session: URLSession?
 
     init?(deviceSession: DeviceTransferSession) {
         guard deviceSession.mode == .debug,
@@ -45,6 +46,20 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
                 transferGeneration: deviceSession.transferGeneration,
                 secureTransferV1: deviceSession.secureTransferV1
               ) else { return nil }
+        guard let session = Self.makeSession(
+            baseURL: deviceSession.baseURL,
+            certificateSHA256: deviceSession.tlsCertificateSHA256
+        ) else { return nil }
+        baseURL = deviceSession.baseURL
+        self.token = token
+        certificateSHA256 = deviceSession.tlsCertificateSHA256
+        self.session = session
+    }
+
+    private static func makeSession(
+        baseURL: URL,
+        certificateSHA256: String
+    ) -> URLSession? {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         configuration.urlCache = nil
@@ -58,18 +73,26 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
             SecureRendererBenchmarkHTTPPolicy.resourceTimeout
         configuration.waitsForConnectivity = false
         configuration.allowsCellularAccess = false
-        guard let session = DeviceTransferPinnedSessionFactory.make(
+        return DeviceTransferPinnedSessionFactory.make(
             configuration: configuration,
-            baseURL: deviceSession.baseURL,
-            certificateSHA256: deviceSession.tlsCertificateSHA256
-        ) else { return nil }
-        baseURL = deviceSession.baseURL
-        self.token = token
-        self.session = session
+            baseURL: baseURL,
+            certificateSHA256: certificateSHA256
+        )
     }
 
     func invalidate() {
-        session.invalidateAndCancel()
+        session?.invalidateAndCancel()
+        session = nil
+    }
+
+    @discardableResult
+    private func renewPinnedSession() -> Bool {
+        session?.invalidateAndCancel()
+        session = Self.makeSession(
+            baseURL: baseURL,
+            certificateSHA256: certificateSHA256
+        )
+        return session != nil
     }
 
     func info() async throws -> RendererBenchmarkDeviceInfo {
@@ -81,10 +104,16 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
         )
     }
 
-    func metrics() async throws -> RendererBenchmarkMetricsSnapshot {
+    func metrics(
+        timeoutInterval: TimeInterval =
+            SecureRendererBenchmarkHTTPPolicy.controlRequestTimeout
+    ) async throws -> RendererBenchmarkMetricsSnapshot {
         try await decodeJSON(
             RendererBenchmarkMetricsSnapshot.self,
-            data: request(path: "device-debug/v1/metrics"),
+            data: request(
+                path: "device-debug/v1/metrics",
+                timeoutInterval: timeoutInterval
+            ),
             maximumBytes: 262_144,
             invalidMessage: "The device returned invalid renderer metrics."
         )
@@ -125,7 +154,9 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
 
     func frame(
         after sequence: UInt32,
-        capturedAtOrAfter timestampMs: UInt32
+        capturedAtOrAfter timestampMs: UInt32,
+        timeoutInterval: TimeInterval =
+            SecureRendererBenchmarkHTTPPolicy.frameRequestTimeout
     ) async throws -> Data? {
         try await request(
             path: "device-debug/v1/frame",
@@ -138,8 +169,7 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
             ],
             allowNoContent: true,
             maximumBytes: 1_048_576,
-            timeoutInterval:
-                SecureRendererBenchmarkHTTPPolicy.frameRequestTimeout
+            timeoutInterval: timeoutInterval
         )
     }
 
@@ -196,6 +226,11 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         do {
+            guard let session else {
+                throw SecureRendererBenchmarkControllerError.unavailable(
+                    "The in-memory pinned HTTPS session is unavailable."
+                )
+            }
             let (data, response) = try await session.data(for: request)
             guard let response = response as? HTTPURLResponse else {
                 throw SecureRendererBenchmarkControllerError.invalidResponse(
@@ -219,6 +254,12 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
             throw error
         } catch {
             let value = error as NSError
+            let renewed = renewPinnedSession()
+            print(
+                "Secure renderer transport renewed path=/\(path) " +
+                "domain=\(value.domain) code=\(value.code) " +
+                "ready=\(renewed)"
+            )
             throw SecureRendererBenchmarkControllerError.network(
                 path,
                 value.domain,
@@ -891,20 +932,31 @@ final class SecureRendererBenchmarkController: ObservableObject {
         enforceContinuity: Bool = true
     ) async throws -> RendererBenchmarkMetricsSnapshot {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
+        var lastError: Error?
         while Date() < deadline {
             if enforceContinuity { try checkContinuity() }
-            let snapshot = try await metricsWithRetry(
-                client: client,
-                timeoutSeconds: min(2, max(deadline.timeIntervalSinceNow, 0.1)),
-                enforceContinuity: enforceContinuity
-            )
-            if snapshot.window.id == windowID,
-               snapshot.window.runId == runID,
-               snapshot.window.repeatNumber == repeatNumber,
-               snapshot.tuning.profile == profile.wireName {
-                return snapshot
+            do {
+                let snapshot = try await metricsWithRetry(
+                    client: client,
+                    timeoutSeconds: min(
+                        2,
+                        max(deadline.timeIntervalSinceNow, 0.1)
+                    ),
+                    enforceContinuity: enforceContinuity
+                )
+                if snapshot.window.id == windowID,
+                   snapshot.window.runId == runID,
+                   snapshot.window.repeatNumber == repeatNumber,
+                   snapshot.tuning.profile == profile.wireName {
+                    return snapshot
+                }
+            } catch {
+                lastError = error
             }
-            try await pause(seconds: 0.35)
+            if Date() < deadline { try await pause(seconds: 0.35) }
+        }
+        if let lastError {
+            throw lastError
         }
         throw SecureRendererBenchmarkControllerError.invalidResponse(
             "The device did not apply the requested renderer window."
@@ -913,7 +965,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
 
     private func metricsWithRetry(
         client: SecureRendererBenchmarkHTTPClient,
-        timeoutSeconds: TimeInterval = 5,
+        timeoutSeconds: TimeInterval =
+            SecureRendererBenchmarkHTTPPolicy.metricsRecoveryTimeout,
         enforceContinuity: Bool = true
     ) async throws -> RendererBenchmarkMetricsSnapshot {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
@@ -921,7 +974,12 @@ final class SecureRendererBenchmarkController: ObservableObject {
         repeat {
             if enforceContinuity { try checkContinuity() }
             do {
-                return try await client.metrics()
+                return try await client.metrics(
+                    timeoutInterval: min(
+                        SecureRendererBenchmarkHTTPPolicy.controlRequestTimeout,
+                        max(deadline.timeIntervalSinceNow, 0.1)
+                    )
+                )
             } catch {
                 lastError = error
                 if Date() < deadline { try await pause(seconds: 0.3) }
@@ -946,15 +1004,22 @@ final class SecureRendererBenchmarkController: ObservableObject {
             : (width: 410, height: 502, rotation: 0)
         // A stale buffered frame is rejected cheaply by the firmware with
         // HTTP 204 before it captures the marker-bound successor. Leave room
-        // for that pinned request plus the measured 4.4-5.9 second frame body.
-        let deadline = Date().addingTimeInterval(10)
+        // for one bounded physical-tail frame attempt and a fresh pinned-
+        // session retry if the persistent connection has to be discarded.
+        let deadline = Date().addingTimeInterval(
+            SecureRendererBenchmarkHTTPPolicy.screenshotRecoveryTimeout
+        )
         var lastError: Error?
         while Date() < deadline {
             try checkContinuity()
             do {
                 guard let data = try await client.frame(
                     after: lastFrameSequence,
-                    capturedAtOrAfter: routeReplay.receivedAtMs
+                    capturedAtOrAfter: routeReplay.receivedAtMs,
+                    timeoutInterval: min(
+                        SecureRendererBenchmarkHTTPPolicy.frameRequestTimeout,
+                        max(deadline.timeIntervalSinceNow, 0.1)
+                    )
                 ) else {
                     try await pause(seconds: 0.25)
                     continue
@@ -1020,7 +1085,9 @@ final class SecureRendererBenchmarkController: ObservableObject {
         routeFixture: RendererBenchmarkRouteFixtureIdentity?
     ) async -> Bool {
         guard let routeFixture else { return false }
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(
+            SecureRendererBenchmarkHTTPPolicy.cleanupRecoveryTimeout
+        )
         while Date() < deadline {
             do {
                 let runID = "\(rootRunID)-cleanup"
