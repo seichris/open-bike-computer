@@ -173,6 +173,15 @@ struct NavigationWriteEndpoint {
     }
 }
 
+nonisolated enum NavigationWriteAcknowledgementTimeoutPolicy {
+    static let normalTimeout: TimeInterval = 3
+    static let remoteDebugTimeout: TimeInterval = 15
+
+    static func timeout(isRemoteDebugActive: Bool) -> TimeInterval {
+        isRemoteDebugActive ? remoteDebugTimeout : normalTimeout
+    }
+}
+
 struct WorkoutTelemetryWriteEndpoint {
     let maximumWriteLength: Int
     let canSend: () -> Bool
@@ -1134,10 +1143,27 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationWriteResponseGeneration: UInt64 = 0
     private var navigationBackpressureStartedAt: Date?
 #if HOST_TESTING
-    private var navigationWriteResponseTimeout: TimeInterval = 60
-#else
-    private var navigationWriteResponseTimeout: TimeInterval = 3
+    private var navigationWriteTimeoutOverrideForTesting: TimeInterval?
 #endif
+    private var navigationWriteResponseTimeout: TimeInterval {
+#if HOST_TESTING
+        if let navigationWriteTimeoutOverrideForTesting {
+            return navigationWriteTimeoutOverrideForTesting
+        }
+#endif
+        return NavigationWriteAcknowledgementTimeoutPolicy.timeout(
+            isRemoteDebugActive: deviceTransferMode ==
+                DeviceTransferSession.Mode.debug.rawValue
+        )
+    }
+    private var navigationBackpressureTimeout: TimeInterval {
+#if HOST_TESTING
+        if let navigationWriteTimeoutOverrideForTesting {
+            return navigationWriteTimeoutOverrideForTesting
+        }
+#endif
+        return NavigationWriteAcknowledgementTimeoutPolicy.normalTimeout
+    }
     private var navigationWriteStallRecoveryForTesting: (() -> Void)?
     private var connectionTimeoutTimer: Timer?
     private var pendingScannedConnectionTimeoutTimer: Timer?
@@ -5475,7 +5501,7 @@ class BLEManager: NSObject, ObservableObject {
         timeout: TimeInterval,
         recovery: @escaping () -> Void
     ) {
-        navigationWriteResponseTimeout = timeout
+        navigationWriteTimeoutOverrideForTesting = timeout
         navigationWriteStallRecoveryForTesting = recovery
     }
 
@@ -6962,7 +6988,7 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
         guard now.timeIntervalSince(startedAt) >=
-                navigationWriteResponseTimeout else {
+                navigationBackpressureTimeout else {
             return
         }
         recoverFromNavigationBackpressure()

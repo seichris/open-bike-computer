@@ -721,6 +721,7 @@ struct NavigationProtocolTests {
         testRendererBenchmarkGPSOverrideSuppressesPhysicalFixes()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
+        testNavigationWriteAcknowledgementTimeoutPolicy()
         testGPSQueuePolicy()
         testRendererBenchmarkProtocol()
         testSecureRendererBenchmarkReadiness()
@@ -19010,6 +19011,32 @@ struct NavigationProtocolTests {
                "persistent no-response backpressure triggers bounded recovery")
         assert(!noResponseWatchdogManager.isNavigationReady,
                "no-response recovery closes the wedged navigation session")
+    }
+
+    static func testNavigationWriteAcknowledgementTimeoutPolicy() {
+        assertEqual(
+            NavigationWriteAcknowledgementTimeoutPolicy.timeout(
+                isRemoteDebugActive: false
+            ),
+            3,
+            "ordinary acknowledged BLE writes retain the reliability deadline"
+        )
+        assertEqual(
+            NavigationWriteAcknowledgementTimeoutPolicy.timeout(
+                isRemoteDebugActive: true
+            ),
+            15,
+            "remote debugging tolerates bounded Wi-Fi and BLE coexistence latency"
+        )
+        assert(
+            NavigationWriteAcknowledgementTimeoutPolicy.remoteDebugTimeout >
+                NavigationWriteAcknowledgementTimeoutPolicy.normalTimeout,
+            "remote debugging receives additional acknowledgement headroom"
+        )
+        assert(
+            NavigationWriteAcknowledgementTimeoutPolicy.remoteDebugTimeout <= 15,
+            "remote-debug acknowledgement recovery remains bounded"
+        )
     }
 
     static func testBLEManagerSendsFallbackMapSettings() {
