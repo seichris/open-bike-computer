@@ -62,6 +62,29 @@ class RideTraceReplayTests(unittest.TestCase):
         records = replay_module.load_trace(trace)
         outputs = replay_module.replay(records, self.binary)
         summary = replay_module.validate_expectations(trace, records, outputs)
+        legacy_candidate_began = None
+        legacy_false_pause_at = None
+        for record in records:
+            evidence = record.get("evidence", {})
+            cadence = evidence.get("cadence_rpm")
+            wheel = evidence.get("wheel_mps")
+            has_direct = cadence is not None or wheel is not None
+            direct_moving = (cadence is not None and cadence >= 20.0) or (
+                wheel is not None and wheel >= 1.5
+            )
+            all_direct_stopped = has_direct and (
+                wheel is None or wheel < 0.5
+            ) and (cadence is None or cadence < 5.0)
+            if all_direct_stopped and not direct_moving:
+                if legacy_candidate_began is None:
+                    legacy_candidate_began = record["t_ms"]
+                if record["t_ms"] - legacy_candidate_began >= 5_000:
+                    legacy_false_pause_at = record["t_ms"]
+                    break
+            else:
+                legacy_candidate_began = None
+        self.assertEqual(legacy_false_pause_at, 5_000)
+        self.assertEqual(records[5]["expected"], "none")
         self.assertEqual(summary["mismatches"], 0)
         self.assertEqual(summary["decisions"], 1)
         self.assertEqual(summary["false_pauses"], 0)
