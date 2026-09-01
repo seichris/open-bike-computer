@@ -542,9 +542,13 @@ struct DeviceTransferServerProbeResult: Equatable, Sendable {
 enum DeviceNetworkJoinPolicy {
     static let applyAttemptCount = 2
     static let configurationSettleDelayNanoseconds: UInt64 = 500_000_000
+    static let configurationApplyTimeout: TimeInterval = 20
+    static let currentNetworkFetchTimeout: TimeInterval = 2
     static let associationObservationTimeout: TimeInterval = 12
     static let associationObservationRetryNanoseconds: UInt64 = 250_000_000
     static let hotspotErrorDomain = "NEHotspotConfigurationErrorDomain"
+    static let joinErrorDomain = "Bicino.DeviceNetworkJoin"
+    static let configurationApplyTimeoutCode = 1
 
     static func isAlreadyAssociated(
         domain: String,
@@ -556,6 +560,11 @@ enum DeviceNetworkJoinPolicy {
     }
 
     static func shouldRetry(domain: String, code: Int) -> Bool {
+        if domain == joinErrorDomain && code == configurationApplyTimeoutCode {
+            // The system may still complete a timed-out apply. Do not start a
+            // concurrent second apply while that first request is unresolved.
+            return false
+        }
         guard domain == hotspotErrorDomain else { return true }
         // Internal, pending, and unknown are the only transient errors in the
         // public NEHotspotConfiguration error contract. User/policy/validation
@@ -573,6 +582,18 @@ enum DeviceNetworkJoinPolicy {
         message: String
     ) -> String {
         "\(message) [\(domain) \(code)]"
+    }
+
+    static var configurationApplyTimeoutError: NSError {
+        NSError(
+            domain: joinErrorDomain,
+            code: configurationApplyTimeoutCode,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "Device Wi-Fi configuration did not complete within " +
+                    "\(Int(configurationApplyTimeout)) seconds."
+            ]
+        )
     }
 
     static func makeHotspotConfiguration<Configuration>(
@@ -603,6 +624,109 @@ enum DeviceNetworkJoinPolicy {
     }
 #endif
 }
+
+#if os(iOS)
+private final class DeviceNetworkApplyGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<NSError?, Never>?
+    private var isResolved = false
+    private var didTimeOut = false
+    private var callbackReceived = false
+    private var callbackSucceeded = false
+    private var isAbandoned = false
+    private var cleanupIssued = false
+    private let cleanup: @Sendable () -> Void
+
+    init(cleanup: @escaping @Sendable () -> Void) {
+        self.cleanup = cleanup
+    }
+
+    func install(_ continuation: CheckedContinuation<NSError?, Never>) {
+        lock.lock()
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func receiveCallback(_ error: NSError?) {
+        var continuationToResume: CheckedContinuation<NSError?, Never>?
+        var shouldCleanUp = false
+        lock.lock()
+        callbackReceived = true
+        callbackSucceeded = error == nil
+        if !isResolved {
+            isResolved = true
+            continuationToResume = continuation
+            continuation = nil
+        } else if didTimeOut && isAbandoned && error == nil && !cleanupIssued {
+            cleanupIssued = true
+            shouldCleanUp = true
+        }
+        lock.unlock()
+        continuationToResume?.resume(returning: error)
+        if shouldCleanUp {
+            cleanup()
+        }
+    }
+
+    func timeOut() {
+        var continuationToResume: CheckedContinuation<NSError?, Never>?
+        lock.lock()
+        if !isResolved {
+            isResolved = true
+            didTimeOut = true
+            continuationToResume = continuation
+            continuation = nil
+        }
+        lock.unlock()
+        continuationToResume?.resume(
+            returning: DeviceNetworkJoinPolicy.configurationApplyTimeoutError
+        )
+    }
+
+    func abandon() {
+        var shouldCleanUp = false
+        lock.lock()
+        isAbandoned = true
+        if didTimeOut && callbackReceived && callbackSucceeded && !cleanupIssued {
+            cleanupIssued = true
+            shouldCleanUp = true
+        }
+        lock.unlock()
+        if shouldCleanUp {
+            cleanup()
+        }
+    }
+}
+
+private final class DeviceNetworkObservationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation:
+        CheckedContinuation<DeviceTransferNetworkObservation, Never>?
+    private var isResolved = false
+
+    func install(
+        _ continuation:
+            CheckedContinuation<DeviceTransferNetworkObservation, Never>
+    ) {
+        lock.lock()
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func resolve(_ observation: DeviceTransferNetworkObservation) {
+        var continuationToResume:
+            CheckedContinuation<DeviceTransferNetworkObservation, Never>?
+        lock.lock()
+        if !isResolved {
+            isResolved = true
+            continuationToResume = continuation
+            continuation = nil
+        }
+        lock.unlock()
+        continuationToResume?.resume(returning: observation)
+    }
+}
+#endif
 
 struct DeviceTransferFreshFailure: Equatable {
     let code: String
@@ -1338,7 +1462,17 @@ final class DeviceTransferManager {
             configuration.joinOnce = false
             configuration.lifeTimeInDays = 1
 
-            let applyError = await apply(configuration: configuration)
+            let applyResult = await apply(
+                configuration: configuration,
+                ssid: ssid
+            )
+            let applyError = applyResult.error
+            var keepAppliedConfiguration = false
+            defer {
+                if !keepAppliedConfiguration {
+                    applyResult.gate.abandon()
+                }
+            }
             lastApplyError = applyError
             var associationAccepted = applyError == nil
 
@@ -1405,6 +1539,7 @@ final class DeviceTransferManager {
                     networkObservation: networkObservation
                 )
                 if result.isReady {
+                    keepAppliedConfiguration = true
                     print("Device Wi-Fi ready: \(ssid)")
                     return
                 }
@@ -1460,26 +1595,46 @@ final class DeviceTransferManager {
 
 #if os(iOS)
     private func apply(
-        configuration: NEHotspotConfiguration
-    ) async -> NSError? {
-        await withCheckedContinuation { continuation in
+        configuration: NEHotspotConfiguration,
+        ssid: String
+    ) async -> (error: NSError?, gate: DeviceNetworkApplyGate) {
+        let gate = DeviceNetworkApplyGate {
+            Self.removeAccessoryNetworkConfiguration(ssid: ssid)
+        }
+        let error = await withCheckedContinuation { continuation in
+            gate.install(continuation)
             NEHotspotConfigurationManager.shared.apply(configuration) { error in
-                continuation.resume(returning: error as NSError?)
+                gate.receiveCallback(error as NSError?)
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(
+                deadline: .now() +
+                    DeviceNetworkJoinPolicy.configurationApplyTimeout
+            ) {
+                gate.timeOut()
             }
         }
+        return (error, gate)
     }
 
     private func currentNetworkObservation(
         expectedSSID: String
     ) async -> DeviceTransferNetworkObservation {
-        await withCheckedContinuation { continuation in
+        let gate = DeviceNetworkObservationGate()
+        return await withCheckedContinuation { continuation in
+            gate.install(continuation)
             NEHotspotNetwork.fetchCurrent { network in
-                continuation.resume(returning:
+                gate.resolve(
                     DeviceTransferNetworkObservation.classify(
                         currentSSID: network?.ssid,
                         expectedSSID: expectedSSID
                     )
                 )
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(
+                deadline: .now() +
+                    DeviceNetworkJoinPolicy.currentNetworkFetchTimeout
+            ) {
+                gate.resolve(.unavailable)
             }
         }
     }

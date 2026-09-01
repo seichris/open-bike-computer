@@ -16488,6 +16488,35 @@ struct NavigationProtocolTests {
         )
         assert(DeviceNetworkJoinPolicy.associationObservationTimeout >= 10,
                "an accepted local-only network gets time to become current")
+        assert(
+            DeviceNetworkJoinPolicy.configurationApplyTimeout >= 10 &&
+                DeviceNetworkJoinPolicy.configurationApplyTimeout <= 30,
+            "the system hotspot prompt has a sufficient but bounded callback window"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.currentNetworkFetchTimeout > 0 &&
+                DeviceNetworkJoinPolicy.currentNetworkFetchTimeout <= 3,
+            "current-network inspection cannot stall accessory association"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.shouldRetry(
+                domain: DeviceNetworkJoinPolicy.joinErrorDomain,
+                code: DeviceNetworkJoinPolicy.configurationApplyTimeoutCode
+            ),
+            "an unresolved system apply cannot overlap a second apply"
+        )
+        let applyTimeout =
+            DeviceNetworkJoinPolicy.configurationApplyTimeoutError
+        assertEqual(
+            applyTimeout.domain,
+            DeviceNetworkJoinPolicy.joinErrorDomain,
+            "the bounded apply failure retains its typed diagnostic domain"
+        )
+        assertEqual(
+            applyTimeout.code,
+            DeviceNetworkJoinPolicy.configurationApplyTimeoutCode,
+            "the bounded apply failure retains its typed diagnostic code"
+        )
         assertEqual(
             DeviceTransferFreshFailurePolicy.failure(
                 after: 17,
