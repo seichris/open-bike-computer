@@ -31,6 +31,7 @@ navigation-ready.
 | `2A73` | iOS -> ESP32 | Binary setting packet | Runtime map-renderer, device-screen, and phone-status values. |
 | `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003` | iOS/Watch -> ESP32 | Fixed 16-byte core/extended or 28-byte origin workout frame | Watch-owned workout state and optional live metrics/provenance for Ride Stats. |
 | `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004` | bidirectional | Fixed 52-byte `RAUT` v2 frame | Internal, feature-gated ride-detection decisions, configuration, prompt responses, cancellations, acknowledgements, confirmations, and resynchronization. |
+| `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005` | bidirectional | Chunked binary screen-configuration document | Owner-only atomic read/write of ordered, duplicate-capable screen instances and per-instance settings. |
 
 `DistanceMeters` is an unsigned 16-bit decimal value (`0...65535`). The iOS
 sender saturates larger maneuver distances at `65535` instead of allowing the
@@ -135,7 +136,8 @@ completes.
 ### Protected session frames
 
 After `OK2`, all app-to-device writes on the auth, navigation, route, GPS,
-settings, and workout characteristics use AES-256-GCM. Auth replies and every
+settings, workout, ride-automation, and screen-configuration characteristics
+use AES-256-GCM. Auth replies and every
 device-to-app navigation notification—including destination requests,
 capabilities, acknowledgements, and transfer status—use the reverse protected
 direction. Plaintext notifications are rejected while a v2 session exists. The
@@ -156,7 +158,8 @@ Tag: 16-byte AES-GCM tag
 ```
 
 Channels are `1=auth`, `2=navigation`, `3=route`, `4=GPS`, `5=settings`,
-`6=workout`, and `7=ride automation`.
+`6=workout`, `7=ride automation`, and `8=screen configuration`. Channel `8`
+is owner-only; a scoped Watch controller cannot read or change screen layouts.
 Each direction has an independent strictly increasing sequence per channel.
 Receivers reject zero, replayed, out-of-order, wrong-channel, or invalid-tag
 frames. The 12-byte nonce is `Channel || 7 zero bytes || Sequence`. Additional
@@ -920,6 +923,81 @@ Legacy v1 map blocks do not contain feature type IDs, so the renderer also
 combines Local with Service and Paths with Tracks for those blocks. Downloading
 a current v2 map is required for independent road-class visibility.
 
+## Configurable screen instances
+
+Clients at version `21` can negotiate CAP2 feature bit `23` and TLV type `2`.
+The feature is advertised only after the firmware configuration store and the
+dedicated characteristic both initialize. The 14-byte TLV value is:
+
+```text
+Schema: UInt8 (=1)
+MaximumInstances: UInt8 (=16)
+MaximumNameBytes: UInt8 (=24)
+RideStatsSlotCount: UInt8 (=7)
+SupportedScreenTypes: UInt32LE
+SupportedRideStatsWidgets: UInt32LE
+MaximumDocumentBytes: UInt16LE (=4096)
+```
+
+Screen types are `0=Map`, `1=Navigation`, `2=Ride Stats`, `3=Map +
+Navigation`, and `4=Battery Status`. Multiple instances may use the same type.
+Each instance has a nonzero stable `UInt32` ID, an independent enabled flag and
+name, and type-specific payload. The ordered enabled instances define the
+device's tap/PWR-button cycle; `DefaultInstanceID` must identify an enabled
+instance.
+
+The schema-1 document is CRC-protected and bounded to 4096 bytes:
+
+```text
+"SCV1" | Schema: UInt8 | InstanceCount: UInt8 | DefaultInstanceID: UInt32LE
+repeat InstanceCount times:
+  InstanceID: UInt32LE | Type: UInt8 | Flags: UInt8
+  NameLength: UInt8 | PayloadLength: UInt16LE | UTF8Name | Payload
+DocumentCRC32: UInt32LE
+```
+
+Flag bit `0` means enabled; other flag bits are invalid. Navigation and Battery
+Status payloads contain only payload version `1`. Map and Map + Navigation
+payloads carry the complete independent map profile (detail, widths, zoom,
+visibility, labels, and the type-specific rotation or bird's-eye fields). Ride
+Stats uses payload version `1`, layout kind `1`, slot count `7`, then seven
+widget IDs. Widget IDs are `0=Empty`, `1=Speed`, `2=Heart Rate`, `3=Heart-Rate
+Zone`, `4=Distance`, `5=Moving Time`, `6=Elapsed Time`, `7=Altitude`, `8=Route
+Remaining`, `9=Power`, `10=Cadence`, `11=Average Speed`, `12=Maximum Speed`,
+`13=Calories`, `14=Average Heart Rate`, and `15...16=Smart Metric 1...2`.
+At least one Ride Stats slot and one screen instance must be visible.
+
+All transfer messages use protected channel `8`. iOS uses acknowledged GATT
+writes and queues every upload batch atomically. Chunk count is at most 160 and
+in-order reassembly expires after five seconds:
+
+```text
+Read:     "SCRQ" | RequestID: UInt32LE
+Upload:   "SCUP" | RequestID: UInt32LE | BaseRevision: UInt32LE |
+          ChunkIndex: UInt8 | ChunkCount: UInt8 | Bytes...
+Download: "SCDN" | RequestID: UInt32LE | Revision: UInt32LE |
+          ChunkIndex: UInt8 | ChunkCount: UInt8 | Bytes...
+Ack:      "SCAK" | RequestID: UInt32LE | Result: UInt8 |
+          Revision: UInt32LE | DocumentCRC32: UInt32LE
+```
+
+Acknowledgement results are `0=Applied`, `1=Conflict`, `2=Malformed`,
+`3=Unsupported`, `4=Persistence Failed`, `5=Busy`, and `6=Unauthorized`.
+Applied acknowledgements echo the committed document CRC and the new nonzero
+revision. Firmware rejects stale `BaseRevision` values without partial changes,
+and remembers a bounded set of completed request IDs so a repeated transfer is
+idempotent.
+
+Persistence uses CRC-checked A/B document slots, an active-head record written
+after the inactive slot verifies, and a mirror-transaction marker for the
+legacy settings projection. On first boot it migrates the five legacy screen
+types in their existing order. Older apps continue to read and write setting
+IDs `13` and `14`; those values project to the primary instance of each type
+and are imported back into the schema-1 document after a short debounce. New
+apps keep an acknowledged per-device cache, always request a fresh snapshot on
+connect, preserve unsaved same-device edits across a transient reconnect, and
+offer an explicit choice after a revision conflict.
+
 ## Device Sound Playback
 
 The authenticated command channel accepts a sound-play frame on either the
@@ -1099,14 +1177,17 @@ connected-display automatic inactivity control (setting ID `36`), and bit `20`
 negotiates persistent, privacy-bounded ride diagnostics and the authenticated
 device-log transfer mode. Bit `21` reports support for the optional detailed
 one-Hz ride-automation trace. Bit `22` reports the application-confirmed
-critical ride-delivery contract described above. Client version `11` requests
+critical ride-delivery contract described above. Bit `23` reports the complete
+configurable-screen store, characteristic, codec, and runtime path described
+above. Client version `11` requests
 bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
 without the newer features. Client version `16` requests bits `18` and `19`,
 including the authenticated renderer-diagnostics contract and the already
 released automatic-display setting. Version `18` requests bit `20`, version
-`19` requests bit `21`, and version `20` requests bit `22`.
+`19` requests bit `21`, version `20` requests bit `22`, and version `21`
+requests bit `23` plus TLV type `2`.
 Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
@@ -1123,7 +1204,8 @@ producer is compiled. Production firmware keeps it clear, and iOS downgrades
 an otherwise detailed capture binding to standard correlation when it is absent.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
-exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). Types are unique;
+exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
+carries the 14-byte screen-configuration limits and support masks. Types are unique;
 malformed, duplicate, or overrun TLVs invalidate the complete response. Unknown
 well-formed types are skipped. Firmware sends legacy `CAPS` to clients below
 version `10`, preserving the version `7...9` extended-byte contract, and current
@@ -1164,6 +1246,9 @@ Detailed ride diagnostics, CAP2 schema 1, only feature bit 21:
 
 Application-confirmed ride delivery, CAP2 schema 1, only feature bit 22:
 43 41 50 32 01 00 00 40 00
+
+Configurable screens, CAP2 schema 1, feature bit 23 and TLV type 2:
+43 41 50 32 01 00 00 80 00 02 0e 01 10 18 07 1f 00 00 00 ff ff 01 00 00 10
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and

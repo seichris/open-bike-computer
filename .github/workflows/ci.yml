@@ -173,6 +173,26 @@ jobs:
           fi
           env -u LD_LIBRARY_PATH python3 tools/build_firmware.py \
             "${BUILD_ENVIRONMENT}" "${factory_args[@]}"
+      - name: Report largest firmware symbols after build failure
+        if: failure()
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          elf=".pio/build/${BUILD_ENVIRONMENT}/firmware.elf"
+          if [[ ! -f "${elf}" ]]; then
+            echo "No linked firmware image is available for symbol analysis"
+            exit 0
+          fi
+          nm_bin="$(find .pio/open-bike-build -type f \
+            \( -name 'xtensa-esp-elf-nm' -o \
+               -name 'xtensa-esp32s3-elf-nm' \) \
+            -perm -111 -print -quit)"
+          if [[ -z "${nm_bin}" ]]; then
+            echo "No Xtensa nm executable is available for symbol analysis"
+            exit 0
+          fi
+          "${nm_bin}" --print-size --size-sort --radix=d "${elf}" | tail -n 120
       - name: Verify production factory bundle packaging
         if: endsWith(matrix.target, '_PRODUCTION')
         env:
@@ -547,6 +567,20 @@ jobs:
             tools/tests/test_device_capabilities_protocol.cpp \
             -o /tmp/test_device_capabilities_protocol
           /tmp/test_device_capabilities_protocol
+      - name: Screen configuration protocol and Ride Stats widget host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_screen_configuration_protocol.cpp \
+            -o /tmp/test_screen_configuration_protocol
+          /tmp/test_screen_configuration_protocol
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_screen_configuration_policy.cpp \
+            -o /tmp/test_screen_configuration_policy
+          /tmp/test_screen_configuration_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_ride_stats_widget.cpp \
+            -o /tmp/test_ride_stats_widget
+          /tmp/test_ride_stats_widget
       - name: Ride controller lease host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \

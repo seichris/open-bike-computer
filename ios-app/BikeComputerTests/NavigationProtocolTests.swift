@@ -741,6 +741,8 @@ struct NavigationProtocolTests {
         testDeviceCapabilitySynchronizesPowerButtonHonkOnce()
         testDeviceCapabilityRetryPolicy()
         testDeviceScreenValidation()
+        testDeviceScreenConfigurationCodecAndValidation()
+        testDeviceScreenConfigurationController()
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
         testBLEScanLifecyclePolicy()
@@ -13873,6 +13875,11 @@ struct NavigationProtocolTests {
             for: DeviceBLEProtocol.navigationCharacteristicUUID,
             authenticatedWriteSession: writeSession
         )
+        let protectedScreenConfiguration = channelManager.devicePayloadForTesting(
+            gpsPayload,
+            for: DeviceBLEProtocol.screenConfigurationCharacteristicUUID,
+            authenticatedWriteSession: writeSession
+        )
         assertEqual(
             protectedGPS?.count,
             gpsPayload.count + AuthenticatedBLEWriteSession.frameOverhead,
@@ -13880,6 +13887,13 @@ struct NavigationProtocolTests {
         )
         assert(protectedGPS != protectedNavigation,
                "native GPS uses its characteristic-bound authenticated channel")
+        assertEqual(
+            protectedScreenConfiguration?.count,
+            gpsPayload.count + AuthenticatedBLEWriteSession.frameOverhead,
+            "screen configuration uses the protected owner transport"
+        )
+        assert(protectedScreenConfiguration != protectedNavigation,
+               "screen configuration has an independent replay sequence")
 
         var transportReady = false
         var queue = NavigationWriteQueue(maxCount: 4, priorityMaxCount: 2)
@@ -14333,8 +14347,9 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rideDiagnosticsCapabilityMask, 1 << 20, "CAP2 bit 20 advertises persistent ride diagnostics")
         assertEqual(DeviceBLEProtocol.detailedRideDiagnosticsCapabilityMask, 1 << 21, "CAP2 bit 21 advertises detailed ride diagnostics")
         assertEqual(DeviceBLEProtocol.rideDeliveryAcknowledgementCapabilityMask, 1 << 22, "CAP2 bit 22 advertises reliable ride delivery")
+        assertEqual(DeviceBLEProtocol.screenConfigurationCapabilityMask, 1 << 23, "CAP2 bit 23 advertises configurable screen instances")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 20, "capability version negotiates reliable ride delivery")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 21, "capability version negotiates configurable screen instances")
         assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
         assertEqual(DeviceBLEProtocol.rendererMetricsResponsePrefix, "RDMT", "renderer metrics responses use RDMT")
         assertEqual(DeviceBLEProtocol.rendererMetricsChunkPrefix, "RDMC", "renderer metrics chunks use RDMC")
@@ -14342,6 +14357,9 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
                     "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
                     "workout telemetry uses the dedicated 128-bit characteristic")
+        assertEqual(DeviceBLEProtocol.screenConfigurationCharacteristicUUIDString,
+                    "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005",
+                    "screen configuration uses the dedicated owner-only characteristic")
         assertEqual(DeviceBLEProtocol.workoutTelemetryFallbackPrefix, "WTLM",
                     "workout telemetry fallback remains explicitly framed")
         assertEqual(DeviceBLEProtocol.serviceRoadsVisibilityMask, 0x400, "service roads use visibility bit 10")
@@ -16305,7 +16323,7 @@ struct NavigationProtocolTests {
         assert(independentManager.handleDeviceCapabilitiesNotification(independentFlags),
                "independent profile capability response should be consumed")
         assertEqual(independentPackets().map { $0[4] },
-                    [20, 16, 17, 18, 21, 22, 19, 8, 1, 2, 3, 9, 10, 7],
+                    [20, 16, 17, 18, 21, 22, 19, 6, 8, 1, 2, 3, 9, 10, 7],
                     "new firmware receives the independent profile before legacy Map IDs")
         let independentDetail = independentPackets().first { $0[4] == 17 }
         assertEqual(readInt32LE(independentDetail!, offset: 5), 0,
@@ -16323,7 +16341,7 @@ struct NavigationProtocolTests {
         assert(birdsEyeManager.supportsBirdsEyeMapNavigation,
                "bird's-eye capability enables the setting")
         assertEqual(birdsEyePackets().map { $0[4] },
-                    [20, 16, 17, 18, 21, 22, 19, 25, 8, 1, 2, 3, 9, 10, 7],
+                    [20, 16, 17, 18, 21, 22, 19, 25, 6, 8, 1, 2, 3, 9, 10, 7],
                     "supported firmware receives the bird's-eye preference with the Map + Navigation profile")
         let birdsEyeSetting = birdsEyePackets().first { $0[4] == 25 }
         assertEqual(readInt32LE(birdsEyeSetting!, offset: 5), 0,
@@ -16343,7 +16361,7 @@ struct NavigationProtocolTests {
             perspectiveCapabilities
         ), "bird's-eye perspective capability response should be consumed")
         assertEqual(perspectivePackets().map { $0[4] },
-                    [20, 16, 17, 18, 21, 22, 19, 25, 26, 8, 1, 2, 3, 9, 10, 7],
+                    [20, 16, 17, 18, 21, 22, 19, 25, 26, 6, 8, 1, 2, 3, 9, 10, 7],
                     "adjustable firmware receives both bird's-eye settings")
         let perspectiveSetting = perspectivePackets().first { $0[4] == 26 }
         assertEqual(readInt32LE(perspectiveSetting!, offset: 5), 2,
@@ -16372,7 +16390,7 @@ struct NavigationProtocolTests {
         let baselineCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) + Data([0])
         assert(legacyManager.handleDeviceCapabilitiesNotification(baselineCapabilities),
                "baseline capability response should be consumed")
-        assertEqual(legacyPackets().map { $0[4] }, [8, 1, 2, 3, 9, 10, 7],
+        assertEqual(legacyPackets().map { $0[4] }, [6, 8, 1, 2, 3, 9, 10, 7],
                     "legacy firmware receives only its shared Map profile IDs")
         assertEqual(legacyManager.mapPlusNavigationZoomLevel, 1,
                     "negotiation preserves the hidden independent local profile")
@@ -16393,15 +16411,15 @@ struct NavigationProtocolTests {
 
         let (lateManager, latePackets) = configuredManager()
         lateManager.useDeviceCapabilitiesFallback()
-        assertEqual(latePackets().map { $0[4] }, [8, 1, 2, 3, 9, 10, 7],
+        assertEqual(latePackets().map { $0[4] }, [6, 8, 1, 2, 3, 9, 10, 7],
                     "timeout fallback sends only the legacy shared profile")
         let lateExtendedFlags = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
             Data([DeviceBLEProtocol.independentMapProfilesCapabilityMask |
                   DeviceBLEProtocol.extendedMapVisibilityCapabilityMask])
         assert(lateManager.handleDeviceCapabilitiesNotification(lateExtendedFlags),
                "late independent profile response should still be consumed")
-        assertEqual(Array(latePackets().map { $0[4] }.suffix(14)),
-                    [20, 16, 17, 18, 21, 22, 19, 8, 1, 2, 3, 9, 10, 7],
+        assertEqual(Array(latePackets().map { $0[4] }.suffix(15)),
+                    [20, 16, 17, 18, 21, 22, 19, 6, 8, 1, 2, 3, 9, 10, 7],
                     "late extended response resends both profiles with new semantics")
         let resentMapVisibility = latePackets().last { $0[4] == 8 }
         assert(readInt32LE(resentMapVisibility!, offset: 5) &

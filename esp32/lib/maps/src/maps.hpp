@@ -190,6 +190,9 @@ private:
     uint64_t styleSignature = 0;
     uint64_t navigationSignature = 0;
     uint64_t projectionSignature = 0;
+    uint32_t screenInstanceID = 0;
+    uint32_t screenProfileSignature = 0;
+    uint8_t screenType = 0;
     uint8_t zoom = map_transform::kMinimumRuntimeZoom;
     uint16_t viewportWidth = 0;
     uint16_t viewportHeight = 0;
@@ -210,6 +213,9 @@ private:
     uint64_t styleSignature = 0;
     uint64_t navigationSignature = 0;
     uint64_t projectionSignature = 0;
+    uint32_t screenInstanceID = 0;
+    uint32_t screenProfileSignature = 0;
+    uint8_t screenType = 0;
     uint16_t viewportWidth = 0;
     uint16_t viewportHeight = 0;
     uint16_t renderWidth = 0;

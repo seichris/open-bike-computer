@@ -65,13 +65,16 @@ int main() {
       device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION == 20);
   static_assert(device_capabilities_protocol::RIDE_DELIVERY_ACK_FEATURE ==
                 (1UL << 22));
+  static_assert(
+      device_capabilities_protocol::SCREEN_CONFIGURATION_CLIENT_VERSION == 21);
+  static_assert(device_capabilities_protocol::SCREEN_CONFIGURATION_FEATURE ==
+                (1UL << 23));
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
       0x00003fff, power, true, output, sizeof(output));
   const uint8_t expected[] = {'C', 'A', 'P', '2', 1, 0xff, 0x3f,
                               0x00, 0x00, 1,   3, 1,    4,    80};
-  static_assert(sizeof(expected) == device_capabilities_protocol::CAP2_MAX_BYTES);
   assert(size == sizeof(expected));
   for (size_t index = 0; index < size; ++index)
     assert(output[index] == expected[index]);
@@ -158,6 +161,17 @@ int main() {
   assert(rideDeliveryAckSize == sizeof(expectedRideDeliveryAck));
   for (size_t index = 0; index < rideDeliveryAckSize; ++index)
     assert(output[index] == expectedRideDeliveryAck[index]);
+  const uint8_t screenTLV[] = {2, 14, 1, 16, 24, 7, 0x1f, 0, 0, 0,
+                               0xff, 0xff, 1, 0, 0, 0x10};
+  const size_t screenSize = device_capabilities_protocol::encodeCap2(
+      device_capabilities_protocol::SCREEN_CONFIGURATION_FEATURE, nullptr,
+      false, output, sizeof(output), screenTLV, sizeof(screenTLV));
+  assert(screenSize == device_capabilities_protocol::CAP2_BASE_BYTES +
+                           sizeof(screenTLV));
+  assert(output[7] == 0x80);
+  for (size_t index = 0; index < sizeof(screenTLV); ++index)
+    assert(output[device_capabilities_protocol::CAP2_BASE_BYTES + index] ==
+           screenTLV[index]);
   std::cout << "device capabilities protocol tests passed\n";
   return 0;
 }

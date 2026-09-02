@@ -8,6 +8,7 @@
 
 #include "mainScr.hpp"
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
+#include "../../ble_navigation/screen_configuration.hpp"
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../route_overlay/route_overlay.hpp"
 #include "../../ride_automation/ride_automation_runtime.hpp"
@@ -85,6 +86,15 @@ static uint32_t mapTileTransitionStartedMs = 0;
 static bool mapTileTransitionUsedRenderAhead = false;
 static bool mapRenderAheadPending = false;
 static tileName mapRenderAheadTile = MAP;
+static uint32_t mapRenderAheadInstanceID = 0;
+static uint32_t mapRenderAheadProfileSignature = 0;
+static uint8_t activeScreenInstanceIndex =
+    screen_configuration::kInvalidInstanceIndex;
+static uint32_t activeScreenInstanceID = 0;
+static uint32_t activeScreenPayloadSignature = 0;
+static uint32_t mapRenderInstanceID = 0;
+static uint8_t mapRenderInstanceType = DEVICE_SCREEN_MAP;
+static uint32_t mapRenderProfileSignature = 0;
 struct DestinationRowContext {
   uint32_t generation = 0;
   uint16_t token = 0;
@@ -553,6 +563,73 @@ const ScreenMapRenderSettings &currentMapStyleSettings() {
   return mapStyleSettingsForTile(static_cast<tileName>(activeTile));
 }
 
+uint32_t currentScreenInstanceID() { return activeScreenInstanceID; }
+
+uint32_t currentMapRenderInstanceID() { return mapRenderInstanceID; }
+
+uint8_t currentMapRenderInstanceType() { return mapRenderInstanceType; }
+
+uint32_t currentMapRenderProfileSignature() {
+  return mapRenderProfileSignature;
+}
+
+static void applyMapInstanceProfile(
+    const screen_configuration_protocol::ScreenInstance &instance) {
+  if (instance.type != screen_configuration_protocol::ScreenType::Map &&
+      instance.type !=
+          screen_configuration_protocol::ScreenType::MapNavigation) {
+    return;
+  }
+  const auto &source = instance.mapProfile;
+  ScreenMapRenderSettings &target =
+      instance.type == screen_configuration_protocol::ScreenType::Map
+          ? mapRenderSettings.mapStyle
+          : mapRenderSettings.mapNavigationStyle;
+  target.minPolygonSize = source.minPolygonSize;
+  target.detailLevel = source.detailLevel;
+  target.routeLineWidth = source.routeLineWidth;
+  target.streetLineWidth = source.streetLineWidth;
+  target.positionMarkerScale = source.positionMarkerScale;
+  target.zoomLevel = source.zoomLevel;
+  target.visibilityMask =
+      source.visibilityMask & MAP_VISIBILITY_EXTENDED_FEATURE_MASK;
+  target.labelDensity = source.labelDensity;
+  target.labelLanguageMode = source.labelLanguageMode;
+  target.labelTextSize = source.labelTextSize;
+  target.labelOrientation = source.labelOrientation;
+  mapRenderSettings.navigationOverlayVisibilityMask =
+      source.visibilityMask & MAP_VISIBILITY_OVERLAY_MASK;
+  if (instance.type == screen_configuration_protocol::ScreenType::Map) {
+    mapRenderSettings.mapRotationMode = source.rotationMode;
+  } else {
+    mapRenderSettings.mapNavigationBirdsEyeEnabled = source.birdsEyeEnabled;
+    mapRenderSettings.mapNavigationBirdsEyePerspective =
+        source.birdsEyePerspective;
+    mapRenderSettings.mapNavigation3DBuildingsEnabled =
+        source.buildings3DEnabled;
+  }
+  mapRenderInstanceID = instance.id;
+  mapRenderInstanceType = static_cast<uint8_t>(instance.type);
+  mapRenderProfileSignature =
+      screen_configuration::mapProfileSignature(instance);
+}
+
+const screen_configuration_protocol::RideStatsLayout &
+currentRideStatsLayout() {
+  static const screen_configuration_protocol::RideStatsLayout defaultLayout{};
+  if (!screen_configuration::isReady())
+    return defaultLayout;
+  const auto &snapshot = screen_configuration::activeSnapshot();
+  const uint8_t index = screen_configuration::findInstanceIndex(
+      snapshot.document, activeScreenInstanceID);
+  if (index == screen_configuration::kInvalidInstanceIndex ||
+      snapshot.document.instances[index].type !=
+          screen_configuration_protocol::ScreenType::RideStats) {
+    return defaultLayout;
+  }
+  return snapshot.document.instances[index].rideStatsLayout;
+}
+
 static void tapCycleScreenEvent(lv_event_t *event);
 static void mapGuidanceOverlayTapEvent(lv_event_t *event);
 static void updateMapGuidanceOverlay();
@@ -722,6 +799,19 @@ static bool nextEnabledMapBackedTile(tileName current, tileName &next) {
   return false;
 }
 
+static bool configuredInstance(uint8_t index,
+                               const screen_configuration_protocol::ScreenInstance *&instance) {
+  if (!screen_configuration::isReady())
+    return false;
+  const auto &document = screen_configuration::activeSnapshot().document;
+  if (index >= document.instanceCount)
+    return false;
+  instance = &document.instances[index];
+  return true;
+}
+
+static void showScreenInstance(uint8_t index);
+
 static bool isGuidanceNavigating() {
   return routeOverlay.hasRoute() || hasCurrentNavigationData();
 }
@@ -798,11 +888,31 @@ static void prepareNextMapScreenRenderAhead(tileName current) {
   }
 
   tileName target = MAP;
-  if (!nextEnabledMapBackedTile(current, target)) {
+  uint32_t targetInstanceID = 0;
+  uint32_t targetProfileSignature = 0;
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    const uint8_t targetIndex =
+        screen_configuration::nextEnabledInstanceOfType(
+            document, activeScreenInstanceIndex,
+            screen_configuration_protocol::ScreenType::Map,
+            screen_configuration_protocol::ScreenType::MapNavigation);
+    if (targetIndex == screen_configuration::kInvalidInstanceIndex) {
+      mapRenderAheadPending = false;
+      return;
+    }
+    const auto &targetInstance = document.instances[targetIndex];
+    target = tileForDeviceScreen(static_cast<uint8_t>(targetInstance.type));
+    targetInstanceID = targetInstance.id;
+    applyMapInstanceProfile(targetInstance);
+    targetProfileSignature = mapRenderProfileSignature;
+  } else if (!nextEnabledMapBackedTile(current, target)) {
     mapRenderAheadPending = false;
     return;
   }
-  if (mapRenderAheadPending && mapRenderAheadTile == target) {
+  if (mapRenderAheadPending && mapRenderAheadTile == target &&
+      mapRenderAheadInstanceID == targetInstanceID &&
+      mapRenderAheadProfileSignature == targetProfileSignature) {
     return;
   }
 
@@ -825,8 +935,12 @@ static void prepareNextMapScreenRenderAhead(tileName current) {
   mapRenderScheduler.markSubmitted(nowMs, currentMapFix());
   mapRenderAheadPending = true;
   mapRenderAheadTile = target;
-  log_i("UI: render-ahead requested for %s screen",
-        target == MAP_GUIDANCE ? "map guidance" : "map");
+  mapRenderAheadInstanceID = targetInstanceID;
+  mapRenderAheadProfileSignature = targetProfileSignature;
+  log_i("UI: render-ahead requested instance=%lu type=%s profile=%lu",
+        static_cast<unsigned long>(targetInstanceID),
+        target == MAP_GUIDANCE ? "map guidance" : "map",
+        static_cast<unsigned long>(mapRenderProfileSignature));
 }
 
 static uint16_t mapGuidanceOverlayHeight() {
@@ -1932,7 +2046,10 @@ static void showMainTile(tileName tile) {
     mapTileTransition.begin();
     mapTileTransitionStartedMs = millis();
     mapTileTransitionUsedRenderAhead =
-        mapRenderAheadPending && mapRenderAheadTile == tile;
+        mapRenderAheadPending && mapRenderAheadTile == tile &&
+        (!screen_configuration::isReady() ||
+         (mapRenderAheadInstanceID == activeScreenInstanceID &&
+          mapRenderAheadProfileSignature == mapRenderProfileSignature));
     zoom = currentMapStyleSettings().zoomLevel;
     if (tile == MAP_GUIDANCE) {
       mapView.followGps = true;
@@ -1941,7 +2058,10 @@ static void showMainTile(tileName tile) {
 
     bool framePublished = false;
     bool renderPending = false;
-    if (mapRenderAheadPending && mapRenderAheadTile == tile) {
+    if (mapRenderAheadPending && mapRenderAheadTile == tile &&
+        (!screen_configuration::isReady() ||
+         (mapRenderAheadInstanceID == activeScreenInstanceID &&
+          mapRenderAheadProfileSignature == mapRenderProfileSignature))) {
       const uint32_t nowMs = millis();
       framePublished = mapView.serviceRenderPipeline(nowMs);
       if (framePublished) {
@@ -2026,6 +2146,25 @@ static void showMainTile(tileName tile) {
   }
 }
 
+static void showScreenInstance(uint8_t index) {
+  const screen_configuration_protocol::ScreenInstance *instance = nullptr;
+  if (!configuredInstance(index, instance) || instance == nullptr ||
+      !instance->enabled) {
+    return;
+  }
+  activeScreenInstanceIndex = index;
+  activeScreenInstanceID = instance->id;
+  activeScreenPayloadSignature =
+      screen_configuration::screenPayloadSignature(*instance);
+  applyMapInstanceProfile(*instance);
+  const tileName tile =
+      tileForDeviceScreen(static_cast<uint8_t>(instance->type));
+  log_i("UI: switching screen instance=%lu type=%u index=%u",
+        static_cast<unsigned long>(instance->id),
+        static_cast<unsigned>(instance->type), index);
+  showMainTile(tile);
+}
+
 static void revealPendingMapTileIfReady() {
   if (!mapView.hasPublishedMapFrame() ||
       !mapTileTransition.canReveal(mapView.isPosMoved, mapView.redrawMap)) {
@@ -2056,10 +2195,23 @@ static void revealPendingMapTileIfReady() {
 }
 
 void showNextMainScreen() {
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    showScreenInstance(screen_configuration::nextEnabledInstanceIndex(
+        document, activeScreenInstanceIndex));
+    return;
+  }
   showMainTile(nextEnabledTile((tileName)activeTile));
 }
 
-void showConfiguredDefaultMainScreen() { showMainTile(configuredDefaultTile()); }
+void showConfiguredDefaultMainScreen() {
+  if (screen_configuration::isReady()) {
+    showScreenInstance(screen_configuration::defaultInstanceIndex(
+        screen_configuration::activeSnapshot().document));
+    return;
+  }
+  showMainTile(configuredDefaultTile());
+}
 
 void applyDeviceScreenSettings() {
   if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
@@ -2067,10 +2219,36 @@ void applyDeviceScreenSettings() {
     return;
   }
 
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    const uint8_t matchingIndex = screen_configuration::findInstanceIndex(
+        document, activeScreenInstanceID);
+    if (matchingIndex == screen_configuration::kInvalidInstanceIndex ||
+        !document.instances[matchingIndex].enabled) {
+      showScreenInstance(screen_configuration::defaultInstanceIndex(document));
+    } else {
+      const auto &matching = document.instances[matchingIndex];
+      activeScreenInstanceIndex = matchingIndex;
+      // Reordering, renaming, or changing only the default screen must not
+      // interrupt the screen currently being ridden. Rebind only when its
+      // render-affecting payload changed.
+      if (activeScreenPayloadSignature !=
+          screen_configuration::screenPayloadSignature(matching)) {
+        showScreenInstance(matchingIndex);
+      } else if (!isMapBackedTile(static_cast<tileName>(activeTile))) {
+        // The visible payload is unchanged, but reordering/enabling another
+        // instance can change which map should be rendered ahead.
+        prepareNextMapScreenRenderAhead(static_cast<tileName>(activeTile));
+      }
+    }
+    return;
+  }
   if (!isScreenEnabled((tileName)activeTile)) {
     showMainTile(configuredDefaultTile());
   }
 }
+
+void applyDeviceScreenConfiguration() { applyDeviceScreenSettings(); }
 
 static void tapCycleScreenEvent(lv_event_t *event) {
   if (!mapRenderSettings.tapToSwitchScreens) {
