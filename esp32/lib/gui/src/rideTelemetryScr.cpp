@@ -110,19 +110,17 @@ const lv_font_t *metricValueFontForWidth(const char *text,
   const uint32_t textLength = static_cast<uint32_t>(std::strlen(text));
 
   if (useLargeFont) {
-    constexpr std::size_t fontCount = 7;
+    constexpr std::size_t fontCount = 6;
     const std::array<const lv_font_t *, fontCount> fonts = {
         &ride_value_font_64,     &ride_value_font_56,
-        &lv_font_montserrat_48,  &lv_font_montserrat_42,
-        &lv_font_montserrat_38,  &lv_font_montserrat_24,
-        &lv_font_montserrat_18,
+        &lv_font_montserrat_48,  &lv_font_montserrat_38,
+        &lv_font_montserrat_24,  &lv_font_montserrat_18,
     };
     return firstFittingFont(fonts, text, textLength, availableWidth);
   }
 
-  constexpr std::size_t fontCount = 4;
+  constexpr std::size_t fontCount = 3;
   const std::array<const lv_font_t *, fontCount> fonts = {
-      &lv_font_montserrat_42,
       &lv_font_montserrat_38,
       &lv_font_montserrat_24,
       &lv_font_montserrat_18,
@@ -588,10 +586,10 @@ void updateConfigurableSlots(
       lv_obj_set_width(slot.labels.value, valueRect.width);
       lv_obj_set_style_text_align(slot.labels.value, LV_TEXT_ALIGN_CENTER, 0);
       if (index == 0) {
-        const std::array<const lv_font_t *, 7> fonts = {
+        const std::array<const lv_font_t *, 6> fonts = {
             &ride_speed_font_84, &ride_value_font_64, &ride_value_font_56,
-            &lv_font_montserrat_48, &lv_font_montserrat_42,
-            &lv_font_montserrat_38, &lv_font_montserrat_24};
+            &lv_font_montserrat_48, &lv_font_montserrat_38,
+            &lv_font_montserrat_24};
         const auto *font = firstFittingFont(
             fonts, widget.value.data(), std::strlen(widget.value.data()),
             valueRect.width - 4);
