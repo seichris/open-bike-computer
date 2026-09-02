@@ -2829,7 +2829,9 @@ describe("catalog lifecycle boundaries", () => {
     const expiresAt = new Date(Date.now() + 90 * dayMilliseconds);
     const withinGrace = new Date(expiresAt.getTime() + 14 * dayMilliseconds);
     const afterGrace = new Date(expiresAt.getTime() + 31 * dayMilliseconds);
-    const staleUpdatedAt = new Date(expiresAt.getTime() - 365 * dayMilliseconds);
+    const staleUpdatedAt = new Date(
+      expiresAt.getTime() - 365 * dayMilliseconds,
+    );
     const shared = publication();
     shared.publicationId = "job-share-retention";
     shared.mapEntryId = `map_v1_${"h".repeat(43)}`;
