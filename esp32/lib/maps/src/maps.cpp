@@ -68,21 +68,6 @@ const char *TAG PROGMEM = "Maps";
 
 namespace {
 
-#if FIRMWARE_DIAGNOSTICS
-renderer_diagnostics::JobCounters rendererJobCounters(
-    const map_render_job::Diagnostics &value) {
-  return {
-      value.submitted,
-      value.started,
-      value.completed,
-      value.published,
-      value.stalePublications,
-      value.cancelled,
-      value.invariantFailures,
-  };
-}
-#endif
-
 // Keep the main-branch memory diagnostics stable while moving raster work off
 // the LVGL task. These samples are observational only and do not alter the
 // renderer's allocation or scheduling policy.
@@ -3722,21 +3707,6 @@ bool Maps::setRendererTuningProfile(renderer_tuning::Profile profile,
   return true;
 }
 
-renderer_diagnostics::JobCounters Maps::rendererDiagnosticsJobCounters() const {
-#if !FIRMWARE_DIAGNOSTICS
-  return {};
-#else
-  if (renderStateMutex == nullptr ||
-      xSemaphoreTake(renderStateMutex, portMAX_DELAY) != pdTRUE) {
-    return {};
-  }
-  const renderer_diagnostics::JobCounters counters =
-      rendererJobCounters(renderJobs.diagnostics());
-  xSemaphoreGive(renderStateMutex);
-  return counters;
-#endif
-}
-
 uint64_t
 Maps::navigationSignatureForScreen(bool guidanceScreenActive) const {
   // Only state that changes the base-frame contract belongs here. Maneuver
@@ -4062,11 +4032,16 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
       1.0 / std::max(0.2, std::fabs(std::cos(latitudeRadians)));
   const double pixelsPerMeter =
       worldUnitsPerMeter * map_transform::worldToScreenScale(request.zoom);
+  const uint16_t minimumOverscanPixels = MAP_RENDER_ROUND_VIEWPORT
+      ? map_presentation::minimumRoundViewportOverscan(
+            request.viewportWidth, request.viewportHeight,
+            MAP_RENDER_SAFETY_PIXELS, MAP_RENDER_MINIMUM_OVERSCAN_PIXELS)
+      : MAP_RENDER_MINIMUM_OVERSCAN_PIXELS;
   const double desiredOverscan = MAP_RENDER_ROUND_VIEWPORT
       ? map_presentation::refreshLeadPixels(
             speedMetersPerSecond, pixelsPerMeter, expectedLatencyMs,
             MAP_RENDER_SAFETY_PIXELS + 8U,
-            MAP_RENDER_MINIMUM_OVERSCAN_PIXELS,
+            minimumOverscanPixels,
             MAP_RENDER_OVERSCAN_PIXELS)
       : MAP_RENDER_OVERSCAN_PIXELS;
   request.overscanPixels = static_cast<uint16_t>(std::ceil(desiredOverscan));
@@ -4126,6 +4101,8 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
   request.version.styleEpoch = styleEpoch;
   request.version.mapEpoch = mapEpoch;
   request.version.projectionEpoch = projectionEpoch;
+  request.version.diagnosticsWindowId =
+      request.context.rendererDiagnosticsWindowId;
   return true;
 }
 
@@ -4136,20 +4113,27 @@ bool Maps::submitRenderRequest(const RenderRequest &immutableRequest) {
   if (xSemaphoreTake(renderStateMutex, 0) != pdTRUE)
     return false;
   request.version = renderJobs.submit(request.version);
+#if FIRMWARE_DIAGNOSTICS
+  renderer_diagnostics::noteJobForWindow(
+      request.version.diagnosticsWindowId,
+      renderer_diagnostics::JobEvent::Requested);
+#endif
   latestRenderRequest = request;
   latestRenderRequestValid = true;
   if (renderJobs.state() == map_render_job::State::Ready &&
       !map_render_job::Version::sameFrame(renderJobs.ready(),
                                           request.version)) {
+#if FIRMWARE_DIAGNOSTICS
+    renderer_diagnostics::noteJobForWindow(
+        renderJobs.ready().diagnosticsWindowId,
+        renderer_diagnostics::JobEvent::Stale);
+#endif
     renderJobs.rejectReadyAsStale();
     readyRenderResultValid = false;
   }
   gMapRenderLatestSequence.store(request.version.sequence,
                                  std::memory_order_release);
   const TaskHandle_t worker = renderWorkerTaskHandle;
-#if FIRMWARE_DIAGNOSTICS
-  renderer_diagnostics::noteJobs(rendererJobCounters(renderJobs.diagnostics()));
-#endif
   xSemaphoreGive(renderStateMutex);
   if (worker != nullptr)
     xTaskNotifyGive(worker);
@@ -4182,13 +4166,20 @@ bool Maps::takeWorkerRequest(RenderRequest &request) {
       request.cancellationGeneration =
           gMapRenderCancellationGeneration.load(std::memory_order_acquire);
       lastTakenRenderSequence = request.version.sequence;
+#if FIRMWARE_DIAGNOSTICS
+      renderer_diagnostics::noteJobForWindow(
+          request.version.diagnosticsWindowId,
+          renderer_diagnostics::JobEvent::Started);
+#endif
     } else {
+#if FIRMWARE_DIAGNOSTICS
+      renderer_diagnostics::noteJobForWindow(
+          renderJobs.active().diagnosticsWindowId,
+          renderer_diagnostics::JobEvent::Cancelled);
+#endif
       renderJobs.cancelActive();
     }
   }
-#if FIRMWARE_DIAGNOSTICS
-  renderer_diagnostics::noteJobs(rendererJobCounters(renderJobs.diagnostics()));
-#endif
   xSemaphoreGive(renderStateMutex);
   return available;
 }
@@ -4469,10 +4460,20 @@ void Maps::renderWorkerLoop() {
             gMapRenderSliceCount.load(std::memory_order_relaxed),
             gMapRenderLongestSliceUs.load(std::memory_order_relaxed),
             MAP_RENDER_DECLARED_SLICE_US);
+#if FIRMWARE_DIAGNOSTICS
+        const bool activeJobStillTracked =
+            renderJobs.state() == map_render_job::State::Rendering &&
+            renderJobs.active() == request.version;
+#endif
         const map_render_job::StopReason stopReason = renderJobs.checkpoint(
             renderWorkerShutdown.load(std::memory_order_acquire));
         const bool latest = stopReason == map_render_job::StopReason::None;
         if (completed && latest && renderJobs.completeActive()) {
+#if FIRMWARE_DIAGNOSTICS
+          renderer_diagnostics::noteJobForWindow(
+              request.version.diagnosticsWindowId,
+              renderer_diagnostics::JobEvent::Completed);
+#endif
           readyRenderResult = result;
           readyRenderResultValid = true;
           MAPIO_LOG(
@@ -4492,10 +4493,21 @@ void Maps::renderWorkerLoop() {
               (unsigned long)result.psramFree,
               (unsigned long)result.psramLargest);
         } else {
+#if FIRMWARE_DIAGNOSTICS
+          // Screen teardown may already have invalidated and accounted for
+          // this active job while the worker was outside the mutex. Do not
+          // count the same cancellation again when it reaches this boundary.
+          if (activeJobStillTracked) {
+            renderer_diagnostics::noteJobForWindow(
+                request.version.diagnosticsWindowId,
+                renderer_diagnostics::JobEvent::Cancelled);
+          }
+#endif
           renderJobs.cancelActive();
 #if FIRMWARE_DIAGNOSTICS
           if (stopReason != map_render_job::StopReason::None)
-            renderer_diagnostics::noteInterrupted();
+            renderer_diagnostics::noteInterruptedForWindow(
+                request.version.diagnosticsWindowId);
 #endif
           // Supersession and shutdown are normal scheduling events. Only an
           // actual render/invariant failure asks the UI to retry the last good
@@ -4510,10 +4522,6 @@ void Maps::renderWorkerLoop() {
               completed ? 1U : 0U, static_cast<unsigned>(stopReason),
               (unsigned long)(millis() - startMs));
         }
-#if FIRMWARE_DIAGNOSTICS
-        renderer_diagnostics::noteJobs(
-            rendererJobCounters(renderJobs.diagnostics()));
-#endif
         xSemaphoreGive(renderStateMutex);
       }
 
@@ -4531,14 +4539,17 @@ void Maps::renderWorkerLoop() {
 
   if (renderStateMutex != nullptr &&
       xSemaphoreTake(renderStateMutex, portMAX_DELAY) == pdTRUE) {
+#if FIRMWARE_DIAGNOSTICS
+    if (renderJobs.state() == map_render_job::State::Rendering) {
+      renderer_diagnostics::noteJobForWindow(
+          renderJobs.active().diagnosticsWindowId,
+          renderer_diagnostics::JobEvent::Cancelled);
+    }
+#endif
     renderJobs.cancelActive();
     readyRenderResultValid = false;
     latestRenderRequestValid = false;
     renderWorkerTaskHandle = nullptr;
-#if FIRMWARE_DIAGNOSTICS
-    renderer_diagnostics::noteJobs(
-        rendererJobCounters(renderJobs.diagnostics()));
-#endif
     xSemaphoreGive(renderStateMutex);
   } else {
     renderWorkerTaskHandle = nullptr;
@@ -4564,12 +4575,13 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
     return false;
   }
   if (!renderResultStillCurrent(readyRenderResult)) {
+#if FIRMWARE_DIAGNOSTICS
+    renderer_diagnostics::noteJobForWindow(
+        readyRenderResult.version.diagnosticsWindowId,
+        renderer_diagnostics::JobEvent::Stale);
+#endif
     renderJobs.rejectReadyAsStale();
     readyRenderResultValid = false;
-#if FIRMWARE_DIAGNOSTICS
-    renderer_diagnostics::noteJobs(
-        rendererJobCounters(renderJobs.diagnostics()));
-#endif
     const TaskHandle_t worker = renderWorkerTaskHandle;
     xSemaphoreGive(renderStateMutex);
     if (worker != nullptr)
@@ -4604,15 +4616,17 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
             rotationDelta, MAP_RENDER_SAFETY_PIXELS,
             MAP_RENDER_ROUND_VIEWPORT);
     if (!covered) {
+#if FIRMWARE_DIAGNOSTICS
+      renderer_diagnostics::noteJobForWindow(
+          readyRenderResult.version.diagnosticsWindowId,
+          renderer_diagnostics::JobEvent::Stale);
+      renderer_diagnostics::noteCoverageRejectedForWindow(
+          readyRenderResult.version.diagnosticsWindowId);
+#endif
       renderJobs.rejectReadyAsStale();
       readyRenderResultValid = false;
       isPosMoved = true;
       redrawMap = true;
-#if FIRMWARE_DIAGNOSTICS
-      renderer_diagnostics::noteCoverageRejected();
-      renderer_diagnostics::noteJobs(
-          rendererJobCounters(renderJobs.diagnostics()));
-#endif
       const TaskHandle_t worker = renderWorkerTaskHandle;
       xSemaphoreGive(renderStateMutex);
       if (worker != nullptr)
@@ -4630,13 +4644,14 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
       bufMapScreen == nullptr || bufMapTemp == nullptr ||
       requiredFrameBytes > bufMapScreenSize ||
       requiredFrameBytes > bufMapTempSize) {
+#if FIRMWARE_DIAGNOSTICS
+    renderer_diagnostics::noteJobForWindow(
+        readyRenderResult.version.diagnosticsWindowId,
+        renderer_diagnostics::JobEvent::InvariantFailed);
+#endif
     renderJobs.rejectReadyAsInvariant();
     readyRenderResultValid = false;
     renderFailurePending = true;
-#if FIRMWARE_DIAGNOSTICS
-    renderer_diagnostics::noteJobs(
-        rendererJobCounters(renderJobs.diagnostics()));
-#endif
     const TaskHandle_t worker = renderWorkerTaskHandle;
     ESP_LOGE(TAG,
              "Map render publication invariant failed required=%u front=%u "
@@ -4657,14 +4672,16 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
     xSemaphoreGive(renderStateMutex);
     return false;
   }
+#if FIRMWARE_DIAGNOSTICS
+  renderer_diagnostics::noteJobForWindow(
+      publishedVersion.diagnosticsWindowId,
+      renderer_diagnostics::JobEvent::Published);
+#endif
   result = readyRenderResult;
   readyRenderResultValid = false;
   std::swap(bufMapScreen, bufMapTemp);
   std::swap(bufMapScreenSize, bufMapTempSize);
   const map_render_job::Diagnostics jobDiagnostics = renderJobs.diagnostics();
-#if FIRMWARE_DIAGNOSTICS
-  renderer_diagnostics::noteJobs(rendererJobCounters(jobDiagnostics));
-#endif
   xSemaphoreGive(renderStateMutex);
 
   const uint32_t swapStartedUs = micros();
@@ -5550,6 +5567,11 @@ bool Maps::requestVectorMapFolderActivation(const std::string &folder) {
   gMapRenderCancellationGeneration.fetch_add(1, std::memory_order_acq_rel);
   renderJobs.requestCancellation();
   if (renderJobs.state() == map_render_job::State::Ready) {
+#if FIRMWARE_DIAGNOSTICS
+    renderer_diagnostics::noteJobForWindow(
+        renderJobs.ready().diagnosticsWindowId,
+        renderer_diagnostics::JobEvent::Stale);
+#endif
     renderJobs.rejectReadyAsStale();
     readyRenderResultValid = false;
   }
@@ -5673,6 +5695,17 @@ void Maps::deleteMapScrSprites() {
       xSemaphoreTake(renderStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
     gMapRenderCancellationGeneration.fetch_add(1, std::memory_order_acq_rel);
     renderJobs.requestCancellation();
+#if FIRMWARE_DIAGNOSTICS
+    if (renderJobs.state() == map_render_job::State::Rendering) {
+      renderer_diagnostics::noteJobForWindow(
+          renderJobs.active().diagnosticsWindowId,
+          renderer_diagnostics::JobEvent::Cancelled);
+    } else if (renderJobs.state() == map_render_job::State::Ready) {
+      renderer_diagnostics::noteJobForWindow(
+          renderJobs.ready().diagnosticsWindowId,
+          renderer_diagnostics::JobEvent::Stale);
+    }
+#endif
     const map_render_job::Version invalidated = renderJobs.invalidate();
     gMapRenderLatestSequence.store(invalidated.sequence,
                                    std::memory_order_release);

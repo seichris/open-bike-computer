@@ -137,6 +137,14 @@ complete frames per second into one session-scoped PSRAM snapshot. If the
 browser holds that snapshot for transmission, the physical display completes
 normally and the capture is counted as skipped.
 
+Persistent authenticated connections are reusable only after the complete
+declared response boundary is written. A short write, exhausted no-progress
+deadline, disconnect, or handler-side revocation marks the response aborted,
+forces the TLS connection closed, and suppresses any fallback status on that
+stream. Frame handling releases its snapshot on every outcome. The renderer
+metrics expose only bounded timing and byte/write counters for this path; they
+never include the token, certificate, Wi-Fi identity, or protected payload.
+
 ## Automation CLI
 
 `esp32/tools/device_debug.py` operates only on an already-established secure

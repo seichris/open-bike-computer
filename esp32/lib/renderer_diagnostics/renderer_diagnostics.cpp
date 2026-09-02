@@ -4,6 +4,7 @@
 
 #include "../ble_navigation/device_ownership_crypto_resource.hpp"
 
+#include <Arduino.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 
@@ -223,12 +224,11 @@ bool sessionActive() {
 
 bool beginWindow(uint32_t windowId, const RunIdentity &identity,
                  renderer_tuning::Profile profile, uint32_t nowMs,
-                 const JobCounters &currentJobs,
                  uint32_t currentGpsPacketSequence) {
   portENTER_CRITICAL(&diagnosticsMux);
   const bool accepted = diagnosticsState != nullptr &&
                         diagnosticsState->beginWindow(
-                            windowId, identity, profile, nowMs, currentJobs,
+                            windowId, identity, profile, nowMs,
                             currentGpsPacketSequence);
   if (accepted)
     lastPeriodicMemorySampleMs = nowMs;
@@ -299,24 +299,25 @@ bool noteRenderForWindow(uint32_t windowId,
   return accepted;
 }
 
-void noteJobs(const JobCounters &jobs) {
+bool noteJobForWindow(uint32_t windowId, JobEvent event) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  const bool accepted = diagnosticsState != nullptr &&
+                        diagnosticsState->noteJobForWindow(windowId, event);
+  portEXIT_CRITICAL(&diagnosticsMux);
+  return accepted;
+}
+
+void noteInterruptedForWindow(uint32_t windowId) {
   portENTER_CRITICAL(&diagnosticsMux);
   if (diagnosticsState != nullptr)
-    diagnosticsState->noteJobs(jobs);
+    diagnosticsState->noteInterruptedForWindow(windowId);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
-void noteInterrupted() {
+void noteCoverageRejectedForWindow(uint32_t windowId) {
   portENTER_CRITICAL(&diagnosticsMux);
   if (diagnosticsState != nullptr)
-    diagnosticsState->noteInterrupted();
-  portEXIT_CRITICAL(&diagnosticsMux);
-}
-
-void noteCoverageRejected() {
-  portENTER_CRITICAL(&diagnosticsMux);
-  if (diagnosticsState != nullptr)
-    diagnosticsState->noteCoverageRejected();
+    diagnosticsState->noteCoverageRejectedForWindow(windowId);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
@@ -353,12 +354,16 @@ void noteRemoteDebug(const RemoteDebugOverhead &overhead) {
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
-Snapshot snapshot(uint32_t nowMs) {
+Snapshot snapshot() {
   const MemorySample memory = memorySample();
   portENTER_CRITICAL(&diagnosticsMux);
   Snapshot value;
   if (diagnosticsState != nullptr) {
     diagnosticsState->noteMemory(memory);
+    // Capture the envelope timestamp under the same lock that protects the
+    // copied route marker. A BLE callback can no longer publish a marker with
+    // a receivedAtMs newer than its enclosing snapshot.
+    const uint32_t nowMs = millis();
     value = diagnosticsState->snapshot(nowMs);
   }
   portEXIT_CRITICAL(&diagnosticsMux);
@@ -506,6 +511,29 @@ std::string toJson(const Snapshot &value) {
        << value.remoteDebug.lastHttpResponseMs
        << ",\"maximumHttpResponseMs\":"
        << value.remoteDebug.maximumHttpResponseMs
+       << ",\"lastFrameSnapshotWaitUs\":"
+       << value.remoteDebug.lastFrameSnapshotWaitUs
+       << ",\"maximumFrameSnapshotWaitUs\":"
+       << value.remoteDebug.maximumFrameSnapshotWaitUs
+       << ",\"lastFrameCrcUs\":" << value.remoteDebug.lastFrameCrcUs
+       << ",\"maximumFrameCrcUs\":"
+       << value.remoteDebug.maximumFrameCrcUs
+       << ",\"lastHttpExpectedBytes\":"
+       << value.remoteDebug.lastHttpExpectedBytes
+       << ",\"lastHttpActualBytes\":"
+       << value.remoteDebug.lastHttpActualBytes
+       << ",\"lastHttpWriteCalls\":"
+       << value.remoteDebug.lastHttpWriteCalls
+       << ",\"lastHttpZeroWriteCalls\":"
+       << value.remoteDebug.lastHttpZeroWriteCalls
+       << ",\"lastHttpShortWriteCalls\":"
+       << value.remoteDebug.lastHttpShortWriteCalls
+       << ",\"lastHttpActiveTlsWriteUs\":"
+       << value.remoteDebug.lastHttpActiveTlsWriteUs
+       << ",\"lastHttpNoProgressWaitMs\":"
+       << value.remoteDebug.lastHttpNoProgressWaitMs
+       << ",\"lastHttpIntentionalDelayMs\":"
+       << value.remoteDebug.lastHttpIntentionalDelayMs
        << ",\"freeBefore\":" << value.remoteDebug.freeBefore
        << ",\"largestBefore\":" << value.remoteDebug.largestBefore
        << ",\"freeAfterAllocate\":"

@@ -1039,7 +1039,21 @@ bool HttpTransferServer::handleClient(TransferClient &client,
   unlockState();
 
   HttpRequestHandler *handler = handlerForPath(request.path);
-  if (handler != nullptr && handler->handleRequest(request, client)) {
+  const bool handled =
+      handler != nullptr && handler->handleRequest(request, client);
+  // A handler Boolean identifies route ownership, while the stream records
+  // whether its response actually reached the declared boundary. Never append
+  // a second status after a partial response and never reuse that TLS stream.
+  if (client.httpResponseWriteFailed() ||
+      (client.httpResponseWriteStarted() && !handled) ||
+      (handler != nullptr && !client.connected())) {
+    client.requestHttpResponseClose();
+    client.stop();
+    if (handler != nullptr)
+      handler->responseDidAbort(request);
+    return false;
+  }
+  if (handled) {
     lockState();
     const bool authorized = currentRequestAuthorized_;
     unlockState();
@@ -1155,19 +1169,25 @@ bool sendHttpHead(TransferClient &client, int status, uint64_t contentLength,
   if (contentType != nullptr && contentType[0] != '\0') {
     const std::string value(contentType);
     if (value.find('\r') != std::string::npos ||
-        value.find('\n') != std::string::npos)
+        value.find('\n') != std::string::npos) {
+      client.noteHttpResponseWriteFailed();
       return false;
+    }
     response += "Content-Type: " + value + "\r\n";
   }
   for (size_t index = 0; index < additionalHeaderCount; ++index) {
     if (additionalHeaders == nullptr || additionalHeaders[index].name == nullptr ||
-        additionalHeaders[index].value == nullptr)
+        additionalHeaders[index].value == nullptr) {
+      client.noteHttpResponseWriteFailed();
       return false;
+    }
     const std::string name(additionalHeaders[index].name);
     const std::string value(additionalHeaders[index].value);
     if (!validHttpHeaderName(name) || value.find('\r') != std::string::npos ||
-        value.find('\n') != std::string::npos)
+        value.find('\n') != std::string::npos) {
+      client.noteHttpResponseWriteFailed();
       return false;
+    }
     response += name + ": " + value + "\r\n";
   }
   response += std::string("Connection: ") +
@@ -1181,25 +1201,37 @@ bool sendHttpHead(TransferClient &client, int status, uint64_t contentLength,
 bool writeHttpBytes(TransferClient &client, const uint8_t *data, size_t length,
                     uint32_t timeoutMs, size_t maximumChunkBytes,
                     uint32_t interChunkDelayMs) {
-  if ((data == nullptr && length != 0) || maximumChunkBytes == 0)
+  client.noteHttpResponseWriteStarted();
+  if ((data == nullptr && length != 0) || maximumChunkBytes == 0) {
+    client.noteHttpResponseWriteFailed();
     return false;
+  }
   size_t offset = 0;
   uint32_t lastProgressMs = millis();
   while (offset < length && millis() - lastProgressMs < timeoutMs) {
-    if (!client.connected())
+    if (!client.connected()) {
+      client.noteHttpResponseWriteFailed();
       return false;
+    }
     const size_t chunk = std::min(maximumChunkBytes, length - offset);
     const size_t written = client.write(data + offset, chunk);
     if (written == 0) {
+      client.noteHttpResponseNoProgressWait(1);
       vTaskDelay(pdMS_TO_TICKS(1));
       continue;
     }
     offset += written;
+    client.noteHttpResponseWriteProgress(written);
     lastProgressMs = millis();
-    if (offset < length && interChunkDelayMs != 0)
+    if (offset < length && interChunkDelayMs != 0) {
+      client.noteHttpResponseIntentionalDelay(interChunkDelayMs);
       vTaskDelay(pdMS_TO_TICKS(interChunkDelayMs));
+    }
   }
-  return offset == length;
+  const bool complete = offset == length;
+  if (!complete)
+    client.noteHttpResponseWriteFailed();
+  return complete;
 }
 
 bool sendHttpJson(TransferClient &client, int status, const std::string &body) {

@@ -8,6 +8,25 @@ namespace map_presentation {
 
 constexpr double kPi = 3.14159265358979323846;
 
+// A round panel can expose pixels outside a shorter centered map viewport.
+// Besides the ordinary safety gutter, each axis therefore needs half of the
+// viewport aspect-ratio difference. Round upward so odd-sized layouts remain
+// fail closed instead of losing the final physical pixel.
+constexpr uint16_t minimumRoundViewportOverscan(
+    uint16_t viewportWidth, uint16_t viewportHeight,
+    uint16_t safetyPixels, uint16_t baseMinimumPixels) {
+  const uint32_t difference = viewportWidth >= viewportHeight
+      ? static_cast<uint32_t>(viewportWidth - viewportHeight)
+      : static_cast<uint32_t>(viewportHeight - viewportWidth);
+  const uint32_t geometryMinimum =
+      static_cast<uint32_t>(safetyPixels) + (difference + 1U) / 2U;
+  const uint32_t required =
+      geometryMinimum > baseMinimumPixels ? geometryMinimum
+                                          : baseMinimumPixels;
+  return required > UINT16_MAX ? UINT16_MAX
+                               : static_cast<uint16_t>(required);
+}
+
 inline double normalizeDegrees(double degrees) {
   if (!std::isfinite(degrees))
     return 0.0;

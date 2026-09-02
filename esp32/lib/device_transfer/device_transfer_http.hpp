@@ -65,6 +65,7 @@ public:
   }
   virtual void responseDidComplete(const HttpRequest &request,
                                    bool peerClosedCleanly) {}
+  virtual void responseDidAbort(const HttpRequest &request) {}
 };
 
 class HttpTransferServer {

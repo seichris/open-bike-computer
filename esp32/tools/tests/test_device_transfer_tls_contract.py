@@ -201,6 +201,36 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
         ]
         self.assertIn('/device-debug/v1/session/exit', exit_policy)
 
+    def test_partial_http_response_forces_close_without_a_second_status(self):
+        handle_client = HTTP_SOURCE[
+            HTTP_SOURCE.index("bool HttpTransferServer::handleClient") :
+            HTTP_SOURCE.index("HttpRequestHandler *\nHttpTransferServer::handlerForPath")
+        ]
+        self.assertIn("client.httpResponseWriteFailed()", handle_client)
+        self.assertIn("client.httpResponseWriteStarted() && !handled", handle_client)
+        abort = handle_client.index("handler->responseDidAbort(request)")
+        not_found = handle_client.index(
+            'sendError(client, 404, "not_found"', abort
+        )
+        self.assertLess(abort, not_found)
+        self.assertIn("noteHttpResponseWriteFailed", HTTP_SOURCE)
+        self.assertIn("responseWriteFailed_ = true", TLS_HEADER)
+        self.assertIn("responseKeepAlive_ = false", TLS_HEADER)
+        self.assertIn("responseDidAbort", HTTP_HEADER)
+        self.assertIn("handler != nullptr && !client.connected()", handle_client)
+        stop = TLS_SOURCE[
+            TLS_SOURCE.index("void TransferClient::stop") :
+            TLS_SOURCE.index("} // namespace device_transfer")
+        ]
+        self.assertNotIn("responseWriteStarted_ = false", stop)
+        self.assertNotIn("responseWriteFailed_ = false", stop)
+        reset = TLS_SOURCE[
+            TLS_SOURCE.index("void TransferClient::resetHttpResponsePolicy") :
+            TLS_SOURCE.index("void TransferClient::requestHttpResponseKeepAlive")
+        ]
+        self.assertIn("responseWriteStarted_ = false", reset)
+        self.assertIn("responseWriteFailed_ = false", reset)
+
     def test_json_response_streams_body_without_rebuilding_it(self):
         send_json = HTTP_SOURCE[
             HTTP_SOURCE.index("bool sendHttpJson") :

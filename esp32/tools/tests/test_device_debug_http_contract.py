@@ -122,6 +122,19 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             window.index("xQueueOverwrite"),
         )
 
+    def test_renderer_snapshot_timestamp_is_captured_with_marker_state(self):
+        snapshot = RENDERER_DIAGNOSTICS[
+            RENDERER_DIAGNOSTICS.index("Snapshot snapshot()") :
+            RENDERER_DIAGNOSTICS.index("std::string toJson")
+        ]
+        self.assertLess(snapshot.index("portENTER_CRITICAL"), snapshot.index("millis()"))
+        self.assertLess(snapshot.index("millis()"), snapshot.index("diagnosticsState->snapshot"))
+        metrics = HTTP[
+            HTTP.index("bool DeviceDebugHttp::handleRendererMetrics") :
+            HTTP.index("bool DeviceDebugHttp::handleRendererWindow")
+        ]
+        self.assertIn("renderer_diagnostics::snapshot()", metrics)
+
     def test_renderer_metrics_expose_non_secret_crypto_resource_counters(self):
         for field in (
             r'\"cryptoCountersScope\":\"window\"',
@@ -178,6 +191,16 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertIn("transfer credentials never enter it", RENDERER_DIAGNOSTICS)
         self.assertIn("PendingMapInput *pendingSettingInputs = nullptr;", BLE)
         self.assertIn("ensurePendingSettingInputs()", BLE)
+        init = BLE[
+            BLE.index("void BLENavigationServer::init") :
+            BLE.index("void BLENavigationServer::process")
+        ]
+        allocation_failure = init.index("!ensurePendingSettingInputs()")
+        self.assertLess(allocation_failure, init.index("return;", allocation_failure))
+        self.assertLess(
+            allocation_failure,
+            init.index("initBleIdentityAndSecurity"),
+        )
 
     def test_renderer_windows_bind_the_active_map_before_profile_change(self):
         active_identity = MAIN[

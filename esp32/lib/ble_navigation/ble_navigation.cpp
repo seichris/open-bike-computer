@@ -2600,8 +2600,8 @@ static void notifyRendererDiagnosticsStatus(NimBLECharacteristic *pChar) {
     return;
   }
 
-  const std::string body = renderer_diagnostics::toJson(
-      renderer_diagnostics::snapshot(millis()));
+  const std::string body =
+      renderer_diagnostics::toJson(renderer_diagnostics::snapshot());
   if (body.empty()) {
     Serial.println(
         "BLE Renderer Diagnostics: snapshot serialization unavailable");
@@ -5476,6 +5476,10 @@ void BLENavigationServer::init(const char *deviceName) {
 
   if (!ensurePendingSettingInputs()) {
     Serial.println("BLE: failed to allocate map setting mailbox in PSRAM");
+    // Settings are advertised by the normal navigation service. Do not bring
+    // up a partially functional service that will authenticate successfully
+    // and then reject every settings packet.
+    return;
   }
 
   if (pendingMapInputMutex == nullptr) {

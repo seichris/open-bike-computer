@@ -710,6 +710,5 @@ public:
   renderer_tuning::Profile rendererTuningProfile() const {
     return rendererTuningProfile_;
   }
-  renderer_diagnostics::JobCounters rendererDiagnosticsJobCounters() const;
   bool takeStreetLabelRuntimeFailure(std::string &code);
 };

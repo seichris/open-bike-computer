@@ -86,6 +86,13 @@ candidate's overscan,
 then swaps the raw pointers under the render-state mutex. LVGL rebinding happens
 on the UI task after the mutex is released.
 
+The adaptive render request may use less than the 96-pixel allocation, but its
+minimum is derived from the visible geometry without weakening publication.
+The 466 x 466 round viewport retains a 64-pixel floor. The supported 466 x 366
+toolbar layout needs 16 safety pixels plus half of the 100-pixel aspect-ratio
+difference, so it uses at least 66 pixels; a 64-pixel source would fail the
+unchanged circular coverage proof by two pixels even when perfectly centered.
+
 The old complete frame remains visible while a replacement renders. The UI
 translates it continuously using the current `PresentedPose`. Course-up rotates
 it by the difference between the frame heading and the current presented

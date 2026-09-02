@@ -25,6 +25,16 @@ struct TransferTlsIdentity {
   bool valid() const;
 };
 
+struct HttpResponseWriteDiagnostics {
+  size_t bytesWritten = 0;
+  uint32_t writeCalls = 0;
+  uint32_t zeroWriteCalls = 0;
+  uint32_t shortWriteCalls = 0;
+  uint32_t activeTlsWriteUs = 0;
+  uint32_t noProgressWaitMs = 0;
+  uint32_t intentionalDelayMs = 0;
+};
+
 enum class TransferTlsFailureStage : uint8_t {
   None = 0,
   Input,
@@ -116,6 +126,30 @@ public:
   void markHttpRequestBodyConsumed() { requestBodyConsumed_ = true; }
   void requestHttpResponseKeepAlive();
   void requestHttpResponseClose() { responseKeepAlive_ = false; }
+  void noteHttpResponseWriteStarted() { responseWriteStarted_ = true; }
+  void noteHttpResponseWriteProgress(size_t bytes) {
+    responseBytesWritten_ += bytes;
+  }
+  void noteHttpResponseNoProgressWait(uint32_t milliseconds) {
+    responseNoProgressWaitMs_ += milliseconds;
+  }
+  void noteHttpResponseIntentionalDelay(uint32_t milliseconds) {
+    responseIntentionalDelayMs_ += milliseconds;
+  }
+  void noteHttpResponseWriteFailed() {
+    responseWriteStarted_ = true;
+    responseWriteFailed_ = true;
+    responseKeepAlive_ = false;
+  }
+  bool httpResponseWriteStarted() const { return responseWriteStarted_; }
+  bool httpResponseWriteFailed() const { return responseWriteFailed_; }
+  size_t httpResponseBytesWritten() const { return responseBytesWritten_; }
+  HttpResponseWriteDiagnostics httpResponseWriteDiagnostics() const {
+    return {responseBytesWritten_, responseWriteCalls_,
+            responseZeroWriteCalls_, responseShortWriteCalls_,
+            responseActiveTlsWriteUs_, responseNoProgressWaitMs_,
+            responseIntentionalDelayMs_};
+  }
   bool httpResponseKeepAlive() const {
     return responseKeepAlive_ && requestBodyConsumed_;
   }
@@ -135,6 +169,15 @@ private:
   bool responsePersistenceAllowed_ = false;
   bool responseKeepAlive_ = false;
   bool requestBodyConsumed_ = true;
+  bool responseWriteStarted_ = false;
+  bool responseWriteFailed_ = false;
+  size_t responseBytesWritten_ = 0;
+  uint32_t responseWriteCalls_ = 0;
+  uint32_t responseZeroWriteCalls_ = 0;
+  uint32_t responseShortWriteCalls_ = 0;
+  uint32_t responseActiveTlsWriteUs_ = 0;
+  uint32_t responseNoProgressWaitMs_ = 0;
+  uint32_t responseIntentionalDelayMs_ = 0;
   TransferTlsHandshakeDiagnostics handshakeDiagnostics_;
 };
 

@@ -22,11 +22,6 @@ RunIdentity runIdentity(const char *routeHash) {
   return identity;
 }
 
-JobCounters jobs(uint32_t offset) {
-  return {10U + offset, 9U + offset, 8U + offset, 7U + offset,
-          6U + offset, 5U + offset, 4U + offset};
-}
-
 } // namespace
 
 int main() {
@@ -75,14 +70,13 @@ int main() {
   build.bootId = 0x12345678;
   build.resetReason = 1;
   state.configureBuild(build);
-  state.noteJobs(jobs(0));
   state.beginSession(true);
 
   constexpr const char *kRouteHash =
       "000102030405060708090a0b0c0d0e0f"
       "101112131415161718191a1b1c1d1e1f";
   assert(state.beginWindow(41, runIdentity(kRouteHash), Profile::Medium, 1000,
-                           jobs(0), 10));
+                           10));
   assert(state.measurementWindowId() == 41);
   assert(!state.noteRenderForWindow(40, Profile::Medium, {}));
   assert(!state.noteRenderForWindow(41, Profile::High, {}));
@@ -104,8 +98,10 @@ int main() {
   state.notePrediction(true, false);
   state.notePrediction(true, false);
   state.notePrediction(false, true);
-  state.noteInterrupted();
-  state.noteCoverageRejected();
+  state.noteInterruptedForWindow(40);
+  state.noteCoverageRejectedForWindow(40);
+  state.noteInterruptedForWindow(41);
+  state.noteCoverageRejectedForWindow(41);
 
   RenderSample render;
   render.totalMs = 620;
@@ -118,7 +114,13 @@ int main() {
                                            LimiterExtrudedPixels),
                       false};
   assert(state.noteRenderForWindow(41, Profile::Medium, render));
-  state.noteJobs(jobs(3));
+  for (int index = 0; index < 3; ++index) {
+    assert(state.noteJobForWindow(41, JobEvent::Requested));
+    assert(state.noteJobForWindow(41, JobEvent::Started));
+    assert(state.noteJobForWindow(41, JobEvent::Completed));
+    assert(state.noteJobForWindow(41, JobEvent::Published));
+  }
+  assert(!state.noteJobForWindow(40, JobEvent::Requested));
 
   uint8_t routeHash[32]{};
   for (size_t index = 0; index < sizeof(routeHash); ++index)
@@ -128,8 +130,33 @@ int main() {
   assert(!state.noteRouteMarker(routeHash, sizeof(routeHash), 12, 90, 1, 2000));
   routeHash[0] = 0;
   assert(state.noteRouteMarker(routeHash, sizeof(routeHash), 12, 90, 1, 2001));
-  state.noteRemoteDebug({true, 434312, 7, 1, 2, 0, 1500, 2300, 12, 18,
-                         3000000, 2100000, 2550000, 1800000});
+  RemoteDebugOverhead remoteDebug;
+  remoteDebug.active = true;
+  remoteDebug.snapshotBytes = 434312;
+  remoteDebug.captured = 7;
+  remoteDebug.skippedCadence = 1;
+  remoteDebug.skippedLocked = 2;
+  remoteDebug.lastCopyUs = 1500;
+  remoteDebug.maximumCopyUs = 2300;
+  remoteDebug.lastHttpResponseMs = 12;
+  remoteDebug.maximumHttpResponseMs = 18;
+  remoteDebug.lastFrameSnapshotWaitUs = 110;
+  remoteDebug.maximumFrameSnapshotWaitUs = 220;
+  remoteDebug.lastFrameCrcUs = 330;
+  remoteDebug.maximumFrameCrcUs = 440;
+  remoteDebug.lastHttpExpectedBytes = 434344;
+  remoteDebug.lastHttpActualBytes = 434344;
+  remoteDebug.lastHttpWriteCalls = 215;
+  remoteDebug.lastHttpZeroWriteCalls = 4;
+  remoteDebug.lastHttpShortWriteCalls = 3;
+  remoteDebug.lastHttpActiveTlsWriteUs = 500000;
+  remoteDebug.lastHttpNoProgressWaitMs = 1200;
+  remoteDebug.lastHttpIntentionalDelayMs = 212;
+  remoteDebug.freeBefore = 3000000;
+  remoteDebug.largestBefore = 2100000;
+  remoteDebug.freeAfterAllocate = 2550000;
+  remoteDebug.largestAfterAllocate = 1800000;
+  state.noteRemoteDebug(remoteDebug);
 
   const Snapshot snapshot = state.snapshot(2500);
   assert(snapshot.sequence == 1);
@@ -155,6 +182,8 @@ int main() {
   assert(snapshot.predictionGraceEntries == 1);
   assert(snapshot.predictionExhaustionEntries == 1);
   assert(snapshot.jobs.requested == 3);
+  assert(snapshot.jobs.started == 3);
+  assert(snapshot.jobs.completed == 3);
   assert(snapshot.jobs.published == 3);
   assert(snapshot.interrupted == 1);
   assert(snapshot.coverageRejected == 1);
@@ -165,6 +194,10 @@ int main() {
   assert(snapshot.routeMarker.rejected == 2);
   assert(snapshot.routeFixtureMatches);
   assert(snapshot.remoteDebug.snapshotBytes == 434312);
+  assert(snapshot.remoteDebug.lastHttpExpectedBytes == 434344);
+  assert(snapshot.remoteDebug.lastHttpActualBytes == 434344);
+  assert(snapshot.remoteDebug.lastHttpZeroWriteCalls == 4);
+  assert(snapshot.remoteDebug.lastHttpActiveTlsWriteUs == 500000);
 
   RenderSample allocationFailure;
   allocationFailure.buildings.allocationFallback = true;
@@ -174,7 +207,8 @@ int main() {
   assert(latchedFailure.buildings.allocationFallback);
 
   assert(state.beginWindow(42, runIdentity(kRouteHash), Profile::Flat, 3000,
-                           jobs(3), 13));
+                           13));
+  assert(!state.noteJobForWindow(41, JobEvent::Completed));
   state.noteMemory({0, 0, 0, 0, 0, 0, 0, 0, 8, 13});
   state.noteMemory({100, 100, 100, 100, 100, 100, 100, 100, 9, 15});
   const Snapshot reset = state.snapshot(3001);
@@ -199,7 +233,7 @@ int main() {
   assert(ended.measurementWindowId == 0);
   assert(!ended.remoteDebug.active);
   assert(!state.beginWindow(43, runIdentity(kRouteHash), Profile::High, 4001,
-                            jobs(3), 13));
+                            13));
   assert(state.measurementWindowId() == 0);
 
   BoundedText<5> bounded;

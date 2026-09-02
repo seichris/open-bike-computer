@@ -22,6 +22,13 @@ candidate selection, not permission to change the default profile.
   building selection/reach, quota limiters, allocation fallback, GPS packet
   cadence, route-marker freshness, reset identity, and remote-debug capture
   overhead;
+- DEBUG-app replay-timer lateness plus cumulative, class-bounded BLE queue,
+  coalescing, backpressure, in-flight acknowledged-write, completion, error,
+  and timeout evidence; these fields contain no characteristic values,
+  credentials, network details, or protected payloads;
+- frame-service snapshot-lock wait, CRC time, expected/actual body bytes, TLS
+  write calls, short/zero writes, active TLS-write time, no-progress wait, and
+  intentional inter-chunk delay;
 - four deterministic screenshots per comparison window, each captured after
   and timestamp-bound to its observed route marker;
 - absolute and relative rejection gates, a Pareto frontier, and a 300-second or
@@ -141,8 +148,12 @@ The checked-in gate file is
 DMA-capable block, and 1.5 MB free/750 KiB largest PSRAM block. The DMA floor
 protects task-stack and hardware-crypto allocations that cannot fall back to
 PSRAM; any crypto headroom rejection or operation failure also rejects the
-run. Firmware baselines the lifetime diagnostics when each window begins, so a
-prior run cannot be attributed to every later profile. It requires a dense view
+run. Every render request captures its diagnostics-window ID and only job
+events carrying the active ID enter that window's counters. Work started before
+a profile transition therefore cannot appear as a completion or publication
+in the next run. The snapshot envelope timestamp is captured under the same
+critical section as the copied route marker, so a snapshot cannot contain a
+marker newer than its own timestamp. It requires a dense view
 (at least 40 median candidates, 24
 selected buildings, and 16 extrusions in every non-flat profile), so a wrong
 map, screen, or disabled-3D setup cannot pass as a useful baseline. It also
