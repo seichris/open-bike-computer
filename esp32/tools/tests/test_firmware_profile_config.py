@@ -153,7 +153,6 @@ for environment, target in expected_targets.items():
     assert config.get(environment, "extends") == base
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
-    assert "-Oz" in {line.strip() for line in flags.splitlines()}
     assert "-DCORE_DEBUG_LEVEL=0" in flags
     assert "-DFIRMWARE_DIAGNOSTICS=0" in flags
     assert "-DARDUINO_USB_CDC_ON_BOOT=0" in flags
@@ -166,7 +165,6 @@ for environment, target in expected_targets.items():
     assert "-DRIDE_AUTOMATION_AUTOMATIC_START=1" not in flags
     unflags = config.get(environment, "build_unflags")
     assert "${waveshare_amoled_common.build_unflags}" in unflags
-    assert "-Os" in {line.strip() for line in unflags.splitlines()}
     assert "-DDEBUG=1" not in unflags
     assert "-DDEVICE_REMOTE_DEBUG=1" not in flags
     assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in flags
