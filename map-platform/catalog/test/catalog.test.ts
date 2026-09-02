@@ -2825,6 +2825,11 @@ describe("catalog lifecycle boundaries", () => {
   });
 
   it("retains an unrevoked share through expiry plus the configured grace", async () => {
+    const dayMilliseconds = 24 * 60 * 60 * 1000;
+    const expiresAt = new Date(Date.now() + 90 * dayMilliseconds);
+    const withinGrace = new Date(expiresAt.getTime() + 14 * dayMilliseconds);
+    const afterGrace = new Date(expiresAt.getTime() + 31 * dayMilliseconds);
+    const staleUpdatedAt = new Date(expiresAt.getTime() - 365 * dayMilliseconds);
     const shared = publication();
     shared.publicationId = "job-share-retention";
     shared.mapEntryId = `map_v1_${"h".repeat(43)}`;
@@ -2854,18 +2859,18 @@ describe("catalog lifecycle boundaries", () => {
       env,
       library.libraryId,
       shared.mapEntryId,
-      "2026-09-01T00:00:00.000Z",
+      expiresAt.toISOString(),
     );
     await detachLibraryMap(env, library.libraryId, shared.mapEntryId);
     await env.DB.prepare("UPDATE map_entries SET updated_at = ? WHERE id = ?")
-      .bind("2026-01-01T00:00:00.000Z", shared.mapEntryId)
+      .bind(staleUpdatedAt.toISOString(), shared.mapEntryId)
       .run();
 
     await prepareRetentionAuthorizations(
       { ...env, RETENTION_GRACE_DAYS: "30" },
       "production",
       10,
-      new Date("2026-09-15T00:00:00.000Z"),
+      withinGrace,
     );
     const protectedArtifact = await env.DB.prepare(
       "SELECT state FROM artifacts WHERE id = ?",
@@ -2878,7 +2883,7 @@ describe("catalog lifecycle boundaries", () => {
       { ...env, RETENTION_GRACE_DAYS: "30" },
       "production",
       10,
-      new Date("2026-10-02T00:00:00.000Z"),
+      afterGrace,
     );
     const tombstonedArtifact = await env.DB.prepare(
       "SELECT state FROM artifacts WHERE id = ?",
