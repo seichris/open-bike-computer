@@ -79,10 +79,10 @@ int main() {
   assert(!state.noteRenderForWindow(41, Profile::High, {}));
   state.noteMemory(
       {48000, 41000, 30000, 2800000, 1900000, 24576, 20000, 12288,
-       0, 0});
+       7, 11});
   state.noteMemory(
       {47000, 40000, 29000, 2700000, 1800000, 23552, 19000, 11264,
-       1, 2});
+       8, 13});
   state.noteUiLoopGap(87);
   state.noteUiLoopGap(42);
   state.noteDisplayFlushUs(84001);
@@ -177,8 +177,8 @@ int main() {
 
   assert(state.beginWindow(42, runIdentity(kRouteHash), Profile::Flat, 3000,
                            jobs(3), 13));
-  state.noteMemory({0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
-  state.noteMemory({100, 100, 100, 100, 100, 100, 100, 100, 0, 0});
+  state.noteMemory({0, 0, 0, 0, 0, 0, 0, 0, 8, 13});
+  state.noteMemory({100, 100, 100, 100, 100, 100, 100, 100, 9, 15});
   const Snapshot reset = state.snapshot(3001);
   assert(reset.measurementWindowId == 42);
   assert(reset.sequence == 3);
@@ -190,6 +190,8 @@ int main() {
   assert(reset.windowMinimumInternalFree == 0);
   assert(reset.windowMinimumPsramFree == 0);
   assert(reset.windowMinimumDmaFree == 0);
+  assert(reset.memory.cryptoHeadroomRejections == 1);
+  assert(reset.memory.cryptoOperationFailures == 2);
   assert(!reset.buildings.allocationFallback);
   assert(reset.profile == Profile::Flat);
   assert(reset.remoteDebug.active);

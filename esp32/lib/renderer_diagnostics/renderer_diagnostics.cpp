@@ -333,6 +333,7 @@ std::string toJson(const Snapshot &value) {
        << ",\"windowMinimumFree\":" << value.windowMinimumDmaFree
        << ",\"windowMinimumLargestBlock\":"
        << value.windowMinimumDmaLargest
+       << ",\"cryptoCountersScope\":\"window\""
        << ",\"cryptoHeadroomRejections\":"
        << value.memory.cryptoHeadroomRejections
        << ",\"cryptoOperationFailures\":"
