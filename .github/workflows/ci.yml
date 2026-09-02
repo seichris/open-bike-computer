@@ -547,6 +547,20 @@ jobs:
             tools/tests/test_device_capabilities_protocol.cpp \
             -o /tmp/test_device_capabilities_protocol
           /tmp/test_device_capabilities_protocol
+      - name: Screen configuration protocol and Ride Stats widget host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_screen_configuration_protocol.cpp \
+            -o /tmp/test_screen_configuration_protocol
+          /tmp/test_screen_configuration_protocol
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_screen_configuration_policy.cpp \
+            -o /tmp/test_screen_configuration_policy
+          /tmp/test_screen_configuration_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_ride_stats_widget.cpp \
+            -o /tmp/test_ride_stats_widget
+          /tmp/test_ride_stats_widget
       - name: Ride controller lease host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \

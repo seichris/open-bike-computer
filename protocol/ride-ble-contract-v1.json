@@ -8,7 +8,8 @@
     "settings": "2A73",
     "auth": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002",
     "workout": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
-    "ride_automation": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004"
+    "ride_automation": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004",
+    "screen_configuration": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005"
   },
   "protected_frame_overhead": 22,
   "protected_channels": {
@@ -18,7 +19,8 @@
     "gps": 4,
     "settings": 5,
     "workout": 6,
-    "ride_automation": 7
+    "ride_automation": 7,
+    "screen_configuration": 8
   },
   "controller_roles": {
     "none": 0,
@@ -29,7 +31,7 @@
     "request_magic": "CAPS",
     "response_magic": "CAP2",
     "response_schema_version": 1,
-    "current_client_version": 20,
+    "current_client_version": 21,
     "features": {
       "device_sounds": {"bit": 0, "minimum_client_version": 1},
       "power_button_honk": {"bit": 1, "minimum_client_version": 1},
@@ -53,7 +55,29 @@
       "automatic_display_off": {"bit": 19, "minimum_client_version": 16},
       "ride_diagnostics": {"bit": 20, "minimum_client_version": 18},
       "detailed_ride_diagnostics": {"bit": 21, "minimum_client_version": 19},
-      "ride_delivery_ack": {"bit": 22, "minimum_client_version": 20}
+      "ride_delivery_ack": {"bit": 22, "minimum_client_version": 20},
+      "screen_configuration_v1": {"bit": 23, "minimum_client_version": 21}
+    }
+  },
+  "screen_configuration": {
+    "schema_version": 1,
+    "capability_tlv_type": 2,
+    "maximum_instances": 16,
+    "maximum_name_bytes": 24,
+    "ride_stats_slot_count": 7,
+    "maximum_document_bytes": 4096,
+    "request_magic": "SCRQ",
+    "upload_magic": "SCUP",
+    "download_magic": "SCDN",
+    "ack_magic": "SCAK",
+    "results": {
+      "applied": 0,
+      "conflict": 1,
+      "malformed": 2,
+      "unsupported": 3,
+      "persistence_failed": 4,
+      "busy": 5,
+      "unauthorized": 6
     }
   },
   "device_requests": {

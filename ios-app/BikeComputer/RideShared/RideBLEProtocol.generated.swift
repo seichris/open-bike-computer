@@ -10,11 +10,12 @@ enum RideBLEGeneratedProtocolV1 {
     static let authUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002"
     static let workoutUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003"
     static let rideAutomationUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004"
+    static let screenConfigurationUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005"
     static let protectedFrameOverhead = 22
     static let capabilityRequestMagic = "CAPS"
     static let capabilityResponseMagic = "CAP2"
     static let capabilitySchemaVersion: UInt8 = 1
-    static let currentClientVersion: UInt8 = 20
+    static let currentClientVersion: UInt8 = 21
     static let deviceSoundsFeature: UInt32 = 1 << 0
     static let deviceSoundsMinimumClientVersion: UInt8 = 1
     static let powerButtonHonkFeature: UInt32 = 1 << 1
@@ -61,6 +62,18 @@ enum RideBLEGeneratedProtocolV1 {
     static let detailedRideDiagnosticsMinimumClientVersion: UInt8 = 19
     static let rideDeliveryAckFeature: UInt32 = 1 << 22
     static let rideDeliveryAckMinimumClientVersion: UInt8 = 20
+    static let screenConfigurationV1Feature: UInt32 = 1 << 23
+    static let screenConfigurationV1MinimumClientVersion: UInt8 = 21
+    static let screenConfigurationSchemaVersion: UInt8 = 1
+    static let screenConfigurationCapabilityTLVType: UInt8 = 2
+    static let maximumScreenConfigurationInstances = 16
+    static let maximumScreenConfigurationNameBytes = 24
+    static let rideStatsConfigurationSlotCount = 7
+    static let maximumScreenConfigurationDocumentBytes = 4096
+    static let screenConfigurationRequestMagic = "SCRQ"
+    static let screenConfigurationUploadMagic = "SCUP"
+    static let screenConfigurationDownloadMagic = "SCDN"
+    static let screenConfigurationAcknowledgementMagic = "SCAK"
     static let workoutStartRequestMagic = "WREQ"
     static let destinationRequestMagic = "DREQ"
     static let applicationCommandMagic = "RCM1"
@@ -82,6 +95,7 @@ enum RideBLEGeneratedProtectedChannelV1: UInt8, Sendable {
     case settings = 5
     case workout = 6
     case rideAutomation = 7
+    case screenConfiguration = 8
 }
 
 enum RideBLEGeneratedControllerRoleV1: UInt8, Sendable {
@@ -102,4 +116,14 @@ enum RideBLEApplicationResultV1: UInt8, Equatable, Sendable {
     case unauthorized = 3
     case malformed = 4
     case resourceRejected = 5
+}
+
+enum RideBLEScreenConfigurationResultV1: UInt8, Equatable, Sendable {
+    case applied = 0
+    case conflict = 1
+    case malformed = 2
+    case unsupported = 3
+    case persistenceFailed = 4
+    case busy = 5
+    case unauthorized = 6
 }

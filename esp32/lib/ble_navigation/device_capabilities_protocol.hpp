@@ -33,6 +33,8 @@ constexpr uint8_t DETAILED_RIDE_DIAGNOSTICS_CLIENT_VERSION =
         DETAILED_RIDE_DIAGNOSTICS_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t RIDE_DELIVERY_ACK_CLIENT_VERSION =
     ride_ble_protocol_generated::RIDE_DELIVERY_ACK_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t SCREEN_CONFIGURATION_CLIENT_VERSION =
+    ride_ble_protocol_generated::SCREEN_CONFIGURATION_V1_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t CAP2_SCHEMA_VERSION =
     ride_ble_protocol_generated::CAPABILITY_SCHEMA_VERSION;
 constexpr uint32_t STREET_LABELS_FEATURE =
@@ -69,20 +71,27 @@ constexpr uint32_t DETAILED_RIDE_DIAGNOSTICS_FEATURE =
     ride_ble_protocol_generated::DETAILED_RIDE_DIAGNOSTICS_FEATURE;
 constexpr uint32_t RIDE_DELIVERY_ACK_FEATURE =
     ride_ble_protocol_generated::RIDE_DELIVERY_ACK_FEATURE;
+constexpr uint32_t SCREEN_CONFIGURATION_FEATURE =
+    ride_ble_protocol_generated::SCREEN_CONFIGURATION_V1_FEATURE;
 constexpr uint8_t POWER_BUTTON_CONFIG_TLV = 1;
 constexpr size_t POWER_BUTTON_CONFIG_BYTES = 3;
 constexpr size_t CAP2_BASE_BYTES = 9;
+constexpr size_t SCREEN_CONFIGURATION_TLV_BYTES = 16;
 constexpr size_t CAP2_MAX_BYTES =
-    CAP2_BASE_BYTES + 2 + POWER_BUTTON_CONFIG_BYTES;
+    CAP2_BASE_BYTES + 2 + POWER_BUTTON_CONFIG_BYTES +
+    SCREEN_CONFIGURATION_TLV_BYTES;
 
 inline size_t encodeCap2(uint32_t featureFlags, const uint8_t *powerConfig,
                          bool includePowerConfig, uint8_t *output,
-                         size_t capacity) {
+                         size_t capacity, const uint8_t *additionalTLV = nullptr,
+                         size_t additionalTLVLength = 0) {
   const size_t required = CAP2_BASE_BYTES +
                           (includePowerConfig ? 2 + POWER_BUTTON_CONFIG_BYTES
-                                              : 0);
+                                              : 0) +
+                          additionalTLVLength;
   if (output == nullptr || capacity < required ||
-      (includePowerConfig && powerConfig == nullptr))
+      (includePowerConfig && powerConfig == nullptr) ||
+      (additionalTLVLength != 0 && additionalTLV == nullptr))
     return 0;
   output[0] = 'C';
   output[1] = 'A';
@@ -96,6 +105,14 @@ inline size_t encodeCap2(uint32_t featureFlags, const uint8_t *powerConfig,
     output[10] = POWER_BUTTON_CONFIG_BYTES;
     for (size_t index = 0; index < POWER_BUTTON_CONFIG_BYTES; ++index)
       output[11 + index] = powerConfig[index];
+  }
+  if (additionalTLVLength != 0) {
+    const size_t offset = CAP2_BASE_BYTES +
+                          (includePowerConfig
+                               ? 2 + POWER_BUTTON_CONFIG_BYTES
+                               : 0);
+    for (size_t index = 0; index < additionalTLVLength; ++index)
+      output[offset + index] = additionalTLV[index];
   }
   return required;
 }

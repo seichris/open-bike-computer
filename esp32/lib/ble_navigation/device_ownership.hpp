@@ -188,8 +188,8 @@ private:
 
   char pendingAuthNonce_[33] = "";
   char pendingServerAuthNonce_[33] = "";
-  std::array<uint32_t, 8> lastInboundSequence_{};
-  std::array<uint32_t, 8> nextOutboundSequence_{};
+  std::array<uint32_t, 9> lastInboundSequence_{};
+  std::array<uint32_t, 9> nextOutboundSequence_{};
 };
 
 std::string hexEncode(const uint8_t *data, size_t length);

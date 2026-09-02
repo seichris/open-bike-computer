@@ -308,6 +308,8 @@ private:
       ride_ble_protocol_generated::WORKOUT_UUID;
   static constexpr const char *RIDE_AUTOMATION_CHAR_UUID =
       ride_ble_protocol_generated::RIDE_AUTOMATION_UUID;
+  static constexpr const char *SCREEN_CONFIGURATION_CHAR_UUID =
+      ride_ble_protocol_generated::SCREEN_CONFIGURATION_UUID;
 
   NimBLEServer *pServer = nullptr;
   NimBLECharacteristic *pNavCharacteristic = nullptr;
@@ -315,12 +317,14 @@ private:
   NimBLECharacteristic *pAuthCharacteristic = nullptr;
   NimBLECharacteristic *pWorkoutTelemetryCharacteristic = nullptr;
   NimBLECharacteristic *pRideAutomationCharacteristic = nullptr;
+  NimBLECharacteristic *pScreenConfigurationCharacteristic = nullptr;
 
   friend class MyBLEServerCallbacks;
   friend class MyNavCharacteristicCallbacks;
   friend class MyRouteCharacteristicCallbacks;
   friend class MyWorkoutTelemetryCharacteristicCallbacks;
   friend class MyRideAutomationCharacteristicCallbacks;
+  friend class MyScreenConfigurationCharacteristicCallbacks;
   friend class MyAuthCharacteristicCallbacks;
 };
 

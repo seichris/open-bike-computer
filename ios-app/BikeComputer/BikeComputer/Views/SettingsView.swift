@@ -140,9 +140,16 @@ struct SettingsView: View {
                     .shouldShowDeviceScreens(
                         knownDeviceCount: bleManager.knownDevices.count
                     ) {
-                    DeviceScreensSettingsSection(
-                        offlineMapManager: offlineMapManager
-                    )
+                    if bleManager.supportsScreenConfiguration {
+                        ConfigurableDeviceScreensSettingsSection(
+                            controller: bleManager
+                                .deviceScreenConfigurationController
+                        )
+                    } else {
+                        DeviceScreensSettingsSection(
+                            offlineMapManager: offlineMapManager
+                        )
+                    }
                 }
                 SavedMapsSettingsSection(
                     manager: offlineMapManager,

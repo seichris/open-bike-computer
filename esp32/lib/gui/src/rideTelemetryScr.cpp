@@ -5,12 +5,15 @@
 
 #include "rideTelemetryScr.hpp"
 #include "../../ble_navigation/ble_navigation.hpp"
+#include "../../ble_navigation/screen_configuration.hpp"
 #include "../../ble_navigation/workout_telemetry_runtime.hpp"
 #include "bikeIcon.hpp"
 #include "gps.hpp"
 #include "rideMetricFontSelection.hpp"
 #include "rideTelemetryLayout.hpp"
 #include "rideTelemetryPresenter.hpp"
+#include "ride_stats_widget.hpp"
+#include "mainScr.hpp"
 #include "../../ride_automation/ride_automation_runtime.hpp"
 
 #include <array>
@@ -27,6 +30,16 @@ namespace {
 struct MetricLabels {
   lv_obj_t *title = nullptr;
   lv_obj_t *value = nullptr;
+};
+
+struct ConfigurableSlotView {
+  MetricLabels labels{};
+  lv_obj_t *heart = nullptr;
+  std::array<lv_obj_t *, ride_telemetry_layout::kHeartRateZoneCount>
+      zoneSegments{};
+  lv_obj_t *zoneHeart = nullptr;
+  lv_obj_t *zoneLabel = nullptr;
+  int8_t displayedZone = -2;
 };
 
 lv_obj_t *ridePage = nullptr;
@@ -56,6 +69,9 @@ lv_obj_t *rideAutomationActions = nullptr;
 ride_telemetry_layout::Layout rideLayout{};
 ride_telemetry_layout::MetricPlacement rideMetricPlacement{};
 int8_t displayedMetricLayout = -1;
+std::array<ConfigurableSlotView,
+           screen_configuration_protocol::RIDE_STATS_SLOT_COUNT>
+    configurableSlots{};
 
 bool fontSupportsText(const lv_font_t *font, const char *text) {
   for (std::size_t index = 0; text[index] != '\0'; ++index) {
@@ -404,6 +420,187 @@ void hideZonePresentation() {
   displayedZoneIndex = -2;
 }
 
+void setConfigurableSlotHidden(ConfigurableSlotView &slot, bool hidden) {
+  auto set = [hidden](lv_obj_t *object) {
+    if (object == nullptr)
+      return;
+    if (hidden)
+      lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
+    else
+      lv_obj_clear_flag(object, LV_OBJ_FLAG_HIDDEN);
+  };
+  set(slot.labels.title);
+  set(slot.labels.value);
+  set(slot.heart);
+  for (lv_obj_t *segment : slot.zoneSegments)
+    set(segment);
+  set(slot.zoneHeart);
+  set(slot.zoneLabel);
+}
+
+void createConfigurableSlot(std::size_t index) {
+  ConfigurableSlotView &slot = configurableSlots[index];
+  const auto rect =
+      ride_telemetry_layout::configurableSlotRect(rideLayout, index);
+  if (index == 0) {
+    slot.labels.value = lv_label_create(ridePage);
+    lv_obj_set_width(slot.labels.value, rideLayout.hero.width);
+    lv_obj_set_pos(slot.labels.value, rideLayout.hero.x, rideLayout.hero.y);
+    lv_obj_set_style_text_font(slot.labels.value, &ride_speed_font_84, 0);
+    lv_obj_set_style_text_color(slot.labels.value, lv_color_white(), 0);
+    lv_obj_set_style_text_align(slot.labels.value, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(slot.labels.value, LV_LABEL_LONG_CLIP);
+    slot.labels.title = createMetricTitle(ridePage, "", rideLayout.heroUnit);
+  } else {
+    slot.labels = createMetric(ridePage, "", rect);
+  }
+  slot.heart = createHeartIcon(ridePage);
+  for (lv_obj_t *&segment : slot.zoneSegments) {
+    segment = lv_obj_create(ridePage);
+    lv_obj_remove_style_all(segment);
+    lv_obj_set_style_radius(segment, 10, 0);
+    lv_obj_set_style_bg_opa(segment, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(
+        segment, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_SCROLLABLE |
+                                            LV_OBJ_FLAG_CLICKABLE));
+  }
+  slot.zoneHeart = createHeartIcon(ridePage);
+  slot.zoneLabel = lv_label_create(ridePage);
+  lv_obj_set_style_text_font(slot.zoneLabel, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_align(slot.zoneLabel, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_long_mode(slot.zoneLabel, LV_LABEL_LONG_CLIP);
+  setConfigurableSlotHidden(slot, true);
+}
+
+void hideLegacyWorkoutMetrics() {
+  lv_obj_add_flag(rideSpeedValue, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideSpeedUnit, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideHeartRate.title, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideHeartRate.value, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideHeartRateHeart, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideZoneTitle, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideDistanceValue, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideMoving.title, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideMoving.value, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideBottomLeft.title, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideBottomLeft.value, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideBottomRight.title, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(rideBottomRight.value, LV_OBJ_FLAG_HIDDEN);
+  hideZonePresentation();
+}
+
+void updateConfigurableZone(
+    ConfigurableSlotView &slot, const ride_telemetry_layout::Rect &rect,
+    const ride_stats_widget::Presentation &widget) {
+  const auto presentation = ride_telemetry_layout::makeZonePresentation(
+      rect, rideLayout.screenWidth, slot.displayedZone, widget.zoneIndex);
+  slot.displayedZone = widget.zoneIndex;
+  if (presentation.update.action ==
+      ride_telemetry_layout::ZoneUpdateAction::Hide) {
+    for (lv_obj_t *segment : slot.zoneSegments)
+      lv_obj_add_flag(segment, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(slot.zoneHeart, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(slot.zoneLabel, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  if (presentation.update.action ==
+      ride_telemetry_layout::ZoneUpdateAction::None)
+    return;
+  for (std::size_t index = 0; index < slot.zoneSegments.size(); ++index) {
+    const auto &segment = presentation.segments[index];
+    lv_obj_set_pos(slot.zoneSegments[index], segment.x, segment.y);
+    lv_obj_set_size(slot.zoneSegments[index], segment.width, segment.height);
+    lv_obj_set_style_bg_color(
+        slot.zoneSegments[index],
+        lv_color_hex(presentation.segmentColors[index]), 0);
+    lv_obj_clear_flag(slot.zoneSegments[index], LV_OBJ_FLAG_HIDDEN);
+  }
+  const lv_color_t foreground = lv_color_hex(presentation.foregroundColor);
+  lv_obj_set_pos(slot.zoneHeart, presentation.heart.x, presentation.heart.y);
+  lv_obj_set_size(slot.zoneHeart, presentation.heart.width,
+                  presentation.heart.height);
+  lv_obj_set_style_text_color(slot.zoneHeart, foreground, 0);
+  lv_obj_clear_flag(slot.zoneHeart, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_pos(slot.zoneLabel, presentation.label.x, presentation.label.y);
+  lv_obj_set_size(slot.zoneLabel, presentation.label.width,
+                  presentation.label.height);
+  lv_obj_set_style_text_color(slot.zoneLabel, foreground, 0);
+  setLabelIfChanged(slot.zoneLabel, presentation.labelText.data());
+  lv_obj_clear_flag(slot.zoneLabel, LV_OBJ_FLAG_HIDDEN);
+}
+
+void updateConfigurableSlots(
+    const ride_telemetry_presenter::ViewModel &model) {
+  hideLegacyWorkoutMetrics();
+  const auto &layout = currentRideStatsLayout();
+  for (std::size_t index = 0; index < configurableSlots.size(); ++index) {
+    ConfigurableSlotView &slot = configurableSlots[index];
+    setConfigurableSlotHidden(slot, true);
+    slot.displayedZone = -2;
+    const auto widget = ride_stats_widget::make(layout.slots[index], model);
+    if (widget.kind == ride_stats_widget::PresentationKind::Empty)
+      continue;
+    const auto rect =
+        ride_telemetry_layout::configurableSlotRect(rideLayout, index);
+    char title[40]{};
+    if (index == 0 && widget.unit[0] != '\0')
+      std::snprintf(title, sizeof(title), "%s · %s", widget.title, widget.unit);
+    else
+      std::snprintf(title, sizeof(title), "%s", widget.title);
+    setLabelIfChanged(slot.labels.title, title);
+    lv_obj_clear_flag(slot.labels.title, LV_OBJ_FLAG_HIDDEN);
+    if (widget.kind == ride_stats_widget::PresentationKind::ZoneStrip &&
+        widget.available) {
+      updateConfigurableZone(slot, rect, widget);
+      continue;
+    }
+    setMetricValueIfChanged(slot.labels.value, widget.value.data());
+    lv_obj_clear_flag(slot.labels.value, LV_OBJ_FLAG_HIDDEN);
+    if (widget.kind == ride_stats_widget::PresentationKind::HeartWithValue &&
+        widget.available) {
+      const auto heart = ride_telemetry_layout::makeHeartRatePresentation(
+          rect, rideLayout.screenWidth, true);
+      lv_obj_set_width(slot.labels.value, heart.maximumValueWidth);
+      const lv_font_t *font = metricValueFontForWidth(
+          widget.value.data(), heart.fontSelectionWidth,
+          heart.fontTier ==
+              ride_telemetry_layout::MetricValueFontTier::RegularLarge);
+      lv_obj_set_style_text_font(slot.labels.value, font, 0);
+      const int32_t textWidth = lv_text_get_width(
+          widget.value.data(), std::strlen(widget.value.data()), font, 0);
+      const auto placement = ride_telemetry_layout::makeHeartRateValueLayout(
+          rect, rideLayout.screenWidth, textWidth);
+      lv_obj_set_pos(slot.labels.value, placement.value.x, placement.value.y);
+      lv_obj_set_width(slot.labels.value, placement.value.width);
+      lv_obj_set_style_text_align(slot.labels.value, LV_TEXT_ALIGN_LEFT, 0);
+      lv_obj_set_pos(slot.heart, placement.heart.x, placement.heart.y);
+      lv_obj_set_size(slot.heart, placement.heart.width, placement.heart.height);
+      lv_obj_set_style_text_color(slot.heart, lv_color_hex(0xFF3B30), 0);
+      lv_obj_clear_flag(slot.heart, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      const auto valueRect = index == 0 ? rideLayout.hero :
+          ride_telemetry_layout::Rect{
+              rect.x, rect.y + ride_telemetry_layout::kMetricValueOffsetY,
+              rect.width,
+              ride_telemetry_layout::metricValueLineHeight(
+                  rideLayout.screenWidth)};
+      lv_obj_set_pos(slot.labels.value, valueRect.x, valueRect.y);
+      lv_obj_set_width(slot.labels.value, valueRect.width);
+      lv_obj_set_style_text_align(slot.labels.value, LV_TEXT_ALIGN_CENTER, 0);
+      if (index == 0) {
+        const std::array<const lv_font_t *, 7> fonts = {
+            &ride_speed_font_84, &ride_value_font_64, &ride_value_font_56,
+            &lv_font_montserrat_48, &lv_font_montserrat_42,
+            &lv_font_montserrat_38, &lv_font_montserrat_24};
+        const auto *font = firstFittingFont(
+            fonts, widget.value.data(), std::strlen(widget.value.data()),
+            valueRect.width - 4);
+        lv_obj_set_style_text_font(slot.labels.value, font, 0);
+      }
+    }
+  }
+}
+
 void startWorkoutEvent(lv_event_t *event) {
   if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
     bleNavServer.requestWorkoutStart();
@@ -610,6 +807,23 @@ ride_telemetry_layout::MetricLayoutMode metricLayoutMode(
 }
 
 void updateMetricLayout(const ride_telemetry_presenter::ViewModel &model) {
+  const bool usesConfigurableLayout =
+      model.usesWorkout && screen_configuration::isReady();
+  if (usesConfigurableLayout) {
+    displayedMetricLayout = static_cast<int8_t>(
+        ride_telemetry_layout::MetricLayoutMode::Workout);
+    rideMetricPlacement = ride_telemetry_layout::makeMetricPlacement(
+        rideLayout, ride_telemetry_layout::MetricLayoutMode::Workout);
+    lv_obj_add_flag(rideStartWorkoutButton, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  for (ConfigurableSlotView &slot : configurableSlots)
+    setConfigurableSlotHidden(slot, true);
+  lv_obj_clear_flag(rideSpeedValue, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(rideSpeedUnit, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(rideDistanceValue, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(rideMoving.title, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(rideMoving.value, LV_OBJ_FLAG_HIDDEN);
   const ride_telemetry_layout::MetricLayoutMode mode = metricLayoutMode(model);
   const int8_t nextLayout = static_cast<int8_t>(mode);
   if (displayedMetricLayout == nextLayout) {
@@ -830,6 +1044,9 @@ void rideTelemetryScr(_lv_obj_t *screen) {
 
   createAutomationPanel(ridePage);
 
+  for (std::size_t index = 0; index < configurableSlots.size(); ++index)
+    createConfigurableSlot(index);
+
   displayedMetricLayout = -1;
   updateRideTelemetryEvent(nullptr);
 }
@@ -855,6 +1072,12 @@ void updateRideTelemetryEvent(lv_event_t *) {
   }
   updateStatusLabel(rideStatus, model);
   updateDetectionWaitingMessage(millis());
+
+  if (model.usesWorkout && screen_configuration::isReady()) {
+    updateConfigurableSlots(model);
+    updateAutomationPanel(millis());
+    return;
+  }
 
   const bool ended = model.usesWorkout &&
                      model.sessionState ==
