@@ -733,7 +733,9 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror \
             lib/map_transfer/map_transfer.cpp \
             lib/maps/src/mapBlockFormat.cpp \
+            lib/maps/src/mapBuildingBlock.cpp \
             lib/maps/src/mapLabelBlock.cpp \
+            lib/maps/src/mapPoiBlock.cpp \
             lib/maps/src/mapFontAsset.cpp \
             lib/maps/src/mapFontAssetFormat.cpp \
             lib/map_transfer/map_stream_format.cpp \
@@ -749,7 +751,9 @@ jobs:
             -DMAP_STREAM_DEVELOPMENT_TRUST=1 \
             lib/map_transfer/map_transfer.cpp \
             lib/maps/src/mapBlockFormat.cpp \
+            lib/maps/src/mapBuildingBlock.cpp \
             lib/maps/src/mapLabelBlock.cpp \
+            lib/maps/src/mapPoiBlock.cpp \
             lib/maps/src/mapFontAsset.cpp \
             lib/maps/src/mapFontAssetFormat.cpp \
             lib/map_transfer/map_stream_format.cpp \
