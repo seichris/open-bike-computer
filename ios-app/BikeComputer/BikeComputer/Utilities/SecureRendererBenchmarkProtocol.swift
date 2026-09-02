@@ -643,6 +643,18 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
         let maximumCopyUs: UInt32
         let lastHttpResponseMs: UInt32
         let maximumHttpResponseMs: UInt32
+        let lastFrameSnapshotWaitUs: UInt32?
+        let maximumFrameSnapshotWaitUs: UInt32?
+        let lastFrameCrcUs: UInt32?
+        let maximumFrameCrcUs: UInt32?
+        let lastHttpExpectedBytes: UInt32?
+        let lastHttpActualBytes: UInt32?
+        let lastHttpWriteCalls: UInt32?
+        let lastHttpZeroWriteCalls: UInt32?
+        let lastHttpShortWriteCalls: UInt32?
+        let lastHttpActiveTlsWriteUs: UInt32?
+        let lastHttpNoProgressWaitMs: UInt32?
+        let lastHttpIntentionalDelayMs: UInt32?
         let freeBefore: UInt32
         let largestBefore: UInt32
         let freeAfterAllocate: UInt32
@@ -663,6 +675,16 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
     let gps: GPS
     let routeReplay: RouteReplay
     let remoteDebug: RemoteDebug
+}
+
+nonisolated struct RendererBenchmarkReplayTimingEvidence: Codable,
+                                                             Equatable,
+                                                             Sendable {
+    let schema: Int
+    let emittedSamples: UInt64
+    let timerCallbacks: UInt64
+    let lastTimerLatenessMs: Int
+    let maximumTimerLatenessMs: Int
 }
 
 nonisolated struct RendererBenchmarkEvidenceIdentity: Codable,
@@ -704,6 +726,8 @@ nonisolated struct RendererBenchmarkEvidenceSample: Codable,
     let renderCount: UInt32
     let buildings: RendererBenchmarkMetricsSnapshot.Buildings
     let routeReplay: RendererBenchmarkMetricsSnapshot.RouteReplay
+    let bleTransport: RendererBenchmarkBLETransportEvidence?
+    let replayTiming: RendererBenchmarkReplayTimingEvidence?
 }
 
 nonisolated struct RendererBenchmarkRunSummary: Codable, Equatable, Sendable {
@@ -939,7 +963,9 @@ nonisolated enum RendererBenchmarkEvidenceSecurityPolicy {
 nonisolated enum RendererBenchmarkEvaluator {
     static func sample(
         snapshot: RendererBenchmarkMetricsSnapshot,
-        elapsedSeconds: Double
+        elapsedSeconds: Double,
+        bleTransport: RendererBenchmarkBLETransportEvidence? = nil,
+        replayTiming: RendererBenchmarkReplayTimingEvidence? = nil
     ) -> RendererBenchmarkEvidenceSample {
         RendererBenchmarkEvidenceSample(
             elapsedSeconds: (elapsedSeconds * 1_000).rounded() / 1_000,
@@ -953,7 +979,9 @@ nonisolated enum RendererBenchmarkEvaluator {
             dmaLargest: snapshot.memory.dmaHeap.largestBlock,
             renderCount: snapshot.render.timings.total.count,
             buildings: snapshot.render.buildings,
-            routeReplay: snapshot.routeReplay
+            routeReplay: snapshot.routeReplay,
+            bleTransport: bleTransport,
+            replayTiming: replayTiming
         )
     }
 

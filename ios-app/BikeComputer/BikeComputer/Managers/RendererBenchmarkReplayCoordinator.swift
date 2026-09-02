@@ -26,6 +26,10 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
     private var idleTimerWasDisabled = false
     private var ownsIdleTimerOverride = false
     private var deviceGPSOverrideToken: UUID?
+    private var expectedReplayTimerUptime: TimeInterval?
+    private var replayTimerCallbacks: UInt64 = 0
+    private var lastReplayTimerLatenessMs: Int = 0
+    private var maximumReplayTimerLatenessMs: Int = 0
 
     deinit {
         timer?.invalidate()
@@ -78,6 +82,10 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             sampleCount = loaded.fixture.points.count
             loop = 0
             emittedSampleCount = 0
+            expectedReplayTimerUptime = nil
+            replayTimerCallbacks = 0
+            lastReplayTimerLatenessMs = 0
+            maximumReplayTimerLatenessMs = 0
             capturedRendererRevision = bleManager.rendererDiagnosticsRevision
             ordinarySnapshots.removeAll(keepingCapacity: true)
             ordinarySnapshotCount = 0
@@ -122,6 +130,8 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             )
             timer.tolerance = 0.05
             self.timer = timer
+            expectedReplayTimerUptime =
+                ProcessInfo.processInfo.systemUptime + 1
             RunLoop.main.add(timer, forMode: .common)
         } catch {
             errorMessage = error.localizedDescription
@@ -133,6 +143,7 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
         captureLatestOrdinarySnapshot()
         timer?.invalidate()
         timer = nil
+        expectedReplayTimerUptime = nil
         if clearRoute, isRunning {
             bleManager?.clearRouteGeometry()
         }
@@ -167,7 +178,41 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
     }
 
     @objc private func handleReplayTimer(_ timer: Timer) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let expectedReplayTimerUptime {
+            let latenessMs = Int(max(
+                0,
+                (now - expectedReplayTimerUptime) * 1_000
+            ).rounded())
+            lastReplayTimerLatenessMs = latenessMs
+            maximumReplayTimerLatenessMs = max(
+                maximumReplayTimerLatenessMs,
+                latenessMs
+            )
+            // A repeating Timer coalesces missed firings after a blocked run
+            // loop. Preserve the ideal cadence while on time, but re-anchor
+            // after a late callback so `last` describes the current delivery
+            // instead of remaining permanently offset by the missed ticks.
+            self.expectedReplayTimerUptime = max(
+                expectedReplayTimerUptime + 1,
+                now + 1
+            )
+        } else {
+            expectedReplayTimerUptime = now + 1
+        }
+        replayTimerCallbacks &+= 1
         emitCurrentSample()
+    }
+
+    func rendererBenchmarkReplayTimingEvidence()
+        -> RendererBenchmarkReplayTimingEvidence {
+        RendererBenchmarkReplayTimingEvidence(
+            schema: 1,
+            emittedSamples: emittedSampleCount,
+            timerCallbacks: replayTimerCallbacks,
+            lastTimerLatenessMs: lastReplayTimerLatenessMs,
+            maximumTimerLatenessMs: maximumReplayTimerLatenessMs
+        )
     }
 
     private func emitCurrentSample() {

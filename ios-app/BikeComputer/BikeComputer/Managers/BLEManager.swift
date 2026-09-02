@@ -1139,6 +1139,13 @@ class BLEManager: NSObject, ObservableObject {
     private var writeWithResponseInFlight = false
     private var navigationWriteWithResponseFailureHandler: (() -> Void)?
     private var navigationWriteWithResponseLabel: String?
+    private var navigationWriteResponseClass: NavigationWriteClass?
+    private var navigationWriteResponseStartedAtUptime: TimeInterval?
+    private var navigationWriteAcknowledgementCompletions: UInt64 = 0
+    private var navigationWriteAcknowledgementErrors: UInt64 = 0
+    private var navigationWriteAcknowledgementTimeouts: UInt64 = 0
+    private var lastNavigationWriteAcknowledgementMs: Int = 0
+    private var maximumNavigationWriteAcknowledgementMs: Int = 0
     private var navigationWriteResponseTimeoutTimer: Timer?
     private var navigationWriteResponseGeneration: UInt64 = 0
     private var navigationBackpressureStartedAt: Date?
@@ -6932,6 +6939,7 @@ class BLEManager: NSObject, ObservableObject {
 
     private func completeNavigationWrite(error: Error?) {
         let writeFailureHandler = navigationWriteWithResponseFailureHandler
+        recordNavigationWriteAcknowledgement(error: error)
         resetNavigationWriteResponseWait()
         if error != nil {
             writeFailureHandler?()
@@ -6947,6 +6955,9 @@ class BLEManager: NSObject, ObservableObject {
         writeWithResponseInFlight = true
         navigationWriteWithResponseFailureHandler = write.onWriteFailure
         navigationWriteWithResponseLabel = write.label
+        navigationWriteResponseClass = write.writeClass
+        navigationWriteResponseStartedAtUptime =
+            ProcessInfo.processInfo.systemUptime
         navigationWriteResponseGeneration &+= 1
         let generation = navigationWriteResponseGeneration
         navigationWriteResponseTimeoutTimer?.invalidate()
@@ -6970,8 +6981,72 @@ class BLEManager: NSObject, ObservableObject {
         writeWithResponseInFlight = false
         navigationWriteWithResponseFailureHandler = nil
         navigationWriteWithResponseLabel = nil
+        navigationWriteResponseClass = nil
+        navigationWriteResponseStartedAtUptime = nil
         navigationBackpressureStartedAt = nil
     }
+
+    private func navigationWriteAcknowledgementAgeMs() -> Int {
+        guard let started = navigationWriteResponseStartedAtUptime else {
+            return 0
+        }
+        return Int(max(
+            0,
+            (ProcessInfo.processInfo.systemUptime - started) * 1_000
+        ).rounded())
+    }
+
+    private func recordNavigationWriteAcknowledgement(error: Error?) {
+        guard navigationWriteResponseStartedAtUptime != nil else { return }
+        let durationMs = navigationWriteAcknowledgementAgeMs()
+        navigationWriteAcknowledgementCompletions &+= 1
+        if error != nil {
+            navigationWriteAcknowledgementErrors &+= 1
+        }
+        lastNavigationWriteAcknowledgementMs = durationMs
+        maximumNavigationWriteAcknowledgementMs = max(
+            maximumNavigationWriteAcknowledgementMs,
+            durationMs
+        )
+    }
+
+#if DEBUG || HOST_TESTING
+    func rendererBenchmarkBLETransportEvidence()
+        -> RendererBenchmarkBLETransportEvidence {
+        let metrics = navigationWriteQueue.cumulativeMetrics
+        return RendererBenchmarkBLETransportEvidence(
+            schema: 1,
+            capturedAtUptimeMs: UInt64(max(
+                0,
+                ProcessInfo.processInfo.systemUptime * 1_000
+            ).rounded()),
+            queueDepth: metrics.currentDepth,
+            queueMaximumDepth: metrics.maxDepth,
+            oldestPendingAgeMs: metrics.oldestPendingAgeMs,
+            retryAgeMs: metrics.retryAgeMs,
+            enqueuedFrames: metrics.enqueuedFrames,
+            flushedFrames: metrics.flushedFrames,
+            droppedFrames: metrics.droppedFrames,
+            rejectedFrames: metrics.rejectedFrames,
+            coalescedFrames: metrics.coalescedFrames,
+            retrySchedules: metrics.retrySchedules,
+            backpressureStops: metrics.backpressureStops,
+            gpsCoalescedFrames: metrics.coalescedFrames(for: .gpsPosition),
+            routeCoalescedFrames: metrics.coalescedFrames(for: .route),
+            settingsCoalescedFrames:
+                metrics.coalescedFrames(for: .settingsControl),
+            inFlightClass: navigationWriteResponseClass?.rawValue,
+            inFlightAgeMs: navigationWriteAcknowledgementAgeMs(),
+            acknowledgementCompletions:
+                navigationWriteAcknowledgementCompletions,
+            acknowledgementErrors: navigationWriteAcknowledgementErrors,
+            acknowledgementTimeouts: navigationWriteAcknowledgementTimeouts,
+            lastAcknowledgementMs: lastNavigationWriteAcknowledgementMs,
+            maximumAcknowledgementMs:
+                maximumNavigationWriteAcknowledgementMs
+        )
+    }
+#endif
 
     private func updateNavigationBackpressureWatchdog(
         madeProgress: Bool,
@@ -7015,6 +7090,13 @@ class BLEManager: NSObject, ObservableObject {
         guard writeWithResponseInFlight else { return }
         let label = navigationWriteWithResponseLabel ?? "unknown write"
         let failureHandler = navigationWriteWithResponseFailureHandler
+        let durationMs = navigationWriteAcknowledgementAgeMs()
+        navigationWriteAcknowledgementTimeouts &+= 1
+        lastNavigationWriteAcknowledgementMs = durationMs
+        maximumNavigationWriteAcknowledgementMs = max(
+            maximumNavigationWriteAcknowledgementMs,
+            durationMs
+        )
         log("Acknowledged BLE write timed out: \(label); reconnecting")
         resetNavigationWriteResponseWait()
         navigationFlushRetryTimer?.invalidate()

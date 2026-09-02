@@ -13878,6 +13878,15 @@ struct NavigationProtocolTests {
                     "queue interval metrics reset after a snapshot")
         assertEqual(metricsQueue.metrics.maxDepth, 0,
                     "an empty queue starts the next interval at zero depth")
+        let cumulativeQueueMetrics = metricsQueue.cumulativeMetrics
+        assertEqual(cumulativeQueueMetrics.enqueuedFrames, 3,
+                    "cumulative metrics survive interval export boundaries")
+        assertEqual(cumulativeQueueMetrics.flushedFrames, 1,
+                    "cumulative metrics retain acknowledged-queue writes")
+        assertEqual(cumulativeQueueMetrics.coalescedFrames(for: .gpsPosition), 1,
+                    "cumulative metrics retain GPS coalescing attribution")
+        assertEqual(cumulativeQueueMetrics.currentDepth, 0,
+                    "cumulative metrics report the live queue depth")
 
         var boundaryQueue = NavigationWriteQueue(maxCount: 3)
         boundaryQueue.enqueue(NavigationWrite(data: Data([6]), label: "pending-1"))
@@ -14668,6 +14677,14 @@ struct NavigationProtocolTests {
             snapshot: metrics,
             elapsedSeconds: 42
         )
+        assertEqual(metrics.remoteDebug.lastFrameSnapshotWaitUs, 110,
+                    "secure benchmark retains frame snapshot wait evidence")
+        assertEqual(metrics.remoteDebug.lastHttpActualBytes, 434_344,
+                    "secure benchmark retains actual response body bytes")
+        assertEqual(metrics.remoteDebug.lastHttpZeroWriteCalls, 4,
+                    "secure benchmark retains TLS zero-write evidence")
+        assertEqual(metrics.remoteDebug.lastHttpActiveTlsWriteUs, 500_000,
+                    "secure benchmark retains active TLS-write time")
         guard let summary = RendererBenchmarkEvaluator.summary(
             snapshots: [metrics],
             samples: [sample]
@@ -14826,6 +14843,43 @@ struct NavigationProtocolTests {
                 jsonData: Data(#"{"deviceId":"abc","passed":true}"#.utf8)
             ),
             "non-secret benchmark evidence is exportable"
+        )
+        let transportEvidence = RendererBenchmarkBLETransportEvidence(
+            schema: 1,
+            capturedAtUptimeMs: 12_345,
+            queueDepth: 2,
+            queueMaximumDepth: 7,
+            oldestPendingAgeMs: 1_200,
+            retryAgeMs: 800,
+            enqueuedFrames: 100,
+            flushedFrames: 90,
+            droppedFrames: 0,
+            rejectedFrames: 1,
+            coalescedFrames: 9,
+            retrySchedules: 3,
+            backpressureStops: 4,
+            gpsCoalescedFrames: 6,
+            routeCoalescedFrames: 2,
+            settingsCoalescedFrames: 1,
+            inFlightClass: NavigationWriteClass.gpsPosition.rawValue,
+            inFlightAgeMs: 1_500,
+            acknowledgementCompletions: 89,
+            acknowledgementErrors: 1,
+            acknowledgementTimeouts: 0,
+            lastAcknowledgementMs: 40,
+            maximumAcknowledgementMs: 1_700
+        )
+        guard let transportEvidenceData = try? JSONEncoder().encode(
+            transportEvidence
+        ) else {
+            assert(false, "BLE transport evidence encodes")
+            return
+        }
+        assert(
+            RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
+                jsonData: transportEvidenceData
+            ),
+            "BLE queue and acknowledgement evidence contains no secret fields"
         )
         assert(
             !RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
@@ -18982,10 +19036,25 @@ struct NavigationProtocolTests {
                "watchdog fixture sends one acknowledged write")
         assertEqual(watchdogWrites.count, 1,
                     "watchdog starts only after the write reaches its transport")
+        let inFlightEvidence =
+            watchdogManager.rendererBenchmarkBLETransportEvidence()
+        assertEqual(
+            inFlightEvidence.inFlightClass,
+            NavigationWriteClass.settingsControl.rawValue,
+            "benchmark telemetry identifies the acknowledged write class"
+        )
+        assertEqual(inFlightEvidence.acknowledgementTimeouts, 0,
+                    "a live acknowledged write is not yet a timeout")
         assert(waitForMainLoop(timeout: 1) { watchdogRecoveries == 1 },
                "missing acknowledged completion triggers bounded recovery")
         assert(!watchdogManager.isNavigationReady,
                "stall recovery closes the unusable navigation session")
+        let timedOutEvidence =
+            watchdogManager.rendererBenchmarkBLETransportEvidence()
+        assertEqual(timedOutEvidence.acknowledgementTimeouts, 1,
+                    "benchmark telemetry retains the bounded ACK timeout")
+        assertEqual(timedOutEvidence.inFlightClass, nil,
+                    "timeout recovery clears the live in-flight class")
 
         let noResponseWatchdogManager = BLEManager()
         noResponseWatchdogManager.isConnected = true

@@ -37,6 +37,34 @@ struct NavigationWriteQueueMetrics: Equatable {
     }
 }
 
+nonisolated struct RendererBenchmarkBLETransportEvidence: Codable,
+                                                              Equatable,
+                                                              Sendable {
+    let schema: Int
+    let capturedAtUptimeMs: UInt64
+    let queueDepth: Int
+    let queueMaximumDepth: Int
+    let oldestPendingAgeMs: Int
+    let retryAgeMs: Int
+    let enqueuedFrames: Int
+    let flushedFrames: Int
+    let droppedFrames: Int
+    let rejectedFrames: Int
+    let coalescedFrames: Int
+    let retrySchedules: Int
+    let backpressureStops: Int
+    let gpsCoalescedFrames: Int
+    let routeCoalescedFrames: Int
+    let settingsCoalescedFrames: Int
+    let inFlightClass: String?
+    let inFlightAgeMs: Int
+    let acknowledgementCompletions: UInt64
+    let acknowledgementErrors: UInt64
+    let acknowledgementTimeouts: UInt64
+    let lastAcknowledgementMs: Int
+    let maximumAcknowledgementMs: Int
+}
+
 struct NavigationWrite {
     let data: Data
     let label: String
@@ -129,6 +157,7 @@ struct NavigationWriteQueue {
     private var pendingWrites: [NavigationWrite] = []
     private var pendingPriorityWrites: [NavigationWrite] = []
     private var diagnosticMetrics = NavigationWriteQueueMetrics()
+    private var cumulativeDiagnosticMetrics = NavigationWriteQueueMetrics()
     private var retryStartedAtUptime: TimeInterval?
     private let now: () -> TimeInterval
 
@@ -141,7 +170,17 @@ struct NavigationWriteQueue {
     }
 
     var metrics: NavigationWriteQueueMetrics {
-        var snapshot = diagnosticMetrics
+        metricsSnapshot(from: diagnosticMetrics)
+    }
+
+    var cumulativeMetrics: NavigationWriteQueueMetrics {
+        metricsSnapshot(from: cumulativeDiagnosticMetrics)
+    }
+
+    private func metricsSnapshot(
+        from source: NavigationWriteQueueMetrics
+    ) -> NavigationWriteQueueMetrics {
+        var snapshot = source
         snapshot.currentDepth = count
         let currentUptime = now()
         let oldestEnqueueUptime = (pendingPriorityWrites + pendingWrites)
@@ -404,6 +443,7 @@ struct NavigationWriteQueue {
     mutating func noteRetryScheduled() {
 #if DEBUG || HOST_TESTING
         diagnosticMetrics.retrySchedules += 1
+        cumulativeDiagnosticMetrics.retrySchedules += 1
         if retryStartedAtUptime == nil, count > 0 {
             retryStartedAtUptime = now()
         }
@@ -413,12 +453,14 @@ struct NavigationWriteQueue {
     private mutating func recordEnqueuedFrames(_ count: Int) {
 #if DEBUG || HOST_TESTING
         diagnosticMetrics.enqueuedFrames += count
+        cumulativeDiagnosticMetrics.enqueuedFrames += count
 #endif
     }
 
     private mutating func recordFlushedFrames(_ count: Int) {
 #if DEBUG || HOST_TESTING
         diagnosticMetrics.flushedFrames += count
+        cumulativeDiagnosticMetrics.flushedFrames += count
 #endif
     }
 
@@ -426,12 +468,18 @@ struct NavigationWriteQueue {
 #if DEBUG || HOST_TESTING
         diagnosticMetrics.droppedFrames += 1
         diagnosticMetrics.droppedFramesByClass[write.writeClass, default: 0] += 1
+        cumulativeDiagnosticMetrics.droppedFrames += 1
+        cumulativeDiagnosticMetrics.droppedFramesByClass[
+            write.writeClass,
+            default: 0
+        ] += 1
 #endif
     }
 
     private mutating func recordRejectedFrames(_ count: Int) {
 #if DEBUG || HOST_TESTING
         diagnosticMetrics.rejectedFrames += count
+        cumulativeDiagnosticMetrics.rejectedFrames += count
 #endif
     }
 
@@ -439,18 +487,25 @@ struct NavigationWriteQueue {
 #if DEBUG || HOST_TESTING
         diagnosticMetrics.coalescedFrames += 1
         diagnosticMetrics.coalescedFramesByClass[write.writeClass, default: 0] += 1
+        cumulativeDiagnosticMetrics.coalescedFrames += 1
+        cumulativeDiagnosticMetrics.coalescedFramesByClass[
+            write.writeClass,
+            default: 0
+        ] += 1
 #endif
     }
 
     private mutating func recordClearedFrames(_ count: Int) {
 #if DEBUG || HOST_TESTING
         diagnosticMetrics.clearedFrames += count
+        cumulativeDiagnosticMetrics.clearedFrames += count
 #endif
     }
 
     private mutating func recordBackpressureStop() {
 #if DEBUG || HOST_TESTING
         diagnosticMetrics.backpressureStops += 1
+        cumulativeDiagnosticMetrics.backpressureStops += 1
 #endif
     }
 
@@ -458,6 +513,11 @@ struct NavigationWriteQueue {
 #if DEBUG || HOST_TESTING
         diagnosticMetrics.currentDepth = count
         diagnosticMetrics.maxDepth = max(diagnosticMetrics.maxDepth, count)
+        cumulativeDiagnosticMetrics.currentDepth = count
+        cumulativeDiagnosticMetrics.maxDepth = max(
+            cumulativeDiagnosticMetrics.maxDepth,
+            count
+        )
 #endif
     }
 

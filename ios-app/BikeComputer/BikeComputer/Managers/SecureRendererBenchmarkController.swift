@@ -768,7 +768,11 @@ final class SecureRendererBenchmarkController: ObservableObject {
             snapshots.append(snapshot)
             samples.append(RendererBenchmarkEvaluator.sample(
                 snapshot: snapshot,
-                elapsedSeconds: elapsed
+                elapsedSeconds: elapsed,
+                bleTransport:
+                    self.bleManager?.rendererBenchmarkBLETransportEvidence(),
+                replayTiming:
+                    self.replay?.rendererBenchmarkReplayTimingEvidence()
             ))
             if captureCheckpoints,
                snapshot.routeReplay.valid,
