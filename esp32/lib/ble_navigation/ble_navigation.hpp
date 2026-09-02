@@ -91,6 +91,8 @@ static constexpr uint32_t MAP_VISIBILITY_TRACKS =
     map_profile_protocol::VISIBILITY_TRACKS;
 static constexpr uint32_t MAP_VISIBILITY_EXTENDED_MARKER =
     map_profile_protocol::VISIBILITY_EXTENDED_MARKER;
+static constexpr uint32_t MAP_VISIBILITY_POI_MASK =
+    map_profile_protocol::VISIBILITY_POI_MASK;
 static constexpr uint32_t MAP_VISIBILITY_EXTENDED_FEATURE_MASK =
     map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK;
 static constexpr uint32_t MAP_VISIBILITY_OVERLAY_MASK =
@@ -107,7 +109,7 @@ struct ScreenMapRenderSettings {
   uint8_t streetLineWidth = map_profile_protocol::DEFAULT_STREET_WIDTH;
   uint8_t positionMarkerScale = 2;  // 1-5: Current-position marker scale
   uint8_t zoomLevel = map_profile_protocol::MAP_DEFAULT_ZOOM_LEVEL;
-  uint32_t visibilityMask = MAP_VISIBILITY_EXTENDED_FEATURE_MASK;
+  uint32_t visibilityMask = map_profile_protocol::MAP_DEFAULT_VISIBILITY_MASK;
   uint8_t labelDensity = map_profile_protocol::DEFAULT_LABEL_DENSITY;
   uint8_t labelLanguageMode =
       map_profile_protocol::DEFAULT_LABEL_LANGUAGE_MODE;

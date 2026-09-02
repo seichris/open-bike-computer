@@ -31,6 +31,8 @@
 #include "mapBuildingRenderer.hpp"
 #include "mapLabelBlock.hpp"
 #include "mapBuildingBlock.hpp"
+#include "mapPoiBlock.hpp"
+#include "mapPoiLayout.hpp"
 #include "mapLabelLayout.hpp"
 #include "mapVars.h"
 #include <Arduino.h>
@@ -110,6 +112,7 @@ private:
     std::vector<Polygon, PsramAllocator<Polygon>> polygons;
     map_label_block::Block labelData;
     map_building_block::Block buildingData;
+    map_poi_block::Block poiData;
 
     // Spatial grid for polygon culling: grid[cellIndex] = list of polygon
     // indices
@@ -179,6 +182,17 @@ private:
     uint32_t extrudedFarthestDistancePx = 0;
     uint32_t buildingProjectionMs = 0;
     uint32_t buildingDrawMs = 0;
+    uint32_t candidatePois = 0;
+    uint32_t acceptedPois = 0;
+    uint32_t collisionRejectedPois = 0;
+    uint32_t offscreenPois = 0;
+    uint32_t capacityDeferredPois = 0;
+    uint32_t decodedPoiRecords = 0;
+    uint32_t decodedPoiBytes = 0;
+    uint32_t poiGatherMs = 0;
+    uint32_t poiLayoutMs = 0;
+    uint32_t poiDrawMs = 0;
+    std::array<uint32_t, 5> acceptedPoiCategories = {};
     uint8_t buildingLimiterFlags = 0;
     bool allocationFallback = false;
   };
@@ -244,6 +258,7 @@ private:
     uint32_t fontFingerprint = 0;
     uint32_t visibilityMask = 0;
     uint64_t blockSignature = 0;
+    uint64_t poiSignature = 0;
     uint8_t zoom = 0;
     uint8_t density = 0;
     uint8_t languageMode = 0;
@@ -269,6 +284,8 @@ private:
       diagnostics = {};
     }
   } labelLayoutCache;
+  MapLabelLayoutVector<map_label_layout::ReservedRegion> poiReservedRegions;
+  uint64_t poiLayoutSignature = 0;
   Point32 point = viewPort.center; // Vector map GPS position point
   double lat2y(double lat);
   double lon2x(double lon);

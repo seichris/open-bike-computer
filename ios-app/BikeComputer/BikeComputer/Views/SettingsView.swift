@@ -1922,6 +1922,19 @@ private struct MapStyleSettingsView: View {
             bleManager.activeMapFontAssetHealthy
     }
 
+    private var poisAvailable: Bool {
+        bleManager.activeMapRendererFormat == 4 &&
+            bleManager.activeMapPoiProfileVersion == 1 &&
+            bleManager.activeMapPoiDataHealthy
+    }
+
+    private var poisFooter: String {
+        if !poisAvailable {
+            return "Download the active map again to add points of interest."
+        }
+        return "Points of interest appear at supported zoom levels and apply immediately."
+    }
+
     private var preferredLanguageName: String {
         guard let tag = bleManager.activeMapLabelLanguages.first else {
             return "map language"
@@ -2083,6 +2096,31 @@ private struct MapStyleSettingsView: View {
         binding(map: \.showOtherAreas, mapPlusNavigation: \.mapPlusNavigationShowOtherAreas)
     }
 
+    private var showPOIShops: Binding<Bool> {
+        binding(map: \.showPOIShops,
+                mapPlusNavigation: \.mapPlusNavigationShowPOIShops)
+    }
+
+    private var showPOIRestaurantsAndCafes: Binding<Bool> {
+        binding(map: \.showPOIRestaurantsAndCafes,
+                mapPlusNavigation: \.mapPlusNavigationShowPOIRestaurantsAndCafes)
+    }
+
+    private var showPOIPublicToilets: Binding<Bool> {
+        binding(map: \.showPOIPublicToilets,
+                mapPlusNavigation: \.mapPlusNavigationShowPOIPublicToilets)
+    }
+
+    private var showPOIGasStations: Binding<Bool> {
+        binding(map: \.showPOIGasStations,
+                mapPlusNavigation: \.mapPlusNavigationShowPOIGasStations)
+    }
+
+    private var showPOIBicycleServices: Binding<Bool> {
+        binding(map: \.showPOIBicycleServices,
+                mapPlusNavigation: \.mapPlusNavigationShowPOIBicycleServices)
+    }
+
     private var birdsEyeFooter: String {
         if !bleManager.hasReceivedDeviceCapabilities {
             return "Connect to the Bike Computer to check bird's-eye view support."
@@ -2224,6 +2262,44 @@ private struct MapStyleSettingsView: View {
                     .onChange(of: showWater.wrappedValue) { _ in sendVisibilityMask() }
                 Toggle("Other Areas", isOn: showOtherAreas)
                     .onChange(of: showOtherAreas.wrappedValue) { _ in sendVisibilityMask() }
+            }
+
+            if bleManager.supportsMapPois {
+                Section(header: Text("Points of Interest"), footer: Text(poisFooter)) {
+                    Group {
+                        Toggle("Shops", isOn: showPOIShops)
+                            .onChange(of: showPOIShops.wrappedValue) { _ in
+                                sendVisibilityMask()
+                            }
+                        Toggle("Restaurants & Cafes", isOn: showPOIRestaurantsAndCafes)
+                            .onChange(of: showPOIRestaurantsAndCafes.wrappedValue) { _ in
+                                sendVisibilityMask()
+                            }
+                        Toggle("Public Toilets", isOn: showPOIPublicToilets)
+                            .onChange(of: showPOIPublicToilets.wrappedValue) { _ in
+                                sendVisibilityMask()
+                            }
+                        Toggle("Gas Stations", isOn: showPOIGasStations)
+                            .onChange(of: showPOIGasStations.wrappedValue) { _ in
+                                sendVisibilityMask()
+                            }
+                        Toggle("Bicycle Shops & Repair", isOn: showPOIBicycleServices)
+                            .onChange(of: showPOIBicycleServices.wrappedValue) { _ in
+                                sendVisibilityMask()
+                            }
+                    }
+                    .disabled(!poisAvailable)
+
+                    if !poisAvailable {
+                        Button("Download Active Map Again") {
+                            offlineMapManager.regenerateActiveMap(
+                                bleManager: bleManager
+                            )
+                        }
+                        .disabled(offlineMapManager.isBusy ||
+                                  bleManager.mapTransferActiveMapId.isEmpty)
+                    }
+                }
             }
 
             Section(header: Text("Map Rendering"), footer: Text("Feature toggles control map categories; polygon size filters tiny filled areas.")) {

@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstring>
 #include <limits>
+#include <tuple>
 
 namespace map_block_format {
 namespace {
@@ -191,7 +192,7 @@ bool StreamValidator::feedBinary(uint8_t byte) {
       return true;
     if (std::memcmp(small_, "FMB", 3) != 0 ||
         (small_[3] != 1 && small_[3] != 2 && small_[3] != 3 &&
-         small_[3] != 4))
+         small_[3] != 4 && small_[3] != 5))
       return false;
     binaryVersion_ = small_[3];
     smallSize_ = 0;
@@ -374,6 +375,12 @@ bool StreamValidator::beginV3Section(uint8_t sectionIndex) {
     v3ParseState_ = V3ParseState::BuildingHeader;
     v4DeclaredBuildingPoints_ = 0;
     v4BuildingPointsSeen_ = 0;
+    break;
+  case 5:
+    v3ParseState_ = V3ParseState::PoiHeader;
+    v5DeclaredCategoryMask_ = 0;
+    v5ActualCategoryMask_ = 0;
+    v5HasPreviousPoi_ = false;
     break;
   default:
     return false;
@@ -667,6 +674,52 @@ bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
                         ? V3ParseState::Complete
                         : V3ParseState::BuildingFixed;
     return true;
+  case V3ParseState::PoiHeader:
+    if (!collect(8) || v3RecordSize_ != 8)
+      return true;
+    v3RecordsRemaining_ = littleEndian16(v3Record_);
+    v5DeclaredCategoryMask_ = littleEndian32(v3Record_ + 4);
+    if (littleEndian16(v3Record_ + 2) != 8 ||
+        v3RecordsRemaining_ > kMaximumPois ||
+        (v5DeclaredCategoryMask_ & ~0x1FU) != 0)
+      return false;
+    v3RecordSize_ = 0;
+    v3ParseState_ = v3RecordsRemaining_ == 0 ? V3ParseState::Complete
+                                              : V3ParseState::PoiRecord;
+    return true;
+  case V3ParseState::PoiRecord:
+    if (!collect(8) || v3RecordSize_ != 8)
+      return true;
+    {
+      const int16_t localX = littleEndianSigned16(v3Record_);
+      const int16_t localY = littleEndianSigned16(v3Record_ + 2);
+      const uint8_t category = v3Record_[4];
+      const uint8_t maximumZoom = v3Record_[5];
+      const uint8_t rank = v3Record_[6];
+      const uint8_t flags = v3Record_[7];
+      const bool outOfOrder =
+          v5HasPreviousPoi_ &&
+          std::tie(localX, localY, category, rank, maximumZoom) <
+              std::tie(v5PreviousPoiX_, v5PreviousPoiY_,
+                       v5PreviousPoiCategory_, v5PreviousPoiRank_,
+                       v5PreviousPoiMaximumZoom_);
+      if (localX < 0 || localX > 4095 || localY < 0 || localY > 4095 ||
+          category < 1 || category > 5 || maximumZoom > 5 || rank > 3 ||
+          flags != 0 || outOfOrder)
+        return false;
+      v5ActualCategoryMask_ |= 1U << (category - 1U);
+      v5HasPreviousPoi_ = true;
+      v5PreviousPoiX_ = localX;
+      v5PreviousPoiY_ = localY;
+      v5PreviousPoiCategory_ = category;
+      v5PreviousPoiRank_ = rank;
+      v5PreviousPoiMaximumZoom_ = maximumZoom;
+    }
+    v3RecordSize_ = 0;
+    v3ParseState_ = --v3RecordsRemaining_ == 0
+                        ? V3ParseState::Complete
+                        : V3ParseState::PoiRecord;
+    return true;
   case V3ParseState::None:
   case V3ParseState::Complete:
     return false;
@@ -678,7 +731,9 @@ bool StreamValidator::finishV3Section() {
   return v3ParseState_ == V3ParseState::Complete && v3RecordSize_ == 0 &&
          v3Utf8Remaining_ == 0 &&
          (v3Sections_[v3CurrentSection_].type != 4 ||
-          v4BuildingPointsSeen_ == v4DeclaredBuildingPoints_);
+          v4BuildingPointsSeen_ == v4DeclaredBuildingPoints_) &&
+         (v3Sections_[v3CurrentSection_].type != 5 ||
+          v5ActualCategoryMask_ == v5DeclaredCategoryMask_);
 }
 
 void StreamValidator::beginCoordinateLine() {

@@ -10,8 +10,10 @@ enum WatchDirectBLEProtocolV1 {
     static let workoutUUID = RideBLEGeneratedProtocolV1.workoutUUID
     static let rideAutomationUUID = RideBLEGeneratedProtocolV1
         .rideAutomationUUID
+    // The Watch requests only through the latest capability it consumes.
+    // Phone-only additions must not silently expand its negotiated surface.
     static let capabilityClientVersion = RideBLEGeneratedProtocolV1
-        .currentClientVersion
+        .rideDeliveryAckMinimumClientVersion
     static let scopedControllerFeature = RideBLEGeneratedProtocolV1
         .scopedWatchControllerFeature
     static let workoutTelemetryFeature = RideBLEGeneratedProtocolV1

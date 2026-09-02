@@ -372,8 +372,8 @@ nonisolated struct OfflineMapReaderCapabilities: Codable, Equatable, Sendable {
         renderers: [
             Renderer(
                 renderer: "esp32-fmb",
-                formatVersions: [1, 2, 3],
-                features: ["3d-buildings", "street-labels"]
+                formatVersions: [1, 2, 3, 4],
+                features: ["3d-buildings", "map-pois", "street-labels"]
             ),
         ]
     )

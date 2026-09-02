@@ -4,12 +4,15 @@ from pathlib import Path
 
 from map_platform.map_artifact_validation import (
     MAX_BUILDINGS,
+    MAX_POIS,
     validate_fma1,
     validate_fmb3,
     validate_fmb4,
+    validate_fmb5,
     validate_renderer_artifacts,
 )
 from tests.map_label_fixtures import (
+    fmb5_with_pois,
     golden_fmb,
     one_building_fmb4,
     one_label_fma1,
@@ -20,6 +23,9 @@ from tests.map_label_fixtures import (
 class MapArtifactValidationTests(unittest.TestCase):
     def test_dense_building_record_ceiling_matches_fmb_v4_contract(self):
         self.assertEqual(MAX_BUILDINGS, 12288)
+
+    def test_poi_record_ceiling_matches_fmb_v5_contract(self):
+        self.assertEqual(MAX_POIS, 16384)
 
     def test_shared_legacy_fmb_golden_blocks_remain_target_one_compatible(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,6 +126,41 @@ class MapArtifactValidationTests(unittest.TestCase):
             block.write_bytes(one_building_fmb4(flags=3))
             with self.assertRaisesRegex(ValueError, "record is invalid"):
                 validate_fmb4(block)
+
+    def test_fmb5_poi_contract_and_target_four_composition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            map_id = "fixture-map"
+            block_relative = f"VECTMAP/{map_id}/+0000+0000/1.fmb"
+            font_relative = f"VECTMAP/{map_id}/assets/street-labels.fma"
+            block = root / block_relative
+            font = root / font_relative
+            block.parent.mkdir(parents=True)
+            font.parent.mkdir(parents=True)
+            block.write_bytes(fmb5_with_pois())
+            font.write_bytes(one_label_fma1())
+
+            metadata = validate_fmb5(block)
+            self.assertEqual(metadata.building_records, 1)
+            self.assertEqual(metadata.poi_records, 2)
+            self.assertEqual(metadata.poi_categories, (0, 1, 0, 0, 1))
+            validate_renderer_artifacts(
+                root,
+                map_id,
+                [{"path": block_relative}, {"path": font_relative}],
+                4,
+            )
+
+            block.write_bytes(
+                fmb5_with_pois(
+                    (
+                        (100, 200, 5, 3, 0, 0),
+                        (12, 34, 2, 3, 2, 0),
+                    )
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "record is invalid"):
+                validate_fmb5(block)
 
 
 if __name__ == "__main__":

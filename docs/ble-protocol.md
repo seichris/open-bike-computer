@@ -838,7 +838,7 @@ Current setting IDs:
 | `4` | Legacy display rotation | Ignored. Rotation is fixed by firmware target: 90° on the 1.75-inch device and 0° on the 2.06-inch device. |
 | `6` | Map rotation mode | `0` north-up, `1` course-up |
 | `7` | Map zoom level | `0...5` |
-| `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker |
+| `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker, bits 13-17 Shops, Restaurants & Cafes, Public Toilets, Gas Stations, and Bicycle Shops & Repair |
 | `9` | Map street width | Absolute rendered width is `1...24` px. The wire value remains `width - 4` (`-3...20`) so older apps that send a boost remain compatible. |
 | `10` | Map current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a route-blue dot when no route is loaded and a route-blue arrow while navigating. Both shapes are rendered at their final display resolution. |
 | `11` | Tap to switch screens | `0` disabled, `1` enabled. When enabled, a short tap cycles the device through the enabled main screens. Map drags and long presses are ignored by this shortcut. |
@@ -919,6 +919,10 @@ local and service roads and bit `2` to both paths and tracks.
 Legacy v1 map blocks do not contain feature type IDs, so the renderer also
 combines Local with Service and Paths with Tracks for those blocks. Downloading
 a current v2 map is required for independent road-class visibility.
+POI bits `13...17` are sent only after authenticated CAP2 bit `23`
+negotiation. Fresh Map profiles enable all five; fresh Map + Navigation profiles
+disable all five. Older firmware receives no POI bits and saved choices remain
+available for a later capable connection.
 
 ## Device Sound Playback
 
@@ -1099,14 +1103,17 @@ connected-display automatic inactivity control (setting ID `36`), and bit `20`
 negotiates persistent, privacy-bounded ride diagnostics and the authenticated
 device-log transfer mode. Bit `21` reports support for the optional detailed
 one-Hz ride-automation trace. Bit `22` reports the application-confirmed
-critical ride-delivery contract described above. Client version `11` requests
+critical ride-delivery contract described above. Bit `23` reports the complete
+renderer-target-4 map POI reader, installer, renderer, profile, and persistence
+path. Client version `11` requests
 bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
 without the newer features. Client version `16` requests bits `18` and `19`,
 including the authenticated renderer-diagnostics contract and the already
 released automatic-display setting. Version `18` requests bit `20`, version
-`19` requests bit `21`, and version `20` requests bit `22`.
+`19` requests bit `21`, version `20` requests bit `22`, and version `21`
+requests bit `23`.
 Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
@@ -1164,6 +1171,9 @@ Detailed ride diagnostics, CAP2 schema 1, only feature bit 21:
 
 Application-confirmed ride delivery, CAP2 schema 1, only feature bit 22:
 43 41 50 32 01 00 00 40 00
+
+Map POIs, CAP2 schema 1, only feature bit 23:
+43 41 50 32 01 00 00 80 00
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -1648,15 +1658,19 @@ Status responses should include:
   them to generate a local preview; preview image bytes are never sent over
   BLE.
 - `activeRendererFormat`: the installed renderer target format (`1` legacy,
-  `2` FMB v3 + FMA1 street labels, `3` FMB v4 + FMA1 + OSM buildings).
-- `labelProfileVersion`: `1` for the current target-2/3 label profile, otherwise
+  `2` FMB v3 + FMA1 street labels, `3` FMB v4 + FMA1 + OSM buildings,
+  `4` FMB v5 + FMA1 + buildings + map POIs).
+- `labelProfileVersion`: `1` for the current target-2/3/4 label profile, otherwise
   `0`.
 - `labelLanguages`: the bounded ordered BCP-47 language tags embedded in the
   active pack.
-- `fontAssetHealthy`: `true` only when the target-2/3 FMA1 asset passed activation
+- `fontAssetHealthy`: `true` only when the target-2/3/4 FMA1 asset passed activation
   validation and the active renderer can open it. The app uses these fields to
   distinguish unsupported firmware, a legacy map that needs regeneration, and
   an unhealthy label asset.
+- `poiProfileVersion`: `1` only for an active target-4 POI profile.
+- `poiDataHealthy`: `true` only after every active FMB v5 POI section and the
+  signed aggregate summary pass independent activation validation.
 - `enabled`: whether Wi-Fi/HTTPS upload mode is enabled.
 - `firmwareVersion`, `firmwareBuild`, and `firmwareGitSha`: the exact running
   firmware identity. The git identity must be the full 40-character lowercase

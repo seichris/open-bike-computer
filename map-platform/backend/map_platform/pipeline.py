@@ -57,7 +57,9 @@ from .map_labels import LABEL_RENDERER_FORMAT_VERSION, renderer_format_version
 from .map_buildings import (
     BUILDING_RENDERER_FORMAT_VERSION,
     load_building_calibration_window,
+    renderer_includes_buildings,
 )
+from .map_pois import POI_RENDERER_FORMAT_VERSION, renderer_includes_pois
 from .building_scope import (
     BuildingScopeError,
     GlobalBuildingPlan,
@@ -998,14 +1000,17 @@ class CommandRunner:
 _MAP_PROGRESS_PATTERN = re.compile(r"MAP_PROGRESS:(\d+):(\d+)")
 _LABEL_STATS_PREFIX = "LABEL_STATS:"
 _BUILDING_STATS_PREFIX = "BUILDING_STATS:"
+_POI_STATS_PREFIX = "POI_STATS:"
 _BUILDING_SCOPE_PREFIX = "BUILDING_SCOPE:"
 _BUILDING_COMPLEXITY_PREFIX = "BUILDING_COMPLEXITY:"
 _BUILDING_BLOCK_CACHE_PREFIX = "BUILDING_BLOCK_CACHE:"
 _BUILDING_FAILURE_PREFIX = "BUILDING_PREPROCESS_FAILURE:"
 _GENERIC_GEOMETRY_FAILURE_PREFIX = "GENERIC_GEOMETRY_FAILURE:"
+_POI_FAILURE_PREFIX = "POI_FAILURE:"
 _PIPELINE_FAILURE_PREFIXES = (
     _BUILDING_FAILURE_PREFIX,
     _GENERIC_GEOMETRY_FAILURE_PREFIX,
+    _POI_FAILURE_PREFIX,
 )
 _BUILDING_PREPROCESS_PROGRESS_PREFIX = "BUILDING_PREPROCESS_PROGRESS:"
 _BUILDING_FAILURE_CODES = {
@@ -1030,6 +1035,8 @@ _BUILDING_FAILURE_CODES = {
     "building_artifact_validation_failed",
     "generic_geometry_invalid",
     "generic_geometry_amplification_limit",
+    "poi_artifact_validation_failed",
+    "poi_artifact_too_large",
 }
 _BUILDING_FAILURE_MESSAGES = {
     "building_scope_exceeded": "selected building scope exceeds policy",
@@ -1065,6 +1072,8 @@ _BUILDING_FAILURE_MESSAGES = {
     "generic_geometry_amplification_limit": (
         "selected map geometry exceeds the decomposition limit"
     ),
+    "poi_artifact_validation_failed": "offline POI data failed validation",
+    "poi_artifact_too_large": "offline POI data exceeds the format limit",
 }
 _CHUNK_SPLIT_FAILURE_CODES = frozenset(
     {
@@ -1433,6 +1442,10 @@ def parse_label_stats(line: str) -> dict[str, Any] | None:
 
 def parse_building_stats(line: str) -> dict[str, Any] | None:
     return _parse_structured_stats(line, _BUILDING_STATS_PREFIX)
+
+
+def parse_poi_stats(line: str) -> dict[str, Any] | None:
+    return _parse_structured_stats(line, _POI_STATS_PREFIX)
 
 
 def parse_building_scope(line: str) -> dict[str, Any] | None:
@@ -1865,13 +1878,13 @@ class MapBuildPipeline:
         format_version = renderer_format_version(job.request)
         processing_bounds = aligned_processing_bounds(
             job,
-            complete_blocks=format_version == BUILDING_RENDERER_FORMAT_VERSION,
+            complete_blocks=renderer_includes_buildings(format_version),
         )
         scope_plan: ScopePlan | None = None
         scope_diagnostics: dict[str, Any] | None = None
         planned_scope_marker: dict[str, Any] | None = None
         selected_scope = False
-        if format_version == BUILDING_RENDERER_FORMAT_VERSION:
+        if renderer_includes_buildings(format_version):
             calibration = load_building_calibration_window(
                 self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
             )
@@ -2117,7 +2130,7 @@ class MapBuildPipeline:
         source_extraction_started = time.perf_counter()
         source_extraction_metrics: dict[str, Any] | None = None
         try:
-            if format_version == BUILDING_RENDERER_FORMAT_VERSION:
+            if renderer_includes_buildings(format_version):
                 extract_kwargs = {"bounds": source_bounds, "force_bounds": True}
                 if selected_scope:
                     extract_kwargs["scope_plan"] = scope_plan
@@ -2470,7 +2483,7 @@ class MapBuildPipeline:
             )
         feature_kwargs = {"bounds": processing_bounds, "on_progress": on_progress}
         if (
-            format_version == BUILDING_RENDERER_FORMAT_VERSION
+            renderer_includes_buildings(format_version)
             and on_phase_progress is not None
         ):
             feature_kwargs["on_phase_progress"] = on_phase_progress
@@ -3646,8 +3659,7 @@ class MapBuildPipeline:
 
     def uses_selected_preprocessing(self, job: MapJob) -> bool:
         if (
-            renderer_format_version(job.request)
-            != BUILDING_RENDERER_FORMAT_VERSION
+            not renderer_includes_buildings(renderer_format_version(job.request))
         ):
             return False
         frozen_mode = job.building_preprocessing_mode
@@ -3667,7 +3679,7 @@ class MapBuildPipeline:
     def uses_chunked_preprocessing(self, job: MapJob) -> bool:
         """Return whether this target-3 job must use the durable chunk path."""
 
-        if renderer_format_version(job.request) != BUILDING_RENDERER_FORMAT_VERSION:
+        if not renderer_includes_buildings(renderer_format_version(job.request)):
             return False
         return self.building_scope_mode in {"chunked_allowlist", "chunked"}
 
@@ -3994,7 +4006,7 @@ class MapBuildPipeline:
         It is opt-in while the parent worker remains on the monolithic path.
         """
 
-        if renderer_format_version(job.request) != BUILDING_RENDERER_FORMAT_VERSION:
+        if not renderer_includes_buildings(renderer_format_version(job.request)):
             raise BuildingScopeError(
                 "building_scope_policy_invalid",
                 "building chunk assembly requires renderer format 3",
@@ -4528,7 +4540,7 @@ class MapBuildPipeline:
         self._active_task_command_metrics_cursor = (
             self._command_execution_metrics_cursor()
         )
-        if renderer_format_version(job.request) != BUILDING_RENDERER_FORMAT_VERSION:
+        if not renderer_includes_buildings(renderer_format_version(job.request)):
             raise BuildingScopeError(
                 "building_scope_policy_invalid",
                 "building chunks require renderer format 3",
@@ -4975,8 +4987,7 @@ class MapBuildPipeline:
             )
         building_identity = None
         if (
-            renderer_format_version(job.request)
-            == BUILDING_RENDERER_FORMAT_VERSION
+            renderer_includes_buildings(renderer_format_version(job.request))
             and self.building_scope_mode
             in {"selected", "chunked_allowlist", "chunked"}
         ):
@@ -5180,8 +5191,7 @@ class MapBuildPipeline:
         preview = manifest.get("preview")
         if (
             self.building_scope_mode != "selected"
-            or renderer_format_version(candidate.request)
-            != BUILDING_RENDERER_FORMAT_VERSION
+            or not renderer_includes_buildings(renderer_format_version(candidate.request))
             or not isinstance(summary, dict)
             or not isinstance(preview, dict)
         ):
@@ -5361,8 +5371,7 @@ class MapBuildPipeline:
     ) -> dict[str, Any] | None:
         if (
             self.building_scope_mode != "selected"
-            or renderer_format_version(job.request)
-            != BUILDING_RENDERER_FORMAT_VERSION
+            or not renderer_includes_buildings(renderer_format_version(job.request))
         ):
             return None
         parent_summary = parent_manifest.get("buildingPreprocessing")
@@ -5580,6 +5589,7 @@ class MapBuildPipeline:
             self._pipeline_metadata(),
             building_stats=metrics.get("buildingBuild"),
             building_preprocessing=building_preprocessing_summary,
+            poi_stats=metrics.get("poiBuild"),
         )
         reserved_preview_sha256 = getattr(
             job, "_reserved_preview_sha256", None
@@ -5603,14 +5613,19 @@ class MapBuildPipeline:
         if renderer_format_version(job.request) in {
             LABEL_RENDERER_FORMAT_VERSION,
             BUILDING_RENDERER_FORMAT_VERSION,
+            POI_RENDERER_FORMAT_VERSION,
         }:
             label_phase_timings = metrics.setdefault("labelPhaseTimings", {})
             if isinstance(label_phase_timings, dict):
                 label_phase_timings["labelPackaging"] = packaging_seconds
-        if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION:
+        if renderer_includes_buildings(renderer_format_version(job.request)):
             building_phase_timings = metrics.setdefault("buildingPhaseTimings", {})
             if isinstance(building_phase_timings, dict):
                 building_phase_timings["packaging"] = packaging_seconds
+        if renderer_includes_pois(renderer_format_version(job.request)):
+            poi_phase_timings = metrics.setdefault("poiPhaseTimings", {})
+            if isinstance(poi_phase_timings, dict):
+                poi_phase_timings["packaging"] = packaging_seconds
         zip_sha256 = None
         zip_record = None
         if self.artifact_store is not None or validate_final_artifact:
@@ -5700,10 +5715,23 @@ class MapBuildPipeline:
             if renderer_format_version(job.request) in {
                 LABEL_RENDERER_FORMAT_VERSION,
                 BUILDING_RENDERER_FORMAT_VERSION,
+                POI_RENDERER_FORMAT_VERSION,
             }:
                 label_phase_timings = metrics.setdefault("labelPhaseTimings", {})
                 if isinstance(label_phase_timings, dict):
                     label_phase_timings["labelSigning"] = stream_build.timings[
+                        "signingSeconds"
+                    ]
+            if renderer_includes_pois(renderer_format_version(job.request)):
+                poi_phase_timings = metrics.setdefault("poiPhaseTimings", {})
+                if isinstance(poi_phase_timings, dict):
+                    poi_phase_timings["signing"] = stream_build.timings[
+                        "signingSeconds"
+                    ]
+            if renderer_includes_buildings(renderer_format_version(job.request)):
+                building_phase_timings = metrics.setdefault("buildingPhaseTimings", {})
+                if isinstance(building_phase_timings, dict):
+                    building_phase_timings["signing"] = stream_build.timings[
                         "signingSeconds"
                     ]
             metrics.update(
@@ -6298,7 +6326,7 @@ class MapBuildPipeline:
         extraction_metrics: dict[str, Any] = {"schemaVersion": 1}
         extraction_option = (
             ["--option=types=multipolygon,building"]
-            if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION
+            if renderer_includes_buildings(renderer_format_version(job.request))
             else []
         )
         if scope_plan is not None:
@@ -7103,6 +7131,8 @@ class MapBuildPipeline:
                 str(bounds.max_lat),
                 str(clipped_pbf),
                 str(geojson_prefix),
+                "--renderer-format",
+                str(renderer_format_version(job.request)),
             ]
         if source_index_manifest is not None:
             if scope_plan_path is None:
@@ -7180,6 +7210,7 @@ class MapBuildPipeline:
         if format_version in {
             LABEL_RENDERER_FORMAT_VERSION,
             BUILDING_RENDERER_FORMAT_VERSION,
+            POI_RENDERER_FORMAT_VERSION,
         }:
             labels = job.request["labels"]
             for language in labels["preferredLanguages"]:
@@ -7214,7 +7245,7 @@ class MapBuildPipeline:
                 "cache-only building assembly requires a block cache identity"
             )
         if (
-            format_version == BUILDING_RENDERER_FORMAT_VERSION
+            renderer_includes_buildings(format_version)
             and job.geometry.geometry is not None
             and job.geometry.mode.value in {"custom_polygon", "route_corridor"}
         ):
@@ -7235,12 +7266,13 @@ class MapBuildPipeline:
         progress_coalescer = ProgressCoalescer()
         label_stats: dict[str, Any] | None = None
         building_stats: dict[str, Any] | None = None
+        poi_stats: dict[str, Any] | None = None
         building_scope: dict[str, Any] | None = None
         building_complexity: dict[str, int] | None = None
         building_block_cache_evidence: dict[str, Any] | None = None
 
         def handle_output(line: str) -> None:
-            nonlocal label_stats, building_stats, building_scope, building_complexity, building_block_cache_evidence
+            nonlocal label_stats, building_stats, poi_stats, building_scope, building_complexity, building_block_cache_evidence
             preprocess_progress = parse_building_preprocess_progress(line)
             if preprocess_progress is not None:
                 self._emit_phase_progress(
@@ -7294,6 +7326,9 @@ class MapBuildPipeline:
             parsed_building_stats = parse_building_stats(line)
             if parsed_building_stats is not None:
                 building_stats = parsed_building_stats
+            parsed_poi_stats = parse_poi_stats(line)
+            if parsed_poi_stats is not None:
+                poi_stats = parsed_poi_stats
             parsed_building_complexity = parse_building_complexity(line)
             if parsed_building_complexity is not None:
                 if building_complexity is None:
@@ -7362,6 +7397,7 @@ class MapBuildPipeline:
             format_version,
             label_stats,
             building_stats,
+            poi_stats,
             planned_scope_marker or building_scope,
             building_complexity,
             require_building_scope=(
@@ -7374,6 +7410,7 @@ class MapBuildPipeline:
         format_version: int,
         stats: dict[str, Any] | None,
         building_stats: dict[str, Any] | None,
+        poi_stats: dict[str, Any] | None = None,
         building_scope: dict[str, Any] | None = None,
         building_complexity: dict[str, int] | None = None,
         *,
@@ -7382,6 +7419,7 @@ class MapBuildPipeline:
         if format_version not in {
             LABEL_RENDERER_FORMAT_VERSION,
             BUILDING_RENDERER_FORMAT_VERSION,
+            POI_RENDERER_FORMAT_VERSION,
         }:
             return {}
         if stats is None:
@@ -7400,7 +7438,7 @@ class MapBuildPipeline:
             "labelBuild": stats,
             "labelPhaseTimings": phase_timings,
         }
-        if format_version == BUILDING_RENDERER_FORMAT_VERSION:
+        if renderer_includes_buildings(format_version):
             if building_stats is None:
                 raise RuntimeError("building-aware extraction did not emit BUILDING_STATS")
             building_phase_timings = building_stats.pop("phaseTimings", {})
@@ -7423,6 +7461,21 @@ class MapBuildPipeline:
                 raise RuntimeError("selected building extraction did not emit BUILDING_SCOPE")
             if building_scope is not None:
                 result["buildingScope"] = building_scope
+        if renderer_includes_pois(format_version):
+            if poi_stats is None:
+                raise RuntimeError("POI-aware extraction did not emit POI_STATS")
+            poi_phase_timings = poi_stats.pop("phaseTimings", {})
+            if not isinstance(poi_phase_timings, dict) or not all(
+                isinstance(key, str)
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                and value >= 0
+                for key, value in poi_phase_timings.items()
+            ):
+                raise RuntimeError("POI-aware extraction emitted invalid phase timings")
+            result["poiBuild"] = poi_stats
+            result["poiPhaseTimings"] = poi_phase_timings
         return result
 
     def _stage_subset_pack(
@@ -7458,7 +7511,7 @@ class MapBuildPipeline:
         if (
             self.building_scope_mode == "selected"
             and renderer_format_version(child.request)
-            == BUILDING_RENDERER_FORMAT_VERSION
+            in {BUILDING_RENDERER_FORMAT_VERSION, POI_RENDERER_FORMAT_VERSION}
         ):
             calibration = load_building_calibration_window(
                 self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
@@ -7598,6 +7651,7 @@ class MapBuildPipeline:
             renderer_format_version(child.request) in {
                 LABEL_RENDERER_FORMAT_VERSION,
                 BUILDING_RENDERER_FORMAT_VERSION,
+                POI_RENDERER_FORMAT_VERSION,
             }
             and not copied_font_asset
         ):

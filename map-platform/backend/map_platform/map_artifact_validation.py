@@ -22,6 +22,7 @@ MAX_GLYPH_DIMENSION = 96
 MAX_BUILDINGS = 12288
 MAX_BUILDING_RINGS = 32
 MAX_BUILDING_POINTS = 131072
+MAX_POIS = 16384
 
 _FMA_HEADER = struct.Struct("<4sBBBBIIIIII")
 _FMA_FACE_PREFIX = struct.Struct("<BBH32s")
@@ -42,6 +43,8 @@ class BlockMetadata:
     maximum_language_id: int
     building_records: int = 0
     building_provenance: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0)
+    poi_records: int = 0
+    poi_categories: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0)
 
 
 def _take(data: bytes, offset: int, amount: int, context: str) -> tuple[bytes, int]:
@@ -232,7 +235,7 @@ def _validate_label_text(raw: bytes) -> str:
 
 
 def _validate_fmb_label_block(path: Path, version: int) -> BlockMetadata:
-    if version not in {3, 4}:
+    if version not in {3, 4, 5}:
         raise ValueError("label block version is unsupported")
     data = path.read_bytes()
     expected_header = b"FMB" + bytes((version,))
@@ -353,7 +356,12 @@ def _validate_fmb_label_block(path: Path, version: int) -> BlockMetadata:
         raise ValueError("FMB v3 label table has trailing bytes")
     building_records, building_provenance = (
         _validate_building_section(sections[3])
-        if version == 4
+        if version >= 4
+        else (0, (0, 0, 0, 0, 0))
+    )
+    poi_records, poi_categories = (
+        _validate_poi_section(sections[4])
+        if version == 5
         else (0, (0, 0, 0, 0, 0))
     )
     return BlockMetadata(
@@ -362,6 +370,8 @@ def _validate_fmb_label_block(path: Path, version: int) -> BlockMetadata:
         maximum_language_id,
         building_records,
         building_provenance,
+        poi_records,
+        poi_categories,
     )
 
 
@@ -371,6 +381,47 @@ def validate_fmb3(path: Path) -> BlockMetadata:
 
 def validate_fmb4(path: Path) -> BlockMetadata:
     return _validate_fmb_label_block(path, 4)
+
+
+def validate_fmb5(path: Path) -> BlockMetadata:
+    return _validate_fmb_label_block(path, 5)
+
+
+def _validate_poi_section(section: bytes) -> tuple[int, tuple[int, int, int, int, int]]:
+    header, cursor = _take(section, 0, 8, "FMB v5 POI header")
+    record_count, record_size, category_mask = struct.unpack("<HHI", header)
+    if (
+        record_count > MAX_POIS
+        or record_size != 8
+        or category_mask & ~0x1F
+        or len(section) != 8 + record_count * record_size
+    ):
+        raise ValueError("FMB v5 POI header is invalid")
+    counts = [0, 0, 0, 0, 0]
+    actual_mask = 0
+    previous: tuple[int, int, int, int, int, int] | None = None
+    for _ in range(record_count):
+        raw, cursor = _take(section, cursor, 8, "FMB v5 POI record")
+        local_x, local_y, category, maximum_zoom, rank, flags = struct.unpack(
+            "<hhBBBB", raw
+        )
+        current = (local_x, local_y, category, rank, maximum_zoom, flags)
+        if (
+            not 0 <= local_x <= 4095
+            or not 0 <= local_y <= 4095
+            or not 1 <= category <= 5
+            or maximum_zoom > 5
+            or rank > 3
+            or flags != 0
+            or (previous is not None and current < previous)
+        ):
+            raise ValueError("FMB v5 POI record is invalid")
+        previous = current
+        counts[category - 1] += 1
+        actual_mask |= 1 << (category - 1)
+    if cursor != len(section) or category_mask != actual_mask:
+        raise ValueError("FMB v5 POI section is not canonical")
+    return record_count, tuple(counts)
 
 
 def _validate_building_section(
@@ -466,6 +517,42 @@ def summarize_fmb4_buildings(paths: list[Path]) -> dict[str, int]:
     }
 
 
+def summarize_fmb5_buildings(paths: list[Path]) -> dict[str, int]:
+    counts = [0, 0, 0, 0, 0]
+    records = 0
+    for path in paths:
+        metadata = validate_fmb5(path)
+        records += metadata.building_records
+        for index, value in enumerate(metadata.building_provenance):
+            counts[index] += value
+    return {
+        "recordCount": records,
+        "explicitHeightCount": counts[0],
+        "levelsHeightCount": counts[1],
+        "inheritedHeightCount": counts[2],
+        "localMedianHeightCount": counts[3],
+        "classDefaultHeightCount": counts[4],
+    }
+
+
+def summarize_fmb5_pois(paths: list[Path]) -> dict[str, int]:
+    counts = [0, 0, 0, 0, 0]
+    records = 0
+    for path in paths:
+        metadata = validate_fmb5(path)
+        records += metadata.poi_records
+        for index, value in enumerate(metadata.poi_categories):
+            counts[index] += value
+    return {
+        "recordCount": records,
+        "shopsCount": counts[0],
+        "restaurantsAndCafesCount": counts[1],
+        "publicToiletsCount": counts[2],
+        "gasStationsCount": counts[3],
+        "bicycleServicesCount": counts[4],
+    }
+
+
 def validate_renderer_artifacts(
     map_root: Path,
     map_id: str,
@@ -478,13 +565,15 @@ def validate_renderer_artifacts(
     font_relative = f"VECTMAP/{map_id}/assets/street-labels.fma"
     if not fmb_paths:
         raise ValueError("map pack contains no binary map blocks")
-    if format_version in {2, 3}:
+    if format_version in {2, 3, 4}:
         if fmp_paths or paths.count(font_relative) != 1:
             raise ValueError(f"renderer target {format_version} has invalid block/font roles")
         font = validate_fma1(map_root / font_relative)
         for relative in fmb_paths:
             block = (
-                validate_fmb4(map_root / relative)
+                validate_fmb5(map_root / relative)
+                if format_version == 4
+                else validate_fmb4(map_root / relative)
                 if format_version == 3
                 else validate_fmb3(map_root / relative)
             )

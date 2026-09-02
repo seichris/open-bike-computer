@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .map_labels import renderer_format_version
-from .map_buildings import BUILDING_PROFILE_VERSION, BUILDING_RENDERER_FORMAT_VERSION
+from .map_buildings import BUILDING_PROFILE_VERSION, renderer_includes_buildings
 from .models import Bounds, GeometryMode, MapJob
 from .preview import render_boundary_preview
 
@@ -124,7 +124,7 @@ def reuse_keys(
         "target": job.request.get("target") or {},
         "labels": job.request.get("labels"),
     }
-    if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION:
+    if renderer_includes_buildings(renderer_format_version(job.request)):
         building_identity = (
             building_preprocessing_identity or _legacy_building_identity()
         )
@@ -177,7 +177,7 @@ def reuse_keys(
             "corridorWidthM": job.geometry.corridor_width_m,
         },
     }
-    if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION:
+    if renderer_includes_buildings(renderer_format_version(job.request)):
         exact_document["buildingPreprocessingIdentitySha256"] = (
             exact_building_identity_sha256
         )

@@ -12,9 +12,13 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from map_format import (
     MAX_BLOCK_BUILDINGS,
+    MAX_BLOCK_POIS,
     MapFormatError,
     MapFormatLimitError,
+    PoiMapFormatError,
+    PoiMapFormatLimitError,
     encode_building_section,
+    encode_poi_section,
     write_fmb,
 )
 from font_asset import FontFaceSpec, FontPackBuilder
@@ -136,20 +140,25 @@ def golden_features():
 class BinaryMapFormatTests(unittest.TestCase):
     def test_shared_golden_blocks_match_producer_bytes(self):
         fixtures = golden_fmb_blocks()
-        self.assertEqual(set(fixtures), {"fmb_v1", "fmb_v2", "fmb_v3", "fmb_v4"})
+        self.assertEqual(
+            set(fixtures), {"fmb_v1", "fmb_v2", "fmb_v3", "fmb_v4", "fmb_v5"}
+        )
         self.assertEqual(fixtures["fmb_v1"][:4], b"FMB\x01")
 
         polygon, road, building = golden_features()
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             expected_versions = {
-                "fmb_v2": write_fmb(root / "v2.fmb", [polygon], [road], 0, 0),
+                "fmb_v2": write_fmb(
+                    root / "v2.fmb", [polygon], [road], 0, 0, renderer_target=1
+                ),
                 "fmb_v3": write_fmb(
                     root / "v3.fmb",
                     [polygon],
                     [road],
                     0,
                     0,
+                    renderer_target=2,
                     font_builder=GoldenFontBuilder(),
                 ),
                 "fmb_v4": write_fmb(
@@ -158,17 +167,52 @@ class BinaryMapFormatTests(unittest.TestCase):
                     [road],
                     0,
                     0,
+                    renderer_target=3,
                     font_builder=GoldenFontBuilder(),
                     building_records=[building],
+                ),
+                "fmb_v5": write_fmb(
+                    root / "v5.fmb",
+                    [polygon],
+                    [road],
+                    0,
+                    0,
+                    renderer_target=4,
+                    font_builder=GoldenFontBuilder(),
+                    building_records=[building],
+                    poi_records=[
+                        {
+                            "local_x": 12,
+                            "local_y": 34,
+                            "category": 2,
+                            "maximum_zoom": 3,
+                            "rank": 2,
+                            "flags": 0,
+                        },
+                        {
+                            "local_x": 100,
+                            "local_y": 200,
+                            "category": 5,
+                            "maximum_zoom": 3,
+                            "rank": 0,
+                            "flags": 0,
+                        },
+                    ],
                 ),
             }
             generated = {
                 "fmb_v2": (root / "v2.fmb").read_bytes(),
                 "fmb_v3": (root / "v3.fmb").read_bytes(),
                 "fmb_v4": (root / "v4.fmb").read_bytes(),
+                "fmb_v5": (root / "v5.fmb").read_bytes(),
             }
 
-        for name, version in (("fmb_v2", 2), ("fmb_v3", 3), ("fmb_v4", 4)):
+        for name, version in (
+            ("fmb_v2", 2),
+            ("fmb_v3", 3),
+            ("fmb_v4", 4),
+            ("fmb_v5", 5),
+        ):
             self.assertEqual(expected_versions[name]["version"], version)
             self.assertEqual(generated[name], fixtures[name])
 
@@ -184,7 +228,14 @@ class BinaryMapFormatTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "0_0.fmb"
-            write_fmb(path, [polygon], polylines, min_x=0, min_y=0)
+            write_fmb(
+                path,
+                [polygon],
+                polylines,
+                min_x=0,
+                min_y=0,
+                renderer_target=1,
+            )
             data = path.read_bytes()
 
         self.assertEqual(data[:4], b"FMB\x02")
@@ -238,6 +289,7 @@ class BinaryMapFormatTests(unittest.TestCase):
                 [road],
                 min_x=0,
                 min_y=0,
+                renderer_target=2,
                 font_builder=builder,
             )
             data = path.read_bytes()
@@ -328,6 +380,7 @@ class BinaryMapFormatTests(unittest.TestCase):
                 [road],
                 min_x=0,
                 min_y=0,
+                renderer_target=2,
                 font_builder=LanguageAwareBuilder(),
             )
             data = path.read_bytes()
@@ -384,6 +437,7 @@ class BinaryMapFormatTests(unittest.TestCase):
                 [],
                 min_x=0,
                 min_y=0,
+                renderer_target=3,
                 font_builder=EmptyBuilder(),
                 building_records=[building],
             )
@@ -396,6 +450,7 @@ class BinaryMapFormatTests(unittest.TestCase):
                 [],
                 min_x=0,
                 min_y=0,
+                renderer_target=3,
                 font_builder=EmptyBuilder(),
                 building_section=section,
                 building_metadata=section_metadata,
@@ -430,6 +485,7 @@ class BinaryMapFormatTests(unittest.TestCase):
                     [],
                     min_x=0,
                     min_y=0,
+                    renderer_target=3,
                     font_builder=EmptyBuilder(),
                     building_records=[building],
                 )
@@ -452,6 +508,93 @@ class BinaryMapFormatTests(unittest.TestCase):
         ) as raised:
             encode_building_section([building] * (MAX_BLOCK_BUILDINGS + 1))
         self.assertEqual(raised.exception.code, "building_artifact_too_large")
+
+    def test_fmb_v5_retains_prior_sections_and_requires_canonical_pois(self):
+        polygon, road, building = golden_features()
+        pois = [
+            {
+                "local_x": 12,
+                "local_y": 34,
+                "category": 2,
+                "maximum_zoom": 3,
+                "rank": 2,
+                "flags": 0,
+            },
+            {
+                "local_x": 100,
+                "local_y": 200,
+                "category": 5,
+                "maximum_zoom": 3,
+                "rank": 0,
+                "flags": 0,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            path = root / "v5.fmb"
+            metadata = write_fmb(
+                path,
+                [polygon],
+                [road],
+                0,
+                0,
+                renderer_target=4,
+                font_builder=GoldenFontBuilder(),
+                building_records=[building],
+                poi_records=pois,
+            )
+            data = path.read_bytes()
+            empty_path = root / "empty-v5.fmb"
+            empty_metadata = write_fmb(
+                empty_path,
+                [polygon],
+                [road],
+                0,
+                0,
+                renderer_target=4,
+                font_builder=GoldenFontBuilder(),
+                building_records=[],
+                poi_records=[],
+            )
+
+        self.assertEqual(data[:4], b"FMB\x05")
+        self.assertEqual(metadata["version"], 5)
+        self.assertEqual(metadata["pois"], 2)
+        self.assertEqual(metadata["restaurantsAndCafesCount"], 1)
+        self.assertEqual(metadata["bicycleServicesCount"], 1)
+        directory_offset = skip_coordinates(
+            data, skip_coordinates(data, 18) + 2 + 13
+        )
+        self.assertEqual(data[directory_offset:directory_offset + 4], b"EXT5")
+        self.assertEqual(data[directory_offset + 4], 5)
+        poi_entry = directory_offset + 8 + 4 * 16
+        section_type, flags, reserved, offset, length, crc = struct.unpack_from(
+            "<BBHIII", data, poi_entry
+        )
+        self.assertEqual((section_type, flags, reserved), (5, 1, 0))
+        section = data[offset:offset + length]
+        self.assertEqual(zlib.crc32(section) & 0xFFFFFFFF, crc)
+        self.assertEqual(struct.unpack_from("<HHI", section), (2, 8, 0b10010))
+        self.assertEqual(struct.unpack_from("<hhBBBB", section, 8), (12, 34, 2, 3, 2, 0))
+        self.assertEqual(empty_metadata["pois"], 0)
+        self.assertEqual(empty_metadata["poiBytes"], 8)
+
+        with self.assertRaises(PoiMapFormatError):
+            encode_poi_section([pois[1], pois[0]])
+        with self.assertRaises(PoiMapFormatLimitError):
+            encode_poi_section([pois[0]] * (MAX_BLOCK_POIS + 1))
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(PoiMapFormatError):
+                write_fmb(
+                    pathlib.Path(directory) / "missing-pois.fmb",
+                    [polygon],
+                    [road],
+                    0,
+                    0,
+                    renderer_target=4,
+                    font_builder=GoldenFontBuilder(),
+                    building_records=[building],
+                )
 
 
 if __name__ == "__main__":

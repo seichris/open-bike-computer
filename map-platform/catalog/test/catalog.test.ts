@@ -2850,11 +2850,12 @@ describe("catalog lifecycle boundaries", () => {
       undefined,
       "production",
     );
+    const shareExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     await createShare(
       env,
       library.libraryId,
       shared.mapEntryId,
-      "2026-09-01T00:00:00.000Z",
+      shareExpiresAt.toISOString(),
     );
     await detachLibraryMap(env, library.libraryId, shared.mapEntryId);
     await env.DB.prepare("UPDATE map_entries SET updated_at = ? WHERE id = ?")
@@ -2865,7 +2866,7 @@ describe("catalog lifecycle boundaries", () => {
       { ...env, RETENTION_GRACE_DAYS: "30" },
       "production",
       10,
-      new Date("2026-09-15T00:00:00.000Z"),
+      new Date(shareExpiresAt.getTime() + 14 * 24 * 60 * 60 * 1000),
     );
     const protectedArtifact = await env.DB.prepare(
       "SELECT state FROM artifacts WHERE id = ?",
@@ -2878,7 +2879,7 @@ describe("catalog lifecycle boundaries", () => {
       { ...env, RETENTION_GRACE_DAYS: "30" },
       "production",
       10,
-      new Date("2026-10-02T00:00:00.000Z"),
+      new Date(shareExpiresAt.getTime() + 31 * 24 * 60 * 60 * 1000),
     );
     const tombstonedArtifact = await env.DB.prepare(
       "SELECT state FROM artifacts WHERE id = ?",

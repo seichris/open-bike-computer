@@ -1056,6 +1056,7 @@ struct OfflineMapGenerationCapabilities: Decodable, Equatable {
             1: ("legacy-vector-v1", []),
             2: ("street-labels-v1", ["street-labels"]),
             3: ("buildings-3d-v1", ["street-labels", "3d-buildings"]),
+            4: ("map-pois-v1", ["street-labels", "3d-buildings", "map-pois"]),
         ]
         guard schemaVersion == 1,
               ["development", "production"].contains(deploymentChannel),
@@ -1398,6 +1399,12 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
     var activeManifestReceipt: String? = nil
     var activeMapDisplayName: String? = nil
     var activeMapBoundsE7: [Int]? = nil
+    var activeRendererFormat: Int? = nil
+    var labelProfileVersion: Int? = nil
+    var labelLanguages: [String]? = nil
+    var fontAssetHealthy: Bool? = nil
+    var poiProfileVersion: Int? = nil
+    var poiDataHealthy: Bool? = nil
     let activation: Activation?
     let protocols: [Int]?
     let streamFormatVersions: [Int]?

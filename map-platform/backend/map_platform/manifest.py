@@ -9,13 +9,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .map_artifact_validation import summarize_fmb4_buildings, validate_renderer_artifacts
+from .map_artifact_validation import (
+    summarize_fmb4_buildings,
+    summarize_fmb5_buildings,
+    summarize_fmb5_pois,
+    validate_renderer_artifacts,
+)
 from .map_buildings import (
     BUILDING_PROFILE_VERSION,
     BUILDING_RENDERER_FORMAT_VERSION,
     manifest_building_summary,
+    renderer_includes_buildings,
 )
 from .map_labels import LABEL_RENDERER_FORMAT_VERSION, renderer_format_version
+from .map_pois import (
+    POI_PROFILE_VERSION,
+    POI_RENDERER_FORMAT_VERSION,
+    manifest_poi_summary,
+    renderer_includes_pois,
+)
 from .models import MapJob
 from .preview import (
     DEFAULT_PREVIEW_HEIGHT,
@@ -183,6 +195,7 @@ def build_manifest(
     *,
     building_stats: dict[str, Any] | None = None,
     building_preprocessing: dict[str, Any] | None = None,
+    poi_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     map_id = job.map_id or stable_map_id(job)
     files = collect_map_files(map_root, map_id)
@@ -199,6 +212,7 @@ def build_manifest(
     if format_version in {
         LABEL_RENDERER_FORMAT_VERSION,
         BUILDING_RENDERER_FORMAT_VERSION,
+        POI_RENDERER_FORMAT_VERSION,
     }:
         if font_asset_path not in file_paths:
             raise ValueError(
@@ -260,31 +274,52 @@ def build_manifest(
     if format_version in {
         LABEL_RENDERER_FORMAT_VERSION,
         BUILDING_RENDERER_FORMAT_VERSION,
+        POI_RENDERER_FORMAT_VERSION,
     }:
         labels = job.request["labels"]
         manifest["target"]["labelProfileVersion"] = labels["profileVersion"]
         manifest["target"]["labelLanguages"] = labels["preferredLanguages"]
         manifest["target"]["internationalFallback"] = labels["internationalFallback"]
-    if format_version == BUILDING_RENDERER_FORMAT_VERSION:
+    if renderer_includes_buildings(format_version):
         manifest["target"]["buildingProfileVersion"] = BUILDING_PROFILE_VERSION
-        artifact_summary = summarize_fmb4_buildings(
+        block_paths = [
+            map_root / entry["path"]
+            for entry in files
+            if entry["path"].endswith(".fmb")
+        ]
+        artifact_summary = (
+            summarize_fmb5_buildings(block_paths)
+            if format_version == POI_RENDERER_FORMAT_VERSION
+            else summarize_fmb4_buildings(block_paths)
+        )
+        if building_stats is not None:
+            reported_summary = manifest_building_summary(building_stats)
+            if reported_summary != artifact_summary:
+                raise ValueError(
+                    f"building statistics do not match FMB v{format_version + 1} artifacts"
+                )
+        manifest["buildings"] = artifact_summary
+        if building_preprocessing is not None:
+            manifest["buildingPreprocessing"] = building_preprocessing
+    elif building_stats is not None:
+        raise ValueError("building statistics require a building-aware renderer target")
+    elif building_preprocessing is not None:
+        raise ValueError("building preprocessing metadata requires a building-aware renderer target")
+    if renderer_includes_pois(format_version):
+        manifest["target"]["poiProfileVersion"] = POI_PROFILE_VERSION
+        artifact_pois = summarize_fmb5_pois(
             [
                 map_root / entry["path"]
                 for entry in files
                 if entry["path"].endswith(".fmb")
             ]
         )
-        if building_stats is not None:
-            reported_summary = manifest_building_summary(building_stats)
-            if reported_summary != artifact_summary:
-                raise ValueError("building statistics do not match FMB v4 artifacts")
-        manifest["buildings"] = artifact_summary
-        if building_preprocessing is not None:
-            manifest["buildingPreprocessing"] = building_preprocessing
-    elif building_stats is not None:
-        raise ValueError("building statistics require renderer target 3")
-    elif building_preprocessing is not None:
-        raise ValueError("building preprocessing metadata requires renderer target 3")
+        if poi_stats is not None:
+            if manifest_poi_summary(poi_stats) != artifact_pois:
+                raise ValueError("POI statistics do not match FMB v5 artifacts")
+        manifest["pois"] = artifact_pois
+    elif poi_stats is not None:
+        raise ValueError("POI statistics require renderer target 4")
     return manifest
 
 

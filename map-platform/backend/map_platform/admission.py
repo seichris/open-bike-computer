@@ -137,7 +137,7 @@ class AdmissionPolicy:
         source: SourceRegion,
     ) -> AdmissionCost:
         format_version = renderer_format_version(request)
-        renderer_weight = {1: 1, 2: 2, 3: 4}.get(format_version)
+        renderer_weight = {1: 1, 2: 2, 3: 4, 4: 5}.get(format_version)
         if renderer_weight is None:
             raise ValueError("renderer format has no admission cost policy")
 

@@ -1,7 +1,9 @@
 #include "map_transfer.hpp"
 #include "../maps/src/mapRendererFileValidator.hpp"
 #include "../maps/src/mapFontAsset.hpp"
+#include "../maps/src/mapBuildingBlock.hpp"
 #include "../maps/src/mapLabelBlock.hpp"
+#include "../maps/src/mapPoiBlock.hpp"
 
 #include <algorithm>
 #include <array>
@@ -407,6 +409,43 @@ static uint64_t jsonUintValue(const std::string &json, const std::string &key) {
   return value;
 }
 
+static std::string jsonObjectValue(const std::string &json,
+                                   const std::string &key) {
+  const std::string needle = "\"" + key + "\"";
+  size_t cursor = json.find(needle);
+  if (cursor == std::string::npos)
+    return {};
+  cursor = json.find('{', cursor + needle.size());
+  if (cursor == std::string::npos)
+    return {};
+  const size_t start = cursor;
+  size_t depth = 0;
+  bool inString = false;
+  bool escaped = false;
+  for (; cursor < json.size(); ++cursor) {
+    const char value = json[cursor];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inString && value == '\\') {
+      escaped = true;
+      continue;
+    }
+    if (value == '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString)
+      continue;
+    if (value == '{')
+      ++depth;
+    else if (value == '}' && --depth == 0)
+      return json.substr(start, cursor - start + 1U);
+  }
+  return {};
+}
+
 static std::vector<std::string>
 jsonStringArrayValue(const std::string &json, const std::string &key,
                      bool *valid = nullptr) {
@@ -507,6 +546,7 @@ static MapTargetMetadata targetMetadata(const MapManifest &manifest) {
   target.labelLanguages = manifest.labelLanguages;
   target.internationalFallback = manifest.internationalFallback;
   target.buildingProfileVersion = manifest.buildingProfileVersion;
+  target.poiProfileVersion = manifest.poiProfileVersion;
   return target;
 }
 
@@ -514,7 +554,7 @@ static bool targetMetadataEmpty(const MapTargetMetadata &target) {
   return target.renderer.empty() && target.formatVersion == 0 &&
          target.labelProfileVersion == 0 && target.labelLanguages.empty() &&
          target.internationalFallback.empty() &&
-         target.buildingProfileVersion == 0;
+         target.buildingProfileVersion == 0 && target.poiProfileVersion == 0;
 }
 
 static bool targetMetadataValid(const MapTargetMetadata &target) {
@@ -522,14 +562,14 @@ static bool targetMetadataValid(const MapTargetMetadata &target) {
     return true;
   if (target.renderer != "esp32-fmb" ||
       (target.formatVersion != 1 && target.formatVersion != 2 &&
-       target.formatVersion != 3)) {
+       target.formatVersion != 3 && target.formatVersion != 4)) {
     return false;
   }
   if (target.formatVersion == 1) {
     return target.labelProfileVersion == 0 &&
            target.labelLanguages.empty() &&
            target.internationalFallback.empty() &&
-           target.buildingProfileVersion == 0;
+           target.buildingProfileVersion == 0 && target.poiProfileVersion == 0;
   }
   if (target.labelProfileVersion != 1 ||
       target.labelLanguages.size() > 3 ||
@@ -545,8 +585,13 @@ static bool targetMetadataValid(const MapTargetMetadata &target) {
         return false;
     }
   }
-  return target.formatVersion == 3 ? target.buildingProfileVersion == 1
-                                   : target.buildingProfileVersion == 0;
+  const bool buildingsValid = target.formatVersion >= 3
+                                  ? target.buildingProfileVersion == 1
+                                  : target.buildingProfileVersion == 0;
+  const bool poisValid = target.formatVersion == 4
+                             ? target.poiProfileVersion == 1
+                             : target.poiProfileVersion == 0;
+  return buildingsValid && poisValid;
 }
 
 static bool targetMetadataMatches(const MapTargetMetadata &left,
@@ -556,7 +601,8 @@ static bool targetMetadataMatches(const MapTargetMetadata &left,
          left.labelProfileVersion == right.labelProfileVersion &&
          left.labelLanguages == right.labelLanguages &&
          left.internationalFallback == right.internationalFallback &&
-         left.buildingProfileVersion == right.buildingProfileVersion;
+         left.buildingProfileVersion == right.buildingProfileVersion &&
+         left.poiProfileVersion == right.poiProfileVersion;
 }
 
 static MapTargetMetadata targetMetadataFromJson(const std::string &json,
@@ -576,6 +622,7 @@ static MapTargetMetadata targetMetadataFromJson(const std::string &json,
   const std::string languagesKey = key("LabelLanguages");
   const std::string fallbackKey = key("InternationalFallback");
   const std::string buildingProfileKey = key("BuildingProfileVersion");
+  const std::string poiProfileKey = key("PoiProfileVersion");
   const auto hasKey = [&](const std::string &name) {
     return json.find("\"" + name + "\"") != std::string::npos;
   };
@@ -593,15 +640,18 @@ static MapTargetMetadata targetMetadataFromJson(const std::string &json,
       jsonUintValue(json, buildingProfileKey);
   target.buildingProfileVersion =
       static_cast<uint32_t>(buildingProfileVersion);
+  const uint64_t poiProfileVersion = jsonUintValue(json, poiProfileKey);
+  target.poiProfileVersion = static_cast<uint32_t>(poiProfileVersion);
   const bool metadataPresent =
       hasKey(rendererKey) || hasKey(formatKey) || hasKey(profileKey) ||
       hasKey(languagesKey) || hasKey(fallbackKey) ||
-      hasKey(buildingProfileKey);
+      hasKey(buildingProfileKey) || hasKey(poiProfileKey);
   if (valid != nullptr) {
     *valid = (!metadataPresent || languagesValid) &&
              formatVersion <= UINT32_MAX &&
              labelProfileVersion <= UINT32_MAX &&
-             buildingProfileVersion <= UINT32_MAX;
+             buildingProfileVersion <= UINT32_MAX &&
+             poiProfileVersion <= UINT32_MAX;
   }
   return target;
 }
@@ -632,7 +682,9 @@ static std::string targetMetadataJson(const MapTargetMetadata &target,
   json += "],\"" + key("InternationalFallback") + "\":\"" +
           jsonEscape(target.internationalFallback) + "\",\"" +
           key("BuildingProfileVersion") + "\":" +
-          std::to_string(target.buildingProfileVersion);
+          std::to_string(target.buildingProfileVersion) + ",\"" +
+          key("PoiProfileVersion") + "\":" +
+          std::to_string(target.poiProfileVersion);
   return json;
 }
 
@@ -939,18 +991,35 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
       jsonStringValue(manifestText, "internationalFallback");
   manifest.buildingProfileVersion = static_cast<uint32_t>(
       jsonUintValue(manifestText, "buildingProfileVersion"));
+  manifest.poiProfileVersion = static_cast<uint32_t>(
+      jsonUintValue(manifestText, "poiProfileVersion"));
+  const std::string buildingSummary =
+      jsonObjectValue(manifestText, "buildings");
+  const std::string poiSummary = jsonObjectValue(manifestText, "pois");
   manifest.buildingRecordCount = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "recordCount"));
+      jsonUintValue(buildingSummary, "recordCount"));
   manifest.buildingProvenanceCounts[0] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "explicitHeightCount"));
+      jsonUintValue(buildingSummary, "explicitHeightCount"));
   manifest.buildingProvenanceCounts[1] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "levelsHeightCount"));
+      jsonUintValue(buildingSummary, "levelsHeightCount"));
   manifest.buildingProvenanceCounts[2] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "inheritedHeightCount"));
+      jsonUintValue(buildingSummary, "inheritedHeightCount"));
   manifest.buildingProvenanceCounts[3] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "localMedianHeightCount"));
+      jsonUintValue(buildingSummary, "localMedianHeightCount"));
   manifest.buildingProvenanceCounts[4] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "classDefaultHeightCount"));
+      jsonUintValue(buildingSummary, "classDefaultHeightCount"));
+  manifest.poiRecordCount =
+      static_cast<uint32_t>(jsonUintValue(poiSummary, "recordCount"));
+  manifest.poiCategoryCounts[0] =
+      static_cast<uint32_t>(jsonUintValue(poiSummary, "shopsCount"));
+  manifest.poiCategoryCounts[1] = static_cast<uint32_t>(
+      jsonUintValue(poiSummary, "restaurantsAndCafesCount"));
+  manifest.poiCategoryCounts[2] = static_cast<uint32_t>(
+      jsonUintValue(poiSummary, "publicToiletsCount"));
+  manifest.poiCategoryCounts[3] = static_cast<uint32_t>(
+      jsonUintValue(poiSummary, "gasStationsCount"));
+  manifest.poiCategoryCounts[4] = static_cast<uint32_t>(
+      jsonUintValue(poiSummary, "bicycleServicesCount"));
   manifest.minimumFirmwareVersion =
       jsonStringValue(manifestText, "minFirmwareVersion");
   if (manifest.renderer.empty() && manifest.formatVersion == 0) {
@@ -1004,13 +1073,14 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
     return fail("manifest_files", "manifest contains no map files");
   if (manifest.renderer != "esp32-fmb" ||
       (manifest.formatVersion != 1 && manifest.formatVersion != 2 &&
-       manifest.formatVersion != 3))
+       manifest.formatVersion != 3 && manifest.formatVersion != 4))
     return fail("manifest_target", "manifest renderer target is unsupported");
-  if (((manifest.formatVersion == 2 || manifest.formatVersion == 3) &&
+  if (((manifest.formatVersion == 2 || manifest.formatVersion == 3 ||
+        manifest.formatVersion == 4) &&
        (fontAssetCount != 1 || legacyTextBlockCount != 0)) ||
       (manifest.formatVersion == 1 && fontAssetCount != 0))
     return fail("manifest_target", "manifest files do not match renderer target");
-  if (manifest.formatVersion == 2 || manifest.formatVersion == 3) {
+  if (manifest.formatVersion >= 2) {
     bool uniqueLanguages = true;
     for (size_t index = 0; index < manifest.labelLanguages.size(); ++index)
       for (size_t other = index + 1; other < manifest.labelLanguages.size(); ++other)
@@ -1032,13 +1102,34 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
   uint64_t provenanceTotal = 0;
   for (uint32_t count : manifest.buildingProvenanceCounts)
     provenanceTotal += count;
-  if (manifest.formatVersion == 3) {
+  if (manifest.formatVersion >= 3) {
     if (manifest.buildingProfileVersion != 1 ||
         provenanceTotal != manifest.buildingRecordCount)
       return fail("manifest_buildings", "manifest building profile is invalid");
   } else if (manifest.buildingProfileVersion != 0 ||
              manifest.buildingRecordCount != 0 || provenanceTotal != 0) {
-    return fail("manifest_buildings", "non-v3 manifest contains building metadata");
+    return fail("manifest_buildings", "legacy manifest contains building metadata");
+  }
+  uint64_t poiTotal = 0;
+  for (uint32_t count : manifest.poiCategoryCounts)
+    poiTotal += count;
+  if (manifest.formatVersion == 4) {
+    static constexpr const char *kRequiredPoiSummaryKeys[] = {
+        "recordCount", "shopsCount", "restaurantsAndCafesCount",
+        "publicToiletsCount", "gasStationsCount", "bicycleServicesCount"};
+    bool completePoiSummary = true;
+    for (const char *key : kRequiredPoiSummaryKeys) {
+      completePoiSummary =
+          completePoiSummary &&
+          poiSummary.find(std::string("\"") + key + "\"") !=
+              std::string::npos;
+    }
+    if (manifest.poiProfileVersion != 1 || poiSummary.empty() ||
+        !completePoiSummary || poiTotal != manifest.poiRecordCount)
+      return fail("manifest_pois", "manifest POI profile is invalid");
+  } else if (manifest.poiProfileVersion != 0 || manifest.poiRecordCount != 0 ||
+             poiTotal != 0 || !poiSummary.empty()) {
+    return fail("manifest_pois", "legacy manifest contains POI metadata");
   }
   return {true, "ok", ""};
 }
@@ -3061,6 +3152,12 @@ MapTransferInstaller::manifestReceipt(const MapManifest &manifest) const {
            std::to_string(manifest.buildingRecordCount) + "\n";
   for (uint32_t count : manifest.buildingProvenanceCounts)
     value += std::to_string(count) + "\n";
+  if (manifest.formatVersion == 4) {
+    value += std::to_string(manifest.poiProfileVersion) + "\n" +
+             std::to_string(manifest.poiRecordCount) + "\n";
+    for (uint32_t count : manifest.poiCategoryCounts)
+      value += std::to_string(count) + "\n";
+  }
   value +=
            manifest.minimumFirmwareVersion + "\n";
   for (const ManifestFile &file : manifest.files) {
@@ -3088,7 +3185,7 @@ MapTransferInstaller::readInstalledManifest(const std::string &root,
 InstallStatus MapTransferInstaller::validateLabelContracts(
     const std::string &root, const MapManifest &manifest,
     bool useManifestPaths) const {
-  if (manifest.formatVersion != 2 && manifest.formatVersion != 3)
+  if (manifest.formatVersion < 2 || manifest.formatVersion > 4)
     return {true, "ok", ""};
   const auto resolvedPath = [&](const ManifestFile &file) {
     if (useManifestPaths)
@@ -3117,6 +3214,11 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
     if (font.language(index) != manifest.labelLanguages[index])
       return fail("label_languages", "FMA1 languages do not match manifest");
 
+  uint64_t buildingRecords = 0;
+  std::array<uint64_t, 5> buildingProvenance = {};
+  uint64_t poiRecords = 0;
+  std::array<uint64_t, 5> poiCategories = {};
+
   for (const ManifestFile &file : manifest.files) {
     if (file.path.size() < 4 ||
         file.path.compare(file.path.size() - 4, 4, ".fmb") != 0)
@@ -3135,7 +3237,7 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
     input.read(reinterpret_cast<char *>(bytes.data()),
                static_cast<std::streamsize>(bytes.size()));
     const uint8_t expectedBlockVersion =
-        manifest.formatVersion == 3 ? 4 : 3;
+        static_cast<uint8_t>(manifest.formatVersion + 1U);
     if (!input || bytes.size() < 4 || bytes[3] != expectedBlockVersion)
       return fail("label_block_version",
                   "map block version does not match renderer target");
@@ -3149,6 +3251,37 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
       return fail("label_block_contract",
                   "FMB label references do not match FMA1");
     }
+    if (manifest.formatVersion >= 3) {
+      map_building_block::Block buildings;
+      if (!map_building_block::decode(bytes.data(), bytes.size(), buildings,
+                                      &error))
+        return fail("building_block_contract", "FMB building section is invalid");
+      buildingRecords += buildings.stats.records;
+      for (size_t index = 0; index < buildingProvenance.size(); ++index)
+        buildingProvenance[index] += buildings.stats.provenance[index];
+    }
+    if (manifest.formatVersion == 4) {
+      map_poi_block::Block pois;
+      if (!map_poi_block::decode(bytes.data(), bytes.size(), pois, &error))
+        return fail("poi_block_contract", "FMB POI section is invalid");
+      poiRecords += pois.stats.records;
+      for (size_t index = 0; index < poiCategories.size(); ++index)
+        poiCategories[index] += pois.stats.categories[index];
+    }
+  }
+  if (manifest.formatVersion >= 3) {
+    if (buildingRecords != manifest.buildingRecordCount)
+      return fail("building_block_contract", "FMB building counts do not match manifest");
+    for (size_t index = 0; index < buildingProvenance.size(); ++index)
+      if (buildingProvenance[index] != manifest.buildingProvenanceCounts[index])
+        return fail("building_block_contract", "FMB building counts do not match manifest");
+  }
+  if (manifest.formatVersion == 4) {
+    if (poiRecords != manifest.poiRecordCount)
+      return fail("poi_block_contract", "FMB POI counts do not match manifest");
+    for (size_t index = 0; index < poiCategories.size(); ++index)
+      if (poiCategories[index] != manifest.poiCategoryCounts[index])
+        return fail("poi_block_contract", "FMB POI counts do not match manifest");
   }
   return {true, "ok", ""};
 }

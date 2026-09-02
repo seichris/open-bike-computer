@@ -1,6 +1,7 @@
 #include "../../lib/maps/src/mapBlockFormat.hpp"
 #include "../../lib/maps/src/mapBuildingBlock.hpp"
 #include "../../lib/maps/src/mapByteOrder.hpp"
+#include "../../lib/maps/src/mapPoiBlock.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -109,6 +110,7 @@ static void refreshSectionCrc(std::vector<uint8_t> &data,
 
 int main() {
   static_assert(map_block_format::kMaximumBuildings == 12288);
+  static_assert(map_block_format::kMaximumPois == 16384);
   for (size_t offset = 0; offset < 8; ++offset) {
     std::vector<uint8_t> unaligned(offset + 4, 0);
     uint8_t *bytes = unaligned.data() + offset;
@@ -124,11 +126,12 @@ int main() {
     assert(map_byte_order::readLeI16(bytes + 2) == -2);
   }
   const auto golden = loadGoldenBlocks();
-  assert(golden.size() == 4);
+  assert(golden.size() == 5);
   const std::vector<uint8_t> &validV1 = golden.at("fmb_v1");
   const std::vector<uint8_t> &valid = golden.at("fmb_v2");
   const std::vector<uint8_t> &validV3 = golden.at("fmb_v3");
   const std::vector<uint8_t> &validV4 = golden.at("fmb_v4");
+  const std::vector<uint8_t> &validV5 = golden.at("fmb_v5");
 
   assert(map_block_format::validate(validV1.data(), validV1.size()));
   for (size_t size = 0; size < validV1.size(); ++size)
@@ -204,6 +207,47 @@ int main() {
   assert(!map_block_format::validate(changed.data(), changed.size()));
   assert(!map_building_block::decode(changed.data(), changed.size(),
                                      buildingBlock, &buildingError));
+
+  assert(map_block_format::validate(validV5.data(), validV5.size()));
+  for (size_t size = 0; size < validV5.size(); ++size)
+    assert(!map_block_format::validate(validV5.data(), size));
+  assert(map_building_block::decode(validV5.data(), validV5.size(),
+                                    buildingBlock, &buildingError));
+  assert(buildingBlock.stats.records == 1);
+  map_poi_block::Block poiBlock;
+  std::string poiError;
+  assert(map_poi_block::decode(validV5.data(), validV5.size(), poiBlock,
+                               &poiError));
+  assert(poiBlock.records.size() == 2);
+  assert(poiBlock.records[0].localX == 12);
+  assert(poiBlock.records[0].localY == 34);
+  assert(poiBlock.records[0].category ==
+         map_poi_block::Category::RestaurantsAndCafes);
+  assert(poiBlock.records[1].category ==
+         map_poi_block::Category::BicycleServices);
+  assert(poiBlock.stats.categories[1] == 1);
+  assert(poiBlock.stats.categories[4] == 1);
+
+  const size_t poiEntry = sectionEntryOffset(validV5, 5, 5);
+  const size_t poiSection = read32(validV5, poiEntry + 4U);
+  changed = validV5;
+  changed[poiSection + 4U] = 0; // declared categories do not match records
+  refreshSectionCrc(changed, poiEntry);
+  assert(!map_block_format::validate(changed.data(), changed.size()));
+  changed = validV5;
+  changed[poiSection + 8U + 4U] = 6; // unknown category
+  refreshSectionCrc(changed, poiEntry);
+  assert(!map_block_format::validate(changed.data(), changed.size()));
+  changed = validV5;
+  changed[poiSection + 8U + 7U] = 1; // reserved flags
+  refreshSectionCrc(changed, poiEntry);
+  assert(!map_block_format::validate(changed.data(), changed.size()));
+  changed = validV5;
+  std::copy(changed.begin() + static_cast<std::ptrdiff_t>(poiSection + 16U),
+            changed.begin() + static_cast<std::ptrdiff_t>(poiSection + 24U),
+            changed.begin() + static_cast<std::ptrdiff_t>(poiSection + 8U));
+  refreshSectionCrc(changed, poiEntry);
+  assert(!map_block_format::validate(changed.data(), changed.size()));
 
   changed = valid;
   changed.push_back(0);

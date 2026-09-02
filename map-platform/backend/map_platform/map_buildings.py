@@ -13,6 +13,7 @@ from .installations import INSTALLATION_ID_PREFIX
 
 BUILDING_PROFILE_VERSION = 1
 BUILDING_RENDERER_FORMAT_VERSION = 3
+BUILDING_RENDERER_FORMAT_VERSIONS = frozenset({3, 4})
 INSTALLATION_ID_PATTERN = re.compile(
     rf"{re.escape(INSTALLATION_ID_PREFIX)}[0-9a-f]{{32}}"
 )
@@ -24,6 +25,10 @@ BUILDING_STATS_KEYS = {
     "localMedianHeightCount",
     "classDefaultHeightCount",
 }
+
+
+def renderer_includes_buildings(format_version: int) -> bool:
+    return format_version in BUILDING_RENDERER_FORMAT_VERSIONS
 
 
 @dataclass(frozen=True)
