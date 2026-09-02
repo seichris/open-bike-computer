@@ -60,7 +60,7 @@ int main() {
   assert(std::strcmp(endedSpeed.value.data(), "24.5") == 0);
   assert(std::strcmp(endedHeart.value.data(), "142") == 0);
 
-  for (const auto dimensions : {
+  for (const auto &dimensions : {
            std::pair<int32_t, int32_t>{466, 466},
            std::pair<int32_t, int32_t>{410, 502}}) {
     const auto layout = ride_telemetry_layout::makeLayout(
