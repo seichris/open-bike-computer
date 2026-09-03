@@ -357,6 +357,14 @@ BUILDING_PREPROCESSING_COMMAND_POLICY = CommandExecutionPolicy(
     max_progress_record_bytes=64 * 1024,
     termination_grace_seconds=5,
 )
+BUILDING_CALIBRATION_COMMAND_POLICY = CommandExecutionPolicy(
+    name="building_calibration",
+    wall_timeout_seconds=6 * 60 * 60,
+    idle_timeout_seconds=None,
+    max_captured_output_bytes=512 * 1024,
+    max_progress_record_bytes=64 * 1024,
+    termination_grace_seconds=5,
+)
 CONVERSION_COMMAND_POLICY = CommandExecutionPolicy(
     name="conversion",
     wall_timeout_seconds=6 * 60 * 60,
@@ -3396,6 +3404,7 @@ class MapBuildPipeline:
                 str(result_path),
             ],
             cwd=scripts_root,
+            policy=SOURCE_INDEX_COMMAND_POLICY,
             on_phase_progress=on_phase_progress,
             default_unit="source_index",
             total_blocks=len(global_plan.output_blocks),
@@ -3542,6 +3551,7 @@ class MapBuildPipeline:
                 str(ids_path),
             ],
             cwd=scripts_root,
+            policy=BUILDING_PREPROCESSING_COMMAND_POLICY,
             on_phase_progress=on_phase_progress,
             default_unit="relation_closure",
             total_blocks=len(scope_plan.output_blocks),
@@ -4660,6 +4670,7 @@ class MapBuildPipeline:
                         str(closure_ids_path),
                     ],
                     cwd=self.paths.osm_extract_root / "scripts",
+                    policy=BUILDING_PREPROCESSING_COMMAND_POLICY,
                     on_phase_progress=on_phase_progress,
                     default_unit="relation_closure",
                     total_blocks=len(scope_plan.output_blocks),
@@ -6476,6 +6487,7 @@ class MapBuildPipeline:
         args: list[str],
         *,
         cwd: Path,
+        policy: CommandExecutionPolicy,
         on_phase_progress,
         default_unit: str,
         total_blocks: int,
@@ -6483,11 +6495,6 @@ class MapBuildPipeline:
         cancellation_check=None,
     ) -> str:
         command_started = time.perf_counter()
-        command_policy = (
-            SOURCE_INDEX_COMMAND_POLICY
-            if default_unit == "source_index"
-            else BUILDING_PREPROCESSING_COMMAND_POLICY
-        )
         self._emit_phase_progress(
             on_phase_progress,
             unit=default_unit,
@@ -6520,14 +6527,14 @@ class MapBuildPipeline:
                     "on_output": handle_output,
                 }
                 if isinstance(self.runner, CommandRunner):
-                    streaming_kwargs["policy"] = command_policy
+                    streaming_kwargs["policy"] = policy
                 if cancellation_check is not None:
                     streaming_kwargs["cancellation_check"] = cancellation_check
                 output = self.runner.run_streaming(args, **streaming_kwargs)
             else:
                 run_kwargs = {"cwd": cwd}
                 if isinstance(self.runner, CommandRunner):
-                    run_kwargs["policy"] = command_policy
+                    run_kwargs["policy"] = policy
                 output = self.runner.run(args, **run_kwargs)
                 if on_phase_progress is not None:
                     for line in output.splitlines():
@@ -6710,6 +6717,7 @@ class MapBuildPipeline:
                     "--full-precompute",
                 ],
                 cwd=scripts_root,
+                policy=BUILDING_CALIBRATION_COMMAND_POLICY,
                 on_phase_progress=on_phase_progress,
                 default_unit="calibration_cells",
                 total_blocks=len(scope_plan.output_blocks),
@@ -6782,6 +6790,7 @@ class MapBuildPipeline:
                 "--result-json", str(source_index_result),
             ],
             cwd=scripts_root,
+            policy=SOURCE_INDEX_COMMAND_POLICY,
             on_phase_progress=on_phase_progress,
             default_unit="source_index",
             total_blocks=total_blocks,
@@ -6814,6 +6823,7 @@ class MapBuildPipeline:
                 "--ids-output", str(closure_ids),
             ],
             cwd=scripts_root,
+            policy=BUILDING_PREPROCESSING_COMMAND_POLICY,
             on_phase_progress=on_phase_progress,
             default_unit="relation_closure",
             total_blocks=total_blocks,
@@ -6865,6 +6875,7 @@ class MapBuildPipeline:
                 "--full-precompute",
             ],
             cwd=scripts_root,
+            policy=BUILDING_CALIBRATION_COMMAND_POLICY,
             on_phase_progress=on_phase_progress,
             default_unit="calibration_cells",
             total_blocks=total_blocks,
@@ -6968,6 +6979,7 @@ class MapBuildPipeline:
                     str(source_index_result),
                 ],
                 cwd=scripts_root,
+                policy=SOURCE_INDEX_COMMAND_POLICY,
                 on_phase_progress=on_phase_progress,
                 default_unit="source_index",
                 total_blocks=len(scope_plan.output_blocks),
@@ -6994,6 +7006,7 @@ class MapBuildPipeline:
                     str(closure_ids),
                 ],
                 cwd=scripts_root,
+                policy=BUILDING_PREPROCESSING_COMMAND_POLICY,
                 on_phase_progress=on_phase_progress,
                 default_unit="relation_closure",
                 total_blocks=len(scope_plan.output_blocks),
