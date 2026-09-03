@@ -13,6 +13,32 @@ template <typename T> struct OptionalMetric {
   T value = 0;
 };
 
+struct WatchMotionEvidence {
+  bool available = false;
+  uint16_t sessionToken = 0;
+  uint16_t sampleEpoch = 0;
+  uint32_t sampleSequence = 0;
+  uint16_t speedCentimetersPerSecond = 0;
+  uint16_t horizontalAccuracyDecimeters = 0;
+  uint32_t capturedAtMs = 0;
+  uint32_t lastReceivedAtMs = 0;
+  bool automaticallyPaused = false;
+};
+
+inline bool operator==(const WatchMotionEvidence &lhs,
+                       const WatchMotionEvidence &rhs) {
+  return lhs.available == rhs.available &&
+         lhs.sessionToken == rhs.sessionToken &&
+         lhs.sampleEpoch == rhs.sampleEpoch &&
+         lhs.sampleSequence == rhs.sampleSequence &&
+         lhs.speedCentimetersPerSecond == rhs.speedCentimetersPerSecond &&
+         lhs.horizontalAccuracyDecimeters ==
+             rhs.horizontalAccuracyDecimeters &&
+         lhs.capturedAtMs == rhs.capturedAtMs &&
+         lhs.lastReceivedAtMs == rhs.lastReceivedAtMs &&
+         lhs.automaticallyPaused == rhs.automaticallyPaused;
+}
+
 struct State {
   workout_telemetry_protocol::SessionState sessionState =
       workout_telemetry_protocol::SessionState::Idle;
@@ -51,6 +77,7 @@ struct State {
   workout_telemetry_protocol::PauseOrigin lastTransitionOrigin =
       workout_telemetry_protocol::PauseOrigin::None;
   uint32_t lastOriginReceivedAtMs = 0;
+  WatchMotionEvidence watchMotion{};
 };
 
 template <typename T>
@@ -91,7 +118,8 @@ inline bool operator==(const State &lhs, const State &rhs) {
          lhs.detectorProfileVersion == rhs.detectorProfileVersion &&
          lhs.pauseOrigin == rhs.pauseOrigin &&
          lhs.lastTransitionOrigin == rhs.lastTransitionOrigin &&
-         lhs.lastOriginReceivedAtMs == rhs.lastOriginReceivedAtMs;
+         lhs.lastOriginReceivedAtMs == rhs.lastOriginReceivedAtMs &&
+         lhs.watchMotion == rhs.watchMotion;
 }
 
 inline bool operator!=(const State &lhs, const State &rhs) {
@@ -116,6 +144,9 @@ enum class ApplyResult : uint8_t {
   IgnoredToken,
   IgnoredPair,
   IgnoredStateRegression,
+  IgnoredMotionEpoch,
+  IgnoredMotionSequence,
+  IgnoredLifecyclePhase,
 };
 
 constexpr uint32_t STALE_AFTER_MS = 10000;
@@ -268,6 +299,11 @@ public:
       if (length != workout_telemetry_protocol::ORIGIN_FRAME_SIZE)
         return ApplyResult::RejectedLength;
       return applyOrigin(bytes, receivedAtMs);
+    case static_cast<uint8_t>(
+        workout_telemetry_protocol::FrameKind::WatchMotion):
+      if (length != workout_telemetry_protocol::FRAME_SIZE)
+        return ApplyResult::RejectedLength;
+      return applyWatchMotion(bytes, receivedAtMs);
     default:
       return ApplyResult::RejectedKind;
     }
@@ -346,6 +382,7 @@ private:
       next.pauseOrigin = PauseOrigin::None;
       next.lastTransitionOrigin = PauseOrigin::None;
       next.lastOriginReceivedAtMs = 0;
+      next.watchMotion = {};
     }
     next.sessionState = incomingState;
     next.sessionToken = token;
@@ -572,6 +609,90 @@ private:
     state_.pauseOrigin = static_cast<PauseOrigin>(rawPauseOrigin);
     state_.lastTransitionOrigin =
         static_cast<PauseOrigin>(rawLastOrigin);
+    if (state_.sessionState == SessionState::Paused &&
+        state_.pauseOrigin != PauseOrigin::Automatic) {
+      state_.watchMotion = {};
+    }
+    return ApplyResult::Applied;
+  }
+
+  static bool serialNewer16(uint16_t incoming, uint16_t current) {
+    const uint16_t delta = static_cast<uint16_t>(incoming - current);
+    return delta != 0 && delta < 0x8000U;
+  }
+
+  static bool serialNewer32(uint32_t incoming, uint32_t current) {
+    const uint32_t delta = incoming - current;
+    return delta != 0 && delta < 0x80000000UL;
+  }
+
+  ApplyResult applyWatchMotion(const uint8_t *bytes, uint32_t receivedAtMs) {
+    using namespace workout_telemetry_protocol;
+
+    const uint8_t flags = bytes[1];
+    const uint16_t token = readUInt16LE(bytes, 2);
+    const uint32_t sequence = readUInt32LE(bytes, 4);
+    const uint16_t speed = readUInt16LE(bytes, 8);
+    const uint16_t accuracy = readUInt16LE(bytes, 10);
+    const uint16_t sampleAge = readUInt16LE(bytes, 12);
+    const uint16_t epoch = readUInt16LE(bytes, 14);
+    const bool fixValid = (flags & WATCH_MOTION_FIX_VALID) != 0;
+    const bool speedAvailable =
+        (flags & WATCH_MOTION_SPEED_AVAILABLE) != 0;
+    const bool accuracyAvailable =
+        (flags & WATCH_MOTION_ACCURACY_AVAILABLE) != 0;
+    const bool currentSample =
+        (flags & WATCH_MOTION_CURRENT_SAMPLE) != 0;
+    const bool automaticallyPaused =
+        (flags & WATCH_MOTION_AUTOMATICALLY_PAUSED) != 0;
+
+    if ((flags & ~WATCH_MOTION_KNOWN_FLAGS_MASK) != 0)
+      return ApplyResult::RejectedFlags;
+    if (token == 0 || epoch == 0 || sequence == 0)
+      return ApplyResult::RejectedToken;
+    if (speedAvailable != (speed != UNAVAILABLE_UINT16) ||
+        accuracyAvailable != (accuracy != UNAVAILABLE_UINT16) ||
+        fixValid != (speedAvailable && accuracyAvailable && currentSample &&
+                     sampleAge != UNAVAILABLE_UINT16)) {
+      return ApplyResult::RejectedFlags;
+    }
+    if (!fixValid)
+      return ApplyResult::RejectedMetric;
+    if (!state_.coreReceived || state_.sessionToken != token)
+      return ApplyResult::IgnoredToken;
+
+    const bool runningPhase =
+        state_.sessionState == SessionState::Running && !automaticallyPaused;
+    const bool automaticallyPausedPhase =
+        state_.sessionState == SessionState::Paused &&
+        state_.originReceived && state_.pauseOrigin == PauseOrigin::Automatic &&
+        automaticallyPaused;
+    if (!runningPhase && !automaticallyPausedPhase)
+      return ApplyResult::IgnoredLifecyclePhase;
+
+    const WatchMotionEvidence &current = state_.watchMotion;
+    if (current.available) {
+      if (epoch == current.sampleEpoch) {
+        if (sequence == current.sampleSequence)
+          return ApplyResult::IgnoredMotionSequence;
+        if (!serialNewer32(sequence, current.sampleSequence))
+          return ApplyResult::IgnoredMotionSequence;
+      } else if (!serialNewer16(epoch, current.sampleEpoch)) {
+        return ApplyResult::IgnoredMotionEpoch;
+      }
+    }
+
+    state_.watchMotion = {
+        true,
+        token,
+        epoch,
+        sequence,
+        speed,
+        accuracy,
+        receivedAtMs - static_cast<uint32_t>(sampleAge),
+        receivedAtMs,
+        automaticallyPaused,
+    };
     return ApplyResult::Applied;
   }
 
@@ -733,6 +854,12 @@ inline const char *applyResultName(ApplyResult result) {
     return "pair_mismatch";
   case ApplyResult::IgnoredStateRegression:
     return "state_regression";
+  case ApplyResult::IgnoredMotionEpoch:
+    return "motion_epoch";
+  case ApplyResult::IgnoredMotionSequence:
+    return "motion_sequence";
+  case ApplyResult::IgnoredLifecyclePhase:
+    return "lifecycle_phase";
   }
   return "unknown";
 }

@@ -42,6 +42,8 @@ enum class MotionEvidenceState : uint8_t {
   CadenceMoving,
   GpsImuMoving,
   GpsImuStopped,
+  WatchGpsMoving,
+  WatchGpsStopped,
   WheelDropout,
   SourceConflict,
 };
@@ -63,6 +65,8 @@ enum EvidenceMask : uint16_t {
   EvidenceImuStopped = 1U << 7,
   EvidenceGpsDisplacement = 1U << 8,
   EvidenceSourceConflict = 1U << 9,
+  EvidenceWatchGpsMoving = 1U << 10,
+  EvidenceWatchGpsStopped = 1U << 11,
 };
 
 enum SourceHealthMask : uint16_t {
@@ -71,6 +75,7 @@ enum SourceHealthMask : uint16_t {
   SourceHealthCadenceFresh = 1U << 1,
   SourceHealthGpsFresh = 1U << 2,
   SourceHealthImuFresh = 1U << 3,
+  SourceHealthWatchGpsFresh = 1U << 4,
 };
 
 struct TimedMetric {
@@ -97,6 +102,12 @@ struct RideEvidenceObservation {
   TimedMetric gpsHorizontalUncertaintyMeters;
   TimedFlag gpsStationaryWindowValid;
   TimedMetric gpsNetDisplacementMeters;
+  TimedMetric watchGpsSpeedMetersPerSecond;
+  TimedMetric watchGpsHorizontalUncertaintyMeters;
+  TimedFlag watchGpsFixValid;
+  bool watchGpsSampleIdentityAvailable = false;
+  uint16_t watchGpsSampleEpoch = 0;
+  uint32_t watchGpsSampleSequence = 0;
 };
 
 struct Settings {
@@ -246,6 +257,7 @@ public:
     pauseSuppressedUntilMs_ = nowMs + profile_.manualResumeGraceMs;
     pauseSuppressionActive_ = true;
     pauseLatch_.reset();
+    watchPauseLatch_.reset();
     pausePath_ = PausePath::None;
   }
 
@@ -274,12 +286,18 @@ private:
     bool imuKnown = false;
     bool imuMoving = false;
     bool imuStopped = false;
+    bool watchGpsKnown = false;
+    bool watchGpsMoving = false;
+    bool watchGpsStopped = false;
+    uint16_t watchGpsSampleEpoch = 0;
+    uint32_t watchGpsSampleSequence = 0;
+    uint32_t watchGpsCapturedAtMs = 0;
     SensorCombination sensorCombination = SensorCombination::Neither;
     uint16_t mask = EvidenceNone;
     uint16_t sourceHealthMask = SourceHealthNone;
   };
 
-  enum class PausePath : uint8_t { None = 0, Direct, GpsImu };
+  enum class PausePath : uint8_t { None = 0, WatchGps, Direct, GpsImu };
 
   bool pendingEvidenceContradicted(const Normalized &evidence) const {
     switch (pendingTransition_) {
@@ -297,11 +315,14 @@ private:
 
   static bool hasConfirmedMovingEvidence(const Normalized &evidence) {
     return evidence.wheelMoving || evidence.cadenceMoving ||
+           evidence.watchGpsMoving ||
            (evidence.gpsKnown && evidence.imuKnown &&
             evidence.gpsResumeMoving && evidence.imuMoving);
   }
 
   static bool hasConfirmedStoppedEvidence(const Normalized &evidence) {
+    if (evidence.watchGpsKnown)
+      return evidence.watchGpsStopped;
     if (evidence.wheelKnown) {
       return evidence.wheelStopped &&
              (!evidence.cadenceKnown || evidence.cadenceStopped);
@@ -319,6 +340,10 @@ private:
       return MotionEvidenceState::WheelMoving;
     if (evidence.cadenceMoving)
       return MotionEvidenceState::CadenceMoving;
+    if (evidence.watchGpsMoving)
+      return MotionEvidenceState::WatchGpsMoving;
+    if (evidence.watchGpsStopped)
+      return MotionEvidenceState::WatchGpsStopped;
     if (evidence.wheelStopped)
       return MotionEvidenceState::WheelStopped;
     if (evidence.wheelKnown)
@@ -485,6 +510,40 @@ private:
                         observation.imuMotionScore.value <=
                             profile_.imuStoppedScore;
 
+    const bool watchSpeedFresh = metricFresh(
+        observation.watchGpsSpeedMetersPerSecond, nowMs,
+        profile_.watchGpsFreshnessMs);
+    const bool watchFixFresh = flagFresh(
+        observation.watchGpsFixValid, nowMs,
+        profile_.watchGpsFreshnessMs);
+    const bool watchAccuracyFresh = metricFresh(
+        observation.watchGpsHorizontalUncertaintyMeters, nowMs,
+        profile_.watchGpsFreshnessMs);
+    result.watchGpsKnown =
+        watchSpeedFresh &&
+        nonnegativeFinite(observation.watchGpsSpeedMetersPerSecond.value) &&
+        watchFixFresh && observation.watchGpsFixValid.value &&
+        watchAccuracyFresh &&
+        nonnegativeFinite(
+            observation.watchGpsHorizontalUncertaintyMeters.value) &&
+        observation.watchGpsHorizontalUncertaintyMeters.value <=
+            profile_.maximumWatchGpsHorizontalUncertaintyMeters &&
+        observation.watchGpsSampleIdentityAvailable &&
+        observation.watchGpsSampleEpoch != 0 &&
+        observation.watchGpsSampleSequence != 0;
+    result.watchGpsMoving =
+        result.watchGpsKnown &&
+        observation.watchGpsSpeedMetersPerSecond.value >=
+            profile_.watchGpsResumeMetersPerSecond;
+    result.watchGpsStopped =
+        result.watchGpsKnown &&
+        observation.watchGpsSpeedMetersPerSecond.value <
+            profile_.watchGpsStoppedMetersPerSecond;
+    result.watchGpsSampleEpoch = observation.watchGpsSampleEpoch;
+    result.watchGpsSampleSequence = observation.watchGpsSampleSequence;
+    result.watchGpsCapturedAtMs =
+        observation.watchGpsSpeedMetersPerSecond.capturedAtMs;
+
     if (result.wheelKnown)
       result.sourceHealthMask |= SourceHealthWheelFresh;
     if (result.cadenceKnown)
@@ -493,6 +552,8 @@ private:
       result.sourceHealthMask |= SourceHealthGpsFresh;
     if (result.imuKnown)
       result.sourceHealthMask |= SourceHealthImuFresh;
+    if (result.watchGpsKnown)
+      result.sourceHealthMask |= SourceHealthWatchGpsFresh;
 
     if (result.wheelMoving)
       result.mask |= EvidenceWheelMoving;
@@ -514,6 +575,10 @@ private:
       result.mask |= EvidenceGpsDisplacement;
     if (result.directConflict)
       result.mask |= EvidenceSourceConflict;
+    if (result.watchGpsMoving)
+      result.mask |= EvidenceWatchGpsMoving;
+    if (result.watchGpsStopped)
+      result.mask |= EvidenceWatchGpsStopped;
     return result;
   }
 
@@ -521,6 +586,8 @@ private:
                          const Settings &settings) {
     pauseLatch_.reset();
     resumeLatch_.reset();
+    watchPauseLatch_.reset();
+    watchResumeLatch_.reset();
     if (settings.startMode == StartMode::Off || !suppressionElapsed(nowMs) ||
         !startSuppressionElapsed(nowMs, evidence)) {
       if (settings.startMode != StartMode::Off &&
@@ -577,10 +644,12 @@ private:
     if (!settings.autoPauseEnabled || !suppressionElapsed(nowMs) ||
         !pauseSuppressionElapsed(nowMs)) {
       pauseLatch_.reset();
+      watchPauseLatch_.reset();
       pausePath_ = PausePath::None;
       return {};
     }
     resumeLatch_.reset();
+    watchResumeLatch_.reset();
 
     if (evidence.directConflict) {
       pauseLatch_.reset();
@@ -604,8 +673,36 @@ private:
       return {};
     }
 
+    if (evidence.watchGpsMoving) {
+      pauseLatch_.reset();
+      watchPauseLatch_.reset();
+      pausePath_ = PausePath::None;
+      return {};
+    }
+
     bool condition = false;
     uint32_t requiredMs = 0;
+    if (evidence.watchGpsKnown) {
+      pauseLatch_.reset();
+      pausePath_ = PausePath::WatchGps;
+      const bool ready = watchPauseLatch_.update(
+          true, evidence.watchGpsStopped, evidence.watchGpsSampleEpoch,
+          evidence.watchGpsSampleSequence, evidence.watchGpsCapturedAtMs,
+          profile_.watchGpsPauseMs, profile_.watchGpsMaximumSampleGapMs);
+      if (!ready) {
+        if (watchPauseLatch_.active()) {
+          detectorStatus_ = {
+              DetectorPhase::PauseCandidate,
+              progressPercent(watchPauseLatch_.spanMs(),
+                              profile_.watchGpsPauseMs)};
+        }
+        return {};
+      }
+      return emit(Transition::Pause, nowMs, evidence.mask,
+                  evidence.sourceHealthMask,
+                  watchPauseLatch_.beganAtMs());
+    }
+    watchPauseLatch_.reset();
     if (evidence.wheelKnown) {
       if (pausePath_ != PausePath::Direct) {
         pauseLatch_.reset();
@@ -643,26 +740,42 @@ private:
 
   Decision evaluateResume(uint32_t nowMs, const Normalized &evidence) {
     pauseLatch_.reset();
+    watchPauseLatch_.reset();
     if (!suppressionElapsed(nowMs)) {
       resumeLatch_.reset();
+      watchResumeLatch_.reset();
       return {};
     }
     const bool directPath = evidence.directMoving;
-    const bool gpsPath = !evidence.wheelKnown && !evidence.cadenceMoving &&
+    const bool watchReady = watchResumeLatch_.update(
+        evidence.watchGpsKnown, evidence.watchGpsMoving,
+        evidence.watchGpsSampleEpoch, evidence.watchGpsSampleSequence,
+        evidence.watchGpsCapturedAtMs, profile_.watchGpsResumeMs,
+        profile_.watchGpsMaximumSampleGapMs);
+    const bool gpsPath = !evidence.watchGpsKnown && !evidence.wheelKnown &&
+                         !evidence.cadenceMoving &&
                          evidence.gpsResumeMoving && evidence.imuMoving;
     const uint32_t requiredMs =
         directPath ? profile_.sensorResumeMs : profile_.gpsImuResumeMs;
-    if (!resumeLatch_.update(nowMs, directPath || gpsPath, requiredMs)) {
-      if (resumeLatch_.active()) {
+    const bool fallbackReady = resumeLatch_.update(
+        nowMs, directPath || gpsPath, requiredMs);
+    if (!watchReady && !fallbackReady) {
+      if (watchResumeLatch_.active() || resumeLatch_.active()) {
+        const uint8_t watchProgress = progressPercent(
+            watchResumeLatch_.spanMs(), profile_.watchGpsResumeMs);
+        const uint8_t fallbackProgress = progressPercent(
+            resumeLatch_.accumulatedMs(nowMs), requiredMs);
         detectorStatus_ = {
             DetectorPhase::ResumeCandidate,
-            progressPercent(resumeLatch_.accumulatedMs(nowMs), requiredMs)};
+            watchProgress > fallbackProgress
+                ? watchProgress : fallbackProgress};
       }
       return {};
     }
     return emit(Transition::Resume, nowMs, evidence.mask,
                 evidence.sourceHealthMask,
-                resumeLatch_.beganAtMs());
+                watchReady ? watchResumeLatch_.beganAtMs()
+                           : resumeLatch_.beganAtMs());
   }
 
   Decision emit(Transition transition, uint32_t nowMs, uint16_t evidenceMask,
@@ -719,16 +832,20 @@ private:
 
   void clearCandidateLatches() {
     pauseLatch_.reset();
+    watchPauseLatch_.reset();
     pausePath_ = PausePath::None;
     resumeLatch_.reset();
+    watchResumeLatch_.reset();
   }
 
   RideDetectionProfile profile_;
   EvidenceWindow<24> startSensorWindow_;
   EvidenceWindow<24> startGpsImuWindow_;
   DurationLatch pauseLatch_;
+  SampleSpanLatch watchPauseLatch_;
   PausePath pausePath_ = PausePath::None;
   DurationLatch resumeLatch_;
+  SampleSpanLatch watchResumeLatch_;
   bool lifecycleInitialized_ = false;
   ConfirmedLifecycle lastLifecycle_ = ConfirmedLifecycle::Idle;
   Transition pendingTransition_ = Transition::None;

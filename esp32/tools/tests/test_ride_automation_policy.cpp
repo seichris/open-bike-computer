@@ -53,6 +53,22 @@ RideEvidenceObservation gpsImu(float gpsMetersPerSecond, float motionScore,
   return observation;
 }
 
+RideEvidenceObservation watchGps(float metersPerSecond, uint32_t nowMs,
+                                 uint32_t sequence,
+                                 float horizontalAccuracyMeters = 5.0F,
+                                 uint16_t epoch = 1) {
+  RideEvidenceObservation observation;
+  observation.watchGpsSpeedMetersPerSecond =
+      metric(metersPerSecond, nowMs);
+  observation.watchGpsHorizontalUncertaintyMeters =
+      metric(horizontalAccuracyMeters, nowMs);
+  observation.watchGpsFixValid = flag(true, nowMs);
+  observation.watchGpsSampleIdentityAvailable = true;
+  observation.watchGpsSampleEpoch = epoch;
+  observation.watchGpsSampleSequence = sequence;
+  return observation;
+}
+
 Decision runSeconds(RideAutomationPolicy &policy, uint32_t startMs,
                     uint8_t seconds, ConfirmedLifecycle lifecycle,
                     const Settings &settings, float wheelSpeed) {
@@ -128,6 +144,16 @@ int main() {
   assert(longRunningLatch.update(
       200, true, std::numeric_limits<uint32_t>::max()));
 
+  SampleSpanLatch sampleSpan;
+  assert(!sampleSpan.update(true, true, 1, 1, 0, 5'000, 3'000));
+  assert(!sampleSpan.update(true, true, 1, 2, 1'000, 5'000, 3'000));
+  assert(!sampleSpan.update(true, true, 1, 2, 4'000, 5'000, 3'000));
+  assert(sampleSpan.spanMs() == 1'000);
+  assert(!sampleSpan.update(true, true, 1, 3, 4'001, 5'000, 3'000));
+  assert(sampleSpan.spanMs() == 0);
+  assert(!sampleSpan.update(true, true, 2, 1, 5'000, 5'000, 3'000));
+  assert(sampleSpan.spanMs() == 0);
+
   EvidenceWindow<12> window;
   for (uint32_t second = 0; second < 8; ++second)
     window.observe(second * 1'000, true, true);
@@ -156,7 +182,7 @@ int main() {
                               ConfirmedLifecycle::Idle, ask);
   assert(decision.transition == Transition::Start);
   assert(decision.sequence != 0);
-  assert(decision.profileVersion == 3);
+  assert(decision.profileVersion == 4);
   assert(sensorAsk.detectorStatus().phase ==
          DetectorPhase::AwaitingConfirmation);
   assert(sensorAsk.detectorStatus().progressPercent == 100);
@@ -417,6 +443,67 @@ int main() {
   assert(sensorlessMoving.lastMotionEvidenceState() ==
          MotionEvidenceState::GpsImuMoving);
 
+  // Raw Watch workout GPS is the sensorless primary path. The duration is
+  // based on distinct producer samples, with no device IMU requirement.
+  RideAutomationPolicy watchPrimaryPause;
+  for (uint32_t second = 0; second < 5; ++second) {
+    const uint32_t nowMs = second * 1'000;
+    assert(!watchPrimaryPause.update(
+        nowMs, watchGps(0.1F, nowMs, second + 1),
+        ConfirmedLifecycle::Running, ask));
+  }
+  assert(!watchPrimaryPause.update(
+      4'999, watchGps(0.1F, 4'999, 6),
+      ConfirmedLifecycle::Running, ask));
+  decision = watchPrimaryPause.update(
+      5'000, watchGps(0.1F, 5'000, 7),
+      ConfirmedLifecycle::Running, ask);
+  assert(decision.transition == Transition::Pause);
+  assert((decision.evidenceMask & EvidenceWatchGpsStopped) != 0);
+  assert((decision.sourceHealthMask & SourceHealthWatchGpsFresh) != 0);
+
+  // Repeating a transport frame cannot advance the sample window.
+  RideAutomationPolicy watchDuplicate;
+  for (uint32_t nowMs = 0; nowMs <= 10'000; nowMs += 1'000) {
+    assert(!watchDuplicate.update(
+        nowMs, watchGps(0.1F, nowMs, 1),
+        ConfirmedLifecycle::Running, ask));
+  }
+
+  // A producer restart or an excessive location-sample gap starts a new span.
+  RideAutomationPolicy watchGap;
+  assert(!watchGap.update(0, watchGps(0.1F, 0, 1),
+                          ConfirmedLifecycle::Running, ask));
+  assert(!watchGap.update(1'000, watchGps(0.1F, 1'000, 2),
+                          ConfirmedLifecycle::Running, ask));
+  assert(!watchGap.update(5'000, watchGps(0.1F, 5'000, 3),
+                          ConfirmedLifecycle::Running, ask));
+  assert(!watchGap.update(9'000, watchGps(0.1F, 9'000, 1, 5.0F, 2),
+                          ConfirmedLifecycle::Running, ask));
+
+  RideAutomationPolicy watchBadAccuracy;
+  for (uint32_t nowMs = 0; nowMs <= 10'000; nowMs += 1'000) {
+    assert(!watchBadAccuracy.update(
+        nowMs, watchGps(0.1F, nowMs, nowMs / 1'000 + 1, 12.51F),
+        ConfirmedLifecycle::Running, ask));
+  }
+
+  RideAutomationPolicy watchThreshold;
+  for (uint32_t nowMs = 0; nowMs <= 10'000; nowMs += 1'000) {
+    assert(!watchThreshold.update(
+        nowMs, watchGps(0.8F, nowMs, nowMs / 1'000 + 1),
+        ConfirmedLifecycle::Running, ask));
+  }
+
+  // Any fresh direct movement remains a safety veto for auto-pause.
+  RideAutomationPolicy watchStoppedWheelMoving;
+  for (uint32_t nowMs = 0; nowMs <= 10'000; nowMs += 1'000) {
+    auto observation = watchGps(0.1F, nowMs, nowMs / 1'000 + 1);
+    observation.wheelSpeedMetersPerSecond = metric(5.0F, nowMs);
+    assert(!watchStoppedWheelMoving.update(
+        nowMs, observation, ConfirmedLifecycle::Running, ask));
+  }
+
   Settings noAutoPause = ask;
   noAutoPause.autoPauseEnabled = false;
   RideAutomationPolicy pauseDisabled;
@@ -520,11 +607,35 @@ int main() {
                               ConfirmedLifecycle::AutomaticallyPaused, ask);
   assert(decision.transition == Transition::Resume);
 
+  RideAutomationPolicy watchPrimaryResume;
+  assert(!watchPrimaryResume.update(
+      0, watchGps(2.0F, 0, 1),
+      ConfirmedLifecycle::AutomaticallyPaused, ask));
+  assert(!watchPrimaryResume.update(
+      1'999, watchGps(2.0F, 1'999, 2),
+      ConfirmedLifecycle::AutomaticallyPaused, ask));
+  decision = watchPrimaryResume.update(
+      2'000, watchGps(2.0F, 2'000, 3),
+      ConfirmedLifecycle::AutomaticallyPaused, ask);
+  assert(decision.transition == Transition::Resume);
+
+  RideAutomationPolicy watchBelowResume;
+  for (uint32_t nowMs = 0; nowMs <= 10'000; nowMs += 1'000) {
+    assert(!watchBelowResume.update(
+        nowMs, watchGps(1.99F, nowMs, nowMs / 1'000 + 1),
+        ConfirmedLifecycle::AutomaticallyPaused, ask));
+  }
+
   RideAutomationPolicy manualPause;
   for (uint32_t second = 0; second < 30; ++second) {
     const uint32_t nowMs = second * 1'000;
     assert(!manualPause.update(nowMs, wheel(4.0F, nowMs),
                                ConfirmedLifecycle::ManuallyPaused, ask));
+  }
+  for (uint32_t nowMs = 30'000; nowMs <= 40'000; nowMs += 1'000) {
+    assert(!manualPause.update(
+        nowMs, watchGps(5.0F, nowMs, nowMs / 1'000 + 1),
+        ConfirmedLifecycle::ManuallyPaused, ask));
   }
 
   // A rider's manual resume receives a grace interval before auto-pause can
@@ -650,6 +761,9 @@ int main() {
   health = resolveDetectionHealth({true, false, false, false, false});
   assert(health.state == DetectionHealthState::HealthyDirectSensor);
   assert(health.healthy() && health.directSensorAvailable);
+  health = resolveDetectionHealth({false, false, false, false, false, true});
+  assert(health.state == DetectionHealthState::HealthyWatchGps);
+  assert(health.healthy() && !health.directSensorAvailable);
   assert(!ride_automation_runtime::shouldShowAutomationPanel(
       ride_automation_runtime::UiPhase::SensorDegraded));
   assert(!ride_automation_runtime::shouldShowAutomationPanel(
@@ -668,8 +782,9 @@ int main() {
   char json[2'048];
   const int length = formatTraceJsonLine(trace, json, sizeof(json));
   assert(length > 0 && static_cast<std::size_t>(length) < sizeof(json));
-  assert(std::strstr(json, "\"schema\":3") != nullptr);
-  assert(std::strstr(json, "\"profile\":3") != nullptr);
+  assert(std::strstr(json, "\"schema\":4") != nullptr);
+  assert(std::strstr(json, "\"profile\":4") != nullptr);
+  assert(std::strstr(json, "\"watch_gps_sequence\":null") != nullptr);
   assert(std::strstr(json, "\"gps_horizontal_uncertainty_m\"") !=
          nullptr);
   assert(std::strstr(json, "\"lifecycle\":\"idle\"") != nullptr);

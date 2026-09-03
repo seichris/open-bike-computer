@@ -417,6 +417,25 @@ void appendWorkoutSensorEvidence(uint32_t nowMs,
         workout.state.lastExtendedReceivedAtMs,
         ride_automation::kRideDetectionProfile.cadenceFreshnessMs};
   }
+  if (workout.state.watchMotion.available) {
+    const auto &motion = workout.state.watchMotion;
+    out.watchGpsSpeedMetersPerSecond = {
+        true,
+        static_cast<float>(motion.speedCentimetersPerSecond) / 100.0F,
+        motion.capturedAtMs,
+        ride_automation::kRideDetectionProfile.watchGpsFreshnessMs};
+    out.watchGpsHorizontalUncertaintyMeters = {
+        true,
+        static_cast<float>(motion.horizontalAccuracyDecimeters) / 10.0F,
+        motion.capturedAtMs,
+        ride_automation::kRideDetectionProfile.watchGpsFreshnessMs};
+    out.watchGpsFixValid = {
+        true, true, motion.capturedAtMs,
+        ride_automation::kRideDetectionProfile.watchGpsFreshnessMs};
+    out.watchGpsSampleIdentityAvailable = true;
+    out.watchGpsSampleEpoch = motion.sampleEpoch;
+    out.watchGpsSampleSequence = motion.sampleSequence;
+  }
 }
 
 void appendGpsEvidence(uint32_t nowMs,
@@ -763,6 +782,27 @@ void processFirmwareShadow(uint32_t nowMs) {
       observation.gpsHorizontalUncertaintyMeters.value <=
           ride_automation::kRideDetectionProfile
               .maximumGpsHorizontalUncertaintyMeters;
+  const bool watchGpsEvidenceAvailable =
+      observation.watchGpsSampleIdentityAvailable &&
+      observation.watchGpsSampleEpoch != 0 &&
+      observation.watchGpsSampleSequence != 0 &&
+      ride_automation::flagFresh(
+          observation.watchGpsFixValid, nowMs,
+          ride_automation::kRideDetectionProfile.watchGpsFreshnessMs) &&
+      observation.watchGpsFixValid.value &&
+      ride_automation::metricFresh(
+          observation.watchGpsSpeedMetersPerSecond, nowMs,
+          ride_automation::kRideDetectionProfile.watchGpsFreshnessMs) &&
+      ride_automation::nonnegativeFinite(
+          observation.watchGpsSpeedMetersPerSecond.value) &&
+      ride_automation::metricFresh(
+          observation.watchGpsHorizontalUncertaintyMeters, nowMs,
+          ride_automation::kRideDetectionProfile.watchGpsFreshnessMs) &&
+      ride_automation::nonnegativeFinite(
+          observation.watchGpsHorizontalUncertaintyMeters.value) &&
+      observation.watchGpsHorizontalUncertaintyMeters.value <=
+          ride_automation::kRideDetectionProfile
+              .maximumWatchGpsHorizontalUncertaintyMeters;
   detectionHealth = ride_automation::resolveDetectionHealth({
       directEvidenceAvailable,
       gpsObservation.source != RidePositionSource::None &&
@@ -772,6 +812,7 @@ void processFirmwareShadow(uint32_t nowMs) {
               ride_automation::kRideDetectionProfile.gpsFreshnessMs,
       gpsEvidenceAvailable,
       imuEvidenceAvailable,
+      watchGpsEvidenceAvailable,
   });
 
   const ride_automation::Settings settings = configuredSettings;

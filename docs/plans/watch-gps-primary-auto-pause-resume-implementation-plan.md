@@ -1,14 +1,15 @@
 # Watch GPS Primary Auto-Pause and Auto-Resume Implementation Plan
 
-## Profile-3 consistency amendment
+## Profile-4 implementation amendment
 
-This amendment supersedes the earlier five-second Watch-GPS-primary pause and
-paused-route exclusion rules below. Production behavior is now source-aware:
+Profile 4 restores the Watch-GPS-primary design below while retaining the
+profile-3 coasting and route-continuity safety fixes:
 
-- only a fresh, definitively stopped wheel-speed source qualifies for the
-  five-second short pause path;
-- cadence zero, cadence-only availability, no cycling sensor, and wheel dropout
-  require ten continuous seconds of trustworthy GPS-plus-IMU stopped evidence;
+- qualified raw Watch workout GPS is the primary pause/resume source;
+- its five- and two-second windows advance only from distinct producer samples,
+  never from a BLE heartbeat or firmware loop tick;
+- when Watch GPS is unavailable, the profile-3 direct-sensor and ten-second
+  device GPS-plus-IMU fallback paths remain available;
 - trustworthy GPS-plus-IMU movement vetoes a pause and resets a pending stopped
   window instead of being ignored behind a nominal sensor source;
 - generic HealthKit `cyclingSpeed` remains a visible metric but does not claim
@@ -17,8 +18,10 @@ paused-route exclusion rules below. Production behavior is now source-aware:
   evidence may continue route and distance recording, while stationary drift is
   rejected. This repairs a false-pause without creating a route gap.
 
-The old profile-2 trace and timing behavior remains replayable for compatibility
-but is not the current acceptance contract.
+Older trace schemas remain replayable for compatibility but are not the current
+acceptance contract. The new transport uses CAP2 bit `23`, client version `21`,
+workout schema `1.6`, and remains internal-control-only until the physical gates
+pass.
 
 ## Outcome
 
@@ -27,10 +30,10 @@ and confirmed workout state agree during coasting, sensor dropout, and recovery.
 
 For a confirmed running Watch-owned workout, the bike computer will:
 
-- begin the short automatic-pause candidate only from fresh definitive stopped
-  wheel-speed evidence;
-- otherwise request automatic pause only after ten continuous seconds of
-  qualified GPS-plus-IMU stopped evidence;
+- request automatic pause after qualified Watch GPS remains below `0.8 m/s`
+  across distinct samples spanning five seconds;
+- fall back to definitive wheel stopped evidence or ten continuous seconds of
+  qualified device GPS-plus-IMU stopped evidence when Watch GPS is unavailable;
 - show candidate progress before the pause request and show the existing
   automatic-pause state only after the Watch confirms the transition;
 - continue receiving Watch location evidence while paused and retain only
@@ -237,7 +240,7 @@ GPS. Source switching is explicit and traceable.
 8. Continue location reception while automatically paused, but keep paused
    samples out of HealthKit route insertion, route distance, and moving-time
    metrics.
-9. Allocate CAP2 bit `22` and client version `20` for
+9. Allocate CAP2 bit `23` and client version `21` for
    `WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE`, based on the next free values on the
    baseline commit. Re-check the allocation against current `main` immediately
    before implementation.
@@ -585,7 +588,7 @@ These buckets distinguish detector latency from BLE and HealthKit latency.
 
 1. Add the optional Watch motion sample epoch and sequence to
    `WorkoutLocationV1` and preserve old snapshot/recovery decoding.
-2. Add capability client version `20` and CAP2 bit `22`, after rechecking the
+2. Add capability client version `21` and CAP2 bit `23`, after rechecking the
    live allocation.
 3. Add kind-4 frame builder/decoder, golden vectors, authenticated native and
    fallback handling, and reset semantics.

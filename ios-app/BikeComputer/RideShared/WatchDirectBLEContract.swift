@@ -22,6 +22,8 @@ enum WatchDirectBLEProtocolV1 {
         .gpsPositionQualityV1Feature
     static let rideDeliveryAcknowledgementFeature =
         RideBLEGeneratedProtocolV1.rideDeliveryAckFeature
+    static let watchGPSMotionEvidenceV1Feature =
+        RideBLEGeneratedProtocolV1.watchGpsMotionEvidenceV1Feature
     static let protectedFrameOverhead = RideBLEGeneratedProtocolV1
         .protectedFrameOverhead
 }
@@ -312,6 +314,11 @@ struct WatchDeviceCapabilitiesV1: Equatable {
     var supportsRideDeliveryAcknowledgement: Bool {
         featureFlags &
             WatchDirectBLEProtocolV1.rideDeliveryAcknowledgementFeature != 0
+    }
+
+    var supportsWatchGPSMotionEvidenceV1: Bool {
+        featureFlags &
+            WatchDirectBLEProtocolV1.watchGPSMotionEvidenceV1Feature != 0
     }
 
     static func decode(_ data: Data) -> Self? {

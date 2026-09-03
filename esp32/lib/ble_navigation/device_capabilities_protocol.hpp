@@ -33,6 +33,9 @@ constexpr uint8_t DETAILED_RIDE_DIAGNOSTICS_CLIENT_VERSION =
         DETAILED_RIDE_DIAGNOSTICS_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t RIDE_DELIVERY_ACK_CLIENT_VERSION =
     ride_ble_protocol_generated::RIDE_DELIVERY_ACK_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t WATCH_GPS_MOTION_EVIDENCE_V1_CLIENT_VERSION =
+    ride_ble_protocol_generated::
+        WATCH_GPS_MOTION_EVIDENCE_V1_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t CAP2_SCHEMA_VERSION =
     ride_ble_protocol_generated::CAPABILITY_SCHEMA_VERSION;
 constexpr uint32_t STREET_LABELS_FEATURE =
@@ -69,6 +72,8 @@ constexpr uint32_t DETAILED_RIDE_DIAGNOSTICS_FEATURE =
     ride_ble_protocol_generated::DETAILED_RIDE_DIAGNOSTICS_FEATURE;
 constexpr uint32_t RIDE_DELIVERY_ACK_FEATURE =
     ride_ble_protocol_generated::RIDE_DELIVERY_ACK_FEATURE;
+constexpr uint32_t WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE =
+    ride_ble_protocol_generated::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE;
 constexpr uint8_t POWER_BUTTON_CONFIG_TLV = 1;
 constexpr size_t POWER_BUTTON_CONFIG_BYTES = 3;
 constexpr size_t CAP2_BASE_BYTES = 9;

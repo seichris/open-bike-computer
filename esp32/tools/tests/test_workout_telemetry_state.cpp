@@ -172,6 +172,40 @@ int main() {
   assert(reducer.state().lastTransitionOrigin ==
          workout_telemetry_protocol::PauseOrigin::Automatic);
 
+  uint8_t watchMotion[workout_telemetry_protocol::FRAME_SIZE]{};
+  watchMotion[0] = static_cast<uint8_t>(
+      workout_telemetry_protocol::FrameKind::WatchMotion);
+  watchMotion[1] =
+      workout_telemetry_protocol::WATCH_MOTION_FIX_VALID |
+      workout_telemetry_protocol::WATCH_MOTION_SPEED_AVAILABLE |
+      workout_telemetry_protocol::WATCH_MOTION_ACCURACY_AVAILABLE |
+      workout_telemetry_protocol::WATCH_MOTION_CURRENT_SAMPLE;
+  writeUInt16LE(watchMotion, 2, 0x1234);
+  writeUInt32LE(watchMotion, 4, 1);
+  writeUInt16LE(watchMotion, 8, 10);
+  writeUInt16LE(watchMotion, 10, 50);
+  writeUInt16LE(watchMotion, 12, 100);
+  writeUInt16LE(watchMotion, 14, 7);
+  assertResultPreservesState(reducer, watchMotion, sizeof(watchMotion), 360,
+                             false,
+                             ApplyResult::RejectedUnauthenticated);
+  assert(reducer.applyFrame(watchMotion, sizeof(watchMotion), 360, true) ==
+         ApplyResult::Applied);
+  assert(reducer.state().watchMotion.available);
+  assert(reducer.state().watchMotion.sampleEpoch == 7);
+  assert(reducer.state().watchMotion.sampleSequence == 1);
+  assert(reducer.state().watchMotion.capturedAtMs == 260);
+  assertResultPreservesState(reducer, watchMotion, sizeof(watchMotion), 370,
+                             true, ApplyResult::IgnoredMotionSequence);
+  uint8_t wrongPhaseMotion[sizeof(watchMotion)];
+  std::memcpy(wrongPhaseMotion, watchMotion, sizeof(watchMotion));
+  wrongPhaseMotion[1] |=
+      workout_telemetry_protocol::WATCH_MOTION_AUTOMATICALLY_PAUSED;
+  writeUInt32LE(wrongPhaseMotion, 4, 2);
+  assertResultPreservesState(reducer, wrongPhaseMotion,
+                             sizeof(wrongPhaseMotion), 380, true,
+                             ApplyResult::IgnoredLifecyclePhase);
+
   uint8_t longFrame[17]{};
   uint8_t malformed[sizeof(core)];
   assertResultPreservesState(reducer, core, sizeof(core), 310, false,
@@ -184,7 +218,7 @@ int main() {
                              ApplyResult::RejectedLength);
 
   std::memcpy(malformed, core, sizeof(core));
-  malformed[0] = 4;
+  malformed[0] = 5;
   assertResultPreservesState(reducer, malformed, sizeof(malformed), 310, true,
                              ApplyResult::RejectedKind);
   std::memcpy(malformed, core, sizeof(core));
@@ -271,6 +305,7 @@ int main() {
   pausedCore[1] = static_cast<uint8_t>(SessionState::Paused);
   assert(reducer.applyFrame(pausedCore, sizeof(pausedCore), 400, true) ==
          ApplyResult::Applied);
+  assert(!reducer.state().watchMotion.available);
   assert(!reducer.state().originReceived);
   assert(reducer.state().pauseOrigin ==
          workout_telemetry_protocol::PauseOrigin::None);
@@ -320,6 +355,23 @@ int main() {
       9004, true, ApplyResult::RejectedMetric);
   assert(reducer.applyFrame(pausedOrigin, sizeof(pausedOrigin), 9005, true) ==
          ApplyResult::Applied);
+  uint8_t pausedWatchMotion[sizeof(watchMotion)];
+  std::memcpy(pausedWatchMotion, watchMotion, sizeof(watchMotion));
+  pausedWatchMotion[1] |=
+      workout_telemetry_protocol::WATCH_MOTION_AUTOMATICALLY_PAUSED;
+  writeUInt32LE(pausedWatchMotion, 4, 2);
+  writeUInt16LE(pausedWatchMotion, 12, 5);
+  assert(reducer.applyFrame(pausedWatchMotion, sizeof(pausedWatchMotion),
+                            9010, true) == ApplyResult::Applied);
+  assert(reducer.state().watchMotion.automaticallyPaused);
+  assert(reducer.state().watchMotion.capturedAtMs == 9005);
+  uint8_t olderEpochMotion[sizeof(pausedWatchMotion)];
+  std::memcpy(olderEpochMotion, pausedWatchMotion, sizeof(pausedWatchMotion));
+  writeUInt16LE(olderEpochMotion, 14, 6);
+  writeUInt32LE(olderEpochMotion, 4, 99);
+  assertResultPreservesState(reducer, olderEpochMotion,
+                             sizeof(olderEpochMotion), 9020, true,
+                             ApplyResult::IgnoredMotionEpoch);
   assert(!workout_telemetry::isStale(reducer.state(), 18999));
 
   const ride_telemetry_presenter::LegacyRideTelemetry legacy{

@@ -177,6 +177,9 @@ nonisolated final class WatchWorkoutRecoveryStore {
         let transportGenerationID: UUID?
         let startDate: Date
         var sequenceHighWatermark: UInt64
+        /// Changes whenever the Watch location producer restarts so firmware
+        /// cannot join sample spans across an app/process interruption.
+        var motionSampleEpoch: UInt16? = nil
         var remoteControlCheckpoint:
             WorkoutRemoteControlSequenceGate.Checkpoint? = nil
         var pauseOrigin: WorkoutTransitionOrigin? = nil
@@ -458,6 +461,23 @@ nonisolated final class WatchWorkoutRecoveryStore {
         self.identity = identity
         sequenceLease = nil
         return identity
+    }
+
+    func beginMotionSampleProducer() throws -> UInt16 {
+        guard var identity else {
+            throw RecoveryStoreError.missingOrInvalidIdentity
+        }
+        let epoch: UInt16
+        if let previous = identity.motionSampleEpoch {
+            let advanced = previous &+ 1
+            epoch = advanced == 0 ? 1 : advanced
+        } else {
+            epoch = Self.makeNonzeroToken()
+        }
+        identity.motionSampleEpoch = epoch
+        try persist(identity)
+        self.identity = identity
+        return epoch
     }
 
     func useRecoveredIdentity(
@@ -1345,6 +1365,7 @@ nonisolated final class WatchWorkoutRecoveryStore {
               identity.healthKitSessionID.map({ $0 != zeroUUID }) ?? true,
               identity.sessionToken != 0,
               identity.transportGenerationID != zeroUUID,
+              identity.motionSampleEpoch.map({ $0 != 0 }) ?? true,
               identity.startDate.timeIntervalSinceReferenceDate.isFinite,
               identity.remoteControlCheckpoint?.isValid ?? true,
               identity.remoteSegmentIntent?.isValid ?? true,

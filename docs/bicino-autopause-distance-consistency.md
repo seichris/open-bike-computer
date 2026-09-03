@@ -1,8 +1,9 @@
 # Bicino auto-pause and distance consistency
 
-This contract closes the August 29 false-pause/distance-gap class without
-enabling ride automation in production profiles. It covers coasting, sensor
-dropout, uncertain workout provenance, and route continuity.
+This contract closes the August 29 false-pause/distance-gap class and adds the
+profile-4 Watch-GPS-primary path without enabling ride automation in production
+profiles. It covers sensorless rides, coasting, sensor dropout, uncertain
+workout provenance, and route continuity.
 
 ## Root cause
 
@@ -27,11 +28,12 @@ whether an automatic transition was safe to reverse.
 
 | Available evidence | Pause rule |
 | --- | --- |
+| Qualified raw Watch workout GPS | Primary path: below `0.8 m/s` across distinct location samples spanning five seconds, with no gap over three seconds. |
 | Fresh, definitively stopped wheel speed | Five continuous seconds on the short path. |
 | Wheel moving | Movement veto; cancel/reset a stopped candidate. |
 | Cadence moving | Movement veto; may start/resume. |
 | Cadence zero or cadence only | Not stopped evidence; require GPS plus IMU fallback. |
-| No cycling sensor | Require ten continuous seconds of trustworthy GPS plus IMU stopped evidence. |
+| Watch GPS unavailable and no cycling sensor | Require ten continuous seconds of trustworthy device GPS plus IMU stopped evidence. |
 | Wheel dropout | Reset the short candidate; require a new qualified fallback window. |
 | Trustworthy GPS plus IMU movement | Movement veto, including while cadence is zero. |
 | Missing, stale, conflicting, or poor-quality evidence | Reset the candidate; never convert unavailable to zero. |
@@ -41,7 +43,13 @@ but its source flag is HealthKit. The paired-speed flag is reserved for an
 explicitly confirmed paired sensor. Paired speed still has presentation
 precedence when that future confirmed source is available.
 
-Profile 3 keeps the existing thresholds and hysteresis: wheel stopped below
+Profile 4 retains profile 3's direct/fallback thresholds and adds qualified raw
+Watch workout GPS as the normal active-workout source. Watch GPS is fresh for
+three seconds, requires horizontal accuracy no worse than `12.5 m`, pauses
+below `0.8 m/s` after a five-second source-sample span, and resumes at or above
+`2.0 m/s` after two seconds. A new sample epoch, stale/poor-quality data, a gap
+over three seconds, or a regressing sequence resets the Watch candidate; BLE
+heartbeats and retries cannot advance it. Wheel stopped remains below
 `0.5 m/s`, wheel/cadence movement at or above `1.5 m/s`/`20 rpm`, qualified
 GPS stopped below `0.8 m/s`, and GPS resume at or above `2.0 m/s` with moving
 IMU evidence.
@@ -68,12 +76,11 @@ schema-1 markers remain readable; partial schema-2 bundles fail closed.
 
 ## Replay and acceptance evidence
 
-`esp32/tools/tests/fixtures/ride_automation/aug-29-coasting-regression.jsonl`
-contains no coordinates or raw HealthKit data. It covers cadence-zero coasting,
-wheel dropout, and a genuine stopped control. The pre-profile-3 rule would emit
-the false pause after five seconds of cadence zero. Profile 3 emits no pause for
-the moving samples and pauses only after the full ten-second qualified stopped
-control.
+The privacy-safe fixtures contain no coordinates or raw HealthKit data.
+`aug-29-coasting-regression.jsonl` covers cadence-zero coasting, wheel dropout,
+and a genuine fallback stopped control. `watch-gps-sensorless-regression.jsonl`
+simulates a sensorless Watch ride and proves the five-second pause and
+two-second resume paths from distinct source samples.
 
 Host acceptance covers the sensor matrix, trace replay, wire origin values,
 HealthKit-versus-paired provenance, transition recovery diagnostics, paused
@@ -84,7 +91,8 @@ Before merge, the owner must test a real Watch and supported Bicino board with:
 
 - pedalling, coasting, cadence-only, speed-only, and combined sensors;
 - no cycling sensor, wheel dropout/reconnect, and sensor disagreement;
-- short stops, slow crawl, genuine ten-second stops, GPS drift, and weak GPS;
+- short stops, slow crawl, genuine five-second Watch stops, fallback ten-second
+  stops, Watch/device GPS drift, weak GPS, delayed samples, and Watch relaunch;
 - automatic versus manual pause/resume and interrupted recovery; and
 - route/distance continuity across false-pause movement with stationary drift
   excluded.

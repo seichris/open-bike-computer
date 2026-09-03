@@ -68,6 +68,7 @@ private struct WorkoutContractTestSuite {
         testUnsupportedMajorVersionIsRejected()
         testOptionalMetricsRemainUnavailable()
         testWorkoutDevicePairGenerationStamp()
+        testWatchGPSMotionFrameUsesRawLocationIdentity()
         testWorkoutDeviceTerminalForwardingBoundary()
         testWorkoutDeviceSharedTerminalMapping()
         testInvalidEnvelopeIdentityIsRejected()
@@ -342,9 +343,13 @@ private struct WorkoutContractTestSuite {
         expect(
             WorkoutSchemaVersion.current
                 .supportsRideAutomationControlContext
+                && WorkoutSchemaVersion.current
+                    .supportsWatchGPSMotionEvidence
+                && !WorkoutSchemaVersion(major: 1, minor: 5)
+                    .supportsWatchGPSMotionEvidence
                 && !WorkoutSchemaVersion(major: 1, minor: 4)
                     .supportsRideAutomationControlContext,
-            "automatic Watch controls must require the 1.5 origin contract"
+            "ride control and Watch motion additions must use their schema minors"
         )
         expect(
             !RideAutomationMonotonicClock.isExpired(
@@ -936,6 +941,134 @@ private struct WorkoutContractTestSuite {
                     .contains(.pairedSpeedSensor) == false,
             "generic HealthKit speed stays visible without asserting paired-wheel capability"
         )
+    }
+
+    private mutating func testWatchGPSMotionFrameUsesRawLocationIdentity() {
+        let sentAt = Date(timeIntervalSinceReferenceDate: 800_001_002.5)
+        let location = WorkoutLocationV1(
+            latitude: 31.2304,
+            longitude: 121.4737,
+            capturedAt: sentAt.addingTimeInterval(-2.5),
+            horizontalAccuracy: 7,
+            altitude: nil,
+            verticalAccuracy: nil,
+            course: nil,
+            speed: 3.5,
+            motionSampleEpoch: 9,
+            motionSampleSequence: 0x0102_0304
+        )
+        let running = WorkoutSnapshotV1(
+            state: .running,
+            currentSpeed: metric(
+                12,
+                .metersPerSecond,
+                sentAt,
+                .pairedCyclingSensor
+            ),
+            location: location,
+            availability: [.currentSpeed, .location]
+        )
+        guard let frame = WorkoutDeviceFrameBuilder.watchMotionFrame(
+            for: running,
+            sessionToken: 0x1234,
+            sentAt: sentAt
+        ) else {
+            expect(false, "raw Watch GPS motion frame must encode")
+            return
+        }
+        expect(
+            frame == Data([
+                4, 0x0F, 0x34, 0x12,
+                0x04, 0x03, 0x02, 0x01,
+                0x5E, 0x01, 0x46, 0x00,
+                0xC4, 0x09, 0x09, 0x00,
+            ]),
+            "motion frame uses raw location speed, quality, age, epoch, and sequence"
+        )
+        let paused = WorkoutSnapshotV1(
+            state: .paused,
+            location: location,
+            availability: [.location],
+            pauseOrigin: .automatic
+        )
+        expect(
+            WorkoutDeviceFrameBuilder.watchMotionFrame(
+                for: paused,
+                sessionToken: 0x1234,
+                sentAt: sentAt
+            )?[1] == 0x1F,
+            "automatic-pause provenance is explicit in Watch motion evidence"
+        )
+        let cachedUpdate = WorkoutDeviceFrameBuilder.watchMotionUpdate(
+            for: running,
+            sessionToken: 0x1234
+        )
+        expect(
+            cachedUpdate.flatMap {
+                WorkoutDeviceFrameBuilder.watchMotionFrame(
+                    for: $0,
+                    sentAt: sentAt.addingTimeInterval(70)
+                )
+            } == nil,
+            "a cached Watch sample must not regain freshness after reconnect"
+        )
+        let oldSchemaMotionEnvelope = makeEnvelope(
+            schemaVersion: .init(major: 1, minor: 5),
+            sequence: 90,
+            capturedAt: sentAt,
+            snapshot: running
+        )
+        expectThrows(
+            .invalidEnvelopePayload,
+            "Watch motion identity must require workout schema 1.6"
+        ) {
+            try WorkoutContractCodec.validate(oldSchemaMotionEnvelope)
+        }
+        let locationWithoutIdentity = WorkoutLocationV1(
+            latitude: location.latitude,
+            longitude: location.longitude,
+            capturedAt: location.capturedAt,
+            horizontalAccuracy: location.horizontalAccuracy,
+            altitude: nil,
+            verticalAccuracy: nil,
+            course: nil,
+            speed: location.speed
+        )
+        expect(
+            WorkoutDeviceFrameBuilder.watchMotionFrame(
+                for: .init(state: .running, location: locationWithoutIdentity),
+                sessionToken: 0x1234,
+                sentAt: sentAt
+            ) == nil,
+            "motion frame fails closed without producer identity"
+        )
+        let incompleteIdentityLocation = WorkoutLocationV1(
+            latitude: location.latitude,
+            longitude: location.longitude,
+            capturedAt: location.capturedAt,
+            horizontalAccuracy: location.horizontalAccuracy,
+            altitude: nil,
+            verticalAccuracy: nil,
+            course: nil,
+            speed: location.speed,
+            motionSampleEpoch: 9
+        )
+        let incompleteIdentityEnvelope = makeEnvelope(
+            sequence: 91,
+            capturedAt: sentAt,
+            snapshot: .init(
+                state: .running,
+                startDate: sentAt.addingTimeInterval(-10),
+                location: incompleteIdentityLocation,
+                availability: [.location]
+            )
+        )
+        expectThrows(
+            .invalidLocation,
+            "motion epoch and sequence must be paired in the shared contract"
+        ) {
+            try WorkoutContractCodec.validate(incompleteIdentityEnvelope)
+        }
     }
 
     private mutating func testWorkoutDeviceTerminalForwardingBoundary() {
@@ -4556,6 +4689,8 @@ private struct WorkoutContractTestSuite {
             let firstStore = WatchWorkoutRecoveryStore(persistence: persistence)
             let identity = try firstStore.begin(startDate: start)
             expect(identity.sessionToken != 0, "persisted workout token must be nonzero")
+            let firstMotionEpoch = try firstStore.beginMotionSampleProducer()
+            expect(firstMotionEpoch != 0, "Watch motion epoch must be nonzero")
             expect(firstStore.nextSequence() == 1, "first transport sequence should be one")
             var zoneAccumulator = WorkoutHeartRateZoneDurationAccumulator()
             _ = zoneAccumulator.update(
@@ -4575,6 +4710,17 @@ private struct WorkoutContractTestSuite {
             expect(
                 recoveredStore.recoveredIdentity?.sessionID == identity.sessionID,
                 "relaunch should recover the same workout identity"
+            )
+            expect(
+                recoveredStore.recoveredIdentity?.motionSampleEpoch
+                    == firstMotionEpoch,
+                "Watch motion epoch must survive relaunch"
+            )
+            let recoveredMotionEpoch = try recoveredStore
+                .beginMotionSampleProducer()
+            expect(
+                recoveredMotionEpoch != firstMotionEpoch,
+                "a recovered producer must begin a new Watch motion epoch"
             )
             expect(
                 recoveredStore.nextSequence() == WorkoutSequenceLease.defaultSize + 1,
@@ -4784,6 +4930,27 @@ private struct WorkoutContractTestSuite {
             )
         } catch {
             expect(false, "legacy recovery migration fixture threw \(error)")
+        }
+
+        let zeroMotionEpochPersistence = ControllableRecoveryPersistence()
+        do {
+            var invalidIdentity = try WatchWorkoutRecoveryStore(
+                persistence: zeroMotionEpochPersistence
+            ).begin(startDate: start)
+            invalidIdentity.motionSampleEpoch = 0
+            zeroMotionEpochPersistence.data = try PropertyListEncoder().encode(
+                invalidIdentity
+            )
+            let invalidStore = WatchWorkoutRecoveryStore(
+                persistence: zeroMotionEpochPersistence
+            )
+            expect(
+                invalidStore.loadState == .corrupt &&
+                    invalidStore.recoveredIdentity == nil,
+                "a persisted zero Watch motion epoch must fail recovery closed"
+            )
+        } catch {
+            expect(false, "invalid Watch motion epoch fixture threw \(error)")
         }
 
         let controlled = ControllableRecoveryPersistence()

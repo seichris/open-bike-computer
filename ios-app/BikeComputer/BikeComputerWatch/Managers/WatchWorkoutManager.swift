@@ -1890,9 +1890,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                     for: HKSeriesType.workoutRoute()
                 ) as? HKWorkoutRouteBuilder
                 : nil
+            let motionSampleEpoch = (try? recoveryStore
+                .beginMotionSampleProducer()) ?? 0
+            identity = recoveryStore.recoveredIdentity ?? identity
             routeRecorder.begin(
                 routeBuilder: routeBuilder,
-                startDate: startDate
+                startDate: startDate,
+                motionSampleEpoch: motionSampleEpoch
             ) { [weak self] in
                 self?.scheduleCoalescedSnapshot()
             }
@@ -2833,9 +2837,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         let routeBuilder = recoveredBuilder.seriesBuilder(
             for: HKSeriesType.workoutRoute()
         ) as? HKWorkoutRouteBuilder
+        let motionSampleEpoch = (try? recoveryStore
+            .beginMotionSampleProducer()) ?? 0
+        identity = recoveryStore.recoveredIdentity ?? identity
         routeRecorder.begin(
             routeBuilder: routeBuilder,
             startDate: startDate,
+            motionSampleEpoch: motionSampleEpoch,
             mayContainExistingRouteData: true
         ) { [weak self] in
             self?.scheduleCoalescedSnapshot()
@@ -6721,7 +6729,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             altitude: hasAltitude ? location.altitude : nil,
             verticalAccuracy: hasAltitude ? location.verticalAccuracy : nil,
             course: course,
-            speed: speed
+            speed: speed,
+            motionSampleEpoch: routeRecorder.motionSampleEpoch,
+            motionSampleSequence: routeRecorder.motionSampleSequence
         )
     }
 

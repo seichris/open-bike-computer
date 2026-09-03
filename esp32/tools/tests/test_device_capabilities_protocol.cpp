@@ -65,6 +65,12 @@ int main() {
       device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION == 20);
   static_assert(device_capabilities_protocol::RIDE_DELIVERY_ACK_FEATURE ==
                 (1UL << 22));
+  static_assert(
+      device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_CLIENT_VERSION ==
+      21);
+  static_assert(
+      device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE ==
+      (1UL << 23));
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
@@ -158,6 +164,14 @@ int main() {
   assert(rideDeliveryAckSize == sizeof(expectedRideDeliveryAck));
   for (size_t index = 0; index < rideDeliveryAckSize; ++index)
     assert(output[index] == expectedRideDeliveryAck[index]);
+  const size_t watchMotionSize = device_capabilities_protocol::encodeCap2(
+      device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE,
+      nullptr, false, output, sizeof(output));
+  const uint8_t expectedWatchMotion[] = {
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x80, 0x00};
+  assert(watchMotionSize == sizeof(expectedWatchMotion));
+  for (size_t index = 0; index < watchMotionSize; ++index)
+    assert(output[index] == expectedWatchMotion[index]);
   std::cout << "device capabilities protocol tests passed\n";
   return 0;
 }

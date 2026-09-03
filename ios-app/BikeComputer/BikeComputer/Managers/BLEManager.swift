@@ -413,6 +413,8 @@ enum DeviceBLEProtocol {
         RideBLEGeneratedProtocolV1.detailedRideDiagnosticsFeature
     static let rideDeliveryAcknowledgementCapabilityMask =
         RideBLEGeneratedProtocolV1.rideDeliveryAckFeature
+    static let watchGPSMotionEvidenceV1CapabilityMask =
+        RideBLEGeneratedProtocolV1.watchGpsMotionEvidenceV1Feature
     static let deviceCapabilitiesVersion =
         RideBLEGeneratedProtocolV1.currentClientVersion
     static let workoutTelemetryFrameLength = 16
@@ -422,6 +424,8 @@ enum DeviceBLEProtocol {
         "workout-telemetry-extended"
     static let workoutTelemetryOriginCoalescingKey =
         "workout-telemetry-origin"
+    static let workoutTelemetryMotionCoalescingKey =
+        "workout-telemetry-motion"
     static let navigationSnapshotCoalescingKey = "navigation-snapshot"
     static let gpsPositionCoalescingKey = "gps-position"
     static let automaticDisplayOffSettingCoalescingKey =
@@ -925,6 +929,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsRideDiagnostics: Bool = false
     @Published private(set) var supportsDetailedRideDiagnostics: Bool = false
     @Published private(set) var supportsRideDeliveryAcknowledgement: Bool = false
+    @Published private(set) var supportsWatchGPSMotionEvidenceV1: Bool = false
     @Published private(set) var rideTransportPhase:
         RideBLETransportPhaseV1 = .idle
     @Published private(set) var rideTransportFailureReason:
@@ -4008,7 +4013,7 @@ class BLEManager: NSObject, ObservableObject {
     ) -> Bool {
         let hasValidLength: Bool
         switch frame.first {
-        case 1, 2:
+        case 1, 2, 4:
             hasValidLength = frame.count ==
                 DeviceBLEProtocol.workoutTelemetryFrameLength
         case 3:
@@ -4026,6 +4031,9 @@ class BLEManager: NSObject, ObservableObject {
               hasReceivedDeviceCapabilities,
               supportsWorkoutTelemetry,
               let navigationEndpoint = navigationWriteEndpoint else {
+            return false
+        }
+        if frame.first == 4, !supportsWatchGPSMotionEvidenceV1 {
             return false
         }
 
@@ -4048,6 +4056,9 @@ class BLEManager: NSObject, ObservableObject {
         case 2:
             coalescingKey =
                 DeviceBLEProtocol.workoutTelemetryExtendedCoalescingKey
+        case 4:
+            coalescingKey =
+                DeviceBLEProtocol.workoutTelemetryMotionCoalescingKey
         default:
             coalescingKey =
                 DeviceBLEProtocol.workoutTelemetryOriginCoalescingKey
@@ -4993,6 +5004,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWatchGPSMotionEvidenceV1 = false
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -6083,6 +6095,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWatchGPSMotionEvidenceV1 = false
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -9034,6 +9047,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWatchGPSMotionEvidenceV1 = false
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -9175,6 +9189,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let hasRideDeliveryAcknowledgement =
             flags & DeviceBLEProtocol
                 .rideDeliveryAcknowledgementCapabilityMask != 0
+        let hasWatchGPSMotionEvidenceV1 =
+            flags & DeviceBLEProtocol
+                .watchGPSMotionEvidenceV1CapabilityMask != 0
         if has3DBuildings && shouldApply3DBuildingVisibilityDefault {
             shouldApply3DBuildingVisibilityDefault = false
             UserDefaults.standard.set(
@@ -9269,6 +9286,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             cancelPendingRideApplicationDeliveries(notifyFailure: true)
         }
         supportsRideDeliveryAcknowledgement = hasRideDeliveryAcknowledgement
+        supportsWatchGPSMotionEvidenceV1 = hasWatchGPSMotionEvidenceV1
         if hasRideDiagnostics {
             sendDiagnosticsCaptureBindingIfNeeded()
         }

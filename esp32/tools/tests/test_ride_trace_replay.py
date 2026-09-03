@@ -98,6 +98,21 @@ class RideTraceReplayTests(unittest.TestCase):
             )
         )
 
+    def test_watch_gps_sensorless_pause_and_resume(self):
+        trace = (
+            Path(__file__).parent
+            / "fixtures"
+            / "ride_automation"
+            / "watch-gps-sensorless-regression.jsonl"
+        )
+        records = replay_module.load_trace(trace)
+        outputs = replay_module.replay(records, self.binary)
+        summary = replay_module.validate_expectations(trace, records, outputs)
+        self.assertEqual(summary["mismatches"], 0)
+        self.assertEqual(summary["decisions"], 2)
+        self.assertEqual(summary["pause_latency_ms_total"], 5_000)
+        self.assertEqual(summary["resume_latency_ms_total"], 2_000)
+
     def test_rejects_private_and_raw_sensor_fields(self):
         for forbidden in sorted(replay_module.FORBIDDEN_KEYS):
             with self.subTest(forbidden=forbidden), tempfile.TemporaryDirectory() as directory:

@@ -29,7 +29,7 @@ navigation-ready.
 | `2A6F` | iOS -> ESP32 | Binary route geometry | Upcoming route polyline for the device map view. |
 | `2A72` | iOS -> ESP32 | Binary GPS position | Current device position and heading for the map view. |
 | `2A73` | iOS -> ESP32 | Binary setting packet | Runtime map-renderer, device-screen, and phone-status values. |
-| `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003` | iOS/Watch -> ESP32 | Fixed 16-byte core/extended or 28-byte origin workout frame | Watch-owned workout state and optional live metrics/provenance for Ride Stats. |
+| `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003` | iOS/Watch -> ESP32 | Fixed 16-byte core/extended/Watch-motion or 28-byte origin workout frame | Watch-owned workout state, optional live metrics/provenance, and capability-gated raw Watch GPS motion evidence. |
 | `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004` | bidirectional | Fixed 52-byte `RAUT` v2 frame | Internal, feature-gated ride-detection decisions, configuration, prompt responses, cancellations, acknowledgements, confirmations, and resynchronization. |
 
 `DistanceMeters` is an unsigned 16-bit decimal value (`0...65535`). The iOS
@@ -51,7 +51,7 @@ Fallback frame prefixes:
 | `MAPR` | route geometry packet |
 | `GPSP` | GPS position packet |
 | `MSET` | map setting packet |
-| `WTLM` | one fixed 16-byte core/extended or 28-byte origin workout frame; prefix plus payload is exactly 20 or 32 plaintext bytes before the protected session envelope described below |
+| `WTLM` | one fixed 16-byte core/extended/Watch-motion or 28-byte origin workout frame; prefix plus payload is exactly 20 or 32 plaintext bytes before the protected session envelope described below |
 | `RAUT` | one fixed 52-byte ride-automation frame; prefix plus payload is exactly 56 plaintext bytes before ownership-v2 protection |
 
 ## Device ownership and authentication
@@ -536,7 +536,7 @@ ordered.
 
 Workout telemetry is iOS/Watch-to-device, RAM-only, and accepted only after the
 existing local authentication handshake. The logical native payload is exactly
-16 bytes for core/extended frames or 28 bytes for the optional origin frame. In
+16 bytes for core/extended/Watch-motion frames or 28 bytes for the optional origin frame. In
 an ownership-v2 session it is carried in an `S2` frame on protected channel `6`,
 for a 38- or 50-byte native wire write. Current firmware exposes the
 native characteristic with both write properties, so iOS uses acknowledged
@@ -547,7 +547,7 @@ workout characteristic uses this fallback whenever the navigation
 characteristic supports acknowledged writes:
 
 ```text
-"WTLM" | 16-byte core/extended or 28-byte origin workout frame
+"WTLM" | 16-byte core/extended/Watch-motion or 28-byte origin workout frame
 ```
 
 The fallback plaintext is exactly 20 or 32 bytes before ownership-v2 protection
@@ -664,6 +664,30 @@ state/origin changes, and authenticated reconnect. Ordinary metric heartbeats
 continue to coalesce the core/extended pair; the origin frame has its own
 coalescing identity and is resent when its values change. Firmware retains the
 last valid origin frame in RAM and marks it stale with the associated workout.
+
+### Watch motion frame, kind `4`
+
+This frame is accepted only after CAP2 bit `23` is negotiated. It transports
+raw Watch workout-location speed rather than the presentation-selected speed.
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| `0` | 1 | frame kind `4` |
+| `1` | 1 | flags: bit 0 valid fix, bit 1 speed available, bit 2 accuracy available, bit 3 current source sample, bit 4 automatically-paused phase; bits 5...7 zero |
+| `2` | 2 | active workout session token, `UInt16LE` |
+| `4` | 4 | producer sample sequence, nonzero `UInt32LE` |
+| `8` | 2 | speed in centimetres/second, `UInt16LE` |
+| `10` | 2 | horizontal accuracy in decimetres, `UInt16LE` |
+| `12` | 2 | sample age at send time in milliseconds, `UInt16LE` |
+| `14` | 2 | persisted producer epoch, nonzero `UInt16LE` |
+
+The token and confirmed running/automatically-paused phase must match retained
+workout state. Duplicate or regressing sequences, old epochs, malformed flags,
+and unauthenticated frames do not mutate evidence. Lifecycle changes clear the
+retained motion sample. Firmware qualifies the source at three-second freshness
+and `12.5 m` maximum horizontal uncertainty; candidate time comes from distinct
+sample capture times, with a three-second maximum gap. No coordinates are
+included.
 
 iOS coalesces numeric changes to at most one update per second and sends
 state/token and fresh-to-stale transitions immediately. Every new-contract
@@ -1101,14 +1125,16 @@ connected-display automatic inactivity control (setting ID `36`), and bit `20`
 negotiates persistent, privacy-bounded ride diagnostics and the authenticated
 device-log transfer mode. Bit `21` reports support for the optional detailed
 one-Hz ride-automation trace. Bit `22` reports the application-confirmed
-critical ride-delivery contract described above. Client version `11` requests
+critical ride-delivery contract described above. Bit `23` reports the Watch GPS
+motion-evidence frame and is advertised only with internal ride control. Client version `11` requests
 bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
 without the newer features. Client version `16` requests bits `18` and `19`,
 including the authenticated renderer-diagnostics contract and the already
 released automatic-display setting. Version `18` requests bit `20`, version
-`19` requests bit `21`, and version `20` requests bit `22`.
+`19` requests bit `21`, version `20` requests bit `22`, and version `21`
+requests bit `23`.
 Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
@@ -1166,6 +1192,9 @@ Detailed ride diagnostics, CAP2 schema 1, only feature bit 21:
 
 Application-confirmed ride delivery, CAP2 schema 1, only feature bit 22:
 43 41 50 32 01 00 00 40 00
+
+Watch GPS motion evidence, CAP2 schema 1, only feature bit 23:
+43 41 50 32 01 00 00 80 00
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and

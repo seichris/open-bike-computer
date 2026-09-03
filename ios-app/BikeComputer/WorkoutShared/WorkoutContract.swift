@@ -1,8 +1,9 @@
 import Foundation
 
 nonisolated struct WorkoutSchemaVersion: Codable, Equatable, Sendable {
-    static let current = Self(major: 1, minor: 5)
+    static let current = Self(major: 1, minor: 6)
     static let rideAutomationControlContextMinor: UInt16 = 5
+    static let watchGPSMotionEvidenceMinor: UInt16 = 6
 
     let major: UInt16
     let minor: UInt16
@@ -10,6 +11,11 @@ nonisolated struct WorkoutSchemaVersion: Codable, Equatable, Sendable {
     var supportsRideAutomationControlContext: Bool {
         major == Self.current.major
             && minor >= Self.rideAutomationControlContextMinor
+    }
+
+    var supportsWatchGPSMotionEvidence: Bool {
+        major == Self.current.major
+            && minor >= Self.watchGPSMotionEvidenceMinor
     }
 }
 
@@ -161,6 +167,35 @@ nonisolated struct WorkoutLocationV1: Codable, Equatable, Sendable {
     let verticalAccuracy: Double?
     let course: Double?
     let speed: Double?
+    /// Per-location producer identity used by device ride automation. The
+    /// epoch changes whenever Watch location production is restarted; the
+    /// sequence changes only for a newly accepted Core Location sample.
+    let motionSampleEpoch: UInt16?
+    let motionSampleSequence: UInt32?
+
+    init(
+        latitude: Double,
+        longitude: Double,
+        capturedAt: Date,
+        horizontalAccuracy: Double,
+        altitude: Double?,
+        verticalAccuracy: Double?,
+        course: Double?,
+        speed: Double?,
+        motionSampleEpoch: UInt16? = nil,
+        motionSampleSequence: UInt32? = nil
+    ) {
+        self.latitude = latitude
+        self.longitude = longitude
+        self.capturedAt = capturedAt
+        self.horizontalAccuracy = horizontalAccuracy
+        self.altitude = altitude
+        self.verticalAccuracy = verticalAccuracy
+        self.course = course
+        self.speed = speed
+        self.motionSampleEpoch = motionSampleEpoch
+        self.motionSampleSequence = motionSampleSequence
+    }
 }
 
 nonisolated enum WorkoutSafeErrorCodeV1: String, Codable, Sendable {
@@ -476,6 +511,10 @@ nonisolated enum WorkoutContractCodec {
                   envelope.error == nil else {
                 throw WorkoutContractError.invalidEnvelopePayload
             }
+            if snapshot.location?.motionSampleEpoch != nil,
+               !envelope.schemaVersion.supportsWatchGPSMotionEvidence {
+                throw WorkoutContractError.invalidEnvelopePayload
+            }
             try validate(snapshot, envelopeCapturedAt: envelope.capturedAt)
         case .control:
             guard envelope.snapshot == nil,
@@ -679,6 +718,12 @@ nonisolated enum WorkoutContractCodec {
                 throw WorkoutContractError.invalidLocation
             }
             if (location.altitude == nil) != (location.verticalAccuracy == nil) {
+                throw WorkoutContractError.invalidLocation
+            }
+            if (location.motionSampleEpoch == nil) !=
+                (location.motionSampleSequence == nil) ||
+                location.motionSampleEpoch == 0 ||
+                location.motionSampleSequence == 0 {
                 throw WorkoutContractError.invalidLocation
             }
         }

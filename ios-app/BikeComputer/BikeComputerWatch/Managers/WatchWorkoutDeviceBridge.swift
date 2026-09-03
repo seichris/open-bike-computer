@@ -33,7 +33,11 @@ final class WatchWorkoutDeviceBridge {
             deviceLink.setWorkoutDemand(true)
             deviceLink.updateWorkout(
                 frames,
-                gps: WorkoutDeviceFrameBuilder.gpsUpdate(for: snapshot)
+                gps: WorkoutDeviceFrameBuilder.gpsUpdate(for: snapshot),
+                motion: WorkoutDeviceFrameBuilder.watchMotionUpdate(
+                    for: snapshot,
+                    sessionToken: sessionToken
+                )
             )
         case .clear:
             guard let idle = WorkoutDeviceFrameBuilder.frames(

@@ -321,6 +321,7 @@ quality, and optional value. Missing or stale is never converted to zero.
 | Direct cadence | 3 s | `>= 20 rpm` | Not authoritative; zero can mean coasting | Moving veto/start/resume only |
 | Confirmed Watch paired speed | 3 s | Same wheel threshold while workout exists | Same wheel threshold | High, active ride only |
 | Generic HealthKit cycling speed | 5 s | Display only | Display only | Never sets paired-sensor detector provenance |
+| Raw Watch workout GPS | 3 s | `>= 2.0 m/s` during an active workout | `< 0.8 m/s`, accuracy `<= 12.5 m` | Primary active-workout pause/resume source in profile 4 |
 | LC76G GPS | 3 s | valid 2D/3D fix, HDOP `<= 2.5`, speed `>= 2.8 m/s` | speed `< 0.8 m/s` and stationary radius | Medium |
 | QMI8658 | 1 s | calibrated windowed vibration/motion score | low score over full window | Corroboration only |
 
@@ -348,7 +349,12 @@ cycling.
 
 ### Pause gate
 
-With a fresh, definitively stopped wheel-speed source, the short path requires
+With qualified raw Watch workout GPS, profile 4 uses distinct producer samples
+spanning five seconds below `0.8 m/s`; BLE retries do not advance the span and
+no source-sample gap may exceed three seconds. Fresh wheel/cadence or qualified
+device GPS-plus-IMU movement vetoes the pause.
+
+When Watch GPS is unavailable, a fresh, definitively stopped wheel-speed source requires
 that stopped wheel evidence for five continuous seconds. Any positive fresh
 wheel/cadence sample or qualified GPS-plus-IMU movement cancels the candidate.
 Cadence-only evidence, cadence zero, missing cycling sensors, and wheel dropout
@@ -368,6 +374,8 @@ not resume the ride unless the speed and IMU gates also pass.
 
 ### Resume gate
 
+- Qualified Watch GPS `>= 2.0 m/s` across distinct samples spanning 2 seconds
+  is the primary automatic-resume path.
 - Wheel speed `>= 1.5 m/s` or cadence `>= 20 rpm` for 2 continuous seconds may
   resume an automatically paused ride.
 - GPS `>= 2.0 m/s` plus positive IMU motion for 4 continuous seconds is the
@@ -741,7 +749,7 @@ Add focused tests for:
 - capability and old-client compatibility;
 - wall-elapsed/moving-time mapping across mixed manual and automatic
   transitions; and
-- reducer parsing for the third workout telemetry frame.
+- reducer parsing for origin and Watch-motion workout telemetry frames.
 
 Suggested files:
 

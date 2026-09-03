@@ -30,6 +30,15 @@ constexpr uint8_t SESSION_STATE_MASK = 0x3F;
 constexpr uint8_t KNOWN_SOURCE_FLAGS_MASK =
     METRIC_SOURCE_FLAGS_MASK | SOURCE_CURRENT_SNAPSHOT |
     PAIR_GENERATION_MASK;
+constexpr uint8_t WATCH_MOTION_FIX_VALID = 1 << 0;
+constexpr uint8_t WATCH_MOTION_SPEED_AVAILABLE = 1 << 1;
+constexpr uint8_t WATCH_MOTION_ACCURACY_AVAILABLE = 1 << 2;
+constexpr uint8_t WATCH_MOTION_CURRENT_SAMPLE = 1 << 3;
+constexpr uint8_t WATCH_MOTION_AUTOMATICALLY_PAUSED = 1 << 4;
+constexpr uint8_t WATCH_MOTION_KNOWN_FLAGS_MASK =
+    WATCH_MOTION_FIX_VALID | WATCH_MOTION_SPEED_AVAILABLE |
+    WATCH_MOTION_ACCURACY_AVAILABLE | WATCH_MOTION_CURRENT_SAMPLE |
+    WATCH_MOTION_AUTOMATICALLY_PAUSED;
 constexpr uint16_t UNAVAILABLE_UINT16 = UINT16_MAX;
 constexpr uint32_t UNAVAILABLE_UINT32 = UINT32_MAX;
 constexpr int16_t UNAVAILABLE_ALTITUDE = INT16_MIN;
@@ -38,6 +47,7 @@ enum class FrameKind : uint8_t {
   Core = 1,
   Extended = 2,
   Origin = 3,
+  WatchMotion = 4,
 };
 
 enum class PauseOrigin : uint8_t {
