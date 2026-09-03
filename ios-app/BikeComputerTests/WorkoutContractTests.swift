@@ -7781,6 +7781,22 @@ private struct WorkoutContractTestSuite {
             "a pending workout route must replace covered metrics with an explicit route-selection and start surface"
         )
         expect(
+            compactContent.contains("route:coordinator.currentRoute")
+                && compactContent.contains(
+                    "routeAlternatives:coordinator.routeAlternatives.map{MapRouteAlternative(id:$0.id,route:$0.route)}"
+                )
+                && compactContent.contains(
+                    "selectedRouteAlternativeID:coordinator.selectedRouteAlternativeID"
+                )
+                && compactContent.contains(
+                    "onRouteAlternativeSelected:{coordinator.selectRouteAlternative($0)}"
+                )
+                && compactContent.contains(
+                    "Taparouteonthemap,orchoosebelow.Yourworkoutkeepsrunning."
+                ),
+            "route alternatives must render and remain selectable on the map while the buttons stay available"
+        )
+        expect(
             compactContent.contains("mapControlsBottomPadding(in:proxy)")
                 && compactContent.contains(
                     "RideSheetLayoutPolicy.mapControlsBottomPadding("

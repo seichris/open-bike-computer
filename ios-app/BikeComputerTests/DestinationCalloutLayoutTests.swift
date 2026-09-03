@@ -20,6 +20,7 @@ private final class RecordingMapView: MKMapView {
     private(set) var regionUpdateCount = 0
     private var recordedSelectedAnnotations: [MKAnnotation] = []
     private var recordedUserTrackingMode: MKUserTrackingMode = .none
+    var pointForCoordinate: ((CLLocationCoordinate2D) -> CGPoint)?
 
     override var selectedAnnotations: [MKAnnotation] {
         get { recordedSelectedAnnotations }
@@ -56,6 +57,14 @@ private final class RecordingMapView: MKMapView {
 
     override func convert(_ point: CGPoint, toCoordinateFrom view: UIView?) -> CLLocationCoordinate2D {
         convertedCoordinate ?? super.convert(point, toCoordinateFrom: view)
+    }
+
+    override func convert(
+        _ coordinate: CLLocationCoordinate2D,
+        toPointTo view: UIView?
+    ) -> CGPoint {
+        pointForCoordinate?(coordinate) ??
+            super.convert(coordinate, toPointTo: view)
     }
 
     override func selectAnnotation(_ annotation: MKAnnotation, animated: Bool) {
@@ -96,17 +105,187 @@ private final class RecordingLongPressGestureRecognizer: UILongPressGestureRecog
 
 private final class RecordingRoute: MKRoute {}
 
+@MainActor
+private final class RecordingTapGestureRecognizer: UITapGestureRecognizer {
+    private var recordedState: UIGestureRecognizer.State
+    private let recordedLocation: CGPoint
+
+    init(state: UIGestureRecognizer.State, location: CGPoint) {
+        recordedState = state
+        recordedLocation = location
+        super.init(target: nil, action: nil)
+    }
+
+    override var state: UIGestureRecognizer.State {
+        get { recordedState }
+        set { recordedState = newValue }
+    }
+
+    override func location(in view: UIView?) -> CGPoint {
+        recordedLocation
+    }
+}
+
+private final class RecordingPolylineRoute: MKRoute {
+    private let storedPolyline: MKPolyline
+
+    init(coordinates: [CLLocationCoordinate2D]) {
+        storedPolyline = MKPolyline(
+            coordinates: coordinates,
+            count: coordinates.count
+        )
+        super.init()
+    }
+
+    override var polyline: MKPolyline {
+        storedPolyline
+    }
+}
+
 @main
 struct DestinationCalloutLayoutTests {
     @MainActor
     static func main() async {
         testLabelExpansion()
+        testRouteAlternativeMapSelection()
         await testDestinationSelectionTrackingIntegration()
         await testResolvedAddressCallbackAndRecentInsertion()
         await testFallbackAddress()
         await testStaleResolutionCancellation()
 
         print("DestinationCalloutLayoutTests passed")
+    }
+
+    @MainActor
+    private static func testRouteAlternativeMapSelection() {
+        let sharedStart = CLLocationCoordinate2D(latitude: 0, longitude: 0)
+        let sharedFinish = CLLocationCoordinate2D(latitude: 0, longitude: 2)
+        let directRoute = RecordingPolylineRoute(
+            coordinates: [sharedStart, sharedFinish]
+        )
+        let scenicRoute = RecordingPolylineRoute(
+            coordinates: [
+                sharedStart,
+                CLLocationCoordinate2D(latitude: 1, longitude: 1),
+                sharedFinish,
+            ]
+        )
+        let directID = UUID()
+        let scenicID = UUID()
+        let alternatives = [
+            MapRouteAlternative(id: scenicID, route: scenicRoute),
+            MapRouteAlternative(id: directID, route: directRoute),
+        ]
+        let mapView = RecordingMapView(
+            frame: CGRect(x: 0, y: 0, width: 240, height: 240)
+        )
+        mapView.pointForCoordinate = {
+            CGPoint(x: $0.longitude * 100, y: $0.latitude * 100)
+        }
+        let coordinator = MapViewContainer.Coordinator()
+        coordinator.mapView = mapView
+        coordinator.installRouteOverlays(
+            route: nil,
+            alternatives: alternatives,
+            selectedAlternativeID: nil,
+            on: mapView
+        )
+        precondition(
+            mapView.overlays.count == 2,
+            "route planning should render every MapKit alternative"
+        )
+
+        var selectedRouteID: UUID?
+        var mapTapCount = 0
+        coordinator.onRouteAlternativeSelected = {
+            selectedRouteID = $0
+        }
+        coordinator.onMapTapped = {
+            mapTapCount += 1
+        }
+        coordinator.handleTap(
+            RecordingTapGestureRecognizer(
+                state: .ended,
+                location: CGPoint(x: 100, y: 96)
+            )
+        )
+        precondition(
+            selectedRouteID == scenicID,
+            "tapping a divergent route segment should select its alternative"
+        )
+        precondition(
+            mapTapCount == 1,
+            "route selection should preserve the general map-tap callback"
+        )
+
+        coordinator.updateSelectedRouteAlternative(scenicID, on: mapView)
+        guard let topOverlay = mapView.overlays.last as? MKPolyline else {
+            preconditionFailure("the selected route should remain a polyline")
+        }
+        precondition(
+            topOverlay === scenicRoute.polyline,
+            "the selected route should render above the other alternatives"
+        )
+
+        guard let selectedRenderer = coordinator.mapView(
+            mapView,
+            rendererFor: scenicRoute.polyline
+        ) as? MKPolylineRenderer,
+              let unselectedRenderer = coordinator.mapView(
+                mapView,
+                rendererFor: directRoute.polyline
+              ) as? MKPolylineRenderer else {
+            preconditionFailure("route alternatives should use polyline renderers")
+        }
+        precondition(
+            selectedRenderer.strokeColor == .systemBlue &&
+                selectedRenderer.lineWidth == 8 &&
+                selectedRenderer.alpha == 1,
+            "the selected route should be prominent and blue"
+        )
+        precondition(
+            unselectedRenderer.strokeColor == .systemGray &&
+                unselectedRenderer.lineWidth == 5 &&
+                unselectedRenderer.alpha == 0.72,
+            "unselected routes should remain visible but visually secondary"
+        )
+
+        selectedRouteID = nil
+        coordinator.handleTap(
+            RecordingTapGestureRecognizer(
+                state: .ended,
+                location: CGPoint(x: 100, y: 4)
+            )
+        )
+        precondition(
+            selectedRouteID == directID,
+            "tapping the direct route should switch away from the scenic route"
+        )
+        coordinator.updateSelectedRouteAlternative(directID, on: mapView)
+
+        selectedRouteID = nil
+        coordinator.handleTap(
+            RecordingTapGestureRecognizer(
+                state: .ended,
+                location: CGPoint(x: 0, y: 0)
+            )
+        )
+        precondition(
+            selectedRouteID == directID,
+            "tapping a shared segment should preserve the selected route"
+        )
+
+        selectedRouteID = nil
+        coordinator.handleTap(
+            RecordingTapGestureRecognizer(
+                state: .ended,
+                location: CGPoint(x: 100, y: 200)
+            )
+        )
+        precondition(
+            selectedRouteID == nil,
+            "a tap outside the route tolerance should not change selection"
+        )
     }
 
     @MainActor

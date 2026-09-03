@@ -227,7 +227,13 @@ struct ContentView: View {
                 let selectionFrame = offlineMapSelectionFrame(in: proxy.size)
                 let isCompactHeight = proxy.size.height < 600
 
-                mapView(selectionFrame: offlineMapManager.isMapAreaSelectionActive ? selectionFrame : nil)
+                mapView(
+                    selectionFrame: offlineMapManager.isMapAreaSelectionActive
+                        ? selectionFrame
+                        : nil,
+                    routePlanningBottomPadding:
+                        mapRoutePlanningBottomPadding(in: proxy)
+                )
                     .ignoresSafeArea()
 
                 if offlineMapManager.isMapAreaSelectionActive {
@@ -1217,7 +1223,7 @@ struct ContentView: View {
                 routeAlternativePicker
                 selectedRouteAdvisory
 
-                Text("Select a route, then start navigation. Your workout keeps running.")
+                Text("Tap a route on the map, or choose below. Your workout keeps running.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -1313,6 +1319,10 @@ struct ContentView: View {
                 }
                 .font(.subheadline)
             }
+
+            Text("Tap a route on the map, or choose below.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
 
             routeAlternativePicker
 
@@ -1487,14 +1497,23 @@ struct ContentView: View {
     
     // MARK: - Map View
     
-    private func mapView(selectionFrame: CGRect?) -> some View {
+    private func mapView(
+        selectionFrame: CGRect?,
+        routePlanningBottomPadding: CGFloat
+    ) -> some View {
         let canSelectDestination = !coordinator.isNavigating && !offlineMapManager.isMapAreaSelectionActive
 
         return MapViewContainer(
             appearance: mapAppearance,
             controlState: mapViewControlState,
             location: coordinator.currentLocation,
-            route: coordinator.currentRoute ?? coordinator.routePreview,
+            route: coordinator.currentRoute,
+            routeAlternatives: coordinator.routeAlternatives.map {
+                MapRouteAlternative(id: $0.id, route: $0.route)
+            },
+            selectedRouteAlternativeID:
+                coordinator.selectedRouteAlternativeID,
+            routePlanningBottomPadding: routePlanningBottomPadding,
             simulatedPosition: coordinator.simulatedPosition,
             isSimulationMode: coordinator.isSimulationMode,
             isNavigating: coordinator.isNavigating,
@@ -1504,6 +1523,9 @@ struct ContentView: View {
                 if isSearchPanelExpanded {
                     isSearchPanelExpanded = false
                 }
+            },
+            onRouteAlternativeSelected: {
+                coordinator.selectRouteAlternative($0)
             },
             onOfflineMapSelectionBoundsChanged: { bounds in
                 offlineMapManager.updateMapAreaSelection(bounds: bounds)
@@ -1515,6 +1537,18 @@ struct ContentView: View {
                 }
             ) : nil
         )
+    }
+
+    private func mapRoutePlanningBottomPadding(
+        in proxy: GeometryProxy
+    ) -> CGFloat {
+        guard workoutStore.presentation.isWorkoutActive else {
+            return 280
+        }
+        return RideSheetLayoutPolicy.compactHeight(
+            isAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
+            maximumHeight: proxy.size.height
+        ) + proxy.safeAreaInsets.bottom + 32
     }
 
     private func offlineMapSelectionFrame(in size: CGSize) -> CGRect {

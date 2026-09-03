@@ -118,17 +118,120 @@ struct MapCompassControl: UIViewRepresentable {
     }
 }
 
+struct MapRouteAlternative: Identifiable, Equatable {
+    let id: UUID
+    let route: MKRoute
+
+    static func == (
+        lhs: MapRouteAlternative,
+        rhs: MapRouteAlternative
+    ) -> Bool {
+        lhs.id == rhs.id && lhs.route === rhs.route
+    }
+}
+
+struct MapRouteSelectionCandidate {
+    let id: UUID
+    let points: [CGPoint]
+}
+
+enum MapRouteSelectionPolicy {
+    static let hitTolerance: CGFloat = 24
+    private static let overlapTolerance: CGFloat = 2
+
+    static func routeID(
+        nearestTo tapPoint: CGPoint,
+        candidates: [MapRouteSelectionCandidate],
+        preferredRouteID: UUID? = nil,
+        tolerance: CGFloat = hitTolerance
+    ) -> UUID? {
+        guard tolerance >= 0 else { return nil }
+
+        let matches = candidates.compactMap { candidate in
+            minimumDistance(from: tapPoint, to: candidate.points).map {
+                (id: candidate.id, distance: $0)
+            }
+        }.filter {
+            $0.distance <= tolerance
+        }
+        guard let nearest = matches.min(by: {
+            $0.distance < $1.distance
+        }) else {
+            return nil
+        }
+
+        if let preferredRouteID,
+           let preferred = matches.first(where: {
+               $0.id == preferredRouteID
+           }), preferred.distance <= nearest.distance + overlapTolerance {
+            return preferred.id
+        }
+        return nearest.id
+    }
+
+    private static func minimumDistance(
+        from point: CGPoint,
+        to polyline: [CGPoint]
+    ) -> CGFloat? {
+        guard let first = polyline.first else { return nil }
+        guard polyline.count > 1 else {
+            return hypot(point.x - first.x, point.y - first.y)
+        }
+
+        return zip(polyline, polyline.dropFirst()).reduce(nil) {
+            (nearest: CGFloat?, segment) in
+            let distance = distance(
+                from: point,
+                toSegmentFrom: segment.0,
+                to: segment.1
+            )
+            return min(nearest ?? distance, distance)
+        }
+    }
+
+    private static func distance(
+        from point: CGPoint,
+        toSegmentFrom start: CGPoint,
+        to end: CGPoint
+    ) -> CGFloat {
+        let deltaX = end.x - start.x
+        let deltaY = end.y - start.y
+        let lengthSquared = deltaX * deltaX + deltaY * deltaY
+        guard lengthSquared > 0 else {
+            return hypot(point.x - start.x, point.y - start.y)
+        }
+
+        let projection = (
+            (point.x - start.x) * deltaX +
+                (point.y - start.y) * deltaY
+        ) / lengthSquared
+        let clampedProjection = min(max(projection, 0), 1)
+        let nearestPoint = CGPoint(
+            x: start.x + clampedProjection * deltaX,
+            y: start.y + clampedProjection * deltaY
+        )
+        return hypot(
+            point.x - nearestPoint.x,
+            point.y - nearestPoint.y
+        )
+    }
+}
+
 struct MapViewContainer: UIViewRepresentable {
     let appearance: IPhoneMapAppearance
     let controlState: MapViewControlState
     let location: CLLocation?
     let route: MKRoute?
+    let routeAlternatives: [MapRouteAlternative]
+    let selectedRouteAlternativeID: UUID?
+    let routePlanningBottomPadding: CGFloat
     let simulatedPosition: CLLocationCoordinate2D?
     let isSimulationMode: Bool
     let isNavigating: Bool
     let isUserLocationAuthorized: Bool
     let offlineMapSelectionFrame: CGRect?
     let onMapTapped: (() -> Void)?
+    let onRouteAlternativeSelected: ((UUID) -> Void)?
     let onOfflineMapSelectionBoundsChanged: ((OfflineMapBounds) -> Void)?
     let onDestinationSelected: ((SavedDestination, CLLocation?) -> Void)?
     
@@ -170,6 +273,8 @@ struct MapViewContainer: UIViewRepresentable {
         
         // Store the callback in coordinator
         context.coordinator.onMapTapped = onMapTapped
+        context.coordinator.onRouteAlternativeSelected =
+            onRouteAlternativeSelected
         context.coordinator.onOfflineMapSelectionBoundsChanged = onOfflineMapSelectionBoundsChanged
         context.coordinator.onDestinationSelected = onDestinationSelected
         context.coordinator.isNavigating = isNavigating
@@ -199,6 +304,8 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.mapView = uiView
         context.coordinator.controlState = controlState
         context.coordinator.onMapTapped = onMapTapped
+        context.coordinator.onRouteAlternativeSelected =
+            onRouteAlternativeSelected
         context.coordinator.offlineMapSelectionFrame = offlineMapSelectionFrame
         context.coordinator.onOfflineMapSelectionBoundsChanged = onOfflineMapSelectionBoundsChanged
         context.coordinator.onDestinationSelected = onDestinationSelected
@@ -222,48 +329,19 @@ struct MapViewContainer: UIViewRepresentable {
             isFreePanActive: isFreePanActive
         )
         
-        // Update route overlay
-        if let route = route, context.coordinator.lastRoute !== route {
-            // Remove old overlays
-            uiView.removeOverlays(uiView.overlays)
-            
-            // Add new route overlay
-            uiView.addOverlay(route.polyline, level: .aboveRoads)
-            context.coordinator.configureRouteCamera(
-                mapView: uiView,
-                route: route,
-                location: location,
-                simulatedPosition: simulatedPosition,
-                isSimulationMode: isSimulationMode,
-                isNavigating: isNavigating,
-                isFreePanActive: isFreePanActive
-            )
-            
-            // Handle simulated position annotation
-            // Remove existing one
-            let existingSimAnnotations = uiView.annotations.filter { $0 is SimulatedPositionAnnotation }
-            uiView.removeAnnotations(existingSimAnnotations)
-            
-            context.coordinator.lastRoute = route
-        } else if route == nil && context.coordinator.lastRoute != nil {
-            // Clear route when navigation stops
-            uiView.removeOverlays(uiView.overlays)
-            context.coordinator.lastRoute = nil
-            
-            // Remove any destination annotations
-            let destinationAnnotations = uiView.annotations.filter { $0 is DestinationAnnotation }
-            uiView.removeAnnotations(destinationAnnotations)
-            
-            // Remove simulation annotation
-            let simAnnotations = uiView.annotations.filter { $0 is SimulatedPositionAnnotation }
-            uiView.removeAnnotations(simAnnotations)
-            
-            context.coordinator.finishNavigationTracking(
-                mapView: uiView,
-                isUserLocationAuthorized: isUserLocationAuthorized,
-                isFreePanActive: isFreePanActive
-            )
-        }
+        context.coordinator.updateRouteOverlays(
+            on: uiView,
+            route: route,
+            alternatives: routeAlternatives,
+            selectedAlternativeID: selectedRouteAlternativeID,
+            routePlanningBottomPadding: routePlanningBottomPadding,
+            location: location,
+            simulatedPosition: simulatedPosition,
+            isSimulationMode: isSimulationMode,
+            isNavigating: isNavigating,
+            isUserLocationAuthorized: isUserLocationAuthorized,
+            isFreePanActive: isFreePanActive
+        )
         
         // Update simulated position
         let existingSimAnnotations = uiView.annotations.filter { $0 is SimulatedPositionAnnotation }
@@ -333,9 +411,12 @@ struct MapViewContainer: UIViewRepresentable {
         typealias AddressResolver = @MainActor (CLLocation) async -> String?
 
         var lastRoute: MKRoute?
+        var lastRouteAlternatives: [MapRouteAlternative] = []
+        var selectedRouteAlternativeID: UUID?
         var mapView: MKMapView?
         weak var controlState: MapViewControlState?
         var onMapTapped: (() -> Void)?
+        var onRouteAlternativeSelected: ((UUID) -> Void)?
         var offlineMapSelectionFrame: CGRect?
         var onOfflineMapSelectionBoundsChanged: ((OfflineMapBounds) -> Void)?
         var onDestinationSelected: ((SavedDestination, CLLocation?) -> Void)?
@@ -348,6 +429,8 @@ struct MapViewContainer: UIViewRepresentable {
         private var trackingButton: MKUserTrackingButton?
         private var lastNavigationCoordinate: CLLocationCoordinate2D?
         private var lastNavigationHeading: CLLocationDirection = 0
+        private var routeAlternativeIDsByOverlay:
+            [ObjectIdentifier: UUID] = [:]
         private var reverseGeocodingTask: Task<Void, Never>?
         private let addressResolver: AddressResolver?
 
@@ -521,6 +604,216 @@ struct MapViewContainer: UIViewRepresentable {
             }
         }
 
+        func updateRouteOverlays(
+            on mapView: MKMapView,
+            route: MKRoute?,
+            alternatives: [MapRouteAlternative],
+            selectedAlternativeID: UUID?,
+            routePlanningBottomPadding: CGFloat,
+            location: CLLocation?,
+            simulatedPosition: CLLocationCoordinate2D?,
+            isSimulationMode: Bool,
+            isNavigating: Bool,
+            isUserLocationAuthorized: Bool,
+            isFreePanActive: Bool
+        ) {
+            let activeRouteMatches =
+                (lastRoute == nil && route == nil) || lastRoute === route
+            let routeContentChanged =
+                !activeRouteMatches || lastRouteAlternatives != alternatives
+
+            if !routeContentChanged {
+                updateSelectedRouteAlternative(
+                    selectedAlternativeID,
+                    on: mapView
+                )
+                return
+            }
+
+            let hadRouteContent = lastRoute != nil ||
+                !lastRouteAlternatives.isEmpty
+            installRouteOverlays(
+                route: route,
+                alternatives: alternatives,
+                selectedAlternativeID: selectedAlternativeID,
+                on: mapView
+            )
+
+            if !alternatives.isEmpty {
+                configureRouteAlternativesCamera(
+                    mapView: mapView,
+                    alternatives: alternatives,
+                    bottomPadding: routePlanningBottomPadding,
+                    isFreePanActive: isFreePanActive
+                )
+                removeSimulationAnnotations(from: mapView)
+            } else if let route {
+                configureRouteCamera(
+                    mapView: mapView,
+                    route: route,
+                    location: location,
+                    simulatedPosition: simulatedPosition,
+                    isSimulationMode: isSimulationMode,
+                    isNavigating: isNavigating,
+                    isFreePanActive: isFreePanActive
+                )
+                removeSimulationAnnotations(from: mapView)
+            } else if hadRouteContent {
+                let destinationAnnotations = mapView.annotations.filter {
+                    $0 is DestinationAnnotation
+                }
+                mapView.removeAnnotations(destinationAnnotations)
+                removeSimulationAnnotations(from: mapView)
+                finishNavigationTracking(
+                    mapView: mapView,
+                    isUserLocationAuthorized: isUserLocationAuthorized,
+                    isFreePanActive: isFreePanActive
+                )
+            }
+        }
+
+        func installRouteOverlays(
+            route: MKRoute?,
+            alternatives: [MapRouteAlternative],
+            selectedAlternativeID: UUID?,
+            on mapView: MKMapView
+        ) {
+            mapView.removeOverlays(mapView.overlays)
+            lastRoute = route
+            lastRouteAlternatives = alternatives
+            self.selectedRouteAlternativeID = selectedAlternativeID
+            routeAlternativeIDsByOverlay.removeAll(keepingCapacity: true)
+
+            guard !alternatives.isEmpty else {
+                if let route {
+                    mapView.addOverlay(route.polyline, level: .aboveRoads)
+                }
+                return
+            }
+
+            for alternative in alternatives {
+                routeAlternativeIDsByOverlay[
+                    ObjectIdentifier(alternative.route.polyline)
+                ] = alternative.id
+            }
+            let orderedAlternatives = alternatives.filter {
+                $0.id != selectedAlternativeID
+            } + alternatives.filter {
+                $0.id == selectedAlternativeID
+            }
+            mapView.addOverlays(
+                orderedAlternatives.map(\.route.polyline),
+                level: .aboveRoads
+            )
+        }
+
+        func updateSelectedRouteAlternative(
+            _ selectedAlternativeID: UUID?,
+            on mapView: MKMapView
+        ) {
+            guard self.selectedRouteAlternativeID != selectedAlternativeID else {
+                return
+            }
+            self.selectedRouteAlternativeID = selectedAlternativeID
+
+            if let selectedAlternativeID,
+               let selectedOverlay = mapView.overlays.first(where: {
+                   routeAlternativeID(for: $0) == selectedAlternativeID
+               }) {
+                mapView.removeOverlay(selectedOverlay)
+                mapView.addOverlay(selectedOverlay, level: .aboveRoads)
+            }
+
+            for overlay in mapView.overlays {
+                guard let renderer = mapView.renderer(for: overlay)
+                    as? MKPolylineRenderer else {
+                    continue
+                }
+                applyRouteStyle(renderer, for: overlay)
+                renderer.setNeedsDisplay()
+            }
+        }
+
+        func routeAlternativeID(
+            at tapPoint: CGPoint,
+            on mapView: MKMapView
+        ) -> UUID? {
+            let candidates = lastRouteAlternatives.map { alternative in
+                MapRouteSelectionCandidate(
+                    id: alternative.id,
+                    points: screenPoints(
+                        for: alternative.route.polyline,
+                        on: mapView
+                    )
+                )
+            }
+            return MapRouteSelectionPolicy.routeID(
+                nearestTo: tapPoint,
+                candidates: candidates,
+                preferredRouteID: selectedRouteAlternativeID
+            )
+        }
+
+        private func screenPoints(
+            for polyline: MKPolyline,
+            on mapView: MKMapView
+        ) -> [CGPoint] {
+            guard polyline.pointCount > 0 else { return [] }
+            var coordinates = [CLLocationCoordinate2D](
+                repeating: CLLocationCoordinate2D(),
+                count: polyline.pointCount
+            )
+            polyline.getCoordinates(
+                &coordinates,
+                range: NSRange(location: 0, length: polyline.pointCount)
+            )
+            return coordinates.map {
+                mapView.convert($0, toPointTo: mapView)
+            }
+        }
+
+        private func routeAlternativeID(for overlay: MKOverlay) -> UUID? {
+            guard let polyline = overlay as? MKPolyline else { return nil }
+            return routeAlternativeIDsByOverlay[ObjectIdentifier(polyline)]
+        }
+
+        private func removeSimulationAnnotations(from mapView: MKMapView) {
+            let annotations = mapView.annotations.filter {
+                $0 is SimulatedPositionAnnotation
+            }
+            mapView.removeAnnotations(annotations)
+        }
+
+        private func configureRouteAlternativesCamera(
+            mapView: MKMapView,
+            alternatives: [MapRouteAlternative],
+            bottomPadding: CGFloat,
+            isFreePanActive: Bool
+        ) {
+            guard !isFreePanActive else {
+                if mapView.userTrackingMode != .none {
+                    mapView.setUserTrackingMode(.none, animated: false)
+                }
+                return
+            }
+            guard let first = alternatives.first else { return }
+            let boundingMapRect = alternatives.dropFirst().reduce(
+                first.route.polyline.boundingMapRect
+            ) { partialResult, alternative in
+                partialResult.union(alternative.route.polyline.boundingMapRect)
+            }
+            mapView.setVisibleMapRect(
+                boundingMapRect,
+                edgePadding: UIEdgeInsets(
+                    top: 140,
+                    left: 48,
+                    bottom: max(bottomPadding, 160),
+                    right: 48
+                ),
+                animated: true
+            )
+        }
+
         func configureRouteCamera(
             mapView: MKMapView,
             route: MKRoute,
@@ -636,6 +929,14 @@ struct MapViewContainer: UIViewRepresentable {
 
         @objc func handleTap(_ gestureRecognizer: UITapGestureRecognizer) {
             guard gestureRecognizer.state == .ended else { return }
+            if let mapView,
+               onRouteAlternativeSelected != nil,
+               let routeID = routeAlternativeID(
+                   at: gestureRecognizer.location(in: mapView),
+                   on: mapView
+               ) {
+                onRouteAlternativeSelected?(routeID)
+            }
             onMapTapped?()
         }
 
@@ -812,13 +1113,29 @@ struct MapViewContainer: UIViewRepresentable {
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             if let polyline = overlay as? MKPolyline {
                 let renderer = MKPolylineRenderer(polyline: polyline)
-                renderer.strokeColor = .systemBlue
-                renderer.lineWidth = 6
+                applyRouteStyle(renderer, for: overlay)
                 renderer.lineCap = .round
                 renderer.lineJoin = .round
                 return renderer
             }
             return MKOverlayRenderer(overlay: overlay)
+        }
+
+        private func applyRouteStyle(
+            _ renderer: MKPolylineRenderer,
+            for overlay: MKOverlay
+        ) {
+            guard let alternativeID = routeAlternativeID(for: overlay) else {
+                renderer.strokeColor = .systemBlue
+                renderer.lineWidth = 6
+                renderer.alpha = 1
+                return
+            }
+
+            let isSelected = alternativeID == selectedRouteAlternativeID
+            renderer.strokeColor = isSelected ? .systemBlue : .systemGray
+            renderer.lineWidth = isSelected ? 8 : 5
+            renderer.alpha = isSelected ? 1 : 0.72
         }
         
 
