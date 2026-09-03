@@ -35,6 +35,38 @@ struct NavigationWriteQueueMetrics: Equatable {
     func coalescedFrames(for writeClass: NavigationWriteClass) -> Int {
         coalescedFramesByClass[writeClass, default: 0]
     }
+
+    func merging(_ other: NavigationWriteQueueMetrics) -> NavigationWriteQueueMetrics {
+        var combined = NavigationWriteQueueMetrics()
+        combined.enqueuedFrames = enqueuedFrames + other.enqueuedFrames
+        combined.flushedFrames = flushedFrames + other.flushedFrames
+        combined.droppedFrames = droppedFrames + other.droppedFrames
+        combined.rejectedFrames = rejectedFrames + other.rejectedFrames
+        combined.coalescedFrames = coalescedFrames + other.coalescedFrames
+        combined.clearedFrames = clearedFrames + other.clearedFrames
+        combined.retrySchedules = retrySchedules + other.retrySchedules
+        combined.backpressureStops = backpressureStops + other.backpressureStops
+        combined.currentDepth = currentDepth + other.currentDepth
+        // The lanes record their high-water marks independently. Their sum is
+        // a conservative upper bound for the aggregate diagnostic high-water
+        // mark and cannot under-report queue pressure.
+        combined.maxDepth = maxDepth + other.maxDepth
+        combined.oldestPendingAgeMs = max(oldestPendingAgeMs, other.oldestPendingAgeMs)
+        combined.retryAgeMs = max(retryAgeMs, other.retryAgeMs)
+        for writeClass in NavigationWriteClass.allCases {
+            let dropped = droppedFrames(for: writeClass) +
+                other.droppedFrames(for: writeClass)
+            if dropped > 0 {
+                combined.droppedFramesByClass[writeClass] = dropped
+            }
+            let coalesced = coalescedFrames(for: writeClass) +
+                other.coalescedFrames(for: writeClass)
+            if coalesced > 0 {
+                combined.coalescedFramesByClass[writeClass] = coalesced
+            }
+        }
+        return combined
+    }
 }
 
 nonisolated struct RendererBenchmarkBLETransportEvidence: Codable,
@@ -148,6 +180,120 @@ struct NavigationWrite {
             protectedFromEviction: protectedFromEviction,
             enqueuedAtUptime: uptime
         )
+    }
+}
+
+enum NavigationLatestStateKind: Equatable {
+    case gpsPosition
+    case rendererBenchmarkMarker
+
+    var writeClass: NavigationWriteClass {
+        switch self {
+        case .gpsPosition:
+            return .gpsPosition
+        case .rendererBenchmarkMarker:
+            return .settingsControl
+        }
+    }
+
+    var coalescingKey: String {
+        switch self {
+        case .gpsPosition:
+            return DeviceBLEProtocol.gpsPositionCoalescingKey
+        case .rendererBenchmarkMarker:
+            return DeviceBLEProtocol.rendererBenchmarkMarkerCoalescingKey
+        }
+    }
+}
+
+/// A deliberately narrow lane for the two replaceable states that drive the
+/// renderer benchmark. Transactional route, settings, transfer, and control
+/// writes cannot enter this lane and therefore retain their existing ordering.
+struct NavigationLatestStateWriteQueue {
+    private var queue: NavigationWriteQueue
+    private var stagedGPSWrite: NavigationWrite?
+
+    init(now: @escaping () -> TimeInterval = {
+        ProcessInfo.processInfo.systemUptime
+    }) {
+        queue = NavigationWriteQueue(maxCount: 2, now: now)
+    }
+
+    var count: Int { queue.count + (stagedGPSWrite == nil ? 0 : 1) }
+    var metrics: NavigationWriteQueueMetrics { queue.metrics }
+    var cumulativeMetrics: NavigationWriteQueueMetrics { queue.cumulativeMetrics }
+
+    @discardableResult
+    mutating func stageGPS(_ write: NavigationWrite) -> Bool {
+        guard write.transportExpectsWriteResponse == false,
+              write.writeClass == NavigationLatestStateKind.gpsPosition.writeClass,
+              write.coalescingKey ==
+                NavigationLatestStateKind.gpsPosition.coalescingKey else {
+            return false
+        }
+        // Once a newer GPS sample exists, an older incomplete or unsent pair
+        // is stale. Remove both halves before staging the replacement so the
+        // lane never exceeds the two writes in one complete pair.
+        queue.removePendingWrites(
+            withCoalescingKey:
+                NavigationLatestStateKind.gpsPosition.coalescingKey
+        )
+        queue.removePendingWrites(
+            withCoalescingKey:
+                NavigationLatestStateKind.rendererBenchmarkMarker.coalescingKey
+        )
+        stagedGPSWrite?.onDrop?()
+        stagedGPSWrite = write
+        return true
+    }
+
+    /// Replaces any unsent pair atomically. Holding GPS until its marker is
+    /// staged guarantees submission order even when the previous pair was
+    /// only partially drained before CoreBluetooth applied backpressure.
+    @discardableResult
+    mutating func completePair(with marker: NavigationWrite) -> Bool {
+        guard let gps = stagedGPSWrite,
+              marker.transportExpectsWriteResponse == false,
+              marker.writeClass ==
+                NavigationLatestStateKind.rendererBenchmarkMarker.writeClass,
+              marker.coalescingKey ==
+                NavigationLatestStateKind.rendererBenchmarkMarker.coalescingKey else {
+            return false
+        }
+        queue.removePendingWrites(
+            withCoalescingKey:
+                NavigationLatestStateKind.gpsPosition.coalescingKey
+        )
+        queue.removePendingWrites(
+            withCoalescingKey:
+                NavigationLatestStateKind.rendererBenchmarkMarker.coalescingKey
+        )
+        guard queue.enqueueAtomically([gps, marker]) else { return false }
+        stagedGPSWrite = nil
+        return true
+    }
+
+    mutating func flush(
+        maxWrites: Int = .max,
+        write: (NavigationWrite) -> Void
+    ) {
+        queue.flush(canSend: { pending in
+            pending.transportCanSend?() ?? false
+        }, maxWrites: maxWrites, write: write)
+    }
+
+    mutating func removeAll() {
+        stagedGPSWrite?.onDrop?()
+        stagedGPSWrite = nil
+        queue.removeAll()
+    }
+
+    mutating func noteRetryScheduled() {
+        queue.noteRetryScheduled()
+    }
+
+    mutating func snapshotMetricsAndReset() -> NavigationWriteQueueMetrics {
+        queue.snapshotMetricsAndReset()
     }
 }
 

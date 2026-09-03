@@ -159,7 +159,9 @@ Channels are `1=auth`, `2=navigation`, `3=route`, `4=GPS`, `5=settings`,
 `6=workout`, and `7=ride automation`.
 Each direction has an independent strictly increasing sequence per channel.
 Receivers reject zero, replayed, out-of-order, wrong-channel, or invalid-tag
-frames. The 12-byte nonce is `Channel || 7 zero bytes || Sequence`. Additional
+frames. Sequence gaps are accepted; this lets a newer replaceable-state frame
+remain valid if an earlier frame was dropped after its sequence was assigned.
+The 12-byte nonce is `Channel || 7 zero bytes || Sequence`. Additional
 authenticated data is ASCII `write2|` for `S2` or `notify2|` for `R2`, followed
 by the one-byte channel and four-byte sequence. The frame adds 22 bytes, so iOS
 subtracts that overhead before packet sizing.

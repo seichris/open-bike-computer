@@ -208,18 +208,44 @@ enum GPSPositionWriteRouting {
     static func route(
         hasNativeWriteWithResponse: Bool,
         hasNativeWriteWithoutResponse: Bool,
+        prefersUnacknowledgedLatestState: Bool,
         payloadLength: Int,
         protectionOverhead: Int,
         withResponseMaximum: Int,
         withoutResponseMaximum: Int
     ) -> GPSPositionWriteRoute {
         let protectedLength = payloadLength + protectionOverhead
+        if prefersUnacknowledgedLatestState,
+           hasNativeWriteWithoutResponse,
+           protectedLength <= withoutResponseMaximum {
+            return .nativeWithoutResponse
+        }
         if hasNativeWriteWithResponse,
            protectedLength <= withResponseMaximum {
             return .nativeWithResponse
         }
         if hasNativeWriteWithoutResponse,
            protectedLength <= withoutResponseMaximum {
+            return .nativeWithoutResponse
+        }
+        return .navigationFallback
+    }
+}
+
+enum RendererBenchmarkMarkerWriteRoute: Equatable {
+    case nativeWithoutResponse
+    case navigationFallback
+}
+
+enum RendererBenchmarkMarkerWriteRouting {
+    static func route(
+        hasNativeWriteWithoutResponse: Bool,
+        payloadLength: Int,
+        protectionOverhead: Int,
+        withoutResponseMaximum: Int
+    ) -> RendererBenchmarkMarkerWriteRoute {
+        if hasNativeWriteWithoutResponse,
+           payloadLength + protectionOverhead <= withoutResponseMaximum {
             return .nativeWithoutResponse
         }
         return .navigationFallback
@@ -332,6 +358,8 @@ enum DeviceBLEProtocol {
         "workout-telemetry-origin"
     static let navigationSnapshotCoalescingKey = "navigation-snapshot"
     static let gpsPositionCoalescingKey = "gps-position"
+    static let rendererBenchmarkMarkerCoalescingKey =
+        "renderer.benchmark.marker"
     static let automaticDisplayOffSettingCoalescingKey =
         "automatic-display-off-setting"
     // Large enough for the worst schema-v1 three-favorite catalog at the
@@ -1038,6 +1066,8 @@ class BLEManager: NSObject, ObservableObject {
         // coexist while an acknowledged write is in flight.
         priorityMaxCount: 6
     )
+    private var navigationLatestStateWriteQueue =
+        NavigationLatestStateWriteQueue()
     private var lastNavigationQueuePendingLogAt = Date.distantPast
 #if DEBUG
     private var navigationQueueMetricsTimer: Timer?
@@ -3388,7 +3418,7 @@ class BLEManager: NSObject, ObservableObject {
         pairingPrompt = nil
         isPairingConfirmationSubmitting = false
         navigationWriteEndpoint = nil
-        navigationWriteQueue.removeAll()
+        clearNavigationWriteQueues()
         isConnected = false
         isNavigationReady = false
         connectedDeviceID = nil
@@ -3553,6 +3583,7 @@ class BLEManager: NSObject, ObservableObject {
 
     func endDeviceGPSOverride(_ token: UUID) {
         guard deviceGPSOverrideToken == token else { return }
+        navigationLatestStateWriteQueue.removeAll()
         deviceGPSOverrideToken = nil
         onDeviceGPSOverrideEnded?()
     }
@@ -3612,6 +3643,10 @@ class BLEManager: NSObject, ObservableObject {
                     characteristic.properties.contains(.write),
                 hasNativeWriteWithoutResponse:
                     characteristic.properties.contains(.writeWithoutResponse),
+                prefersUnacknowledgedLatestState:
+                    rendererBenchmarkLatestStateLaneIsAvailable(
+                        on: peripheral
+                    ),
                 payloadLength: data.count,
                 protectionOverhead: authenticatedWriteSession == nil
                     ? 0
@@ -3634,29 +3669,43 @@ class BLEManager: NSObject, ObservableObject {
             }
             if let writeType {
                 let expectsWriteResponse = writeType == .withResponse
-                guard enqueueNavigationWrite(
-                    data,
-                    endpoint: endpoint,
-                    label: "native GPS position",
-                    writeClass: .gpsPosition,
-                    coalescingKey: DeviceBLEProtocol.gpsPositionCoalescingKey,
-                    transportWrite: { [weak self, weak peripheral, weak characteristic] _ in
-                        guard let self, let peripheral, let characteristic else { return }
-                        self.writeDeviceData(
-                            buildData(),
-                            to: characteristic,
-                            on: peripheral,
-                            type: writeType
-                        )
-                    },
-                    transportCanSend: { [weak self, weak peripheral] in
-                        if expectsWriteResponse {
-                            return self?.writeWithResponseInFlight == false
+                let transportWrite: (Data) -> Void = {
+                    [weak self, weak peripheral, weak characteristic] _ in
+                    guard let self, let peripheral, let characteristic else { return }
+                    self.writeDeviceData(
+                        buildData(),
+                        to: characteristic,
+                        on: peripheral,
+                        type: writeType
+                    )
+                }
+                let queued: Bool
+                if expectsWriteResponse {
+                    queued = enqueueNavigationWrite(
+                        data,
+                        endpoint: endpoint,
+                        label: "native GPS position",
+                        writeClass: .gpsPosition,
+                        coalescingKey: DeviceBLEProtocol.gpsPositionCoalescingKey,
+                        transportWrite: transportWrite,
+                        transportCanSend: { [weak self] in
+                            self?.writeWithResponseInFlight == false
+                        },
+                        transportExpectsWriteResponse: true
+                    )
+                } else {
+                    queued = enqueueLatestStateWrite(
+                        data,
+                        endpoint: endpoint,
+                        label: "native GPS position",
+                        kind: .gpsPosition,
+                        transportWrite: transportWrite,
+                        transportCanSend: { [weak peripheral] in
+                            peripheral?.canSendWriteWithoutResponse ?? false
                         }
-                        return peripheral?.canSendWriteWithoutResponse ?? false
-                    },
-                    transportExpectsWriteResponse: expectsWriteResponse
-                ) else {
+                    )
+                }
+                guard queued else {
                     log("GPS position not queued: write queue unavailable")
                     return false
                 }
@@ -4944,11 +4993,9 @@ class BLEManager: NSObject, ObservableObject {
         }
         return DevicePacketRouting.sendPreferredThenFallback(
             preferred: {
-                sendNativeMapTransferPacket(
+                sendNativeRendererBenchmarkMarker(
                     packet,
-                    label: "renderer benchmark marker",
-                    writeClass: .settingsControl,
-                    coalescingKey: "renderer.benchmark.marker"
+                    label: "renderer benchmark marker"
                 )
             },
             fallback: {
@@ -4956,7 +5003,8 @@ class BLEManager: NSObject, ObservableObject {
                     packet,
                     label: "renderer benchmark marker",
                     writeClass: .settingsControl,
-                    coalescingKey: "renderer.benchmark.marker"
+                    coalescingKey:
+                        DeviceBLEProtocol.rendererBenchmarkMarkerCoalescingKey
                 )
             }
         )
@@ -5227,7 +5275,7 @@ class BLEManager: NSObject, ObservableObject {
         deviceOperationTimeoutTimer?.invalidate()
         deviceOperationTimeoutTimer = nil
         resetNavigationWriteResponseWait()
-        navigationWriteQueue.removeAll()
+        clearNavigationWriteQueues()
         lastSentPhoneBatteryPercent = nil
         lastSentPhoneBatteryCharging = nil
         authRetryTimer?.invalidate()
@@ -5293,7 +5341,7 @@ class BLEManager: NSObject, ObservableObject {
         authInfoAttempts = 0
         deviceOperationTimeoutTimer?.invalidate()
         deviceOperationTimeoutTimer = nil
-        navigationWriteQueue.removeAll()
+        clearNavigationWriteQueues()
         lastSentPhoneBatteryPercent = nil
         lastSentPhoneBatteryCharging = nil
         navigationFlushRetryTimer?.invalidate()
@@ -5482,6 +5530,7 @@ class BLEManager: NSObject, ObservableObject {
             maxCount: maxCount,
             priorityMaxCount: priorityMaxCount
         )
+        navigationLatestStateWriteQueue = NavigationLatestStateWriteQueue()
     }
 
     @discardableResult
@@ -5502,6 +5551,28 @@ class BLEManager: NSObject, ObservableObject {
     func flushPendingNavigationWritesForTesting() {
         guard let endpoint = navigationWriteEndpoint else { return }
         flushPendingNavigationWrites(endpoint: endpoint)
+    }
+
+    @discardableResult
+    func enqueueLatestStateWriteForTesting(
+        _ data: Data,
+        kind: NavigationLatestStateKind,
+        canSend: @escaping () -> Bool,
+        write: @escaping (Data) -> Void
+    ) -> Bool {
+        guard let endpoint = navigationWriteEndpoint else { return false }
+        return enqueueLatestStateWrite(
+            data,
+            endpoint: endpoint,
+            label: "test latest state",
+            kind: kind,
+            transportWrite: write,
+            transportCanSend: canSend
+        )
+    }
+
+    var navigationPendingWriteCountForTesting: Int {
+        navigationPendingWriteCount
     }
 
     func installNavigationWriteStallRecoveryForTesting(
@@ -6655,6 +6726,37 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
+    private func enqueueLatestStateWrite(
+        _ data: Data,
+        endpoint: NavigationWriteEndpoint,
+        label: String,
+        kind: NavigationLatestStateKind,
+        transportWrite: @escaping (Data) -> Void,
+        transportCanSend: @escaping () -> Bool
+    ) -> Bool {
+        let write = NavigationWrite(
+            data: data,
+            label: label,
+            transportWrite: transportWrite,
+            transportCanSend: transportCanSend,
+            transportExpectsWriteResponse: false,
+            writeClass: kind.writeClass,
+            coalescingKey: kind.coalescingKey
+        )
+        switch kind {
+        case .gpsPosition:
+            return navigationLatestStateWriteQueue.stageGPS(write)
+        case .rendererBenchmarkMarker:
+            guard navigationLatestStateWriteQueue.completePair(with: write) else {
+                return false
+            }
+        }
+        flushPendingNavigationWrites(endpoint: endpoint)
+        scheduleNavigationFlushRetryIfNeeded()
+        return true
+    }
+
+    @discardableResult
     private func enqueueDestinationFrames(
         _ frames: [Data],
         endpoint: NavigationWriteEndpoint,
@@ -6841,16 +6943,87 @@ class BLEManager: NSObject, ObservableObject {
         return true
     }
 
+    @discardableResult
+    private func sendNativeRendererBenchmarkMarker(
+        _ data: Data,
+        label: String
+    ) -> Bool {
+        guard isConnected,
+              isNavigationReady,
+              let peripheral = connectedPeripheral,
+              let characteristic = settingsCharacteristic,
+              let endpoint = navigationWriteEndpoint,
+              RendererBenchmarkMarkerWriteRouting.route(
+                hasNativeWriteWithoutResponse:
+                    characteristic.properties.contains(.writeWithoutResponse),
+                payloadLength: data.count,
+                protectionOverhead: authenticatedWriteSession == nil
+                    ? 0
+                    : AuthenticatedBLEWriteSession.frameOverhead,
+                withoutResponseMaximum: peripheral.maximumWriteValueLength(
+                    for: .withoutResponse
+                )
+              ) == .nativeWithoutResponse else {
+            return false
+        }
+        guard enqueueLatestStateWrite(
+            data,
+            endpoint: endpoint,
+            label: "native \(label)",
+            kind: .rendererBenchmarkMarker,
+            transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
+                guard let self, let peripheral, let characteristic else { return }
+                self.writeDeviceData(
+                    payload,
+                    to: characteristic,
+                    on: peripheral,
+                    type: .withoutResponse
+                )
+            },
+            transportCanSend: { [weak peripheral] in
+                peripheral?.canSendWriteWithoutResponse ?? false
+            }
+        ) else { return false }
+        log("Queued native \(label): \(data.count) bytes")
+        return true
+    }
+
+    private func rendererBenchmarkLatestStateLaneIsAvailable(
+        on peripheral: CBPeripheral
+    ) -> Bool {
+        guard deviceGPSOverrideToken != nil,
+              supportsRendererDiagnostics,
+              let settingsCharacteristic,
+              settingsCharacteristic.properties.contains(.writeWithoutResponse)
+              else { return false }
+        let protectedLength = RendererBenchmarkMarkerPacket.byteCount +
+            (authenticatedWriteSession == nil
+                ? 0
+                : AuthenticatedBLEWriteSession.frameOverhead)
+        return protectedLength <= peripheral.maximumWriteValueLength(
+            for: .withoutResponse
+        )
+    }
+
+    private var navigationPendingWriteCount: Int {
+        navigationWriteQueue.count + navigationLatestStateWriteQueue.count
+    }
+
+    private func clearNavigationWriteQueues() {
+        navigationWriteQueue.removeAll()
+        navigationLatestStateWriteQueue.removeAll()
+    }
+
     func waitForNavigationWritesToDrain(timeoutSeconds: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while navigationWriteQueue.count > 0 {
+        while navigationPendingWriteCount > 0 {
             if Task.isCancelled {
                 return false
             }
             if let endpoint = navigationWriteEndpoint {
                 flushPendingNavigationWrites(endpoint: endpoint)
             }
-            if navigationWriteQueue.count == 0 {
+            if navigationPendingWriteCount == 0 {
                 return true
             }
             if Date() >= deadline {
@@ -6864,6 +7037,11 @@ class BLEManager: NSObject, ObservableObject {
 
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
         var madeProgress = false
+        navigationLatestStateWriteQueue.flush(maxWrites: 2) { write in
+            madeProgress = true
+            write.perform(using: endpoint.write)
+            log("Sent \(write.label): \(write.data.count) bytes")
+        }
         navigationWriteQueue.flush(canSend: { [weak self] write in
             guard let self else { return false }
             let expectsWriteResponse = write.transportExpectsWriteResponse
@@ -6884,14 +7062,14 @@ class BLEManager: NSObject, ObservableObject {
         }
         updateNavigationBackpressureWatchdog(
             madeProgress: madeProgress,
-            hasPendingWrites: navigationWriteQueue.count > 0
+            hasPendingWrites: navigationPendingWriteCount > 0
         )
-        if navigationWriteQueue.count == 0 {
+        if navigationPendingWriteCount == 0 {
             navigationFlushRetryTimer?.invalidate()
             navigationFlushRetryTimer = nil
             lastNavigationQueuePendingLogAt = .distantPast
         } else if Date().timeIntervalSince(lastNavigationQueuePendingLogAt) >= 1 {
-            log("Navigation write queue pending: \(navigationWriteQueue.count)")
+            log("Navigation write queue pending: \(navigationPendingWriteCount)")
             lastNavigationQueuePendingLogAt = Date()
         }
         if madeProgress,
@@ -6912,7 +7090,9 @@ class BLEManager: NSObject, ObservableObject {
             max(0, (now - lastNavigationQueueMetricsUptime) * 1_000).rounded()
         )
         lastNavigationQueueMetricsUptime = now
-        let metrics = navigationWriteQueue.snapshotMetricsAndReset()
+        let metrics = navigationWriteQueue.snapshotMetricsAndReset().merging(
+            navigationLatestStateWriteQueue.snapshotMetricsAndReset()
+        )
         log(
             "PWRMET_IOS v=\(NavigationWriteQueueMetrics.schemaVersion) " +
             "intervalMs=\(intervalMs) " +
@@ -7013,7 +7193,9 @@ class BLEManager: NSObject, ObservableObject {
 #if DEBUG || HOST_TESTING
     func rendererBenchmarkBLETransportEvidence()
         -> RendererBenchmarkBLETransportEvidence {
-        let metrics = navigationWriteQueue.cumulativeMetrics
+        let metrics = navigationWriteQueue.cumulativeMetrics.merging(
+            navigationLatestStateWriteQueue.cumulativeMetrics
+        )
         return RendererBenchmarkBLETransportEvidence(
             schema: 1,
             capturedAtUptimeMs: UInt64(max(
@@ -7176,7 +7358,7 @@ class BLEManager: NSObject, ObservableObject {
 #endif
 
     private func scheduleNavigationFlushRetryIfNeeded() {
-        guard navigationWriteQueue.count > 0,
+        guard navigationPendingWriteCount > 0,
               navigationFlushRetryTimer == nil else { return }
 
         navigationFlushRetryTimer = Timer.scheduledTimer(withTimeInterval: 0.05,
@@ -7188,7 +7370,12 @@ class BLEManager: NSObject, ObservableObject {
             self.flushPendingNavigationWrites(endpoint: endpoint)
             self.scheduleNavigationFlushRetryIfNeeded()
         }
-        navigationWriteQueue.noteRetryScheduled()
+        if navigationWriteQueue.count > 0 {
+            navigationWriteQueue.noteRetryScheduled()
+        }
+        if navigationLatestStateWriteQueue.count > 0 {
+            navigationLatestStateWriteQueue.noteRetryScheduled()
+        }
     }
 }
 
@@ -7559,7 +7746,7 @@ extension BLEManager: CBCentralManagerDelegate {
         deviceOperationTimeoutTimer?.invalidate()
         deviceOperationTimeoutTimer = nil
         resetNavigationWriteResponseWait()
-        navigationWriteQueue.removeAll()
+        clearNavigationWriteQueues()
         lastSentPhoneBatteryPercent = nil
         lastSentPhoneBatteryCharging = nil
         connectionTimeoutTimer?.invalidate()
@@ -7847,7 +8034,7 @@ extension BLEManager: CBPeripheralDelegate {
             return
         }
         guard isNavigationReady, let endpoint = navigationWriteEndpoint else { return }
-        log("BLE transport ready; pending writes=\(navigationWriteQueue.count)")
+        log("BLE transport ready; pending writes=\(navigationPendingWriteCount)")
         flushPendingNavigationWrites(endpoint: endpoint)
         scheduleNavigationFlushRetryIfNeeded()
     }
