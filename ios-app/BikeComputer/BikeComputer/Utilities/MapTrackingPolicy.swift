@@ -33,3 +33,40 @@ enum MapTrackingPolicy {
         return true
     }
 }
+
+enum RideSheetLayoutPolicy {
+    static let standardBottomPadding: CGFloat = 12
+    static let standardCompactHeight: CGFloat = 280
+    static let accessibilityCompactHeight: CGFloat = 360
+    static let maximumCompactHeightFraction: CGFloat = 0.72
+
+    static func compactHeight(
+        isAccessibilitySize: Bool,
+        maximumHeight: CGFloat
+    ) -> CGFloat {
+        let preferredHeight = isAccessibilitySize
+            ? accessibilityCompactHeight
+            : standardCompactHeight
+        return min(
+            preferredHeight,
+            max(maximumHeight, 0) * maximumCompactHeightFraction
+        )
+    }
+
+    static func mapControlsBottomPadding(
+        isRideSheetPresented: Bool,
+        isCompactDetent: Bool,
+        isAccessibilitySize: Bool,
+        maximumHeight: CGFloat,
+        safeAreaBottom: CGFloat
+    ) -> CGFloat {
+        guard isRideSheetPresented, isCompactDetent else {
+            return standardBottomPadding
+        }
+
+        return compactHeight(
+            isAccessibilitySize: isAccessibilitySize,
+            maximumHeight: maximumHeight
+        ) + max(safeAreaBottom, 0) + standardBottomPadding
+    }
+}
