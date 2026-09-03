@@ -14385,18 +14385,32 @@ struct NavigationProtocolTests {
                     "backpressure can pause between the GPS and marker submissions")
         assert(partialQueue.stageGPS(latestWrite(2, kind: .gpsPosition) {
             transportReadyForSecondWrite
-        }), "a newer GPS discards the unmatched stale marker")
+        }), "a newer GPS is safely skipped while its predecessor marker is pending")
         assert(partialQueue.completePair(with: latestWrite(
             2,
             kind: .rendererBenchmarkMarker,
             canSend: { transportReadyForSecondWrite }
-        )), "a new complete pair replaces the partial stale pair")
+        )), "the skipped GPS also skips its corresponding marker")
         transportReadyForSecondWrite = true
         partialQueue.flush { write in
             partialSent.append(write.label)
         }
-        assertEqual(partialSent, ["gps-1", "gps-2", "marker-2"],
-                    "no stale marker can overtake the newest corresponding GPS")
+        assertEqual(partialSent, ["gps-1", "marker-1"],
+                    "the unmatched marker survives later replay ticks and eventually drains")
+        assert(partialQueue.stageGPS(latestWrite(3, kind: .gpsPosition)),
+               "the next GPS stages after the unmatched marker drains")
+        assert(partialQueue.completePair(with: latestWrite(
+            3,
+            kind: .rendererBenchmarkMarker
+        )), "the next complete pair is admitted after recovery")
+        partialQueue.flush { write in
+            partialSent.append(write.label)
+        }
+        assertEqual(
+            partialSent,
+            ["gps-1", "marker-1", "gps-3", "marker-3"],
+            "recovery preserves every submitted GPS-before-marker relationship"
+        )
 
         assert(!partialQueue.stageGPS(NavigationWrite(
             data: Data([3]),
@@ -14442,6 +14456,55 @@ struct NavigationProtocolTests {
         resetManager.endDeviceGPSOverride(overrideToken)
         assertEqual(resetManager.navigationPendingWriteCountForTesting, 0,
                     "ending the renderer session clears unsent latest state")
+
+        let precedenceManager = BLEManager()
+        precedenceManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 512,
+            expectsWriteResponse: true,
+            canSend: { true },
+            write: { _ in }
+        ))
+        var orderedReady = false
+        var latestReady = true
+        var precedenceWrites: [UInt8] = []
+        precedenceManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 512,
+            expectsWriteResponse: true,
+            canSend: { orderedReady },
+            write: { data in precedenceWrites.append(data[0]) }
+        ))
+        assert(precedenceManager.enqueueProtectedNavigationWriteForTesting(
+            Data([0x40])
+        ), "an ordered transaction waits before the renderer pair")
+        assert(precedenceManager.enqueueLatestStateWriteForTesting(
+            Data([0x41]),
+            kind: .gpsPosition,
+            canSend: { latestReady },
+            write: { data in
+                precedenceWrites.append(data[0])
+                latestReady = false
+            }
+        ), "the physical backpressure fixture stages GPS")
+        assert(precedenceManager.enqueueLatestStateWriteForTesting(
+            Data([0x42]),
+            kind: .rendererBenchmarkMarker,
+            canSend: { latestReady },
+            write: { data in precedenceWrites.append(data[0]) }
+        ), "the physical backpressure fixture completes the pair")
+        orderedReady = true
+        precedenceManager.flushPendingNavigationWritesForTesting()
+        assertEqual(
+            precedenceWrites,
+            [0x41],
+            "ordered traffic cannot overtake a marker after GPS consumes the transport credit"
+        )
+        latestReady = true
+        precedenceManager.flushPendingNavigationWritesForTesting()
+        assertEqual(
+            precedenceWrites,
+            [0x41, 0x42, 0x40],
+            "marker recovery precedes the next ordered transaction"
+        )
     }
 
     static func testRendererBenchmarkProtocol() {

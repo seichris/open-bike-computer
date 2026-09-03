@@ -212,6 +212,7 @@ enum NavigationLatestStateKind: Equatable {
 struct NavigationLatestStateWriteQueue {
     private var queue: NavigationWriteQueue
     private var stagedGPSWrite: NavigationWrite?
+    private var discardMarkerForSkippedGPS = false
 
     init(now: @escaping () -> TimeInterval = {
         ProcessInfo.processInfo.systemUptime
@@ -231,9 +232,31 @@ struct NavigationLatestStateWriteQueue {
                 NavigationLatestStateKind.gpsPosition.coalescingKey else {
             return false
         }
-        // Once a newer GPS sample exists, an older incomplete or unsent pair
-        // is stale. Remove both halves before staging the replacement so the
-        // lane never exceeds the two writes in one complete pair.
+        let hasPendingGPS = queue.containsPendingWrite(
+            withCoalescingKey:
+                NavigationLatestStateKind.gpsPosition.coalescingKey
+        )
+        let hasPendingMarker = queue.containsPendingWrite(
+            withCoalescingKey:
+                NavigationLatestStateKind.rendererBenchmarkMarker.coalescingKey
+        )
+        if hasPendingMarker && !hasPendingGPS {
+            // CoreBluetooth can consume its final no-response credit on the
+            // GPS half of a pair and leave the marker pending for longer than
+            // one replay interval. Never replace that unmatched marker: doing
+            // so every second can starve marker delivery forever. Skip this
+            // newer pair and preserve the only marker that can identify the
+            // GPS already submitted to the device.
+            queue.noteCoalesced(write)
+            write.onDrop?()
+            stagedGPSWrite?.onDrop?()
+            stagedGPSWrite = nil
+            discardMarkerForSkippedGPS = true
+            return true
+        }
+        discardMarkerForSkippedGPS = false
+        // A complete pair that has not started transport is replaceable as a
+        // unit. Keep only the newest pair while preserving GPS-before-marker.
         queue.removePendingWrites(
             withCoalescingKey:
                 NavigationLatestStateKind.gpsPosition.coalescingKey
@@ -252,6 +275,18 @@ struct NavigationLatestStateWriteQueue {
     /// only partially drained before CoreBluetooth applied backpressure.
     @discardableResult
     mutating func completePair(with marker: NavigationWrite) -> Bool {
+        if discardMarkerForSkippedGPS {
+            guard marker.transportExpectsWriteResponse == false,
+                  marker.writeClass ==
+                    NavigationLatestStateKind.rendererBenchmarkMarker.writeClass,
+                  marker.coalescingKey ==
+                    NavigationLatestStateKind.rendererBenchmarkMarker.coalescingKey
+            else { return false }
+            queue.noteCoalesced(marker)
+            marker.onDrop?()
+            discardMarkerForSkippedGPS = false
+            return true
+        }
         guard let gps = stagedGPSWrite,
               marker.transportExpectsWriteResponse == false,
               marker.writeClass ==
@@ -285,6 +320,7 @@ struct NavigationLatestStateWriteQueue {
     mutating func removeAll() {
         stagedGPSWrite?.onDrop?()
         stagedGPSWrite = nil
+        discardMarkerForSkippedGPS = false
         queue.removeAll()
     }
 
@@ -520,6 +556,15 @@ struct NavigationWriteQueue {
             withCoalescingKey: key,
             resetRetryWhenEmpty: true
         )
+    }
+
+    func containsPendingWrite(withCoalescingKey key: String) -> Bool {
+        pendingPriorityWrites.contains { $0.coalescingKey == key } ||
+            pendingWrites.contains { $0.coalescingKey == key }
+    }
+
+    mutating func noteCoalesced(_ write: NavigationWrite) {
+        recordCoalesced(write: write)
     }
 
     private mutating func removePendingWrites(

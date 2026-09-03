@@ -6745,6 +6745,11 @@ class BLEManager: NSObject, ObservableObject {
         )
         switch kind {
         case .gpsPosition:
+            // Give a marker left behind by a partially drained pair the first
+            // opportunity to use newly available CoreBluetooth credit. If it
+            // is still blocked, stageGPS preserves it and skips this newer
+            // pair rather than starving marker delivery indefinitely.
+            flushPendingNavigationWrites(endpoint: endpoint)
             return navigationLatestStateWriteQueue.stageGPS(write)
         case .rendererBenchmarkMarker:
             guard navigationLatestStateWriteQueue.completePair(with: write) else {
@@ -7042,23 +7047,31 @@ class BLEManager: NSObject, ObservableObject {
             write.perform(using: endpoint.write)
             log("Sent \(write.label): \(write.data.count) bytes")
         }
-        navigationWriteQueue.flush(canSend: { [weak self] write in
-            guard let self else { return false }
-            let expectsWriteResponse = write.transportExpectsWriteResponse
-                ?? endpoint.expectsWriteResponse
-            if expectsWriteResponse && self.writeWithResponseInFlight {
-                return false
+        // Do not keep feeding acknowledged traffic while a partially drained
+        // latest-state pair is waiting for no-response transport credit. The
+        // physical CoreBluetooth path can otherwise advance route/status
+        // writes indefinitely while the corresponding marker is replaced on
+        // every 1 Hz tick. Once the pair drains, one ordered write may advance
+        // in the same flush, so transactional traffic is not starved.
+        if navigationLatestStateWriteQueue.count == 0 {
+            navigationWriteQueue.flush(canSend: { [weak self] write in
+                guard let self else { return false }
+                let expectsWriteResponse = write.transportExpectsWriteResponse
+                    ?? endpoint.expectsWriteResponse
+                if expectsWriteResponse && self.writeWithResponseInFlight {
+                    return false
+                }
+                return write.transportCanSend?() ?? endpoint.canSend()
+            }, maxWrites: 1) { write in
+                madeProgress = true
+                let expectsWriteResponse = write.transportExpectsWriteResponse
+                    ?? endpoint.expectsWriteResponse
+                if expectsWriteResponse {
+                    beginNavigationWriteResponseWait(for: write)
+                }
+                write.perform(using: endpoint.write)
+                log("Sent \(write.label): \(write.data.count) bytes")
             }
-            return write.transportCanSend?() ?? endpoint.canSend()
-        }, maxWrites: 1) { write in
-            madeProgress = true
-            let expectsWriteResponse = write.transportExpectsWriteResponse
-                ?? endpoint.expectsWriteResponse
-            if expectsWriteResponse {
-                beginNavigationWriteResponseWait(for: write)
-            }
-            write.perform(using: endpoint.write)
-            log("Sent \(write.label): \(write.data.count) bytes")
         }
         updateNavigationBackpressureWatchdog(
             madeProgress: madeProgress,
