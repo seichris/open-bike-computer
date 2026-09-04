@@ -21,9 +21,60 @@ HTTP_LIMITS_HEADER = (
 DEBUG_HTTP_SOURCE = (
     ROOT / "lib/device_debug/device_debug_http.cpp"
 ).read_text(encoding="utf-8")
+BLE_SOURCE = (
+    ROOT / "lib/ble_navigation/ble_navigation.cpp"
+).read_text(encoding="utf-8")
 
 
 class DeviceTransferTLSContractTests(unittest.TestCase):
+    def test_generic_status_resumes_when_notification_queue_is_full(self):
+        notify = BLE_SOURCE[
+            BLE_SOURCE.index("static void notifyGenericTransferStatus(") :
+            BLE_SOURCE.index("static void notifyRendererDiagnosticsStatus(")
+        ]
+        pump = notify[
+            notify.index("static void pumpPendingDeviceTransferStatusChunks(") :
+        ]
+        self.assertIn("pendingDeviceTransferStatusChunks.active()", notify)
+        self.assertIn(
+            "map_transfer_status_protocol::chunkPayloadBytes(peerMtu)",
+            notify,
+        )
+        self.assertIn("pendingDeviceTransferStatusChunks.begin(", notify)
+        self.assertIn(
+            "pendingDeviceTransferStatusContinuation.store(true", notify
+        )
+        self.assertIn("deferredNotificationAvailableCapacity()", pump)
+        self.assertIn('nextFrame("DSTC")', pump)
+        self.assertIn("pendingDeviceTransferStatusChunks.advance()", pump)
+        self.assertNotIn("delay(2)", notify)
+
+        deferred_handler = BLE_SOURCE[
+            BLE_SOURCE.index("static void deferredNotificationEventHandler(") :
+            BLE_SOURCE.index("static void notifyAuthResponse(")
+        ]
+        self.assertIn(
+            "pendingDeviceTransferStatusContinuation.load(", deferred_handler
+        )
+        process_loop = BLE_SOURCE[
+            BLE_SOURCE.index("void BLENavigationServer::process()") :
+            BLE_SOURCE.index("void BLENavigationServer::noteUserWake()")
+        ]
+        self.assertIn("pumpPendingDeviceTransferStatusChunks();", process_loop)
+
+    def test_busy_diagnostics_entry_returns_a_generic_status(self):
+        process = BLE_SOURCE[
+            BLE_SOURCE.index("static void processPendingTransferControl()") :
+            BLE_SOURCE.index("static void notifyDeviceCapabilities(")
+        ]
+        self.assertIn("request.disconnectCleanup ||", process)
+        self.assertIn("resetPendingDeviceTransferStatusChunks();", process)
+        busy = process[
+            process.index("diagnosticsSessionStartInProgress.load(") :
+            process.index("switch (request.action)")
+        ]
+        self.assertIn("notifyGenericTransferStatus(", busy)
+
     def test_tls_handshake_precedes_http_parsing(self):
         worker = HTTP_SOURCE[
             HTTP_SOURCE.index("void HttpTransferServer::runWorker()") :

@@ -152,6 +152,9 @@ static map_transfer_status_protocol::ChunkTransmission
     pendingMapTransferStatusChunks;
 static std::atomic<bool> pendingMapTransferStatusContinuation{false};
 static map_transfer_status_protocol::ChunkTransmission
+    pendingDeviceTransferStatusChunks;
+static std::atomic<bool> pendingDeviceTransferStatusContinuation{false};
+static map_transfer_status_protocol::ChunkTransmission
     pendingRendererDiagnosticsChunks;
 static std::atomic<bool> pendingRendererDiagnosticsContinuation{false};
 static BLEDebugStats bleDebugStats;
@@ -266,6 +269,7 @@ static void processDeferredNotifications();
 static void scheduleDeferredNotificationEvent();
 static void deferredNotificationEventHandler(struct ble_npl_event *event);
 static void pumpPendingMapTransferStatusChunks();
+static void pumpPendingDeviceTransferStatusChunks();
 static void pumpPendingRendererDiagnosticsChunks();
 
 static void clearRendererWindowRequest() {
@@ -1495,6 +1499,8 @@ static void deferredNotificationEventHandler(struct ble_npl_event *event) {
   deferredNotificationEventScheduled.store(false, std::memory_order_release);
   if (deferredNotificationEventPending.load(std::memory_order_acquire) ||
       pendingMapTransferStatusContinuation.load(std::memory_order_acquire) ||
+      pendingDeviceTransferStatusContinuation.load(
+          std::memory_order_acquire) ||
       pendingRendererDiagnosticsContinuation.load(
           std::memory_order_acquire)) {
     ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
@@ -2558,9 +2564,11 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
   if (pChar == nullptr) {
     return;
   }
+  if (pendingDeviceTransferStatusChunks.active()) {
+    pumpPendingDeviceTransferStatusChunks();
+    return;
+  }
 
-  constexpr size_t kChunkBytes = 128;
-  static uint8_t transferId = 0;
   const std::string body = genericTransferStatusJson();
   const std::string response = "DSTS" + body;
   if (notifyAuthenticatedNavigation(
@@ -2570,29 +2578,78 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
                   static_cast<unsigned>(response.size()));
     return;
   }
-  const size_t chunkCount = (body.size() + kChunkBytes - 1) / kChunkBytes;
+  const uint16_t peerMtu = activePeerMtu.load(std::memory_order_acquire);
+  const size_t chunkBytes =
+      map_transfer_status_protocol::chunkPayloadBytes(peerMtu);
+  const size_t chunkCount =
+      chunkBytes == 0 ? 0 : (body.size() + chunkBytes - 1) / chunkBytes;
   if (chunkCount == 0 || chunkCount > 255) {
+    Serial.printf(
+        "BLE Device Transfer: status cannot fit MTU %u (%u bytes)\n",
+        static_cast<unsigned>(peerMtu),
+        static_cast<unsigned>(body.size()));
+    return;
+  }
+  static map_transfer_status_protocol::ChunkSession chunkSession;
+  const uint8_t transferId = chunkSession.transferIdFor(body);
+  if (!pendingDeviceTransferStatusChunks.begin(body, transferId,
+                                               chunkBytes)) {
     Serial.printf("BLE Device Transfer: status too large (%u bytes)\n",
                   static_cast<unsigned>(body.size()));
     return;
   }
-  transferId++;
-  for (size_t index = 0; index < chunkCount; index++) {
-    const size_t offset = index * kChunkBytes;
-    const size_t chunkLength = std::min(kChunkBytes, body.size() - offset);
-    std::string chunk = "DSTC";
-    chunk.push_back(static_cast<char>(transferId));
-    chunk.push_back(static_cast<char>(index));
-    chunk.push_back(static_cast<char>(chunkCount));
-    chunk.append(body.data() + offset, chunkLength);
-    if (!notifyAuthenticatedNavigation(
-            pChar, reinterpret_cast<const uint8_t *>(chunk.data()),
-            chunk.size())) {
-      Serial.println("BLE Device Transfer: protected status chunk failed");
+  pendingDeviceTransferStatusContinuation.store(true,
+                                                std::memory_order_release);
+  pumpPendingDeviceTransferStatusChunks();
+}
+
+static void pumpPendingDeviceTransferStatusChunks() {
+  if (!pendingDeviceTransferStatusChunks.active()) {
+    pendingDeviceTransferStatusContinuation.store(false,
+                                                  std::memory_order_release);
+    return;
+  }
+  if (!bleSessionAuthenticated ||
+      activeConnHandle == BLE_HS_CONN_HANDLE_NONE ||
+      mapTransferStatusCharacteristic == nullptr) {
+    pendingDeviceTransferStatusChunks.reset();
+    pendingDeviceTransferStatusContinuation.store(false,
+                                                  std::memory_order_release);
+    return;
+  }
+
+  const uint8_t available = deferredNotificationAvailableCapacity();
+  for (uint8_t slot = 0;
+       slot < available && pendingDeviceTransferStatusChunks.active();
+       ++slot) {
+    const std::string frame =
+        pendingDeviceTransferStatusChunks.nextFrame("DSTC");
+    if (frame.empty() ||
+        !notifyAuthenticatedNavigation(
+            mapTransferStatusCharacteristic,
+            reinterpret_cast<const uint8_t *>(frame.data()), frame.size())) {
       return;
     }
-    delay(2);
+    pendingDeviceTransferStatusChunks.advance();
   }
+
+  if (!pendingDeviceTransferStatusChunks.active()) {
+    const size_t bodySize = pendingDeviceTransferStatusChunks.bodySize();
+    const size_t chunkCount = pendingDeviceTransferStatusChunks.chunkCount();
+    pendingDeviceTransferStatusChunks.reset();
+    pendingDeviceTransferStatusContinuation.store(false,
+                                                  std::memory_order_release);
+    Serial.printf(
+        "BLE Device Transfer: status notified (%u bytes, %u chunks)\n",
+        static_cast<unsigned>(bodySize),
+        static_cast<unsigned>(chunkCount));
+  }
+}
+
+static void resetPendingDeviceTransferStatusChunks() {
+  pendingDeviceTransferStatusChunks.reset();
+  pendingDeviceTransferStatusContinuation.store(false,
+                                                std::memory_order_release);
 }
 
 static void notifyRendererDiagnosticsStatus(NimBLECharacteristic *pChar) {
@@ -2955,6 +3012,14 @@ static void processPendingTransferControl() {
     return;
   }
 
+  if (request.disconnectCleanup ||
+      request.action != ble_transfer::Action::None) {
+    // A mode transition needs a status snapshot of the state it just applied.
+    // A BLE authorization boundary must additionally discard any plaintext
+    // token or hotspot secret that belonged to the previous session.
+    resetPendingDeviceTransferStatusChunks();
+  }
+
   if (request.disconnectCleanup) {
     cancelDiagnosticsSessionStart();
     // Session credentials and request authorization were synchronously revoked
@@ -3002,6 +3067,10 @@ static void processPendingTransferControl() {
         "transfer_busy", "device diagnostics are still preparing storage");
     Serial.println(
         "BLE Device Transfer: enter rejected, diagnostics are preparing");
+    if (request.notifications & ble_transfer::NotifyMap)
+      notifyMapTransferStatus(mapTransferStatusCharacteristic);
+    if (request.notifications & ble_transfer::NotifyGeneric)
+      notifyGenericTransferStatus(mapTransferStatusCharacteristic);
     return;
   }
 
@@ -5768,6 +5837,7 @@ void BLENavigationServer::process() {
   }
   processPendingTransferControl();
   pumpPendingMapTransferStatusChunks();
+  pumpPendingDeviceTransferStatusChunks();
   pumpPendingRendererDiagnosticsChunks();
   scheduleDeferredNotificationEvent();
   const uint32_t nowMs = millis();

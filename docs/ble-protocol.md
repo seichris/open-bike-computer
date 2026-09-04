@@ -1486,6 +1486,8 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `DTRN` | iOS -> ESP32 | `tls\|cancel` | Delete a staged identity without changing the active identity. |
 | `DTRN` | iOS -> ESP32 | `exit` | Exit the active map, firmware, debug, or diagnostics transfer mode. |
 | `DSTS` | iOS -> ESP32 | empty | Request generic device-transfer status and the current HTTPS credential/pin. |
+| `DSTS` | ESP32 -> iOS | UTF-8 JSON | Complete generic device-transfer status when it fits one authenticated notification. |
+| `DSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Chunked generic device-transfer status. |
 
 The device preserves a detailed binding through short BLE gaps. If the last
 confirmed workout lifecycle was active and workout telemetry remains stale for
@@ -1519,6 +1521,13 @@ continues to use it. Otherwise `MSTC` responses fit the minimum BLE notification
 payload: ASCII `MSTC`, a one-byte transfer id, zero-based chunk index, chunk
 count, and up to 13 JSON bytes (20 bytes total). The app reassembles chunks by
 transfer id and accepts both forms.
+
+Generic device-transfer status uses the equivalent `DSTS{...}` direct response
+or `DSTC` chunk header. Firmware keeps an incomplete `DSTC` snapshot on the
+owner task and resumes it only as the bounded authenticated-notification queue
+drains. A request received while that snapshot is pending continues the same
+transfer instead of assigning a new transfer id and stranding the iOS
+reassembler with another partial response.
 
 The HTTPS credential is not part of the map-status payload. Current iOS clients
 send `DTRNenter|map`, which applies map mode and publishes a fresh generic
