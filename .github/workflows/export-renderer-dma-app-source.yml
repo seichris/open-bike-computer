@@ -30,6 +30,7 @@ jobs:
             cp "$path" "$destination/$path"
           done <<'PATHS'
           AGENTS.md
+          docs/renderer-benchmark.md
           ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift
           ios-app/BikeComputer/BikeComputer/Managers/SecureRendererBenchmarkController.swift
           ios-app/BikeComputer/BikeComputer/Managers/RendererBenchmarkReplayCoordinator.swift
@@ -37,6 +38,7 @@ jobs:
           ios-app/BikeComputerTests/NavigationProtocolTests.swift
           esp32/tools/renderer_benchmark.py
           esp32/tools/renderer_benchmark_gates.json
+          esp32/tools/tests/test_renderer_benchmark.py
           ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-gates-v1.json
           PATHS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
