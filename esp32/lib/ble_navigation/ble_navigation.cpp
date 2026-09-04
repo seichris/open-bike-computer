@@ -5189,12 +5189,19 @@ public:
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
     const std::string frame = pChar->getValue();
+    const uint32_t receivedAtMs = millis();
     std::string value;
     if (!unwrapOwnerAuthenticatedPayload(
             device_ownership::AuthenticatedChannel::Gps, frame, value,
             "GPS characteristic")) {
+#if FIRMWARE_DIAGNOSTICS
+      renderer_diagnostics::noteGpsAuthentication(false, receivedAtMs);
+#endif
       return;
     }
+#if FIRMWARE_DIAGNOSTICS
+    renderer_diagnostics::noteGpsAuthentication(true, receivedAtMs);
+#endif
     if (!requireAuthenticated("GPS position")) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Gps);
       return;
@@ -5204,8 +5211,10 @@ public:
     const uint8_t *bytes = reinterpret_cast<const uint8_t *>(value.data());
     if (renderer_diagnostics_ble_protocol::hasReplaySamplePrefix(
             bytes, value.length())) {
+      renderer_diagnostics::noteReplaySampleDetected(receivedAtMs);
       if (!bleSessionSupportsRendererBenchmarkSample.load(
               std::memory_order_acquire)) {
+        renderer_diagnostics::noteReplaySampleUnnegotiated(millis());
         Serial.println(
             "BLE Renderer Diagnostics: unnegotiated replay sample rejected");
         return;
@@ -5214,8 +5223,11 @@ public:
           renderer_diagnostics_ble_protocol::dispatchReplaySample(
               bytes, value.length(),
               [](const uint8_t *gpsPayload, size_t gpsPayloadLength) {
-                return queueMapInput(PendingMapInputType::Gps, gpsPayload,
-                                     gpsPayloadLength, "native");
+                const bool accepted = queueMapInput(
+                    PendingMapInputType::Gps, gpsPayload, gpsPayloadLength,
+                    "native");
+                renderer_diagnostics::noteReplayGpsMailbox(accepted, millis());
+                return accepted;
               },
               [](const renderer_diagnostics_ble_protocol::RouteMarker &marker) {
                 return renderer_diagnostics::noteRouteMarker(
@@ -5223,6 +5235,10 @@ public:
                     marker.sampleIndex, marker.sampleCount, marker.loop,
                     millis());
               });
+      const bool decoded =
+          result != renderer_diagnostics_ble_protocol::
+                        ReplaySampleDispatchResult::Malformed;
+      renderer_diagnostics::noteReplaySampleDecoded(decoded, millis());
       if (result == renderer_diagnostics_ble_protocol::
                         ReplaySampleDispatchResult::Malformed) {
         Serial.println(

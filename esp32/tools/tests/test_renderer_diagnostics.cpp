@@ -72,12 +72,36 @@ int main() {
   state.configureBuild(build);
   state.beginSession(true);
 
+  uint8_t preWindowRouteHash[32]{};
+  state.noteGpsAuthentication(false, 900);
+  state.noteGpsAuthentication(true, 901);
+  state.noteReplaySampleDetected(902);
+  state.noteReplaySampleDecoded(true, 903);
+  state.noteReplayGpsMailbox(true, 904);
+  assert(!state.noteRouteMarker(preWindowRouteHash,
+                                sizeof(preWindowRouteHash), 1, 90, 0, 905));
+  const ReplayTransportDiagnostics preWindowDiagnostics =
+      state.replayTransportDiagnostics();
+  assert(preWindowDiagnostics.gpsAuthenticationRejected == 1);
+  assert(preWindowDiagnostics.gpsAuthenticationAccepted == 1);
+  assert(preWindowDiagnostics.rbs1Detected == 1);
+  assert(preWindowDiagnostics.rbs1Decoded == 1);
+  assert(preWindowDiagnostics.gpsMailboxAccepted == 1);
+  assert(preWindowDiagnostics.markerRejectedNoActiveWindow == 1);
+  assert(preWindowDiagnostics.lastMarkerResult ==
+         ReplayMarkerResult::NoActiveWindow);
+  assert(preWindowDiagnostics.lastActiveWindowId == 0);
+  assert(preWindowDiagnostics.lastCandidateFixtureTagValid);
+  assert(!preWindowDiagnostics.lastExpectedFixtureTagValid);
+
   constexpr const char *kRouteHash =
       "000102030405060708090a0b0c0d0e0f"
       "101112131415161718191a1b1c1d1e1f";
   assert(state.beginWindow(41, runIdentity(kRouteHash), Profile::Medium, 1000,
                            10));
   assert(state.measurementWindowId() == 41);
+  assert(state.replayTransportDiagnostics()
+             .markerRejectedNoActiveWindow == 1);
   assert(!state.noteRenderForWindow(40, Profile::Medium, {}));
   assert(!state.noteRenderForWindow(41, Profile::High, {}));
   state.noteMemory(
@@ -193,6 +217,18 @@ int main() {
   assert(snapshot.routeMarker.accepted == 1);
   assert(snapshot.routeMarker.rejected == 2);
   assert(snapshot.routeFixtureMatches);
+  assert(snapshot.replayTransport.markerAccepted == 1);
+  assert(snapshot.replayTransport.markerRejectedInvalid == 1);
+  assert(snapshot.replayTransport.markerRejectedFixtureMismatch == 1);
+  assert(snapshot.replayTransport.markerRejectedNoActiveWindow == 1);
+  assert(snapshot.replayTransport.lastMarkerResult ==
+         ReplayMarkerResult::Accepted);
+  assert(snapshot.replayTransport.lastActiveWindowId == 41);
+  assert(snapshot.replayTransport.lastSampleIndex == 12);
+  assert(snapshot.replayTransport.lastExpectedFixtureTagValid);
+  assert(snapshot.replayTransport.lastCandidateFixtureTagValid);
+  assert(snapshot.replayTransport.lastExpectedFixtureTag == 0x00010203U);
+  assert(snapshot.replayTransport.lastCandidateFixtureTag == 0x00010203U);
   assert(snapshot.remoteDebug.snapshotBytes == 434312);
   assert(snapshot.remoteDebug.lastHttpExpectedBytes == 434344);
   assert(snapshot.remoteDebug.lastHttpActualBytes == 434344);
@@ -218,6 +254,8 @@ int main() {
   assert(reset.jobs.requested == 0);
   assert(reset.maximumUiGapMs == 0);
   assert(reset.routeMarker.accepted == 0);
+  assert(reset.replayTransport.markerRejectedNoActiveWindow == 1);
+  assert(reset.replayTransport.markerAccepted == 1);
   assert(reset.windowMinimumInternalFree == 0);
   assert(reset.windowMinimumPsramFree == 0);
   assert(reset.windowMinimumDmaFree == 0);
@@ -232,6 +270,8 @@ int main() {
   assert(ended.profile == Profile::Current);
   assert(ended.measurementWindowId == 0);
   assert(!ended.remoteDebug.active);
+  assert(ended.replayTransport.rbs1Detected == 0);
+  assert(ended.replayTransport.markerRejectedNoActiveWindow == 0);
   assert(!state.beginWindow(43, runIdentity(kRouteHash), Profile::High, 4001,
                             13));
   assert(state.measurementWindowId() == 0);

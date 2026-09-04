@@ -228,6 +228,63 @@ struct RouteMarker {
   bool valid = false;
 };
 
+enum class ReplayMarkerResult : uint8_t {
+  None,
+  Accepted,
+  Invalid,
+  NoActiveWindow,
+  ActiveFixtureUnavailable,
+  FixtureMismatch,
+};
+
+inline const char *replayMarkerResultName(ReplayMarkerResult result) {
+  switch (result) {
+  case ReplayMarkerResult::Accepted:
+    return "accepted";
+  case ReplayMarkerResult::Invalid:
+    return "invalid";
+  case ReplayMarkerResult::NoActiveWindow:
+    return "no_active_window";
+  case ReplayMarkerResult::ActiveFixtureUnavailable:
+    return "active_fixture_unavailable";
+  case ReplayMarkerResult::FixtureMismatch:
+    return "fixture_mismatch";
+  case ReplayMarkerResult::None:
+  default:
+    return "none";
+  }
+}
+
+// Session-scoped, non-secret transport evidence. Unlike RouteMarker, this is
+// deliberately not cleared by beginWindow(), so an RBS1 received before the
+// first measurement window remains observable after that window is created.
+struct ReplayTransportDiagnostics {
+  uint32_t gpsAuthenticationAccepted = 0;
+  uint32_t gpsAuthenticationRejected = 0;
+  uint32_t rbs1Detected = 0;
+  uint32_t rbs1Decoded = 0;
+  uint32_t rbs1Malformed = 0;
+  uint32_t rbs1Unnegotiated = 0;
+  uint32_t gpsMailboxAccepted = 0;
+  uint32_t gpsMailboxRejected = 0;
+  uint32_t markerAccepted = 0;
+  uint32_t markerRejectedInvalid = 0;
+  uint32_t markerRejectedNoActiveWindow = 0;
+  uint32_t markerRejectedActiveFixtureUnavailable = 0;
+  uint32_t markerRejectedFixtureMismatch = 0;
+  uint32_t lastTransportEventAtMs = 0;
+  uint32_t lastMarkerAtMs = 0;
+  uint32_t lastActiveWindowId = 0;
+  uint16_t lastSampleIndex = 0;
+  uint16_t lastSampleCount = 0;
+  uint32_t lastLoop = 0;
+  uint32_t lastCandidateFixtureTag = 0;
+  uint32_t lastExpectedFixtureTag = 0;
+  bool lastCandidateFixtureTagValid = false;
+  bool lastExpectedFixtureTagValid = false;
+  ReplayMarkerResult lastMarkerResult = ReplayMarkerResult::None;
+};
+
 struct Snapshot {
   uint8_t schema = kSchemaVersion;
   uint32_t sequence = 0;
@@ -265,6 +322,7 @@ struct Snapshot {
   uint32_t predictionExhaustionEntries = 0;
   RouteMarker routeMarker{};
   bool routeFixtureMatches = false;
+  ReplayTransportDiagnostics replayTransport{};
   RemoteDebugOverhead remoteDebug{};
 };
 
@@ -277,6 +335,7 @@ public:
     profile_ = renderer_tuning::Profile::Current;
     remoteDebug_ = {};
     remoteDebug_.active = remoteDebugActive;
+    replayTransport_ = {};
     resetWindowState();
   }
 
@@ -284,6 +343,7 @@ public:
     sessionActive_ = false;
     profile_ = renderer_tuning::Profile::Current;
     remoteDebug_ = {};
+    replayTransport_ = {};
     resetWindowState();
   }
 
@@ -424,14 +484,99 @@ public:
     lastPredictionExhausted_ = exhausted;
   }
 
+  void noteGpsAuthentication(bool accepted, uint32_t nowMs) {
+    if (!sessionActive_)
+      return;
+    if (accepted)
+      ++replayTransport_.gpsAuthenticationAccepted;
+    else
+      ++replayTransport_.gpsAuthenticationRejected;
+    replayTransport_.lastTransportEventAtMs = nowMs;
+  }
+
+  void noteReplaySampleDetected(uint32_t nowMs) {
+    if (!sessionActive_)
+      return;
+    ++replayTransport_.rbs1Detected;
+    replayTransport_.lastTransportEventAtMs = nowMs;
+  }
+
+  void noteReplaySampleDecoded(bool accepted, uint32_t nowMs) {
+    if (!sessionActive_)
+      return;
+    if (accepted)
+      ++replayTransport_.rbs1Decoded;
+    else
+      ++replayTransport_.rbs1Malformed;
+    replayTransport_.lastTransportEventAtMs = nowMs;
+  }
+
+  void noteReplaySampleUnnegotiated(uint32_t nowMs) {
+    if (!sessionActive_)
+      return;
+    ++replayTransport_.rbs1Unnegotiated;
+    replayTransport_.lastTransportEventAtMs = nowMs;
+  }
+
+  void noteReplayGpsMailbox(bool accepted, uint32_t nowMs) {
+    if (!sessionActive_)
+      return;
+    if (accepted)
+      ++replayTransport_.gpsMailboxAccepted;
+    else
+      ++replayTransport_.gpsMailboxRejected;
+    replayTransport_.lastTransportEventAtMs = nowMs;
+  }
+
+  ReplayTransportDiagnostics replayTransportDiagnostics() const {
+    return replayTransport_;
+  }
+
   bool noteRouteMarker(const uint8_t *fixtureSha256, size_t hashBytes,
                        uint16_t sampleIndex, uint16_t sampleCount,
                        uint32_t loop, uint32_t nowMs) {
+    replayTransport_.lastTransportEventAtMs = nowMs;
+    replayTransport_.lastMarkerAtMs = nowMs;
+    replayTransport_.lastActiveWindowId = measurementWindowId_;
+    replayTransport_.lastSampleIndex = sampleIndex;
+    replayTransport_.lastSampleCount = sampleCount;
+    replayTransport_.lastLoop = loop;
+    replayTransport_.lastCandidateFixtureTagValid =
+        fixtureSha256 != nullptr &&
+        hashBytes == routeMarker_.fixtureSha256.size();
+    replayTransport_.lastCandidateFixtureTag =
+        replayTransport_.lastCandidateFixtureTagValid
+            ? fixtureTag(fixtureSha256)
+            : 0;
+    uint32_t expectedFixtureTag = 0;
+    replayTransport_.lastExpectedFixtureTagValid =
+        expectedRouteHashTag(expectedFixtureTag);
+    replayTransport_.lastExpectedFixtureTag = expectedFixtureTag;
+
+    auto reject = [this](ReplayMarkerResult result, uint32_t &counter) {
+      ++routeMarker_.rejected;
+      ++counter;
+      replayTransport_.lastMarkerResult = result;
+      return false;
+    };
     if (fixtureSha256 == nullptr ||
         hashBytes != routeMarker_.fixtureSha256.size() || sampleCount == 0 ||
-        sampleIndex >= sampleCount || !routeHashMatches(fixtureSha256)) {
-      ++routeMarker_.rejected;
-      return false;
+        sampleIndex >= sampleCount) {
+      return reject(ReplayMarkerResult::Invalid,
+                    replayTransport_.markerRejectedInvalid);
+    }
+    if (measurementWindowId_ == 0) {
+      return reject(ReplayMarkerResult::NoActiveWindow,
+                    replayTransport_.markerRejectedNoActiveWindow);
+    }
+    if (!replayTransport_.lastExpectedFixtureTagValid) {
+      return reject(
+          ReplayMarkerResult::ActiveFixtureUnavailable,
+          replayTransport_.markerRejectedActiveFixtureUnavailable);
+    }
+    if (!routeHashMatches(fixtureSha256)) {
+      return reject(ReplayMarkerResult::FixtureMismatch,
+                    replayTransport_.markerRejectedFixtureMismatch);
     }
     std::copy(fixtureSha256, fixtureSha256 + hashBytes,
               routeMarker_.fixtureSha256.begin());
@@ -441,6 +586,8 @@ public:
     routeMarker_.receivedAtMs = nowMs;
     ++routeMarker_.accepted;
     routeMarker_.valid = true;
+    ++replayTransport_.markerAccepted;
+    replayTransport_.lastMarkerResult = ReplayMarkerResult::Accepted;
     return true;
   }
 
@@ -491,6 +638,7 @@ public:
     result.predictionExhaustionEntries = predictionExhaustionEntries_;
     result.routeMarker = routeMarker_;
     result.routeFixtureMatches = routeHashMatches();
+    result.replayTransport = replayTransport_;
     result.remoteDebug = remoteDebug_;
     return result;
   }
@@ -524,6 +672,33 @@ private:
     if (value >= 'A' && value <= 'F')
       return value - 'A' + 10;
     return -1;
+  }
+
+  static uint32_t fixtureTag(const uint8_t *hash) {
+    if (hash == nullptr)
+      return 0;
+    return (static_cast<uint32_t>(hash[0]) << 24U) |
+           (static_cast<uint32_t>(hash[1]) << 16U) |
+           (static_cast<uint32_t>(hash[2]) << 8U) |
+           static_cast<uint32_t>(hash[3]);
+  }
+
+  bool expectedRouteHashTag(uint32_t &tag) const {
+    const char *expected = run_.routeFixtureSha256.c_str();
+    if (std::strlen(expected) != 64)
+      return false;
+    tag = 0;
+    for (size_t index = 0; index < 32; ++index) {
+      const int high = hexNibble(expected[index * 2]);
+      const int low = hexNibble(expected[index * 2 + 1]);
+      if (high < 0 || low < 0)
+        return false;
+      if (index < 4) {
+        tag = (tag << 8U) |
+              static_cast<uint32_t>((high << 4) | low);
+      }
+    }
+    return true;
   }
 
   bool routeHashMatches(const uint8_t *candidate) const {
@@ -626,6 +801,7 @@ private:
   bool lastPredictionGraceActive_ = false;
   bool lastPredictionExhausted_ = false;
   RouteMarker routeMarker_{};
+  ReplayTransportDiagnostics replayTransport_{};
   RemoteDebugOverhead remoteDebug_{};
 };
 

@@ -335,6 +335,41 @@ void notePrediction(bool graceActive, bool exhausted) {
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
+void noteGpsAuthentication(bool accepted, uint32_t nowMs) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteGpsAuthentication(accepted, nowMs);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+void noteReplaySampleDetected(uint32_t nowMs) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteReplaySampleDetected(nowMs);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+void noteReplaySampleDecoded(bool accepted, uint32_t nowMs) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteReplaySampleDecoded(accepted, nowMs);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+void noteReplaySampleUnnegotiated(uint32_t nowMs) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteReplaySampleUnnegotiated(nowMs);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+void noteReplayGpsMailbox(bool accepted, uint32_t nowMs) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteReplayGpsMailbox(accepted, nowMs);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
 bool noteRouteMarker(const uint8_t *fixtureSha256, size_t hashBytes,
                      uint16_t sampleIndex, uint16_t sampleCount, uint32_t loop,
                      uint32_t nowMs) {
@@ -498,6 +533,55 @@ std::string toJson(const Snapshot &value) {
        << ",\"receivedAtMs\":" << value.routeMarker.receivedAtMs
        << ",\"accepted\":" << value.routeMarker.accepted
        << ",\"rejected\":" << value.routeMarker.rejected << "}"
+       << ",\"replayTransport\":{\"gpsAuthenticationAccepted\":"
+       << value.replayTransport.gpsAuthenticationAccepted
+       << ",\"gpsAuthenticationRejected\":"
+       << value.replayTransport.gpsAuthenticationRejected
+       << ",\"rbs1Detected\":" << value.replayTransport.rbs1Detected
+       << ",\"rbs1Decoded\":" << value.replayTransport.rbs1Decoded
+       << ",\"rbs1Malformed\":" << value.replayTransport.rbs1Malformed
+       << ",\"rbs1Unnegotiated\":"
+       << value.replayTransport.rbs1Unnegotiated
+       << ",\"gpsMailboxAccepted\":"
+       << value.replayTransport.gpsMailboxAccepted
+       << ",\"gpsMailboxRejected\":"
+       << value.replayTransport.gpsMailboxRejected
+       << ",\"markerAccepted\":"
+       << value.replayTransport.markerAccepted
+       << ",\"markerRejectedInvalid\":"
+       << value.replayTransport.markerRejectedInvalid
+       << ",\"markerRejectedNoActiveWindow\":"
+       << value.replayTransport.markerRejectedNoActiveWindow
+       << ",\"markerRejectedActiveFixtureUnavailable\":"
+       << value.replayTransport.markerRejectedActiveFixtureUnavailable
+       << ",\"markerRejectedFixtureMismatch\":"
+       << value.replayTransport.markerRejectedFixtureMismatch
+       << ",\"lastTransportEventAtMs\":"
+       << value.replayTransport.lastTransportEventAtMs
+       << ",\"lastMarkerAtMs\":"
+       << value.replayTransport.lastMarkerAtMs
+       << ",\"lastActiveWindowId\":"
+       << value.replayTransport.lastActiveWindowId
+       << ",\"lastSampleIndex\":"
+       << value.replayTransport.lastSampleIndex
+       << ",\"lastSampleCount\":"
+       << value.replayTransport.lastSampleCount
+       << ",\"lastLoop\":" << value.replayTransport.lastLoop
+       << ",\"lastCandidateFixtureTag\":"
+       << value.replayTransport.lastCandidateFixtureTag
+       << ",\"lastCandidateFixtureTagValid\":"
+       << (value.replayTransport.lastCandidateFixtureTagValid
+               ? "true"
+               : "false")
+       << ",\"lastExpectedFixtureTag\":"
+       << value.replayTransport.lastExpectedFixtureTag
+       << ",\"lastExpectedFixtureTagValid\":"
+       << (value.replayTransport.lastExpectedFixtureTagValid
+               ? "true"
+               : "false")
+       << ",\"lastMarkerResult\":\""
+       << replayMarkerResultName(value.replayTransport.lastMarkerResult)
+       << "\"}"
        << ",\"remoteDebug\":{\"active\":"
        << (value.remoteDebug.active ? "true" : "false")
        << ",\"snapshotBytes\":" << value.remoteDebug.snapshotBytes

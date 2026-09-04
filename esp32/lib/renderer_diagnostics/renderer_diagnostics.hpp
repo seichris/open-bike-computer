@@ -35,6 +35,11 @@ void noteInterruptedForWindow(uint32_t windowId);
 void noteCoverageRejectedForWindow(uint32_t windowId);
 void noteGpsPacket(uint32_t packetSequence, uint32_t packetGapMs);
 void notePrediction(bool graceActive, bool exhausted);
+void noteGpsAuthentication(bool accepted, uint32_t nowMs);
+void noteReplaySampleDetected(uint32_t nowMs);
+void noteReplaySampleDecoded(bool accepted, uint32_t nowMs);
+void noteReplaySampleUnnegotiated(uint32_t nowMs);
+void noteReplayGpsMailbox(bool accepted, uint32_t nowMs);
 bool noteRouteMarker(const uint8_t *fixtureSha256, size_t hashBytes,
                      uint16_t sampleIndex, uint16_t sampleCount, uint32_t loop,
                      uint32_t nowMs);
@@ -68,6 +73,11 @@ inline void noteInterruptedForWindow(uint32_t) {}
 inline void noteCoverageRejectedForWindow(uint32_t) {}
 inline void noteGpsPacket(uint32_t, uint32_t) {}
 inline void notePrediction(bool, bool) {}
+inline void noteGpsAuthentication(bool, uint32_t) {}
+inline void noteReplaySampleDetected(uint32_t) {}
+inline void noteReplaySampleDecoded(bool, uint32_t) {}
+inline void noteReplaySampleUnnegotiated(uint32_t) {}
+inline void noteReplayGpsMailbox(bool, uint32_t) {}
 inline bool noteRouteMarker(const uint8_t *, size_t, uint16_t, uint16_t,
                             uint32_t, uint32_t) {
   return false;
