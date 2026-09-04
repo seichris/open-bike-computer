@@ -148,6 +148,9 @@ static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
 static map_transfer_status_protocol::ChunkTransmission
     pendingMapTransferStatusChunks;
 static std::atomic<bool> pendingMapTransferStatusContinuation{false};
+static map_transfer_status_protocol::ChunkTransmission
+    pendingRendererDiagnosticsChunks;
+static std::atomic<bool> pendingRendererDiagnosticsContinuation{false};
 static BLEDebugStats bleDebugStats;
 static gps_input_freshness::State gpsFreshnessState;
 static_assert(BLE_HS_CONN_HANDLE_NONE == ble_connection_policy::noConnection,
@@ -260,6 +263,7 @@ static void processDeferredNotifications();
 static void scheduleDeferredNotificationEvent();
 static void deferredNotificationEventHandler(struct ble_npl_event *event);
 static void pumpPendingMapTransferStatusChunks();
+static void pumpPendingRendererDiagnosticsChunks();
 
 static void clearRendererWindowRequest() {
   portENTER_CRITICAL(&rendererWindowRequestMux);
@@ -1458,7 +1462,9 @@ static void deferredNotificationEventHandler(struct ble_npl_event *event) {
   processDeferredNotifications();
   deferredNotificationEventScheduled.store(false, std::memory_order_release);
   if (deferredNotificationEventPending.load(std::memory_order_acquire) ||
-      pendingMapTransferStatusContinuation.load(std::memory_order_acquire)) {
+      pendingMapTransferStatusContinuation.load(std::memory_order_acquire) ||
+      pendingRendererDiagnosticsContinuation.load(
+          std::memory_order_acquire)) {
     ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
   }
 }
@@ -2560,6 +2566,10 @@ static void notifyRendererDiagnosticsStatus(NimBLECharacteristic *pChar) {
       !bleSessionSupportsRendererDiagnostics.load(std::memory_order_acquire)) {
     return;
   }
+  if (pendingRendererDiagnosticsChunks.active()) {
+    pumpPendingRendererDiagnosticsChunks();
+    return;
+  }
 
   const std::string body = renderer_diagnostics::toJson(
       renderer_diagnostics::snapshot(millis()));
@@ -2596,32 +2606,63 @@ static void notifyRendererDiagnosticsStatus(NimBLECharacteristic *pChar) {
         static_cast<unsigned>(peerMtu), static_cast<unsigned>(body.size()));
     return;
   }
-  static uint8_t transferId = 0;
-  ++transferId;
-  for (size_t index = 0; index < chunkCount; ++index) {
-    const size_t offset = index * chunkBytes;
-    const size_t length = std::min(chunkBytes, body.size() - offset);
-    std::string frame =
-        renderer_diagnostics_ble_protocol::METRICS_CHUNK_PREFIX;
-    frame.push_back(static_cast<char>(transferId));
-    frame.push_back(static_cast<char>(index));
-    frame.push_back(static_cast<char>(chunkCount));
-    frame.append(body.data() + offset, length);
-    if (!notifyAuthenticatedNavigation(
-            pChar, reinterpret_cast<const uint8_t *>(frame.data()),
-            frame.size())) {
-      Serial.println(
-          "BLE Renderer Diagnostics: protected snapshot chunk failed");
-      return;
-    }
-    delay(2);
+  static map_transfer_status_protocol::ChunkSession chunkSession;
+  const uint8_t transferId = chunkSession.transferIdFor(body);
+  if (!pendingRendererDiagnosticsChunks.begin(body, transferId, chunkBytes)) {
+    Serial.printf(
+        "BLE Renderer Diagnostics: snapshot too large (%u bytes)\n",
+        static_cast<unsigned>(body.size()));
+    return;
   }
-  Serial.printf(
-      "BLE Renderer Diagnostics: snapshot notified (%u bytes, %u chunks)\n",
-      static_cast<unsigned>(body.size()),
-      static_cast<unsigned>(chunkCount));
+  pendingRendererDiagnosticsContinuation.store(true,
+                                               std::memory_order_release);
+  pumpPendingRendererDiagnosticsChunks();
 #else
   (void)pChar;
+#endif
+}
+
+static void pumpPendingRendererDiagnosticsChunks() {
+#if FIRMWARE_DIAGNOSTICS
+  if (!pendingRendererDiagnosticsChunks.active()) {
+    pendingRendererDiagnosticsContinuation.store(false,
+                                                 std::memory_order_release);
+    return;
+  }
+  if (!bleSessionAuthenticated ||
+      activeConnHandle == BLE_HS_CONN_HANDLE_NONE ||
+      mapTransferStatusCharacteristic == nullptr) {
+    pendingRendererDiagnosticsChunks.reset();
+    pendingRendererDiagnosticsContinuation.store(false,
+                                                 std::memory_order_release);
+    return;
+  }
+
+  const uint8_t available = deferredNotificationAvailableCapacity();
+  for (uint8_t slot = 0;
+       slot < available && pendingRendererDiagnosticsChunks.active(); ++slot) {
+    const std::string frame = pendingRendererDiagnosticsChunks.nextFrame(
+        renderer_diagnostics_ble_protocol::METRICS_CHUNK_PREFIX);
+    if (frame.empty() ||
+        !notifyAuthenticatedNavigation(
+            mapTransferStatusCharacteristic,
+            reinterpret_cast<const uint8_t *>(frame.data()), frame.size())) {
+      return;
+    }
+    pendingRendererDiagnosticsChunks.advance();
+  }
+
+  if (!pendingRendererDiagnosticsChunks.active()) {
+    const size_t bodySize = pendingRendererDiagnosticsChunks.bodySize();
+    const size_t chunkCount = pendingRendererDiagnosticsChunks.chunkCount();
+    pendingRendererDiagnosticsChunks.reset();
+    pendingRendererDiagnosticsContinuation.store(false,
+                                                 std::memory_order_release);
+    Serial.printf(
+        "BLE Renderer Diagnostics: snapshot notified (%u bytes, %u chunks)\n",
+        static_cast<unsigned>(bodySize),
+        static_cast<unsigned>(chunkCount));
+  }
 #endif
 }
 
@@ -5599,6 +5640,7 @@ void BLENavigationServer::process() {
   }
   processPendingTransferControl();
   pumpPendingMapTransferStatusChunks();
+  pumpPendingRendererDiagnosticsChunks();
   scheduleDeferredNotificationEvent();
   const uint32_t nowMs = millis();
 #if BLE_RADIO_CHARACTERIZATION

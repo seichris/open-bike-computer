@@ -97,7 +97,7 @@ same-origin page. All versioned API routes require the existing
 | `GET` | `/device-debug/v1/info` | Target, identity, dimensions, display/network state, sequence, and counters. |
 | `GET` | `/device-debug/v1/metrics` | One bounded schema-1 renderer/RAM snapshot; responses are limited to four per second. |
 | `POST` | `/device-debug/v1/metrics/window` | Queue one validated renderer profile and fixture identity for the UI task, at most once per second; the active map ID and manifest receipt must match before it is applied. |
-| `GET` | `/device-debug/v1/frame?after=N` | `204` if unchanged; otherwise one `BCF1` header and RGB565 payload. |
+| `GET` | `/device-debug/v1/frame?after=N` | `204` if unchanged; otherwise one `BCF1` header and RGB565 payload. Benchmark clients may add `capturedAtOrAfter=M`; a buffered frame older than that wrap-safe device-uptime timestamp produces `204` and arms a fresh capture instead of transferring stale pixels. |
 | `POST` | `/device-debug/v1/pointer` | Queue one schema-1 down/move/up/cancel event. |
 | `POST` | `/device-debug/v1/display/wake` | Queue a UI-task display wake and full refresh. |
 | `POST` | `/device-debug/v1/button/boot` | Queue one debounced BOOT/GPIO0 short press through the normal firmware path. |

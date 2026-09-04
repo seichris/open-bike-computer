@@ -129,6 +129,22 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertNotIn("sessionToken", RENDERER_DIAGNOSTICS)
         self.assertNotIn("apPassphrase", RENDERER_DIAGNOSTICS)
 
+    def test_checkpoint_frame_floor_skips_stale_pixels_before_transfer(self):
+        frame = HTTP[
+            HTTP.index("bool DeviceDebugHttp::handleFrame") :
+            HTTP.index("bool DeviceDebugHttp::handlePointer")
+        ]
+        self.assertIn("parseFrameRequestPath", frame)
+        self.assertIn("query.hasCapturedAtOrAfter", frame)
+        self.assertIn("timestampAtOrAfter", frame)
+        stale_check = frame.index("!timestampAtOrAfter")
+        release = frame.index("frameStore().releaseSnapshot()", stale_check)
+        no_content = frame.index("sendHttpHead(client, 204, 0)", release)
+        payload = frame.index("snapshot.payloadBytes", no_content)
+        self.assertLess(stale_check, release)
+        self.assertLess(release, no_content)
+        self.assertLess(no_content, payload)
+
     def test_renderer_windows_bind_the_active_map_before_profile_change(self):
         active_identity = MAIN[
             MAIN.index("static bool readActiveRendererMap") :
