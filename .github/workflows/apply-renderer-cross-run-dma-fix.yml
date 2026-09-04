@@ -29,6 +29,7 @@ jobs:
           unexpected="$(git diff --name-only \
             a1dce92dd8a49c0122b92f94d9630133ea5547ba..HEAD -- \
             ':(exclude).github/scripts/apply_renderer_cross_run_dma_fix.py' \
+            ':(exclude).github/scripts/fix_renderer_cross_run_test_import.py' \
             ':(exclude).github/workflows/apply-renderer-cross-run-dma-fix.yml')"
           test -z "$unexpected" || {
             echo "::error::Unexpected pre-existing branch changes"
@@ -40,11 +41,13 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/scripts/apply_renderer_cross_run_dma_fix.py
+          python3 .github/scripts/fix_renderer_cross_run_test_import.py
           git diff --check
           actual="$(git diff --name-only | sort)"
           expected="$(cat <<'EOF'
           docs/renderer-benchmark.md
           esp32/tools/renderer_benchmark.py
+          esp32/tools/tests/test_renderer_benchmark_cross_run_memory.py
           ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift
           ios-app/BikeComputerTests/NavigationProtocolTests.swift
           EOF
@@ -121,6 +124,7 @@ jobs:
           set -euo pipefail
           git rm \
             .github/scripts/apply_renderer_cross_run_dma_fix.py \
+            .github/scripts/fix_renderer_cross_run_test_import.py \
             .github/workflows/apply-renderer-cross-run-dma-fix.yml
           git diff --check
           git config user.name "github-actions[bot]"
