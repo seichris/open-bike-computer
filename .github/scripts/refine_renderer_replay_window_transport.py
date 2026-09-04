@@ -14,7 +14,7 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 
 ble = ble_path.read_text(encoding="utf-8")
 start_marker = (
-    "    private func flushPendingNavigationWrites(" 
+    "    private func flushPendingNavigationWrites("
     "endpoint: NavigationWriteEndpoint) {\n"
 )
 end_marker = "    private func logNavigationQueueMetricsInterval() {\n"
@@ -24,7 +24,7 @@ start = ble.index(start_marker)
 end = ble.index(end_marker, start)
 flush = '''    private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
         var madeProgress = false
-        while !writeWithResponseInFlight {
+        while true {
             var wroteRegular = false
             navigationWriteQueue.flush(canSend: { [weak self] write in
                 guard let self else { return false }
@@ -45,7 +45,7 @@ flush = '''    private func flushPendingNavigationWrites(endpoint: NavigationWri
                 write.perform(using: endpoint.write)
                 log("Sent \\(write.label): \\(write.data.count) bytes")
             }
-            if !wroteRegular {
+            if !wroteRegular || writeWithResponseInFlight {
                 break
             }
         }
