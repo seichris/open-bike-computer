@@ -1,0 +1,94 @@
+name: Apply renderer replay admission diagnostics
+
+on:
+  push:
+    branches:
+      - fix/renderer-replay-admission-diagnostics
+
+permissions:
+  contents: write
+
+concurrency:
+  group: renderer-replay-admission-diagnostics
+  cancel-in-progress: false
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          ref: fix/renderer-replay-admission-diagnostics
+
+      - name: Verify isolated exact-head bootstrap
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor \
+            c901a7cd0b933c1b21ec55d9d4fcb9fb4e86e849 HEAD
+          unexpected="$(git diff --name-only \
+            c901a7cd0b933c1b21ec55d9d4fcb9fb4e86e849..HEAD -- \
+            ':(exclude).github/workflows/apply-renderer-replay-admission-diagnostics.yml' \
+            ':(exclude).github/scripts/apply_renderer_replay_admission_diagnostics.py')"
+          test -z "$unexpected" || {
+            echo "::error::Unexpected pre-existing branch changes"
+            printf '%s\n' "$unexpected"
+            exit 1
+          }
+
+      - name: Apply deterministic diagnostics mutation
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_renderer_replay_admission_diagnostics.py
+          git diff --check
+          git status --short
+
+      - name: Run focused firmware host tests
+        working-directory: esp32
+        run: |
+          set -euo pipefail
+          for test in \
+            test_renderer_diagnostics \
+            test_renderer_diagnostics_ble_protocol; do
+            g++ -std=c++17 -Wall -Wextra -Werror \
+              "tools/tests/${test}.cpp" -o "/tmp/${test}"
+            "/tmp/${test}"
+          done
+
+      - name: Build exact remote-debug profile
+        working-directory: esp32
+        run: |
+          set -euo pipefail
+          env -u LD_LIBRARY_PATH python3 tools/build_firmware.py \
+            WAVESHARE_AMOLED_175_REMOTE_DEBUG
+
+      - name: Verify remote-debug metrics and replay markers
+        working-directory: esp32
+        run: |
+          set -euo pipefail
+          artifact=.pio/build/WAVESHARE_AMOLED_175_REMOTE_DEBUG/firmware.elf
+          test -f "$artifact"
+          for marker in \
+            /device-debug/v1/metrics \
+            replayTransport \
+            markerRejectedNoActiveWindow \
+            fixture_mismatch; do
+            grep -aFq "$marker" "$artifact" || {
+              echo "::error::Missing firmware marker: $marker"
+              exit 1
+            }
+          done
+
+      - name: Commit validated diagnostics
+        run: |
+          set -euo pipefail
+          git rm \
+            .github/workflows/apply-renderer-replay-admission-diagnostics.yml \
+            .github/scripts/apply_renderer_replay_admission_diagnostics.py
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Add renderer replay admission diagnostics"
+          git push origin HEAD:fix/renderer-replay-admission-diagnostics
