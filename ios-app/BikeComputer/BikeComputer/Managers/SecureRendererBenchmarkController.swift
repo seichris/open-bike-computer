@@ -492,15 +492,16 @@ final class SecureRendererBenchmarkController: ObservableObject {
                 )
             }
 
-            status = "Starting pinned 1 Hz replay"
-            replay.start(
+            status = "Arming pinned 1 Hz replay"
+            replay.prepare(
                 bleManager: bleManager,
                 isNavigationActive: false,
                 bundle: bundle
             )
-            guard replay.isRunning else {
+            guard replay.isRunning, !replay.isCadenceActive else {
                 throw SecureRendererBenchmarkControllerError.unavailable(
-                    replay.errorMessage ?? "The pinned 1 Hz replay could not start."
+                    replay.errorMessage ??
+                        "The pinned 1 Hz replay could not be armed."
                 )
             }
             try checkContinuity()
@@ -558,6 +559,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
                 completedRunCount = totalRunCount
             }
 
+            replay.pauseCadence()
             status = "Restoring Current profile"
             cleanupRestoredCurrent = await restoreCurrentProfile(
                 client: client,
@@ -612,6 +614,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
             errorMessage = passed ? nil :
                 "One or more automated gates failed; review the exported report."
         } catch {
+            replay.pauseCadence()
             if profileMayNeedRestoration {
                 status = "Restoring Current profile"
                 cleanupRestoredCurrent = await restoreCurrentProfile(
@@ -716,22 +719,18 @@ final class SecureRendererBenchmarkController: ObservableObject {
             routeFixture: routeFixture,
             gates: gates
         )
-        let windowID = try await beginTrackedWindow(
+        let activation = try await activateReplayWindow(
             client: client,
             profile: profile,
-            runId: runID,
             repeatNumber: repeatNumber,
-            mapFixture: mapFixture,
-            routeFixture: routeFixture
-        )
-        let initialSnapshot = try await waitForWindow(
-            client: client,
-            windowID: windowID,
             runID: runID,
-            repeatNumber: repeatNumber,
-            profile: profile,
-            timeoutSeconds: 10
+            mapFixture: mapFixture,
+            routeFixture: routeFixture,
+            expectedRouteSampleCount: expectedRouteSampleCount,
+            gates: gates
         )
+        let windowID = activation.windowID
+        let initialSnapshot = activation.initialSnapshot
         let checkpoints = SecureRendererBenchmarkPlan.checkpointIndexes(
             sampleCount: expectedRouteSampleCount,
             fractions: gates.checkpointFractions
@@ -889,15 +888,41 @@ final class SecureRendererBenchmarkController: ObservableObject {
         )
     }
 
-    private func warmUp(
+    private func activateReplayWindow(
         client: SecureRendererBenchmarkHTTPClient,
         profile: RendererBenchmarkProfile,
         repeatNumber: Int,
         runID: String,
         mapFixture: RendererBenchmarkMapFixtureIdentity,
         routeFixture: RendererBenchmarkRouteFixtureIdentity,
+        expectedRouteSampleCount: Int,
         gates: RendererBenchmarkGates
-    ) async throws {
+    ) async throws -> (
+        windowID: UInt32,
+        initialSnapshot: RendererBenchmarkMetricsSnapshot
+    ) {
+        guard let replay, let bleManager else {
+            throw SecureRendererBenchmarkControllerError.unavailable(
+                "The authenticated renderer replay is unavailable."
+            )
+        }
+
+        replay.pauseCadence()
+        let freshnessSeconds =
+            Double(gates.absolute.maximumRouteMarkerAgeMs) / 1_000
+        guard freshnessSeconds == 2.5 else {
+            throw SecureRendererBenchmarkControllerError.invalidResponse(
+                "The checked-in route-marker freshness gate changed."
+            )
+        }
+        guard await bleManager.waitForNavigationWritesToDrain(
+            timeoutSeconds: freshnessSeconds
+        ) else {
+            throw SecureRendererBenchmarkControllerError.unavailable(
+                "The previous acknowledged replay transaction did not settle within the 2.5-second freshness gate."
+            )
+        }
+
         let windowID = try await beginTrackedWindow(
             client: client,
             profile: profile,
@@ -914,22 +939,93 @@ final class SecureRendererBenchmarkController: ObservableObject {
             profile: profile,
             timeoutSeconds: 10
         )
-        let markerDeadline = Date().addingTimeInterval(12)
-        var markerConfirmed = false
-        while Date() < markerDeadline {
-            try checkContinuity()
-            let snapshot = try await metricsWithRetry(client: client)
-            if snapshot.routeReplay.valid && snapshot.routeReplay.fixtureMatches {
-                markerConfirmed = true
-                break
-            }
-            try await pause(seconds: 0.5)
-        }
-        guard markerConfirmed else {
+
+        let acceptanceDeadline = Date().addingTimeInterval(freshnessSeconds)
+        guard replay.emitInitialSample() else {
             throw SecureRendererBenchmarkControllerError.unavailable(
-                "The device did not confirm the in-app 1 Hz route marker."
+                replay.errorMessage ??
+                    "The first acknowledged renderer sample could not be queued."
             )
         }
+
+        let acknowledgementBudget = acceptanceDeadline.timeIntervalSinceNow
+        guard acknowledgementBudget > 0,
+              await bleManager.waitForNavigationWritesToDrain(
+                timeoutSeconds: acknowledgementBudget
+              ) else {
+            throw SecureRendererBenchmarkControllerError.unavailable(
+                "The device did not acknowledge the first route and renderer sample within the 2.5-second freshness gate."
+            )
+        }
+
+        var lastMetricsError: Error?
+        while Date() < acceptanceDeadline {
+            try checkContinuity()
+            do {
+                let remaining = max(
+                    acceptanceDeadline.timeIntervalSinceNow,
+                    0.05
+                )
+                let snapshot = try await metricsWithRetry(
+                    client: client,
+                    timeoutSeconds: min(0.6, remaining)
+                )
+                if snapshot.window.id == windowID,
+                   snapshot.window.runId == runID,
+                   snapshot.window.repeatNumber == repeatNumber,
+                   snapshot.tuning.profile == profile.wireName,
+                   snapshot.routeReplay.valid,
+                   snapshot.routeReplay.fixtureMatches,
+                   snapshot.routeReplay.sampleCount ==
+                    expectedRouteSampleCount {
+                    guard replay.startCadence() else {
+                        throw SecureRendererBenchmarkControllerError.unavailable(
+                            "The confirmed renderer replay cadence could not start."
+                        )
+                    }
+                    return (windowID, snapshot)
+                }
+            } catch {
+                lastMetricsError = error
+            }
+            if Date() < acceptanceDeadline {
+                try await pause(seconds: min(
+                    0.1,
+                    max(acceptanceDeadline.timeIntervalSinceNow, 0)
+                ))
+            }
+        }
+
+        try checkContinuity()
+        if let lastMetricsError,
+           !(lastMetricsError is SecureRendererBenchmarkControllerError) {
+            throw lastMetricsError
+        }
+        throw SecureRendererBenchmarkControllerError.unavailable(
+            "The acknowledged renderer sample was not accepted for the active window within the 2.5-second freshness gate."
+        )
+    }
+
+    private func warmUp(
+        client: SecureRendererBenchmarkHTTPClient,
+        profile: RendererBenchmarkProfile,
+        repeatNumber: Int,
+        runID: String,
+        mapFixture: RendererBenchmarkMapFixtureIdentity,
+        routeFixture: RendererBenchmarkRouteFixtureIdentity,
+        gates: RendererBenchmarkGates
+    ) async throws {
+        _ = try await activateReplayWindow(
+            client: client,
+            profile: profile,
+            repeatNumber: repeatNumber,
+            runID: runID,
+            mapFixture: mapFixture,
+            routeFixture: routeFixture,
+            expectedRouteSampleCount:
+                replay?.sampleCount ?? 0,
+            gates: gates
+        )
         let warmDeadline = Date().addingTimeInterval(
             Double(gates.warmupSeconds)
         )

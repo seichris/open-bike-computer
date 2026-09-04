@@ -227,20 +227,20 @@ enum GPSPositionWriteRouting {
 }
 
 enum RendererBenchmarkSampleWriteRoute: Equatable {
-    case nativeWithoutResponse
+    case nativeWithResponse
     case unavailable
 }
 
 enum RendererBenchmarkSampleWriteRouting {
     static func route(
-        hasNativeWriteWithoutResponse: Bool,
+        hasNativeWriteWithResponse: Bool,
         payloadLength: Int,
         protectionOverhead: Int,
-        withoutResponseMaximum: Int
+        withResponseMaximum: Int
     ) -> RendererBenchmarkSampleWriteRoute {
-        if hasNativeWriteWithoutResponse,
-           payloadLength + protectionOverhead <= withoutResponseMaximum {
-            return .nativeWithoutResponse
+        if hasNativeWriteWithResponse,
+           payloadLength + protectionOverhead <= withResponseMaximum {
+            return .nativeWithResponse
         }
         return .unavailable
     }
@@ -358,6 +358,8 @@ enum DeviceBLEProtocol {
         "renderer.benchmark.marker"
     static let rendererBenchmarkSampleCoalescingKey =
         "renderer.benchmark.sample"
+    static let rendererBenchmarkRouteCoalescingKey =
+        "renderer.benchmark.route"
     static let automaticDisplayOffSettingCoalescingKey =
         "automatic-display-off-setting"
     // Large enough for the worst schema-v1 three-favorite catalog at the
@@ -3562,6 +3564,75 @@ class BLEManager: NSObject, ObservableObject {
         )
     }
 
+    private func discardPendingRendererBenchmarkSample() {
+        navigationWriteQueue.removePendingWrites(
+            withCoalescingKey:
+                DeviceBLEProtocol.rendererBenchmarkSampleCoalescingKey
+        )
+    }
+
+    /// Queues benchmark route state on the acknowledged native route
+    /// characteristic. The matching RBS1 sample uses the same ordered queue,
+    /// so a newer sample cannot overtake route geometry that was queued first.
+    @discardableResult
+    func sendRendererBenchmarkRouteGeometry(_ data: Data) -> Bool {
+        guard let peripheral = connectedPeripheral,
+              let characteristic = routeGeometryCharacteristic,
+              let endpoint = navigationWriteEndpoint,
+              isConnected,
+              isNavigationReady,
+              characteristic.properties.contains(.write) else {
+            log("Cannot send renderer benchmark geometry: acknowledged native route transport unavailable")
+            return false
+        }
+
+        let protectedLength = data.count + (authenticatedWriteSession == nil
+            ? 0
+            : AuthenticatedBLEWriteSession.frameOverhead)
+        guard data.count <= endpoint.maximumWriteLength,
+              protectedLength <= peripheral.maximumWriteValueLength(
+                for: .withResponse
+              ) else {
+            log("Cannot send renderer benchmark geometry: acknowledged write limit exceeded")
+            return false
+        }
+
+        // If a previous sample has not reached CoreBluetooth yet, its route
+        // context is also replaceable. Remove that pending sample before the
+        // newer route is admitted; emitCurrentSample() immediately stages the
+        // matching newest sample behind this route.
+        discardPendingRendererBenchmarkSample()
+        guard enqueueNavigationWrite(
+            data,
+            endpoint: endpoint,
+            label: "native renderer benchmark route geometry",
+            writeClass: .route,
+            coalescingKey:
+                DeviceBLEProtocol.rendererBenchmarkRouteCoalescingKey,
+            transportWrite: {
+                [weak self, weak peripheral, weak characteristic] payload in
+                guard let self, let peripheral, let characteristic else {
+                    return
+                }
+                self.writeDeviceData(
+                    payload,
+                    to: characteristic,
+                    on: peripheral,
+                    type: .withResponse
+                )
+            },
+            transportCanSend: { [weak self] in
+                self?.writeWithResponseInFlight == false
+            },
+            transportExpectsWriteResponse: true
+        ) else {
+            log("Renderer benchmark geometry not queued: write queue unavailable")
+            return false
+        }
+        log("Queued native renderer benchmark route geometry: \(data.count) bytes")
+        return true
+    }
+
     /// Clear route geometry on ESP32.
     func clearRouteGeometry() {
         _ = sendRouteGeometry(Data())
@@ -3582,6 +3653,14 @@ class BLEManager: NSObject, ObservableObject {
 
     func endDeviceGPSOverride(_ token: UUID) {
         guard deviceGPSOverrideToken == token else { return }
+        navigationWriteQueue.removePendingWrites(
+            withCoalescingKey:
+                DeviceBLEProtocol.rendererBenchmarkRouteCoalescingKey
+        )
+        navigationWriteQueue.removePendingWrites(
+            withCoalescingKey:
+                DeviceBLEProtocol.rendererBenchmarkSampleCoalescingKey
+        )
         navigationLatestStateWriteQueue.removeAll()
         deviceGPSOverrideToken = nil
         onDeviceGPSOverrideEnded?()
@@ -5588,6 +5667,47 @@ class BLEManager: NSObject, ObservableObject {
         )
     }
 
+    @discardableResult
+    func enqueueRendererBenchmarkRouteWriteForTesting(
+        _ data: Data,
+        canSend: @escaping () -> Bool,
+        write: @escaping (Data) -> Void
+    ) -> Bool {
+        guard let endpoint = navigationWriteEndpoint else { return false }
+        discardPendingRendererBenchmarkSample()
+        return enqueueNavigationWrite(
+            data,
+            endpoint: endpoint,
+            label: "test renderer route",
+            writeClass: .route,
+            coalescingKey:
+                DeviceBLEProtocol.rendererBenchmarkRouteCoalescingKey,
+            transportWrite: write,
+            transportCanSend: canSend,
+            transportExpectsWriteResponse: true
+        )
+    }
+
+    @discardableResult
+    func enqueueRendererBenchmarkSampleWriteForTesting(
+        _ data: Data,
+        canSend: @escaping () -> Bool,
+        write: @escaping (Data) -> Void
+    ) -> Bool {
+        guard let endpoint = navigationWriteEndpoint else { return false }
+        return enqueueNavigationWrite(
+            data,
+            endpoint: endpoint,
+            label: "test renderer sample",
+            writeClass: .gpsPosition,
+            coalescingKey:
+                DeviceBLEProtocol.rendererBenchmarkSampleCoalescingKey,
+            transportWrite: write,
+            transportCanSend: canSend,
+            transportExpectsWriteResponse: true
+        )
+    }
+
     var navigationPendingWriteCountForTesting: Int {
         navigationPendingWriteCount
     }
@@ -6971,36 +7091,44 @@ class BLEManager: NSObject, ObservableObject {
               let characteristic = gpsPositionCharacteristic,
               let endpoint = navigationWriteEndpoint,
               RendererBenchmarkSampleWriteRouting.route(
-                hasNativeWriteWithoutResponse:
-                    characteristic.properties.contains(.writeWithoutResponse),
+                hasNativeWriteWithResponse:
+                    characteristic.properties.contains(.write),
                 payloadLength: data.count,
                 protectionOverhead: authenticatedWriteSession == nil
                     ? 0
                     : AuthenticatedBLEWriteSession.frameOverhead,
-                withoutResponseMaximum: peripheral.maximumWriteValueLength(
-                    for: .withoutResponse
+                withResponseMaximum: peripheral.maximumWriteValueLength(
+                    for: .withResponse
                 )
-              ) == .nativeWithoutResponse else {
+              ) == .nativeWithResponse else {
             return false
         }
-        guard enqueueLatestStateWrite(
+        guard enqueueNavigationWrite(
             data,
             endpoint: endpoint,
             label: "native \(label)",
-            kind: .rendererBenchmarkSample,
-            transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
-                guard let self, let peripheral, let characteristic else { return }
+            writeClass: .gpsPosition,
+            coalescingKey:
+                DeviceBLEProtocol.rendererBenchmarkSampleCoalescingKey,
+            transportWrite: {
+                [weak self, weak peripheral, weak characteristic] payload in
+                guard let self, let peripheral, let characteristic else {
+                    return
+                }
                 self.writeDeviceData(
                     payload,
                     to: characteristic,
                     on: peripheral,
-                    type: .withoutResponse
+                    type: .withResponse
                 )
             },
-            transportCanSend: { [weak peripheral] in
-                peripheral?.canSendWriteWithoutResponse ?? false
-            }
-        ) else { return false }
+            transportCanSend: { [weak self] in
+                self?.writeWithResponseInFlight == false
+            },
+            transportExpectsWriteResponse: true
+        ) else {
+            return false
+        }
         log("Queued native \(label): \(data.count) bytes")
         return true
     }
@@ -7046,10 +7174,9 @@ class BLEManager: NSObject, ObservableObject {
             write.perform(using: endpoint.write)
             log("Sent \(write.label): \(write.data.count) bytes")
         }
-        // Do not feed acknowledged traffic while the atomic renderer sample is
-        // waiting for no-response transport credit. Once it drains, one
-        // ordered write may advance in the same flush, so transactional traffic
-        // is preserved without splitting GPS from its marker.
+        // Preserve the established independent no-response bypass for
+        // non-renderer traffic. Renderer replay no longer enters this lane:
+        // its route and RBS1 writes share the acknowledged ordered queue.
         if navigationLatestStateWriteQueue.count == 0 {
             navigationWriteQueue.flush(canSend: { [weak self] write in
                 guard let self else { return false }
@@ -7129,7 +7256,21 @@ class BLEManager: NSObject, ObservableObject {
 
     private func completeNavigationWrite(error: Error?) {
         let writeFailureHandler = navigationWriteWithResponseFailureHandler
+        let label = navigationWriteWithResponseLabel ?? "unknown write"
+        let durationMs = navigationWriteAcknowledgementAgeMs()
         recordNavigationWriteAcknowledgement(error: error)
+        if let error {
+            log(
+                "Acknowledged BLE write failed: \(label); " +
+                    "durationMs=\(durationMs); " +
+                    "error=\(error.localizedDescription)"
+            )
+        } else {
+            log(
+                "Acknowledged BLE write completed: \(label); " +
+                    "durationMs=\(durationMs)"
+            )
+        }
         resetNavigationWriteResponseWait()
         if error != nil {
             writeFailureHandler?()
@@ -7245,20 +7386,6 @@ class BLEManager: NSObject, ObservableObject {
         hasPendingWrites: Bool
     ) {
         if madeProgress || !hasPendingWrites || writeWithResponseInFlight {
-            navigationBackpressureStartedAt = nil
-            return
-        }
-
-        // A renderer replay deliberately owns a bounded, replaceable one-slot
-        // state lane. CoreBluetooth can withhold another no-response credit
-        // while the ESP32 is rendering or serving the pinned HTTPS session.
-        // Keep coalescing to the newest complete GPS-plus-marker sample and let
-        // the benchmark's unchanged freshness/cadence gates measure the stall.
-        // The replay has its own bounded warm-up/window lifetimes and clears
-        // the lane on stop. Outside that explicit lease, the normal watchdog
-        // still reconnects a persistently backpressured BLE session.
-        if deviceGPSOverrideToken != nil,
-           navigationLatestStateWriteQueue.count > 0 {
             navigationBackpressureStartedAt = nil
             return
         }
