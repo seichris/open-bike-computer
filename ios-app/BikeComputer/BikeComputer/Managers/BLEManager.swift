@@ -15,6 +15,10 @@ import Security
 import UIKit
 #endif
 
+nonisolated struct NavigationWriteDrainCheckpoint: Equatable, Sendable {
+    fileprivate let failureGeneration: UInt64
+}
+
 nonisolated struct DeviceActiveMapDescriptor: Equatable, Sendable {
     let mapID: String
     let sessionID: String?
@@ -1175,6 +1179,7 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationWriteAcknowledgementCompletions: UInt64 = 0
     private var navigationWriteAcknowledgementErrors: UInt64 = 0
     private var navigationWriteAcknowledgementTimeouts: UInt64 = 0
+    private var navigationWriteFailureGeneration: UInt64 = 0
     private var lastNavigationWriteAcknowledgementMs: Int = 0
     private var maximumNavigationWriteAcknowledgementMs: Int = 0
     private var navigationWriteResponseTimeoutTimer: Timer?
@@ -3624,7 +3629,13 @@ class BLEManager: NSObject, ObservableObject {
             transportCanSend: { [weak self] in
                 self?.writeWithResponseInFlight == false
             },
-            transportExpectsWriteResponse: true
+            transportExpectsWriteResponse: true,
+            onWriteFailure: { [weak self] in
+                // The RBS1 sample behind this route is valid only when this
+                // route reached the device. Never release it after an
+                // acknowledged route write fails.
+                self?.discardPendingRendererBenchmarkSample()
+            }
         ) else {
             log("Renderer benchmark geometry not queued: write queue unavailable")
             return false
@@ -5684,7 +5695,10 @@ class BLEManager: NSObject, ObservableObject {
                 DeviceBLEProtocol.rendererBenchmarkRouteCoalescingKey,
             transportWrite: write,
             transportCanSend: canSend,
-            transportExpectsWriteResponse: true
+            transportExpectsWriteResponse: true,
+            onWriteFailure: { [weak self] in
+                self?.discardPendingRendererBenchmarkSample()
+            }
         )
     }
 
@@ -5714,6 +5728,12 @@ class BLEManager: NSObject, ObservableObject {
 
     var navigationHasUnsettledWritesForTesting: Bool {
         navigationHasUnsettledWrites
+    }
+
+    func navigationWriteDrainFailedForTesting(
+        since checkpoint: NavigationWriteDrainCheckpoint
+    ) -> Bool {
+        navigationWriteFailureGeneration != checkpoint.failureGeneration
     }
 
     func installNavigationWriteStallRecoveryForTesting(
@@ -7144,19 +7164,36 @@ class BLEManager: NSObject, ObservableObject {
     private func clearNavigationWriteQueues() {
         navigationWriteQueue.removeAll()
         navigationLatestStateWriteQueue.removeAll()
+        navigationWriteFailureGeneration &+= 1
     }
 
-    func waitForNavigationWritesToDrain(timeoutSeconds: TimeInterval) async -> Bool {
+    func navigationWriteDrainCheckpoint() -> NavigationWriteDrainCheckpoint {
+        NavigationWriteDrainCheckpoint(
+            failureGeneration: navigationWriteFailureGeneration
+        )
+    }
+
+    func waitForNavigationWritesToDrain(
+        timeoutSeconds: TimeInterval,
+        since checkpoint: NavigationWriteDrainCheckpoint? = nil
+    ) async -> Bool {
+        let startingFailureGeneration = checkpoint?.failureGeneration ??
+            navigationWriteFailureGeneration
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while navigationHasUnsettledWrites {
             if Task.isCancelled {
+                return false
+            }
+            if navigationWriteFailureGeneration !=
+                startingFailureGeneration {
                 return false
             }
             if let endpoint = navigationWriteEndpoint {
                 flushPendingNavigationWrites(endpoint: endpoint)
             }
             if !navigationHasUnsettledWrites {
-                return true
+                return navigationWriteFailureGeneration ==
+                    startingFailureGeneration
             }
             if Date() >= deadline {
                 log("Navigation writes did not settle before timeout")
@@ -7164,7 +7201,8 @@ class BLEManager: NSObject, ObservableObject {
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
-        return true
+        return navigationWriteFailureGeneration ==
+            startingFailureGeneration
     }
 
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
@@ -7255,6 +7293,10 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func completeNavigationWrite(error: Error?) {
+        guard writeWithResponseInFlight else {
+            log("Ignored unexpected acknowledged BLE write callback")
+            return
+        }
         let writeFailureHandler = navigationWriteWithResponseFailureHandler
         let label = navigationWriteWithResponseLabel ?? "unknown write"
         let durationMs = navigationWriteAcknowledgementAgeMs()
@@ -7273,6 +7315,7 @@ class BLEManager: NSObject, ObservableObject {
         }
         resetNavigationWriteResponseWait()
         if error != nil {
+            navigationWriteFailureGeneration &+= 1
             writeFailureHandler?()
         }
         if isNavigationReady, let endpoint = navigationWriteEndpoint {
@@ -7425,6 +7468,7 @@ class BLEManager: NSObject, ObservableObject {
         let failureHandler = navigationWriteWithResponseFailureHandler
         let durationMs = navigationWriteAcknowledgementAgeMs()
         navigationWriteAcknowledgementTimeouts &+= 1
+        navigationWriteFailureGeneration &+= 1
         lastNavigationWriteAcknowledgementMs = durationMs
         maximumNavigationWriteAcknowledgementMs = max(
             maximumNavigationWriteAcknowledgementMs,
@@ -7448,7 +7492,15 @@ class BLEManager: NSObject, ObservableObject {
 
 #if HOST_TESTING
     func completeNavigationWriteForTesting(error: Error?) {
-        completeNavigationWrite(error: error)
+        if writeWithResponseInFlight {
+            completeNavigationWrite(error: error)
+        } else if error == nil,
+                  isNavigationReady,
+                  let endpoint = navigationWriteEndpoint {
+            // Some queue tests use a synthetic success callback only to
+            // signal that their fake transport became writable.
+            flushPendingNavigationWrites(endpoint: endpoint)
+        }
     }
 #endif
 

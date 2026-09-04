@@ -14547,6 +14547,60 @@ struct NavigationProtocolTests {
         manager.completeNavigationWriteForTesting(error: nil)
         assert(!manager.navigationHasUnsettledWritesForTesting,
                "queue drain settles after acknowledgement")
+        let successfulCheckpoint = manager.navigationWriteDrainCheckpoint()
+        assert(
+            !manager.navigationWriteDrainFailedForTesting(
+                since: successfulCheckpoint
+            ),
+            "a successful acknowledged transaction drains cleanly"
+        )
+
+        let failedManager = BLEManager()
+        failedManager.isConnected = true
+        failedManager.isNavigationReady = true
+        var failedWrites: [UInt8] = []
+        failedManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 512,
+            expectsWriteResponse: true,
+            canSend: { true },
+            write: { failedWrites.append($0[0]) }
+        ))
+        guard let replayToken = failedManager.beginDeviceGPSOverride() else {
+            assert(false, "failed-write fixture acquires the GPS lease")
+            return
+        }
+        let failedCheckpoint = failedManager.navigationWriteDrainCheckpoint()
+        assert(failedManager.enqueueRendererBenchmarkRouteWriteForTesting(
+            Data([0x61]),
+            canSend: { true },
+            write: { failedWrites.append($0[0]) }
+        ), "failed-write fixture submits its route")
+        assert(failedManager.enqueueRendererBenchmarkSampleWriteForTesting(
+            Data([0x62]),
+            canSend: { true },
+            write: { failedWrites.append($0[0]) }
+        ), "failed-write fixture stages the dependent sample")
+        failedManager.completeNavigationWriteForTesting(error: NSError(
+            domain: "RendererBenchmarkDrainTests",
+            code: 1
+        ))
+        assertEqual(
+            failedWrites,
+            [0x61],
+            "a failed route acknowledgement never releases its dependent sample"
+        )
+        assertEqual(
+            failedManager.navigationPendingWriteCountForTesting,
+            0,
+            "the invalid dependent sample is discarded after route failure"
+        )
+        assert(
+            failedManager.navigationWriteDrainFailedForTesting(
+                since: failedCheckpoint
+            ),
+            "a write error cannot be reported as a successful drain"
+        )
+        failedManager.endDeviceGPSOverride(replayToken)
     }
 
     static func testRendererBenchmarkProtocol() {
@@ -15173,6 +15227,61 @@ struct NavigationProtocolTests {
             replayDelta.rbs1Detected,
             4,
             "the admission delta reports firmware RBS1 ingress"
+        )
+        assert(
+            replayDelta.observedFirmwareIngress,
+            "any authenticated or replay counter proves firmware ingress"
+        )
+        assert(
+            !RendererBenchmarkInitialAdmissionRetryPolicy
+                .shouldRetrySilentAttempt(
+                    completedAttempts: 1,
+                    attemptElapsedSeconds: 0.5,
+                    remainingSeconds: 1.5,
+                    delta: replayDelta
+                ),
+            "an explicit firmware admission or rejection is never retried as transport silence"
+        )
+        guard let silentDelta = RendererBenchmarkReplayTransportDelta(
+            baseline: replayTransport,
+            latest: replayTransport
+        ) else {
+            assert(false, "unchanged diagnostics produce a zero ingress delta")
+            return
+        }
+        assert(
+            !silentDelta.observedFirmwareIngress,
+            "unchanged synchronized counters prove a silent transport attempt"
+        )
+        assert(
+            RendererBenchmarkInitialAdmissionRetryPolicy
+                .shouldRetrySilentAttempt(
+                    completedAttempts: 1,
+                    attemptElapsedSeconds: 0.5,
+                    remainingSeconds: 1.5,
+                    delta: silentDelta
+                ),
+            "one silent attempt may retry inside the original freshness deadline"
+        )
+        assert(
+            !RendererBenchmarkInitialAdmissionRetryPolicy
+                .shouldRetrySilentAttempt(
+                    completedAttempts: 2,
+                    attemptElapsedSeconds: 0.5,
+                    remainingSeconds: 1.5,
+                    delta: silentDelta
+                ),
+            "the silent-ingress retry remains bounded to two total attempts"
+        )
+        assert(
+            !RendererBenchmarkInitialAdmissionRetryPolicy
+                .shouldRetrySilentAttempt(
+                    completedAttempts: 1,
+                    attemptElapsedSeconds: 0.5,
+                    remainingSeconds: 0.5,
+                    delta: silentDelta
+                ),
+            "a retry cannot extend or crowd the original 2.5-second gate"
         )
         assert(
             replayDelta.failureDescription.contains(

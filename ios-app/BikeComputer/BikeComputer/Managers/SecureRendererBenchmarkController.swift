@@ -941,61 +941,101 @@ final class SecureRendererBenchmarkController: ObservableObject {
         )
 
         let acceptanceDeadline = Date().addingTimeInterval(freshnessSeconds)
-        guard replay.emitInitialSample() else {
-            throw SecureRendererBenchmarkControllerError.unavailable(
-                replay.errorMessage ??
-                    "The first acknowledged renderer sample could not be queued."
-            )
-        }
-
-        let acknowledgementBudget = acceptanceDeadline.timeIntervalSinceNow
-        guard acknowledgementBudget > 0,
-              await bleManager.waitForNavigationWritesToDrain(
-                timeoutSeconds: acknowledgementBudget
-              ) else {
-            throw SecureRendererBenchmarkControllerError.unavailable(
-                "The device did not acknowledge the first route and renderer sample within the 2.5-second freshness gate."
-            )
-        }
-
         var lastMetricsError: Error?
         var lastAcceptanceSnapshot = confirmedWindowSnapshot
-        while Date() < acceptanceDeadline {
+        var completedAttempts = 0
+        admissionAttempts: while Date() < acceptanceDeadline {
             try checkContinuity()
-            do {
-                let remaining = max(
-                    acceptanceDeadline.timeIntervalSinceNow,
-                    0.05
+            completedAttempts += 1
+            let attemptStartedAt = Date()
+            let drainCheckpoint = bleManager.navigationWriteDrainCheckpoint()
+            guard replay.emitInitialSample() else {
+                throw SecureRendererBenchmarkControllerError.unavailable(
+                    replay.errorMessage ??
+                        "The acknowledged renderer sample could not be queued."
                 )
-                let snapshot = try await metricsWithRetry(
-                    client: client,
-                    timeoutSeconds: min(0.6, remaining)
+            }
+
+            let acknowledgementBudget =
+                acceptanceDeadline.timeIntervalSinceNow
+            let didDrain: Bool
+            if acknowledgementBudget > 0 {
+                didDrain = await bleManager.waitForNavigationWritesToDrain(
+                    timeoutSeconds: acknowledgementBudget,
+                    since: drainCheckpoint
                 )
-                lastAcceptanceSnapshot = snapshot
-                if snapshot.window.id == windowID,
-                   snapshot.window.runId == runID,
-                   snapshot.window.repeatNumber == repeatNumber,
-                   snapshot.tuning.profile == profile.wireName,
-                   snapshot.routeReplay.valid,
-                   snapshot.routeReplay.fixtureMatches,
-                   snapshot.routeReplay.sampleCount ==
-                    expectedRouteSampleCount {
-                    guard replay.startCadence() else {
-                        throw SecureRendererBenchmarkControllerError.unavailable(
-                            "The confirmed renderer replay cadence could not start."
-                        )
-                    }
-                    return (windowID, snapshot)
+            } else {
+                didDrain = false
+            }
+            try checkContinuity()
+            if !didDrain {
+                let remaining = acceptanceDeadline.timeIntervalSinceNow
+                if RendererBenchmarkInitialAdmissionRetryPolicy
+                    .shouldRetryFailedWrite(
+                        completedAttempts: completedAttempts,
+                        remainingSeconds: remaining
+                    ) {
+                    continue admissionAttempts
                 }
-            } catch {
-                lastMetricsError = error
+                throw SecureRendererBenchmarkControllerError.unavailable(
+                    "The device did not acknowledge the route and renderer sample within the 2.5-second freshness gate."
+                )
             }
-            if Date() < acceptanceDeadline {
-                try await pause(seconds: min(
-                    0.1,
-                    max(acceptanceDeadline.timeIntervalSinceNow, 0)
-                ))
+
+            while Date() < acceptanceDeadline {
+                try checkContinuity()
+                do {
+                    let remaining = max(
+                        acceptanceDeadline.timeIntervalSinceNow,
+                        0.05
+                    )
+                    let snapshot = try await metricsWithRetry(
+                        client: client,
+                        timeoutSeconds: min(0.6, remaining)
+                    )
+                    lastAcceptanceSnapshot = snapshot
+                    if snapshot.window.id == windowID,
+                       snapshot.window.runId == runID,
+                       snapshot.window.repeatNumber == repeatNumber,
+                       snapshot.tuning.profile == profile.wireName,
+                       snapshot.routeReplay.valid,
+                       snapshot.routeReplay.fixtureMatches,
+                       snapshot.routeReplay.sampleCount ==
+                        expectedRouteSampleCount {
+                        guard replay.startCadence() else {
+                            throw SecureRendererBenchmarkControllerError.unavailable(
+                                "The confirmed renderer replay cadence could not start."
+                            )
+                        }
+                        return (windowID, snapshot)
+                    }
+
+                    let delta = RendererBenchmarkReplayTransportDelta(
+                        baseline: confirmedWindowSnapshot.replayTransport,
+                        latest: snapshot.replayTransport
+                    )
+                    if RendererBenchmarkInitialAdmissionRetryPolicy
+                        .shouldRetrySilentAttempt(
+                            completedAttempts: completedAttempts,
+                            attemptElapsedSeconds:
+                                Date().timeIntervalSince(attemptStartedAt),
+                            remainingSeconds:
+                                acceptanceDeadline.timeIntervalSinceNow,
+                            delta: delta
+                        ) {
+                        continue admissionAttempts
+                    }
+                } catch {
+                    lastMetricsError = error
+                }
+                if Date() < acceptanceDeadline {
+                    try await pause(seconds: min(
+                        0.1,
+                        max(acceptanceDeadline.timeIntervalSinceNow, 0)
+                    ))
+                }
             }
+            break
         }
 
         try checkContinuity()

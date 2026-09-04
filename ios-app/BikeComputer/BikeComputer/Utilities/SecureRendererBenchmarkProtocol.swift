@@ -859,6 +859,22 @@ nonisolated struct RendererBenchmarkReplayTransportDelta: Equatable, Sendable {
         lastSampleCount = latest.lastSampleCount
     }
 
+    var observedFirmwareIngress: Bool {
+        gpsAuthenticationAccepted > 0 ||
+            gpsAuthenticationRejected > 0 ||
+            rbs1Detected > 0 ||
+            rbs1Decoded > 0 ||
+            rbs1Malformed > 0 ||
+            rbs1Unnegotiated > 0 ||
+            gpsMailboxAccepted > 0 ||
+            gpsMailboxRejected > 0 ||
+            markerAccepted > 0 ||
+            markerRejectedInvalid > 0 ||
+            markerRejectedNoActiveWindow > 0 ||
+            markerRejectedActiveFixtureUnavailable > 0 ||
+            markerRejectedFixtureMismatch > 0
+    }
+
     var failureDescription: String {
         "Replay diagnostics for this attempt: " +
             "authAccepted=\(gpsAuthenticationAccepted), " +
@@ -880,6 +896,36 @@ nonisolated struct RendererBenchmarkReplayTransportDelta: Equatable, Sendable {
             "lastMarkerResult=\(lastMarkerResult), " +
             "lastActiveWindowId=\(lastActiveWindowId), " +
             "lastSample=\(lastSampleIndex)/\(lastSampleCount)."
+    }
+}
+
+/// A single bounded retry is permitted only when the firmware's synchronized
+/// session counters prove that no part of the acknowledged RBS1 transaction
+/// reached the application. The original 2.5-second acceptance deadline is
+/// never extended.
+nonisolated enum RendererBenchmarkInitialAdmissionRetryPolicy {
+    static let maximumAttempts = 2
+    static let minimumSilentObservationSeconds: TimeInterval = 0.25
+    static let minimumRemainingBudgetSeconds: TimeInterval = 0.75
+
+    static func shouldRetrySilentAttempt(
+        completedAttempts: Int,
+        attemptElapsedSeconds: TimeInterval,
+        remainingSeconds: TimeInterval,
+        delta: RendererBenchmarkReplayTransportDelta?
+    ) -> Bool {
+        completedAttempts < maximumAttempts &&
+            attemptElapsedSeconds >= minimumSilentObservationSeconds &&
+            remainingSeconds >= minimumRemainingBudgetSeconds &&
+            delta?.observedFirmwareIngress == false
+    }
+
+    static func shouldRetryFailedWrite(
+        completedAttempts: Int,
+        remainingSeconds: TimeInterval
+    ) -> Bool {
+        completedAttempts < maximumAttempts &&
+            remainingSeconds >= minimumRemainingBudgetSeconds
     }
 }
 
