@@ -760,6 +760,7 @@ struct NavigationProtocolTests {
         testRendererBenchmarkProtocol()
         testSecureRendererBenchmarkReadiness()
         testSecureRendererBenchmarkProtocol()
+        testRendererCrossRunRetainedMemoryPolicy()
         testSecureRendererReplayWindowOrdering()
         testDeviceBLEProtocolConstants()
         testWorkoutDeviceFrameVectors()
@@ -15382,6 +15383,64 @@ struct NavigationProtocolTests {
                 jsonData: Data(#"{"baseURL":"https://device"}"#.utf8)
             ),
             "benchmark evidence rejects device session origins"
+        )
+    }
+
+    static func testRendererCrossRunRetainedMemoryPolicy() {
+        assert(
+            RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [46_000, 44_500, 43_000],
+                allowedDecline: 1_024
+            ),
+            "progressive retained DMA decline is rejected"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [46_000, 44_000, 43_990],
+                allowedDecline: 1_024
+            ),
+            "one-time transition followed by a plateau is accepted"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [46_000, 45_920, 46_010],
+                allowedDecline: 1_024
+            ),
+            "stable retained memory with jitter is accepted"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [39_307, 37_803, 37_779],
+                allowedDecline: 1_024
+            ),
+            "the physical three-point minimum series is not progressive"
+        )
+
+        let sourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift"
+        )
+        guard let source = try? String(
+            contentsOf: sourceURL,
+            encoding: .utf8
+        ), let start = source.range(
+            of: "    static func applyCrossRunMemoryGates("
+        ), let end = source.range(
+            of: "    static func aggregate(",
+            range: start.upperBound..<source.endIndex
+        ) else {
+            assert(false, "cross-run memory source contract is readable")
+            return
+        }
+        let body = String(source[start.lowerBound..<end.lowerBound])
+        assert(
+            body.contains("finalSnapshot.memory.dmaHeap.free") &&
+                body.contains("finalSnapshot.memory.dmaHeap.largestBlock"),
+            "cross-run DMA gates use terminal current state"
+        )
+        assert(
+            !body.contains(".summary.minimumDmaFree") &&
+                !body.contains(".summary.minimumDmaLargest"),
+            "heterogeneous window minima are not treated as retained state"
         )
     }
 

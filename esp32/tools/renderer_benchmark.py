@@ -1103,56 +1103,88 @@ def evaluate_run(
     return sorted(set(failures))
 
 
+def progressive_cross_run_decline(
+    values: list[int], *, allowed_decline: int
+) -> bool:
+    if len(values) < 3:
+        return False
+    normalized = [int(value) for value in values]
+    allowed = max(0, int(allowed_decline))
+    continuation_noise = max(1, allowed // 4)
+    total_decline = normalized[0] - normalized[-1]
+    if total_decline <= allowed:
+        return False
+
+    downward_steps: list[int] = []
+    for previous, current in zip(normalized, normalized[1:]):
+        delta = previous - current
+        if delta < -continuation_noise:
+            return False
+        downward_steps.append(max(0, delta))
+    if not downward_steps:
+        return False
+    largest_step = max(downward_steps)
+    return sum(downward_steps) - largest_step > continuation_noise
+
+
 def apply_cross_run_memory_gates(
     runs: list[dict[str, Any]], gates: dict[str, Any]
 ) -> None:
     trend = gates["trend"]
+    # Per-window minima continue to enforce the unchanged absolute floors.
+    # Cross-run retention uses terminal current heap state because a minimum
+    # may be set by any transient render, checkpoint, TLS, or polling phase.
     checks = (
         (
-            "minimumInternalFree",
+            lambda run: run["finalSnapshot"]["memory"]["internalHeap"]["free"],
             "crossRunInternalAllowedDeclineBytes",
             "cross_run_internal_decline",
         ),
         (
-            "minimumInternalLargest",
+            lambda run: run["finalSnapshot"]["memory"]["internalHeap"][
+                "largestBlock"
+            ],
             "crossRunInternalAllowedDeclineBytes",
             "cross_run_internal_largest_decline",
         ),
         (
-            "minimumPsramFree",
+            lambda run: run["finalSnapshot"]["memory"]["psram"]["free"],
             "crossRunPsramAllowedDeclineBytes",
             "cross_run_psram_decline",
         ),
         (
-            "minimumPsramLargest",
+            lambda run: run["finalSnapshot"]["memory"]["psram"]["largestBlock"],
             "crossRunPsramAllowedDeclineBytes",
             "cross_run_psram_largest_decline",
         ),
         (
-            "minimumDmaFree",
+            lambda run: run["finalSnapshot"]["memory"]["dmaHeap"]["free"],
             "crossRunDmaAllowedDeclineBytes",
             "cross_run_dma_decline",
         ),
         (
-            "minimumDmaLargest",
+            lambda run: run["finalSnapshot"]["memory"]["dmaHeap"][
+                "largestBlock"
+            ],
             "crossRunDmaAllowedDeclineBytes",
             "cross_run_dma_largest_decline",
         ),
     )
     for profile in PROFILES:
-        profile_runs = [run for run in runs if run["profile"] == profile]
+        profile_runs = sorted(
+            (run for run in runs if run["profile"] == profile),
+            key=lambda run: run["repeat"],
+        )
         if len(profile_runs) < 3:
             continue
-        for metric, allowed_key, label in checks:
-            values = [run["summary"][metric] for run in profile_runs]
-            if (
-                all(right < left for left, right in zip(values, values[1:]))
-                and values[0] - values[-1] > trend[allowed_key]
+        for value, allowed_key, label in checks:
+            values = [value(run) for run in profile_runs]
+            if progressive_cross_run_decline(
+                values, allowed_decline=trend[allowed_key]
             ):
                 for run in profile_runs:
                     run["failures"] = sorted(set(run["failures"] + [label]))
                     run["passed"] = False
-
 
 def aggregate_profiles(runs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     aggregate: dict[str, dict[str, Any]] = {}

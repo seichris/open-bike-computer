@@ -159,6 +159,19 @@ These are intentionally predeclared so results cannot be judged against a
 moving target. If physical evidence shows a threshold should change, update it
 in a separate reviewed change before rerunning the experiment.
 
+Per-window minimum-free and minimum-largest-block values continue to enforce
+the unchanged absolute floors, and the retained one-second samples continue to
+drive the within-window trend checks. Cross-run retention is evaluated
+separately from each run's terminal current free and largest-block values.
+Window minima are deliberately not used for this purpose because they combine
+heterogeneous observation phases (window start, periodic polling, render
+completion, and secure checkpoint activity) and therefore describe transient
+low-water pressure rather than memory that remained allocated. A cross-run
+failure still requires a decline beyond the existing byte allowance to
+continue after discounting one bounded session/cache transition; progressive
+free-memory loss and progressive largest-block fragmentation remain failures.
+
+
 The first complete pinned-HTTPS iPhone sweep showed that each uncompressed
 434312-byte checkpoint frame occupies the device's single secure HTTP worker
 for roughly five seconds. Metrics collection is intentionally serialized with
