@@ -42,11 +42,27 @@ jobs:
       - name: Apply deterministic source mutations
         run: |
           set -euo pipefail
-          python3 .github/scripts/apply_renderer_dma_attribution.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          for source, destination in (
+              (".github/scripts/apply_renderer_dma_attribution.py",
+               "/tmp/apply_renderer_dma_attribution.py"),
+              (".github/scripts/correct_renderer_dma_attribution.py",
+               "/tmp/correct_renderer_dma_attribution.py"),
+          ):
+              text = Path(source).read_text(encoding="utf-8")
+              text = text.replace("responseStartedAtMs", "responseStartedMs")
+              Path(destination).write_text(text, encoding="utf-8")
+          PY
+          python3 /tmp/apply_renderer_dma_attribution.py
           python3 .github/scripts/fix_renderer_memory_session_phase.py
-          python3 .github/scripts/correct_renderer_dma_attribution.py
+          python3 /tmp/correct_renderer_dma_attribution.py
           git diff --check
-          actual="$(git diff --name-only | sort)"
+          actual="$(
+            { git diff --name-only; git ls-files --others --exclude-standard; } \
+              | sort -u
+          )"
           expected="$(cat <<'EOF'
           docs/renderer-benchmark.md
           esp32/lib/device_debug/device_debug_http.cpp
@@ -135,7 +151,10 @@ jobs:
           git restore --source=HEAD --worktree --staged -- \
             ':(glob)esp32/sdkconfig*' || true
           git diff --check
-          actual="$(git diff --name-only | sort)"
+          actual="$(
+            { git diff --name-only; git ls-files --others --exclude-standard; } \
+              | sort -u
+          )"
           expected="$(cat <<'EOF'
           docs/renderer-benchmark.md
           esp32/lib/device_debug/device_debug_http.cpp
