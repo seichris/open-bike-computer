@@ -23,6 +23,7 @@
 
 | Plan | Status |
 | --- | --- |
+| [Topographic map support](plans/issue-190-topographic-map-support-implementation-plan.md) | Planned; tracks [issue #190](https://github.com/seichris/open-bike-computer/issues/190) |
 | [iPhone MapKit appearance switcher](plans/iphone-mapkit-appearance-switcher-implementation-plan.md) | Implemented in software; redesigned control rail pending physical validation |
 | [Opportunistic Bicino discovery and single-session BLE scanning](plans/opportunistic-bicino-discovery-implementation-plan.md) | Implemented in software; physical validation pending |
 | [Geofabrik/OSM 3D buildings](plans/geofabrik-osm-3d-buildings-implementation-plan.md) | Implemented; physical rendering validated on the 1.75-inch device |
