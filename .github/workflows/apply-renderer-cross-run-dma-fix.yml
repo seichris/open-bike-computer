@@ -45,7 +45,6 @@ jobs:
           expected="$(cat <<'EOF'
           docs/renderer-benchmark.md
           esp32/tools/renderer_benchmark.py
-          esp32/tools/tests/test_renderer_benchmark_cross_run_memory.py
           ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift
           ios-app/BikeComputerTests/NavigationProtocolTests.swift
           EOF
