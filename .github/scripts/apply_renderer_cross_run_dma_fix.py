@@ -1,300 +1,253 @@
 from __future__ import annotations
 
 from pathlib import Path
-import ast
-import re
 
 ROOT = Path.cwd()
+SWIFT = ROOT / "ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift"
+SWIFT_TEST = ROOT / "ios-app/BikeComputerTests/NavigationProtocolTests.swift"
+PYTHON = ROOT / "esp32/tools/renderer_benchmark.py"
+PYTHON_TEST = ROOT / "esp32/tools/tests/test_renderer_benchmark_cross_run_memory.py"
+DOC = ROOT / "docs/renderer-benchmark.md"
 
 
-def swift_block(text: str, marker: str):
-    position = text.index(marker)
-    start = text.rfind("\n", 0, position) + 1
-    brace = text.index("{", position)
+def replace_once(text: str, old: str, new: str, label: str) -> str:
+    count = text.count(old)
+    if count != 1:
+        raise RuntimeError(f"{label}: expected one match, found {count}")
+    return text.replace(old, new, 1)
+
+
+def replace_braced_function(text: str, marker: str, replacement: str) -> str:
+    start = text.index(marker)
+    brace = text.index("{", start)
     depth = 0
     for index in range(brace, len(text)):
-        if text[index] == "{":
+        character = text[index]
+        if character == "{":
             depth += 1
-        elif text[index] == "}":
+        elif character == "}":
             depth -= 1
             if depth == 0:
-                return start, brace, index + 1
-    raise RuntimeError(f"unclosed Swift block: {marker}")
+                return text[:start] + replacement + text[index + 1:]
+    raise RuntimeError(f"unclosed function: {marker}")
 
 
-def owner_before(text: str, position: int) -> str:
-    candidates = []
-    expression = re.compile(
-        r"(?m)^\s*(?:(?:private|internal|public|fileprivate)\s+)?"
-        r"(?:enum|struct|class)\s+(\w+)[^{]*\{"
-    )
-    for match in expression.finditer(text[:position]):
-        brace = text.find("{", match.start(), match.end() + 2)
-        if brace < 0:
-            continue
-        depth = 0
-        end = None
-        for index in range(brace, len(text)):
-            if text[index] == "{":
-                depth += 1
-            elif text[index] == "}":
-                depth -= 1
-                if depth == 0:
-                    end = index + 1
-                    break
-        if end is not None and end >= position:
-            candidates.append((brace, end, match.group(1)))
-    if not candidates:
-        raise RuntimeError("Swift owner type not found")
-    return max(candidates, key=lambda item: item[0])[2]
+def replace_python_function(text: str, name: str, replacement: str) -> str:
+    marker = f"def {name}("
+    start = text.index(marker)
+    following = text.find("\ndef ", start + len(marker))
+    if following < 0:
+        raise RuntimeError(f"next Python function not found after {name}")
+    return text[:start] + replacement.rstrip() + "\n\n" + text[following + 1:]
 
 
-def parse_swift_parameters(signature: str):
-    inside = signature[signature.index("(") + 1:signature.rindex(")")]
-    parts = []
-    start = 0
-    depth = 0
-    for index, character in enumerate(inside):
-        if character in "([<":
-            depth += 1
-        elif character in ")]>":
-            depth -= 1
-        elif character == "," and depth == 0:
-            parts.append(inside[start:index].strip())
-            start = index + 1
-    parts.append(inside[start:].strip())
-    result = []
-    for part in parts:
-        names = part.split(":", 1)[0].strip().split()
-        if len(names) == 1:
-            result.append((names[0], names[0]))
-        else:
-            result.append((names[-2], names[-1]))
-    return result
-
-
-def call_argument(label: str, expression: str) -> str:
-    return expression if label == "_" else f"{label}: {expression}"
-
-
-# Swift evaluator: terminal current heap values test retained state. Existing
-# per-window minima continue to enforce the unchanged absolute memory floors.
-swift_path = ROOT / (
-    "ios-app/BikeComputer/BikeComputer/Utilities/"
-    "SecureRendererBenchmarkProtocol.swift"
+swift = SWIFT.read_text(encoding="utf-8")
+swift_apply = r'''    static func applyCrossRunMemoryGates(
+        runs: inout [RendererBenchmarkRunEvidence],
+        gates: RendererBenchmarkGates
+    ) {
+        struct Check {
+            let value: (RendererBenchmarkRunEvidence) -> UInt32
+            let allowed: UInt32
+            let label: String
+        }
+        // Per-window minima remain authoritative for the unchanged absolute
+        // safety floors. Cross-run retention instead compares the standardized
+        // current heap state in each terminal metrics snapshot: a minimum may
+        // be set by any transient render, checkpoint, TLS, or polling phase and
+        // is therefore not evidence that memory remained allocated.
+        let checks = [
+            Check(value: { $0.finalSnapshot.memory.internalHeap.free },
+                  allowed: gates.trend.crossRunInternalAllowedDeclineBytes,
+                  label: "cross_run_internal_decline"),
+            Check(value: {
+                $0.finalSnapshot.memory.internalHeap.largestBlock
+            }, allowed: gates.trend.crossRunInternalAllowedDeclineBytes,
+               label: "cross_run_internal_largest_decline"),
+            Check(value: { $0.finalSnapshot.memory.psram.free },
+                  allowed: gates.trend.crossRunPsramAllowedDeclineBytes,
+                  label: "cross_run_psram_decline"),
+            Check(value: { $0.finalSnapshot.memory.psram.largestBlock },
+                  allowed: gates.trend.crossRunPsramAllowedDeclineBytes,
+                  label: "cross_run_psram_largest_decline"),
+            Check(value: { $0.finalSnapshot.memory.dmaHeap.free },
+                  allowed: gates.trend.crossRunDmaAllowedDeclineBytes,
+                  label: "cross_run_dma_decline"),
+            Check(value: {
+                $0.finalSnapshot.memory.dmaHeap.largestBlock
+            }, allowed: gates.trend.crossRunDmaAllowedDeclineBytes,
+               label: "cross_run_dma_largest_decline"),
+        ]
+        for profile in RendererBenchmarkProfile.allCases {
+            let indexes = runs.indices.filter {
+                runs[$0].profile == profile.wireName
+            }.sorted {
+                runs[$0].repeatNumber < runs[$1].repeatNumber
+            }
+            guard indexes.count >=
+                    SecureRendererBenchmarkPlan.comparisonRepeats else {
+                continue
+            }
+            for check in checks {
+                let values = indexes.map { check.value(runs[$0]) }
+                guard progressiveCrossRunDecline(
+                    values,
+                    allowedDecline: check.allowed
+                ) else { continue }
+                for index in indexes {
+                    runs[index].failures = Array(Set(
+                        runs[index].failures + [check.label]
+                    )).sorted()
+                    runs[index].passed = false
+                }
+            }
+        }
+    }'''
+swift = replace_braced_function(
+    swift,
+    "    static func applyCrossRunMemoryGates(",
+    swift_apply,
 )
-text = swift_path.read_text(encoding="utf-8")
-start, brace, end = swift_block(text, "func monotonicDecline")
-signature = text[start:brace].rstrip()
-owner = owner_before(text, start)
-parameters = parse_swift_parameters(signature)
-if len(parameters) < 2:
-    raise RuntimeError(f"unexpected monotonicDecline signature: {signature}")
-values_name = parameters[0][1]
-allowance_name = parameters[1][1]
-signature = re.sub(
-    r"\bprivate\s+static\s+func\s+monotonicDecline",
-    "static func monotonicDecline",
-    signature,
-    count=1,
-)
-body = f'''{{
-        guard {values_name}.count >= 3 else {{ return false }}
-        let normalized = {values_name}.map {{ Int64($0) }}
-        let allowed = max(Int64(0), Int64({allowance_name}))
+helper_marker = "    private static func median(_ values: [Double]) -> Double {"
+helper = r'''    static func progressiveCrossRunDecline(
+        _ values: [UInt32],
+        allowedDecline: UInt32
+    ) -> Bool {
+        guard values.count >= 3 else { return false }
+        let normalized = values.map(Int64.init)
+        let allowed = max(Int64(0), Int64(allowedDecline))
         let continuationNoise = max(Int64(1), allowed / 4)
+        let totalDecline = normalized[0] - normalized[normalized.count - 1]
+        guard totalDecline > allowed else { return false }
+
         var downwardSteps: [Int64] = []
         downwardSteps.reserveCapacity(normalized.count - 1)
-        for index in 1..<normalized.count {{
-            let delta = normalized[index - 1] - normalized[index]
-            if delta < -continuationNoise {{ return false }}
+        for (previous, current) in zip(
+            normalized,
+            normalized.dropFirst()
+        ) {
+            let delta = previous - current
+            // A rebound larger than the bounded noise allowance contradicts a
+            // progressive retained-state decline.
+            if delta < -continuationNoise { return false }
             downwardSteps.append(max(Int64(0), delta))
-        }}
-        guard normalized[0] - normalized[normalized.count - 1] > allowed,
-              let largestStep = downwardSteps.max() else {{
-            return false
-        }}
-        // A single cache/allocation transition is not progressive leakage.
-        // Require continued decline beyond the largest one-time step.
-        let continuedDecline = downwardSteps.reduce(Int64(0), +) - largestStep
-        return continuedDecline > continuationNoise
-    }}'''
-text = text[:start] + signature + " " + body + text[end:]
-
-apply_start, _, apply_end = swift_block(text, "func applyCrossRunMemoryGates")
-apply_body = text[apply_start:apply_end]
-replacements = {
-    ".summary.minimumInternalFree": ".finalSnapshot.memory.internalHeap.free",
-    ".summary.minimumInternalLargest": ".finalSnapshot.memory.internalHeap.largestBlock",
-    ".summary.minimumPsramFree": ".finalSnapshot.memory.psram.free",
-    ".summary.minimumPsramLargest": ".finalSnapshot.memory.psram.largestBlock",
-    ".summary.minimumDmaFree": ".finalSnapshot.memory.dmaHeap.free",
-    ".summary.minimumDmaLargest": ".finalSnapshot.memory.dmaHeap.largestBlock",
-}
-replaced = 0
-for old, new in replacements.items():
-    count = apply_body.count(old)
-    apply_body = apply_body.replace(old, new)
-    replaced += count
-if replaced < 2:
-    raise RuntimeError("cross-run Swift minimum-series references not found")
-text = text[:apply_start] + apply_body + text[apply_end:]
-swift_path.write_text(text, encoding="utf-8")
-
-# Preserve the new firmware phase attribution in evidence without making it
-# mandatory for older diagnostics schemas.
-text = swift_path.read_text(encoding="utf-8")
-structs = []
-expression = re.compile(
-    r"(?m)^\s*(?:(?:private|internal|public|fileprivate)\s+)?"
-    r"struct\s+(\w+)[^{]*\{"
-)
-for match in expression.finditer(text):
-    struct_brace = text.index("{", match.start())
-    depth = 0
-    for index in range(struct_brace, len(text)):
-        if text[index] == "{":
-            depth += 1
-        elif text[index] == "}":
-            depth -= 1
-            if depth == 0:
-                struct_body = text[struct_brace:index + 1]
-                if (
-                    "windowMinimumFree" in struct_body
-                    and "windowMinimumLargestBlock" in struct_body
-                    and "minimumEverFree" in struct_body
-                ):
-                    structs.append(
-                        (index + 1 - match.start(), match.group(1),
-                         match.start(), struct_brace, index + 1, struct_body)
-                    )
-                break
-if not structs:
-    raise RuntimeError("DMA heap model not found")
-dma_structs = [item for item in structs if "dma" in item[1].lower()]
-_, dma_name, _, dma_brace, _, dma_body = min(
-    dma_structs or structs, key=lambda item: item[0]
-)
-if "windowMinimumFreeAttribution" not in dma_body:
-    nested = '''
-        struct MinimumAttribution: Codable, Equatable {
-            let phase: String
-            let observedAtMs: UInt32
-            let value: Int
-            let frameTransferActive: Bool
         }
+        guard let largestStep = downwardSteps.max() else { return false }
+        // Discount one one-time cache/session transition. A real progressive
+        // leak or fragmentation trend must continue beyond that single step.
+        let continuedDecline =
+            downwardSteps.reduce(Int64(0), +) - largestStep
+        return continuedDecline > continuationNoise
+    }
 
 '''
-    text = text[:dma_brace + 1] + nested + text[dma_brace + 1:]
-    # Locate the same smallest DMA struct again after insertion.
-    selected = None
-    for match in expression.finditer(text):
-        if match.group(1) != dma_name:
+swift = replace_once(
+    swift, helper_marker, helper + helper_marker,
+    "Swift cross-run helper insertion",
+)
+SWIFT.write_text(swift, encoding="utf-8")
+
+python_text = PYTHON.read_text(encoding="utf-8")
+helper_py = r'''def progressive_cross_run_decline(
+    values: list[int], *, allowed_decline: int
+) -> bool:
+    if len(values) < 3:
+        return False
+    normalized = [int(value) for value in values]
+    allowed = max(0, int(allowed_decline))
+    continuation_noise = max(1, allowed // 4)
+    total_decline = normalized[0] - normalized[-1]
+    if total_decline <= allowed:
+        return False
+
+    downward_steps: list[int] = []
+    for previous, current in zip(normalized, normalized[1:]):
+        delta = previous - current
+        if delta < -continuation_noise:
+            return False
+        downward_steps.append(max(0, delta))
+    if not downward_steps:
+        return False
+    largest_step = max(downward_steps)
+    return sum(downward_steps) - largest_step > continuation_noise
+
+
+'''
+apply_py = r'''def apply_cross_run_memory_gates(
+    runs: list[dict[str, Any]], gates: dict[str, Any]
+) -> None:
+    trend = gates["trend"]
+    # Per-window minima continue to enforce the unchanged absolute floors.
+    # Cross-run retention uses terminal current heap state because a minimum
+    # may be set by any transient render, checkpoint, TLS, or polling phase.
+    checks = (
+        (
+            lambda run: run["finalSnapshot"]["memory"]["internalHeap"]["free"],
+            "crossRunInternalAllowedDeclineBytes",
+            "cross_run_internal_decline",
+        ),
+        (
+            lambda run: run["finalSnapshot"]["memory"]["internalHeap"][
+                "largestBlock"
+            ],
+            "crossRunInternalAllowedDeclineBytes",
+            "cross_run_internal_largest_decline",
+        ),
+        (
+            lambda run: run["finalSnapshot"]["memory"]["psram"]["free"],
+            "crossRunPsramAllowedDeclineBytes",
+            "cross_run_psram_decline",
+        ),
+        (
+            lambda run: run["finalSnapshot"]["memory"]["psram"]["largestBlock"],
+            "crossRunPsramAllowedDeclineBytes",
+            "cross_run_psram_largest_decline",
+        ),
+        (
+            lambda run: run["finalSnapshot"]["memory"]["dmaHeap"]["free"],
+            "crossRunDmaAllowedDeclineBytes",
+            "cross_run_dma_decline",
+        ),
+        (
+            lambda run: run["finalSnapshot"]["memory"]["dmaHeap"][
+                "largestBlock"
+            ],
+            "crossRunDmaAllowedDeclineBytes",
+            "cross_run_dma_largest_decline",
+        ),
+    )
+    for profile in PROFILES:
+        profile_runs = sorted(
+            (run for run in runs if run["profile"] == profile),
+            key=lambda run: run["repeat"],
+        )
+        if len(profile_runs) < 3:
             continue
-        candidate_brace = text.index("{", match.start())
-        depth = 0
-        for index in range(candidate_brace, len(text)):
-            if text[index] == "{":
-                depth += 1
-            elif text[index] == "}":
-                depth -= 1
-                if depth == 0:
-                    candidate = text[candidate_brace:index + 1]
-                    if "windowMinimumFree" in candidate:
-                        selected = (candidate_brace, index + 1, candidate)
-                        break
-        if selected is not None:
-            break
-    if selected is None:
-        raise RuntimeError("DMA heap model disappeared after insertion")
-    dma_brace, _, dma_body = selected
-    property_match = re.search(
-        r"(?m)^(\s*)let\s+windowMinimumLargestBlock\s*:\s*[^\n]+$",
-        dma_body,
-    )
-    if property_match is None:
-        raise RuntimeError("DMA largest minimum property not found")
-    absolute = dma_brace + property_match.end()
-    indent = property_match.group(1)
-    properties = (
-        f"\n{indent}var windowMinimumFreeAttribution: MinimumAttribution? = nil"
-        f"\n{indent}var windowMinimumLargestBlockAttribution: MinimumAttribution? = nil"
-    )
-    text = text[:absolute] + properties + text[absolute:]
-swift_path.write_text(text, encoding="utf-8")
-
-# Python mirror.
-python_path = ROOT / "esp32/tools/renderer_benchmark.py"
-python_text = python_path.read_text(encoding="utf-8")
-tree = ast.parse(python_text)
-node = next(
-    item for item in tree.body
-    if isinstance(item, ast.FunctionDef) and item.name == "monotonic_decline"
+        for value, allowed_key, label in checks:
+            values = [value(run) for run in profile_runs]
+            if progressive_cross_run_decline(
+                values, allowed_decline=trend[allowed_key]
+            ):
+                for run in profile_runs:
+                    run["failures"] = sorted(set(run["failures"] + [label]))
+                    run["passed"] = False
+'''
+python_text = replace_python_function(
+    python_text, "apply_cross_run_memory_gates", apply_py
 )
-arguments = [argument.arg for argument in node.args.args]
-if len(arguments) < 2:
-    raise RuntimeError("unexpected Python monotonic_decline signature")
-lines = python_text.splitlines(keepends=True)
-indent = " " * node.col_offset
-signature_line = lines[node.lineno - 1].rstrip("\n")
-new_lines = [
-    signature_line,
-    f"{indent}    if len({arguments[0]}) < 3:",
-    f"{indent}        return False",
-    f"{indent}    normalized = [int(value) for value in {arguments[0]}]",
-    f"{indent}    allowed = max(0, int({arguments[1]}))",
-    f"{indent}    continuation_noise = max(1, allowed // 4)",
-    f"{indent}    downward_steps = []",
-    f"{indent}    for previous, current in zip(normalized, normalized[1:]):",
-    f"{indent}        delta = previous - current",
-    f"{indent}        if delta < -continuation_noise:",
-    f"{indent}            return False",
-    f"{indent}        downward_steps.append(max(0, delta))",
-    f"{indent}    if normalized[0] - normalized[-1] <= allowed:",
-    f"{indent}        return False",
-    f"{indent}    largest_step = max(downward_steps, default=0)",
-    f"{indent}    return sum(downward_steps) - largest_step > continuation_noise",
-]
-lines[node.lineno - 1:node.end_lineno] = [line + "\n" for line in new_lines]
-python_text = "".join(lines)
-tree = ast.parse(python_text)
-apply_node = next(
-    item for item in tree.body
-    if isinstance(item, ast.FunctionDef)
-    and item.name == "apply_cross_run_memory_gates"
-)
-lines = python_text.splitlines(keepends=True)
-apply_text = "".join(lines[apply_node.lineno - 1:apply_node.end_lineno])
-python_replacements = {
-    '["summary"]["minimumInternalFree"]': '["finalSnapshot"]["memory"]["internalHeap"]["free"]',
-    '["summary"]["minimumInternalLargest"]': '["finalSnapshot"]["memory"]["internalHeap"]["largestBlock"]',
-    '["summary"]["minimumPsramFree"]': '["finalSnapshot"]["memory"]["psram"]["free"]',
-    '["summary"]["minimumPsramLargest"]': '["finalSnapshot"]["memory"]["psram"]["largestBlock"]',
-    '["summary"]["minimumDmaFree"]': '["finalSnapshot"]["memory"]["dmaHeap"]["free"]',
-    '["summary"]["minimumDmaLargest"]': '["finalSnapshot"]["memory"]["dmaHeap"]["largestBlock"]',
-    "['summary']['minimumInternalFree']": "['finalSnapshot']['memory']['internalHeap']['free']",
-    "['summary']['minimumInternalLargest']": "['finalSnapshot']['memory']['internalHeap']['largestBlock']",
-    "['summary']['minimumPsramFree']": "['finalSnapshot']['memory']['psram']['free']",
-    "['summary']['minimumPsramLargest']": "['finalSnapshot']['memory']['psram']['largestBlock']",
-    "['summary']['minimumDmaFree']": "['finalSnapshot']['memory']['dmaHeap']['free']",
-    "['summary']['minimumDmaLargest']": "['finalSnapshot']['memory']['dmaHeap']['largestBlock']",
-}
-python_replaced = 0
-for old, new in python_replacements.items():
-    count = apply_text.count(old)
-    apply_text = apply_text.replace(old, new)
-    python_replaced += count
-if python_replaced < 2:
-    raise RuntimeError("cross-run Python minimum-series references not found")
-lines[apply_node.lineno - 1:apply_node.end_lineno] = [apply_text]
-python_text = "".join(lines)
-ast.parse(python_text)
-python_path.write_text(python_text, encoding="utf-8")
+insert_marker = "\ndef apply_cross_run_memory_gates("
+if helper_py.strip() not in python_text:
+    python_text = replace_once(
+        python_text,
+        insert_marker,
+        "\n" + helper_py + "def apply_cross_run_memory_gates(",
+        "Python cross-run helper insertion",
+    )
+PYTHON.write_text(python_text, encoding="utf-8")
 
-# Permanent Python policy regression.
-(ROOT / "esp32/tools/tests/test_renderer_benchmark_cross_run_memory.py").write_text(
-'''#!/usr/bin/env python3
+PYTHON_TEST.write_text(r'''#!/usr/bin/env python3
 from __future__ import annotations
+
 import copy
 import importlib.util
 import json
@@ -307,151 +260,254 @@ SPEC = importlib.util.spec_from_file_location(
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
-GATES = json.loads((ROOT / "tools" / "renderer_benchmark_gates.json").read_text())
+GATES = json.loads(
+    (ROOT / "tools" / "renderer_benchmark_gates.json").read_text(
+        encoding="utf-8"
+    )
+)
 
 
-def run(profile, repeat, *, minimum, current,
-        minimum_largest=22000, current_largest=24000):
+def run(
+    profile: str,
+    repeat: int,
+    *,
+    minimum: int,
+    current: int,
+    minimum_largest: int = 22000,
+    current_largest: int = 28660,
+) -> dict:
     return {
-        "profile": profile, "repeat": repeat, "passed": True, "failures": [],
+        "profile": profile,
+        "repeat": repeat,
+        "passed": True,
+        "failures": [],
         "summary": {
-            "minimumInternalFree": 60000, "minimumInternalLargest": 40000,
-            "minimumPsramFree": 2500000, "minimumPsramLargest": 1800000,
-            "minimumDmaFree": minimum, "minimumDmaLargest": minimum_largest,
+            "minimumInternalFree": 60000,
+            "minimumInternalLargest": 40000,
+            "minimumPsramFree": 2500000,
+            "minimumPsramLargest": 1800000,
+            "minimumDmaFree": minimum,
+            "minimumDmaLargest": minimum_largest,
         },
-        "finalSnapshot": {"memory": {
-            "internalHeap": {"free": 70000, "largestBlock": 50000},
-            "psram": {"free": 2700000, "largestBlock": 1900000},
-            "dmaHeap": {
-                "free": current, "minimumEverFree": min(minimum, current),
-                "largestBlock": current_largest,
-                "windowMinimumFree": minimum,
-                "windowMinimumLargestBlock": minimum_largest,
-            },
-        }},
+        "finalSnapshot": {
+            "memory": {
+                "internalHeap": {"free": 70000, "largestBlock": 50000},
+                "psram": {"free": 2700000, "largestBlock": 1900000},
+                "dmaHeap": {
+                    "free": current,
+                    "minimumEverFree": min(minimum, current),
+                    "largestBlock": current_largest,
+                    "windowMinimumFree": minimum,
+                    "windowMinimumLargestBlock": minimum_largest,
+                },
+            }
+        },
     }
 
 
-def evaluated(runs):
-    candidate = copy.deepcopy(runs)
-    result = MODULE.apply_cross_run_memory_gates(candidate, GATES)
-    return candidate if result is None else result
+def evaluated(rows: list[dict]) -> list[dict]:
+    result = copy.deepcopy(rows)
+    MODULE.apply_cross_run_memory_gates(result, GATES)
+    return result
 
 
-def failures(rows, profile="high"):
-    return [failure for row in rows if row["profile"] == profile
-            for failure in row.get("failures", [])]
+def profile_failures(rows: list[dict], profile: str = "high") -> list[str]:
+    return [
+        failure
+        for row in rows
+        if row["profile"] == profile
+        for failure in row.get("failures", [])
+    ]
 
 
-def main():
-    assert MODULE.monotonic_decline([40000, 39000, 38000], 1024)
-    assert not MODULE.monotonic_decline([40000, 38000, 38000], 1024)
-    assert not MODULE.monotonic_decline([40000, 39920, 40010], 1024)
-    assert not MODULE.monotonic_decline([39307, 37803, 37779], 1024)
+def main() -> None:
+    allowed = GATES["trend"]["crossRunDmaAllowedDeclineBytes"]
 
-    leak = [run("high", 1, minimum=39000, current=46000),
-            run("high", 2, minimum=37500, current=45000),
-            run("high", 3, minimum=36000, current=44000)]
-    assert any("dma" in value and "decline" in value
-               for value in failures(evaluated(leak)))
+    assert MODULE.progressive_cross_run_decline(
+        [46000, 44500, 43000], allowed_decline=allowed
+    )
+    assert not MODULE.progressive_cross_run_decline(
+        [46000, 44000, 43990], allowed_decline=allowed
+    )
+    assert not MODULE.progressive_cross_run_decline(
+        [46000, 45920, 46010], allowed_decline=allowed
+    )
+    assert not MODULE.progressive_cross_run_decline(
+        [39307, 37803, 37779], allowed_decline=allowed
+    )
 
-    plateau = [run("high", 1, minimum=39307, current=45251),
-               run("high", 2, minimum=37803, current=43700),
-               run("high", 3, minimum=37779, current=43690)]
-    assert not failures(evaluated(plateau))
+    leak = [
+        run("high", 1, minimum=39000, current=46000),
+        run("high", 2, minimum=37500, current=44500),
+        run("high", 3, minimum=36000, current=43000),
+    ]
+    assert "cross_run_dma_decline" in profile_failures(evaluated(leak))
 
-    physical = [run("high", 1, minimum=39307, current=45251,
-                    minimum_largest=23540, current_largest=25588),
-                run("high", 2, minimum=37803, current=44983,
-                    minimum_largest=21492, current_largest=25588),
-                run("high", 3, minimum=37779, current=44907,
-                    minimum_largest=21492, current_largest=25588)]
-    assert not failures(evaluated(physical))
+    plateau = [
+        run("high", 1, minimum=39307, current=46000),
+        run("high", 2, minimum=37803, current=44000),
+        run("high", 3, minimum=37779, current=43990),
+    ]
+    assert not profile_failures(evaluated(plateau))
 
-    transient = [run("high", 1, minimum=39000, current=46000),
-                 run("high", 2, minimum=37000, current=45950),
-                 run("high", 3, minimum=35000, current=46020)]
-    assert not failures(evaluated(transient))
+    jitter = [
+        run("high", 1, minimum=39000, current=46000),
+        run("high", 2, minimum=38900, current=45920),
+        run("high", 3, minimum=39100, current=46010),
+    ]
+    assert not profile_failures(evaluated(jitter))
 
-    fragmented = [run("high", 1, minimum=39000, current=46000,
-                      current_largest=26000),
-                  run("high", 2, minimum=39000, current=46000,
-                      current_largest=25000),
-                  run("high", 3, minimum=39000, current=46000,
-                      current_largest=24000)]
-    assert any("dma" in value and "decline" in value
-               for value in failures(evaluated(fragmented)))
+    transient = [
+        run("high", 1, minimum=39000, current=46000),
+        run("high", 2, minimum=37000, current=45950),
+        run("high", 3, minimum=35000, current=46020),
+    ]
+    assert not profile_failures(evaluated(transient))
 
-    interleaved = [physical[0], run("flat", 1, minimum=41000, current=47000),
-                   physical[1], run("current", 1, minimum=40000, current=46500),
-                   physical[2]]
-    assert not failures(evaluated(interleaved))
-    print("renderer cross-run memory policy tests passed")
+    physical = [
+        run(
+            "high", 1, minimum=39307, current=45251,
+            minimum_largest=23540, current_largest=28660
+        ),
+        run(
+            "high", 2, minimum=37803, current=44983,
+            minimum_largest=21492, current_largest=28660
+        ),
+        run(
+            "high", 3, minimum=37779, current=44907,
+            minimum_largest=21492, current_largest=28660
+        ),
+    ]
+    assert not profile_failures(evaluated(physical))
+
+    fragmented = [
+        run("high", 1, minimum=39000, current=46000,
+            current_largest=26000),
+        run("high", 2, minimum=39000, current=46000,
+            current_largest=24500),
+        run("high", 3, minimum=39000, current=46000,
+            current_largest=23000),
+    ]
+    assert "cross_run_dma_largest_decline" in profile_failures(
+        evaluated(fragmented)
+    )
+
+    interleaved = [
+        physical[2],
+        run("flat", 2, minimum=41000, current=47000),
+        physical[0],
+        run("current", 1, minimum=40000, current=46500),
+        physical[1],
+    ]
+    assert not profile_failures(evaluated(interleaved))
+
+    print("renderer cross-run retained-memory policy tests passed")
 
 
 if __name__ == "__main__":
     main()
 ''', encoding="utf-8")
 
-# Gate copies must stay byte-identical and retain the physically attested 0.3
-# metrics-sample calibration.
-(ROOT / "esp32/tools/tests/test_renderer_benchmark_gate_parity.py").write_text(
-'''#!/usr/bin/env python3
-from pathlib import Path
-import hashlib
-import json
-
-root = Path(__file__).resolve().parents[3]
-firmware = root / "esp32/tools/renderer_benchmark_gates.json"
-app = root / "ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-gates-v1.json"
-a = firmware.read_bytes()
-b = app.read_bytes()
-assert a == b, (hashlib.sha256(a).hexdigest(), hashlib.sha256(b).hexdigest())
-config = json.loads(a)
-
-def find(value, key):
-    if isinstance(value, dict):
-        if key in value:
-            return value[key]
-        for child in value.values():
-            found = find(child, key)
-            if found is not None:
-                return found
-    elif isinstance(value, list):
-        for child in value:
-            found = find(child, key)
-            if found is not None:
-                return found
-    return None
-
-assert find(config, "minimumMetricsSampleFraction") == 0.3
-print("renderer benchmark gate copies are canonical and byte-identical")
-''', encoding="utf-8")
-
-# Add direct Swift sequence tests to the existing command-line test harness.
-test_path = ROOT / "ios-app/BikeComputerTests/NavigationProtocolTests.swift"
-test_text = test_path.read_text(encoding="utf-8")
-main = re.search(r"(?m)^\s*static func main\(\)(?:\s+async)?\s*\{", test_text)
-if main is None:
-    raise RuntimeError("Swift navigation test main not found")
-
-def swift_call(values, allowance):
-    return owner + ".monotonicDecline(" + ", ".join([
-        call_argument(parameters[0][0], "[" + ",".join(map(str, values)) + "]"),
-        call_argument(parameters[1][0], str(allowance)),
-    ]) + ")"
-
-assertions = '''
-        // Distinguish a progressive retained trend from a one-time transition.
-        assert(%s, "progressive retained decline is rejected")
-        assert(!%s, "one-time step followed by plateau is accepted")
-        assert(!%s, "stable memory with small jitter is accepted")
-        assert(!%s, "physical high-profile values are step plus plateau")
-''' % (
-    swift_call([40000, 39000, 38000], 1024),
-    swift_call([40000, 38000, 38000], 1024),
-    swift_call([40000, 39920, 40010], 1024),
-    swift_call([39307, 37803, 37779], 1024),
+tests = SWIFT_TEST.read_text(encoding="utf-8")
+call_marker = '''        testSecureRendererBenchmarkProtocol()
+        testSecureRendererReplayWindowOrdering()
+'''
+tests = replace_once(
+    tests,
+    call_marker,
+    '''        testSecureRendererBenchmarkProtocol()
+        testRendererCrossRunRetainedMemoryPolicy()
+        testSecureRendererReplayWindowOrdering()
+''',
+    "Swift test registration",
 )
-test_text = test_text[:main.end()] + assertions + test_text[main.end():]
-test_path.write_text(test_text, encoding="utf-8")
+function_marker = '''    static func testSecureRendererReplayWindowOrdering() {
+'''
+function = r'''    static func testRendererCrossRunRetainedMemoryPolicy() {
+        assert(
+            RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [46_000, 44_500, 43_000],
+                allowedDecline: 1_024
+            ),
+            "progressive retained DMA decline is rejected"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [46_000, 44_000, 43_990],
+                allowedDecline: 1_024
+            ),
+            "one-time transition followed by a plateau is accepted"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [46_000, 45_920, 46_010],
+                allowedDecline: 1_024
+            ),
+            "stable retained memory with jitter is accepted"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [39_307, 37_803, 37_779],
+                allowedDecline: 1_024
+            ),
+            "the physical three-point minimum series is not progressive"
+        )
+
+        let sourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift"
+        )
+        guard let source = try? String(
+            contentsOf: sourceURL,
+            encoding: .utf8
+        ), let start = source.range(
+            of: "    static func applyCrossRunMemoryGates("
+        ), let end = source.range(
+            of: "    static func aggregate(",
+            range: start.upperBound..<source.endIndex
+        ) else {
+            assert(false, "cross-run memory source contract is readable")
+            return
+        }
+        let body = String(source[start.lowerBound..<end.lowerBound])
+        assert(
+            body.contains("finalSnapshot.memory.dmaHeap.free") &&
+                body.contains("finalSnapshot.memory.dmaHeap.largestBlock"),
+            "cross-run DMA gates use terminal current state"
+        )
+        assert(
+            !body.contains(".summary.minimumDmaFree") &&
+                !body.contains(".summary.minimumDmaLargest"),
+            "heterogeneous window minima are not treated as retained state"
+        )
+    }
+
+'''
+tests = replace_once(
+    tests, function_marker, function + function_marker,
+    "Swift retained-memory test insertion",
+)
+SWIFT_TEST.write_text(tests, encoding="utf-8")
+
+doc = DOC.read_text(encoding="utf-8")
+doc_marker = '''These are intentionally predeclared so results cannot be judged against a
+moving target. If physical evidence shows a threshold should change, update it
+in a separate reviewed change before rerunning the experiment.
+'''
+doc_insert = '''Per-window minimum-free and minimum-largest-block values continue to enforce
+the unchanged absolute floors, and the retained one-second samples continue to
+drive the within-window trend checks. Cross-run retention is evaluated
+separately from each run's terminal current free and largest-block values.
+Window minima are deliberately not used for this purpose because they combine
+heterogeneous observation phases (window start, periodic polling, render
+completion, and secure checkpoint activity) and therefore describe transient
+low-water pressure rather than memory that remained allocated. A cross-run
+failure still requires a decline beyond the existing byte allowance to
+continue after discounting one bounded session/cache transition; progressive
+free-memory loss and progressive largest-block fragmentation remain failures.
+
+'''
+doc = replace_once(
+    doc, doc_marker, doc_marker + "\n" + doc_insert,
+    "renderer benchmark retained-memory documentation",
+)
+DOC.write_text(doc, encoding="utf-8")
