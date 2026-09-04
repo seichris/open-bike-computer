@@ -272,6 +272,14 @@ int main() {
   assert(!ended.remoteDebug.active);
   assert(ended.replayTransport.rbs1Detected == 0);
   assert(ended.replayTransport.markerRejectedNoActiveWindow == 0);
+  assert(!state.noteRouteMarker(routeHash, sizeof(routeHash), 12, 90, 1,
+                                4001));
+  const ReplayTransportDiagnostics postSessionReplay =
+      state.replayTransportDiagnostics();
+  assert(postSessionReplay.lastTransportEventAtMs == 0);
+  assert(postSessionReplay.lastMarkerAtMs == 0);
+  assert(postSessionReplay.markerAccepted == 0);
+  assert(postSessionReplay.markerRejectedNoActiveWindow == 0);
   assert(!state.beginWindow(43, runIdentity(kRouteHash), Profile::High, 4001,
                             13));
   assert(state.measurementWindowId() == 0);

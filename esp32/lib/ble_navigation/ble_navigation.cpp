@@ -5199,13 +5199,16 @@ public:
 #endif
       return;
     }
-#if FIRMWARE_DIAGNOSTICS
-    renderer_diagnostics::noteGpsAuthentication(true, receivedAtMs);
-#endif
     if (!requireAuthenticated("GPS position")) {
+#if FIRMWARE_DIAGNOSTICS
+      renderer_diagnostics::noteGpsAuthentication(false, receivedAtMs);
+#endif
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Gps);
       return;
     }
+#if FIRMWARE_DIAGNOSTICS
+    renderer_diagnostics::noteGpsAuthentication(true, receivedAtMs);
+#endif
 
 #if FIRMWARE_DIAGNOSTICS
     const uint8_t *bytes = reinterpret_cast<const uint8_t *>(value.data());

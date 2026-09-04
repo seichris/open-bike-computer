@@ -535,6 +535,8 @@ public:
   bool noteRouteMarker(const uint8_t *fixtureSha256, size_t hashBytes,
                        uint16_t sampleIndex, uint16_t sampleCount,
                        uint32_t loop, uint32_t nowMs) {
+    if (!sessionActive_)
+      return false;
     replayTransport_.lastTransportEventAtMs = nowMs;
     replayTransport_.lastMarkerAtMs = nowMs;
     replayTransport_.lastActiveWindowId = measurementWindowId_;

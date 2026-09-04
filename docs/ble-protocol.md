@@ -1212,6 +1212,16 @@ selection/reach and limiter counters,
 render-job outcomes, UI/display/GPS gaps, prediction state, fixture-marker
 freshness, and remote-debug overhead. It intentionally contains no route
 coordinates, network credentials, or transfer token.
+
+Diagnostic firmware also includes a session-scoped `replayTransport` object.
+Its bounded counters distinguish authenticated GPS envelope acceptance,
+RBS1 detection and decoding, GPS-mailbox admission, and marker acceptance or
+rejection (`invalid`, `no_active_window`, `active_fixture_unavailable`, or
+`fixture_mismatch`). Last-event state contains only monotonic timestamps,
+window/sample/loop identifiers, and four-byte fixture-hash tags. It is reset at
+diagnostics-session end, is not reset by a new measurement window, and contains
+no owner key, ciphertext, plaintext GPS payload, network credential, transfer
+token, certificate, or pin.
 The DMA-crypto rejection and operation-failure fields are deltas from the
 counter baseline captured at the start of the active measurement window; the
 DMA object identifies that contract as `cryptoCountersScope: "window"`. The
