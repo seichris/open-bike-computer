@@ -24,8 +24,15 @@ start = ble.index(start_marker)
 end = ble.index(end_marker, start)
 flush = '''    private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
         var madeProgress = false
-        while true {
-            var wroteRegular = false
+        navigationLatestStateWriteQueue.flush(maxWrites: 1) { write in
+            madeProgress = true
+            write.perform(using: endpoint.write)
+            log("Sent \\(write.label): \\(write.data.count) bytes")
+        }
+        // Preserve the established independent no-response bypass for
+        // non-renderer traffic. Renderer replay no longer enters this lane:
+        // its route and RBS1 writes share the acknowledged ordered queue.
+        if navigationLatestStateWriteQueue.count == 0 {
             navigationWriteQueue.flush(canSend: { [weak self] write in
                 guard let self else { return false }
                 let expectsWriteResponse = write.transportExpectsWriteResponse
@@ -35,7 +42,6 @@ flush = '''    private func flushPendingNavigationWrites(endpoint: NavigationWri
                 }
                 return write.transportCanSend?() ?? endpoint.canSend()
             }, maxWrites: 1) { write in
-                wroteRegular = true
                 madeProgress = true
                 let expectsWriteResponse = write.transportExpectsWriteResponse
                     ?? endpoint.expectsWriteResponse
@@ -45,22 +51,7 @@ flush = '''    private func flushPendingNavigationWrites(endpoint: NavigationWri
                 write.perform(using: endpoint.write)
                 log("Sent \\(write.label): \\(write.data.count) bytes")
             }
-            if !wroteRegular || writeWithResponseInFlight {
-                break
-            }
         }
-
-        // This lane contains only explicitly independent no-response work.
-        // Renderer replay no longer enters it: benchmark route and RBS1 writes
-        // share the acknowledged ordered queue above. Independent transfer
-        // control may therefore retain its existing ability to bypass an
-        // unrelated write-with-response acknowledgement.
-        navigationLatestStateWriteQueue.flush(maxWrites: 1) { write in
-            madeProgress = true
-            write.perform(using: endpoint.write)
-            log("Sent \\(write.label): \\(write.data.count) bytes")
-        }
-
         updateNavigationBackpressureWatchdog(
             madeProgress: madeProgress,
             hasPendingWrites: navigationPendingWriteCount > 0
