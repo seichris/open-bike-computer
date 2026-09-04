@@ -106,10 +106,10 @@ public:
   }
 
 private:
-  static constexpr std::array<uint32_t, 27> kUpperBoundsMs{{
+  static constexpr std::array<uint32_t, 28> kUpperBoundsMs{{
       1,    2,    4,    8,    12,   16,   24,   32,   48,
       64,   80,   100,  125,  150,  200,  250,  350,  500,
-      750,  1000, 1500, 2000, 3000, 5000, 7500, 10000,
+      750,  1000, 1250, 1500, 2000, 3000, 5000, 7500, 10000,
       std::numeric_limits<uint32_t>::max(),
   }};
 
@@ -178,6 +178,16 @@ struct JobCounters {
   uint32_t invariantFailed = 0;
 };
 
+enum class JobEvent : uint8_t {
+  Requested,
+  Started,
+  Completed,
+  Published,
+  Stale,
+  Cancelled,
+  InvariantFailed,
+};
+
 struct RemoteDebugOverhead {
   bool active = false;
   uint32_t snapshotBytes = 0;
@@ -189,6 +199,18 @@ struct RemoteDebugOverhead {
   uint32_t maximumCopyUs = 0;
   uint32_t lastHttpResponseMs = 0;
   uint32_t maximumHttpResponseMs = 0;
+  uint32_t lastFrameSnapshotWaitUs = 0;
+  uint32_t maximumFrameSnapshotWaitUs = 0;
+  uint32_t lastFrameCrcUs = 0;
+  uint32_t maximumFrameCrcUs = 0;
+  uint32_t lastHttpExpectedBytes = 0;
+  uint32_t lastHttpActualBytes = 0;
+  uint32_t lastHttpWriteCalls = 0;
+  uint32_t lastHttpZeroWriteCalls = 0;
+  uint32_t lastHttpShortWriteCalls = 0;
+  uint32_t lastHttpActiveTlsWriteUs = 0;
+  uint32_t lastHttpNoProgressWaitMs = 0;
+  uint32_t lastHttpIntentionalDelayMs = 0;
   uint32_t freeBefore = 0;
   uint32_t largestBefore = 0;
   uint32_t freeAfterAllocate = 0;
@@ -269,7 +291,6 @@ public:
 
   bool beginWindow(uint32_t windowId, const RunIdentity &identity,
                    renderer_tuning::Profile profile, uint32_t nowMs,
-                   const JobCounters &currentJobs,
                    uint32_t currentGpsPacketSequence) {
     if (!sessionActive_ || windowId == 0)
       return false;
@@ -278,8 +299,7 @@ public:
     windowStartedAtMs_ = nowMs;
     run_ = identity;
     profile_ = profile;
-    jobs_ = currentJobs;
-    jobBaseline_ = currentJobs;
+    jobs_ = {};
     lastGpsPacketSequence_ = currentGpsPacketSequence;
     return true;
   }
@@ -331,10 +351,49 @@ public:
     return true;
   }
 
-  void noteJobs(const JobCounters &jobs) { jobs_ = jobs; }
+  bool noteJobForWindow(uint32_t windowId, JobEvent event) {
+    if (!sessionActive_ || windowId == 0 ||
+        windowId != measurementWindowId_) {
+      return false;
+    }
+    switch (event) {
+    case JobEvent::Requested:
+      ++jobs_.requested;
+      break;
+    case JobEvent::Started:
+      ++jobs_.started;
+      break;
+    case JobEvent::Completed:
+      ++jobs_.completed;
+      break;
+    case JobEvent::Published:
+      ++jobs_.published;
+      break;
+    case JobEvent::Stale:
+      ++jobs_.stale;
+      break;
+    case JobEvent::Cancelled:
+      ++jobs_.cancelled;
+      break;
+    case JobEvent::InvariantFailed:
+      ++jobs_.invariantFailed;
+      break;
+    }
+    return true;
+  }
 
-  void noteInterrupted() { ++interrupted_; }
-  void noteCoverageRejected() { ++coverageRejected_; }
+  void noteInterruptedForWindow(uint32_t windowId) {
+    if (sessionActive_ && windowId != 0 &&
+        windowId == measurementWindowId_) {
+      ++interrupted_;
+    }
+  }
+  void noteCoverageRejectedForWindow(uint32_t windowId) {
+    if (sessionActive_ && windowId != 0 &&
+        windowId == measurementWindowId_) {
+      ++coverageRejected_;
+    }
+  }
 
   void noteUiLoopGap(uint32_t milliseconds) {
     maximumUiGapMs_ = std::max(maximumUiGapMs_, milliseconds);
@@ -421,7 +480,7 @@ public:
     result.buildings = buildings_;
     result.buildings.allocationFallback = allocationFallbackObserved_;
     result.limiterPasses = limiterPasses_;
-    result.jobs = subtractJobs(jobs_, jobBaseline_);
+    result.jobs = jobs_;
     result.interrupted = interrupted_;
     result.coverageRejected = coverageRejected_;
     result.maximumUiGapMs = maximumUiGapMs_;
@@ -455,19 +514,6 @@ private:
 
   static uint32_t subtract(uint32_t value, uint32_t baseline) {
     return value >= baseline ? value - baseline : 0;
-  }
-
-  static JobCounters subtractJobs(const JobCounters &value,
-                                  const JobCounters &baseline) {
-    return {
-        subtract(value.requested, baseline.requested),
-        subtract(value.started, baseline.started),
-        subtract(value.completed, baseline.completed),
-        subtract(value.published, baseline.published),
-        subtract(value.stale, baseline.stale),
-        subtract(value.cancelled, baseline.cancelled),
-        subtract(value.invariantFailed, baseline.invariantFailed),
-    };
   }
 
   static int hexNibble(char value) {
@@ -525,7 +571,7 @@ private:
     buildings_ = {};
     allocationFallbackObserved_ = false;
     limiterPasses_.fill(0);
-    jobBaseline_ = jobs_;
+    jobs_ = {};
     interrupted_ = 0;
     coverageRejected_ = 0;
     maximumUiGapMs_ = 0;
@@ -568,7 +614,6 @@ private:
   bool allocationFallbackObserved_ = false;
   std::array<uint32_t, 6> limiterPasses_{};
   JobCounters jobs_{};
-  JobCounters jobBaseline_{};
   uint32_t interrupted_ = 0;
   uint32_t coverageRejected_ = 0;
   uint32_t maximumUiGapMs_ = 0;

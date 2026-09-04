@@ -64,6 +64,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstring>
+#include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -74,6 +75,7 @@
 #include <host/ble_hs_mbuf.h>
 #include <nimble/porting/nimble/include/nimble/nimble_port.h>
 #include <mbedtls/md.h>
+#include <new>
 #include <WiFi.h>
 
 #if !defined(CONFIG_BT_NIMBLE_MAX_CONNECTIONS) || \
@@ -120,6 +122,7 @@ static bool bleSessionSupportsStreetLabels = false;
 static bool bleSessionSupports3DBuildings = false;
 static std::atomic<bool> bleSessionSupportsExplicitInvalidGpsHeading{false};
 static std::atomic<bool> bleSessionSupportsRendererDiagnostics{false};
+static std::atomic<bool> bleSessionSupportsRendererBenchmarkSample{false};
 static std::atomic<bool> bleSessionSupportsRideDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRideDeliveryAck{false};
 // Captured while the ownership mutex is held by the accepted ride write. The
@@ -832,9 +835,29 @@ static PendingRouteRideDelivery pendingRouteRideDelivery;
 static PendingMapInput pendingGpsInput;
 static constexpr size_t MAP_SETTING_SLOT_COUNT = 256;
 static constexpr size_t MAP_SETTING_MASK_BYTES = MAP_SETTING_SLOT_COUNT / 8;
-static PendingMapInput pendingSettingInputs[MAP_SETTING_SLOT_COUNT];
+// The 256-way table keeps independently queued setting IDs from replacing one
+// another, but its entries contain only mailbox metadata and payload pointers.
+// Keep the actual setting payloads in their existing bounded allocations while
+// placing this non-secret, long-lived table in PSRAM so TLS retains contiguous
+// internal headroom during remote-debug frame responses.
+static PendingMapInput *pendingSettingInputs = nullptr;
 static uint8_t pendingSettingMask[MAP_SETTING_MASK_BYTES] = {0};
 static std::atomic<uint16_t> pendingMapInputCount{0};
+
+static bool ensurePendingSettingInputs() {
+  if (pendingSettingInputs != nullptr)
+    return true;
+  void *storage = heap_caps_malloc(
+      sizeof(PendingMapInput) * MAP_SETTING_SLOT_COUNT,
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (storage == nullptr)
+    return false;
+  auto *inputs = static_cast<PendingMapInput *>(storage);
+  for (size_t index = 0; index < MAP_SETTING_SLOT_COUNT; ++index)
+    new (&inputs[index]) PendingMapInput();
+  pendingSettingInputs = inputs;
+  return true;
+}
 
 static void noteRideDeliveryMember(
     const ride_delivery_protocol::CommandMember &member,
@@ -862,8 +885,10 @@ static void resetRideDeliveryTracking() {
     };
     clearInput(pendingRouteInput);
     clearInput(pendingGpsInput);
-    for (PendingMapInput &input : pendingSettingInputs)
-      clearInput(input);
+    if (pendingSettingInputs != nullptr) {
+      for (size_t index = 0; index < MAP_SETTING_SLOT_COUNT; ++index)
+        clearInput(pendingSettingInputs[index]);
+    }
     memset(pendingSettingMask, 0, sizeof(pendingSettingMask));
     pendingMapInputCount.store(0, std::memory_order_release);
     pendingRouteRideDelivery = {};
@@ -929,8 +954,13 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
     slot = &pendingGpsInput;
     break;
   case PendingMapInputType::Setting:
-    if (len == 0) {
-      Serial.println("BLE: rejected queued map setting without an ID");
+    if (len == 0 || pendingSettingInputs == nullptr) {
+      if (len == 0) {
+        Serial.println("BLE: rejected queued map setting without an ID");
+      } else {
+        Serial.println(
+            "BLE: rejected queued map setting without mailbox storage");
+      }
       free(input.data);
       return false;
     }
@@ -1200,6 +1230,8 @@ static bool unwrapOwnerAuthenticatedPayload(
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRendererBenchmarkSample.store(
+        false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
     clearRendererWindowRequest();
@@ -1766,6 +1798,8 @@ static void handleAuthPayload(const std::string &frame) {
           false, std::memory_order_release);
       bleSessionSupportsRendererDiagnostics.store(false,
                                                   std::memory_order_release);
+      bleSessionSupportsRendererBenchmarkSample.store(
+          false, std::memory_order_release);
       bleSessionSupportsRideDiagnostics.store(false,
                                               std::memory_order_release);
       clearRendererWindowRequest();
@@ -1817,6 +1851,8 @@ static void handleAuthPayload(const std::string &frame) {
                 bleSessionSupportsExplicitInvalidGpsHeading.store(
                     false, std::memory_order_release);
                 bleSessionSupportsRendererDiagnostics.store(
+                    false, std::memory_order_release);
+                bleSessionSupportsRendererBenchmarkSample.store(
                     false, std::memory_order_release);
                 clearRendererWindowRequest();
                 bleDebugStats.authenticated = false;
@@ -1889,6 +1925,8 @@ static void handleAuthPayload(const std::string &frame) {
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRendererBenchmarkSample.store(
+        false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
@@ -2571,8 +2609,8 @@ static void notifyRendererDiagnosticsStatus(NimBLECharacteristic *pChar) {
     return;
   }
 
-  const std::string body = renderer_diagnostics::toJson(
-      renderer_diagnostics::snapshot(millis()));
+  const std::string body =
+      renderer_diagnostics::toJson(renderer_diagnostics::snapshot());
   if (body.empty()) {
     Serial.println(
         "BLE Renderer Diagnostics: snapshot serialization unavailable");
@@ -3286,6 +3324,11 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::RENDERER_DIAGNOSTICS_FEATURE;
     }
+    if (clientVersion >= device_capabilities_protocol::
+                             RENDERER_BENCHMARK_SAMPLE_CLIENT_VERSION) {
+      featureFlags |= device_capabilities_protocol::
+          RENDERER_BENCHMARK_SAMPLE_FEATURE;
+    }
 #endif
 #if PERSISTENT_RIDE_DIAGNOSTICS
     if (clientVersion >= device_capabilities_protocol::
@@ -3386,9 +3429,15 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
         clientVersion >= device_capabilities_protocol::
                              RENDERER_DIAGNOSTICS_CLIENT_VERSION,
         std::memory_order_release);
+    bleSessionSupportsRendererBenchmarkSample.store(
+        clientVersion >= device_capabilities_protocol::
+                             RENDERER_BENCHMARK_SAMPLE_CLIENT_VERSION,
+        std::memory_order_release);
 #else
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRendererBenchmarkSample.store(
+        false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
 #endif
@@ -4612,11 +4661,15 @@ static void processPendingMapInputs() {
         break;
       }
     }
-    if (pendingSettingId >= 0) {
+    if (pendingSettingId >= 0 && pendingSettingInputs != nullptr) {
       PendingMapInput &slot = pendingSettingInputs[pendingSettingId];
       input = slot;
       slot = {};
       pendingMapInputCount.fetch_sub(1, std::memory_order_release);
+    } else if (pendingSettingId >= 0) {
+      pendingSettingMask[pendingSettingId / 8] &=
+          static_cast<uint8_t>(~(1U << (pendingSettingId % 8)));
+      pendingSettingId = -1;
     }
     xSemaphoreGive(pendingMapInputMutex);
     if (pendingSettingId < 0) {
@@ -4727,6 +4780,8 @@ public:
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRendererBenchmarkSample.store(
+        false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
@@ -4809,6 +4864,8 @@ public:
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRendererBenchmarkSample.store(
+        false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
@@ -5143,6 +5200,50 @@ public:
       return;
     }
 
+#if FIRMWARE_DIAGNOSTICS
+    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(value.data());
+    if (renderer_diagnostics_ble_protocol::hasReplaySamplePrefix(
+            bytes, value.length())) {
+      if (!bleSessionSupportsRendererBenchmarkSample.load(
+              std::memory_order_acquire)) {
+        Serial.println(
+            "BLE Renderer Diagnostics: unnegotiated replay sample rejected");
+        return;
+      }
+      const auto result =
+          renderer_diagnostics_ble_protocol::dispatchReplaySample(
+              bytes, value.length(),
+              [](const uint8_t *gpsPayload, size_t gpsPayloadLength) {
+                return queueMapInput(PendingMapInputType::Gps, gpsPayload,
+                                     gpsPayloadLength, "native");
+              },
+              [](const renderer_diagnostics_ble_protocol::RouteMarker &marker) {
+                return renderer_diagnostics::noteRouteMarker(
+                    marker.fixtureSha256, sizeof(marker.fixtureSha256),
+                    marker.sampleIndex, marker.sampleCount, marker.loop,
+                    millis());
+              });
+      if (result == renderer_diagnostics_ble_protocol::
+                        ReplaySampleDispatchResult::Malformed) {
+        Serial.println(
+            "BLE Renderer Diagnostics: malformed replay sample rejected");
+        return;
+      }
+      if (result == renderer_diagnostics_ble_protocol::
+                        ReplaySampleDispatchResult::GpsRejected) {
+        Serial.println(
+            "BLE Renderer Diagnostics: replay GPS sample rejected");
+        return;
+      }
+      if (result == renderer_diagnostics_ble_protocol::
+                        ReplaySampleDispatchResult::MarkerRejected) {
+        Serial.println(
+            "BLE Renderer Diagnostics: replay sample marker rejected");
+      }
+      return;
+    }
+#endif
+
     queueMapInput(PendingMapInputType::Gps, (const uint8_t *)value.data(),
                   value.length(), "native");
   }
@@ -5440,6 +5541,14 @@ void BLENavigationServer::init(const char *deviceName) {
 
   // Load persisted settings from NVS
   loadSettingsFromNVS();
+
+  if (!ensurePendingSettingInputs()) {
+    Serial.println("BLE: failed to allocate map setting mailbox in PSRAM");
+    // Settings are advertised by the normal navigation service. Do not bring
+    // up a partially functional service that will authenticate successfully
+    // and then reject every settings packet.
+    return;
+  }
 
   if (pendingMapInputMutex == nullptr) {
     pendingMapInputMutex = xSemaphoreCreateMutex();
@@ -5836,6 +5945,8 @@ bool BLENavigationServer::forgetOwner() {
                                                     std::memory_order_release);
   bleSessionSupportsRendererDiagnostics.store(false,
                                               std::memory_order_release);
+  bleSessionSupportsRendererBenchmarkSample.store(false,
+                                                  std::memory_order_release);
   bleSessionSupportsRideDiagnostics.store(false,
                                           std::memory_order_release);
   lastRendererMetricsRequestMs.store(0, std::memory_order_release);

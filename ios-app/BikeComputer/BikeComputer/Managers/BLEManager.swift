@@ -413,6 +413,8 @@ enum DeviceBLEProtocol {
         RideBLEGeneratedProtocolV1.detailedRideDiagnosticsFeature
     static let rideDeliveryAcknowledgementCapabilityMask =
         RideBLEGeneratedProtocolV1.rideDeliveryAckFeature
+    static let rendererBenchmarkSampleCapabilityMask =
+        RideBLEGeneratedProtocolV1.rendererBenchmarkSampleFeature
     static let deviceCapabilitiesVersion =
         RideBLEGeneratedProtocolV1.currentClientVersion
     static let workoutTelemetryFrameLength = 16

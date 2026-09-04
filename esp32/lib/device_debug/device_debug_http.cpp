@@ -21,6 +21,9 @@ namespace device_debug {
 
 namespace {
 
+constexpr size_t kFrameResponseChunkBytes = 2048;
+constexpr uint32_t kFrameResponseInterChunkDelayMs = 1;
+
 constexpr uint32_t kFrameResponseMinimumIntervalMs = 80;
 constexpr uint32_t kMetricsResponseMinimumIntervalMs = 250;
 constexpr uint32_t kRendererWindowMinimumIntervalMs = 1000;
@@ -132,7 +135,13 @@ DeviceDebugHttp::beginSession(bool fullFrameRgb565Available) {
   lastFrameResponseMs_ = 0;
   lastFrameResponseDurationMs_ = 0;
   maxFrameResponseDurationMs_ = 0;
-  lastFrameResponseBytes_ = 0;
+  lastFrameExpectedBytes_ = 0;
+  lastFrameActualBytes_ = 0;
+  lastFrameSnapshotWaitUs_ = 0;
+  maxFrameSnapshotWaitUs_ = 0;
+  lastFrameCrcUs_ = 0;
+  maxFrameCrcUs_ = 0;
+  lastFrameWriteDiagnostics_ = {};
   lastMetricsResponseMs_ = 0;
   lastRendererWindowRequestMs_ = 0;
   xQueueReset(rendererRunQueue_);
@@ -201,6 +210,16 @@ bool DeviceDebugHttp::handleRequest(
   }
   if (!authorize(request, client))
     return true;
+  // Every request remains independently token- and generation-authenticated.
+  // Only the app's serial secure-sweep client explicitly opts into reuse.
+  // WebKit can open parallel/speculative sockets that would otherwise retain
+  // this single worker. Session exit deliberately retains Connection: close
+  // as its durable teardown boundary.
+  if (request.connectionReuseRequested && !request.connectionClose &&
+      !(request.method == "POST" &&
+        request.path == "/device-debug/v1/session/exit")) {
+    client.requestHttpResponseKeepAlive();
+  }
   if (request.method == "GET" && request.path == "/device-debug/v1/info")
     return handleInfo(client);
   if (request.method == "GET" &&
@@ -281,7 +300,7 @@ bool DeviceDebugHttp::handleInfo(device_transfer::TransferClient &client) {
        << ",\"maxCopyUs\":" << frames.maxCopyDurationUs
        << ",\"lastFrameResponseMs\":" << lastFrameResponseDurationMs_
        << ",\"maxFrameResponseMs\":" << maxFrameResponseDurationMs_
-       << ",\"lastFrameResponseBytes\":" << lastFrameResponseBytes_
+       << ",\"lastFrameResponseBytes\":" << lastFrameActualBytes_
        << ",\"pointerAccepted\":" << pointers.accepted
        << ",\"pointerRejected\":" << pointers.rejected
        << ",\"pointerTimeouts\":" << pointers.timeouts
@@ -318,6 +337,23 @@ void DeviceDebugHttp::updateRendererDebugOverhead() {
   overhead.maximumCopyUs = frames.maxCopyDurationUs;
   overhead.lastHttpResponseMs = lastFrameResponseDurationMs_;
   overhead.maximumHttpResponseMs = maxFrameResponseDurationMs_;
+  overhead.lastFrameSnapshotWaitUs = lastFrameSnapshotWaitUs_;
+  overhead.maximumFrameSnapshotWaitUs = maxFrameSnapshotWaitUs_;
+  overhead.lastFrameCrcUs = lastFrameCrcUs_;
+  overhead.maximumFrameCrcUs = maxFrameCrcUs_;
+  overhead.lastHttpExpectedBytes = lastFrameExpectedBytes_;
+  overhead.lastHttpActualBytes = lastFrameActualBytes_;
+  overhead.lastHttpWriteCalls = lastFrameWriteDiagnostics_.writeCalls;
+  overhead.lastHttpZeroWriteCalls =
+      lastFrameWriteDiagnostics_.zeroWriteCalls;
+  overhead.lastHttpShortWriteCalls =
+      lastFrameWriteDiagnostics_.shortWriteCalls;
+  overhead.lastHttpActiveTlsWriteUs =
+      lastFrameWriteDiagnostics_.activeTlsWriteUs;
+  overhead.lastHttpNoProgressWaitMs =
+      lastFrameWriteDiagnostics_.noProgressWaitMs;
+  overhead.lastHttpIntentionalDelayMs =
+      lastFrameWriteDiagnostics_.intentionalDelayMs;
   overhead.freeBefore = memory.freeBefore;
   overhead.largestBefore = memory.largestBefore;
   overhead.freeAfterAllocate = memory.freeAfterAllocate;
@@ -336,7 +372,7 @@ bool DeviceDebugHttp::handleRendererMetrics(device_transfer::TransferClient &cli
   }
   updateRendererDebugOverhead();
   const std::string body =
-      renderer_diagnostics::toJson(renderer_diagnostics::snapshot(nowMs));
+      renderer_diagnostics::toJson(renderer_diagnostics::snapshot());
   if (body.empty())
     return device_transfer::sendHttpError(
         client, 503, "metrics_memory",
@@ -376,9 +412,11 @@ bool DeviceDebugHttp::handleRendererWindow(
     return device_transfer::sendHttpError(
         client, 408, "renderer_window_body_timeout",
         "renderer window body was not received");
-  if (!server_->isRequestAuthorized(request))
+  if (!server_->isRequestAuthorized(request)) {
+    client.requestHttpResponseClose();
     return device_transfer::sendHttpError(client, 401, "session_revoked",
                                           "debug session was revoked");
+  }
 
   JsonDocument document;
   if (deserializeJson(document, body))
@@ -478,7 +516,13 @@ bool DeviceDebugHttp::handleFrame(
   }
 
   FrameSnapshot snapshot;
-  if (!frameStore().acquireSnapshot(query.afterSequence, snapshot)) {
+  const uint32_t snapshotWaitStartedUs = micros();
+  const bool snapshotAcquired =
+      frameStore().acquireSnapshot(query.afterSequence, snapshot);
+  lastFrameSnapshotWaitUs_ = micros() - snapshotWaitStartedUs;
+  maxFrameSnapshotWaitUs_ =
+      std::max(maxFrameSnapshotWaitUs_, lastFrameSnapshotWaitUs_);
+  if (!snapshotAcquired) {
     frameStore().requestNextFrame();
     return device_transfer::sendHttpError(client, 503, "frame_unavailable",
                                           "no complete frame is available yet");
@@ -494,7 +538,10 @@ bool DeviceDebugHttp::handleFrame(
     return sent;
   }
   const uint32_t responseStartedMs = millis();
+  const uint32_t crcStartedUs = micros();
   const uint32_t checksum = crc32(snapshot.pixels, snapshot.payloadBytes);
+  lastFrameCrcUs_ = micros() - crcStartedUs;
+  maxFrameCrcUs_ = std::max(maxFrameCrcUs_, lastFrameCrcUs_);
   FrameHeader header;
   header.sequence = snapshot.sequence;
   header.capturedAtMs = snapshot.capturedAtMs;
@@ -516,19 +563,32 @@ bool DeviceDebugHttp::handleFrame(
       client, 200, encoded.size() + snapshot.payloadBytes,
       "application/vnd.bicino.frame+binary", responseHeaders,
       sizeof(responseHeaders) / sizeof(responseHeaders[0]));
+  const bool responseHeadSent = sent;
+  const size_t responseBodyStartBytes =
+      responseHeadSent ? client.httpResponseBytesWritten() : 0;
   if (sent)
     sent = device_transfer::writeHttpBytes(client, encoded.data(), encoded.size());
   if (sent)
     sent = device_transfer::writeHttpBytes(client, snapshot.pixels,
-                                           snapshot.payloadBytes);
+                                           snapshot.payloadBytes, 5000,
+                                           kFrameResponseChunkBytes,
+                                           kFrameResponseInterChunkDelayMs);
   frameStore().releaseSnapshot();
   frameStore().requestNextFrame();
   const uint32_t responseDurationMs = millis() - responseStartedMs;
   lastFrameResponseDurationMs_ = responseDurationMs;
   if (responseDurationMs > maxFrameResponseDurationMs_)
     maxFrameResponseDurationMs_ = responseDurationMs;
-  lastFrameResponseBytes_ =
+  lastFrameExpectedBytes_ =
       static_cast<uint32_t>(encoded.size()) + snapshot.payloadBytes;
+  lastFrameWriteDiagnostics_ = client.httpResponseWriteDiagnostics();
+  const size_t actualBodyBytes =
+      responseHeadSent &&
+              lastFrameWriteDiagnostics_.bytesWritten >= responseBodyStartBytes
+          ? lastFrameWriteDiagnostics_.bytesWritten - responseBodyStartBytes
+          : 0;
+  lastFrameActualBytes_ = static_cast<uint32_t>(
+      std::min<size_t>(actualBodyBytes, UINT32_MAX));
   if (sent)
     lastFrameResponseMs_ = nowMs;
   return true;
@@ -555,9 +615,11 @@ bool DeviceDebugHttp::handlePointer(
                                      kPointerBodyMaximumBytes, body))
     return device_transfer::sendHttpError(client, 408, "pointer_body_timeout",
                                           "pointer body was not received");
-  if (!server_->isRequestAuthorized(request))
+  if (!server_->isRequestAuthorized(request)) {
+    client.requestHttpResponseClose();
     return device_transfer::sendHttpError(client, 401, "session_revoked",
                                           "debug session was revoked");
+  }
   if (displayPowerManager.state() == display_power::State::Off)
     return device_transfer::sendHttpError(client, 409, "display_off",
                                           "wake the display before sending input");
@@ -605,9 +667,11 @@ bool DeviceDebugHttp::handleWake(device_transfer::TransferClient &client) {
 
 bool DeviceDebugHttp::handleBootPress(
     const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
-  if (!server_->isRequestAuthorized(request))
+  if (!server_->isRequestAuthorized(request)) {
+    client.requestHttpResponseClose();
     return device_transfer::sendHttpError(client, 401, "session_revoked",
                                           "debug session was revoked");
+  }
   if (!bootPressRequested_.request())
     return device_transfer::sendHttpError(
         client, 409, "boot_press_pending",
@@ -634,6 +698,18 @@ void DeviceDebugHttp::responseDidComplete(
       peerClosedCleanly) {
     exitRequested_.store(true, std::memory_order_release);
     ui_scheduler::notify(ui_scheduler::WakeReason::RemoteDebug);
+  }
+#endif
+}
+
+void DeviceDebugHttp::responseDidAbort(
+    const device_transfer::HttpRequest &request) {
+#if !DEVICE_REMOTE_DEBUG
+  (void)request;
+#else
+  if (request.method == "POST" &&
+      request.path == "/device-debug/v1/session/exit") {
+    exitResponsePending_.store(false, std::memory_order_release);
   }
 #endif
 }
@@ -693,6 +769,11 @@ void DeviceDebugHttp::responseDidComplete(
     const device_transfer::HttpRequest &request, bool peerClosedCleanly) {
   (void)request;
   (void)peerClosedCleanly;
+}
+
+void DeviceDebugHttp::responseDidAbort(
+    const device_transfer::HttpRequest &request) {
+  (void)request;
 }
 
 bool DeviceDebugHttp::takeWakeRequest() { return false; }

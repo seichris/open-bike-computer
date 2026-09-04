@@ -21,7 +21,6 @@ void endSession(uint32_t nowMs);
 bool sessionActive();
 bool beginWindow(uint32_t windowId, const RunIdentity &identity,
                  renderer_tuning::Profile profile, uint32_t nowMs,
-                 const JobCounters &currentJobs,
                  uint32_t currentGpsPacketSequence);
 void setProfile(renderer_tuning::Profile profile);
 renderer_tuning::Profile currentProfile();
@@ -31,16 +30,16 @@ void noteDisplayFlushUs(uint32_t microseconds);
 bool noteRenderForWindow(uint32_t windowId,
                          renderer_tuning::Profile profile,
                          const RenderSample &sample);
-void noteJobs(const JobCounters &jobs);
-void noteInterrupted();
-void noteCoverageRejected();
+bool noteJobForWindow(uint32_t windowId, JobEvent event);
+void noteInterruptedForWindow(uint32_t windowId);
+void noteCoverageRejectedForWindow(uint32_t windowId);
 void noteGpsPacket(uint32_t packetSequence, uint32_t packetGapMs);
 void notePrediction(bool graceActive, bool exhausted);
 bool noteRouteMarker(const uint8_t *fixtureSha256, size_t hashBytes,
                      uint16_t sampleIndex, uint16_t sampleCount, uint32_t loop,
                      uint32_t nowMs);
 void noteRemoteDebug(const RemoteDebugOverhead &overhead);
-Snapshot snapshot(uint32_t nowMs);
+Snapshot snapshot();
 std::string toJson(const Snapshot &snapshot);
 #else
 inline void configureBuildIdentity(const char *, const char *, const char *,
@@ -50,7 +49,7 @@ inline void endSession(uint32_t) {}
 inline bool sessionActive() { return false; }
 inline bool beginWindow(uint32_t, const RunIdentity &,
                         renderer_tuning::Profile, uint32_t,
-                        const JobCounters &, uint32_t) {
+                        uint32_t) {
   return false;
 }
 inline void setProfile(renderer_tuning::Profile) {}
@@ -64,9 +63,9 @@ inline bool noteRenderForWindow(uint32_t, renderer_tuning::Profile,
                                 const RenderSample &) {
   return false;
 }
-inline void noteJobs(const JobCounters &) {}
-inline void noteInterrupted() {}
-inline void noteCoverageRejected() {}
+inline bool noteJobForWindow(uint32_t, JobEvent) { return false; }
+inline void noteInterruptedForWindow(uint32_t) {}
+inline void noteCoverageRejectedForWindow(uint32_t) {}
 inline void noteGpsPacket(uint32_t, uint32_t) {}
 inline void notePrediction(bool, bool) {}
 inline bool noteRouteMarker(const uint8_t *, size_t, uint16_t, uint16_t,
@@ -74,11 +73,7 @@ inline bool noteRouteMarker(const uint8_t *, size_t, uint16_t, uint16_t,
   return false;
 }
 inline void noteRemoteDebug(const RemoteDebugOverhead &) {}
-inline Snapshot snapshot(uint32_t nowMs) {
-  Snapshot value;
-  value.timestampMs = nowMs;
-  return value;
-}
+inline Snapshot snapshot() { return {}; }
 inline std::string toJson(const Snapshot &) { return "{}"; }
 #endif
 
