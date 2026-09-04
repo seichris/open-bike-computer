@@ -23,18 +23,22 @@ jobs:
       - name: Stage selected sources
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/source"
-          cp --parents \
-            AGENTS.md \
-            ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift \
-            ios-app/BikeComputer/BikeComputer/Managers/SecureRendererBenchmarkController.swift \
-            ios-app/BikeComputer/BikeComputer/Managers/RendererBenchmarkReplayCoordinator.swift \
-            ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
-            ios-app/BikeComputerTests/NavigationProtocolTests.swift \
-            esp32/tools/renderer_benchmark.py \
-            esp32/tools/renderer_benchmark_gates.json \
-            ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-gates-v1.json \
-            "$RUNNER_TEMP/source"
+          destination="$RUNNER_TEMP/source"
+          mkdir -p "$destination"
+          while IFS= read -r path; do
+            mkdir -p "$destination/$(dirname "$path")"
+            cp "$path" "$destination/$path"
+          done <<'PATHS'
+          AGENTS.md
+          ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift
+          ios-app/BikeComputer/BikeComputer/Managers/SecureRendererBenchmarkController.swift
+          ios-app/BikeComputer/BikeComputer/Managers/RendererBenchmarkReplayCoordinator.swift
+          ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift
+          ios-app/BikeComputerTests/NavigationProtocolTests.swift
+          esp32/tools/renderer_benchmark.py
+          esp32/tools/renderer_benchmark_gates.json
+          ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-gates-v1.json
+          PATHS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: renderer-dma-app-source
