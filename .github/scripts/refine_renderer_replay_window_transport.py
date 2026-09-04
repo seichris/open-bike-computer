@@ -153,10 +153,85 @@ ble_path.write_text(ble, encoding="utf-8")
 
 
 tests = test_path.read_text(encoding="utf-8")
-main_call = '''        await testRendererLatestStateScheduling()
+tests = replace_once(
+    tests,
+    '''        await testRendererLatestStateScheduling()
+''',
+    '''        testRendererLatestStateScheduling()
+''',
+    "synchronous renderer test registration",
+)
+tests = replace_once(
+    tests,
+    '''    @MainActor
+    static func testRendererLatestStateScheduling() async {
+''',
+    '''    @MainActor
+    static func testRendererLatestStateScheduling() {
+''',
+    "synchronous renderer test declaration",
+)
+
+timeout_block = '''        transportReady = true
+        assert(manager.enqueueRendererBenchmarkRouteWriteForTesting(
+            Data([0x71]),
+            canSend: { transportReady },
+            write: { data in
+                writes.append(data[0])
+                transportReady = false
+            }
+        ), "bounded-ack fixture submits a route")
+        let drained = await manager.waitForNavigationWritesToDrain(
+            timeoutSeconds: 0.02
+        )
+        assert(!drained, "a missing acknowledged completion fails in bounded time")
+        manager.completeNavigationWriteForTesting(
+            error: NSError(domain: "RendererReplayTests", code: 1)
+        )
+
+'''
+timeout_replacement = '''        let timeoutManager = BLEManager()
+        timeoutManager.isConnected = true
+        timeoutManager.isNavigationReady = true
+        var timeoutRecoveries = 0
+        timeoutManager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 512,
+                expectsWriteResponse: true,
+                canSend: { true },
+                write: { _ in }
+            )
+        )
+        timeoutManager.installNavigationWriteStallRecoveryForTesting(
+            timeout: 0.01,
+            recovery: { timeoutRecoveries += 1 }
+        )
+        assert(timeoutManager.enqueueRendererBenchmarkRouteWriteForTesting(
+            Data([0x71]),
+            canSend: { true },
+            write: { _ in }
+        ), "bounded-ack fixture submits a route")
+        assert(
+            waitForMainLoop(timeout: 1) { timeoutRecoveries == 1 },
+            "a missing renderer acknowledgement triggers bounded recovery"
+        )
+        assert(
+            !timeoutManager.isNavigationReady,
+            "bounded renderer recovery closes the unusable transport"
+        )
+
+'''
+tests = replace_once(
+    tests,
+    timeout_block,
+    timeout_replacement,
+    "renderer missing-ack fixture",
+)
+
+main_call = '''        testRendererLatestStateScheduling()
         testNavigationWriteAcknowledgementTimeoutPolicy()
 '''
-main_call_replacement = '''        await testRendererLatestStateScheduling()
+main_call_replacement = '''        testRendererLatestStateScheduling()
         testRendererPendingSampleCannotOvertakeNewRoute()
         testNavigationWriteAcknowledgementTimeoutPolicy()
 '''
