@@ -11367,7 +11367,7 @@ struct NavigationProtocolTests {
                 deviceSection.contains("case .mapPlusNavigation:") &&
                 deviceSection.contains("? .mapPlusNavigation\n                : .map") &&
                 deviceSection.contains(
-                    "case .navigation, .rideStats, .batteryStatus:\n            return nil"
+                    "case .navigation, .rideStats, .batteryStatus, .worldRadio:\n            return nil"
                 ),
             "only Map rows receive gears and legacy firmware opens the shared map profile"
         )
@@ -14333,8 +14333,9 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rideDiagnosticsCapabilityMask, 1 << 20, "CAP2 bit 20 advertises persistent ride diagnostics")
         assertEqual(DeviceBLEProtocol.detailedRideDiagnosticsCapabilityMask, 1 << 21, "CAP2 bit 21 advertises detailed ride diagnostics")
         assertEqual(DeviceBLEProtocol.rideDeliveryAcknowledgementCapabilityMask, 1 << 22, "CAP2 bit 22 advertises reliable ride delivery")
+        assertEqual(DeviceBLEProtocol.worldRadioCapabilityMask, 1 << 23, "CAP2 bit 23 advertises World Radio")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 20, "capability version negotiates reliable ride delivery")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 21, "capability version negotiates World Radio")
         assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
         assertEqual(DeviceBLEProtocol.rendererMetricsResponsePrefix, "RDMT", "renderer metrics responses use RDMT")
         assertEqual(DeviceBLEProtocol.rendererMetricsChunkPrefix, "RDMC", "renderer metrics chunks use RDMC")
@@ -14409,12 +14410,15 @@ struct NavigationProtocolTests {
         assertEqual(DeviceScreen.rideStats.rawValue, 2, "Ride Stats screen protocol value stays stable")
         assertEqual(DeviceScreen.mapPlusNavigation.rawValue, 3, "Map + Navigation screen protocol value stays stable")
         assertEqual(DeviceScreen.batteryStatus.rawValue, 4, "Battery Status screen uses protocol value 4")
+        assertEqual(DeviceScreen.worldRadio.rawValue, 5, "World Radio screen uses protocol value 5")
         assertEqual(DeviceScreen.mapPlusNavigation.title, "Map + Navigation", "combined map/navigation screen keeps user-facing label")
         assertEqual(DeviceScreen.batteryStatus.title, "Battery Status", "battery screen has a user-facing label")
+        assertEqual(DeviceScreen.worldRadio.title, "World Radio", "World Radio has a user-facing label")
         assertEqual(DeviceScreen.displayOrder,
-                    [.mapPlusNavigation, .rideStats, .map, .navigation, .batteryStatus],
-                    "Battery Status is the last device screen in settings and cycling order")
-        assertEqual(DeviceScreen.allScreensMask, 0x1F, "all supported device screens use the low five mask bits")
+                    [.mapPlusNavigation, .rideStats, .map, .navigation, .worldRadio, .batteryStatus],
+                    "World Radio precedes Battery Status in settings and cycling order")
+        assertEqual(DeviceScreen.allScreensMask, 0x3F, "all supported device screens use the low six mask bits")
+        assertEqual(DeviceScreen.defaultScreensMask, 0x1F, "World Radio is off by default")
         assertEqual(DeviceScreen.legacyScreensMask, 0x0F, "legacy firmware receives only the original four screen bits")
         assertEqual(DisconnectedSleepTimeout.oneMinute.settingValue, 60, "one-minute sleep timeout sends seconds")
         assertEqual(DisconnectedSleepTimeout.twoMinutes.settingValue, 120, "two-minute sleep timeout sends seconds")
@@ -16248,12 +16252,33 @@ struct NavigationProtocolTests {
                "Battery Status remains the last available screen")
         let currentSettings = screenSettings(in: currentPackets())
         assertEqual(currentSettings[DeviceBLEProtocol.enabledScreensSettingID],
-                    Int32(DeviceScreen.allScreensMask) |
+                    Int32(DeviceScreen.allScreensMask & ~DeviceScreen.worldRadio.bit) |
                         DeviceBLEProtocol.currentScreenMaskMarker,
-                    "current firmware receives a marked five-screen mask")
+                    "Battery Status firmware receives a marked five-screen mask")
         assertEqual(currentSettings[DeviceBLEProtocol.defaultScreenSettingID],
                     Int32(DeviceScreen.batteryStatus.rawValue),
                     "current firmware may use Battery Status as its default")
+
+        let (radioManager, radioPackets) = configuredManager()
+        var radioCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8)
+        radioCapabilities.append(1)
+        let radioFlags = UInt32(DeviceBLEProtocol.batteryStatusScreenCapabilityMask) |
+            DeviceBLEProtocol.worldRadioCapabilityMask
+        radioCapabilities.append(UInt8(truncatingIfNeeded: radioFlags))
+        radioCapabilities.append(UInt8(truncatingIfNeeded: radioFlags >> 8))
+        radioCapabilities.append(UInt8(truncatingIfNeeded: radioFlags >> 16))
+        radioCapabilities.append(UInt8(truncatingIfNeeded: radioFlags >> 24))
+        assert(radioManager.handleDeviceCapabilitiesNotification(radioCapabilities),
+               "World Radio capability response should be consumed")
+        assert(radioManager.supportsWorldRadio,
+               "firmware bit 23 exposes World Radio")
+        assert(radioManager.availableDeviceScreens.contains(.worldRadio),
+               "World Radio is available on capable firmware")
+        let radioSettings = screenSettings(in: radioPackets())
+        assertEqual(radioSettings[DeviceBLEProtocol.enabledScreensSettingID],
+                    Int32(DeviceScreen.allScreensMask) |
+                        DeviceBLEProtocol.currentScreenMaskMarker,
+                    "World Radio firmware receives a marked six-screen mask")
 
         let (fallbackManager, fallbackPackets) = configuredManager()
         fallbackManager.useDeviceCapabilitiesFallback()

@@ -1858,7 +1858,7 @@ private struct DeviceScreensSettingsSection: View {
             return bleManager.supportsIndependentMapProfiles
                 ? .mapPlusNavigation
                 : .map
-        case .navigation, .rideStats, .batteryStatus:
+        case .navigation, .rideStats, .batteryStatus, .worldRadio:
             return nil
         }
     }

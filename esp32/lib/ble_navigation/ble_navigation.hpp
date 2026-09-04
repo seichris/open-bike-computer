@@ -19,6 +19,7 @@
 #include "map_profile_protocol.hpp"
 #include "renderer_diagnostics_ble_protocol.hpp"
 #include "ride_ble_protocol.generated.hpp"
+#include "../world_radio/world_radio_protocol.hpp"
 
 // Forward declarations - actual NimBLE includes only in .cpp
 class NimBLEServer;
@@ -58,12 +59,15 @@ enum DeviceScreenSetting : uint8_t {
   DEVICE_SCREEN_RIDE_STATS = 2,
   DEVICE_SCREEN_MAP_PLUS_NAVIGATION = 3,
   DEVICE_SCREEN_BATTERY_STATUS = 4,
+  DEVICE_SCREEN_WORLD_RADIO = 5,
 };
 
 static constexpr uint8_t DEVICE_SCREEN_SUPPORTED_MASK =
     (1 << DEVICE_SCREEN_MAP) | (1 << DEVICE_SCREEN_NAVIGATION) |
     (1 << DEVICE_SCREEN_RIDE_STATS) | (1 << DEVICE_SCREEN_MAP_PLUS_NAVIGATION) |
-    (1 << DEVICE_SCREEN_BATTERY_STATUS);
+    (1 << DEVICE_SCREEN_BATTERY_STATUS) | (1 << DEVICE_SCREEN_WORLD_RADIO);
+static constexpr uint8_t DEVICE_SCREEN_DEFAULT_MASK =
+    DEVICE_SCREEN_SUPPORTED_MASK & ~(1 << DEVICE_SCREEN_WORLD_RADIO);
 
 static constexpr uint32_t MAP_VISIBILITY_BUILDINGS =
     map_profile_protocol::VISIBILITY_BUILDINGS;
@@ -140,7 +144,7 @@ struct MapRenderSettings {
   uint8_t mapRotationMode = 0; // 0=North Up, 1=Course Up
   uint8_t tapToSwitchScreens = 0; // 0=off, 1=short tap cycles main screens
   uint8_t enabledScreensMask =
-      DEVICE_SCREEN_SUPPORTED_MASK; // Bits follow DeviceScreenSetting
+      DEVICE_SCREEN_DEFAULT_MASK; // Bits follow DeviceScreenSetting
   uint8_t defaultScreen =
       DEVICE_SCREEN_MAP_PLUS_NAVIGATION; // DeviceScreenSetting value
   uint32_t disconnectedSleepTimeoutSeconds =
@@ -273,6 +277,8 @@ public:
   bool requestWorkoutStart();
   bool canRequestWorkoutStart() const;
   WorkoutStartRequestPresentation workoutStartRequestPresentation() const;
+  bool requestWorldRadio(const world_radio_protocol::Request &request);
+  bool canRequestWorldRadio() const;
   bool notifyRideAutomationFrame(const uint8_t *data, size_t length);
 
   BLEDebugStats getDebugStats() const;

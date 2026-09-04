@@ -596,6 +596,14 @@ jobs:
             tools/tests/test_device_screen_protocol.cpp \
             -o /tmp/test_device_screen_protocol
           /tmp/test_device_screen_protocol
+      - name: World Radio protocol and screen registry host tests
+        run: |
+          for test in test_world_radio_protocol test_main_screen_registry; do
+            g++ -std=c++17 -Wall -Wextra -Werror \
+              "tools/tests/${test}.cpp" \
+              -o "/tmp/${test}"
+            "/tmp/${test}"
+          done
       - name: Device ownership crypto host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \
