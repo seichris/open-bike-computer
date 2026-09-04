@@ -29,7 +29,8 @@ jobs:
           unexpected="$(git diff --name-only \
             10e0cd5320c6feeaeb46036f27a7adde091454e5..HEAD -- \
             ':(exclude).github/workflows/apply-renderer-replay-window-transport.yml' \
-            ':(exclude).github/scripts/apply_renderer_replay_window_transport.py')"
+            ':(exclude).github/scripts/apply_renderer_replay_window_transport.py' \
+            ':(exclude).github/scripts/refine_renderer_replay_window_transport.py')"
           test -z "$unexpected" || {
             echo "::error::Unexpected pre-existing branch changes"
             printf '%s\n' "$unexpected"
@@ -43,59 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/scripts/apply_renderer_replay_window_transport.py
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path(
-              "ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift"
-          )
-          text = path.read_text(encoding="utf-8")
-          start_marker = (
-              "    private func flushPendingNavigationWrites(" +
-              "endpoint: NavigationWriteEndpoint) {\n"
-          )
-          comment_marker = (
-              "        // The former renderer lane is retained only for " +
-              "compatibility with\n"
-          )
-          if text.count(start_marker) != 1 or text.count(comment_marker) != 1:
-              raise SystemExit("unexpected navigation flush mutation boundaries")
-          start = text.index(start_marker)
-          comment = text.index(comment_marker, start)
-          replacement = '''    private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
-              var madeProgress = false
-              while !writeWithResponseInFlight {
-                  var wroteRegular = false
-                  navigationWriteQueue.flush(canSend: { [weak self] write in
-                      guard let self else { return false }
-                      let expectsWriteResponse = write.transportExpectsWriteResponse
-                          ?? endpoint.expectsWriteResponse
-                      if expectsWriteResponse && self.writeWithResponseInFlight {
-                          return false
-                      }
-                      return write.transportCanSend?() ?? endpoint.canSend()
-                  }, maxWrites: 1) { write in
-                      wroteRegular = true
-                      madeProgress = true
-                      let expectsWriteResponse = write.transportExpectsWriteResponse
-                          ?? endpoint.expectsWriteResponse
-                      if expectsWriteResponse {
-                          beginNavigationWriteResponseWait(for: write)
-                      }
-                      write.perform(using: endpoint.write)
-                      log("Sent \\(write.label): \\(write.data.count) bytes")
-                  }
-                  if !wroteRegular {
-                      break
-                  }
-              }
-
-          '''
-          path.write_text(
-              text[:start] + replacement + text[comment:],
-              encoding="utf-8"
-          )
-          PY
+          python3 .github/scripts/refine_renderer_replay_window_transport.py
           git diff --check
           git status --short
 
@@ -138,7 +87,8 @@ jobs:
           set -euo pipefail
           git rm \
             .github/workflows/apply-renderer-replay-window-transport.yml \
-            .github/scripts/apply_renderer_replay_window_transport.py
+            .github/scripts/apply_renderer_replay_window_transport.py \
+            .github/scripts/refine_renderer_replay_window_transport.py
           git diff --check
           git config user.name "github-actions[bot]"
           git config user.email \
