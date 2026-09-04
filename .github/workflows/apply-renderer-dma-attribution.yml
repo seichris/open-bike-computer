@@ -1,0 +1,100 @@
+name: Apply renderer DMA attribution
+
+on:
+  push:
+    branches:
+      - fix/renderer-replay-admission-diagnostics
+
+permissions:
+  contents: write
+
+concurrency:
+  group: renderer-dma-attribution
+  cancel-in-progress: false
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          ref: fix/renderer-replay-admission-diagnostics
+
+      - name: Verify isolated exact-head bootstrap
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor \
+            7fd3e2d5628d81e386046e0048d58d635d4ff664 HEAD
+          unexpected="$(git diff --name-only \
+            7fd3e2d5628d81e386046e0048d58d635d4ff664..HEAD -- \
+            ':(exclude).github/scripts/apply_renderer_dma_attribution.py' \
+            ':(exclude).github/workflows/apply-renderer-dma-attribution.yml')"
+          test -z "$unexpected" || {
+            echo "::error::Unexpected pre-existing branch changes"
+            printf '%s\n' "$unexpected"
+            exit 1
+          }
+
+      - name: Apply deterministic source mutation
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_renderer_dma_attribution.py
+          git diff --check
+          actual="$(git diff --name-only | sort)"
+          expected="$(cat <<'EOF'
+          esp32/lib/device_debug/device_debug_http.cpp
+          esp32/lib/renderer_diagnostics/renderer_diagnostics.cpp
+          esp32/lib/renderer_diagnostics/renderer_diagnostics.hpp
+          esp32/lib/renderer_diagnostics/renderer_diagnostics_policy.hpp
+          esp32/tools/renderer_benchmark.py
+          esp32/tools/renderer_benchmark_gates.json
+          esp32/tools/tests/test_renderer_benchmark_cross_run_memory.py
+          esp32/tools/tests/test_renderer_benchmark_gate_parity.py
+          esp32/tools/tests/test_renderer_diagnostics.cpp
+          ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-gates-v1.json
+          EOF
+          )"
+          test "$actual" = "$expected" || {
+            echo "::error::Unexpected changed-file set"
+            printf 'Actual:\n%s\nExpected:\n%s\n' "$actual" "$expected"
+            exit 1
+          }
+
+      - name: Run gate and evaluator regressions
+        run: |
+          set -euo pipefail
+          python3 esp32/tools/tests/test_renderer_benchmark_gate_parity.py
+          python3 esp32/tools/tests/test_renderer_benchmark_cross_run_memory.py
+          python3 -m py_compile \
+            esp32/tools/renderer_benchmark.py \
+            esp32/tools/tests/test_renderer_benchmark_cross_run_memory.py \
+            esp32/tools/tests/test_renderer_benchmark_gate_parity.py
+
+      - name: Run focused firmware host tests
+        working-directory: esp32
+        run: |
+          set -euo pipefail
+          for test in \
+            test_renderer_diagnostics \
+            test_renderer_diagnostics_ble_protocol \
+            test_renderer_diagnostics_request; do
+            g++ -std=c++17 -Wall -Wextra -Werror \
+              "tools/tests/${test}.cpp" \
+              -o "/tmp/${test}"
+            "/tmp/${test}"
+          done
+
+      - name: Commit validated implementation
+        run: |
+          set -euo pipefail
+          git rm \
+            .github/scripts/apply_renderer_dma_attribution.py \
+            .github/workflows/apply-renderer-dma-attribution.yml
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Attribute renderer DMA minima by phase"
+          git push origin HEAD:fix/renderer-replay-admission-diagnostics
