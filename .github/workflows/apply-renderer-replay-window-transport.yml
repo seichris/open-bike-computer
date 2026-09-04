@@ -24,147 +24,29 @@ jobs:
       - name: Verify isolated exact-head bootstrap
         run: |
           set -euo pipefail
-          test "$(git rev-parse 10e0cd5320c6feeaeb46036f27a7adde091454e5)" = \
-            "10e0cd5320c6feeaeb46036f27a7adde091454e5"
           git merge-base --is-ancestor \
             10e0cd5320c6feeaeb46036f27a7adde091454e5 HEAD
           unexpected="$(git diff --name-only \
             10e0cd5320c6feeaeb46036f27a7adde091454e5..HEAD -- \
-            ':(exclude).github/workflows/apply-renderer-replay-window-transport.yml')"
+            ':(exclude).github/workflows/apply-renderer-replay-window-transport.yml' \
+            ':(exclude).github/scripts/apply_renderer_replay_window_transport.py')"
           test -z "$unexpected" || {
             echo "::error::Unexpected pre-existing branch changes"
             printf '%s\n' "$unexpected"
             exit 1
           }
+          echo \
+            "f4eec9797291f4fea4470e6f0dca450da88d07d4a286aaf7a501447e803a2020  .github/scripts/apply_renderer_replay_window_transport.py" \
+            | shasum -a 256 -c -
 
       - name: Apply deterministic source mutation
-        env:
-          MUTATION_SHA256: ca17a02c56685607f49c7cd53beebab313082aea7a8bf14e1ef486992ce19908
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/mutation.py.gz.b64" <<'PAYLOAD'
-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
-q4whwA6qAAA=
-PAYLOAD
-          base64 --decode "$RUNNER_TEMP/mutation.py.gz.b64" \
-            > "$RUNNER_TEMP/mutation.py.gz"
-          gzip -dc "$RUNNER_TEMP/mutation.py.gz" \
-            > "$RUNNER_TEMP/mutation.py"
-          echo "$MUTATION_SHA256  $RUNNER_TEMP/mutation.py" | shasum -a 256 -c -
-          python3 "$RUNNER_TEMP/mutation.py"
+          python3 .github/scripts/apply_renderer_replay_window_transport.py
           git diff --check
+          git status --short
 
-      - name: Run focused iOS host regressions
+      - name: Run iOS host regressions
         working-directory: ios-app
         run: ./scripts/run-navigation-tests.sh
 
@@ -201,15 +83,13 @@ PAYLOAD
       - name: Commit validated implementation
         run: |
           set -euo pipefail
-          git rm .github/workflows/apply-renderer-replay-window-transport.yml
+          git rm \
+            .github/workflows/apply-renderer-replay-window-transport.yml \
+            .github/scripts/apply_renderer_replay_window_transport.py
           git diff --check
-          git status --short
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
-            ios-app/BikeComputer/BikeComputer/Managers/RendererBenchmarkReplayCoordinator.swift \
-            ios-app/BikeComputer/BikeComputer/Managers/SecureRendererBenchmarkController.swift \
-            ios-app/BikeComputerTests/NavigationProtocolTests.swift
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
           git commit -m "Fix renderer replay window transport"
           git push origin HEAD:fix/renderer-replay-window-transport
