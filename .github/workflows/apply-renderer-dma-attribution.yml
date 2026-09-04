@@ -58,10 +58,6 @@ jobs:
           )
           start = text.index(start_marker)
           end = text.index(end_marker, start)
-          # The original attribution bootstrap attempted to rewrite the
-          # mature within-window monotonic_decline helper. Drop that section;
-          # the correction script adds a separate cross-run retained-state
-          # helper and leaves within-window semantics unchanged.
           text = text[:start] + text[end:]
           Path("/tmp/apply_renderer_dma_attribution.py").write_text(
               text, encoding="utf-8"
@@ -83,7 +79,6 @@ jobs:
               | sort -u
           )"
           expected="$(cat <<'EOF'
-          docs/renderer-benchmark.md
           esp32/lib/device_debug/device_debug_http.cpp
           esp32/lib/renderer_diagnostics/renderer_diagnostics.cpp
           esp32/lib/renderer_diagnostics/renderer_diagnostics.hpp
@@ -175,7 +170,6 @@ jobs:
               | sort -u
           )"
           expected="$(cat <<'EOF'
-          docs/renderer-benchmark.md
           esp32/lib/device_debug/device_debug_http.cpp
           esp32/lib/renderer_diagnostics/renderer_diagnostics.cpp
           esp32/lib/renderer_diagnostics/renderer_diagnostics.hpp
