@@ -50,40 +50,19 @@ jobs:
               "ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift"
           )
           text = path.read_text(encoding="utf-8")
-          old = '''    private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
-              var madeProgress = false
-              navigationWriteQueue.flush(canSend: { [weak self] write in
-                  guard let self else { return false }
-                  let expectsWriteResponse = write.transportExpectsWriteResponse
-                      ?? endpoint.expectsWriteResponse
-                  if expectsWriteResponse && self.writeWithResponseInFlight {
-                      return false
-                  }
-                  return write.transportCanSend?() ?? endpoint.canSend()
-              }, maxWrites: 1) { write in
-                  madeProgress = true
-                  let expectsWriteResponse = write.transportExpectsWriteResponse
-                      ?? endpoint.expectsWriteResponse
-                  if expectsWriteResponse {
-                      beginNavigationWriteResponseWait(for: write)
-                  }
-                  write.perform(using: endpoint.write)
-                  log("Sent \\(write.label): \\(write.data.count) bytes")
-              }
-
-              // The former renderer lane is retained only for compatibility with
-              // already-queued host fixtures. It may run only after the ordered
-              // transaction queue is empty, and therefore can never block or
-              // overtake route, settings, transfer, or acknowledged GPS writes.
-              if navigationWriteQueue.count == 0 && !writeWithResponseInFlight {
-                  navigationLatestStateWriteQueue.flush(maxWrites: 1) { write in
-                      madeProgress = true
-                      write.perform(using: endpoint.write)
-                      log("Sent \\(write.label): \\(write.data.count) bytes")
-                  }
-              }
-          '''
-          new = '''    private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
+          start_marker = (
+              "    private func flushPendingNavigationWrites(" +
+              "endpoint: NavigationWriteEndpoint) {\n"
+          )
+          comment_marker = (
+              "        // The former renderer lane is retained only for " +
+              "compatibility with\n"
+          )
+          if text.count(start_marker) != 1 or text.count(comment_marker) != 1:
+              raise SystemExit("unexpected navigation flush mutation boundaries")
+          start = text.index(start_marker)
+          comment = text.index(comment_marker, start)
+          replacement = '''    private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
               var madeProgress = false
               while !writeWithResponseInFlight {
                   var wroteRegular = false
@@ -111,24 +90,11 @@ jobs:
                   }
               }
 
-              // The former renderer lane is retained only for compatibility with
-              // already-queued host fixtures. It may run only after the ordered
-              // transaction queue is empty, and therefore can never block or
-              // overtake route, settings, transfer, or acknowledged GPS writes.
-              if navigationWriteQueue.count == 0 && !writeWithResponseInFlight {
-                  navigationLatestStateWriteQueue.flush(maxWrites: 1) { write in
-                      madeProgress = true
-                      write.perform(using: endpoint.write)
-                      log("Sent \\(write.label): \\(write.data.count) bytes")
-                  }
-              }
           '''
-          if text.count(old) != 1:
-              raise SystemExit(
-                  "expected one generated navigation flush block, found " +
-                  str(text.count(old))
-              )
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          path.write_text(
+              text[:start] + replacement + text[comment:],
+              encoding="utf-8"
+          )
           PY
           git diff --check
           git status --short
