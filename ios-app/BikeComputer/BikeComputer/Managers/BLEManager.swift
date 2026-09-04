@@ -5592,6 +5592,10 @@ class BLEManager: NSObject, ObservableObject {
         navigationPendingWriteCount
     }
 
+    var navigationHasUnsettledWritesForTesting: Bool {
+        navigationHasUnsettledWrites
+    }
+
     func installNavigationWriteStallRecoveryForTesting(
         timeout: TimeInterval,
         recovery: @escaping () -> Void
@@ -7005,6 +7009,10 @@ class BLEManager: NSObject, ObservableObject {
         navigationWriteQueue.count + navigationLatestStateWriteQueue.count
     }
 
+    private var navigationHasUnsettledWrites: Bool {
+        navigationPendingWriteCount > 0 || writeWithResponseInFlight
+    }
+
     private func clearNavigationWriteQueues() {
         navigationWriteQueue.removeAll()
         navigationLatestStateWriteQueue.removeAll()
@@ -7012,18 +7020,18 @@ class BLEManager: NSObject, ObservableObject {
 
     func waitForNavigationWritesToDrain(timeoutSeconds: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while navigationPendingWriteCount > 0 {
+        while navigationHasUnsettledWrites {
             if Task.isCancelled {
                 return false
             }
             if let endpoint = navigationWriteEndpoint {
                 flushPendingNavigationWrites(endpoint: endpoint)
             }
-            if navigationPendingWriteCount == 0 {
+            if !navigationHasUnsettledWrites {
                 return true
             }
             if Date() >= deadline {
-                log("Navigation write queue did not drain before timeout")
+                log("Navigation writes did not settle before timeout")
                 return false
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -7237,6 +7245,20 @@ class BLEManager: NSObject, ObservableObject {
         hasPendingWrites: Bool
     ) {
         if madeProgress || !hasPendingWrites || writeWithResponseInFlight {
+            navigationBackpressureStartedAt = nil
+            return
+        }
+
+        // A renderer replay deliberately owns a bounded, replaceable one-slot
+        // state lane. CoreBluetooth can withhold another no-response credit
+        // while the ESP32 is rendering or serving the pinned HTTPS session.
+        // Keep coalescing to the newest complete GPS-plus-marker sample and let
+        // the benchmark's unchanged freshness/cadence gates measure the stall.
+        // The replay has its own bounded warm-up/window lifetimes and clears
+        // the lane on stop. Outside that explicit lease, the normal watchdog
+        // still reconnects a persistently backpressured BLE session.
+        if deviceGPSOverrideToken != nil,
+           navigationLatestStateWriteQueue.count > 0 {
             navigationBackpressureStartedAt = nil
             return
         }

@@ -461,21 +461,23 @@ final class SecureRendererBenchmarkController: ObservableObject {
                 componentSha256: currentAppIdentity.componentSha256
             )
 
-            status = "Starting pinned 1 Hz replay"
-            replay.start(
-                bleManager: bleManager,
-                isNavigationActive: false,
-                bundle: bundle
-            )
-            guard replay.isRunning else {
+            try checkSecureSessionContinuity()
+            status = "Settling authenticated BLE setup"
+            guard await bleManager.waitForNavigationWritesToDrain(
+                timeoutSeconds: 15
+            ) else {
                 throw SecureRendererBenchmarkControllerError.unavailable(
-                    replay.errorMessage ?? "The pinned 1 Hz replay could not start."
+                    "Authenticated BLE setup traffic did not settle before the benchmark."
                 )
             }
-            try checkContinuity()
+            try checkSecureSessionContinuity()
             status = "Validating exact device identity"
             let info = try await client.info()
-            let initialMetrics = try await metricsWithRetry(client: client)
+            let initialMetrics = try await metricsWithRetry(
+                client: client,
+                enforceContinuity: false
+            )
+            try checkSecureSessionContinuity()
             let baseline = try validatePreflight(
                 info: info,
                 metrics: initialMetrics,
@@ -489,6 +491,19 @@ final class SecureRendererBenchmarkController: ObservableObject {
                     "The renderer benchmark target is unsupported."
                 )
             }
+
+            status = "Starting pinned 1 Hz replay"
+            replay.start(
+                bleManager: bleManager,
+                isNavigationActive: false,
+                bundle: bundle
+            )
+            guard replay.isRunning else {
+                throw SecureRendererBenchmarkControllerError.unavailable(
+                    replay.errorMessage ?? "The pinned 1 Hz replay could not start."
+                )
+            }
+            try checkContinuity()
 
             let rootRunID = Self.makeRootRunID()
             var runs: [RendererBenchmarkRunEvidence] = []
@@ -1155,11 +1170,19 @@ final class SecureRendererBenchmarkController: ObservableObject {
     }
 
     private func checkContinuity() throws {
+        try checkSecureSessionContinuity()
+        guard let replay, replay.isRunning else {
+            throw SecureRendererBenchmarkControllerError.unavailable(
+                "The authenticated renderer replay ended."
+            )
+        }
+    }
+
+    private func checkSecureSessionContinuity() throws {
         guard !stopRequested else {
             throw SecureRendererBenchmarkControllerError.stopped
         }
-        guard let replay, replay.isRunning,
-              let bleManager,
+        guard let bleManager,
               bleManager.isConnected,
               bleManager.isNavigationReady,
               bleManager.supportsRendererDiagnostics,
@@ -1170,7 +1193,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
                 bleManager: bleManager
               ) != nil else {
             throw SecureRendererBenchmarkControllerError.unavailable(
-                "The authenticated replay or secure debug session ended."
+                "The authenticated secure debug session ended."
             )
         }
     }

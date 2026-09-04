@@ -750,6 +750,7 @@ struct NavigationProtocolTests {
         testSharedNavigationQueueRendererStallReproduction()
         testRendererLatestStateScheduling()
         testNavigationWriteAcknowledgementTimeoutPolicy()
+        testNavigationDrainIncludesAcknowledgement()
         testGPSQueuePolicy()
         testRendererBenchmarkProtocol()
         testSecureRendererBenchmarkReadiness()
@@ -14466,6 +14467,74 @@ struct NavigationProtocolTests {
             [0x41, 0x40],
             "the atomic sample drains before the next ordered transaction"
         )
+
+        let replayBackpressureManager = BLEManager()
+        replayBackpressureManager.isConnected = true
+        replayBackpressureManager.isNavigationReady = true
+        var replayTransportReady = false
+        var replayWrites: [UInt8] = []
+        var replayRecoveries = 0
+        replayBackpressureManager.installNavigationWriteEndpoint(
+            NavigationWriteEndpoint(
+                maximumWriteLength: 512,
+                expectsWriteResponse: false,
+                canSend: { false },
+                write: { _ in }
+            )
+        )
+        replayBackpressureManager.installNavigationWriteStallRecoveryForTesting(
+            timeout: 0.01,
+            recovery: { replayRecoveries += 1 }
+        )
+        guard let replayToken =
+                replayBackpressureManager.beginDeviceGPSOverride() else {
+            assert(false, "benchmark backpressure fixture acquires the GPS lease")
+            return
+        }
+        assert(replayBackpressureManager.enqueueLatestStateWriteForTesting(
+            Data([0x51]),
+            kind: .rendererBenchmarkSample,
+            canSend: { replayTransportReady },
+            write: { replayWrites.append($0[0]) }
+        ), "benchmark backpressure stages the first complete sample")
+        _ = waitForMainLoop(timeout: 0.08) { false }
+        assertEqual(replayRecoveries, 0,
+                    "replaceable benchmark pressure does not tear down BLE")
+        assert(replayBackpressureManager.isNavigationReady,
+               "the authenticated benchmark session remains available")
+        assert(replayBackpressureManager.enqueueLatestStateWriteForTesting(
+            Data([0x52]),
+            kind: .rendererBenchmarkSample,
+            canSend: { replayTransportReady },
+            write: { replayWrites.append($0[0]) }
+        ), "a newer complete benchmark sample replaces the stalled one")
+        assertEqual(replayBackpressureManager.navigationPendingWriteCountForTesting, 1,
+                    "benchmark backpressure remains bounded to one state sample")
+        replayTransportReady = true
+        replayBackpressureManager.flushPendingNavigationWritesForTesting()
+        assertEqual(replayWrites, [0x52],
+                    "credit recovery sends only the newest complete sample")
+        replayBackpressureManager.endDeviceGPSOverride(replayToken)
+    }
+
+    @MainActor
+    static func testNavigationDrainIncludesAcknowledgement() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            expectsWriteResponse: true,
+            canSend: { true },
+            write: { _ in }
+        ))
+        assert(manager.requestDeviceCapabilities(),
+               "drain fixture starts one acknowledged setup write")
+        assert(manager.navigationHasUnsettledWritesForTesting,
+               "queue drain includes the outstanding acknowledgement")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assert(!manager.navigationHasUnsettledWritesForTesting,
+               "queue drain settles after acknowledgement")
     }
 
     static func testRendererBenchmarkProtocol() {
