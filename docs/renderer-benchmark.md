@@ -9,7 +9,7 @@ candidate selection, not permission to change the default profile.
 ## What is automated
 
 - one checked-in Shanghai route with 120 exact 1 Hz GPS samples and a SHA-256
-  marker on every sample, serialized after that sample's GPS write;
+  marker on every sample, carried together in one authenticated atomic write;
 - `flat`, `current`, `medium`, and `high` profiles in a balanced order, with at
   least three complete 120-second fixture loops per profile;
 - authenticated, rate-limited snapshots from the same bounded firmware state
@@ -87,7 +87,9 @@ controls, not hidden profile or gate changes.
    leave that Developer Settings page open; replay keeps the iPhone awake while
    active. Put the Bike Computer itself on the map-backed navigation screen
    with 3D buildings enabled. The iPhone sends the route window on the app's
-   normal two-second cadence and sends GPS plus the fixture marker at 1 Hz.
+   normal two-second cadence and sends the atomic GPS-plus-marker sample at
+   1 Hz. CAP2 bit `23` is mandatory so older two-write replay firmware fails
+   readiness instead of running an unreliable fallback.
    Stop any active navigation first. While replay is active, a scoped GPS
    override prevents live Core Location fixes from interleaving with the
    fixture; starting navigation stops replay and releases the override.
@@ -172,8 +174,9 @@ in a separate reviewed change before rerunning the experiment.
 
 After a remote-debug report selects a Pareto candidate, flash the corresponding
 ordinary developer/diagnostic build for the same board and firmware commit.
-The browser service is absent, but CAP2 bit 18 exposes the bounded metrics over
-the authenticated BLE session. Keep map, firmware, and debug transfers stopped;
+The browser service is absent, but CAP2 bits 18 and 23 expose bounded metrics
+and atomic replay over the authenticated BLE session. Keep map, firmware, and
+debug transfers stopped;
 firmware rejects a new ordinary window and ends an active one if any device
 transfer becomes active.
 

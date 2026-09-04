@@ -122,6 +122,7 @@ static bool bleSessionSupportsStreetLabels = false;
 static bool bleSessionSupports3DBuildings = false;
 static std::atomic<bool> bleSessionSupportsExplicitInvalidGpsHeading{false};
 static std::atomic<bool> bleSessionSupportsRendererDiagnostics{false};
+static std::atomic<bool> bleSessionSupportsRendererBenchmarkSample{false};
 static std::atomic<bool> bleSessionSupportsRideDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRideDeliveryAck{false};
 // Captured while the ownership mutex is held by the accepted ride write. The
@@ -1229,6 +1230,8 @@ static bool unwrapOwnerAuthenticatedPayload(
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRendererBenchmarkSample.store(
+        false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
     clearRendererWindowRequest();
@@ -1795,6 +1798,8 @@ static void handleAuthPayload(const std::string &frame) {
           false, std::memory_order_release);
       bleSessionSupportsRendererDiagnostics.store(false,
                                                   std::memory_order_release);
+      bleSessionSupportsRendererBenchmarkSample.store(
+          false, std::memory_order_release);
       bleSessionSupportsRideDiagnostics.store(false,
                                               std::memory_order_release);
       clearRendererWindowRequest();
@@ -1846,6 +1851,8 @@ static void handleAuthPayload(const std::string &frame) {
                 bleSessionSupportsExplicitInvalidGpsHeading.store(
                     false, std::memory_order_release);
                 bleSessionSupportsRendererDiagnostics.store(
+                    false, std::memory_order_release);
+                bleSessionSupportsRendererBenchmarkSample.store(
                     false, std::memory_order_release);
                 clearRendererWindowRequest();
                 bleDebugStats.authenticated = false;
@@ -1918,6 +1925,8 @@ static void handleAuthPayload(const std::string &frame) {
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRendererBenchmarkSample.store(
+        false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
@@ -3315,6 +3324,11 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::RENDERER_DIAGNOSTICS_FEATURE;
     }
+    if (clientVersion >= device_capabilities_protocol::
+                             RENDERER_BENCHMARK_SAMPLE_CLIENT_VERSION) {
+      featureFlags |= device_capabilities_protocol::
+          RENDERER_BENCHMARK_SAMPLE_FEATURE;
+    }
 #endif
 #if PERSISTENT_RIDE_DIAGNOSTICS
     if (clientVersion >= device_capabilities_protocol::
@@ -3415,9 +3429,15 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
         clientVersion >= device_capabilities_protocol::
                              RENDERER_DIAGNOSTICS_CLIENT_VERSION,
         std::memory_order_release);
+    bleSessionSupportsRendererBenchmarkSample.store(
+        clientVersion >= device_capabilities_protocol::
+                             RENDERER_BENCHMARK_SAMPLE_CLIENT_VERSION,
+        std::memory_order_release);
 #else
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRendererBenchmarkSample.store(
+        false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
 #endif
@@ -4760,6 +4780,8 @@ public:
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRendererBenchmarkSample.store(
+        false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
@@ -4842,6 +4864,8 @@ public:
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
                                                 std::memory_order_release);
+    bleSessionSupportsRendererBenchmarkSample.store(
+        false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
@@ -5175,6 +5199,50 @@ public:
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Gps);
       return;
     }
+
+#if FIRMWARE_DIAGNOSTICS
+    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(value.data());
+    if (renderer_diagnostics_ble_protocol::hasReplaySamplePrefix(
+            bytes, value.length())) {
+      if (!bleSessionSupportsRendererBenchmarkSample.load(
+              std::memory_order_acquire)) {
+        Serial.println(
+            "BLE Renderer Diagnostics: unnegotiated replay sample rejected");
+        return;
+      }
+      const auto result =
+          renderer_diagnostics_ble_protocol::dispatchReplaySample(
+              bytes, value.length(),
+              [](const uint8_t *gpsPayload, size_t gpsPayloadLength) {
+                return queueMapInput(PendingMapInputType::Gps, gpsPayload,
+                                     gpsPayloadLength, "native");
+              },
+              [](const renderer_diagnostics_ble_protocol::RouteMarker &marker) {
+                return renderer_diagnostics::noteRouteMarker(
+                    marker.fixtureSha256, sizeof(marker.fixtureSha256),
+                    marker.sampleIndex, marker.sampleCount, marker.loop,
+                    millis());
+              });
+      if (result == renderer_diagnostics_ble_protocol::
+                        ReplaySampleDispatchResult::Malformed) {
+        Serial.println(
+            "BLE Renderer Diagnostics: malformed replay sample rejected");
+        return;
+      }
+      if (result == renderer_diagnostics_ble_protocol::
+                        ReplaySampleDispatchResult::GpsRejected) {
+        Serial.println(
+            "BLE Renderer Diagnostics: replay GPS sample rejected");
+        return;
+      }
+      if (result == renderer_diagnostics_ble_protocol::
+                        ReplaySampleDispatchResult::MarkerRejected) {
+        Serial.println(
+            "BLE Renderer Diagnostics: replay sample marker rejected");
+      }
+      return;
+    }
+#endif
 
     queueMapInput(PendingMapInputType::Gps, (const uint8_t *)value.data(),
                   value.length(), "native");
@@ -5877,6 +5945,8 @@ bool BLENavigationServer::forgetOwner() {
                                                     std::memory_order_release);
   bleSessionSupportsRendererDiagnostics.store(false,
                                               std::memory_order_release);
+  bleSessionSupportsRendererBenchmarkSample.store(false,
+                                                  std::memory_order_release);
   bleSessionSupportsRideDiagnostics.store(false,
                                           std::memory_order_release);
   lastRendererMetricsRequestMs.store(0, std::memory_order_release);
