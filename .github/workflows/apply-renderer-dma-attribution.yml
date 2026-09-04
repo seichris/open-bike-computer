@@ -30,6 +30,7 @@ jobs:
             7fd3e2d5628d81e386046e0048d58d635d4ff664..HEAD -- \
             ':(exclude).github/scripts/apply_renderer_dma_attribution.py' \
             ':(exclude).github/scripts/correct_renderer_dma_attribution.py' \
+            ':(exclude).github/scripts/fix_renderer_dma_policy_semicolon.py' \
             ':(exclude).github/scripts/fix_renderer_memory_session_phase.py' \
             ':(exclude).github/workflows/apply-renderer-dma-attribution.yml' \
             ':(exclude).github/workflows/fix-renderer-memory-session-phase.yml')"
@@ -73,6 +74,7 @@ jobs:
           python3 /tmp/apply_renderer_dma_attribution.py
           python3 .github/scripts/fix_renderer_memory_session_phase.py
           python3 /tmp/correct_renderer_dma_attribution.py
+          python3 .github/scripts/fix_renderer_dma_policy_semicolon.py
           git diff --check
           actual="$(
             { git diff --name-only; git ls-files --others --exclude-standard; } \
@@ -191,6 +193,7 @@ jobs:
           git rm \
             .github/scripts/apply_renderer_dma_attribution.py \
             .github/scripts/correct_renderer_dma_attribution.py \
+            .github/scripts/fix_renderer_dma_policy_semicolon.py \
             .github/scripts/fix_renderer_memory_session_phase.py \
             .github/workflows/apply-renderer-dma-attribution.yml \
             .github/workflows/fix-renderer-memory-session-phase.yml
