@@ -1,0 +1,80 @@
+name: Fix renderer memory session phase
+
+on:
+  push:
+    branches:
+      - fix/renderer-replay-admission-diagnostics
+
+permissions:
+  contents: write
+
+concurrency:
+  group: renderer-memory-session-phase
+  cancel-in-progress: false
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          ref: fix/renderer-replay-admission-diagnostics
+
+      - name: Verify validated attribution baseline
+        run: |
+          set -euo pipefail
+          git log --format=%s --all | grep -Fx \
+            'Attribute renderer DMA minima by phase'
+          git grep -q 'windowMinimumFreeAttribution' -- \
+            esp32/lib/renderer_diagnostics/renderer_diagnostics.cpp
+          git grep -q 'MemoryObservationPhase::SessionStart, nowMs' -- \
+            esp32/lib/renderer_diagnostics/renderer_diagnostics.cpp
+
+      - name: Apply phase correction
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/fix_renderer_memory_session_phase.py
+          git diff --check
+          actual="$(git diff --name-only | sort)"
+          expected="$(cat <<'EOF'
+          esp32/lib/renderer_diagnostics/renderer_diagnostics.cpp
+          esp32/lib/renderer_diagnostics/renderer_diagnostics_policy.hpp
+          esp32/tools/tests/test_renderer_diagnostics.cpp
+          EOF
+          )"
+          test "$actual" = "$expected" || {
+            echo "::error::Unexpected changed-file set"
+            printf 'Actual:\n%s\nExpected:\n%s\n' "$actual" "$expected"
+            exit 1
+          }
+
+      - name: Run focused firmware regressions
+        working-directory: esp32
+        run: |
+          set -euo pipefail
+          for test in \
+            test_renderer_diagnostics \
+            test_renderer_diagnostics_ble_protocol \
+            test_renderer_diagnostics_request; do
+            g++ -std=c++17 -Wall -Wextra -Werror \
+              "tools/tests/${test}.cpp" \
+              -o "/tmp/${test}"
+            "/tmp/${test}"
+          done
+          python3 tools/tests/test_renderer_benchmark_gate_parity.py
+          python3 tools/tests/test_renderer_benchmark_cross_run_memory.py
+
+      - name: Commit correction
+        run: |
+          set -euo pipefail
+          git rm \
+            .github/scripts/fix_renderer_memory_session_phase.py \
+            .github/workflows/fix-renderer-memory-session-phase.yml
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Classify renderer session-end memory samples"
+          git push origin HEAD:fix/renderer-replay-admission-diagnostics
