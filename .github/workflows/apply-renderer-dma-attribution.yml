@@ -45,15 +45,34 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          for source, destination in (
-              (".github/scripts/apply_renderer_dma_attribution.py",
-               "/tmp/apply_renderer_dma_attribution.py"),
-              (".github/scripts/correct_renderer_dma_attribution.py",
-               "/tmp/correct_renderer_dma_attribution.py"),
-          ):
-              text = Path(source).read_text(encoding="utf-8")
-              text = text.replace("responseStartedAtMs", "responseStartedMs")
-              Path(destination).write_text(text, encoding="utf-8")
+          source = Path(".github/scripts/apply_renderer_dma_attribution.py")
+          text = source.read_text(encoding="utf-8")
+          text = text.replace("responseStartedAtMs", "responseStartedMs")
+          start_marker = (
+              "# Python evaluator mirror: terminal current memory represents "
+              "retained state;"
+          )
+          end_marker = (
+              "# Synchronize both gate copies from the intentionally "
+              "calibrated app-stack"
+          )
+          start = text.index(start_marker)
+          end = text.index(end_marker, start)
+          # The original attribution bootstrap attempted to rewrite the
+          # mature within-window monotonic_decline helper. Drop that section;
+          # the correction script adds a separate cross-run retained-state
+          # helper and leaves within-window semantics unchanged.
+          text = text[:start] + text[end:]
+          Path("/tmp/apply_renderer_dma_attribution.py").write_text(
+              text, encoding="utf-8"
+          )
+
+          source = Path(".github/scripts/correct_renderer_dma_attribution.py")
+          text = source.read_text(encoding="utf-8")
+          text = text.replace("responseStartedAtMs", "responseStartedMs")
+          Path("/tmp/correct_renderer_dma_attribution.py").write_text(
+              text, encoding="utf-8"
+          )
           PY
           python3 /tmp/apply_renderer_dma_attribution.py
           python3 .github/scripts/fix_renderer_memory_session_phase.py
