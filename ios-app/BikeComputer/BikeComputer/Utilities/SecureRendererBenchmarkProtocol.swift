@@ -540,11 +540,20 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
     }
 
     nonisolated struct DMAMemoryRegion: Codable, Equatable, Sendable {
+        nonisolated struct MinimumAttribution: Codable, Equatable, Sendable {
+            let phase: String
+            let observedAtMs: UInt32
+            let value: UInt32
+            let frameTransferActive: Bool
+        }
+
         let free: UInt32
         let minimumEverFree: UInt32
         let largestBlock: UInt32
         let windowMinimumFree: UInt32
         let windowMinimumLargestBlock: UInt32
+        let windowMinimumFreeAttribution: MinimumAttribution?
+        let windowMinimumLargestBlockAttribution: MinimumAttribution?
         let cryptoCountersScope: String?
         let cryptoHeadroomRejections: UInt32
         let cryptoOperationFailures: UInt32

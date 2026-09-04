@@ -15109,6 +15109,23 @@ struct NavigationProtocolTests {
             "lastExpectedFixtureTagValid": true,
             "lastMarkerResult": "accepted",
         ] as [String: Any]
+        if var memory = diagnosticMetricsObject["memory"] as? [String: Any],
+           var dmaHeap = memory["dmaHeap"] as? [String: Any] {
+            dmaHeap["windowMinimumFreeAttribution"] = [
+                "phase": "render_complete",
+                "observedAtMs": 12_300,
+                "value": 20_000,
+                "frameTransferActive": true,
+            ] as [String: Any]
+            dmaHeap["windowMinimumLargestBlockAttribution"] = [
+                "phase": "metrics_snapshot",
+                "observedAtMs": 12_345,
+                "value": 10_000,
+                "frameTransferActive": false,
+            ] as [String: Any]
+            memory["dmaHeap"] = dmaHeap
+            diagnosticMetricsObject["memory"] = memory
+        }
         guard let diagnosticMetricsData = try? JSONSerialization.data(
             withJSONObject: diagnosticMetricsObject
         ), let diagnosticMetrics = try? JSONDecoder().decode(
@@ -15132,6 +15149,18 @@ struct NavigationProtocolTests {
             replayTransport.lastMarkerResult,
             "accepted",
             "the last firmware admission result survives the evidence round trip"
+        )
+        assertEqual(
+            diagnosticMetrics.memory.dmaHeap
+                .windowMinimumFreeAttribution?.phase,
+            "render_complete",
+            "DMA low-water phase attribution survives evidence decoding"
+        )
+        assertEqual(
+            diagnosticMetrics.memory.dmaHeap
+                .windowMinimumFreeAttribution?.frameTransferActive,
+            true,
+            "DMA attribution retains only the non-secret frame-overlap bit"
         )
         guard let replayDelta = RendererBenchmarkReplayTransportDelta(
             baseline: nil,
@@ -15197,6 +15226,169 @@ struct NavigationProtocolTests {
             summary.cryptoOperationFailures,
             0,
             "secure benchmark retains the zero crypto-failure gate"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [39_307, 37_803, 37_779],
+                allowedDecline: 1_024
+            ),
+            "the physical transient low-water step plus plateau is not a retained leak"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [45_251, 44_983, 44_907],
+                allowedDecline: 1_024
+            ),
+            "terminal jitter below the allowance is not a retained leak"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [45_000, 42_000, 41_900],
+                allowedDecline: 1_024
+            ),
+            "one allocator transition followed by bounded noise is not progressive"
+        )
+        assert(
+            RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [45_000, 43_500, 42_000],
+                allowedDecline: 1_024
+            ),
+            "continued retained loss beyond the largest step remains a hard failure"
+        )
+        assert(
+            RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [26_000, 25_000, 24_000],
+                allowedDecline: 1_024
+            ),
+            "progressive terminal largest-block fragmentation remains a hard failure"
+        )
+
+        func crossRunEvidence(
+            repeatNumber: Int,
+            terminalDmaFree: UInt32,
+            terminalDmaLargest: UInt32,
+            minimumDmaFree: UInt32,
+            minimumDmaLargest: UInt32
+        ) -> RendererBenchmarkRunEvidence? {
+            var snapshotObject = diagnosticMetricsObject
+            guard var window = snapshotObject["window"] as? [String: Any],
+                  var tuning = snapshotObject["tuning"] as? [String: Any],
+                  var memory = snapshotObject["memory"] as? [String: Any],
+                  var dmaHeap = memory["dmaHeap"] as? [String: Any],
+                  let encodedSummary = try? JSONEncoder().encode(summary),
+                  var summaryObject = try? JSONSerialization.jsonObject(
+                    with: encodedSummary
+                  ) as? [String: Any] else {
+                return nil
+            }
+            window["repeat"] = repeatNumber
+            tuning["profile"] = "high"
+            dmaHeap["free"] = terminalDmaFree
+            dmaHeap["largestBlock"] = terminalDmaLargest
+            dmaHeap["windowMinimumFree"] = minimumDmaFree
+            dmaHeap["windowMinimumLargestBlock"] = minimumDmaLargest
+            memory["dmaHeap"] = dmaHeap
+            snapshotObject["window"] = window
+            snapshotObject["tuning"] = tuning
+            snapshotObject["memory"] = memory
+            summaryObject["profile"] = "high"
+            summaryObject["repeat"] = repeatNumber
+            summaryObject["minimumDmaFree"] = minimumDmaFree
+            summaryObject["minimumDmaLargest"] = minimumDmaLargest
+            guard let snapshotData = try? JSONSerialization.data(
+                withJSONObject: snapshotObject
+            ), let terminalSnapshot = try? JSONDecoder().decode(
+                RendererBenchmarkMetricsSnapshot.self,
+                from: snapshotData
+            ), let summaryData = try? JSONSerialization.data(
+                withJSONObject: summaryObject
+            ), let runSummary = try? JSONDecoder().decode(
+                RendererBenchmarkRunSummary.self,
+                from: summaryData
+            ) else {
+                return nil
+            }
+            return RendererBenchmarkRunEvidence(
+                schema: 1,
+                runId: "cross-run-\(repeatNumber)",
+                windowId: UInt32(repeatNumber),
+                profile: "high",
+                repeatNumber: repeatNumber,
+                durationSeconds: 120,
+                soak: false,
+                passed: true,
+                failures: [],
+                summary: runSummary,
+                samples: [],
+                screenshots: [],
+                finalSnapshot: terminalSnapshot
+            )
+        }
+
+        guard let transientOne = crossRunEvidence(
+            repeatNumber: 1,
+            terminalDmaFree: 45_251,
+            terminalDmaLargest: 23_540,
+            minimumDmaFree: 39_307,
+            minimumDmaLargest: 23_540
+        ), let transientTwo = crossRunEvidence(
+            repeatNumber: 2,
+            terminalDmaFree: 44_983,
+            terminalDmaLargest: 21_492,
+            minimumDmaFree: 37_803,
+            minimumDmaLargest: 21_492
+        ), let transientThree = crossRunEvidence(
+            repeatNumber: 3,
+            terminalDmaFree: 44_907,
+            terminalDmaLargest: 21_492,
+            minimumDmaFree: 37_779,
+            minimumDmaLargest: 21_492
+        ), let leakOne = crossRunEvidence(
+            repeatNumber: 1,
+            terminalDmaFree: 45_000,
+            terminalDmaLargest: 26_000,
+            minimumDmaFree: 39_000,
+            minimumDmaLargest: 22_000
+        ), let leakTwo = crossRunEvidence(
+            repeatNumber: 2,
+            terminalDmaFree: 43_500,
+            terminalDmaLargest: 25_000,
+            minimumDmaFree: 39_000,
+            minimumDmaLargest: 22_000
+        ), let leakThree = crossRunEvidence(
+            repeatNumber: 3,
+            terminalDmaFree: 42_000,
+            terminalDmaLargest: 24_000,
+            minimumDmaFree: 39_000,
+            minimumDmaLargest: 22_000
+        ) else {
+            assert(false, "secure benchmark constructs cross-run evidence")
+            return
+        }
+        var transientRuns = [transientTwo, transientOne, transientThree]
+        RendererBenchmarkEvaluator.applyCrossRunMemoryGates(
+            runs: &transientRuns,
+            gates: gates
+        )
+        assert(
+            transientRuns.allSatisfy { run in
+                !run.failures.contains("cross_run_dma_decline") &&
+                    !run.failures.contains("cross_run_dma_largest_decline")
+            },
+            "interleaved run order uses stable terminal state, not transient minima"
+        )
+        var leakRuns = [leakTwo, leakThree, leakOne]
+        RendererBenchmarkEvaluator.applyCrossRunMemoryGates(
+            runs: &leakRuns,
+            gates: gates
+        )
+        assert(
+            leakRuns.allSatisfy { run in
+                run.failures.contains("cross_run_dma_decline") &&
+                    run.failures.contains("cross_run_dma_largest_decline") &&
+                    !run.passed
+            },
+            "interleaved terminal retained loss and fragmentation fail every profile run"
         )
         let baseline = RendererBenchmarkEvidenceIdentity(
             deviceId: metrics.identity.deviceId,

@@ -346,6 +346,98 @@ class RendererBenchmarkTests(unittest.TestCase):
             )
         )
 
+    def test_cross_run_memory_uses_terminal_state_and_continued_decline(self):
+        self.assertFalse(
+            renderer_benchmark.progressive_cross_run_decline(
+                [39_307, 37_803, 37_779], allowed_decline=1_024
+            )
+        )
+        self.assertFalse(
+            renderer_benchmark.progressive_cross_run_decline(
+                [45_251, 44_983, 44_907], allowed_decline=1_024
+            )
+        )
+        self.assertFalse(
+            renderer_benchmark.progressive_cross_run_decline(
+                [45_000, 42_000, 41_900], allowed_decline=1_024
+            )
+        )
+        self.assertTrue(
+            renderer_benchmark.progressive_cross_run_decline(
+                [45_000, 43_500, 42_000], allowed_decline=1_024
+            )
+        )
+        self.assertTrue(
+            renderer_benchmark.progressive_cross_run_decline(
+                [26_000, 25_000, 24_000], allowed_decline=1_024
+            )
+        )
+
+        def run(
+            repeat: int,
+            terminal_dma_free: int,
+            terminal_dma_largest: int,
+            minimum_dma_free: int,
+            minimum_dma_largest: int,
+        ) -> dict:
+            return {
+                "profile": "high",
+                "repeat": repeat,
+                "passed": True,
+                "failures": [],
+                "summary": {
+                    "minimumDmaFree": minimum_dma_free,
+                    "minimumDmaLargest": minimum_dma_largest,
+                },
+                "finalSnapshot": {
+                    "memory": {
+                        "internalHeap": {
+                            "free": 50_000,
+                            "largestBlock": 30_000,
+                        },
+                        "psram": {
+                            "free": 2_500_000,
+                            "largestBlock": 1_500_000,
+                        },
+                        "dmaHeap": {
+                            "free": terminal_dma_free,
+                            "largestBlock": terminal_dma_largest,
+                        },
+                    }
+                },
+            }
+
+        gates = renderer_benchmark.load_gates(
+            TOOLS / "renderer_benchmark_gates.json"
+        )
+        transient_runs = [
+            run(2, 44_983, 21_492, 37_803, 21_492),
+            run(1, 45_251, 23_540, 39_307, 23_540),
+            run(3, 44_907, 21_492, 37_779, 21_492),
+        ]
+        renderer_benchmark.apply_cross_run_memory_gates(
+            transient_runs, gates
+        )
+        self.assertTrue(all(item["passed"] for item in transient_runs))
+        self.assertTrue(
+            all(not item["failures"] for item in transient_runs)
+        )
+
+        leak_runs = [
+            run(2, 43_500, 25_000, 39_000, 22_000),
+            run(3, 42_000, 24_000, 39_000, 22_000),
+            run(1, 45_000, 26_000, 39_000, 22_000),
+        ]
+        renderer_benchmark.apply_cross_run_memory_gates(leak_runs, gates)
+        self.assertTrue(
+            all(
+                "cross_run_dma_decline" in item["failures"]
+                and "cross_run_dma_largest_decline" in item["failures"]
+                and not item["passed"]
+                for item in leak_runs
+            )
+        )
+
     def test_dma_floor_and_decline_are_hard_failures(self):
         fixture = {
             "id": "shanghai-renderer-v1",
