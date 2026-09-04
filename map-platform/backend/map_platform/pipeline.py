@@ -1080,6 +1080,15 @@ _CHUNK_SPLIT_FAILURE_CODES = frozenset(
         "building_scope_exceeded",
         "building_chunk_wall_time_exceeded",
         "building_worker_oom",
+        "generic_geometry_invalid",
+    }
+)
+_PATHOLOGICAL_BLOCK_FAILURE_CODES = frozenset(
+    {
+        "building_object_limit_exceeded",
+        "building_scope_exceeded",
+        "building_chunk_wall_time_exceeded",
+        "building_worker_oom",
     }
 )
 MAX_FINAL_ASSEMBLY_ARCHIVE_BYTES = 512 * 1024 * 1024
@@ -3050,7 +3059,7 @@ class MapBuildPipeline:
                     typed_failure = (
                         "building_pathological_block"
                         if len(task.blocks) == 1
-                        and exc.code in _CHUNK_SPLIT_FAILURE_CODES
+                        and exc.code in _PATHOLOGICAL_BLOCK_FAILURE_CODES
                         else exc.code
                     )
                     failure_resource = self._last_task_failure_resource()
