@@ -1,0 +1,45 @@
+name: Export renderer DMA firmware source
+
+on:
+  push:
+    branches:
+      - analysis/renderer-dma-attribution-fw-7fd3e2d
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: analysis/renderer-dma-attribution-fw-7fd3e2d
+          fetch-depth: 0
+      - name: Verify exact analysis base
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor 7fd3e2d5628d81e386046e0048d58d635d4ff664 HEAD
+      - name: Stage selected sources
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/source"
+          cp --parents \
+            AGENTS.md \
+            esp32/tools/renderer_benchmark.py \
+            esp32/tools/renderer_benchmark_gates.json \
+            esp32/lib/renderer_diagnostics/renderer_diagnostics.cpp \
+            esp32/lib/renderer_diagnostics/renderer_diagnostics.hpp \
+            esp32/lib/renderer_diagnostics/renderer_diagnostics_policy.hpp \
+            esp32/lib/device_debug/device_debug_http.cpp \
+            esp32/lib/device_debug/device_debug_frame_store.cpp \
+            esp32/lib/maps/src/maps.cpp \
+            esp32/tools/tests/test_renderer_diagnostics.cpp \
+            esp32/tools/tests/test_renderer_diagnostics_ble_protocol.cpp \
+            "$RUNNER_TEMP/source"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: renderer-dma-firmware-source
+          path: ${{ runner.temp }}/source
+          if-no-files-found: error
+          retention-days: 1
