@@ -265,6 +265,47 @@ int main() {
   assert(reset.profile == Profile::Flat);
   assert(reset.remoteDebug.active);
 
+  assert(std::strcmp(
+             memoryObservationPhaseName(MemoryObservationPhase::SessionEnd),
+             "session_end") == 0);
+  State attributionState;
+  attributionState.beginSession(true);
+  assert(attributionState.beginWindow(
+      77, runIdentity(kRouteHash), Profile::High, 5000, 0));
+  attributionState.noteMemory(
+      {50000, 49000, 30000, 2800000, 1900000, 40000, 39000, 24000,
+       0, 0},
+      MemoryObservationPhase::WindowStart, 5000, false);
+  attributionState.noteMemory(
+      {50000, 49000, 30000, 2800000, 1900000, 40000, 39000, 24000,
+       0, 0},
+      MemoryObservationPhase::Periodic, 5050, true);
+  attributionState.noteMemory(
+      {50000, 49000, 30000, 2800000, 1900000, 38000, 37000, 24000,
+       0, 0},
+      MemoryObservationPhase::RenderComplete, 5100, true);
+  attributionState.noteMemory(
+      {50000, 49000, 30000, 2800000, 1900000, 38500, 37000, 22000,
+       0, 0},
+      MemoryObservationPhase::MetricsSnapshot, 5200, false);
+  const Snapshot attributed = attributionState.snapshot(5250);
+  assert(attributed.windowMinimumDmaFreeAttribution.phase ==
+         MemoryObservationPhase::RenderComplete);
+  assert(attributed.windowMinimumDmaFreeAttribution.observedAtMs == 5100);
+  assert(attributed.windowMinimumDmaFreeAttribution.value == 38000);
+  assert(attributed.windowMinimumDmaFreeAttribution.frameTransferActive);
+  assert(attributed.windowMinimumDmaLargestAttribution.phase ==
+         MemoryObservationPhase::MetricsSnapshot);
+  assert(attributed.windowMinimumDmaLargestAttribution.observedAtMs == 5200);
+  assert(attributed.windowMinimumDmaLargestAttribution.value == 22000);
+  assert(!attributed.windowMinimumDmaLargestAttribution.frameTransferActive);
+  assert(attributionState.beginWindow(
+      78, runIdentity(kRouteHash), Profile::Current, 6000, 0));
+  const Snapshot attributionReset = attributionState.snapshot(6001);
+  assert(attributionReset.windowMinimumDmaFreeAttribution.phase ==
+         MemoryObservationPhase::Unknown);
+  assert(attributionReset.windowMinimumDmaFreeAttribution.value == 0);
+
   state.endSession();
   const Snapshot ended = state.snapshot(4000);
   assert(ended.profile == Profile::Current);

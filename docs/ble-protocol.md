@@ -1227,6 +1227,17 @@ counter baseline captured at the start of the active measurement window; the
 DMA object identifies that contract as `cryptoCountersScope: "window"`. The
 separate authenticated device-status diagnostics retain their lifetime scope.
 
+Each diagnostic DMA region also includes
+`windowMinimumFreeAttribution` and
+`windowMinimumLargestBlockAttribution`. Both bounded objects contain `phase`,
+`observedAtMs`, `value`, and `frameTransferActive`. The allowed phase values are
+`unknown`, `session_start`, `session_end`, `window_start`, `periodic`,
+`render_complete`, and `metrics_snapshot`. Attribution changes only when a
+strictly lower window minimum is observed, so equal allocator readings retain
+the first phase. The frame field is only a correlation bit; no frame bytes,
+HTTP authorization material, token, certificate, pin, SSID, or password is
+retained.
+
 The checked-in benchmark replay marks every exact 1 Hz GPS sample with:
 
 ```text

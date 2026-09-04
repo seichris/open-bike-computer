@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <cstdio>
 #include <new>
@@ -25,6 +26,7 @@ portMUX_TYPE diagnosticsMux = portMUX_INITIALIZER_UNLOCKED;
 // security-sensitive buffers there; transfer credentials never enter it.
 State *diagnosticsState = nullptr;
 uint32_t lastPeriodicMemorySampleMs = 0;
+std::atomic<bool> frameTransferActive{false};
 
 State *allocateDiagnosticsState() {
   void *storage = heap_caps_calloc(
@@ -143,11 +145,13 @@ MemorySample memorySample() {
   };
 }
 
-void noteCurrentMemory() {
+void noteCurrentMemory(MemoryObservationPhase phase, uint32_t nowMs) {
   const MemorySample sample = memorySample();
+  const bool frameActive =
+      frameTransferActive.load(std::memory_order_acquire);
   portENTER_CRITICAL(&diagnosticsMux);
   if (diagnosticsState != nullptr)
-    diagnosticsState->noteMemory(sample);
+    diagnosticsState->noteMemory(sample, phase, nowMs, frameActive);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
@@ -159,6 +163,15 @@ void appendTiming(JsonBuilder &body, const TimingSummary &value) {
   body << "{\"count\":" << value.count << ",\"lastMs\":" << value.lastMs
        << ",\"p50Ms\":" << value.p50Ms << ",\"p95Ms\":" << value.p95Ms
        << ",\"maximumMs\":" << value.maximumMs << "}";
+}
+
+void appendMemoryMinimumAttribution(
+    JsonBuilder &body, const MemoryMinimumAttribution &value) {
+  body << "{\"phase\":\"" << memoryObservationPhaseName(value.phase)
+       << "\",\"observedAtMs\":" << value.observedAtMs
+       << ",\"value\":" << value.value
+       << ",\"frameTransferActive\":"
+       << (value.frameTransferActive ? "true" : "false") << "}";
 }
 
 std::string routeMarkerHash(const RouteMarker &marker) {
@@ -202,7 +215,7 @@ void beginSession(bool remoteDebugActive, uint32_t nowMs) {
     diagnosticsState->beginSession(remoteDebugActive);
   lastPeriodicMemorySampleMs = nowMs;
   portEXIT_CRITICAL(&diagnosticsMux);
-  noteCurrentMemory();
+  noteCurrentMemory(MemoryObservationPhase::SessionStart, nowMs);
 }
 
 void endSession(uint32_t nowMs) {
@@ -211,7 +224,7 @@ void endSession(uint32_t nowMs) {
     diagnosticsState->endSession();
   lastPeriodicMemorySampleMs = nowMs;
   portEXIT_CRITICAL(&diagnosticsMux);
-  noteCurrentMemory();
+  noteCurrentMemory(MemoryObservationPhase::SessionEnd, nowMs);
 }
 
 bool sessionActive() {
@@ -234,7 +247,7 @@ bool beginWindow(uint32_t windowId, const RunIdentity &identity,
     lastPeriodicMemorySampleMs = nowMs;
   portEXIT_CRITICAL(&diagnosticsMux);
   if (accepted)
-    noteCurrentMemory();
+    noteCurrentMemory(MemoryObservationPhase::WindowStart, nowMs);
   return accepted;
 }
 
@@ -275,7 +288,7 @@ void noteLoop(uint32_t nowMs, uint32_t gapMs) {
   }
   portEXIT_CRITICAL(&diagnosticsMux);
   if (sampleMemory)
-    noteCurrentMemory();
+    noteCurrentMemory(MemoryObservationPhase::Periodic, nowMs);
 }
 
 void noteDisplayFlushUs(uint32_t microseconds) {
@@ -289,12 +302,16 @@ bool noteRenderForWindow(uint32_t windowId,
                          renderer_tuning::Profile profile,
                          const RenderSample &sample) {
   const MemorySample memory = memorySample();
+  const uint32_t observedAtMs = millis();
+  const bool frameActive =
+      frameTransferActive.load(std::memory_order_acquire);
   portENTER_CRITICAL(&diagnosticsMux);
   const bool accepted = diagnosticsState != nullptr &&
                         diagnosticsState->noteRenderForWindow(
                             windowId, profile, sample);
   if (accepted)
-    diagnosticsState->noteMemory(memory);
+    diagnosticsState->noteMemory(memory, MemoryObservationPhase::RenderComplete,
+                                 observedAtMs, frameActive);
   portEXIT_CRITICAL(&diagnosticsMux);
   return accepted;
 }
@@ -389,16 +406,23 @@ void noteRemoteDebug(const RemoteDebugOverhead &overhead) {
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
+void setFrameTransferActive(bool active) {
+  frameTransferActive.store(active, std::memory_order_release);
+}
+
 Snapshot snapshot() {
   const MemorySample memory = memorySample();
+  const bool frameActive =
+      frameTransferActive.load(std::memory_order_acquire);
   portENTER_CRITICAL(&diagnosticsMux);
   Snapshot value;
   if (diagnosticsState != nullptr) {
-    diagnosticsState->noteMemory(memory);
     // Capture the envelope timestamp under the same lock that protects the
     // copied route marker. A BLE callback can no longer publish a marker with
     // a receivedAtMs newer than its enclosing snapshot.
     const uint32_t nowMs = millis();
+    diagnosticsState->noteMemory(
+        memory, MemoryObservationPhase::MetricsSnapshot, nowMs, frameActive);
     value = diagnosticsState->snapshot(nowMs);
   }
   portEXIT_CRITICAL(&diagnosticsMux);
@@ -465,7 +489,13 @@ std::string toJson(const Snapshot &value) {
        << ",\"windowMinimumFree\":" << value.windowMinimumDmaFree
        << ",\"windowMinimumLargestBlock\":"
        << value.windowMinimumDmaLargest
-       << ",\"cryptoCountersScope\":\"window\""
+       << ",\"windowMinimumFreeAttribution\":";
+    appendMemoryMinimumAttribution(
+        body, value.windowMinimumDmaFreeAttribution);
+    body << ",\"windowMinimumLargestBlockAttribution\":";
+    appendMemoryMinimumAttribution(
+        body, value.windowMinimumDmaLargestAttribution);
+    body << ",\"cryptoCountersScope\":\"window\""
        << ",\"cryptoHeadroomRejections\":"
        << value.memory.cryptoHeadroomRejections
        << ",\"cryptoOperationFailures\":"

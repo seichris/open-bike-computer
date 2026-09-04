@@ -44,6 +44,7 @@ bool noteRouteMarker(const uint8_t *fixtureSha256, size_t hashBytes,
                      uint16_t sampleIndex, uint16_t sampleCount, uint32_t loop,
                      uint32_t nowMs);
 void noteRemoteDebug(const RemoteDebugOverhead &overhead);
+void setFrameTransferActive(bool active);
 Snapshot snapshot();
 std::string toJson(const Snapshot &snapshot);
 #else
@@ -83,6 +84,7 @@ inline bool noteRouteMarker(const uint8_t *, size_t, uint16_t, uint16_t,
   return false;
 }
 inline void noteRemoteDebug(const RemoteDebugOverhead &) {}
+inline void setFrameTransferActive(bool) {}
 inline Snapshot snapshot() { return {}; }
 inline std::string toJson(const Snapshot &) { return "{}"; }
 #endif

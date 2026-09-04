@@ -71,6 +71,43 @@ struct MemorySample {
   uint32_t cryptoOperationFailures = 0;
 };
 
+enum class MemoryObservationPhase : uint8_t {
+  Unknown = 0,
+  SessionStart,
+  SessionEnd,
+  WindowStart,
+  Periodic,
+  RenderComplete,
+  MetricsSnapshot,
+};
+
+inline const char *memoryObservationPhaseName(MemoryObservationPhase phase) {
+  switch (phase) {
+  case MemoryObservationPhase::SessionStart:
+    return "session_start";
+  case MemoryObservationPhase::SessionEnd:
+    return "session_end";
+  case MemoryObservationPhase::WindowStart:
+    return "window_start";
+  case MemoryObservationPhase::Periodic:
+    return "periodic";
+  case MemoryObservationPhase::RenderComplete:
+    return "render_complete";
+  case MemoryObservationPhase::MetricsSnapshot:
+    return "metrics_snapshot";
+  case MemoryObservationPhase::Unknown:
+  default:
+    return "unknown";
+  }
+}
+
+struct MemoryMinimumAttribution {
+  MemoryObservationPhase phase = MemoryObservationPhase::Unknown;
+  uint32_t observedAtMs = 0;
+  uint32_t value = 0;
+  bool frameTransferActive = false;
+};
+
 struct TimingSummary {
   uint32_t count = 0;
   uint32_t lastMs = 0;
@@ -302,6 +339,8 @@ struct Snapshot {
   uint32_t windowMinimumPsramLargest = 0;
   uint32_t windowMinimumDmaFree = 0;
   uint32_t windowMinimumDmaLargest = 0;
+  MemoryMinimumAttribution windowMinimumDmaFreeAttribution{};
+  MemoryMinimumAttribution windowMinimumDmaLargestAttribution{};
   TimingSummary totalRender{};
   TimingSummary blockLoad{};
   TimingSummary draw{};
@@ -372,8 +411,15 @@ public:
 
   JobCounters currentJobs() const { return jobs_; }
 
-  void noteMemory(const MemorySample &sample) {
+  void noteMemory(
+      const MemorySample &sample,
+      MemoryObservationPhase phase = MemoryObservationPhase::Unknown,
+      uint32_t nowMs = 0, bool frameTransferActive = false) {
     memory_ = sample;
+    const MemoryMinimumAttribution freeAttribution{
+        phase, nowMs, sample.dmaFree, frameTransferActive};
+    const MemoryMinimumAttribution largestAttribution{
+        phase, nowMs, sample.dmaLargest, frameTransferActive};
     if (!memoryObserved_) {
       cryptoHeadroomRejectionsBaseline_ = sample.cryptoHeadroomRejections;
       cryptoOperationFailuresBaseline_ = sample.cryptoOperationFailures;
@@ -383,6 +429,8 @@ public:
       windowMinimumPsramLargest_ = sample.psramLargest;
       windowMinimumDmaFree_ = sample.dmaFree;
       windowMinimumDmaLargest_ = sample.dmaLargest;
+      windowMinimumDmaFreeAttribution_ = freeAttribution;
+      windowMinimumDmaLargestAttribution_ = largestAttribution;
       memoryObserved_ = true;
       return;
     }
@@ -394,10 +442,14 @@ public:
         std::min(windowMinimumPsramFree_, sample.psramFree);
     windowMinimumPsramLargest_ =
         std::min(windowMinimumPsramLargest_, sample.psramLargest);
-    windowMinimumDmaFree_ =
-        std::min(windowMinimumDmaFree_, sample.dmaFree);
-    windowMinimumDmaLargest_ =
-        std::min(windowMinimumDmaLargest_, sample.dmaLargest);
+    if (sample.dmaFree < windowMinimumDmaFree_) {
+      windowMinimumDmaFree_ = sample.dmaFree;
+      windowMinimumDmaFreeAttribution_ = freeAttribution;
+    }
+    if (sample.dmaLargest < windowMinimumDmaLargest_) {
+      windowMinimumDmaLargest_ = sample.dmaLargest;
+      windowMinimumDmaLargestAttribution_ = largestAttribution;
+    }
   }
 
   bool noteRenderForWindow(uint32_t windowId,
@@ -619,6 +671,10 @@ public:
     result.windowMinimumPsramLargest = windowMinimumPsramLargest_;
     result.windowMinimumDmaFree = windowMinimumDmaFree_;
     result.windowMinimumDmaLargest = windowMinimumDmaLargest_;
+    result.windowMinimumDmaFreeAttribution =
+        windowMinimumDmaFreeAttribution_;
+    result.windowMinimumDmaLargestAttribution =
+        windowMinimumDmaLargestAttribution_;
     result.totalRender = totalRender_.summary();
     result.blockLoad = blockLoad_.summary();
     result.draw = draw_.summary();
@@ -738,6 +794,8 @@ private:
     windowMinimumPsramLargest_ = 0;
     windowMinimumDmaFree_ = 0;
     windowMinimumDmaLargest_ = 0;
+    windowMinimumDmaFreeAttribution_ = {};
+    windowMinimumDmaLargestAttribution_ = {};
     totalRender_.reset();
     blockLoad_.reset();
     draw_.reset();
@@ -780,6 +838,8 @@ private:
   uint32_t windowMinimumPsramLargest_ = 0;
   uint32_t windowMinimumDmaFree_ = 0;
   uint32_t windowMinimumDmaLargest_ = 0;
+  MemoryMinimumAttribution windowMinimumDmaFreeAttribution_{};
+  MemoryMinimumAttribution windowMinimumDmaLargestAttribution_{};
   TimingHistogram totalRender_{};
   TimingHistogram blockLoad_{};
   TimingHistogram draw_{};

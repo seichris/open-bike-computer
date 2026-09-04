@@ -170,6 +170,23 @@ These are intentionally predeclared so results cannot be judged against a
 moving target. If physical evidence shows a threshold should change, update it
 in a separate reviewed change before rerunning the experiment.
 
+Per-window memory minima remain the absolute-floor and within-window trend
+evidence: a transient low watermark can still fail the run or expose unsafe
+headroom. Cross-run retained-allocation and fragmentation checks use each
+run's terminal current free and largest-block values, ordered by repeat. They
+ignore one largest step as a possible bounded cache or allocator transition,
+but fail when meaningful decline continues beyond that step and the existing
+per-region allowance. This distinction does not weaken the absolute floors or
+the 20-sample within-window leak detector.
+
+New diagnostic firmware also attributes the first observation of each DMA
+window minimum to a bounded phase (`session_start`, `session_end`,
+`window_start`, `periodic`, `render_complete`, or `metrics_snapshot`), device
+uptime, the observed value, and whether a checkpoint frame transfer was active.
+Equal observations retain the original attribution. These fields identify
+where transient pressure was first observed without exporting credentials,
+payloads, certificates, pins, or allocator traces.
+
 ## Confirm the winner without remote-debug overhead
 
 After a remote-debug report selects a Pareto candidate, flash the corresponding

@@ -28,6 +28,19 @@ constexpr uint32_t kFrameResponseMinimumIntervalMs = 80;
 constexpr uint32_t kMetricsResponseMinimumIntervalMs = 250;
 constexpr uint32_t kRendererWindowMinimumIntervalMs = 1000;
 
+class RendererFrameTransferScope {
+public:
+  RendererFrameTransferScope() {
+    renderer_diagnostics::setFrameTransferActive(true);
+  }
+  ~RendererFrameTransferScope() {
+    renderer_diagnostics::setFrameTransferActive(false);
+  }
+  RendererFrameTransferScope(const RendererFrameTransferScope &) = delete;
+  RendererFrameTransferScope &
+  operator=(const RendererFrameTransferScope &) = delete;
+};
+
 const char *displayStateName(display_power::State state) {
   switch (state) {
   case display_power::State::Active:
@@ -537,6 +550,7 @@ bool DeviceDebugHttp::handleFrame(
       lastFrameResponseMs_ = nowMs;
     return sent;
   }
+  RendererFrameTransferScope frameTransferScope;
   const uint32_t responseStartedMs = millis();
   const uint32_t crcStartedUs = micros();
   const uint32_t checksum = crc32(snapshot.pixels, snapshot.payloadBytes);
