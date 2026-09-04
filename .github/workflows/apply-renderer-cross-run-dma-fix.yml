@@ -1,115 +1,13 @@
-name: Apply renderer cross-run DMA fix
+name: Apply corrected renderer cross-run memory gate
 
 on:
-  push:
-    branches:
-      - fix/renderer-replay-window-transport
+  workflow_dispatch:
 
 permissions:
   contents: write
 
-concurrency:
-  group: renderer-cross-run-dma-fix
-  cancel-in-progress: false
-
 jobs:
-  apply-and-validate:
-    runs-on: macos-latest
+  paused:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          ref: fix/renderer-replay-window-transport
-
-      - name: Verify isolated exact-head bootstrap
-        run: |
-          set -euo pipefail
-          git merge-base --is-ancestor \
-            a1dce92dd8a49c0122b92f94d9630133ea5547ba HEAD
-          unexpected="$(git diff --name-only \
-            a1dce92dd8a49c0122b92f94d9630133ea5547ba..HEAD -- \
-            ':(exclude).github/scripts/apply_renderer_cross_run_dma_fix.py' \
-            ':(exclude).github/workflows/apply-renderer-cross-run-dma-fix.yml')"
-          test -z "$unexpected" || {
-            echo "::error::Unexpected pre-existing branch changes"
-            printf '%s\n' "$unexpected"
-            exit 1
-          }
-
-      - name: Apply deterministic source mutation
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/apply_renderer_cross_run_dma_fix.py
-          git diff --check
-          actual="$(git diff --name-only | sort)"
-          expected="$(cat <<'EOF'
-          esp32/tools/renderer_benchmark.py
-          esp32/tools/tests/test_renderer_benchmark_cross_run_memory.py
-          esp32/tools/tests/test_renderer_benchmark_gate_parity.py
-          ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift
-          ios-app/BikeComputerTests/NavigationProtocolTests.swift
-          EOF
-          )"
-          test "$actual" = "$expected" || {
-            echo "::error::Unexpected changed-file set"
-            printf 'Actual:\n%s\nExpected:\n%s\n' "$actual" "$expected"
-            exit 1
-          }
-
-      - name: Run mirrored gate regressions
-        run: |
-          set -euo pipefail
-          python3 esp32/tools/tests/test_renderer_benchmark_gate_parity.py
-          python3 esp32/tools/tests/test_renderer_benchmark_cross_run_memory.py
-          python3 -m py_compile \
-            esp32/tools/renderer_benchmark.py \
-            esp32/tools/tests/test_renderer_benchmark_cross_run_memory.py \
-            esp32/tools/tests/test_renderer_benchmark_gate_parity.py
-
-      - name: Run complete iOS host regressions
-        working-directory: ios-app
-        run: ./scripts/run-navigation-tests.sh
-
-      - name: Build unsigned Debug app
-        working-directory: ios-app
-        run: |
-          ./scripts/xcodebuild-cli.sh \
-            -project BikeComputer/BikeComputer.xcodeproj \
-            -scheme BikeComputer \
-            -configuration Debug \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/bike-computer-development" \
-            CODE_SIGNING_ALLOWED=NO \
-            build
-
-      - name: Validate Debug app container
-        working-directory: ios-app
-        run: |
-          bash ./scripts/verify-development-container.sh \
-            "$RUNNER_TEMP/bike-computer-development/Build/Products/Debug-iphoneos/BikeComputer.app"
-
-      - name: Build unsigned Release app
-        working-directory: ios-app
-        run: |
-          ./scripts/xcodebuild-cli.sh \
-            -project BikeComputer/BikeComputer.xcodeproj \
-            -scheme BikeComputer \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/bike-computer-release" \
-            CODE_SIGNING_ALLOWED=NO \
-            build
-
-      - name: Commit validated implementation
-        run: |
-          set -euo pipefail
-          git rm \
-            .github/scripts/apply_renderer_cross_run_dma_fix.py \
-            .github/workflows/apply-renderer-cross-run-dma-fix.yml
-          git diff --check
-          git config user.name "github-actions[bot]"
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "Distinguish progressive renderer memory decline"
-          git push origin HEAD:fix/renderer-replay-window-transport
+      - run: echo "Bootstrap paused while the deterministic mutation is corrected."
