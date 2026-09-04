@@ -3337,7 +3337,8 @@ private struct RendererBenchmarkReplaySettingsSection: View {
     }
 
     private var canStartReplay: Bool {
-        canRequestSnapshot && !isNavigationActive
+        canRequestSnapshot && bleManager.supportsRendererBenchmarkSample &&
+            !isNavigationActive
     }
 
     private var activeSession: DeviceTransferSession? {
@@ -3351,6 +3352,8 @@ private struct RendererBenchmarkReplaySettingsSection: View {
                 isNavigationReady: bleManager.isNavigationReady,
                 supportsRendererDiagnostics:
                     bleManager.supportsRendererDiagnostics,
+                supportsRendererBenchmarkSample:
+                    bleManager.supportsRendererBenchmarkSample,
                 isNavigationActive: isNavigationActive,
                 hasSecureSession: activeSession != nil,
                 hasActiveMap: bleManager.activeDeviceMap != nil,

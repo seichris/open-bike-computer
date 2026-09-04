@@ -208,18 +208,12 @@ enum GPSPositionWriteRouting {
     static func route(
         hasNativeWriteWithResponse: Bool,
         hasNativeWriteWithoutResponse: Bool,
-        prefersUnacknowledgedLatestState: Bool,
         payloadLength: Int,
         protectionOverhead: Int,
         withResponseMaximum: Int,
         withoutResponseMaximum: Int
     ) -> GPSPositionWriteRoute {
         let protectedLength = payloadLength + protectionOverhead
-        if prefersUnacknowledgedLatestState,
-           hasNativeWriteWithoutResponse,
-           protectedLength <= withoutResponseMaximum {
-            return .nativeWithoutResponse
-        }
         if hasNativeWriteWithResponse,
            protectedLength <= withResponseMaximum {
             return .nativeWithResponse
@@ -232,23 +226,23 @@ enum GPSPositionWriteRouting {
     }
 }
 
-enum RendererBenchmarkMarkerWriteRoute: Equatable {
+enum RendererBenchmarkSampleWriteRoute: Equatable {
     case nativeWithoutResponse
-    case navigationFallback
+    case unavailable
 }
 
-enum RendererBenchmarkMarkerWriteRouting {
+enum RendererBenchmarkSampleWriteRouting {
     static func route(
         hasNativeWriteWithoutResponse: Bool,
         payloadLength: Int,
         protectionOverhead: Int,
         withoutResponseMaximum: Int
-    ) -> RendererBenchmarkMarkerWriteRoute {
+    ) -> RendererBenchmarkSampleWriteRoute {
         if hasNativeWriteWithoutResponse,
            payloadLength + protectionOverhead <= withoutResponseMaximum {
             return .nativeWithoutResponse
         }
-        return .navigationFallback
+        return .unavailable
     }
 }
 
@@ -313,6 +307,7 @@ enum DeviceBLEProtocol {
     static let rendererMetricsResponsePrefix = "RDMT"
     static let rendererMetricsChunkPrefix = "RDMC"
     static let rendererBenchmarkMarkerPrefix = "RBM1"
+    static let rendererBenchmarkSamplePrefix = "RBS1"
     static let rendererBenchmarkWindowPrefix = "RBW1"
     static let deviceCapabilitiesPrefix = "CAPS"
     static let deviceCapabilitiesV2Prefix = "CAP2"
@@ -348,7 +343,8 @@ enum DeviceBLEProtocol {
     static let automaticDisplayOffCapabilityMask: UInt32 = 1 << 19
     static let rideDiagnosticsCapabilityMask: UInt32 = 1 << 20
     static let detailedRideDiagnosticsCapabilityMask: UInt32 = 1 << 21
-    static let deviceCapabilitiesVersion: UInt8 = 19
+    static let rendererBenchmarkSampleCapabilityMask: UInt32 = 1 << 23
+    static let deviceCapabilitiesVersion: UInt8 = 21
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryOriginFrameLength = 28
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
@@ -360,6 +356,8 @@ enum DeviceBLEProtocol {
     static let gpsPositionCoalescingKey = "gps-position"
     static let rendererBenchmarkMarkerCoalescingKey =
         "renderer.benchmark.marker"
+    static let rendererBenchmarkSampleCoalescingKey =
+        "renderer.benchmark.sample"
     static let automaticDisplayOffSettingCoalescingKey =
         "automatic-display-off-setting"
     // Large enough for the worst schema-v1 three-favorite catalog at the
@@ -857,6 +855,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsRemoteDeviceDebug: Bool = false
     @Published private(set) var supportsGPSPositionQualityV1: Bool = false
     @Published private(set) var supportsRendererDiagnostics: Bool = false
+    @Published private(set) var supportsRendererBenchmarkSample: Bool = false
     @Published private(set) var supportsRideDiagnostics: Bool = false
     @Published private(set) var supportsDetailedRideDiagnostics: Bool = false
     @Published private(set) var rendererDiagnosticsSnapshotJSON: String?
@@ -3643,10 +3642,6 @@ class BLEManager: NSObject, ObservableObject {
                     characteristic.properties.contains(.write),
                 hasNativeWriteWithoutResponse:
                     characteristic.properties.contains(.writeWithoutResponse),
-                prefersUnacknowledgedLatestState:
-                    rendererBenchmarkLatestStateLaneIsAvailable(
-                        on: peripheral
-                    ),
                 payloadLength: data.count,
                 protectionOverhead: authenticatedWriteSession == nil
                     ? 0
@@ -3694,15 +3689,17 @@ class BLEManager: NSObject, ObservableObject {
                         transportExpectsWriteResponse: true
                     )
                 } else {
-                    queued = enqueueLatestStateWrite(
+                    queued = enqueueNavigationWrite(
                         data,
                         endpoint: endpoint,
                         label: "native GPS position",
-                        kind: .gpsPosition,
+                        writeClass: .gpsPosition,
+                        coalescingKey: DeviceBLEProtocol.gpsPositionCoalescingKey,
                         transportWrite: transportWrite,
                         transportCanSend: { [weak peripheral] in
                             peripheral?.canSendWriteWithoutResponse ?? false
-                        }
+                        },
+                        transportExpectsWriteResponse: false
                     )
                 }
                 guard queued else {
@@ -4370,6 +4367,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
         supportsRendererDiagnostics = false
+        supportsRendererBenchmarkSample = false
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         rendererDiagnosticsChunks.reset()
@@ -4976,6 +4974,34 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
+    func sendRendererBenchmarkSample(
+        gpsPosition: Data,
+        fixtureSHA256: Data,
+        sampleIndex: Int,
+        sampleCount: Int,
+        loop: UInt32
+    ) -> Bool {
+        guard supportsRendererDiagnostics,
+              supportsRendererBenchmarkSample,
+              let marker = RendererBenchmarkMarkerPacket.data(
+                fixtureSHA256: fixtureSHA256,
+                sampleIndex: sampleIndex,
+                sampleCount: sampleCount,
+                loop: loop
+              ),
+              let packet = RendererBenchmarkSamplePacket.data(
+                gpsPosition: gpsPosition,
+                marker: marker
+              ) else {
+            return false
+        }
+        return sendNativeRendererBenchmarkSample(
+            packet,
+            label: "renderer benchmark sample"
+        )
+    }
+
+    @discardableResult
     func sendRendererBenchmarkMarker(
         fixtureSHA256: Data,
         sampleIndex: Int,
@@ -4991,22 +5017,12 @@ class BLEManager: NSObject, ObservableObject {
               ) else {
             return false
         }
-        return DevicePacketRouting.sendPreferredThenFallback(
-            preferred: {
-                sendNativeRendererBenchmarkMarker(
-                    packet,
-                    label: "renderer benchmark marker"
-                )
-            },
-            fallback: {
-                sendFallbackMapPacket(
-                    packet,
-                    label: "renderer benchmark marker",
-                    writeClass: .settingsControl,
-                    coalescingKey:
-                        DeviceBLEProtocol.rendererBenchmarkMarkerCoalescingKey
-                )
-            }
+        return sendFallbackMapPacket(
+            packet,
+            label: "renderer benchmark marker",
+            writeClass: .settingsControl,
+            coalescingKey:
+                DeviceBLEProtocol.rendererBenchmarkMarkerCoalescingKey
         )
     }
 
@@ -5448,6 +5464,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
         supportsRendererDiagnostics = false
+        supportsRendererBenchmarkSample = false
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         rendererDiagnosticsChunks.reset()
@@ -6743,18 +6760,9 @@ class BLEManager: NSObject, ObservableObject {
             writeClass: kind.writeClass,
             coalescingKey: kind.coalescingKey
         )
-        switch kind {
-        case .gpsPosition:
-            // Give a marker left behind by a partially drained pair the first
-            // opportunity to use newly available CoreBluetooth credit. If it
-            // is still blocked, stageGPS preserves it and skips this newer
-            // pair rather than starving marker delivery indefinitely.
-            flushPendingNavigationWrites(endpoint: endpoint)
-            return navigationLatestStateWriteQueue.stageGPS(write)
-        case .rendererBenchmarkMarker:
-            guard navigationLatestStateWriteQueue.completePair(with: write) else {
-                return false
-            }
+        guard kind == .rendererBenchmarkSample,
+              navigationLatestStateWriteQueue.enqueue(write) else {
+            return false
         }
         flushPendingNavigationWrites(endpoint: endpoint)
         scheduleNavigationFlushRetryIfNeeded()
@@ -6949,16 +6957,16 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    private func sendNativeRendererBenchmarkMarker(
+    private func sendNativeRendererBenchmarkSample(
         _ data: Data,
         label: String
     ) -> Bool {
         guard isConnected,
               isNavigationReady,
               let peripheral = connectedPeripheral,
-              let characteristic = settingsCharacteristic,
+              let characteristic = gpsPositionCharacteristic,
               let endpoint = navigationWriteEndpoint,
-              RendererBenchmarkMarkerWriteRouting.route(
+              RendererBenchmarkSampleWriteRouting.route(
                 hasNativeWriteWithoutResponse:
                     characteristic.properties.contains(.writeWithoutResponse),
                 payloadLength: data.count,
@@ -6975,7 +6983,7 @@ class BLEManager: NSObject, ObservableObject {
             data,
             endpoint: endpoint,
             label: "native \(label)",
-            kind: .rendererBenchmarkMarker,
+            kind: .rendererBenchmarkSample,
             transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
                 guard let self, let peripheral, let characteristic else { return }
                 self.writeDeviceData(
@@ -6991,23 +6999,6 @@ class BLEManager: NSObject, ObservableObject {
         ) else { return false }
         log("Queued native \(label): \(data.count) bytes")
         return true
-    }
-
-    private func rendererBenchmarkLatestStateLaneIsAvailable(
-        on peripheral: CBPeripheral
-    ) -> Bool {
-        guard deviceGPSOverrideToken != nil,
-              supportsRendererDiagnostics,
-              let settingsCharacteristic,
-              settingsCharacteristic.properties.contains(.writeWithoutResponse)
-              else { return false }
-        let protectedLength = RendererBenchmarkMarkerPacket.byteCount +
-            (authenticatedWriteSession == nil
-                ? 0
-                : AuthenticatedBLEWriteSession.frameOverhead)
-        return protectedLength <= peripheral.maximumWriteValueLength(
-            for: .withoutResponse
-        )
     }
 
     private var navigationPendingWriteCount: Int {
@@ -7042,17 +7033,15 @@ class BLEManager: NSObject, ObservableObject {
 
     private func flushPendingNavigationWrites(endpoint: NavigationWriteEndpoint) {
         var madeProgress = false
-        navigationLatestStateWriteQueue.flush(maxWrites: 2) { write in
+        navigationLatestStateWriteQueue.flush(maxWrites: 1) { write in
             madeProgress = true
             write.perform(using: endpoint.write)
             log("Sent \(write.label): \(write.data.count) bytes")
         }
-        // Do not keep feeding acknowledged traffic while a partially drained
-        // latest-state pair is waiting for no-response transport credit. The
-        // physical CoreBluetooth path can otherwise advance route/status
-        // writes indefinitely while the corresponding marker is replaced on
-        // every 1 Hz tick. Once the pair drains, one ordered write may advance
-        // in the same flush, so transactional traffic is not starved.
+        // Do not feed acknowledged traffic while the atomic renderer sample is
+        // waiting for no-response transport credit. Once it drains, one
+        // ordered write may advance in the same flush, so transactional traffic
+        // is preserved without splitting GPS from its marker.
         if navigationLatestStateWriteQueue.count == 0 {
             navigationWriteQueue.flush(canSend: { [weak self] write in
                 guard let self else { return false }
@@ -8219,6 +8208,7 @@ extension BLEManager: CBPeripheralDelegate {
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
         supportsRendererDiagnostics = false
+        supportsRendererBenchmarkSample = false
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         rendererDiagnosticsChunks.reset()
@@ -8348,6 +8338,9 @@ extension BLEManager: CBPeripheralDelegate {
             flags & DeviceBLEProtocol.gpsPositionQualityV1CapabilityMask != 0
         let hasRendererDiagnostics =
             flags & DeviceBLEProtocol.rendererDiagnosticsCapabilityMask != 0
+        let hasRendererBenchmarkSample = hasRendererDiagnostics &&
+            flags &
+                DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask != 0
         let hasAutomaticDisplayOff =
             flags & DeviceBLEProtocol.automaticDisplayOffCapabilityMask != 0
         let hasRideDiagnostics =
@@ -8441,8 +8434,12 @@ extension BLEManager: CBPeripheralDelegate {
         supportsRemoteDeviceDebug = hasRemoteDeviceDebug
         supportsGPSPositionQualityV1 = hasGPSPositionQualityV1
         supportsRendererDiagnostics = hasRendererDiagnostics
+        supportsRendererBenchmarkSample = hasRendererBenchmarkSample
         supportsRideDiagnostics = hasRideDiagnostics
         supportsDetailedRideDiagnostics = hasDetailedRideDiagnostics
+        if !hasRendererBenchmarkSample {
+            navigationLatestStateWriteQueue.removeAll()
+        }
         if hasRideDiagnostics {
             sendDiagnosticsCaptureBindingIfNeeded()
         }

@@ -327,6 +327,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
                 isNavigationReady: bleManager.isNavigationReady,
                 supportsRendererDiagnostics:
                     bleManager.supportsRendererDiagnostics,
+                supportsRendererBenchmarkSample:
+                    bleManager.supportsRendererBenchmarkSample,
                 isNavigationActive: isNavigationActive,
                 hasSecureSession: deviceSession != nil,
                 hasActiveMap: map != nil,
@@ -1161,6 +1163,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
               bleManager.isConnected,
               bleManager.isNavigationReady,
               bleManager.supportsRendererDiagnostics,
+              bleManager.supportsRendererBenchmarkSample,
               bleManager.deviceStorageBackend == "sdmmc",
               bleManager.deviceStoragePowerCycleRequired == false,
               RemoteDeviceDebugSessionPolicy.activeSession(

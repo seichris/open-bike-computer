@@ -65,9 +65,10 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
         }
         guard bleManager.isConnected,
               bleManager.isNavigationReady,
-              bleManager.supportsRendererDiagnostics else {
+              bleManager.supportsRendererDiagnostics,
+              bleManager.supportsRendererBenchmarkSample else {
             errorMessage =
-                "Connect an authenticated diagnostics firmware build first."
+                "Connect diagnostics firmware with atomic renderer replay support first."
             status = "Unavailable"
             return
         }
@@ -221,6 +222,7 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
               bleManager.isConnected,
               bleManager.isNavigationReady,
               bleManager.supportsRendererDiagnostics,
+              bleManager.supportsRendererBenchmarkSample,
               let fixture,
               fixture.points.indices.contains(sampleIndex),
               let routeData = RendererBenchmarkRouteGeometry.data(
@@ -253,10 +255,14 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             }
         }
         let now = Date()
-        guard bleManager.sendGPSPosition(
+        let gpsPosition = DeviceGPSPacketBuilder.data(
             lat: point.latitude,
             lon: point.longitude,
-            heading: heading,
+            heading: DeviceGPSHeadingWirePolicy.heading(
+                heading,
+                supportsExplicitInvalidHeading:
+                    bleManager.supportsExplicitInvalidGPSHeading
+            ),
             speedMetersPerSecond: fixture.nominalSpeedMetersPerSecond,
             altitudeMeters: 8,
             distanceTraveledMeters:
@@ -267,23 +273,21 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
                 Double(fixture.points.count - sampleIndex) *
                 fixture.nominalSpeedMetersPerSecond,
             horizontalAccuracyMeters: 3,
-            locationTimestamp: now
-        ) else {
-            errorMessage = "The benchmark GPS sample could not be queued."
-            status = "Stopped"
-            stop()
-            return
-        }
-        // Keep the marker behind its GPS write in the serialized navigation
-        // queue. A frame captured after firmware accepts the marker can then
-        // be attributed to this sample rather than the previous position.
-        guard bleManager.sendRendererBenchmarkMarker(
+            locationTimestamp: now,
+            includeRideDetectionQuality:
+                bleManager.supportsGPSPositionQualityV1
+        )
+        // GPS and its marker share one authenticated GPS-channel write. This
+        // keeps their order atomic and consumes only one CoreBluetooth
+        // write-without-response credit per one-Hz replay tick.
+        guard bleManager.sendRendererBenchmarkSample(
+            gpsPosition: gpsPosition,
             fixtureSHA256: fixtureSHA256,
             sampleIndex: sampleIndex,
             sampleCount: fixture.points.count,
             loop: loop
         ) else {
-            errorMessage = "The benchmark marker could not be queued."
+            errorMessage = "The atomic benchmark sample could not be queued."
             status = "Stopped"
             stop()
             return

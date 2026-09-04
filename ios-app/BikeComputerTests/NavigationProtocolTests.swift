@@ -391,6 +391,7 @@ final class TestBLEManager: BLEManager {
     var sentPackets: [String] = []
     var sentRouteGeometry: [Data] = []
     var sentGPSPositions: [Data] = []
+    var sentRendererBenchmarkSamples: [Data] = []
 
     override func centralManagerDidUpdateState(_ central: CBCentralManager) {
         // Keep CoreBluetooth startup callbacks from changing test-controlled state.
@@ -443,6 +444,31 @@ final class TestBLEManager: BLEManager {
             locationTimestamp: locationTimestamp,
             includeRideDetectionQuality: supportsGPSPositionQualityV1
         ))
+        return true
+    }
+
+    override func sendRendererBenchmarkSample(
+        gpsPosition: Data,
+        fixtureSHA256: Data,
+        sampleIndex: Int,
+        sampleCount: Int,
+        loop: UInt32
+    ) -> Bool {
+        guard isConnected, isNavigationReady,
+              let marker = RendererBenchmarkMarkerPacket.data(
+                fixtureSHA256: fixtureSHA256,
+                sampleIndex: sampleIndex,
+                sampleCount: sampleCount,
+                loop: loop
+              ),
+              let packet = RendererBenchmarkSamplePacket.data(
+                gpsPosition: gpsPosition,
+                marker: marker
+              ) else {
+            return false
+        }
+        sentRendererBenchmarkSamples.append(packet)
+        sentGPSPositions.append(gpsPosition)
         return true
     }
 }
@@ -13919,17 +13945,6 @@ struct NavigationProtocolTests {
         assertEqual(GPSPositionWriteRouting.route(
             hasNativeWriteWithResponse: true,
             hasNativeWriteWithoutResponse: true,
-            prefersUnacknowledgedLatestState: true,
-            payloadLength: 36,
-            protectionOverhead: 22,
-            withResponseMaximum: 58,
-            withoutResponseMaximum: 58
-        ), .nativeWithoutResponse,
-                    "renderer GPS uses the independent replaceable-state lane")
-        assertEqual(GPSPositionWriteRouting.route(
-            hasNativeWriteWithResponse: true,
-            hasNativeWriteWithoutResponse: true,
-            prefersUnacknowledgedLatestState: false,
             payloadLength: 30,
             protectionOverhead: 22,
             withResponseMaximum: 512,
@@ -13939,7 +13954,6 @@ struct NavigationProtocolTests {
         assertEqual(GPSPositionWriteRouting.route(
             hasNativeWriteWithResponse: true,
             hasNativeWriteWithoutResponse: false,
-            prefersUnacknowledgedLatestState: true,
             payloadLength: 30,
             protectionOverhead: 22,
             withResponseMaximum: 512,
@@ -13949,7 +13963,6 @@ struct NavigationProtocolTests {
         assertEqual(GPSPositionWriteRouting.route(
             hasNativeWriteWithResponse: false,
             hasNativeWriteWithoutResponse: false,
-            prefersUnacknowledgedLatestState: true,
             payloadLength: 30,
             protectionOverhead: 22,
             withResponseMaximum: 512,
@@ -13959,7 +13972,6 @@ struct NavigationProtocolTests {
         assertEqual(GPSPositionWriteRouting.route(
             hasNativeWriteWithResponse: true,
             hasNativeWriteWithoutResponse: true,
-            prefersUnacknowledgedLatestState: false,
             payloadLength: 30,
             protectionOverhead: 22,
             withResponseMaximum: 20,
@@ -13969,7 +13981,6 @@ struct NavigationProtocolTests {
         assertEqual(GPSPositionWriteRouting.route(
             hasNativeWriteWithResponse: true,
             hasNativeWriteWithoutResponse: true,
-            prefersUnacknowledgedLatestState: true,
             payloadLength: 30,
             protectionOverhead: 22,
             withResponseMaximum: 20,
@@ -13977,20 +13988,20 @@ struct NavigationProtocolTests {
         ), .navigationFallback,
                     "insufficient native MTU falls back without dropping current GPS")
 
-        assertEqual(RendererBenchmarkMarkerWriteRouting.route(
+        assertEqual(RendererBenchmarkSampleWriteRouting.route(
             hasNativeWriteWithoutResponse: true,
-            payloadLength: RendererBenchmarkMarkerPacket.byteCount,
+            payloadLength: RendererBenchmarkSamplePacket.maximumByteCount,
             protectionOverhead: AuthenticatedBLEWriteSession.frameOverhead,
-            withoutResponseMaximum: 66
+            withoutResponseMaximum: 107
         ), .nativeWithoutResponse,
-                    "the protected renderer marker fits the paired latest-state lane")
-        assertEqual(RendererBenchmarkMarkerWriteRouting.route(
+                    "the protected atomic renderer sample fits one latest-state write")
+        assertEqual(RendererBenchmarkSampleWriteRouting.route(
             hasNativeWriteWithoutResponse: true,
-            payloadLength: RendererBenchmarkMarkerPacket.byteCount,
+            payloadLength: RendererBenchmarkSamplePacket.maximumByteCount,
             protectionOverhead: AuthenticatedBLEWriteSession.frameOverhead,
-            withoutResponseMaximum: 65
-        ), .navigationFallback,
-                    "a renderer marker that cannot fit keeps the reliable fallback")
+            withoutResponseMaximum: 106
+        ), .unavailable,
+                    "an atomic sample that cannot fit fails closed")
 
         let channelManager = BLEManager()
         let writeSession = AuthenticatedBLEWriteSession(
@@ -14309,36 +14320,26 @@ struct NavigationProtocolTests {
 
         var latestQueue = NavigationLatestStateWriteQueue()
         var sent: [String] = []
-        func latestWrite(
-            _ sample: UInt8,
-            kind: NavigationLatestStateKind,
-            canSend: @escaping () -> Bool = { true }
-        ) -> NavigationWrite {
+        func latestWrite(_ sample: UInt8,
+                         canSend: @escaping () -> Bool = { true })
+            -> NavigationWrite {
             NavigationWrite(
                 data: Data([sample]),
-                label: kind == .gpsPosition
-                    ? "gps-\(sample)"
-                    : "marker-\(sample)",
+                label: "sample-\(sample)",
                 transportCanSend: canSend,
                 transportExpectsWriteResponse: false,
-                writeClass: kind.writeClass,
-                coalescingKey: kind.coalescingKey
+                writeClass:
+                    NavigationLatestStateKind.rendererBenchmarkSample.writeClass,
+                coalescingKey:
+                    NavigationLatestStateKind.rendererBenchmarkSample.coalescingKey
             )
         }
 
         for sample in UInt8(223)...UInt8(226) {
-            assert(latestQueue.stageGPS(latestWrite(
-                sample,
-                kind: .gpsPosition
-            )), "new renderer GPS is staged")
-            assert(latestQueue.count <= 2,
-                   "staging a replacement never exceeds the bounded lane")
-            assert(latestQueue.completePair(with: latestWrite(
-                sample,
-                kind: .rendererBenchmarkMarker
-            )), "the corresponding marker completes an atomic latest-state pair")
-            assertEqual(latestQueue.count, 2,
-                        "only one complete GPS/marker pair remains pending")
+            assert(latestQueue.enqueue(latestWrite(sample)),
+                   "new atomic renderer sample is staged")
+            assertEqual(latestQueue.count, 1,
+                        "the latest-state lane retains exactly one sample")
         }
 
         orderedQueue.flush(canSend: { write in
@@ -14352,74 +14353,46 @@ struct NavigationProtocolTests {
         latestQueue.flush { write in
             sent.append(write.label)
         }
-        assertEqual(sent, ["gps-226", "marker-226"],
-                    "newest GPS precedes its marker despite the unrelated acknowledgement")
+        assertEqual(sent, ["sample-226"],
+                    "one atomic newest sample bypasses the unrelated acknowledgement")
         assertEqual(latestQueue.metrics.coalescedFrames(for: .gpsPosition), 3,
-                    "stale GPS states are bounded by coalescing")
-        assertEqual(latestQueue.metrics.coalescedFrames(for: .settingsControl), 3,
-                    "stale marker states are bounded by coalescing")
+                    "stale composite states are bounded by coalescing")
 
         acknowledgedSettingInFlight = false
         orderedQueue.flush(canSend: { _ in true }) { write in
             sent.append(write.label)
         }
-        assertEqual(sent, ["gps-226", "marker-226", "queued route"],
+        assertEqual(sent, ["sample-226", "queued route"],
                     "transactional route ordering resumes unchanged after the ACK")
 
-        var transportReadyForSecondWrite = true
-        var partialQueue = NavigationLatestStateWriteQueue()
-        assert(partialQueue.stageGPS(latestWrite(1, kind: .gpsPosition) {
-            transportReadyForSecondWrite
-        }), "partial-drain fixture stages GPS")
-        assert(partialQueue.completePair(with: latestWrite(
-            1,
-            kind: .rendererBenchmarkMarker,
-            canSend: { transportReadyForSecondWrite }
-        )), "partial-drain fixture completes its first pair")
-        var partialSent: [String] = []
-        partialQueue.flush { write in
-            partialSent.append(write.label)
-            transportReadyForSecondWrite = false
+        var latestReady = false
+        var backpressuredQueue = NavigationLatestStateWriteQueue()
+        assert(backpressuredQueue.enqueue(latestWrite(1) { latestReady }),
+               "backpressure fixture stages one composite sample")
+        assert(backpressuredQueue.enqueue(latestWrite(2) { latestReady }),
+               "a newer complete sample replaces the blocked one")
+        var backpressureSent: [String] = []
+        backpressuredQueue.flush { write in
+            backpressureSent.append(write.label)
         }
-        assertEqual(partialSent, ["gps-1"],
-                    "backpressure can pause between the GPS and marker submissions")
-        assert(partialQueue.stageGPS(latestWrite(2, kind: .gpsPosition) {
-            transportReadyForSecondWrite
-        }), "a newer GPS is safely skipped while its predecessor marker is pending")
-        assert(partialQueue.completePair(with: latestWrite(
-            2,
-            kind: .rendererBenchmarkMarker,
-            canSend: { transportReadyForSecondWrite }
-        )), "the skipped GPS also skips its corresponding marker")
-        transportReadyForSecondWrite = true
-        partialQueue.flush { write in
-            partialSent.append(write.label)
+        assert(backpressureSent.isEmpty,
+               "no half-sample can drain without transport credit")
+        latestReady = true
+        backpressuredQueue.flush { write in
+            backpressureSent.append(write.label)
         }
-        assertEqual(partialSent, ["gps-1", "marker-1"],
-                    "the unmatched marker survives later replay ticks and eventually drains")
-        assert(partialQueue.stageGPS(latestWrite(3, kind: .gpsPosition)),
-               "the next GPS stages after the unmatched marker drains")
-        assert(partialQueue.completePair(with: latestWrite(
-            3,
-            kind: .rendererBenchmarkMarker
-        )), "the next complete pair is admitted after recovery")
-        partialQueue.flush { write in
-            partialSent.append(write.label)
-        }
-        assertEqual(
-            partialSent,
-            ["gps-1", "marker-1", "gps-3", "marker-3"],
-            "recovery preserves every submitted GPS-before-marker relationship"
-        )
+        assertEqual(backpressureSent, ["sample-2"],
+                    "the newest complete sample eventually drains in one write")
 
-        assert(!partialQueue.stageGPS(NavigationWrite(
+        assert(!backpressuredQueue.enqueue(NavigationWrite(
             data: Data([3]),
-            label: "acknowledged GPS",
+            label: "acknowledged sample",
             transportExpectsWriteResponse: true,
             writeClass: .gpsPosition,
-            coalescingKey: DeviceBLEProtocol.gpsPositionCoalescingKey
+            coalescingKey:
+                DeviceBLEProtocol.rendererBenchmarkSampleCoalescingKey
         )), "acknowledged writes cannot enter the unacknowledged state lane")
-        assert(!partialQueue.stageGPS(NavigationWrite(
+        assert(!backpressuredQueue.enqueue(NavigationWrite(
             data: Data([4]),
             label: "transactional setting",
             transportExpectsWriteResponse: false,
@@ -14428,10 +14401,10 @@ struct NavigationProtocolTests {
                 DeviceBLEProtocol.automaticDisplayOffSettingCoalescingKey
         )), "ordinary settings cannot enter the replaceable-state lane")
 
-        assert(partialQueue.stageGPS(latestWrite(5, kind: .gpsPosition)),
-               "session-reset fixture stages a final GPS")
-        partialQueue.removeAll()
-        assertEqual(partialQueue.count, 0,
+        assert(backpressuredQueue.enqueue(latestWrite(5)),
+               "session-reset fixture stages a final composite sample")
+        backpressuredQueue.removeAll()
+        assertEqual(backpressuredQueue.count, 0,
                     "disconnect or session reset clears staged and queued state")
 
         let resetManager = BLEManager()
@@ -14447,10 +14420,10 @@ struct NavigationProtocolTests {
         }
         assert(resetManager.enqueueLatestStateWriteForTesting(
             Data([6]),
-            kind: .gpsPosition,
+            kind: .rendererBenchmarkSample,
             canSend: { false },
             write: { _ in }
-        ), "BLE manager stages a renderer GPS write during the override")
+        ), "BLE manager stages an atomic renderer sample during the override")
         assertEqual(resetManager.navigationPendingWriteCountForTesting, 1,
                     "the staged renderer GPS is visible to cleanup accounting")
         resetManager.endDeviceGPSOverride(overrideToken)
@@ -14465,7 +14438,7 @@ struct NavigationProtocolTests {
             write: { _ in }
         ))
         var orderedReady = false
-        var latestReady = true
+        var managerLatestReady = false
         var precedenceWrites: [UInt8] = []
         precedenceManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 512,
@@ -14478,32 +14451,20 @@ struct NavigationProtocolTests {
         ), "an ordered transaction waits before the renderer pair")
         assert(precedenceManager.enqueueLatestStateWriteForTesting(
             Data([0x41]),
-            kind: .gpsPosition,
-            canSend: { latestReady },
-            write: { data in
-                precedenceWrites.append(data[0])
-                latestReady = false
-            }
-        ), "the physical backpressure fixture stages GPS")
-        assert(precedenceManager.enqueueLatestStateWriteForTesting(
-            Data([0x42]),
-            kind: .rendererBenchmarkMarker,
-            canSend: { latestReady },
+            kind: .rendererBenchmarkSample,
+            canSend: { managerLatestReady },
             write: { data in precedenceWrites.append(data[0]) }
-        ), "the physical backpressure fixture completes the pair")
+        ), "the physical backpressure fixture stages one atomic sample")
         orderedReady = true
         precedenceManager.flushPendingNavigationWritesForTesting()
-        assertEqual(
-            precedenceWrites,
-            [0x41],
-            "ordered traffic cannot overtake a marker after GPS consumes the transport credit"
-        )
-        latestReady = true
+        assert(precedenceWrites.isEmpty,
+               "ordered traffic cannot overtake a blocked renderer sample")
+        managerLatestReady = true
         precedenceManager.flushPendingNavigationWritesForTesting()
         assertEqual(
             precedenceWrites,
-            [0x41, 0x42, 0x40],
-            "marker recovery precedes the next ordered transaction"
+            [0x41, 0x40],
+            "the atomic sample drains before the next ordered transaction"
         )
     }
 
@@ -14630,6 +14591,42 @@ struct NavigationProtocolTests {
         assertEqual(readUInt32LE(marker, offset: 40), 0x1234_5678,
                     "renderer marker carries replay loop")
 
+        let replayGPS = DeviceGPSPacketBuilder.data(
+            lat: fixture.points[119].latitude,
+            lon: fixture.points[119].longitude,
+            heading: 90,
+            speedMetersPerSecond: fixture.nominalSpeedMetersPerSecond,
+            altitudeMeters: 8,
+            distanceTraveledMeters: 119,
+            elapsedSeconds: 119,
+            routeRemainingMeters: 4,
+            horizontalAccuracyMeters: 3,
+            locationTimestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            includeRideDetectionQuality: true
+        )
+        guard let sample = RendererBenchmarkSamplePacket.data(
+            gpsPosition: replayGPS,
+            marker: marker
+        ) else {
+            assert(false, "valid renderer benchmark sample encodes")
+            return
+        }
+        assertEqual(sample.count, 85,
+                    "one protected write contains a 36-byte GPS and marker")
+        assertEqual(String(data: sample.prefix(4), encoding: .utf8), "RBS1",
+                    "atomic renderer sample uses the negotiated prefix")
+        assertEqual(sample[4], 36,
+                    "atomic renderer sample bounds its GPS member")
+        assertEqual(String(data: sample[41..<45], encoding: .utf8), "RBM1",
+                    "marker follows GPS in the same transport payload")
+        assert(
+            RendererBenchmarkSamplePacket.data(
+                gpsPosition: Data(repeating: 0, count: 35),
+                marker: marker
+            ) == nil,
+            "non-canonical GPS members fail closed"
+        )
+
         guard let window = RendererBenchmarkWindowPacket.data(
             profile: .medium,
             repeatNumber: 7,
@@ -14729,11 +14726,13 @@ struct NavigationProtocolTests {
 
         let manager = BLEManager()
         var cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8)
-        cap2.append(contentsOf: [1, 0, 0, 4, 0])
+        cap2.append(contentsOf: [1, 0, 0, 0x84, 0])
         assert(manager.handleDeviceCapabilitiesNotification(cap2),
                "renderer diagnostics CAP2 response is consumed")
         assert(manager.supportsRendererDiagnostics,
                "CAP2 bit 18 enables renderer diagnostics")
+        assert(manager.supportsRendererBenchmarkSample,
+               "CAP2 bit 23 enables atomic renderer replay samples")
         manager.isConnected = true
         manager.isNavigationReady = true
         var writes: [Data] = []
@@ -15220,6 +15219,7 @@ struct NavigationProtocolTests {
             isConnected: Bool = true,
             isNavigationReady: Bool = true,
             supportsRendererDiagnostics: Bool = true,
+            supportsRendererBenchmarkSample: Bool = true,
             isNavigationActive: Bool = false,
             hasSecureSession: Bool = true,
             hasActiveMap: Bool = true,
@@ -15234,6 +15234,8 @@ struct NavigationProtocolTests {
                     isConnected: isConnected,
                     isNavigationReady: isNavigationReady,
                     supportsRendererDiagnostics: supportsRendererDiagnostics,
+                    supportsRendererBenchmarkSample:
+                        supportsRendererBenchmarkSample,
                     isNavigationActive: isNavigationActive,
                     hasSecureSession: hasSecureSession,
                     hasActiveMap: hasActiveMap,
@@ -15247,6 +15249,11 @@ struct NavigationProtocolTests {
         }
 
         assertEqual(blocker(), nil, "complete secure sweep state is ready")
+        assertEqual(
+            blocker(supportsRendererBenchmarkSample: false),
+            .rendererBenchmarkSampleUnsupported,
+            "secure sweep requires atomic GPS-plus-marker delivery"
+        )
         assertEqual(
             blocker(hasSecureSession: false),
             .secureSessionUnavailable,
@@ -15333,12 +15340,14 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.automaticDisplayOffCapabilityMask, 1 << 19, "CAP2 bit 19 advertises automatic display-off")
         assertEqual(DeviceBLEProtocol.rideDiagnosticsCapabilityMask, 1 << 20, "CAP2 bit 20 advertises persistent ride diagnostics")
         assertEqual(DeviceBLEProtocol.detailedRideDiagnosticsCapabilityMask, 1 << 21, "CAP2 bit 21 advertises detailed ride diagnostics")
+        assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 19, "capability version negotiates detailed ride diagnostics")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 21, "capability version negotiates atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
         assertEqual(DeviceBLEProtocol.rendererMetricsResponsePrefix, "RDMT", "renderer metrics responses use RDMT")
         assertEqual(DeviceBLEProtocol.rendererMetricsChunkPrefix, "RDMC", "renderer metrics chunks use RDMC")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkMarkerPrefix, "RBM1", "renderer replay markers use RBM1")
+        assertEqual(DeviceBLEProtocol.rendererBenchmarkSamplePrefix, "RBS1", "atomic renderer replay samples use RBS1")
         assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
                     "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
                     "workout telemetry uses the dedicated 128-bit characteristic")

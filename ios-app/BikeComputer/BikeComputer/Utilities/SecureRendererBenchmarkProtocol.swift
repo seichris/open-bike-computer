@@ -223,6 +223,7 @@ nonisolated struct SecureRendererBenchmarkReadinessInputs: Equatable, Sendable {
     let isConnected: Bool
     let isNavigationReady: Bool
     let supportsRendererDiagnostics: Bool
+    let supportsRendererBenchmarkSample: Bool
     let isNavigationActive: Bool
     let hasSecureSession: Bool
     let hasActiveMap: Bool
@@ -237,6 +238,7 @@ nonisolated enum SecureRendererBenchmarkReadinessBlocker: Equatable, Sendable {
     case deviceDisconnected
     case navigationNotReady
     case rendererDiagnosticsUnsupported
+    case rendererBenchmarkSampleUnsupported
     case navigationActive
     case manualReplayRunning
     case secureSessionUnavailable
@@ -254,6 +256,8 @@ nonisolated enum SecureRendererBenchmarkReadinessBlocker: Equatable, Sendable {
             return "Wait for authenticated BLE navigation to become ready."
         case .rendererDiagnosticsUnsupported:
             return "The connected firmware does not expose renderer diagnostics."
+        case .rendererBenchmarkSampleUnsupported:
+            return "The connected firmware cannot deliver each benchmark GPS sample and marker atomically."
         case .navigationActive:
             return "Stop navigation before running the renderer benchmark."
         case .manualReplayRunning:
@@ -282,6 +286,9 @@ nonisolated enum SecureRendererBenchmarkReadiness {
         guard inputs.isNavigationReady else { return .navigationNotReady }
         guard inputs.supportsRendererDiagnostics else {
             return .rendererDiagnosticsUnsupported
+        }
+        guard inputs.supportsRendererBenchmarkSample else {
+            return .rendererBenchmarkSampleUnsupported
         }
         guard !inputs.isNavigationActive else { return .navigationActive }
         guard !inputs.manualReplayIsRunning else {
