@@ -639,6 +639,36 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
         let rejected: UInt32
     }
 
+    /// Session-scoped, non-secret firmware evidence for replay ingress and
+    /// marker admission. This is optional so an app built from this stack can
+    /// still decode metrics from the immediately preceding firmware head.
+    nonisolated struct ReplayTransport: Codable, Equatable, Sendable {
+        let gpsAuthenticationAccepted: UInt32
+        let gpsAuthenticationRejected: UInt32
+        let rbs1Detected: UInt32
+        let rbs1Decoded: UInt32
+        let rbs1Malformed: UInt32
+        let rbs1Unnegotiated: UInt32
+        let gpsMailboxAccepted: UInt32
+        let gpsMailboxRejected: UInt32
+        let markerAccepted: UInt32
+        let markerRejectedInvalid: UInt32
+        let markerRejectedNoActiveWindow: UInt32
+        let markerRejectedActiveFixtureUnavailable: UInt32
+        let markerRejectedFixtureMismatch: UInt32
+        let lastTransportEventAtMs: UInt32
+        let lastMarkerAtMs: UInt32
+        let lastActiveWindowId: UInt32
+        let lastSampleIndex: UInt16
+        let lastSampleCount: UInt16
+        let lastLoop: UInt32
+        let lastCandidateFixtureTag: UInt32
+        let lastCandidateFixtureTagValid: Bool
+        let lastExpectedFixtureTag: UInt32
+        let lastExpectedFixtureTagValid: Bool
+        let lastMarkerResult: String
+    }
+
     nonisolated struct RemoteDebug: Codable, Equatable, Sendable {
         let active: Bool
         let snapshotBytes: UInt32
@@ -681,6 +711,7 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
     let displayFlush: Timing
     let gps: GPS
     let routeReplay: RouteReplay
+    let replayTransport: ReplayTransport?
     let remoteDebug: RemoteDebug
 }
 
@@ -733,8 +764,114 @@ nonisolated struct RendererBenchmarkEvidenceSample: Codable,
     let renderCount: UInt32
     let buildings: RendererBenchmarkMetricsSnapshot.Buildings
     let routeReplay: RendererBenchmarkMetricsSnapshot.RouteReplay
+    let replayTransport: RendererBenchmarkMetricsSnapshot.ReplayTransport?
     let bleTransport: RendererBenchmarkBLETransportEvidence?
     let replayTiming: RendererBenchmarkReplayTimingEvidence?
+}
+
+/// A bounded, secret-free delta for one initial replay-admission attempt.
+/// Firmware counters are session-scoped, so the controller compares the last
+/// snapshot with the window-confirmation snapshot captured before it emits the
+/// route and RBS1 pair.
+nonisolated struct RendererBenchmarkReplayTransportDelta: Equatable, Sendable {
+    let gpsAuthenticationAccepted: UInt32
+    let gpsAuthenticationRejected: UInt32
+    let rbs1Detected: UInt32
+    let rbs1Decoded: UInt32
+    let rbs1Malformed: UInt32
+    let rbs1Unnegotiated: UInt32
+    let gpsMailboxAccepted: UInt32
+    let gpsMailboxRejected: UInt32
+    let markerAccepted: UInt32
+    let markerRejectedInvalid: UInt32
+    let markerRejectedNoActiveWindow: UInt32
+    let markerRejectedActiveFixtureUnavailable: UInt32
+    let markerRejectedFixtureMismatch: UInt32
+    let lastMarkerResult: String
+    let lastActiveWindowId: UInt32
+    let lastSampleIndex: UInt16
+    let lastSampleCount: UInt16
+
+    init?(
+        baseline: RendererBenchmarkMetricsSnapshot.ReplayTransport?,
+        latest: RendererBenchmarkMetricsSnapshot.ReplayTransport?
+    ) {
+        guard let latest else { return nil }
+        func delta(
+            _ value: UInt32,
+            _ keyPath: KeyPath<
+                RendererBenchmarkMetricsSnapshot.ReplayTransport,
+                UInt32
+            >
+        ) -> UInt32 {
+            value &- (baseline?[keyPath: keyPath] ?? 0)
+        }
+
+        gpsAuthenticationAccepted = delta(
+            latest.gpsAuthenticationAccepted,
+            \.gpsAuthenticationAccepted
+        )
+        gpsAuthenticationRejected = delta(
+            latest.gpsAuthenticationRejected,
+            \.gpsAuthenticationRejected
+        )
+        rbs1Detected = delta(latest.rbs1Detected, \.rbs1Detected)
+        rbs1Decoded = delta(latest.rbs1Decoded, \.rbs1Decoded)
+        rbs1Malformed = delta(latest.rbs1Malformed, \.rbs1Malformed)
+        rbs1Unnegotiated = delta(latest.rbs1Unnegotiated, \.rbs1Unnegotiated)
+        gpsMailboxAccepted = delta(
+            latest.gpsMailboxAccepted,
+            \.gpsMailboxAccepted
+        )
+        gpsMailboxRejected = delta(
+            latest.gpsMailboxRejected,
+            \.gpsMailboxRejected
+        )
+        markerAccepted = delta(latest.markerAccepted, \.markerAccepted)
+        markerRejectedInvalid = delta(
+            latest.markerRejectedInvalid,
+            \.markerRejectedInvalid
+        )
+        markerRejectedNoActiveWindow = delta(
+            latest.markerRejectedNoActiveWindow,
+            \.markerRejectedNoActiveWindow
+        )
+        markerRejectedActiveFixtureUnavailable = delta(
+            latest.markerRejectedActiveFixtureUnavailable,
+            \.markerRejectedActiveFixtureUnavailable
+        )
+        markerRejectedFixtureMismatch = delta(
+            latest.markerRejectedFixtureMismatch,
+            \.markerRejectedFixtureMismatch
+        )
+        lastMarkerResult = latest.lastMarkerResult
+        lastActiveWindowId = latest.lastActiveWindowId
+        lastSampleIndex = latest.lastSampleIndex
+        lastSampleCount = latest.lastSampleCount
+    }
+
+    var failureDescription: String {
+        "Replay diagnostics for this attempt: " +
+            "authAccepted=\(gpsAuthenticationAccepted), " +
+            "authRejected=\(gpsAuthenticationRejected), " +
+            "rbs1Detected=\(rbs1Detected), " +
+            "rbs1Decoded=\(rbs1Decoded), " +
+            "rbs1Malformed=\(rbs1Malformed), " +
+            "rbs1Unnegotiated=\(rbs1Unnegotiated), " +
+            "gpsMailboxAccepted=\(gpsMailboxAccepted), " +
+            "gpsMailboxRejected=\(gpsMailboxRejected), " +
+            "markerAccepted=\(markerAccepted), " +
+            "markerRejectedInvalid=\(markerRejectedInvalid), " +
+            "markerRejectedNoActiveWindow=" +
+            "\(markerRejectedNoActiveWindow), " +
+            "markerRejectedActiveFixtureUnavailable=" +
+            "\(markerRejectedActiveFixtureUnavailable), " +
+            "markerRejectedFixtureMismatch=" +
+            "\(markerRejectedFixtureMismatch), " +
+            "lastMarkerResult=\(lastMarkerResult), " +
+            "lastActiveWindowId=\(lastActiveWindowId), " +
+            "lastSample=\(lastSampleIndex)/\(lastSampleCount)."
+    }
 }
 
 nonisolated struct RendererBenchmarkRunSummary: Codable, Equatable, Sendable {
@@ -987,6 +1124,7 @@ nonisolated enum RendererBenchmarkEvaluator {
             renderCount: snapshot.render.timings.total.count,
             buildings: snapshot.render.buildings,
             routeReplay: snapshot.routeReplay,
+            replayTransport: snapshot.replayTransport,
             bleTransport: bleTransport,
             replayTiming: replayTiming
         )

@@ -15072,9 +15072,100 @@ struct NavigationProtocolTests {
             assert(false, "secure benchmark decodes the firmware metrics contract")
             return
         }
+        assert(
+            metrics.replayTransport == nil,
+            "the app remains compatible with firmware before replay-transport diagnostics"
+        )
+        guard var diagnosticMetricsObject = try? JSONSerialization.jsonObject(
+            with: metricsData
+        ) as? [String: Any] else {
+            assert(false, "secure benchmark creates diagnostic metrics fixture")
+            return
+        }
+        diagnosticMetricsObject["replayTransport"] = [
+            "gpsAuthenticationAccepted": 5,
+            "gpsAuthenticationRejected": 1,
+            "rbs1Detected": 4,
+            "rbs1Decoded": 3,
+            "rbs1Malformed": 1,
+            "rbs1Unnegotiated": 0,
+            "gpsMailboxAccepted": 3,
+            "gpsMailboxRejected": 0,
+            "markerAccepted": 2,
+            "markerRejectedInvalid": 0,
+            "markerRejectedNoActiveWindow": 1,
+            "markerRejectedActiveFixtureUnavailable": 0,
+            "markerRejectedFixtureMismatch": 0,
+            "lastTransportEventAtMs": 12_345,
+            "lastMarkerAtMs": 12_344,
+            "lastActiveWindowId": 41,
+            "lastSampleIndex": 12,
+            "lastSampleCount": 120,
+            "lastLoop": 2,
+            "lastCandidateFixtureTag": 0x0fec_6228,
+            "lastCandidateFixtureTagValid": true,
+            "lastExpectedFixtureTag": 0x0fec_6228,
+            "lastExpectedFixtureTagValid": true,
+            "lastMarkerResult": "accepted",
+        ] as [String: Any]
+        guard let diagnosticMetricsData = try? JSONSerialization.data(
+            withJSONObject: diagnosticMetricsObject
+        ), let diagnosticMetrics = try? JSONDecoder().decode(
+            RendererBenchmarkMetricsSnapshot.self,
+            from: diagnosticMetricsData
+        ), let replayTransport = diagnosticMetrics.replayTransport,
+              let roundTripData = try? JSONEncoder().encode(diagnosticMetrics),
+              let roundTripObject = try? JSONSerialization.jsonObject(
+                with: roundTripData
+              ) as? [String: Any],
+              roundTripObject["replayTransport"] != nil else {
+            assert(false, "replay transport diagnostics survive evidence decoding and encoding")
+            return
+        }
+        assertEqual(
+            replayTransport.markerRejectedNoActiveWindow,
+            1,
+            "pre-window replay rejection remains available to exported evidence"
+        )
+        assertEqual(
+            replayTransport.lastMarkerResult,
+            "accepted",
+            "the last firmware admission result survives the evidence round trip"
+        )
+        guard let replayDelta = RendererBenchmarkReplayTransportDelta(
+            baseline: nil,
+            latest: replayTransport
+        ) else {
+            assert(false, "replay transport diagnostics produce a failure delta")
+            return
+        }
+        assertEqual(
+            replayDelta.rbs1Detected,
+            4,
+            "the admission delta reports firmware RBS1 ingress"
+        )
+        assert(
+            replayDelta.failureDescription.contains(
+                "markerRejectedNoActiveWindow=1"
+            ) && replayDelta.failureDescription.contains(
+                "lastMarkerResult=accepted"
+            ),
+            "a failed warm-up exposes bounded non-secret admission evidence"
+        )
+        assert(
+            RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
+                jsonData: roundTripData
+            ),
+            "replay transport diagnostics remain eligible for evidence export"
+        )
         let sample = RendererBenchmarkEvaluator.sample(
-            snapshot: metrics,
+            snapshot: diagnosticMetrics,
             elapsedSeconds: 42
+        )
+        assertEqual(
+            sample.replayTransport,
+            diagnosticMetrics.replayTransport,
+            "each sampled evidence point retains replay admission diagnostics"
         )
         assertEqual(metrics.remoteDebug.lastFrameSnapshotWaitUs, 110,
                     "secure benchmark retains frame snapshot wait evidence")

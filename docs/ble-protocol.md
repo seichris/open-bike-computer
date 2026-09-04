@@ -1108,7 +1108,8 @@ render-job outcomes, UI/display/GPS gaps, prediction state, fixture-marker
 freshness, and remote-debug overhead. It intentionally contains no route
 coordinates, network credentials, or transfer token.
 
-The checked-in benchmark replay marks every exact 1 Hz GPS sample with:
+The checked-in benchmark replay marks every exact 1 Hz GPS sample with an
+`RBM1` payload:
 
 ```text
 "RBM1" | RouteFixtureSHA256: 32 bytes |
@@ -1116,11 +1117,32 @@ The checked-in benchmark replay marks every exact 1 Hz GPS sample with:
 ```
 
 The frame is exactly 44 bytes. `SampleCount` is non-zero and `SampleIndex` must
-be smaller than it. iOS serializes each GPS write before its corresponding
-marker. Firmware accepts a marker only when its hash matches the active
-measurement window. This prevents an otherwise plausible GPS stream from being
-attributed to the pinned fixture and lets a later checkpoint frame be tied to
-the intended position sample.
+be smaller than it. CAP2 bit `23` additionally permits the atomic native GPS
+payload:
+
+```text
+"RBS1" | GPSLength: UInt8 | GPS payload | complete RBM1 payload
+```
+
+The complete RBS1 application payload is at most 85 bytes. The secure renderer
+sweep protects it on the GPS channel and requires one native
+write-with-response; it does not fall back to write-without-response or split
+the GPS/marker pair. Firmware authenticates the frame, queues its GPS portion,
+and only then attempts to admit its marker. The secure sweep first confirms the
+exact HTTP measurement window, sends acknowledged route geometry before the
+matching RBS1, waits for both GATT acknowledgements, and requires a pinned-HTTPS
+metrics snapshot that proves marker acceptance for that window before starting
+the 1 Hz cadence. Firmware accepts a marker only when its hash matches the
+active measurement window. This prevents an otherwise plausible GPS stream
+from being attributed to the pinned fixture and lets a later checkpoint frame
+be tied to the intended position sample.
+
+When diagnostic firmware supplies session-scoped replay-admission counters,
+the app compares the last acceptance snapshot with the snapshot taken just
+before the initial route/RBS1 transaction. A failed warm-up displays only that
+attempt's bounded counter deltas and last admission result; it does not expose
+the authenticated payload, route coordinates, credentials, or debug-session
+secrets.
 
 For confirmation on an ordinary diagnostic build, iOS starts a session-scoped
 measurement window with:

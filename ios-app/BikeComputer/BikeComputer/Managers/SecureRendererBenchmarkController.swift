@@ -931,7 +931,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
             mapFixture: mapFixture,
             routeFixture: routeFixture
         )
-        _ = try await waitForWindow(
+        let confirmedWindowSnapshot = try await waitForWindow(
             client: client,
             windowID: windowID,
             runID: runID,
@@ -959,6 +959,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
         }
 
         var lastMetricsError: Error?
+        var lastAcceptanceSnapshot = confirmedWindowSnapshot
         while Date() < acceptanceDeadline {
             try checkContinuity()
             do {
@@ -970,6 +971,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
                     client: client,
                     timeoutSeconds: min(0.6, remaining)
                 )
+                lastAcceptanceSnapshot = snapshot
                 if snapshot.window.id == windowID,
                    snapshot.window.runId == runID,
                    snapshot.window.repeatNumber == repeatNumber,
@@ -1001,9 +1003,17 @@ final class SecureRendererBenchmarkController: ObservableObject {
            !(lastMetricsError is SecureRendererBenchmarkControllerError) {
             throw lastMetricsError
         }
-        throw SecureRendererBenchmarkControllerError.unavailable(
+        let baseMessage =
             "The acknowledged renderer sample was not accepted for the active window within the 2.5-second freshness gate."
-        )
+        if let delta = RendererBenchmarkReplayTransportDelta(
+            baseline: confirmedWindowSnapshot.replayTransport,
+            latest: lastAcceptanceSnapshot.replayTransport
+        ) {
+            throw SecureRendererBenchmarkControllerError.unavailable(
+                baseMessage + " " + delta.failureDescription
+            )
+        }
+        throw SecureRendererBenchmarkControllerError.unavailable(baseMessage)
     }
 
     private func warmUp(
