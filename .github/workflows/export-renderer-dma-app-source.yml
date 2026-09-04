@@ -1,0 +1,43 @@
+name: Export renderer DMA app source
+
+on:
+  push:
+    branches:
+      - analysis/renderer-dma-gate-app-a1dce92
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: analysis/renderer-dma-gate-app-a1dce92
+          fetch-depth: 0
+      - name: Verify exact analysis base
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor a1dce92dd8a49c0122b92f94d9630133ea5547ba HEAD
+      - name: Stage selected sources
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/source"
+          cp --parents \
+            AGENTS.md \
+            ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift \
+            ios-app/BikeComputer/BikeComputer/Managers/SecureRendererBenchmarkController.swift \
+            ios-app/BikeComputer/BikeComputer/Managers/RendererBenchmarkReplayCoordinator.swift \
+            ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
+            ios-app/BikeComputerTests/NavigationProtocolTests.swift \
+            esp32/tools/renderer_benchmark.py \
+            esp32/tools/renderer_benchmark_gates.json \
+            ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-gates-v1.json \
+            "$RUNNER_TEMP/source"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: renderer-dma-app-source
+          path: ${{ runner.temp }}/source
+          if-no-files-found: error
+          retention-days: 1
