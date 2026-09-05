@@ -23,6 +23,8 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     private let session: WCSession?
     private let defaults: UserDefaults
     private var hasActivated = false
+    private var intentionallyCancelledRouteTransferIDs =
+        Set<ObjectIdentifier>()
     private var pendingControllerRevocations: [WatchControllerRequestV1] = []
     private var coordinateFavoritesEnvelope: CoordinateFavoritesEnvelopeV1?
     private var routeDisplayNamesEnvelope:
@@ -494,6 +496,26 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         )
     }
 
+    @discardableResult
+    func cancelRouteTransfers(
+        _ identity: WatchRouteIdentityV1
+    ) -> Int {
+        guard let session else { return 0 }
+        let matchingTransfers = session.outstandingFileTransfers.filter {
+            WatchRouteSyncMessageV1.isInstallTransfer(
+                $0.file.metadata,
+                matching: identity
+            )
+        }
+        matchingTransfers.forEach {
+            intentionallyCancelledRouteTransferIDs.insert(
+                ObjectIdentifier($0)
+            )
+            $0.cancel()
+        }
+        return matchingTransfers.count
+    }
+
     /// Attempts the high-priority route path while Watch is reachable. The
     /// caller always queues `transferRoute` first so a failed live message
     /// still has a durable background fallback.
@@ -649,6 +671,11 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         _ transfer: WCSessionFileTransfer,
         error: Error?
     ) {
+        if intentionallyCancelledRouteTransferIDs.remove(
+            ObjectIdentifier(transfer)
+        ) != nil {
+            return
+        }
         guard let error,
               let metadata = transfer.file.metadata,
               let install = WatchRouteSyncMessageV1(propertyList: metadata),

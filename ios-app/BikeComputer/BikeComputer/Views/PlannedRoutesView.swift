@@ -336,10 +336,7 @@ struct SavedRoutesSettingsSection: View {
                 .frame(width: 32, height: 32)
                 .accessibilityLabel("\(displayName) is saved on Apple Watch")
         case .transferring:
-            ProgressView()
-                .controlSize(.small)
-                .frame(width: 32, height: 32)
-                .accessibilityLabel("Sending \(displayName) to Apple Watch")
+            cancelSendButton(route, displayName: displayName)
         case .deleting:
             ProgressView()
                 .controlSize(.small)
@@ -383,6 +380,26 @@ struct SavedRoutesSettingsSection: View {
         }
         .buttonStyle(.borderless)
         .accessibilityLabel("Send \(displayName) to Apple Watch")
+    }
+
+    private func cancelSendButton(
+        _ route: PlannedRouteSummaryV1,
+        displayName: String
+    ) -> some View {
+        Button(role: .destructive) {
+            finishRenaming()
+            focusedRouteID = nil
+            if !routeLibrary.cancelSendToWatch(route) {
+                errorMessage =
+                    "The queued Watch transfer is no longer cancellable. " +
+                    "Keep the iPhone and Watch nearby so its final status can arrive."
+            }
+        } label: {
+            Image(systemName: "xmark.circle")
+                .frame(width: 32, height: 32)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel("Cancel sending \(displayName) to Apple Watch")
     }
 
     private func transientStatus(
