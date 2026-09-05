@@ -109,7 +109,9 @@ controls, not hidden profile or gate changes.
    Settings and therefore stops the sweep; do not stream it simultaneously.
 
 Replay cadence is owned by a cancellable main-actor async loop, armed before
-the first sample. Missed ticks are coalesced instead of sent as a catch-up
+the first sample. Deadlines stay on the original monotonic one-second grid;
+ordinary wake-up jitter and callback work do not accumulate into cadence drift.
+Missed ticks are coalesced instead of sent as a catch-up
 burst; stopping or restarting invalidates callbacks from the previous run.
 Exports also include `renderer-benchmark-startup.json`: a bounded trace of the
 latest 128 startup/warm-up observations, with a discarded-sample count. It

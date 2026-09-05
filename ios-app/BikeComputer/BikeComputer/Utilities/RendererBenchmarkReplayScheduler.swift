@@ -57,9 +57,16 @@ final class RendererBenchmarkReplayScheduler {
                 guard actual >= deadline else { continue }
                 let latenessMs = Int(max(0, (actual - deadline) * 1_000).rounded())
                 tick(latenessMs)
-                // Coalesce missed ticks, never send a catch-up burst. Account
-                // for time spent inside the callback before sleeping again.
-                deadline = max(deadline + interval, now() + interval)
+                // Preserve the original cadence despite ordinary wake-up
+                // jitter/callback work. Re-anchoring on now() would accumulate
+                // that delay on every tick and underfill a 120-second window.
+                deadline += interval
+                let afterTick = now()
+                if deadline <= afterTick {
+                    // Skip elapsed slots after a genuine stall, rather than
+                    // emitting a burst to catch up. Stay on the same time grid.
+                    deadline += (floor((afterTick - deadline) / interval) + 1) * interval
+                }
             }
         }
     }

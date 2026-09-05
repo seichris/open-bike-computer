@@ -30,6 +30,31 @@ struct RendererBenchmarkReplaySchedulerTests {
 
     @MainActor
     static func main() async {
+        // Physical evidence exposed 30-50 ms of accumulated delay per tick.
+        // Repeat a two-minute run with 40 ms wake-up jitter and 3 ms callback
+        // work: the deadline must remain on the original one-second grid.
+        let driftClock = ManualClock()
+        var driftTicks = 0
+        let driftScheduler = RendererBenchmarkReplayScheduler(
+            now: { driftClock.now }, sleep: { try await driftClock.sleep($0) }
+        )
+        driftScheduler.start { lateness in
+            precondition(lateness == 40)
+            driftTicks += 1
+            driftClock.now += 0.003
+        }
+        await waitFor { driftClock.pending.count == 1 }
+        for tick in 1...120 {
+            let scheduledAt = driftClock.now + driftClock.waits.last!
+            precondition(abs(scheduledAt - Double(tick)) < 0.000_001,
+                         "callback jitter must not shift the next 1 Hz deadline")
+            driftClock.wake(at: Double(tick) + 0.04)
+            await waitFor { driftTicks == tick && driftClock.pending.count == 1 }
+        }
+        precondition(driftTicks == 120 && driftClock.now < 120.05)
+        driftScheduler.stop()
+        driftClock.wake(at: 121)
+
         let clock = ManualClock()
         var callbacks: [Int] = []
         let scheduler = RendererBenchmarkReplayScheduler(
@@ -51,7 +76,8 @@ struct RendererBenchmarkReplaySchedulerTests {
         clock.wake(at: 5.5)
         await waitFor { clock.pending.count == 1 && callbacks.count == 3 }
         precondition(callbacks.last == 2_500)
-        precondition(clock.waits.last == 1)
+        precondition(clock.waits.last == 0.5,
+                     "a missed slot resumes at the next original deadline")
         scheduler.stop()
         precondition(!scheduler.isScheduled)
         // Stop/restart before the old sleep returns must not invoke the old tick.
@@ -67,6 +93,26 @@ struct RendererBenchmarkReplaySchedulerTests {
         clock.wake(at: 7.5)
         for _ in 0..<20 { await Task.yield() }
         precondition(callbacks.count == 4)
+
+        let slowClock = ManualClock()
+        var slowTicks = 0
+        let slowScheduler = RendererBenchmarkReplayScheduler(
+            now: { slowClock.now }, sleep: { try await slowClock.sleep($0) }
+        )
+        slowScheduler.start { _ in
+            slowTicks += 1
+            slowClock.now += 2.25
+        }
+        await waitFor { slowClock.pending.count == 1 }
+        slowClock.wake(at: 0.5)
+        await waitFor { slowClock.pending.count == 1 }
+        precondition(slowTicks == 0, "an early wake never emits a sample")
+        slowClock.wake(at: 1)
+        await waitFor { slowTicks == 1 && slowClock.pending.count == 1 }
+        precondition(slowClock.waits.last == 0.75,
+                     "slow callback skips elapsed slots without a catch-up burst")
+        slowScheduler.stop()
+        slowClock.wake(at: 4)
 
         // The sleeping task must not retain its owner indefinitely.
         var owner: RendererBenchmarkReplayScheduler? = .init(
