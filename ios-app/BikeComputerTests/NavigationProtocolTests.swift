@@ -724,6 +724,7 @@ struct NavigationProtocolTests {
         testGPSQueuePolicy()
         testRendererBenchmarkProtocol()
         testSecureRendererBenchmarkProtocol()
+        testDeviceNetworkJoinTimeoutPolicy()
         testSecureRendererBenchmarkReadiness()
         testRendererBenchmarkAtomicDelivery()
         testATTWriteSubmissionEvidence()
@@ -14816,6 +14817,64 @@ struct NavigationProtocolTests {
         manager.completeNavigationWriteForTesting(error: nil)
         assert(!manager.navigationHasUnsettledWritesForTesting,
                "setup settles only after its acknowledgement")
+    }
+
+    static func testDeviceNetworkJoinTimeoutPolicy() {
+        let transferManagerURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift"
+        )
+        guard let transferManagerSource = try? String(
+            contentsOf: transferManagerURL,
+            encoding: .utf8
+        ), let remoteEntryStart = transferManagerSource.range(
+            of: "func enterRemoteDebug("
+        )?.lowerBound,
+        let remoteWaitStart = transferManagerSource.range(
+            of: "private func waitForRemoteDebugSession(",
+            range: remoteEntryStart..<transferManagerSource.endIndex
+        )?.lowerBound else {
+            assert(false, "remote-debug transfer source should be available")
+            return
+        }
+        let remoteEntrySource = String(
+            transferManagerSource[remoteEntryStart..<remoteWaitStart]
+        )
+        assert(
+            remoteEntrySource.contains("try await joinDeviceNetworkIfNeeded(") &&
+                remoteEntrySource.contains(
+                    "statusPath: \"device-debug/v1/info\""
+                ),
+            "hotspot remote debugging joins and probes the pinned device endpoint"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.configurationApplyTimeout >= 10 &&
+                DeviceNetworkJoinPolicy.configurationApplyTimeout <= 30,
+            "the system hotspot prompt has a sufficient but bounded callback window"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.currentNetworkFetchTimeout > 0 &&
+                DeviceNetworkJoinPolicy.currentNetworkFetchTimeout <= 3,
+            "current-network inspection cannot stall accessory association"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.shouldRetry(
+                domain: DeviceNetworkJoinPolicy.joinErrorDomain,
+                code: DeviceNetworkJoinPolicy.configurationApplyTimeoutCode
+            ),
+            "an unresolved system apply cannot overlap a second apply"
+        )
+        let applyTimeout =
+            DeviceNetworkJoinPolicy.configurationApplyTimeoutError
+        assertEqual(
+            applyTimeout.domain,
+            DeviceNetworkJoinPolicy.joinErrorDomain,
+            "the bounded apply failure retains its typed diagnostic domain"
+        )
+        assertEqual(
+            applyTimeout.code,
+            DeviceNetworkJoinPolicy.configurationApplyTimeoutCode,
+            "the bounded apply failure retains its typed diagnostic code"
+        )
     }
 
     static func testSecureRendererBenchmarkProtocol() {
