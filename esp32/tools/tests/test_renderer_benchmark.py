@@ -480,7 +480,7 @@ class RendererBenchmarkTests(unittest.TestCase):
                 sequence=index + 1,
                 timestamp_ms=1000 + index * 1000,
                 map_fixture=fixture,
-                route_id="shanghai-center-renderer-v1",
+                route_id="shanghai-jingan-renderer-v1",
                 route_sha256=route_hash,
             )
             dma_free = 24_000 - index * 750
@@ -525,7 +525,7 @@ class RendererBenchmarkTests(unittest.TestCase):
                 "id": "shanghai-renderer-v1",
                 "manifestReceipt": "a" * 64,
             },
-            route_id="shanghai-center-renderer-v1",
+            route_id="shanghai-jingan-renderer-v1",
             route_sha256="b" * 64,
         )
         value["memory"]["dmaHeap"]["cryptoHeadroomRejections"] = 1
@@ -596,7 +596,7 @@ class RendererBenchmarkTests(unittest.TestCase):
                 sequence=index + 1,
                 timestamp_ms=1000 + index * 5000,
                 map_fixture=fixture,
-                route_id="shanghai-center-renderer-v1",
+                route_id="shanghai-jingan-renderer-v1",
                 route_sha256=route_hash,
             )
             for index in range(13)
@@ -639,7 +639,7 @@ class RendererBenchmarkTests(unittest.TestCase):
                 sequence=index + 1,
                 timestamp_ms=1000 + index * 1000,
                 map_fixture=fixture,
-                route_id="shanghai-center-renderer-v1",
+                route_id="shanghai-jingan-renderer-v1",
                 route_sha256=route_hash,
             )
             for index in range(121)
@@ -681,7 +681,7 @@ class RendererBenchmarkTests(unittest.TestCase):
                 sequence=index + 1,
                 timestamp_ms=1000 + index * 1000,
                 map_fixture=fixture,
-                route_id="shanghai-center-renderer-v1",
+                route_id="shanghai-jingan-renderer-v1",
                 route_sha256=route_hash,
             )
             for index in range(61)
