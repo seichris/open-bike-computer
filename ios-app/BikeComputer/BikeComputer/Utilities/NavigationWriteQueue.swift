@@ -37,7 +37,93 @@ struct NavigationWriteQueueMetrics: Equatable {
     func coalescedFrames(for writeClass: NavigationWriteClass) -> Int {
         coalescedFramesByClass[writeClass, default: 0]
     }
+
+    /// Combine completed diagnostic intervals without changing live gauges.
+    func accumulating(_ earlier: Self) -> Self {
+        var result = self
+        result.enqueuedFrames += earlier.enqueuedFrames
+        result.flushedFrames += earlier.flushedFrames
+        result.droppedFrames += earlier.droppedFrames
+        result.rejectedFrames += earlier.rejectedFrames
+        result.coalescedFrames += earlier.coalescedFrames
+        result.clearedFrames += earlier.clearedFrames
+        result.retrySchedules += earlier.retrySchedules
+        result.backpressureStops += earlier.backpressureStops
+        result.maxDepth = max(maxDepth, earlier.maxDepth)
+        result.maxBytes = max(maxBytes, earlier.maxBytes)
+        for writeClass in NavigationWriteClass.allCases {
+            result.droppedFramesByClass[writeClass, default: 0] +=
+                earlier.droppedFrames(for: writeClass)
+            result.coalescedFramesByClass[writeClass, default: 0] +=
+                earlier.coalescedFrames(for: writeClass)
+        }
+        return result
+    }
 }
+
+#if DEBUG || HOST_TESTING
+nonisolated enum BLEWriteSubmissionStage: String, Codable, Sendable {
+    case prepared
+    case callingCoreBluetooth = "calling_corebluetooth"
+    case submitted
+    case rejectedBeforeSubmission = "rejected_before_submission"
+}
+
+/// App monotonic clock only. Delegate entry is the Swift callback boundary,
+/// not the time an ATT response reached the radio or the iOS Bluetooth host.
+nonisolated struct RendererATTWriteTiming: Codable, Equatable, Sendable {
+    let writeID: UInt64
+    let connectionGeneration: UInt64
+    let writeClass: String
+    let preparedAtUptimeMs: UInt64
+    let apiEntryAtUptimeMs: UInt64?
+    let apiReturnAtUptimeMs: UInt64?
+    let delegateEntryAtUptimeMs: UInt64?
+    let completedAtUptimeMs: UInt64
+    let outcome: String
+
+    var durationMs: UInt64 {
+        completedAtUptimeMs >= preparedAtUptimeMs ?
+            completedAtUptimeMs - preparedAtUptimeMs : 0
+    }
+}
+
+nonisolated struct RendererBenchmarkBLETransportEvidence: Codable,
+                                                              Equatable,
+                                                              Sendable {
+    let schema: Int
+    let capturedAtUptimeMs: UInt64
+    let queueDepth: Int
+    let queueMaximumDepth: Int
+    let oldestPendingAgeMs: Int
+    let retryAgeMs: Int
+    let enqueuedFrames: Int
+    let flushedFrames: Int
+    let droppedFrames: Int
+    let rejectedFrames: Int
+    let coalescedFrames: Int
+    let retrySchedules: Int
+    let backpressureStops: Int
+    let gpsCoalescedFrames: Int
+    let routeCoalescedFrames: Int
+    let settingsCoalescedFrames: Int
+    let inFlightClass: String?
+    let inFlightAgeMs: Int
+    let acknowledgementCompletions: UInt64
+    let acknowledgementErrors: UInt64
+    let acknowledgementTimeouts: UInt64
+    let lastAcknowledgementMs: Int
+    let maximumAcknowledgementMs: Int
+    // Optional additions preserve decoding of earlier schema-1 archives.
+    var inFlightWriteID: UInt64? = nil
+    var inFlightSubmissionStage: BLEWriteSubmissionStage? = nil
+    var lastTimedOutWriteID: UInt64? = nil
+    var lastTimedOutSubmissionStage: BLEWriteSubmissionStage? = nil
+    var ignoredWriteCallbacks: UInt64? = nil
+    var lastWriteTiming: RendererATTWriteTiming? = nil
+    var slowestWriteTiming: RendererATTWriteTiming? = nil
+}
+#endif
 
 struct NavigationWrite {
     let data: Data
@@ -152,6 +238,7 @@ struct NavigationWriteQueue {
     private var pendingWrites: [NavigationWrite] = []
     private var pendingPriorityWrites: [NavigationWrite] = []
     private var diagnosticMetrics = NavigationWriteQueueMetrics()
+    private var completedDiagnosticIntervals = NavigationWriteQueueMetrics()
     private var retryStartedAtUptime: TimeInterval?
     private let now: () -> TimeInterval
 
@@ -193,6 +280,9 @@ struct NavigationWriteQueue {
     mutating func snapshotMetricsAndReset() -> NavigationWriteQueueMetrics {
         let snapshot = metrics
 #if DEBUG || HOST_TESTING
+        completedDiagnosticIntervals = snapshot.accumulating(
+            completedDiagnosticIntervals
+        )
         diagnosticMetrics = NavigationWriteQueueMetrics()
         diagnosticMetrics.currentDepth = count
         diagnosticMetrics.maxDepth = count
@@ -200,6 +290,10 @@ struct NavigationWriteQueue {
         diagnosticMetrics.maxBytes = pendingByteCount
 #endif
         return snapshot
+    }
+
+    var cumulativeMetrics: NavigationWriteQueueMetrics {
+        metrics.accumulating(completedDiagnosticIntervals)
     }
 
     init(
@@ -332,6 +426,56 @@ struct NavigationWriteQueue {
         })
         recordEnqueuedFrames(writes.count)
         recordDepth()
+        return true
+    }
+
+    /// Replaces only an unsent, complete route snapshot. Unlike ordinary
+    /// coalescing, this never evicts unrelated traffic or weakens the admitted
+    /// frame's protection. Application-command members and route-clear/state
+    /// boundaries are not replaceable. The outstanding ATT slot is untouched.
+    @discardableResult
+    mutating func enqueueLatestRouteSnapshot(_ write: NavigationWrite) -> Bool {
+        guard write.writeClass == .route,
+              write.applicationCommandID == nil,
+              let key = write.coalescingKey, !key.isEmpty,
+              !write.data.isEmpty,
+              write.data.count <= Self.maximumFrameBytes,
+              !pendingPriorityWrites.contains(where: {
+                  $0.coalescingKey == key
+              }) else {
+            recordRejectedFrames(1)
+            return false
+        }
+        // Do not move an old snapshot across a clear or a command boundary.
+        let boundary = pendingWrites.lastIndex(where: {
+            $0.writeClass == .route &&
+                ($0.applicationCommandID != nil || $0.coalescingKey != key)
+        }) ?? -1
+        let matches = pendingWrites.indices.filter {
+            $0 > boundary && pendingWrites[$0].writeClass == .route &&
+                pendingWrites[$0].applicationCommandID == nil &&
+                pendingWrites[$0].coalescingKey == key
+        }
+        let replacedBytes = matches.reduce(0) {
+            $0 + pendingWrites[$1].data.count
+        }
+        guard pendingWrites.count - matches.count + 1 <= maxCount,
+              regularPendingByteCount - replacedBytes + write.data.count <=
+                maxPendingBytes else {
+            // Reject transactionally: retain the previous admitted snapshot.
+            recordRejectedFrames(1)
+            return false
+        }
+        beginEnqueueIfEmpty()
+        var removed: [NavigationWrite] = []
+        for index in matches.reversed() {
+            removed.append(pendingWrites.remove(at: index))
+        }
+        pendingWrites.append(write.enqueued(at: now()).protectingAtomicBatch())
+        recordEnqueuedFrames(1)
+        for old in removed { recordCoalesced(write: old) }
+        recordDepth()
+        for old in removed { old.onDrop?() }
         return true
     }
 

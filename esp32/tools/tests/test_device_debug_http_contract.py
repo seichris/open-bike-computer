@@ -145,6 +145,43 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertNotIn("sessionToken", RENDERER_DIAGNOSTICS)
         self.assertNotIn("apPassphrase", RENDERER_DIAGNOSTICS)
 
+    def test_renderer_dma_minima_include_bounded_phase_attribution(self):
+        for field in (
+            r'\"windowMinimumFreeAttribution\"',
+            r'\"windowMinimumLargestBlockAttribution\"',
+            r'\"phase\"',
+            r'\"observedAtMs\"',
+            r'\"value\"',
+            r'\"frameTransferActive\"',
+        ):
+            self.assertIn(field, RENDERER_DIAGNOSTICS)
+        for phase in (
+            "SessionStart",
+            "SessionEnd",
+            "WindowStart",
+            "Periodic",
+            "RenderComplete",
+            "MetricsSnapshot",
+        ):
+            self.assertIn(
+                f"MemoryObservationPhase::{phase}", RENDERER_DIAGNOSTICS
+            )
+
+    def test_frame_transfer_overlap_scope_excludes_empty_and_stale_responses(self):
+        frame = HTTP[
+            HTTP.index("bool DeviceDebugHttp::handleFrame") :
+            HTTP.index("bool DeviceDebugHttp::handlePointer")
+        ]
+        scope = frame.index("RendererFrameTransferScope frameTransferScope;")
+        stale = frame.index("!timestampAtOrAfter")
+        response = frame.index("const uint32_t responseStartedMs")
+        release = frame.index("frameStore().releaseSnapshot()", scope)
+        self.assertLess(stale, scope)
+        self.assertLess(scope, response)
+        self.assertLess(response, release)
+        self.assertIn("setFrameTransferActive(true)", HTTP)
+        self.assertIn("setFrameTransferActive(false)", HTTP)
+
     def test_renderer_metrics_serialize_without_small_internal_stream_buffers(self):
         self.assertIn("class JsonBuilder", RENDERER_DIAGNOSTICS)
         self.assertIn("body_.reserve(4096);", RENDERER_DIAGNOSTICS)

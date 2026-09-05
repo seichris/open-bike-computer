@@ -1,5 +1,11 @@
 # BLE Protocol
 
+Remote-debug renderer metrics may additionally expose schema-1 `deliveryTiming`
+records; see [delivery-stage timing](renderer-benchmark.md#completed-results-and-delivery-stage-timing).
+These payload-free, device-clock diagnostic fields do not change BLE framing,
+authentication, UUIDs, capability negotiation, or ATT/application-ACK semantics.
+Ordinary and production profiles omit them; clients must accept their absence.
+
 The ESP32 advertises BLE service UUID
 `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800` under its user-assigned device name.
 An unregistered device uses `BikeComputer XXYY`, where `XXYY` is derived from
@@ -1212,10 +1218,31 @@ selection/reach and limiter counters,
 render-job outcomes, UI/display/GPS gaps, prediction state, fixture-marker
 freshness, and remote-debug overhead. It intentionally contains no route
 coordinates, network credentials, or transfer token.
+
+Diagnostic firmware also includes a session-scoped `replayTransport` object.
+Its bounded counters distinguish authenticated GPS envelope acceptance,
+RBS1 detection and decoding, GPS-mailbox admission, and marker acceptance or
+rejection (`invalid`, `no_active_window`, `active_fixture_unavailable`, or
+`fixture_mismatch`). Last-event state contains only monotonic timestamps,
+window/sample/loop identifiers, and four-byte fixture-hash tags. It is reset at
+diagnostics-session end, is not reset by a new measurement window, and contains
+no owner key, ciphertext, plaintext GPS payload, network credential, transfer
+token, certificate, or pin.
 The DMA-crypto rejection and operation-failure fields are deltas from the
 counter baseline captured at the start of the active measurement window; the
 DMA object identifies that contract as `cryptoCountersScope: "window"`. The
 separate authenticated device-status diagnostics retain their lifetime scope.
+
+Each diagnostic DMA region also includes
+`windowMinimumFreeAttribution` and
+`windowMinimumLargestBlockAttribution`. Both bounded objects contain `phase`,
+`observedAtMs`, `value`, and `frameTransferActive`. The allowed phase values are
+`unknown`, `session_start`, `session_end`, `window_start`, `periodic`,
+`render_complete`, and `metrics_snapshot`. Attribution changes only when a
+strictly lower window minimum is observed, so equal allocator readings retain
+the first phase. The frame field is only a correlation bit; no frame bytes,
+HTTP authorization material, token, certificate, pin, SSID, or password is
+retained.
 
 The checked-in benchmark replay marks every exact 1 Hz GPS sample with:
 
@@ -1241,14 +1268,27 @@ with one GPS-characteristic payload:
 
 `GPSLength` must be one of the canonical GPS packet lengths (`8`, `10`, `14`,
 `30`, or `36`), and the complete unprotected frame is at most 85 bytes. The
-frame uses the existing authenticated GPS channel and requires a native
-write-without-response that fits together with its protected-frame overhead;
-there is no acknowledged or navigation-characteristic fallback. Firmware
+frame uses the existing authenticated GPS channel and a native write that fits
+together with its protected-frame overhead. Like ordinary GPS, iOS prefers
+acknowledged writes when advertised and fitting, retaining native
+write-without-response with CoreBluetooth flow control for compatibility.
+There is no navigation-characteristic fallback. Both native ATT write modes
+already enter the firmware's same authenticated GPS callback. Firmware
 validates both members, queues the GPS state first, and accepts the marker only
 if that queue operation succeeded. iOS retains at most one unsent complete
 sample, so coalescing cannot split, reorder, or mismatch GPS and marker state.
-This uses one CoreBluetooth credit per one-Hz tick and prevents the marker from
-being stranded behind the GPS half of the same logical sample.
+This uses one atomic payload per one-Hz tick and prevents the marker from
+being stranded behind the GPS half of the same logical sample. An ATT response
+only confirms transport completion; benchmark acceptance still requires a
+matching marker in the active firmware measurement window.
+
+The iOS secure sweep waits for setup writes and their acknowledgements to
+settle, opens and verifies the HTTPS measurement window and fixture identities,
+then acquires the replay GPS lease. Atomic samples use the existing shared
+writer and a single coalescing key; they do not bypass authentication, ATT, or
+application-acknowledgement ordering. Releasing the lease discards any unsent
+sample. A secure sweep requires both renderer diagnostics and atomic-sample
+capabilities; it never falls back to the legacy two-write pair.
 
 For confirmation on an ordinary diagnostic build, iOS starts a session-scoped
 measurement window with:
@@ -1465,6 +1505,8 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `DTRN` | iOS -> ESP32 | `tls\|cancel` | Delete a staged identity without changing the active identity. |
 | `DTRN` | iOS -> ESP32 | `exit` | Exit the active map, firmware, debug, or diagnostics transfer mode. |
 | `DSTS` | iOS -> ESP32 | empty | Request generic device-transfer status and the current HTTPS credential/pin. |
+| `DSTS` | ESP32 -> iOS | UTF-8 JSON | Complete generic device-transfer status when it fits one authenticated notification. |
+| `DSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Chunked generic device-transfer status. |
 
 The device preserves a detailed binding through short BLE gaps. If the last
 confirmed workout lifecycle was active and workout telemetry remains stale for
@@ -1498,6 +1540,13 @@ continues to use it. Otherwise `MSTC` responses fit the minimum BLE notification
 payload: ASCII `MSTC`, a one-byte transfer id, zero-based chunk index, chunk
 count, and up to 13 JSON bytes (20 bytes total). The app reassembles chunks by
 transfer id and accepts both forms.
+
+Generic device-transfer status uses the equivalent `DSTS{...}` direct response
+or `DSTC` chunk header. Firmware keeps an incomplete `DSTC` snapshot on the
+owner task and resumes it only as the bounded authenticated-notification queue
+drains. A request received while that snapshot is pending continues the same
+transfer instead of assigning a new transfer id and stranding the iOS
+reassembler with another partial response.
 
 The HTTPS credential is not part of the map-status payload. Current iOS clients
 send `DTRNenter|map`, which applies map mode and publishes a fresh generic

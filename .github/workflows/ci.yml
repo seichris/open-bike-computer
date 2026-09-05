@@ -528,6 +528,7 @@ jobs:
             test_map_route_geometry \
             test_map_building_workspace \
             test_renderer_diagnostics \
+            test_renderer_delivery_timing \
             test_renderer_diagnostics_ble_protocol \
             test_renderer_diagnostics_request; do
             g++ -std=c++17 -Wall -Wextra -Werror \

@@ -723,6 +723,12 @@ struct NavigationProtocolTests {
         testNavigationWriteQueue()
         testGPSQueuePolicy()
         testRendererBenchmarkProtocol()
+        testSecureRendererBenchmarkProtocol()
+        testSecureRendererBenchmarkReadiness()
+        testRendererBenchmarkAtomicDelivery()
+        testATTWriteSubmissionEvidence()
+        testRouteSnapshotManagerAdmission()
+        testNavigationDrainIncludesAcknowledgement()
         testDeviceBLEProtocolConstants()
         testWorkoutDeviceFrameVectors()
         testWorkoutDeviceFrameSentinelsAndSaturation()
@@ -11157,6 +11163,25 @@ struct NavigationProtocolTests {
                 !routesSource.contains(".sheet("),
             "Saved Routes requests presentation without owning a transient sheet"
         )
+        guard let remoteStart = settingsSource.range(
+            of: "private struct RemoteDeviceDebugSettingsSection"
+        )?.lowerBound,
+        let replayStart = settingsSource.range(
+            of: "private struct RendererBenchmarkReplaySettingsSection",
+            range: remoteStart..<settingsSource.endIndex
+        )?.lowerBound else {
+            assert(false, "remote-debug settings source should be available")
+            return
+        }
+        let remoteSource = String(settingsSource[remoteStart..<replayStart])
+        assert(
+            remoteSource.contains("NavigationLink {") &&
+                remoteSource.contains(
+                    "RemoteDeviceDebugConsoleView(session: session)"
+                ) &&
+                !remoteSource.contains(".sheet("),
+            "the secure console stays in Settings navigation instead of presenting a nested sheet"
+        )
     }
 
     static func testStravaRouteCatalogUIWiring() {
@@ -14078,12 +14103,72 @@ struct NavigationProtocolTests {
             assert(false, "checked-in renderer benchmark fixture decodes")
             return
         }
-        assertEqual(fixture.id, "shanghai-center-renderer-v1",
+        assertEqual(fixture.id, "shanghai-jingan-renderer-v1",
                     "renderer benchmark keeps its pinned fixture identity")
         assertEqual(fixture.cadenceHz, 1,
                     "renderer benchmark fixture stays at exactly 1 Hz")
         assertEqual(fixture.points.count, 120,
                     "renderer benchmark fixture retains the full Shanghai loop")
+        assertEqual(fixture.points.map(\.latitude).min(), 31.2245400,
+                    "renderer benchmark loop stays south of Jing'an Temple")
+        assertEqual(fixture.points.map(\.latitude).max(), 31.2258900,
+                    "renderer benchmark loop stays north of Jing'an Temple")
+        assertEqual(fixture.points.map(\.longitude).min(), 121.4409173,
+                    "renderer benchmark loop starts just east of Jing'an Temple")
+        assertEqual(fixture.points.map(\.longitude).max(), 121.4436673,
+                    "renderer benchmark loop stays in the Jing'an neighborhood")
+        assert(
+            !RendererBenchmarkCleanupPolicy.requiresCurrentProfileRestore(
+                after: .current
+            ),
+            "an already-current ordinary replay does not queue redundant cleanup"
+        )
+        for profile in RendererBenchmarkProfile.allCases
+            where profile != .current {
+            assert(
+                RendererBenchmarkCleanupPolicy.requiresCurrentProfileRestore(
+                    after: profile
+                ),
+                "a non-current ordinary replay restores the production profile"
+            )
+        }
+        guard let broadMapBounds = OfflineMapPreviewBounds(coordinates: [
+            121.4403621, 31.2158861, 121.4743744, 31.2449696,
+        ]),
+        let broadCoverage = RendererBenchmarkRouteCoverage(
+            fixture: fixture,
+            mapBounds: broadMapBounds
+        ) else {
+            assert(false, "renderer benchmark evaluates valid map coverage")
+            return
+        }
+        assert(broadCoverage.coversEntireRoute,
+               "signed benchmark map bounds cover the Jing'an Temple fixture")
+        assertEqual(broadCoverage.firstOutsidePointIndex, nil,
+                    "covered fixture has no rejected sample")
+
+        guard let narrowMapBounds = OfflineMapPreviewBounds(coordinates: [
+            121.4410, 31.2248, 121.4420, 31.2254,
+        ]),
+        let narrowCoverage = RendererBenchmarkRouteCoverage(
+            fixture: fixture,
+            mapBounds: narrowMapBounds
+        ) else {
+            assert(false, "renderer benchmark evaluates narrow map coverage")
+            return
+        }
+        assert(!narrowCoverage.coversEntireRoute,
+               "narrow map bounds reject the full Jing'an Temple fixture")
+        assertEqual(narrowCoverage.firstOutsidePointIndex, 0,
+                    "coverage reports the first rejected fixture sample")
+        assertEqual(
+            narrowCoverage.failureDescription(mapBounds: narrowMapBounds),
+            "The active signed map does not cover the pinned Shanghai route. " +
+                "map=[121.4410000,31.2248000,121.4420000,31.2254000] " +
+                "route=[121.4409173,31.2245400,121.4436673,31.2258900] " +
+                "firstOutside=0:(121.4409173,31.2250400)",
+            "coverage failure exposes only bounded map and route coordinates"
+        )
         let shortFixture = Data(
             #"{"schema":1,"id":"short","cadenceHz":1,"nominalSpeedMetersPerSecond":4,"points":[{"latitude":31.2,"longitude":121.4},{"latitude":31.2001,"longitude":121.4001}]}"#.utf8
         )
@@ -14095,7 +14180,7 @@ struct NavigationProtocolTests {
         let fixtureHash = Data(SHA256.hash(data: fixtureData))
         assertEqual(
             fixtureHash.map { String(format: "%02x", $0) }.joined(),
-            "d5171f6b30478a09948381bbdb86da33752bc646fa6077153f69a4bd840eb36e",
+            "0fec6228e89cdb6841b971226c5fdedcc5e711dcb9b0e72bcaf95da4f6452f64",
             "fixture edits require an explicit pinned-hash update"
         )
         guard let geometry = RendererBenchmarkRouteGeometry.data(
@@ -14131,6 +14216,42 @@ struct NavigationProtocolTests {
                     "renderer marker carries fixture sample count")
         assertEqual(readUInt32LE(marker, offset: 40), 0x1234_5678,
                     "renderer marker carries replay loop")
+
+        let replayGPS = DeviceGPSPacketBuilder.data(
+            lat: fixture.points[119].latitude,
+            lon: fixture.points[119].longitude,
+            heading: 90,
+            speedMetersPerSecond: fixture.nominalSpeedMetersPerSecond,
+            altitudeMeters: 8,
+            distanceTraveledMeters: 119,
+            elapsedSeconds: 119,
+            routeRemainingMeters: 4,
+            horizontalAccuracyMeters: 3,
+            locationTimestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            includeRideDetectionQuality: true
+        )
+        guard let sample = RendererBenchmarkSamplePacket.data(
+            gpsPosition: replayGPS,
+            marker: marker
+        ) else {
+            assert(false, "valid renderer benchmark sample encodes")
+            return
+        }
+        assertEqual(sample.count, 85,
+                    "one protected write contains a 36-byte GPS and marker")
+        assertEqual(String(data: sample.prefix(4), encoding: .utf8), "RBS1",
+                    "atomic renderer sample uses the negotiated prefix")
+        assertEqual(sample[4], 36,
+                    "atomic renderer sample bounds its GPS member")
+        assertEqual(String(data: sample[41..<45], encoding: .utf8), "RBM1",
+                    "marker follows GPS in the same transport payload")
+        assert(
+            RendererBenchmarkSamplePacket.data(
+                gpsPosition: Data(repeating: 0, count: 35),
+                marker: marker
+            ) == nil,
+            "non-canonical GPS members fail closed"
+        )
 
         guard let window = RendererBenchmarkWindowPacket.data(
             profile: .medium,
@@ -14231,11 +14352,13 @@ struct NavigationProtocolTests {
 
         let manager = BLEManager()
         var cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8)
-        cap2.append(contentsOf: [1, 0, 0, 4, 0])
+        cap2.append(contentsOf: [1, 0, 0, 0x84, 0])
         assert(manager.handleDeviceCapabilitiesNotification(cap2),
                "renderer diagnostics CAP2 response is consumed")
         assert(manager.supportsRendererDiagnostics,
                "CAP2 bit 18 enables renderer diagnostics")
+        assert(manager.supportsRendererBenchmarkSample,
+               "CAP2 bit 23 enables atomic renderer replay samples")
         manager.isConnected = true
         manager.isNavigationReady = true
         var writes: [Data] = []
@@ -14286,6 +14409,874 @@ struct NavigationProtocolTests {
                "stale chunk remainder is consumed as a new incomplete stream")
         assertEqual(manager.rendererDiagnosticsRevision, 1,
                     "a newer direct snapshot invalidates older partial chunks")
+    }
+
+
+    static func testRendererBenchmarkAtomicDelivery() {
+        // Full-size atomic samples use the same protected native routing as
+        // ordinary GPS, including MTU boundaries and legacy compatibility.
+        for (withResponse, withoutResponse, acknowledgedLimit, creditLimit, expected) in [
+            (true, true, 107, 107, GPSPositionWriteRoute.nativeWithResponse),
+            (true, false, 107, 0, .nativeWithResponse),
+            (false, true, 0, 107, .nativeWithoutResponse),
+            (true, true, 106, 107, .nativeWithoutResponse),
+            (true, true, 106, 106, .navigationFallback),
+            (false, false, 512, 512, .navigationFallback),
+        ] {
+            assertEqual(GPSPositionWriteRouting.route(
+                hasNativeWriteWithResponse: withResponse,
+                hasNativeWriteWithoutResponse: withoutResponse,
+                payloadLength: 85, protectionOverhead: 22,
+                withResponseMaximum: acknowledgedLimit,
+                withoutResponseMaximum: creditLimit
+            ), expected, "atomic replay respects native properties and protected MTU")
+        }
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        var ready = false
+        var writes: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 185,
+            expectsWriteResponse: false,
+            canSend: { ready },
+            write: { writes.append($0) }
+        ))
+        let hash = Data(repeating: 0x12, count: 32)
+        func send(_ index: Int) -> Bool {
+            manager.sendRendererBenchmarkSample(
+                gpsPosition: Data(repeating: UInt8(index), count: 36),
+                fixtureSHA256: hash, sampleIndex: index,
+                sampleCount: 120, loop: 0
+            )
+        }
+        assert(!send(0), "atomic replay requires negotiated firmware capability")
+        var cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8)
+        cap2.append(contentsOf: [1, 0, 0, 0x84, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2),
+               "atomic replay capability is consumed")
+        assert(!send(0), "atomic replay requires the exclusive GPS lease")
+        guard let lease = manager.beginDeviceGPSOverride() else {
+            assert(false, "atomic replay acquires GPS lease")
+            return
+        }
+        assert(send(1), "first complete GPS and marker queue together")
+        assert(send(2), "latest complete sample replaces a backpressured sample")
+        assertEqual(writes.count, 0, "transport credit is respected")
+        ready = true
+        manager.flushPendingNavigationWritesForTesting()
+        assertEqual(writes.count, 1, "only the newest atomic sample is dispatched")
+        assertEqual(String(data: writes[0].prefix(4), encoding: .utf8), "RBS1",
+                    "native replay preserves atomic framing")
+        assertEqual(writes[0][5], 2, "latest GPS is paired with latest marker")
+        assertEqual(readUInt16LE(writes[0], offset: 77), 2,
+                    "marker index matches its GPS inside the same payload")
+        ready = false
+        assert(send(3), "another sample can wait for credit")
+        manager.endDeviceGPSOverride(lease)
+        ready = true
+        manager.flushPendingNavigationWritesForTesting()
+        assertEqual(writes.filter {
+            String(data: $0.prefix(4), encoding: .utf8) == "RBS1"
+        }.count, 1, "stop discards pending replay state")
+        assert(writes.count > 1, "stop preserves unrelated setup traffic")
+        assert(!send(4), "ended lease cannot emit stale replay")
+
+        let acknowledged = BLEManager()
+        assert(acknowledged.handleDeviceCapabilitiesNotification(cap2),
+               "acknowledged replay negotiates the same atomic capability")
+        acknowledged.isConnected = true
+        acknowledged.isNavigationReady = true
+        var acknowledgedWrites: [Data] = []
+        acknowledged.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 185, expectsWriteResponse: true,
+            canSend: { true }, write: { acknowledgedWrites.append($0) }
+        ))
+        guard let acknowledgedLease = acknowledged.beginDeviceGPSOverride() else {
+            assert(false, "acknowledged replay obtains exclusive GPS lease")
+            return
+        }
+        func sendAcknowledged(_ index: Int) -> Bool {
+            acknowledged.sendRendererBenchmarkSample(
+                gpsPosition: Data(repeating: UInt8(index), count: 36),
+                fixtureSHA256: hash, sampleIndex: index, sampleCount: 120, loop: 0
+            )
+        }
+        assert(sendAcknowledged(1), "acknowledged native replay is supported")
+        assert(acknowledged.hasPendingATTWriteForTesting,
+               "atomic replay enters the shared ATT response wait")
+        assert(sendAcknowledged(2) && sendAcknowledged(3),
+               "ticks during ATT wait retain the newest complete sample")
+        assertEqual(acknowledgedWrites.count, 1,
+                    "no sample bypasses the outstanding ATT response")
+        acknowledged.completeNavigationWriteForTesting(error: nil)
+        assertEqual(acknowledgedWrites.count, 2,
+                    "next sample progresses on ATT completion without a credit callback")
+        assertEqual(acknowledgedWrites[1][5], 3,
+                    "acknowledged coalescing retains the latest GPS")
+        assertEqual(readUInt16LE(acknowledgedWrites[1], offset: 77), 3,
+                    "acknowledged coalescing keeps GPS and marker paired")
+        assert(sendAcknowledged(4), "a later tick waits behind the second ATT write")
+        acknowledged.endDeviceGPSOverride(acknowledgedLease)
+        acknowledged.completeNavigationWriteForTesting(error: nil)
+        assertEqual(acknowledgedWrites.count, 2,
+                    "Stop drops pending samples without replaying completed writes")
+        assert(!acknowledged.hasPendingATTWriteForTesting,
+               "the final ATT completion releases the writer")
+        assert(!sendAcknowledged(5), "stopped acknowledged replay cannot emit")
+
+        var queue = NavigationWriteQueue(maxCount: 8)
+        _ = queue.enqueueCoalescing(NavigationWrite(
+            data: Data([1]), label: "one", writeClass: .gpsPosition,
+            coalescingKey: "sample"
+        ), prioritized: false)
+        _ = queue.snapshotMetricsAndReset()
+        _ = queue.enqueueCoalescing(NavigationWrite(
+            data: Data([2]), label: "two", writeClass: .gpsPosition,
+            coalescingKey: "sample"
+        ), prioritized: false)
+        assertEqual(queue.cumulativeMetrics.enqueuedFrames, 2,
+                    "benchmark counters survive logging interval reset")
+        assertEqual(queue.cumulativeMetrics.coalescedFrames, 1,
+                    "cumulative metrics retain coalescing")
+        _ = queue.snapshotMetricsAndReset()
+        assertEqual(queue.cumulativeMetrics.enqueuedFrames, 2,
+                    "repeated snapshots do not double-count")
+        assertEqual(queue.cumulativeMetrics.currentDepth, 1,
+                    "cumulative queue depth remains a live gauge")
+    }
+
+    static func testRouteSnapshotManagerAdmission() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        var writes: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 185, expectsWriteResponse: true,
+            canSend: { true }, write: { writes.append($0) }
+        ))
+        assert(manager.enqueueRouteSnapshotForTesting(Data([1])), "first route enters ATT")
+        let originalID = manager.rendererBenchmarkBLETransportEvidence().inFlightWriteID
+        for index in 2...100 {
+            assert(manager.enqueueRouteSnapshotForTesting(Data([UInt8(index)])),
+                   "new unsent route replaces obsolete snapshot through real admission")
+        }
+        let blocked = manager.rendererBenchmarkBLETransportEvidence()
+        assertEqual(writes.count, 1, "route replacement cannot bypass ATT wait")
+        assertEqual(blocked.inFlightWriteID, originalID, "pending identity unchanged")
+        assertEqual(blocked.queueDepth, 1, "manager bounds pending route backlog")
+        assertEqual(blocked.routeCoalescedFrames, 98, "manager uses snapshot admission")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(writes, [Data([1]), Data([100])], "only newest unsent route recovers")
+        assert(manager.enqueueRouteSnapshotForTesting(Data()), "empty clear remains admitted")
+        assert(manager.enqueueRouteSnapshotForTesting(Data([101])), "route after clear")
+        assert(manager.enqueueRouteSnapshotForTesting(Data([102])), "replace only after clear")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(writes.last, Data(), "clear boundary is not coalesced away")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(writes.last, Data([102]), "latest route follows clear")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assert(!manager.hasPendingATTWriteForTesting, "writer drains normally")
+    }
+
+    static func testATTWriteSubmissionEvidence() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 185, expectsWriteResponse: true,
+            canSend: { true }, write: { _ in }
+        ))
+        assert(manager.requestDeviceCapabilities(), "diagnostic test queues an ATT write")
+        let prepared = manager.rendererBenchmarkBLETransportEvidence()
+        guard let writeID = prepared.inFlightWriteID else {
+            assert(false, "ATT preparation assigns a correlation ID")
+            return
+        }
+        assertEqual(prepared.inFlightSubmissionStage, .prepared,
+                    "dequeuing is not proof of CoreBluetooth submission")
+        manager.noteATTWriteSubmissionForTesting(
+            writeID: writeID, stage: .submitted, matchingCharacteristic: false
+        )
+        assertEqual(manager.rendererBenchmarkBLETransportEvidence().inFlightSubmissionStage,
+                    .prepared, "a different characteristic cannot tag this write")
+        manager.noteATTWriteSubmissionForTesting(writeID: writeID, stage: .callingCoreBluetooth)
+        assertEqual(manager.rendererBenchmarkBLETransportEvidence().inFlightSubmissionStage,
+                    .callingCoreBluetooth, "API entry is distinct from return")
+        manager.noteATTWriteSubmissionForTesting(writeID: writeID, stage: .submitted)
+        manager.timeoutATTWriteForTesting()
+        let timedOut = manager.rendererBenchmarkBLETransportEvidence()
+        assert(timedOut.inFlightWriteID == nil && timedOut.lastTimedOutWriteID == writeID,
+               "timeout evidence survives clearing the pending write")
+        assertEqual(timedOut.lastTimedOutSubmissionStage, .submitted,
+                    "timeout records that CoreBluetooth returned without an ACK")
+        let timing = timedOut.lastWriteTiming!
+        assertEqual(timing.writeID, writeID, "timing uses the real pending ATT identity")
+        assert(timing.apiEntryAtUptimeMs != nil && timing.apiReturnAtUptimeMs != nil,
+               "actual manager stage transitions retain API timestamps")
+        assert(timing.delegateEntryAtUptimeMs == nil,
+               "timeout does not invent a delegate callback")
+        assertEqual(timing.outcome, "timeout", "timing retains completion reason")
+        assert(timedOut.slowestWriteTiming != nil, "tail evidence survives pending-slot removal")
+        assert(manager.requestDeviceCapabilities(), "next ATT write starts independently")
+        manager.noteATTWriteSubmissionForTesting(writeID: writeID, stage: .submitted)
+        assertEqual(manager.rendererBenchmarkBLETransportEvidence().inFlightSubmissionStage,
+                    .prepared, "a delayed return cannot mark a successor write submitted")
+        manager.ignoreATTWriteCallbackForTesting()
+        let next = manager.rendererBenchmarkBLETransportEvidence()
+        assertEqual(next.ignoredWriteCallbacks, 1, "unmatched callbacks are counted")
+        assertEqual(next.lastTimedOutSubmissionStage, .submitted,
+                    "new activity preserves the last timeout evidence")
+        guard let nextID = next.inFlightWriteID else { return }
+        manager.noteATTWriteSubmissionForTesting(writeID: nextID, stage: .rejectedBeforeSubmission)
+        manager.timeoutATTWriteForTesting()
+        let rejected = manager.rendererBenchmarkBLETransportEvidence()
+        assertEqual(rejected.lastTimedOutSubmissionStage, .rejectedBeforeSubmission,
+                    "a local preparation failure is distinguishable from a missing ACK")
+        guard let encoded = try? JSONEncoder().encode(rejected),
+              var legacy = try? JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        else { assert(false, "submission evidence encodes"); return }
+        assert(RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(jsonData: encoded),
+               "submission evidence contains no credentials or packet contents")
+        for key in ["inFlightWriteID", "inFlightSubmissionStage", "lastTimedOutWriteID",
+                    "lastTimedOutSubmissionStage", "ignoredWriteCallbacks",
+                    "lastWriteTiming", "slowestWriteTiming"] {
+            legacy.removeValue(forKey: key)
+        }
+        let legacyData = try! JSONSerialization.data(withJSONObject: legacy)
+        let decoded = try! JSONDecoder().decode(RendererBenchmarkBLETransportEvidence.self,
+                                                from: legacyData)
+        assert(decoded.lastTimedOutSubmissionStage == nil && decoded.ignoredWriteCallbacks == nil,
+               "legacy evidence remains unknown rather than inventing submission state")
+        assert(decoded.lastWriteTiming == nil && decoded.slowestWriteTiming == nil,
+               "older app traces need no new timing fields")
+        for key in ["attemptId", "connectionGeneration", "class", "bytes", "phase", "reason", "kind"] {
+            assert(RideDiagnosticsFieldPolicy.isAllowed(key),
+                   "submission trace metadata survives the recorder privacy filter")
+        }
+    }
+
+    static func testNavigationDrainIncludesAcknowledgement() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            expectsWriteResponse: true,
+            canSend: { true },
+            write: { _ in }
+        ))
+        assert(manager.requestDeviceCapabilities(), "setup request queues")
+        assert(manager.navigationHasUnsettledWritesForTesting,
+               "drain must include the outstanding ATT acknowledgement")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assert(!manager.navigationHasUnsettledWritesForTesting,
+               "setup settles only after its acknowledgement")
+    }
+
+    static func testSecureRendererBenchmarkProtocol() {
+        assertEqual(
+            SecureRendererBenchmarkHTTPPolicy.connectionReuseHeaderName,
+            "X-BikeComputer-Connection-Reuse",
+            "the serial sweep uses the firmware connection-reuse contract"
+        )
+        assertEqual(
+            SecureRendererBenchmarkHTTPPolicy.connectionReuseHeaderValue,
+            "1",
+            "the serial sweep explicitly opts into connection reuse"
+        )
+        assertEqual(
+            SecureRendererBenchmarkHTTPPolicy.controlRequestTimeout,
+            5,
+            "control and metrics requests retain the tight five-second bound"
+        )
+        assertEqual(
+            SecureRendererBenchmarkHTTPPolicy.frameRequestTimeout,
+            12,
+            "large pinned frame bodies receive physical tail headroom"
+        )
+        assert(
+            SecureRendererBenchmarkHTTPPolicy.frameRequestTimeout > 8,
+            "the frame deadline exceeds the failed physical deadline"
+        )
+        assert(
+            SecureRendererBenchmarkHTTPPolicy.metricsRecoveryTimeout >
+                SecureRendererBenchmarkHTTPPolicy.controlRequestTimeout * 2,
+            "metrics recovery permits a fresh pinned-session retry"
+        )
+        assert(
+            SecureRendererBenchmarkHTTPPolicy.screenshotRecoveryTimeout >
+                SecureRendererBenchmarkHTTPPolicy.frameRequestTimeout,
+            "checkpoint capture can retry after renewing its pinned session"
+        )
+        assert(
+            SecureRendererBenchmarkHTTPPolicy.cleanupRecoveryTimeout >
+                SecureRendererBenchmarkHTTPPolicy.controlRequestTimeout * 2,
+            "Current cleanup can recover after a poisoned persistent socket"
+        )
+        assertEqual(
+            SecureRendererBenchmarkHTTPPolicy.resourceTimeout,
+            20,
+            "the session resource ceiling remains bounded above the frame deadline"
+        )
+        var reuseRequest = URLRequest(url: URL(string: "https://device.invalid")!)
+        SecureRendererBenchmarkHTTPPolicy.enableConnectionReuse(
+            on: &reuseRequest
+        )
+        assertEqual(
+            reuseRequest.value(forHTTPHeaderField:
+                SecureRendererBenchmarkHTTPPolicy.connectionReuseHeaderName),
+            "1",
+            "the secure sweep request carries only the non-secret reuse marker"
+        )
+        let appGatesURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-gates-v1.json"
+        )
+        let firmwareGatesURL = URL(fileURLWithPath:
+            "esp32/tools/renderer_benchmark_gates.json"
+        )
+        guard let appGatesData = try? Data(contentsOf: appGatesURL),
+              let firmwareGatesData = try? Data(contentsOf: firmwareGatesURL),
+              let gates = try? RendererBenchmarkGates.decode(appGatesData) else {
+            assert(false, "secure renderer benchmark gates decode")
+            return
+        }
+        assertEqual(
+            appGatesData,
+            firmwareGatesData,
+            "the in-app sweep uses the exact firmware benchmark gate contract"
+        )
+        assertEqual(gates.schema, 1, "secure benchmark gates retain schema 1")
+        assertEqual(gates.absolute.maximumCoverageRejectedRenders, 4,
+                    "temporary coverage allowance remains explicit until issue 402 is resolved")
+        assertEqual(gates.absolute.maximumStaleRenders, 3,
+                    "temporary coverage allowance does not relax the independent stale gate")
+        assertEqual(
+            gates.absolute.minimumMetricsSampleFraction,
+            0.3,
+            "secure benchmark sampling reflects serialized pinned HTTPS frames"
+        )
+
+        let mapFixture = RendererBenchmarkMapFixtureIdentity(
+            id: "shanghai-map",
+            sha256: String(repeating: "a", count: 64)
+        )
+        let routeFixture = RendererBenchmarkRouteFixtureIdentity(
+            id: "shanghai-jingan-renderer-v1",
+            sha256: String(repeating: "b", count: 64),
+            mode: "ios-fixture-1hz"
+        )
+        guard let windowRequestData = try?
+                RendererBenchmarkWindowWireContract.requestData(
+                    profile: "current",
+                    runId: "test-run",
+                    repeatNumber: 2,
+                    mapFixture: mapFixture,
+                    routeFixture: routeFixture
+                ),
+              let windowRequest = try? JSONSerialization.jsonObject(
+                with: windowRequestData
+              ) as? [String: Any],
+              let encodedMapFixture = windowRequest["mapFixture"]
+                as? [String: Any],
+              let encodedRouteFixture = windowRequest["routeFixture"]
+                as? [String: Any] else {
+            assert(false, "secure benchmark encodes the renderer-window request")
+            return
+        }
+        assertEqual(
+            windowRequest.keys.sorted(),
+            [
+                "mapFixture", "profile", "repeat", "routeFixture",
+                "routeMode", "runId", "schema",
+            ],
+            "renderer-window request has exactly the firmware top-level fields"
+        )
+        assertEqual(
+            encodedMapFixture.keys.sorted(),
+            ["id", "sha256"],
+            "renderer-window map identity has exactly two fields"
+        )
+        assertEqual(
+            encodedRouteFixture.keys.sorted(),
+            ["id", "sha256"],
+            "renderer-window route identity excludes the evidence-only mode field"
+        )
+        assertEqual(
+            windowRequest["routeMode"] as? String,
+            routeFixture.mode,
+            "renderer-window route mode remains a top-level firmware field"
+        )
+        assertEqual(
+            windowRequest["repeat"] as? Int,
+            2,
+            "renderer-window repeat uses the firmware field name"
+        )
+        assertEqual(
+            RendererBenchmarkWindowWireContract.acceptedStatusCode,
+            202,
+            "renderer-window requests accept the firmware asynchronous status"
+        )
+        assertEqual(
+            RendererBenchmarkWindowWireContract.requestID(
+                from: Data(#"{"ok":true,"requestId":17}"#.utf8)
+            ),
+            17,
+            "renderer-window response decodes the firmware 202 body"
+        )
+        assert(
+            RendererBenchmarkWindowWireContract.requestID(
+                from: Data(#"{"ok":true,"requestId":0}"#.utf8)
+            ) == nil,
+            "renderer-window response rejects request ID zero"
+        )
+        assert(
+            RendererBenchmarkWindowWireContract.requestID(
+                from: Data(#"{"ok":false,"requestId":17}"#.utf8)
+            ) == nil,
+            "renderer-window response rejects a negative acknowledgement"
+        )
+        assert(
+            RendererBenchmarkWindowWireContract.requestID(
+                from: Data(#"{"ok":true}"#.utf8)
+            ) == nil,
+            "renderer-window response rejects a missing request ID"
+        )
+
+        let schedule = SecureRendererBenchmarkPlan.balancedSchedule().map {
+            $0.map(\.wireName)
+        }
+        assertEqual(
+            schedule,
+            [
+                ["flat", "current", "high", "medium"],
+                ["current", "medium", "flat", "high"],
+                ["medium", "high", "current", "flat"],
+            ],
+            "secure benchmark reproduces the balanced firmware-tool schedule"
+        )
+        assertEqual(
+            SecureRendererBenchmarkPlan.checkpointIndexes(
+                sampleCount: 120,
+                fractions: gates.checkpointFractions
+            ),
+            [0, 30, 60, 90],
+            "secure benchmark captures the four route checkpoints"
+        )
+        assertEqual(
+            RendererBenchmarkProfile.allCases.map(\.expectedTuningFingerprint),
+            [
+                10_406_861_497_667_589_141,
+                8_401_707_559_015_286_048,
+                12_673_537_785_575_117_931,
+                7_901_381_679_465_817_306,
+            ],
+            "secure benchmark pins the firmware tuning fingerprints"
+        )
+
+        let metricsURL = URL(fileURLWithPath:
+            "ios-app/BikeComputerTests/Fixtures/renderer-metrics-v1.json"
+        )
+        guard let metricsData = try? Data(contentsOf: metricsURL),
+              let metrics = try? JSONDecoder().decode(
+                RendererBenchmarkMetricsSnapshot.self,
+                from: metricsData
+              ) else {
+            assert(false, "secure benchmark decodes the firmware metrics contract")
+            return
+        }
+        let sample = RendererBenchmarkEvaluator.sample(
+            snapshot: metrics,
+            elapsedSeconds: 42
+        )
+        assertEqual(metrics.remoteDebug.lastFrameSnapshotWaitUs, 110,
+                    "secure benchmark retains frame snapshot wait evidence")
+        assertEqual(metrics.replayTransport?.markerRejectedNoActiveWindow, 221,
+                    "export retains the missing-window diagnostic counter")
+        assertEqual(metrics.memory.dmaHeap.windowMinimumFreeAttribution?.frameTransferActive, true,
+                    "export retains DMA minimum attribution")
+        let interrupted = RendererBenchmarkInterruptedEvidence(
+            schema: 1, source: "bicino-debug-secure-sweep-interrupted-v1",
+            automatedPassed: false, stopped: true, reason: "Stopped",
+            cleanupRestoredCurrent: true, completedRuns: [],
+            partialSamples: [], lastSnapshot: metrics
+        )
+        let interruptedData = try! JSONEncoder().encode(interrupted)
+        let interruptedObject = try! JSONSerialization.jsonObject(
+            with: interruptedData
+        ) as! [String: Any]
+        assertEqual(interruptedObject["automatedPassed"] as? Bool, false,
+                    "partial evidence cannot claim a completed passing run")
+        assert(RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
+            jsonData: interruptedData
+        ), "partial evidence uses the same secret-free export policy")
+        assertEqual(metrics.remoteDebug.lastHttpActualBytes, 434_344,
+                    "secure benchmark retains actual response body bytes")
+        assertEqual(metrics.remoteDebug.lastHttpZeroWriteCalls, 4,
+                    "secure benchmark retains TLS zero-write evidence")
+        assertEqual(metrics.remoteDebug.lastHttpActiveTlsWriteUs, 500_000,
+                    "secure benchmark retains active TLS-write time")
+        guard let summary = RendererBenchmarkEvaluator.summary(
+            snapshots: [metrics],
+            samples: [sample]
+        ) else {
+            assert(false, "secure benchmark summarizes a metrics window")
+            return
+        }
+        assertEqual(
+            summary.minimumDmaFree,
+            20_000,
+            "secure benchmark retains the firmware DMA minimum"
+        )
+        for (coverage, stale) in [(3, 3), (4, 0), (5, 0), (4, 4)] {
+            guard let summaryData = try? JSONEncoder().encode(summary),
+                  var object = try? JSONSerialization.jsonObject(with: summaryData)
+                    as? [String: Any] else {
+                assert(false, "coverage boundary fixture encodes")
+                return
+            }
+            object["coverageRejectedRenders"] = coverage
+            object["staleRenders"] = stale
+            guard let data = try? JSONSerialization.data(withJSONObject: object),
+                  let boundarySummary = try? JSONDecoder().decode(
+                    RendererBenchmarkRunSummary.self, from: data
+                  ) else {
+                assert(false, "coverage boundary fixture decodes")
+                return
+            }
+            let failures = RendererBenchmarkEvaluator.evaluate(
+                snapshots: [metrics], samples: [sample], summary: boundarySummary,
+                durationSeconds: 1, screenshotCount: 0, checkpointCount: 0,
+                expectedRouteSampleCount: 120, gates: gates
+            )
+            assertEqual(
+                failures.filter { $0.hasPrefix("coverage_rejections:") },
+                coverage > 4 ? ["coverage_rejections:5"] : [],
+                "coverage allowance accepts four but rejects five"
+            )
+            assertEqual(
+                failures.filter { $0.hasPrefix("stale_renders:") },
+                stale > 3 ? ["stale_renders:4"] : [],
+                "stale render gate remains independent of coverage allowance"
+            )
+        }
+        assertEqual(
+            summary.cryptoHeadroomRejections,
+            0,
+            "secure benchmark retains the zero crypto-rejection gate"
+        )
+        assertEqual(
+            summary.cryptoOperationFailures,
+            0,
+            "secure benchmark retains the zero crypto-failure gate"
+        )
+        let baseline = RendererBenchmarkEvidenceIdentity(
+            deviceId: metrics.identity.deviceId,
+            firmwareCommit: metrics.identity.firmwareCommit,
+            firmwareVersion: "test",
+            firmwareBuild: 1,
+            board: metrics.identity.board,
+            buildProfile: metrics.identity.buildProfile,
+            storageBackend: "sdmmc",
+            storagePowerCycleRequired: false,
+            bootId: metrics.identity.bootId,
+            resetReason: metrics.identity.resetReason
+        )
+        assertEqual(
+            RendererBenchmarkEvaluator.identityFailures(
+                snapshot: metrics,
+                baseline: baseline,
+                profile: .medium,
+                runId: metrics.window.runId,
+                repeatNumber: metrics.window.repeatNumber,
+                mapFixture: metrics.identity.mapFixture,
+                routeFixture: metrics.identity.routeFixture,
+                windowId: metrics.window.id
+            ),
+            [],
+            "secure benchmark accepts an exact window/build/fixture identity"
+        )
+        if var legacyMetricsObject = try? JSONSerialization.jsonObject(
+            with: metricsData
+        ) as? [String: Any],
+           var memory = legacyMetricsObject["memory"] as? [String: Any],
+           var dmaHeap = memory["dmaHeap"] as? [String: Any] {
+            dmaHeap.removeValue(forKey: "cryptoCountersScope")
+            memory["dmaHeap"] = dmaHeap
+            legacyMetricsObject["memory"] = memory
+            if let legacyMetricsData = try? JSONSerialization.data(
+                withJSONObject: legacyMetricsObject
+            ),
+               let legacyMetrics = try? JSONDecoder().decode(
+                RendererBenchmarkMetricsSnapshot.self,
+                from: legacyMetricsData
+               ) {
+                assertEqual(
+                    RendererBenchmarkEvaluator.identityFailures(
+                        snapshot: legacyMetrics,
+                        baseline: baseline,
+                        profile: .medium,
+                        runId: legacyMetrics.window.runId,
+                        repeatNumber: legacyMetrics.window.repeatNumber,
+                        mapFixture: legacyMetrics.identity.mapFixture,
+                        routeFixture: legacyMetrics.identity.routeFixture,
+                        windowId: legacyMetrics.window.id
+                    ),
+                    ["stale_identity:crypto_counter_scope"],
+                    "secure benchmark reports old cumulative crypto counters"
+                )
+            } else {
+                assert(false, "secure benchmark decodes the legacy crypto-counter shape")
+            }
+        } else {
+            assert(false, "secure benchmark constructs a legacy crypto-counter fixture")
+        }
+
+        let pixels = Data([0x00, 0xf8, 0xe0, 0x07])
+        var frame = Data("BCF1".utf8)
+        appendUInt16LE(32, to: &frame)
+        appendUInt16LE(0, to: &frame)
+        appendUInt32LE(7, to: &frame)
+        appendUInt32LE(9, to: &frame)
+        appendUInt16LE(2, to: &frame)
+        appendUInt16LE(1, to: &frame)
+        appendUInt16LE(4, to: &frame)
+        frame.append(contentsOf: [1, 0])
+        appendUInt32LE(UInt32(pixels.count), to: &frame)
+        appendUInt32LE(RendererBenchmarkFrameDecoder.crc32(pixels), to: &frame)
+        frame.append(pixels)
+        guard let decoded = try? RendererBenchmarkFrameDecoder.decode(
+            frame,
+            expectedPanelWidth: 2,
+            expectedPanelHeight: 1,
+            rotationQuarters: 1
+        ) else {
+            assert(false, "secure benchmark frame decoder accepts valid RGB565")
+            return
+        }
+        assertEqual(decoded.sequence, 7, "decoded frame retains its sequence")
+        assertEqual(decoded.width, 1, "quarter-turn frame width is rotated")
+        assertEqual(decoded.height, 2, "quarter-turn frame height is rotated")
+        assertEqual(
+            Array(decoded.rgba),
+            [0, 255, 0, 255, 255, 0, 0, 255],
+            "RGB565 frames are rotated and converted to RGBA deterministically"
+        )
+        assertEqual(
+            RendererBenchmarkCheckpointFramePolicy.decision(
+                capturedAtMs: 1_005,
+                markerReceivedAtMs: 1_000,
+                maximumAgeMs: 2_500
+            ),
+            .accept(lagMs: 5),
+            "the first timestamp-bound checkpoint frame is accepted"
+        )
+        assertEqual(
+            RendererBenchmarkCheckpointFramePolicy.decision(
+                capturedAtMs: 999,
+                markerReceivedAtMs: 1_000,
+                maximumAgeMs: 2_500
+            ),
+            .beforeMarker,
+            "a cached frame from before the marker is consumed but rejected"
+        )
+        assertEqual(
+            RendererBenchmarkCheckpointFramePolicy.decision(
+                capturedAtMs: 3_501,
+                markerReceivedAtMs: 1_000,
+                maximumAgeMs: 2_500
+            ),
+            .tooLate(lagMs: 2_501),
+            "a checkpoint frame outside the marker-age gate is rejected"
+        )
+        var corruptFrame = frame
+        corruptFrame[corruptFrame.count - 1] ^= 0xff
+        assert(
+            (try? RendererBenchmarkFrameDecoder.decode(
+                corruptFrame,
+                expectedPanelWidth: 2,
+                expectedPanelHeight: 1,
+                rotationQuarters: 1
+            )) == nil,
+            "secure benchmark rejects a corrupt screenshot frame"
+        )
+
+        assert(
+            RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
+                jsonData: Data(#"{"deviceId":"abc","passed":true}"#.utf8)
+            ),
+            "non-secret benchmark evidence is exportable"
+        )
+        let transportEvidence = RendererBenchmarkBLETransportEvidence(
+            schema: 1,
+            capturedAtUptimeMs: 12_345,
+            queueDepth: 2,
+            queueMaximumDepth: 7,
+            oldestPendingAgeMs: 1_200,
+            retryAgeMs: 800,
+            enqueuedFrames: 100,
+            flushedFrames: 90,
+            droppedFrames: 0,
+            rejectedFrames: 1,
+            coalescedFrames: 9,
+            retrySchedules: 3,
+            backpressureStops: 4,
+            gpsCoalescedFrames: 6,
+            routeCoalescedFrames: 2,
+            settingsCoalescedFrames: 1,
+            inFlightClass: NavigationWriteClass.gpsPosition.rawValue,
+            inFlightAgeMs: 1_500,
+            acknowledgementCompletions: 89,
+            acknowledgementErrors: 1,
+            acknowledgementTimeouts: 0,
+            lastAcknowledgementMs: 40,
+            maximumAcknowledgementMs: 1_700
+        )
+        guard let transportEvidenceData = try? JSONEncoder().encode(
+            transportEvidence
+        ) else {
+            assert(false, "BLE transport evidence encodes")
+            return
+        }
+        assert(
+            RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
+                jsonData: transportEvidenceData
+            ),
+            "BLE queue and acknowledgement evidence contains no secret fields"
+        )
+        let legacyTimingJSON = Data(#"{"schema":1,"emittedSamples":1,"timerCallbacks":0,"lastTimerLatenessMs":0,"maximumTimerLatenessMs":0}"#.utf8)
+        guard var timing = try? JSONDecoder().decode(
+            RendererBenchmarkReplayTimingEvidence.self, from: legacyTimingJSON
+        ) else {
+            assert(false, "legacy replay timing evidence decodes")
+            return
+        }
+        assert(timing.schedulerActive == nil,
+               "older evidence does not invent a scheduler state")
+        timing.schedulerActive = true
+        var startupTrace = RendererBenchmarkStartupTrace()
+        for index in 0..<(RendererBenchmarkStartupTrace.maximumSamples + 3) {
+            startupTrace.record(RendererBenchmarkStartupSample(
+                phase: "metrics_\(index)",
+                bleTransport: transportEvidence,
+                replayTiming: timing,
+                window: metrics.window,
+                routeReplay: metrics.routeReplay,
+                replayTransport: metrics.replayTransport
+            ))
+        }
+        assert(startupTrace.samples.count == 128 && startupTrace.droppedSamples == 3,
+               "startup trace remains bounded and counts discarded samples")
+        assert(startupTrace.samples.first?.phase == "metrics_3" &&
+               startupTrace.samples.last?.phase == "metrics_130",
+               "startup trace retains the latest failure context")
+        guard let traceData = try? JSONEncoder().encode(startupTrace),
+              let decodedTrace = try? JSONDecoder().decode(
+                RendererBenchmarkStartupTrace.self, from: traceData
+              ) else {
+            assert(false, "startup trace round trips")
+            return
+        }
+        assert(decodedTrace.samples == startupTrace.samples &&
+               decodedTrace.droppedSamples == startupTrace.droppedSamples,
+               "startup evidence preserves scheduler, queue, window and marker state")
+        assert(RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(jsonData: traceData),
+               "startup trace follows the same secret-free export policy")
+        assert(
+            !RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
+                jsonData: Data(#"{"sessionToken":"secret"}"#.utf8)
+            ),
+            "benchmark evidence rejects transfer tokens"
+        )
+        assert(
+            !RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
+                jsonData: Data(#"{"baseURL":"https://device"}"#.utf8)
+            ),
+            "benchmark evidence rejects device session origins"
+        )
+    }
+
+
+    static func testSecureRendererBenchmarkReadiness() {
+        func blocker(
+            isConnected: Bool = true,
+            isNavigationReady: Bool = true,
+            supportsRendererDiagnostics: Bool = true,
+            supportsRendererBenchmarkSample: Bool = true,
+            isNavigationActive: Bool = false,
+            hasSecureSession: Bool = true,
+            hasActiveMap: Bool = true,
+            hasManifestReceipt: Bool = true,
+            hasMapBounds: Bool = true,
+            storageBackend: String? = "sdmmc",
+            storagePowerCycleRequired: Bool? = false,
+            manualReplayIsRunning: Bool = false
+        ) -> SecureRendererBenchmarkReadinessBlocker? {
+            SecureRendererBenchmarkReadiness.blocker(
+                for: SecureRendererBenchmarkReadinessInputs(
+                    isConnected: isConnected,
+                    isNavigationReady: isNavigationReady,
+                    supportsRendererDiagnostics: supportsRendererDiagnostics,
+                    supportsRendererBenchmarkSample:
+                        supportsRendererBenchmarkSample,
+                    isNavigationActive: isNavigationActive,
+                    hasSecureSession: hasSecureSession,
+                    hasActiveMap: hasActiveMap,
+                    hasManifestReceipt: hasManifestReceipt,
+                    hasMapBounds: hasMapBounds,
+                    storageBackend: storageBackend,
+                    storagePowerCycleRequired: storagePowerCycleRequired,
+                    manualReplayIsRunning: manualReplayIsRunning
+                )
+            )
+        }
+
+        assertEqual(blocker(), nil, "complete secure sweep state is ready")
+        assertEqual(
+            blocker(supportsRendererBenchmarkSample: false),
+            .rendererBenchmarkSampleUnsupported,
+            "secure sweep requires atomic GPS-plus-marker delivery"
+        )
+        assertEqual(
+            blocker(hasSecureSession: false),
+            .secureSessionUnavailable,
+            "secure sweep requires the in-memory pinned HTTPS session"
+        )
+        assertEqual(
+            blocker(hasActiveMap: false),
+            .activeMapUnavailable,
+            "secure sweep reports missing active-map status"
+        )
+        assertEqual(
+            blocker(hasManifestReceipt: false),
+            .manifestReceiptUnavailable,
+            "secure sweep requires the active manifest receipt"
+        )
+        assertEqual(
+            blocker(hasMapBounds: false),
+            .mapBoundsUnavailable,
+            "secure sweep requires validated active-map bounds"
+        )
+        assertEqual(
+            blocker(storageBackend: nil),
+            .storageStatusUnavailable,
+            "secure sweep distinguishes missing storage status"
+        )
+        assertEqual(
+            blocker(storageBackend: "legacy_spi_migration"),
+            .nativeSDMMCRequired,
+            "secure sweep rejects the migration storage fallback"
+        )
+        assertEqual(
+            blocker(storagePowerCycleRequired: true),
+            .nativeSDMMCRequired,
+            "secure sweep retains the full-power-cycle SDMMC gate"
+        )
+        assertEqual(
+            blocker(manualReplayIsRunning: true),
+            .manualReplayRunning,
+            "secure sweep cannot overlap the manual replay"
+        )
     }
 
     static func testDeviceBLEProtocolConstants() {
@@ -18980,6 +19971,43 @@ struct NavigationProtocolTests {
                "copyable session details redact the hotspot password")
         assert(details.contains("Fallback reason: endpoint_unreachable"),
                "secret-free diagnostics retain the firmware fallback reason")
+        let refreshedSession = DeviceTransferSession(
+            mode: .debug,
+            baseURL: session.baseURL,
+            accessPointSSID: nil,
+            sessionToken: session.sessionToken,
+            networkTransport: "lan",
+            networkSSID: "trusted-network",
+            hotspotFallback: false,
+            tlsCertificateSHA256: session.tlsCertificateSHA256,
+            tlsIdentityVersion: session.tlsIdentityVersion,
+            transferGeneration: session.transferGeneration,
+            secureTransferV1: true
+        )
+        assert(
+            RemoteDeviceDebugSessionPolicy.hasSameAuthorizationIdentity(
+                refreshedSession,
+                as: session
+            ),
+            "non-secret network status refreshes retain the debug authorization"
+        )
+        let replacedSession = DeviceTransferSession(
+            mode: .debug,
+            baseURL: session.baseURL,
+            accessPointSSID: session.accessPointSSID,
+            sessionToken: String(repeating: "c", count: 32),
+            tlsCertificateSHA256: session.tlsCertificateSHA256,
+            tlsIdentityVersion: session.tlsIdentityVersion,
+            transferGeneration: session.transferGeneration,
+            secureTransferV1: true
+        )
+        assert(
+            !RemoteDeviceDebugSessionPolicy.hasSameAuthorizationIdentity(
+                replacedSession,
+                as: session
+            ),
+            "a replaced transfer token invalidates the open debug console"
+        )
 
         let shortEndpointManager = BLEManager()
         shortEndpointManager.isConnected = true

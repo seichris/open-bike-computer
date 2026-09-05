@@ -12,6 +12,16 @@
 
 namespace renderer_diagnostics {
 
+#if FIRMWARE_DIAGNOSTICS && defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+DeliveryCallbackTiming beginDeliveryCallback(uint8_t channel, uint32_t nowMs);
+void completeDeliveryCallback(DeliveryCallbackTiming value);
+void noteDeliveryOwner(const DeliveryOwnerTiming &value);
+#else
+inline DeliveryCallbackTiming beginDeliveryCallback(uint8_t, uint32_t) { return {}; }
+inline void completeDeliveryCallback(DeliveryCallbackTiming) {}
+inline void noteDeliveryOwner(const DeliveryOwnerTiming &) {}
+#endif
+
 #if FIRMWARE_DIAGNOSTICS
 void configureBuildIdentity(const char *deviceId, const char *firmwareCommit,
                             const char *board, const char *buildProfile,
@@ -35,10 +45,16 @@ void noteInterruptedForWindow(uint32_t windowId);
 void noteCoverageRejectedForWindow(uint32_t windowId);
 void noteGpsPacket(uint32_t packetSequence, uint32_t packetGapMs);
 void notePrediction(bool graceActive, bool exhausted);
+void noteGpsAuthentication(bool accepted, uint32_t nowMs);
+void noteReplaySampleDetected(uint32_t nowMs);
+void noteReplaySampleDecoded(bool accepted, uint32_t nowMs);
+void noteReplaySampleUnnegotiated(uint32_t nowMs);
+void noteReplayGpsMailbox(bool accepted, uint32_t nowMs);
 bool noteRouteMarker(const uint8_t *fixtureSha256, size_t hashBytes,
                      uint16_t sampleIndex, uint16_t sampleCount, uint32_t loop,
                      uint32_t nowMs);
 void noteRemoteDebug(const RemoteDebugOverhead &overhead);
+void setFrameTransferActive(bool active);
 Snapshot snapshot();
 std::string toJson(const Snapshot &snapshot);
 #else
@@ -68,11 +84,17 @@ inline void noteInterruptedForWindow(uint32_t) {}
 inline void noteCoverageRejectedForWindow(uint32_t) {}
 inline void noteGpsPacket(uint32_t, uint32_t) {}
 inline void notePrediction(bool, bool) {}
+inline void noteGpsAuthentication(bool, uint32_t) {}
+inline void noteReplaySampleDetected(uint32_t) {}
+inline void noteReplaySampleDecoded(bool, uint32_t) {}
+inline void noteReplaySampleUnnegotiated(uint32_t) {}
+inline void noteReplayGpsMailbox(bool, uint32_t) {}
 inline bool noteRouteMarker(const uint8_t *, size_t, uint16_t, uint16_t,
                             uint32_t, uint32_t) {
   return false;
 }
 inline void noteRemoteDebug(const RemoteDebugOverhead &) {}
+inline void setFrameTransferActive(bool) {}
 inline Snapshot snapshot() { return {}; }
 inline std::string toJson(const Snapshot &) { return "{}"; }
 #endif
