@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstring>
 #include <iostream>
+#include <vector>
 
 int main() {
   namespace protocol = renderer_diagnostics_ble_protocol;
@@ -44,6 +45,86 @@ int main() {
 
   input.sampleIndex = input.sampleCount;
   assert(!protocol::encodeRouteMarker(input, encoded, sizeof(encoded)));
+  input.sampleIndex = 257;
+
+  uint8_t gpsPayload[protocol::MAX_GPS_PAYLOAD_BYTES]{};
+  for (size_t index = 0; index < sizeof(gpsPayload); ++index)
+    gpsPayload[index] = static_cast<uint8_t>(0xa0U + index);
+  uint8_t replaySample[protocol::REPLAY_SAMPLE_MAX_BYTES]{};
+  size_t replaySampleLength = 0;
+  assert(protocol::encodeReplaySample(
+      gpsPayload, sizeof(gpsPayload), input, replaySample,
+      sizeof(replaySample), replaySampleLength));
+  assert(replaySampleLength == protocol::REPLAY_SAMPLE_MAX_BYTES);
+  assert(std::memcmp(replaySample, "RBS1", 4) == 0);
+  assert(replaySample[4] == sizeof(gpsPayload));
+  assert(std::memcmp(replaySample + protocol::REPLAY_SAMPLE_HEADER_BYTES,
+                     gpsPayload, sizeof(gpsPayload)) == 0);
+  assert(std::memcmp(replaySample +
+                         protocol::REPLAY_SAMPLE_HEADER_BYTES +
+                         sizeof(gpsPayload),
+                     "RBM1", 4) == 0);
+
+  protocol::ReplaySample decodedReplaySample;
+  assert(protocol::decodeReplaySample(replaySample, replaySampleLength,
+                                      decodedReplaySample));
+  assert(decodedReplaySample.gpsPayloadLength == sizeof(gpsPayload));
+  assert(std::memcmp(decodedReplaySample.gpsPayload, gpsPayload,
+                     sizeof(gpsPayload)) == 0);
+  assert(decodedReplaySample.marker.sampleIndex == input.sampleIndex);
+  assert(decodedReplaySample.marker.sampleCount == input.sampleCount);
+  assert(decodedReplaySample.marker.loop == input.loop);
+  assert(!protocol::decodeReplaySample(replaySample,
+                                       replaySampleLength - 1,
+                                       decodedReplaySample));
+  replaySample[4] = 35;
+  assert(!protocol::decodeReplaySample(replaySample, replaySampleLength,
+                                       decodedReplaySample));
+  replaySample[4] = sizeof(gpsPayload);
+  replaySample[0] = 'X';
+  assert(!protocol::decodeReplaySample(replaySample, replaySampleLength,
+                                       decodedReplaySample));
+  replaySample[0] = 'R';
+  assert(!protocol::encodeReplaySample(
+      gpsPayload, 35, input, replaySample, sizeof(replaySample),
+      replaySampleLength));
+
+  std::vector<int> dispatchOrder;
+  assert(protocol::dispatchReplaySample(
+             replaySample, protocol::REPLAY_SAMPLE_MAX_BYTES,
+             [&dispatchOrder](const uint8_t *payload, size_t length) {
+               dispatchOrder.push_back(1);
+               return payload != nullptr && length == 36;
+             },
+             [&dispatchOrder](const protocol::RouteMarker &) {
+               dispatchOrder.push_back(2);
+               return true;
+             }) == protocol::ReplaySampleDispatchResult::Accepted);
+  assert((dispatchOrder == std::vector<int>{1, 2}));
+  dispatchOrder.clear();
+  assert(protocol::dispatchReplaySample(
+             replaySample, protocol::REPLAY_SAMPLE_MAX_BYTES,
+             [&dispatchOrder](const uint8_t *, size_t) {
+               dispatchOrder.push_back(1);
+               return false;
+             },
+             [&dispatchOrder](const protocol::RouteMarker &) {
+               dispatchOrder.push_back(2);
+               return true;
+             }) == protocol::ReplaySampleDispatchResult::GpsRejected);
+  assert((dispatchOrder == std::vector<int>{1}));
+  dispatchOrder.clear();
+  assert(protocol::dispatchReplaySample(
+             replaySample, protocol::REPLAY_SAMPLE_MAX_BYTES,
+             [&dispatchOrder](const uint8_t *, size_t) {
+               dispatchOrder.push_back(1);
+               return true;
+             },
+             [&dispatchOrder](const protocol::RouteMarker &) {
+               dispatchOrder.push_back(2);
+               return false;
+             }) == protocol::ReplaySampleDispatchResult::MarkerRejected);
+  assert((dispatchOrder == std::vector<int>{1, 2}));
 
   protocol::WindowRequest window;
   window.profile = 2;

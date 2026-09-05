@@ -230,6 +230,25 @@ enum RendererBenchmarkMarkerPacket {
     }
 }
 
+enum RendererBenchmarkSamplePacket {
+    static let supportedGPSByteCounts: Set<Int> = [8, 10, 14, 30, 36]
+    static let maximumByteCount = 4 + 1 + 36 + RendererBenchmarkMarkerPacket.byteCount
+
+    static func data(gpsPosition: Data, marker: Data) -> Data? {
+        guard supportedGPSByteCounts.contains(gpsPosition.count),
+              marker.count == RendererBenchmarkMarkerPacket.byteCount,
+              String(data: marker.prefix(4), encoding: .utf8) ==
+                DeviceBLEProtocol.rendererBenchmarkMarkerPrefix else {
+            return nil
+        }
+        var data = Data(DeviceBLEProtocol.rendererBenchmarkSamplePrefix.utf8)
+        data.append(UInt8(gpsPosition.count))
+        data.append(gpsPosition)
+        data.append(marker)
+        return data.count <= maximumByteCount ? data : nil
+    }
+}
+
 enum RendererBenchmarkWindowPacket {
     static let maximumByteCount = 97
 

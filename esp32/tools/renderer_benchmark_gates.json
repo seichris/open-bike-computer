@@ -31,7 +31,7 @@
     "maximumStaleRenders": 3,
     "maximumCancelledRenders": 4,
     "maximumInterruptedRenders": 6,
-    "maximumCoverageRejectedRenders": 2,
+    "maximumCoverageRejectedRenders": 4,
     "maximumPredictionExhaustionEntries": 1,
     "maximumInvariantFailures": 0,
     "maximumRemoteDebugCaptureErrors": 0

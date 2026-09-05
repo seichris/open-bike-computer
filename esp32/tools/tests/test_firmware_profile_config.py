@@ -57,9 +57,36 @@ assert "CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=n" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=n" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_CUSTOM_MEM_ALLOC=n" in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y" in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384" in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096" in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_SSL_PROTO_DTLS=n" in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y" in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA" not in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT" not in waveshare_sdkconfig
+assert "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" not in waveshare_sdkconfig
 waveshare_unflags = config.get("waveshare_amoled_common", "build_unflags")
 assert "-Wl,--wrap=log_printf" in waveshare_unflags
 waveshare_flags = config.get("waveshare_amoled_common", "build_flags")
+expected_dynamic_tls_wrappers = {
+    "mbedtls_ssl_write_client_hello",
+    "mbedtls_ssl_handshake_client_step",
+    "mbedtls_ssl_tls13_handshake_client_step",
+    "mbedtls_ssl_handshake_server_step",
+    "mbedtls_ssl_read",
+    "mbedtls_ssl_write",
+    "mbedtls_ssl_session_reset",
+    "mbedtls_ssl_free",
+    "mbedtls_ssl_setup",
+    "mbedtls_ssl_send_alert_message",
+    "mbedtls_ssl_close_notify",
+}
+waveshare_flag_lines = {line.strip() for line in waveshare_flags.splitlines()}
+for wrapper in expected_dynamic_tls_wrappers:
+    assert f"-Wl,--wrap={wrapper}" in waveshare_flag_lines
+assert sum(
+    line.startswith("-Wl,--wrap=mbedtls_ssl_") for line in waveshare_flag_lines
+) == len(expected_dynamic_tls_wrappers)
 assert "-DDEBUG=1" not in waveshare_flags
 assert "-DCORE_DEBUG_LEVEL=" not in waveshare_flags
 assert "-DFIRMWARE_DIAGNOSTICS=" not in waveshare_flags
@@ -67,6 +94,7 @@ assert "-DARDUINO_USB_CDC_ON_BOOT=" not in waveshare_flags
 assert "-DBLE_RADIO_CHARACTERIZATION=1" not in waveshare_flags
 assert "-DBLE_TX_POWER_DBM=" not in waveshare_flags
 assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" not in waveshare_flags
+assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in waveshare_flags
 waveshare_dependencies = config.get("waveshare_amoled_common", "lib_deps")
 assert waveshare_dependencies.count("https://github.com/jgauchia/NeoGPS.git") == 1
 assert (
@@ -101,6 +129,7 @@ for environment, (base, board_define) in diagnostic_profiles.items():
     assert "-DRIDE_AUTOMATION_SHADOW=1" in flags
     assert "-DRIDE_AUTOMATION_INTERNAL_CONTROL=1" in flags
     assert "-DRIDE_AUTOMATION_AUTOMATIC_START=1" not in flags
+    assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in flags
     assert (
         inherited_option(environment, "board_build.partitions")
         == "partitions_remote_debug.csv"
@@ -138,6 +167,7 @@ for environment, target in expected_targets.items():
     assert "${waveshare_amoled_common.build_unflags}" in unflags
     assert "-DDEBUG=1" not in unflags
     assert "-DDEVICE_REMOTE_DEBUG=1" not in flags
+    assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in flags
     assert (
         inherited_option(environment, "board_build.partitions")
         == "partitions.csv"
@@ -159,6 +189,16 @@ for environment, (base, target) in remote_debug_profiles.items():
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
     assert "-DDEVICE_REMOTE_DEBUG=1" in flags
+    assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" in flags
+
+for environment in config.sections():
+    if not environment.startswith("env:") or environment in remote_debug_profiles:
+        continue
+    assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in config.get(
+        environment,
+        "build_flags",
+        fallback="",
+    )
 
 large_diagnostic_profiles = (
     *remote_debug_profiles,
@@ -216,6 +256,14 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=n" in sdkconfig
     assert "CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y" in sdkconfig
     assert "CONFIG_MBEDTLS_CUSTOM_MEM_ALLOC=n" in sdkconfig
+    assert "CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y" in sdkconfig
+    assert "CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384" in sdkconfig
+    assert "CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096" in sdkconfig
+    assert "CONFIG_MBEDTLS_SSL_PROTO_DTLS=n" in sdkconfig
+    assert "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y" in sdkconfig
+    assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA" not in sdkconfig
+    assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT" not in sdkconfig
+    assert "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" not in sdkconfig
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
     assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" in flags
