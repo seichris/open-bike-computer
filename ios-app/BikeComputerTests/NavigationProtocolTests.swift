@@ -726,6 +726,7 @@ struct NavigationProtocolTests {
         testSecureRendererBenchmarkProtocol()
         testSecureRendererBenchmarkReadiness()
         testRendererBenchmarkAtomicDelivery()
+        testATTWriteSubmissionEvidence()
         testNavigationDrainIncludesAcknowledgement()
         testDeviceBLEProtocolConstants()
         testWorkoutDeviceFrameVectors()
@@ -14542,6 +14543,72 @@ struct NavigationProtocolTests {
                     "repeated snapshots do not double-count")
         assertEqual(queue.cumulativeMetrics.currentDepth, 1,
                     "cumulative queue depth remains a live gauge")
+    }
+
+    static func testATTWriteSubmissionEvidence() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 185, expectsWriteResponse: true,
+            canSend: { true }, write: { _ in }
+        ))
+        assert(manager.requestDeviceCapabilities(), "diagnostic test queues an ATT write")
+        let prepared = manager.rendererBenchmarkBLETransportEvidence()
+        guard let writeID = prepared.inFlightWriteID else {
+            assert(false, "ATT preparation assigns a correlation ID")
+            return
+        }
+        assertEqual(prepared.inFlightSubmissionStage, .prepared,
+                    "dequeuing is not proof of CoreBluetooth submission")
+        manager.noteATTWriteSubmissionForTesting(
+            writeID: writeID, stage: .submitted, matchingCharacteristic: false
+        )
+        assertEqual(manager.rendererBenchmarkBLETransportEvidence().inFlightSubmissionStage,
+                    .prepared, "a different characteristic cannot tag this write")
+        manager.noteATTWriteSubmissionForTesting(writeID: writeID, stage: .callingCoreBluetooth)
+        assertEqual(manager.rendererBenchmarkBLETransportEvidence().inFlightSubmissionStage,
+                    .callingCoreBluetooth, "API entry is distinct from return")
+        manager.noteATTWriteSubmissionForTesting(writeID: writeID, stage: .submitted)
+        manager.timeoutATTWriteForTesting()
+        let timedOut = manager.rendererBenchmarkBLETransportEvidence()
+        assert(timedOut.inFlightWriteID == nil && timedOut.lastTimedOutWriteID == writeID,
+               "timeout evidence survives clearing the pending write")
+        assertEqual(timedOut.lastTimedOutSubmissionStage, .submitted,
+                    "timeout records that CoreBluetooth returned without an ACK")
+        assert(manager.requestDeviceCapabilities(), "next ATT write starts independently")
+        manager.noteATTWriteSubmissionForTesting(writeID: writeID, stage: .submitted)
+        assertEqual(manager.rendererBenchmarkBLETransportEvidence().inFlightSubmissionStage,
+                    .prepared, "a delayed return cannot mark a successor write submitted")
+        manager.ignoreATTWriteCallbackForTesting()
+        let next = manager.rendererBenchmarkBLETransportEvidence()
+        assertEqual(next.ignoredWriteCallbacks, 1, "unmatched callbacks are counted")
+        assertEqual(next.lastTimedOutSubmissionStage, .submitted,
+                    "new activity preserves the last timeout evidence")
+        guard let nextID = next.inFlightWriteID else { return }
+        manager.noteATTWriteSubmissionForTesting(writeID: nextID, stage: .rejectedBeforeSubmission)
+        manager.timeoutATTWriteForTesting()
+        let rejected = manager.rendererBenchmarkBLETransportEvidence()
+        assertEqual(rejected.lastTimedOutSubmissionStage, .rejectedBeforeSubmission,
+                    "a local preparation failure is distinguishable from a missing ACK")
+        guard let encoded = try? JSONEncoder().encode(rejected),
+              var legacy = try? JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        else { assert(false, "submission evidence encodes"); return }
+        assert(RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(jsonData: encoded),
+               "submission evidence contains no credentials or packet contents")
+        for key in ["inFlightWriteID", "inFlightSubmissionStage", "lastTimedOutWriteID",
+                    "lastTimedOutSubmissionStage", "ignoredWriteCallbacks"] {
+            legacy.removeValue(forKey: key)
+        }
+        let legacyData = try! JSONSerialization.data(withJSONObject: legacy)
+        let decoded = try! JSONDecoder().decode(RendererBenchmarkBLETransportEvidence.self,
+                                                from: legacyData)
+        assert(decoded.lastTimedOutSubmissionStage == nil && decoded.ignoredWriteCallbacks == nil,
+               "legacy evidence remains unknown rather than inventing submission state")
+        for key in ["attemptId", "connectionGeneration", "class", "bytes", "phase", "reason", "kind"] {
+            assert(RideDiagnosticsFieldPolicy.isAllowed(key),
+                   "submission trace metadata survives the recorder privacy filter")
+        }
     }
 
     static func testNavigationDrainIncludesAcknowledgement() {

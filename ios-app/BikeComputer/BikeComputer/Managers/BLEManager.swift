@@ -1243,6 +1243,9 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationWriteAcknowledgementTimeouts: UInt64 = 0
     private var lastNavigationWriteAcknowledgementMs = 0
     private var maximumNavigationWriteAcknowledgementMs = 0
+    private var lastTimedOutWriteID: UInt64?
+    private var lastTimedOutSubmissionStage: BLEWriteSubmissionStage?
+    private var ignoredATTWriteCallbacks: UInt64 = 0
 #endif
     private enum ATTWriteOwner: Equatable {
         case authentication
@@ -1259,6 +1262,9 @@ class BLEManager: NSObject, ObservableObject {
         let byteCount: Int
         let startedAtUptime: TimeInterval
         let applicationCommandID: UUID?
+#if DEBUG || HOST_TESTING
+        var submissionStage: BLEWriteSubmissionStage = .prepared
+#endif
     }
     private var pendingATTWrite: PendingATTWrite?
     private var writeWithResponseInFlight: Bool {
@@ -7990,7 +7996,12 @@ class BLEManager: NSObject, ObservableObject {
             acknowledgementTimeouts: navigationWriteAcknowledgementTimeouts,
             lastAcknowledgementMs: lastNavigationWriteAcknowledgementMs,
             maximumAcknowledgementMs:
-                maximumNavigationWriteAcknowledgementMs
+                maximumNavigationWriteAcknowledgementMs,
+            inFlightWriteID: pendingATTWrite?.writeID,
+            inFlightSubmissionStage: pendingATTWrite?.submissionStage,
+            lastTimedOutWriteID: lastTimedOutWriteID,
+            lastTimedOutSubmissionStage: lastTimedOutSubmissionStage,
+            ignoredWriteCallbacks: ignoredATTWriteCallbacks
         )
     }
 #endif
@@ -8009,6 +8020,8 @@ class BLEManager: NSObject, ObservableObject {
         if pending.owner == .ride {
             if timedOut {
                 navigationWriteAcknowledgementTimeouts &+= 1
+                lastTimedOutWriteID = pending.writeID
+                lastTimedOutSubmissionStage = pending.submissionStage
             } else {
                 navigationWriteAcknowledgementCompletions &+= 1
                 if error != nil { navigationWriteAcknowledgementErrors &+= 1 }
@@ -8019,11 +8032,7 @@ class BLEManager: NSObject, ObservableObject {
             )
         }
 #endif
-        diagnosticsRecorder?.record(
-            level: error == nil && !timedOut ? .info : .warning,
-            category: .ble,
-            event: timedOut ? "att_write_timeout" : "att_write_completed",
-            fields: [
+        var fields = [
                 "owner": pending.owner == .authentication ? "auth" : "ride",
                 "class": pending.writeClass.rawValue,
                 "bytes": Self.diagnosticByteBucket(pending.byteCount),
@@ -8033,6 +8042,15 @@ class BLEManager: NSObject, ObservableObject {
                 "connectionGeneration":
                     String(pending.connectionGeneration),
             ]
+#if DEBUG || HOST_TESTING
+        fields["attemptId"] = String(pending.writeID)
+        fields["phase"] = pending.submissionStage.rawValue
+#endif
+        diagnosticsRecorder?.record(
+            level: error == nil && !timedOut ? .info : .warning,
+            category: .ble,
+            event: timedOut ? "att_write_timeout" : "att_write_completed",
+            fields: fields
         )
         navigationWriteResponseTimeoutTimer?.invalidate()
         navigationWriteResponseTimeoutTimer = nil
@@ -8202,6 +8220,27 @@ class BLEManager: NSObject, ObservableObject {
         navigationHasUnsettledWrites
     }
 
+    func noteATTWriteSubmissionForTesting(
+        writeID: UInt64, stage: BLEWriteSubmissionStage,
+        matchingCharacteristic: Bool = true
+    ) {
+        guard let pending = pendingATTWrite else { return }
+        noteATTWriteSubmission(
+            writeID: writeID, peripheralID: pending.peripheralID,
+            characteristicUUID: matchingCharacteristic ? pending.characteristicUUID
+                : CBUUID(string: "FFFF"),
+            stage: stage
+        )
+    }
+
+    func timeoutATTWriteForTesting() {
+        finishPendingATTWrite(error: nil, timedOut: true)
+    }
+
+    func ignoreATTWriteCallbackForTesting() {
+        noteIgnoredATTWriteCallback(characteristicUUID: gpsPositionCharacteristicUUID)
+    }
+
     func completeNavigationWriteForTesting(error: Error?) {
         if pendingATTWrite?.owner == .ride {
             completeNavigationWrite(error: error)
@@ -8221,6 +8260,13 @@ class BLEManager: NSObject, ObservableObject {
         type explicitType: CBCharacteristicWriteType? = nil
     ) {
         guard let writeType = explicitType ?? preferredWriteType(for: characteristic) else {
+#if DEBUG || HOST_TESTING
+            noteATTWriteSubmission(
+                writeID: pendingATTWrite?.writeID, peripheralID: peripheral.identifier,
+                characteristicUUID: characteristic.uuid, stage: .rejectedBeforeSubmission,
+                reason: "unsupported_properties"
+            )
+#endif
             log("Cannot write characteristic \(characteristic.uuid): unsupported properties")
             return
         }
@@ -8229,6 +8275,13 @@ class BLEManager: NSObject, ObservableObject {
             for: characteristic.uuid,
             authenticatedWriteSession: authenticatedWriteSession
         ) else {
+#if DEBUG || HOST_TESTING
+            noteATTWriteSubmission(
+                writeID: pendingATTWrite?.writeID, peripheralID: peripheral.identifier,
+                characteristicUUID: characteristic.uuid, stage: .rejectedBeforeSubmission,
+                reason: "payload_preparation_failed"
+            )
+#endif
             log("Cannot protect write for characteristic \(characteristic.uuid)")
             return
         }
@@ -8251,6 +8304,13 @@ class BLEManager: NSObject, ObservableObject {
         type: CBCharacteristicWriteType
     ) {
         guard connectedPeripheral?.identifier == peripheral.identifier else {
+#if DEBUG || HOST_TESTING
+            noteATTWriteSubmission(
+                writeID: pendingATTWrite?.writeID, peripheralID: peripheral.identifier,
+                characteristicUUID: characteristic.uuid, stage: .rejectedBeforeSubmission,
+                reason: "peripheral_changed"
+            )
+#endif
             return
         }
         if type == .withResponse {
@@ -8265,8 +8325,64 @@ class BLEManager: NSObject, ObservableObject {
                 return
             }
         }
+#if DEBUG || HOST_TESTING
+        let submissionWriteID = type == .withResponse ? pendingATTWrite?.writeID : nil
+        noteATTWriteSubmission(
+            writeID: submissionWriteID, peripheralID: peripheral.identifier,
+            characteristicUUID: characteristic.uuid, stage: .callingCoreBluetooth
+        )
+#endif
         peripheral.writeValue(data, for: characteristic, type: type)
+#if DEBUG || HOST_TESTING
+        // Returning from writeValue proves API submission only, not radio
+        // delivery. A synchronous/reentrant completion must not tag a new write.
+        noteATTWriteSubmission(
+            writeID: submissionWriteID, peripheralID: peripheral.identifier,
+            characteristicUUID: characteristic.uuid, stage: .submitted
+        )
+#endif
     }
+
+#if DEBUG || HOST_TESTING
+    private func noteATTWriteSubmission(
+        writeID: UInt64?, peripheralID: UUID, characteristicUUID: CBUUID,
+        stage: BLEWriteSubmissionStage, reason: String? = nil
+    ) {
+        guard let writeID, let pending = pendingATTWrite,
+              pending.writeID == writeID,
+              pending.peripheralID == peripheralID,
+              pending.connectionGeneration == rideDeliveryConnectionGeneration,
+              pending.characteristicUUID == characteristicUUID else { return }
+        pendingATTWrite?.submissionStage = stage
+        var fields = [
+            "attemptId": String(writeID),
+            "connectionGeneration": String(pending.connectionGeneration),
+            "class": pending.writeClass.rawValue,
+            "bytes": Self.diagnosticByteBucket(pending.byteCount),
+            "phase": stage.rawValue,
+        ]
+        if let reason { fields["reason"] = reason }
+        diagnosticsRecorder?.record(
+            level: stage == .rejectedBeforeSubmission ? .warning : .info,
+            category: .ble, event: "att_write_submission", fields: fields
+        )
+    }
+
+    private func noteIgnoredATTWriteCallback(characteristicUUID: CBUUID) {
+        ignoredATTWriteCallbacks &+= 1
+        diagnosticsRecorder?.record(
+            level: .warning, category: .ble, event: "att_write_callback_ignored",
+            fields: [
+                "attemptId": pendingATTWrite.map { String($0.writeID) } ?? "none",
+                "connectionGeneration": String(rideDeliveryConnectionGeneration),
+                "kind": authenticatedChannel(for: characteristicUUID).map {
+                    String(describing: $0)
+                } ?? "unknown",
+                "reason": "unmatched_pending_write",
+            ]
+        )
+    }
+#endif
 
     private func flushReadyRideWritesIfPossible() {
         guard isNavigationReady,
@@ -9041,6 +9157,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
               pending.connectionGeneration == rideDeliveryConnectionGeneration,
               pending.characteristicUUID == characteristic.uuid else {
             log("Ignored stale or unmatched BLE write callback")
+#if DEBUG || HOST_TESTING
+            noteIgnoredATTWriteCallback(characteristicUUID: characteristic.uuid)
+#endif
             return
         }
         if let error = error {

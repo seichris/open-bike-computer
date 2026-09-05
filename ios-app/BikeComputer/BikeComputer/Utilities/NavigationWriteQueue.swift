@@ -62,6 +62,13 @@ struct NavigationWriteQueueMetrics: Equatable {
 }
 
 #if DEBUG || HOST_TESTING
+nonisolated enum BLEWriteSubmissionStage: String, Codable, Sendable {
+    case prepared
+    case callingCoreBluetooth = "calling_corebluetooth"
+    case submitted
+    case rejectedBeforeSubmission = "rejected_before_submission"
+}
+
 nonisolated struct RendererBenchmarkBLETransportEvidence: Codable,
                                                               Equatable,
                                                               Sendable {
@@ -88,6 +95,12 @@ nonisolated struct RendererBenchmarkBLETransportEvidence: Codable,
     let acknowledgementTimeouts: UInt64
     let lastAcknowledgementMs: Int
     let maximumAcknowledgementMs: Int
+    // Optional additions preserve decoding of earlier schema-1 archives.
+    var inFlightWriteID: UInt64? = nil
+    var inFlightSubmissionStage: BLEWriteSubmissionStage? = nil
+    var lastTimedOutWriteID: UInt64? = nil
+    var lastTimedOutSubmissionStage: BLEWriteSubmissionStage? = nil
+    var ignoredWriteCallbacks: UInt64? = nil
 }
 #endif
 

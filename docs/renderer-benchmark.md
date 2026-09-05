@@ -133,6 +133,18 @@ write-without-response-only endpoint still respects transport credits, and a
 sample that fits neither native mode is rejected rather than split or sent on
 the navigation channel. ATT completion never substitutes for a device marker.
 
+Debug-build BLE evidence includes the in-flight write ID and submission stage,
+the last timed-out write's ID/stage, and a cumulative ignored-callback count.
+Stages distinguish queue preparation, entering CoreBluetooth, returning from
+`writeValue`, and a local rejection before submission. `submitted` means only
+that the API returned, not that a packet reached the radio or firmware. App
+diagnostic events correlate submission and completion by `attemptId` and
+connection generation. They contain byte-size buckets and fixed stage/reason
+labels, never payload bytes, coordinates, tokens, or keys. The last timeout is
+retained after reconnect/cleanup so an interrupted ZIP preserves that boundary.
+Older schema-1 exports omit these optional fields and cannot establish the
+submission stage. This tracing does not alter retries, watchdogs, or gates.
+
 For a separately authorized external automation
    harness, put the Mac on the reported LAN or device-hotspot network and store
    `baseUrl`, `tlsCertificateSha256`, and `token` in a mode-`0600` JSON session
