@@ -3218,13 +3218,19 @@ private struct RendererBenchmarkReplaySettingsSection: View {
                     )
                 }
 
-                if let exportURL = secureSweep.exportURL {
-                    ShareLink(item: exportURL) {
-                        Label(
-                            "Share Benchmark Evidence ZIP",
-                            systemImage: "square.and.arrow.up"
-                        )
-                    }
+            }
+
+            if secureSweep.canRetryEvidenceExport {
+                Button("Retry Evidence Export", action: secureSweep.retryEvidenceExport)
+                    .disabled(secureSweep.isRunning)
+            }
+            // Keep the result available even if disconnect resets capabilities.
+            if let exportURL = secureSweep.exportURL {
+                ShareLink(item: exportURL) {
+                    Label(
+                        "Share Benchmark Evidence ZIP",
+                        systemImage: "square.and.arrow.up"
+                    )
                 }
             }
 
@@ -3297,24 +3303,24 @@ private struct RendererBenchmarkReplaySettingsSection: View {
         }
         .onChange(of: bleManager.isNavigationReady) { ready in
             if !ready {
-                secureSweep.stop()
+                secureSweep.stop(reason: .transport)
                 if !secureSweep.isRunning { replay.stop(clearRoute: false) }
             }
         }
         .onChange(of: bleManager.supportsRendererDiagnostics) { supported in
             if !supported {
-                secureSweep.stop()
+                secureSweep.stop(reason: .transport)
                 if !secureSweep.isRunning { replay.stop(clearRoute: false) }
             }
         }
         .onChange(of: isNavigationActive) { active in
             if active {
-                secureSweep.stop()
-                if !secureSweep.isRunning { replay.stop() }
+                secureSweep.stop(clearRoute: false, reason: .lifecycle)
+                if !secureSweep.isRunning { replay.stop(clearRoute: false) }
             }
         }
         .onChange(of: bleManager.deviceTransferSessionToken) { _ in
-            if activeSession == nil { secureSweep.stop() }
+            if activeSession == nil { secureSweep.stop(reason: .transport) }
         }
         .onChange(of: bleManager.deviceTransferMode) { mode in
             if mode == DeviceTransferSession.Mode.debug.rawValue {
@@ -3322,11 +3328,11 @@ private struct RendererBenchmarkReplaySettingsSection: View {
             }
         }
         .onChange(of: bleManager.activeDeviceMap) { _ in
-            if secureSweep.isRunning { secureSweep.stop() }
+            if secureSweep.isRunning { secureSweep.stop(reason: .lifecycle) }
         }
         .onAppear(perform: refreshSecureSweepReadiness)
         .onDisappear {
-            secureSweep.stop()
+            secureSweep.stop(reason: .lifecycle)
             if !secureSweep.isRunning { replay.stop() }
         }
     }
@@ -3338,7 +3344,7 @@ private struct RendererBenchmarkReplaySettingsSection: View {
 
     private var canStartReplay: Bool {
         canRequestSnapshot && bleManager.supportsRendererBenchmarkSample &&
-            !isNavigationActive
+            !isNavigationActive && !bleManager.supportsRemoteDeviceDebug
     }
 
     private var activeSession: DeviceTransferSession? {

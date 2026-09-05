@@ -381,12 +381,14 @@ The report contains:
   callback/notifier readiness, and startup-lock completion (Step A reports
   zero locks; the opt-in light-sleep profile reports live values); and
 - `appQueue=ios-diagnostic`, which identifies the separate
-  `PWRMET_IOS v=2` ten-second interval report produced by a Debug iOS build.
+  `PWRMET_IOS v=3` ten-second interval report produced by a Debug iOS build.
 
-The iOS queue report includes current/maximum depth, oldest pending and active
-retry age, total admissions/flushes/drops/rejections/coalesces, and packet-class
-drop/coalescing counters. Queue schema-version-1 traces remain usable but do not
-contain the age or packet-class fields; retain the raw version with every trace.
+The iOS queue report includes current/maximum frame depth, current/maximum
+pending bytes, oldest pending and active retry age, total
+admissions/flushes/drops/rejections/coalesces, and packet-class drop/coalescing
+counters. Queue schema-version-1 traces remain usable but do not contain the
+age or packet-class fields; schema-version-2 traces do not contain byte
+high-water fields. Retain the raw version with every trace.
 
 The accumulator schema is defined in
 `esp32/lib/power_metrics/power_metrics_schema.hpp` and has a host test in

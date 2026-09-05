@@ -6,6 +6,7 @@ import UIKit
 
 private enum SecureRendererBenchmarkControllerError: LocalizedError {
     case unavailable(String)
+    case transportEnded(String)
     case invalidResponse(String)
     case httpStatus(Int, String?)
     case network(String, String, Int)
@@ -13,7 +14,8 @@ private enum SecureRendererBenchmarkControllerError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unavailable(let message), .invalidResponse(let message):
+        case .unavailable(let message), .invalidResponse(let message),
+             .transportEnded(let message):
             return message
         case .httpStatus(let status, let code):
             return "The secure device endpoint returned HTTP \(status)" +
@@ -286,6 +288,13 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
 
 @MainActor
 final class SecureRendererBenchmarkController: ObservableObject {
+    @Published private(set) var terminalOutcome: RendererBenchmarkTerminalOutcome?
+    @Published private(set) var canRetryEvidenceExport = false
+    private var requestedStopReason: RendererBenchmarkStopReason?
+    private var didFinishMeasurements = false
+    private var activeGates: RendererBenchmarkGates?
+    private var pendingExport: (entries: [(String, Data)], passed: Bool,
+                                forbiddenValues: [String])?
     @Published private(set) var isRunning = false
     @Published private(set) var status = "Idle"
     @Published private(set) var completedRunCount = 0
@@ -304,6 +313,12 @@ final class SecureRendererBenchmarkController: ObservableObject {
     private var screenshotEntries: [(String, Data)] = []
     private var previousIdleTimerDisabled: Bool?
     private var profileMayNeedRestoration = false
+    private var expectedSession: DeviceTransferSession?
+    private var lastMeasuredSnapshot: RendererBenchmarkMetricsSnapshot?
+    private var partialSamples: [RendererBenchmarkEvidenceSample] = []
+    private var startupTrace = RendererBenchmarkStartupTrace()
+    private var collectingStartupEvidence = false
+    private let windowAdmission = RendererBenchmarkWindowAdmission()
 
     var progressDescription: String {
         guard isRunning else { return status }
@@ -363,7 +378,18 @@ final class SecureRendererBenchmarkController: ObservableObject {
             id: map.mapID,
             sha256: mapReceipt
         )
+        terminalOutcome = nil
+        requestedStopReason = nil
+        didFinishMeasurements = false
+        activeGates = nil
+        pendingExport = nil
+        canRetryEvidenceExport = false
         self.client = client
+        expectedSession = deviceSession
+        lastMeasuredSnapshot = nil
+        partialSamples = []
+        startupTrace = RendererBenchmarkStartupTrace()
+        collectingStartupEvidence = true
         self.replay = replay
         self.bleManager = bleManager
         stopRequested = false
@@ -389,9 +415,18 @@ final class SecureRendererBenchmarkController: ObservableObject {
         }
     }
 
-    func stop() {
+    func stop(clearRoute: Bool = true,
+              reason: RendererBenchmarkStopReason = .user) {
         guard isRunning else { return }
-        stopRequested = true
+        captureStartupEvidence(phase: "stop_requested_" + reason.rawValue)
+        // Cleanup still runs. Do not relabel already completed measurements,
+        // or replace the first interruption with a later cascading event.
+        if !didFinishMeasurements {
+            if requestedStopReason == nil { requestedStopReason = reason }
+            stopRequested = true
+        }
+        // Stop GPS immediately; HTTPS cleanup may take several seconds.
+        replay?.stop(clearRoute: clearRoute, restoreCurrent: false)
         status = "Stopping and restoring Current"
     }
 
@@ -413,9 +448,18 @@ final class SecureRendererBenchmarkController: ObservableObject {
         }
         var cleanupRestoredCurrent = false
         var cleanupRouteFixture: RendererBenchmarkRouteFixtureIdentity?
+        var runs: [RendererBenchmarkRunEvidence] = []
+        var completedSoakRun: RendererBenchmarkRunEvidence?
+        let forbiddenValues = [
+            deviceSession.sessionToken ?? "",
+            deviceSession.baseURL.absoluteString,
+            deviceSession.tlsCertificateSHA256,
+            deviceSession.accessPointPassphrase ?? "",
+        ]
         do {
             let routeLoaded = try RendererBenchmarkFixture.load(bundle: bundle)
             let gatesLoaded = try RendererBenchmarkGates.load(bundle: bundle)
+            activeGates = gatesLoaded.gates
             let routeHash = Self.sha256Hex(routeLoaded.sha256)
             guard routeLoaded.fixture.id == "shanghai-jingan-renderer-v1",
                   routeLoaded.fixture.cadenceHz == 1,
@@ -492,6 +536,32 @@ final class SecureRendererBenchmarkController: ObservableObject {
                 )
             }
 
+            // Prove the HTTP window and fixtures before emitting any GPS/marker.
+            let rootRunID = Self.makeRootRunID()
+            let setupRunID = "\(rootRunID)-setup"
+            status = "Opening and verifying measurement window"
+            let setupWindowID = try await beginTrackedWindow(
+                client: client, profile: .current, runId: setupRunID,
+                repeatNumber: 1, mapFixture: mapFixture,
+                routeFixture: routeFixture
+            )
+            let setupSnapshot = try await waitForWindow(
+                client: client, windowID: setupWindowID, runID: setupRunID,
+                repeatNumber: 1, profile: .current, timeoutSeconds: 10,
+                enforceContinuity: false
+            )
+            try checkSecureSessionContinuity()
+            let setupFailures = RendererBenchmarkEvaluator.identityFailures(
+                snapshot: setupSnapshot, baseline: baseline, profile: .current,
+                runId: setupRunID, repeatNumber: 1, mapFixture: mapFixture,
+                routeFixture: routeFixture, windowId: setupWindowID
+            )
+            guard setupFailures.isEmpty else {
+                throw SecureRendererBenchmarkControllerError.invalidResponse(
+                    setupFailures.joined(separator: ", ")
+                )
+            }
+            lastMeasuredSnapshot = setupSnapshot
             status = "Starting pinned 1 Hz replay"
             replay.start(
                 bleManager: bleManager,
@@ -505,8 +575,6 @@ final class SecureRendererBenchmarkController: ObservableObject {
             }
             try checkContinuity()
 
-            let rootRunID = Self.makeRootRunID()
-            var runs: [RendererBenchmarkRunEvidence] = []
             for item in SecureRendererBenchmarkPlan.comparisonRuns() {
                 try checkContinuity()
                 let index = runs.count + 1
@@ -525,6 +593,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
                     gates: gatesLoaded.gates
                 )
                 runs.append(evidence)
+                partialSamples = []
                 completedRunCount = runs.count
             }
             RendererBenchmarkEvaluator.applyCrossRunMemoryGates(
@@ -555,9 +624,11 @@ final class SecureRendererBenchmarkController: ObservableObject {
                     expectedRouteSampleCount: routeLoaded.fixture.points.count,
                     gates: gatesLoaded.gates
                 )
+                completedSoakRun = soakRun
                 completedRunCount = totalRunCount
             }
 
+            didFinishMeasurements = true
             status = "Restoring Current profile"
             cleanupRestoredCurrent = await restoreCurrentProfile(
                 client: client,
@@ -566,8 +637,12 @@ final class SecureRendererBenchmarkController: ObservableObject {
                 routeFixture: routeFixture
             )
             replay.stop(clearRoute: true, restoreCurrent: false)
-            let passed = runs.allSatisfy(\.passed) &&
-                soakRun?.passed == true && cleanupRestoredCurrent
+            let outcome = makeTerminalOutcome(
+                execution: .completed, cleanupRestoredCurrent: cleanupRestoredCurrent,
+                runs: runs, soakRun: soakRun, reason: nil
+            )
+            terminalOutcome = outcome
+            let passed = outcome.automatedPassed
             let report = SecureRendererBenchmarkEvidenceReport(
                 schema: 1,
                 source: "bicino-debug-secure-sweep-v1",
@@ -597,21 +672,22 @@ final class SecureRendererBenchmarkController: ObservableObject {
                     "Waveshare board-family physical acceptance",
                 ]
             )
-            status = "Exporting secret-free evidence"
-            exportURL = try exportEvidence(
-                report: report,
-                forbiddenValues: [
-                    deviceSession.sessionToken ?? "",
-                    deviceSession.baseURL.absoluteString,
-                    deviceSession.tlsCertificateSHA256,
-                    deviceSession.accessPointPassphrase ?? "",
-                ]
-            )
             automatedPassed = passed
-            status = passed ? "Automated gates passed" : "Evidence exported with failures"
-            errorMessage = passed ? nil :
-                "One or more automated gates failed; review the exported report."
+            status = outcome.status
+            errorMessage = passed ? nil : outcome.details
+            do {
+                exportURL = try exportEvidence(
+                    report: report, forbiddenValues: forbiddenValues
+                )
+            } catch {
+                // Export I/O cannot retroactively turn a completed sweep into
+                // a transport abort or discard its full comparison/soak report.
+                status = outcome.status + " — evidence export failed"
+                errorMessage = outcome.details + "\nEvidence ZIP could not be written."
+            }
         } catch {
+            let execution = termination(for: error)
+            captureStartupEvidence(phase: "failure_before_cleanup")
             if profileMayNeedRestoration {
                 status = "Restoring Current profile"
                 cleanupRestoredCurrent = await restoreCurrentProfile(
@@ -623,14 +699,53 @@ final class SecureRendererBenchmarkController: ObservableObject {
             }
             replay.stop(clearRoute: true, restoreCurrent: false)
             automatedPassed = false
-            let message = (error as? LocalizedError)?.errorDescription ??
-                "The secure renderer benchmark failed."
+            let message: String
+            switch execution {
+            case .userCancelled: message = "Cancelled by the user."
+            case .lifecycleCancelled: message = "Cancelled by a lifecycle change."
+            case .transportAborted where requestedStopReason == .transport:
+                message = "The authenticated BLE/debug transport ended."
+            default:
+                message = (error as? LocalizedError)?.errorDescription ??
+                    "The secure renderer benchmark failed."
+            }
             errorMessage = profileMayNeedRestoration ?
                 message + " Current-profile cleanup was not confirmed." : message
-            status = stopRequested ? "Stopped" : "Failed"
+            let outcome = makeTerminalOutcome(
+                execution: execution, cleanupRestoredCurrent: cleanupRestoredCurrent,
+                runs: runs, soakRun: completedSoakRun, reason: message
+            )
+            terminalOutcome = outcome
+            status = outcome.status
+            errorMessage = outcome.details
+            do {
+                let interrupted = RendererBenchmarkInterruptedEvidence(
+                    schema: 1, source: "bicino-debug-secure-sweep-interrupted-v1",
+                    automatedPassed: false,
+                    stopped: execution == .userCancelled || execution == .lifecycleCancelled,
+                    reason: errorMessage ?? message,
+                    cleanupRestoredCurrent: cleanupRestoredCurrent,
+                    completedRuns: runs, partialSamples: partialSamples,
+                    lastSnapshot: lastMeasuredSnapshot
+                )
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                exportURL = try exportArchive(
+                    entries: screenshotEntries + [
+                        ("renderer-benchmark-interrupted.json",
+                         try encoder.encode(interrupted)),
+                    ],
+                    automatedPassed: false, forbiddenValues: forbiddenValues
+                )
+                status += " — partial evidence available"
+            } catch {
+                errorMessage = (errorMessage ?? message) +
+                    " Partial evidence could not be exported safely."
+            }
         }
         client.invalidate()
         self.client = nil
+        expectedSession = nil
         self.bleManager = nil
         self.replay = nil
         restoreIdleTimer()
@@ -740,6 +855,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
         var screenshots: [RendererBenchmarkScreenshotEvidence] = []
         var snapshots: [RendererBenchmarkMetricsSnapshot] = []
         var samples: [RendererBenchmarkEvidenceSample] = []
+        partialSamples = []
         var failures: [String] = []
         var previousSequence: UInt32? = initialSnapshot.sequence
         var previousTimestamp: UInt32? = initialSnapshot.timestampMs
@@ -791,6 +907,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
                 replayTiming:
                     self.replay?.rendererBenchmarkReplayTimingEvidence()
             ))
+            lastMeasuredSnapshot = snapshot
+            partialSamples = samples
             if captureCheckpoints,
                snapshot.routeReplay.valid,
                snapshot.routeReplay.fixtureMatches,
@@ -898,6 +1016,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
         routeFixture: RendererBenchmarkRouteFixtureIdentity,
         gates: RendererBenchmarkGates
     ) async throws {
+        collectingStartupEvidence = true
+        captureStartupEvidence(phase: "opening_\(profile.wireName)_warmup")
         let windowID = try await beginTrackedWindow(
             client: client,
             profile: profile,
@@ -915,6 +1035,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
             timeoutSeconds: 10
         )
         let markerDeadline = Date().addingTimeInterval(12)
+        status = "Warm-up: waiting for 1 Hz marker (\(profile.title))"
         var markerConfirmed = false
         while Date() < markerDeadline {
             try checkContinuity()
@@ -930,6 +1051,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
                 "The device did not confirm the in-app 1 Hz route marker."
             )
         }
+        status = "Warming up \(profile.title)"
         let warmDeadline = Date().addingTimeInterval(
             Double(gates.warmupSeconds)
         )
@@ -941,6 +1063,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
                 max(warmDeadline.timeIntervalSinceNow, 0)
             ))
         }
+        collectingStartupEvidence = false
+        status = "Measuring \(profile.title), repeat \(repeatNumber)"
     }
 
     private func waitForWindow(
@@ -994,13 +1118,21 @@ final class SecureRendererBenchmarkController: ObservableObject {
         var lastError: Error?
         repeat {
             if enforceContinuity { try checkContinuity() }
+            if collectingStartupEvidence {
+                captureStartupEvidence(phase: "before_metrics")
+            }
             do {
-                return try await client.metrics(
+                let snapshot = try await client.metrics(
                     timeoutInterval: min(
                         SecureRendererBenchmarkHTTPPolicy.controlRequestTimeout,
                         max(deadline.timeIntervalSinceNow, 0.1)
                     )
                 )
+                if enforceContinuity { lastMeasuredSnapshot = snapshot }
+                if collectingStartupEvidence {
+                    captureStartupEvidence(phase: "metrics_received", snapshot: snapshot)
+                }
+                return snapshot
             } catch {
                 lastError = error
                 if Date() < deadline { try await pause(seconds: 0.3) }
@@ -1112,12 +1244,14 @@ final class SecureRendererBenchmarkController: ObservableObject {
         while Date() < deadline {
             do {
                 let runID = "\(rootRunID)-cleanup"
-                let windowID = try await client.beginWindow(
+                let windowID = try await beginPacedWindow(
+                    client: client,
                     profile: .current,
                     runId: runID,
                     repeatNumber: 1,
                     mapFixture: mapFixture,
-                    routeFixture: routeFixture
+                    routeFixture: routeFixture,
+                    enforceContinuity: false
                 )
                 _ = try await waitForWindow(
                     client: client,
@@ -1147,7 +1281,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
     ) async throws -> UInt32 {
         let restorationWasAlreadyNeeded = profileMayNeedRestoration
         do {
-            let requestID = try await client.beginWindow(
+            let requestID = try await beginPacedWindow(
+                client: client,
                 profile: profile,
                 runId: runId,
                 repeatNumber: repeatNumber,
@@ -1169,10 +1304,43 @@ final class SecureRendererBenchmarkController: ObservableObject {
         }
     }
 
+    private func beginPacedWindow(
+        client: SecureRendererBenchmarkHTTPClient,
+        profile: RendererBenchmarkProfile,
+        runId: String,
+        repeatNumber: Int,
+        mapFixture: RendererBenchmarkMapFixtureIdentity,
+        routeFixture: RendererBenchmarkRouteFixtureIdentity,
+        enforceContinuity: Bool = true
+    ) async throws -> UInt32 {
+        try await windowAdmission.execute(
+            check: {
+                // Setup precedes replay. Cleanup intentionally runs after Stop,
+                // but still uses the same pinned client and bounded pacing.
+                if enforceContinuity { try self.checkSecureSessionContinuity() }
+            },
+            isRateLimited: { error in
+                guard let error = error as? SecureRendererBenchmarkControllerError,
+                      case .httpStatus(let status, let code) = error else {
+                    return false
+                }
+                return RendererBenchmarkWindowAdmission.isRetryable(
+                    status: status, code: code
+                )
+            },
+            operation: {
+                try await client.beginWindow(
+                    profile: profile, runId: runId, repeatNumber: repeatNumber,
+                    mapFixture: mapFixture, routeFixture: routeFixture
+                )
+            }
+        )
+    }
+
     private func checkContinuity() throws {
         try checkSecureSessionContinuity()
         guard let replay, replay.isRunning else {
-            throw SecureRendererBenchmarkControllerError.unavailable(
+            throw SecureRendererBenchmarkControllerError.transportEnded(
                 "The authenticated renderer replay ended."
             )
         }
@@ -1189,10 +1357,12 @@ final class SecureRendererBenchmarkController: ObservableObject {
               bleManager.supportsRendererBenchmarkSample,
               bleManager.deviceStorageBackend == "sdmmc",
               bleManager.deviceStoragePowerCycleRequired == false,
-              RemoteDeviceDebugSessionPolicy.activeSession(
-                bleManager: bleManager
-              ) != nil else {
-            throw SecureRendererBenchmarkControllerError.unavailable(
+              let expectedSession,
+              RemoteDeviceDebugSessionPolicy.hasSameAuthorizationIdentity(
+                RemoteDeviceDebugSessionPolicy.activeSession(bleManager: bleManager),
+                as: expectedSession
+              ) else {
+            throw SecureRendererBenchmarkControllerError.transportEnded(
                 "The authenticated secure debug session ended."
             )
         }
@@ -1221,6 +1391,33 @@ final class SecureRendererBenchmarkController: ObservableObject {
         entries.append(("renderer-benchmark.json", reportData))
         entries.append(("renderer-benchmark.csv", Self.csvData(report)))
         entries.append(("renderer-benchmark.md", Self.markdownData(report)))
+        return try exportArchive(
+            entries: entries, automatedPassed: report.automatedPassed,
+            forbiddenValues: forbiddenValues
+        )
+    }
+
+    private func exportArchive(
+        entries initialEntries: [(String, Data)],
+        automatedPassed: Bool,
+        forbiddenValues: [String]
+    ) throws -> URL {
+        var entries = initialEntries
+        let traceEncoder = JSONEncoder()
+        traceEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let terminalOutcome {
+            entries.append(("renderer-benchmark-outcome.json",
+                            try traceEncoder.encode(terminalOutcome)))
+        }
+        entries.append((
+            "renderer-benchmark-startup.json",
+            try traceEncoder.encode(startupTrace)
+        ))
+        for (path, data) in entries where path.hasSuffix(".json") {
+            guard RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
+                jsonData: data
+            ) else { throw SecureRendererBenchmarkProtocolError.invalidEvidence }
+        }
         entries.sort { $0.0 < $1.0 }
         try Self.validateTextEvidence(entries, forbiddenValues: forbiddenValues)
 
@@ -1234,7 +1431,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
         let manifestObject: [String: Any] = [
             "schema": 1,
             "kind": "bicino-renderer-benchmark-evidence",
-            "automatedPassed": report.automatedPassed,
+            "automatedPassed": automatedPassed,
             "files": files,
         ]
         let manifest = try JSONSerialization.data(
@@ -1261,8 +1458,108 @@ final class SecureRendererBenchmarkController: ObservableObject {
             filename,
             isDirectory: false
         )
-        try RideDiagnosticsStoredZipWriter.write(entries: entries, to: url)
-        return url
+        // Only retain a retry after all secret checks have succeeded. The
+        // retry uses the same checks and never depends on a live BLE session.
+        pendingExport = (initialEntries, automatedPassed, forbiddenValues)
+        do {
+            try RideDiagnosticsStoredZipWriter.write(entries: entries, to: url)
+            pendingExport = nil
+            canRetryEvidenceExport = false
+            return url
+        } catch {
+            canRetryEvidenceExport = true
+            throw error
+        }
+    }
+
+    func retryEvidenceExport() {
+        guard !isRunning, let pendingExport else { return }
+        do {
+            exportURL = try exportArchive(
+                entries: pendingExport.entries, automatedPassed: pendingExport.passed,
+                forbiddenValues: pendingExport.forbiddenValues
+            )
+            if let terminalOutcome {
+                status = terminalOutcome.status
+                errorMessage = terminalOutcome.automatedPassed ? nil : terminalOutcome.details
+            }
+        } catch {
+            status = (terminalOutcome?.status ?? "Evidence retained") + " — evidence export failed"
+            errorMessage = (terminalOutcome?.details ?? "") + "\nEvidence ZIP could not be written."
+        }
+    }
+
+    private func termination(for error: Error) -> RendererBenchmarkExecutionOutcome {
+        if didFinishMeasurements { return .completed }
+        if let requestedStopReason { return requestedStopReason.executionOutcome }
+        if error is CancellationError { return .lifecycleCancelled }
+        if let failure = error as? SecureRendererBenchmarkControllerError {
+            switch failure {
+            case .network(_, _, _), .httpStatus(_, _), .transportEnded(_):
+                return .transportAborted
+            default: break
+            }
+        }
+        return .executionAborted
+    }
+
+    private func makeTerminalOutcome(
+        execution: RendererBenchmarkExecutionOutcome,
+        cleanupRestoredCurrent: Bool,
+        runs: [RendererBenchmarkRunEvidence],
+        soakRun: RendererBenchmarkRunEvidence?, reason: String?
+    ) -> RendererBenchmarkTerminalOutcome {
+        let allRuns = runs + (soakRun.map { [$0] } ?? [])
+        let failures = allRuns.flatMap { run in
+            run.failures.map { raw -> RendererBenchmarkGateFailure in
+                let gate = raw.split(separator: ":", maxSplits: 1).first.map(String.init) ?? raw
+                var observed: UInt64?
+                var limit: UInt64?
+                if gate == "gps_packet_gap" {
+                    observed = UInt64(run.summary.maximumGpsPacketGapMs)
+                    limit = activeGates.map { UInt64($0.absolute.maximumGpsPacketGapMs) }
+                } else if gate == "stale_route_marker" {
+                    // Maximum observed/sample age, not a continuous peak.
+                    observed = run.samples.compactMap { sample in
+                        RendererBenchmarkObservation.markerAgeMs(
+                            timestampMs: sample.timestampMs,
+                            receivedAtMs: sample.routeReplay.receivedAtMs,
+                            valid: sample.routeReplay.valid && sample.routeReplay.fixtureMatches
+                        )
+                    }.max()
+                    limit = activeGates.map { UInt64($0.absolute.maximumRouteMarkerAgeMs) }
+                }
+                return RendererBenchmarkGateFailure(
+                    runId: run.runId, profile: run.profile, repeatNumber: run.repeatNumber,
+                    soak: run.soak, rawFailure: raw, observed: observed,
+                    limit: limit, unit: observed == nil ? nil : "ms"
+                )
+            }
+        }
+        let cleanup: RendererBenchmarkCleanupOutcome = cleanupRestoredCurrent ?
+            .restoredCurrent : (profileMayNeedRestoration ? .failed : .notRequired)
+        return RendererBenchmarkTerminalOutcome(
+            schema: 1, execution: execution, cleanup: cleanup,
+            expectedComparisons: SecureRendererBenchmarkPlan.totalComparisonRunCount,
+            completedComparisons: runs.count, passedComparisons: runs.filter(\.passed).count,
+            soakCompleted: soakRun != nil, soakPassed: soakRun?.passed == true,
+            failures: failures, interruptionReason: reason
+        )
+    }
+
+    private func captureStartupEvidence(
+        phase: String,
+        snapshot: RendererBenchmarkMetricsSnapshot? = nil
+    ) {
+        guard let bleManager, let replay else { return }
+        startupTrace.record(RendererBenchmarkStartupSample(
+            phase: phase,
+            bleTransport: bleManager.rendererBenchmarkBLETransportEvidence(),
+            replayTiming: replay.rendererBenchmarkReplayTimingEvidence(),
+            window: snapshot?.window,
+            routeReplay: snapshot?.routeReplay,
+            replayTransport: snapshot?.replayTransport
+        ))
     }
 
     private static func validateTextEvidence(

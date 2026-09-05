@@ -5,6 +5,37 @@
 
 namespace scoped_watch_payload_policy {
 
+enum class RequestSessionRole : uint8_t {
+  Unreadable = 0,
+  Owner = 1,
+  ScopedWatch = 2,
+};
+
+enum class OwnerOnlyRequestPresentation : uint8_t {
+  Unavailable = 0,
+  OwnerAction = 1,
+  ScopedWatchAction = 2,
+};
+
+inline OwnerOnlyRequestPresentation ownerOnlyRequestPresentation(
+    bool connected, bool authenticated, bool notificationAvailable,
+    RequestSessionRole role) {
+  if (!connected || !authenticated || !notificationAvailable ||
+      role == RequestSessionRole::Unreadable)
+    return OwnerOnlyRequestPresentation::Unavailable;
+  return role == RequestSessionRole::Owner
+             ? OwnerOnlyRequestPresentation::OwnerAction
+             : OwnerOnlyRequestPresentation::ScopedWatchAction;
+}
+
+inline bool allowsOwnerOnlyRequest(bool connected, bool authenticated,
+                                   bool notificationAvailable,
+                                   RequestSessionRole role) {
+  return ownerOnlyRequestPresentation(connected, authenticated,
+                                      notificationAvailable, role) ==
+         OwnerOnlyRequestPresentation::OwnerAction;
+}
+
 inline bool hasPrefix(const uint8_t *data, size_t length, const char prefix[5]) {
   return data != nullptr && length >= 4 && data[0] == prefix[0] &&
          data[1] == prefix[1] && data[2] == prefix[2] &&
