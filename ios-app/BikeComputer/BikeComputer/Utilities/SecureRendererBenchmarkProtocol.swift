@@ -1,6 +1,35 @@
 #if DEBUG || HOST_TESTING
 import Foundation
 
+nonisolated enum SecureRendererBenchmarkHTTPPolicy {
+    // Only the serial benchmark client opts into firmware connection reuse.
+    // The secure console intentionally omits this header so WebKit's parallel
+    // and speculative sockets cannot retain the device's single HTTP worker.
+    static let connectionReuseHeaderName =
+        "X-BikeComputer-Connection-Reuse"
+    static let connectionReuseHeaderValue = "1"
+    static let controlRequestTimeout: TimeInterval = 5
+    // A full 1.75-inch RGB565 frame is 434,312 bytes. Physical measurements
+    // initially put the pinned HTTPS body at 4.4-5.9 seconds, while the
+    // loop-three physical sweep exceeded the former eight-second deadline.
+    // Keep a bounded frame-specific budget without relaxing control requests.
+    static let frameRequestTimeout: TimeInterval = 12
+    // A timed-out persistent frame can take the firmware's bounded response
+    // and idle deadlines to release the single TLS worker. Leave room for one
+    // failed control attempt followed by a fresh pinned-session retry.
+    static let metricsRecoveryTimeout: TimeInterval = 12
+    static let screenshotRecoveryTimeout: TimeInterval = 20
+    static let cleanupRecoveryTimeout: TimeInterval = 12
+    static let resourceTimeout: TimeInterval = 20
+
+    static func enableConnectionReuse(on request: inout URLRequest) {
+        request.setValue(
+            connectionReuseHeaderValue,
+            forHTTPHeaderField: connectionReuseHeaderName
+        )
+    }
+}
+
 nonisolated enum SecureRendererBenchmarkProtocolError: LocalizedError,
                                                         Equatable,
                                                         Sendable {
@@ -190,10 +219,24 @@ nonisolated struct RendererBenchmarkRunPlanItem: Equatable, Sendable {
     let repeatNumber: Int
 }
 
+/// Interrupted runs deliberately use a distinct report shape and cannot pass.
+nonisolated struct RendererBenchmarkInterruptedEvidence: Encodable {
+    let schema: Int
+    let source: String
+    let automatedPassed: Bool
+    let stopped: Bool
+    let reason: String
+    let cleanupRestoredCurrent: Bool
+    let completedRuns: [RendererBenchmarkRunEvidence]
+    let partialSamples: [RendererBenchmarkEvidenceSample]
+    let lastSnapshot: RendererBenchmarkMetricsSnapshot?
+}
+
 nonisolated struct SecureRendererBenchmarkReadinessInputs: Equatable, Sendable {
     let isConnected: Bool
     let isNavigationReady: Bool
     let supportsRendererDiagnostics: Bool
+    let supportsRendererBenchmarkSample: Bool
     let isNavigationActive: Bool
     let hasSecureSession: Bool
     let hasActiveMap: Bool
@@ -208,6 +251,7 @@ nonisolated enum SecureRendererBenchmarkReadinessBlocker: Equatable, Sendable {
     case deviceDisconnected
     case navigationNotReady
     case rendererDiagnosticsUnsupported
+    case rendererBenchmarkSampleUnsupported
     case navigationActive
     case manualReplayRunning
     case secureSessionUnavailable
@@ -225,6 +269,8 @@ nonisolated enum SecureRendererBenchmarkReadinessBlocker: Equatable, Sendable {
             return "Wait for authenticated BLE navigation to become ready."
         case .rendererDiagnosticsUnsupported:
             return "The connected firmware does not expose renderer diagnostics."
+        case .rendererBenchmarkSampleUnsupported:
+            return "The connected firmware cannot deliver each benchmark GPS sample and marker atomically."
         case .navigationActive:
             return "Stop navigation before running the renderer benchmark."
         case .manualReplayRunning:
@@ -253,6 +299,9 @@ nonisolated enum SecureRendererBenchmarkReadiness {
         guard inputs.isNavigationReady else { return .navigationNotReady }
         guard inputs.supportsRendererDiagnostics else {
             return .rendererDiagnosticsUnsupported
+        }
+        guard inputs.supportsRendererBenchmarkSample else {
+            return .rendererBenchmarkSampleUnsupported
         }
         guard !inputs.isNavigationActive else { return .navigationActive }
         guard !inputs.manualReplayIsRunning else {
@@ -400,6 +449,65 @@ nonisolated struct RendererBenchmarkRouteFixtureIdentity: Codable,
     let mode: String
 }
 
+nonisolated enum RendererBenchmarkWindowWireContract {
+    static let acceptedStatusCode = 202
+
+    private struct Fixture: Encodable {
+        let id: String
+        let sha256: String
+    }
+
+    private struct Request: Encodable {
+        let schema = 1
+        let profile: String
+        let runId: String
+        let repeatNumber: Int
+        let mapFixture: Fixture
+        let routeFixture: Fixture
+        let routeMode: String
+
+        enum CodingKeys: String, CodingKey {
+            case schema, profile, runId, mapFixture, routeFixture, routeMode
+            case repeatNumber = "repeat"
+        }
+    }
+
+    private struct Response: Decodable {
+        let ok: Bool
+        let requestId: UInt32
+    }
+
+    static func requestData(
+        profile: String,
+        runId: String,
+        repeatNumber: Int,
+        mapFixture: RendererBenchmarkMapFixtureIdentity,
+        routeFixture: RendererBenchmarkRouteFixtureIdentity
+    ) throws -> Data {
+        try JSONEncoder().encode(Request(
+            profile: profile,
+            runId: runId,
+            repeatNumber: repeatNumber,
+            mapFixture: Fixture(
+                id: mapFixture.id,
+                sha256: mapFixture.sha256
+            ),
+            routeFixture: Fixture(
+                id: routeFixture.id,
+                sha256: routeFixture.sha256
+            ),
+            routeMode: routeFixture.mode
+        ))
+    }
+
+    static func requestID(from data: Data) -> UInt32? {
+        guard let response = try? JSONDecoder().decode(Response.self, from: data),
+              response.ok,
+              response.requestId != 0 else { return nil }
+        return response.requestId
+    }
+}
+
 nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
                                                             Equatable,
                                                             Sendable {
@@ -450,8 +558,18 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
         let largestBlock: UInt32
         let windowMinimumFree: UInt32
         let windowMinimumLargestBlock: UInt32
+        let cryptoCountersScope: String?
         let cryptoHeadroomRejections: UInt32
         let cryptoOperationFailures: UInt32
+        let windowMinimumFreeAttribution: MemoryAttribution?
+        let windowMinimumLargestBlockAttribution: MemoryAttribution?
+    }
+
+    nonisolated struct MemoryAttribution: Codable, Equatable, Sendable {
+        let phase: String
+        let observedAtMs: UInt32
+        let value: UInt32
+        let frameTransferActive: Bool
     }
 
     nonisolated struct Memory: Codable, Equatable, Sendable {
@@ -543,6 +661,33 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
         let rejected: UInt32
     }
 
+    nonisolated struct ReplayTransport: Codable, Equatable, Sendable {
+        let gpsAuthenticationAccepted: UInt32
+        let gpsAuthenticationRejected: UInt32
+        let rbs1Detected: UInt32
+        let rbs1Decoded: UInt32
+        let rbs1Malformed: UInt32
+        let rbs1Unnegotiated: UInt32
+        let gpsMailboxAccepted: UInt32
+        let gpsMailboxRejected: UInt32
+        let markerAccepted: UInt32
+        let markerRejectedInvalid: UInt32
+        let markerRejectedNoActiveWindow: UInt32
+        let markerRejectedActiveFixtureUnavailable: UInt32
+        let markerRejectedFixtureMismatch: UInt32
+        let lastTransportEventAtMs: UInt32
+        let lastMarkerAtMs: UInt32
+        let lastActiveWindowId: UInt32
+        let lastSampleIndex: UInt32
+        let lastSampleCount: UInt32
+        let lastLoop: UInt32
+        let lastCandidateFixtureTag: UInt32
+        let lastCandidateFixtureTagValid: Bool
+        let lastExpectedFixtureTag: UInt32
+        let lastExpectedFixtureTagValid: Bool
+        let lastMarkerResult: String
+    }
+
     nonisolated struct RemoteDebug: Codable, Equatable, Sendable {
         let active: Bool
         let snapshotBytes: UInt32
@@ -554,6 +699,18 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
         let maximumCopyUs: UInt32
         let lastHttpResponseMs: UInt32
         let maximumHttpResponseMs: UInt32
+        let lastFrameSnapshotWaitUs: UInt32?
+        let maximumFrameSnapshotWaitUs: UInt32?
+        let lastFrameCrcUs: UInt32?
+        let maximumFrameCrcUs: UInt32?
+        let lastHttpExpectedBytes: UInt32?
+        let lastHttpActualBytes: UInt32?
+        let lastHttpWriteCalls: UInt32?
+        let lastHttpZeroWriteCalls: UInt32?
+        let lastHttpShortWriteCalls: UInt32?
+        let lastHttpActiveTlsWriteUs: UInt32?
+        let lastHttpNoProgressWaitMs: UInt32?
+        let lastHttpIntentionalDelayMs: UInt32?
         let freeBefore: UInt32
         let largestBefore: UInt32
         let freeAfterAllocate: UInt32
@@ -573,7 +730,80 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
     let displayFlush: Timing
     let gps: GPS
     let routeReplay: RouteReplay
+    let replayTransport: ReplayTransport?
     let remoteDebug: RemoteDebug
+    var deliveryTiming: RendererDeliveryTimingEvidence? = nil
+}
+
+nonisolated struct RendererDeliveryTimingEvidence: Codable, Equatable, Sendable {
+    nonisolated struct Callback: Codable, Equatable, Sendable {
+        let session: UInt32
+        let ordinal: UInt32
+        let channel: UInt8
+        let startedAtMs: UInt32
+        let callbackUs: UInt32
+        let setupUs: UInt32
+        let authenticationUs: UInt32
+        let allocationUs: UInt32
+        let mailboxWaitUs: UInt32
+        let mailboxHoldUs: UInt32
+        let authenticated: Bool
+        let mailboxAccepted: Bool
+        let frameActiveAtEntry: Bool
+        let frameActiveAtExit: Bool
+    }
+    nonisolated struct Owner: Codable, Equatable, Sendable {
+        let session: UInt32
+        let ordinal: UInt32
+        let channel: UInt8
+        let startedAtMs: UInt32
+        let mailboxAgeUs: UInt32
+        let processingUs: UInt32
+    }
+    let schema: Int
+    let session: UInt32
+    let completed: UInt32
+    let latest: Callback
+    let slowestRoute: Callback
+    let slowestGps: Callback
+    let latestOwner: Owner
+    let slowestOwner: Owner
+}
+
+nonisolated struct RendererBenchmarkReplayTimingEvidence: Codable,
+                                                             Equatable,
+                                                             Sendable {
+    let schema: Int
+    let emittedSamples: UInt64
+    let timerCallbacks: UInt64
+    let lastTimerLatenessMs: Int
+    let maximumTimerLatenessMs: Int
+    // Optional for compatibility with earlier schema-1 evidence. The legacy
+    // timer field names above now describe the async cadence callbacks.
+    var schedulerActive: Bool? = nil
+}
+
+nonisolated struct RendererBenchmarkStartupSample: Codable, Equatable, Sendable {
+    let phase: String
+    let bleTransport: RendererBenchmarkBLETransportEvidence
+    let replayTiming: RendererBenchmarkReplayTimingEvidence
+    let window: RendererBenchmarkMetricsSnapshot.Window?
+    let routeReplay: RendererBenchmarkMetricsSnapshot.RouteReplay?
+    let replayTransport: RendererBenchmarkMetricsSnapshot.ReplayTransport?
+}
+
+nonisolated struct RendererBenchmarkStartupTrace: Codable, Sendable {
+    static let maximumSamples = 128
+    private(set) var samples: [RendererBenchmarkStartupSample] = []
+    private(set) var droppedSamples: UInt64 = 0
+
+    mutating func record(_ sample: RendererBenchmarkStartupSample) {
+        if samples.count == Self.maximumSamples {
+            samples.removeFirst()
+            droppedSamples &+= 1
+        }
+        samples.append(sample)
+    }
 }
 
 nonisolated struct RendererBenchmarkEvidenceIdentity: Codable,
@@ -615,6 +845,13 @@ nonisolated struct RendererBenchmarkEvidenceSample: Codable,
     let renderCount: UInt32
     let buildings: RendererBenchmarkMetricsSnapshot.Buildings
     let routeReplay: RendererBenchmarkMetricsSnapshot.RouteReplay
+    let bleTransport: RendererBenchmarkBLETransportEvidence?
+    let replayTiming: RendererBenchmarkReplayTimingEvidence?
+    // Optional, additive schema-1 fields: older archives still decode.
+    var gps: RendererBenchmarkMetricsSnapshot.GPS? = nil
+    var replayTransport: RendererBenchmarkMetricsSnapshot.ReplayTransport? = nil
+    var remoteDebug: RendererBenchmarkMetricsSnapshot.RemoteDebug? = nil
+    var deliveryTiming: RendererDeliveryTimingEvidence? = nil
 }
 
 nonisolated struct RendererBenchmarkRunSummary: Codable, Equatable, Sendable {
@@ -702,6 +939,25 @@ nonisolated struct RendererBenchmarkScreenshotEvidence: Codable,
     let path: String
     let bytes: Int
     let sha256: String
+}
+
+nonisolated enum RendererBenchmarkCheckpointFramePolicy {
+    enum Decision: Equatable, Sendable {
+        case beforeMarker
+        case accept(lagMs: UInt32)
+        case tooLate(lagMs: UInt32)
+    }
+
+    static func decision(
+        capturedAtMs: UInt32,
+        markerReceivedAtMs: UInt32,
+        maximumAgeMs: UInt32
+    ) -> Decision {
+        let lag = capturedAtMs &- markerReceivedAtMs
+        guard lag < 0x8000_0000 else { return .beforeMarker }
+        guard lag <= maximumAgeMs else { return .tooLate(lagMs: lag) }
+        return .accept(lagMs: lag)
+    }
 }
 
 nonisolated struct RendererBenchmarkRunEvidence: Codable, Equatable, Sendable {
@@ -831,7 +1087,9 @@ nonisolated enum RendererBenchmarkEvidenceSecurityPolicy {
 nonisolated enum RendererBenchmarkEvaluator {
     static func sample(
         snapshot: RendererBenchmarkMetricsSnapshot,
-        elapsedSeconds: Double
+        elapsedSeconds: Double,
+        bleTransport: RendererBenchmarkBLETransportEvidence? = nil,
+        replayTiming: RendererBenchmarkReplayTimingEvidence? = nil
     ) -> RendererBenchmarkEvidenceSample {
         RendererBenchmarkEvidenceSample(
             elapsedSeconds: (elapsedSeconds * 1_000).rounded() / 1_000,
@@ -845,7 +1103,13 @@ nonisolated enum RendererBenchmarkEvaluator {
             dmaLargest: snapshot.memory.dmaHeap.largestBlock,
             renderCount: snapshot.render.timings.total.count,
             buildings: snapshot.render.buildings,
-            routeReplay: snapshot.routeReplay
+            routeReplay: snapshot.routeReplay,
+            bleTransport: bleTransport,
+            replayTiming: replayTiming,
+            gps: snapshot.gps,
+            replayTransport: snapshot.replayTransport,
+            remoteDebug: snapshot.remoteDebug,
+            deliveryTiming: snapshot.deliveryTiming
         )
     }
 
@@ -979,6 +1243,9 @@ nonisolated enum RendererBenchmarkEvaluator {
         }
         if snapshot.tuning.fingerprint != profile.expectedTuningFingerprint {
             failures.append("stale_tuning:fingerprint")
+        }
+        if snapshot.memory.dmaHeap.cryptoCountersScope != "window" {
+            failures.append("stale_identity:crypto_counter_scope")
         }
         if identity.mapFixture != mapFixture {
             failures.append("stale_identity:map_fixture")

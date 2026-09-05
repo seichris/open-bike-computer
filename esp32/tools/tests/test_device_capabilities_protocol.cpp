@@ -61,6 +61,15 @@ int main() {
   static_assert(
       device_capabilities_protocol::DETAILED_RIDE_DIAGNOSTICS_FEATURE ==
       (1UL << 21));
+  static_assert(
+      device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION == 20);
+  static_assert(device_capabilities_protocol::RIDE_DELIVERY_ACK_FEATURE ==
+                (1UL << 22));
+  static_assert(device_capabilities_protocol::
+                    RENDERER_BENCHMARK_SAMPLE_CLIENT_VERSION == 21);
+  static_assert(
+      device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE ==
+      (1UL << 23));
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
@@ -145,6 +154,25 @@ int main() {
          sizeof(expectedDetailedRideDiagnostics));
   for (size_t index = 0; index < detailedRideDiagnosticsSize; ++index)
     assert(output[index] == expectedDetailedRideDiagnostics[index]);
+  const size_t rideDeliveryAckSize =
+      device_capabilities_protocol::encodeCap2(
+          device_capabilities_protocol::RIDE_DELIVERY_ACK_FEATURE, nullptr,
+          false, output, sizeof(output));
+  const uint8_t expectedRideDeliveryAck[] = {
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x40, 0x00};
+  assert(rideDeliveryAckSize == sizeof(expectedRideDeliveryAck));
+  for (size_t index = 0; index < rideDeliveryAckSize; ++index)
+    assert(output[index] == expectedRideDeliveryAck[index]);
+  const size_t rendererBenchmarkSampleSize =
+      device_capabilities_protocol::encodeCap2(
+          device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE,
+          nullptr, false, output, sizeof(output));
+  const uint8_t expectedRendererBenchmarkSample[] = {
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x80, 0x00};
+  assert(rendererBenchmarkSampleSize ==
+         sizeof(expectedRendererBenchmarkSample));
+  for (size_t index = 0; index < rendererBenchmarkSampleSize; ++index)
+    assert(output[index] == expectedRendererBenchmarkSample[index]);
   std::cout << "device capabilities protocol tests passed\n";
   return 0;
 }

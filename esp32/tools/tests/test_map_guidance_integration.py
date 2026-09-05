@@ -121,6 +121,17 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("vTaskDeleteWithCaps(nullptr)", thunk)
         self.assertNotIn("vTaskDelete(nullptr)", thunk)
 
+    def test_round_panel_sizes_overscan_without_spending_coverage_margin(self):
+        request = function_body(
+            MAP_RENDERER_SOURCE, "bool Maps::buildRenderRequestForScreen"
+        )
+        self.assertIn("MAP_RENDER_MINIMUM_OVERSCAN_PIXELS = 64", MAP_HEADER_SOURCE)
+        self.assertIn("MAP_RENDER_ROUND_VIEWPORT", request)
+        self.assertIn("map_presentation::refreshLeadPixels", request)
+        self.assertIn("MAP_RENDER_SAFETY_PIXELS + 8U", request)
+        self.assertIn("request.overscanPixels - MAP_RENDER_SAFETY_PIXELS", request)
+        self.assertIn("request.viewportWidth + request.overscanPixels * 2U", request)
+
     def test_amoled_lvgl_pool_uses_psram_to_preserve_wifi_headroom(self):
         gate = (
             "#if defined(BOARD_HAS_PSRAM) && "

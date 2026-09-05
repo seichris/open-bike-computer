@@ -14,7 +14,10 @@ enum WorkoutDeviceTelemetryMapper {
             : WorkoutDeviceSessionState(requestedState)
 
         if state == .idle {
-            return emptySample(state: .idle, token: 0)
+            return WorkoutDeviceTelemetrySampleMapperV1.emptySample(
+                state: .idle,
+                sessionToken: 0
+            )
         }
 
         guard let envelope,
@@ -54,117 +57,16 @@ enum WorkoutDeviceTelemetryMapper {
             isCurrentSnapshot = false
         }
 
-        guard hasLiveNumerics else {
-            return emptySample(
-                state: state,
-                token: envelope.sessionToken,
-                isCurrentSnapshot: isCurrentSnapshot
-            )
-        }
-
-        var flags: WorkoutDeviceSourceFlags = []
-        switch snapshot.currentSpeed?.source {
-        case .pairedCyclingSensor:
-            flags.insert(.pairedSpeedSensor)
-        case .watchLocation:
-            flags.insert(.watchSpeed)
-        default:
-            break
-        }
-        if snapshot.cyclingDistance?.source == .healthKit {
-            flags.insert(.healthKitDistance)
-        }
-
         let rawSnapshot = envelope.snapshot
-        if rawSnapshot?.availability.contains(.altitude) == true,
-           rawSnapshot?.location?.altitude != nil {
-            flags.insert(.watchAltitude)
-        }
-        if rawSnapshot?.availability.contains(.heartRateZone) == true,
-           rawSnapshot?.currentHeartRateZone != nil,
-           rawSnapshot?.heartRateZoneCount != nil {
-            flags.insert(.liveHeartRateZone)
-        }
-
-        return WorkoutDeviceTelemetrySample(
+        return WorkoutDeviceTelemetrySampleMapperV1.sample(
+            snapshot: snapshot,
+            provenanceSnapshot: rawSnapshot,
             state: state,
             sessionToken: envelope.sessionToken,
-            hasLiveNumerics: true,
-            isCurrentSnapshot: true,
-            elapsedSeconds: metric(snapshot.elapsedTime, unit: .seconds),
-            distanceMeters: metric(snapshot.cyclingDistance, unit: .meters),
-            speedMetersPerSecond: metric(
-                snapshot.currentSpeed,
-                unit: .metersPerSecond
-            ),
-            currentHeartRateBPM: metric(
-                snapshot.currentHeartRate,
-                unit: .beatsPerMinute
-            ),
-            averageHeartRateBPM: metric(
-                snapshot.averageHeartRate,
-                unit: .beatsPerMinute
-            ),
-            activeEnergyKilocalories: metric(
-                snapshot.activeEnergy,
-                unit: .kilocalories
-            ),
-            cyclingPowerWatts: metric(snapshot.cyclingPower, unit: .watts),
-            cyclingCadenceRPM: metric(
-                snapshot.cyclingCadence,
-                unit: .revolutionsPerMinute
-            ),
-            currentHeartRateZone: snapshot.currentHeartRateZone,
-            altitudeMeters: snapshot.location?.altitude,
-            heartRateZoneCount: snapshot.heartRateZoneCount,
-            sourceFlags: flags,
-            pauseOrigin: snapshot.pauseOrigin,
-            wallElapsedSeconds: metric(
-                snapshot.wallElapsedTime,
-                unit: .seconds
-            ),
             sessionID: presentation.sessionID,
-            detectorProfileVersion: snapshot.detectorProfileVersion,
-            lastTransitionOrigin: snapshot.lastTransitionOrigin
+            hasLiveNumerics: hasLiveNumerics,
+            isCurrentSnapshot: isCurrentSnapshot
         )
-    }
-
-    private static func emptySample(
-        state: WorkoutDeviceSessionState,
-        token: UInt16,
-        isCurrentSnapshot: Bool = false
-    ) -> WorkoutDeviceTelemetrySample {
-        WorkoutDeviceTelemetrySample(
-            state: state,
-            sessionToken: token,
-            hasLiveNumerics: false,
-            isCurrentSnapshot: isCurrentSnapshot,
-            elapsedSeconds: nil,
-            distanceMeters: nil,
-            speedMetersPerSecond: nil,
-            currentHeartRateBPM: nil,
-            averageHeartRateBPM: nil,
-            activeEnergyKilocalories: nil,
-            cyclingPowerWatts: nil,
-            cyclingCadenceRPM: nil,
-            currentHeartRateZone: nil,
-            altitudeMeters: nil,
-            heartRateZoneCount: nil,
-            sourceFlags: [],
-            pauseOrigin: nil,
-            wallElapsedSeconds: nil,
-            sessionID: nil,
-            detectorProfileVersion: nil,
-            lastTransitionOrigin: nil
-        )
-    }
-
-    private static func metric(
-        _ metric: WorkoutMetricV1?,
-        unit: WorkoutMetricUnitV1
-    ) -> Double? {
-        guard let metric, metric.unit == unit else { return nil }
-        return metric.value
     }
 }
 

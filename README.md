@@ -6,7 +6,7 @@ A sleek, Garmin-mounted bike computer. Get yours at [Bicino.com](https://bicino.
 🛣️ Import bike routes from Strava.\
 📡 Connect your power meter and cadence sensor.
 
-[![Download Bike Computer 2.0 on the App Store](https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83)](https://geo.itunes.apple.com/app/id6788977349)
+[![Download Bike Computer 2.0 on the App Store](https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83)](https://apps.apple.com/us/app/bicino/id6788977349)
 
 <table width="100%">
   <!-- First row: 5 images -->
@@ -95,7 +95,7 @@ A sleek, Garmin-mounted bike computer. Get yours at [Bicino.com](https://bicino.
 ## Get started
 
 1. **Buy your bike computer including Garmin mount at [bicino.com](https://bicino.com)** or get a generic [Waveshare 1.75"](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31262), or a [Waveshare 2.06"](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm).
-2. **Download** [**the Bicino iPhone and Apple Watch app**](https://geo.itunes.apple.com/app/id6788977349) and pair your bike computer.
+2. **Download** [**the Bicino iPhone and Apple Watch app**](https://apps.apple.com/us/app/bicino/id6788977349) and pair your bike computer.
 3. **Ride.** Track your workout and check your live ride statistics on your bike computer.
 4. **Analyze.** Check your ride stats and GPS track in Apple Fitness and Strava.
 

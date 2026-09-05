@@ -319,6 +319,29 @@ void MapTransferHttpServer::responseDidComplete(
   beginDeferredActivation(deferred, peerClosedCleanly);
 }
 
+void MapTransferHttpServer::responseDidAbort(
+    const device_transfer::HttpRequest &request) {
+  DeferredActivation deferred;
+  lockState();
+  if (deferredActivation_.pending() &&
+      deferredActivation_.response.matches(
+          request.transferGeneration, request.method, request.path)) {
+    deferred = std::move(deferredActivation_);
+    deferredActivation_ = {};
+  }
+  unlockState();
+  if (!deferred.pending())
+    return;
+  const InstallStatus discarded =
+      installer_.discardUnselectedStreamMap(deferred.sessionId);
+  updateStreamInstallState(MapStreamInstallSnapshot(), false);
+  setLastError(discarded.ok ? "response_incomplete" : discarded.code,
+               discarded.ok
+                   ? "map activation was cancelled because the HTTP response "
+                     "did not complete"
+                   : discarded.message);
+}
+
 bool MapTransferHttpServer::handleInstallStream(
     const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
   std::string sessionId;
