@@ -1099,6 +1099,7 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
     case deviceSDCardUnavailable
     case deviceMapTransferRejected(String)
     case firmwareMapStreamUnsupported
+    case mapStreamCompatibilityRejected(MapInstallProtocolRejection)
     case backgroundMapUploadInProgress
     case mapActivationFailed(String)
     case transferWiFiJoinFailed(String, String)
@@ -1134,6 +1135,8 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             return "Device could not start map transfer mode: \(message)"
         case .firmwareMapStreamUnsupported:
             return "This saved map cannot be installed securely. Update the device firmware and regenerate the map as a signed stream."
+        case .mapStreamCompatibilityRejected(let rejection):
+            return "This saved map cannot be installed securely (\(rejection.rawValue)). Regenerate it with this app or use compatible device firmware."
         case .backgroundMapUploadInProgress:
             return "Another map upload is already in progress. Wait for it to finish before transferring a different map."
         case .mapActivationFailed(let message):
@@ -1429,6 +1432,31 @@ nonisolated enum MapInstallProtocolSelection: Equatable {
     case legacyArtifactRequired
 }
 
+nonisolated enum MapInstallProtocolRejection: String, Equatable {
+    case notSignedStream = "not_signed_stream"
+    case missingSignatureCapability = "missing_signature_capability"
+    case deviceProtocolUnsupported = "device_protocol_unsupported"
+    case signingKeyNotTrusted = "signing_key_not_trusted"
+    case readerRequirementsUnsupported = "reader_requirements_unsupported"
+    case appIdentityIncomplete = "app_identity_incomplete"
+    case appIdentityMismatch = "app_identity_mismatch"
+    case firmwareIdentityIncomplete = "firmware_identity_incomplete"
+    case firmwareIdentityMismatch = "firmware_identity_mismatch"
+}
+
+nonisolated struct MapInstallProtocolEvaluation: Equatable {
+    let selection: MapInstallProtocolSelection
+    let rejection: MapInstallProtocolRejection?
+
+    static let streamV2 = Self(selection: .streamV2, rejection: nil)
+
+    static func rejected(
+        _ rejection: MapInstallProtocolRejection
+    ) -> Self {
+        Self(selection: .legacyArtifactRequired, rejection: rejection)
+    }
+}
+
 nonisolated enum MapInstallProtocolSelector {
     static func select(
         isBikeMapStream: Bool,
@@ -1446,14 +1474,51 @@ nonisolated enum MapInstallProtocolSelector {
         requiredFirmwareGitSha: String? = nil,
         deviceStatus: MapTransferDeviceStatus
     ) -> MapInstallProtocolSelection {
-        guard isBikeMapStream else { return .legacyArtifactRequired }
-        guard let signatureTrustCapability else {
-            return .legacyArtifactRequired
+        evaluate(
+            isBikeMapStream: isBikeMapStream,
+            signatureTrustCapability: signatureTrustCapability,
+            requiredIosBuild: requiredIosBuild,
+            requiredIosGitSha: requiredIosGitSha,
+            requiredIosBuildSha256: requiredIosBuildSha256,
+            currentIosBuild: currentIosBuild,
+            currentIosGitSha: currentIosGitSha,
+            currentIosBuildSha256: currentIosBuildSha256,
+            compatibleArtifactAppIdentities: compatibleArtifactAppIdentities,
+            readerRequirements: readerRequirements,
+            requiredFirmwareVersion: requiredFirmwareVersion,
+            requiredFirmwareBuild: requiredFirmwareBuild,
+            requiredFirmwareGitSha: requiredFirmwareGitSha,
+            deviceStatus: deviceStatus
+        ).selection
+    }
+
+    static func evaluate(
+        isBikeMapStream: Bool,
+        signatureTrustCapability: String? = nil,
+        requiredIosBuild: String? = nil,
+        requiredIosGitSha: String? = nil,
+        requiredIosBuildSha256: String? = nil,
+        currentIosBuild: String? = nil,
+        currentIosGitSha: String? = nil,
+        currentIosBuildSha256: String? = nil,
+        compatibleArtifactAppIdentities: [MapStreamAppBuildIdentity] = [],
+        readerRequirements: OfflineMapReaderRequirements? = nil,
+        requiredFirmwareVersion: String? = nil,
+        requiredFirmwareBuild: UInt32? = nil,
+        requiredFirmwareGitSha: String? = nil,
+        deviceStatus: MapTransferDeviceStatus
+    ) -> MapInstallProtocolEvaluation {
+        guard isBikeMapStream else {
+            return .rejected(.notSignedStream)
         }
-        guard deviceStatus.supportsBikeMapStreamV1(
-            trustCapability: signatureTrustCapability
-        ) else {
-            return .legacyArtifactRequired
+        guard let signatureTrustCapability else {
+            return .rejected(.missingSignatureCapability)
+        }
+        guard deviceStatus.supportsBikeMapStreamV1 else {
+            return .rejected(.deviceProtocolUnsupported)
+        }
+        guard deviceStatus.streamTrust?.contains(signatureTrustCapability) == true else {
+            return .rejected(.signingKeyNotTrusted)
         }
         let appRequirements = (
             requiredIosBuild,
@@ -1466,7 +1531,7 @@ nonisolated enum MapInstallProtocolSelector {
                   OfflineMapReaderCompatibilityPolicy.supports(
                     readerRequirements
                   ) else {
-                return .legacyArtifactRequired
+                return .rejected(.readerRequirementsUnsupported)
             }
         } else {
             guard let requiredAppBuild = appRequirements.0,
@@ -1475,7 +1540,7 @@ nonisolated enum MapInstallProtocolSelector {
                   let currentAppBuild = currentIosBuild,
                   let currentAppGitSHA = currentIosGitSha,
                   let currentAppBuildSHA256 = currentIosBuildSha256 else {
-                return .legacyArtifactRequired
+                return .rejected(.appIdentityIncomplete)
             }
             let requiredAppIdentity = MapStreamAppBuildIdentity(
                 schemaVersion: 1,
@@ -1495,7 +1560,7 @@ nonisolated enum MapInstallProtocolSelector {
                     compatibleArtifactAppIdentities.contains(
                         requiredAppIdentity
                     ) else {
-                return .legacyArtifactRequired
+                return .rejected(.appIdentityMismatch)
             }
         }
         let deviceRequirements = (
@@ -1509,11 +1574,13 @@ nonisolated enum MapInstallProtocolSelector {
         }
         guard let requiredVersion = deviceRequirements.0,
               let requiredBuild = deviceRequirements.1,
-              let requiredGitSHA = deviceRequirements.2,
-              deviceStatus.firmwareVersion == requiredVersion,
+              let requiredGitSHA = deviceRequirements.2 else {
+            return .rejected(.firmwareIdentityIncomplete)
+        }
+        guard deviceStatus.firmwareVersion == requiredVersion,
               deviceStatus.firmwareBuild == requiredBuild,
               deviceStatus.firmwareGitSha == requiredGitSHA else {
-            return .legacyArtifactRequired
+            return .rejected(.firmwareIdentityMismatch)
         }
         return .streamV2
     }
