@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -159,5 +160,10 @@ def main() -> None:
     print("renderer cross-run retained-memory policy tests passed")
 
 
+class RendererCrossRunMemoryTests(unittest.TestCase):
+    def test_retained_memory_regressions(self):
+        main()
+
+
 if __name__ == "__main__":
-    main()
+    unittest.main()

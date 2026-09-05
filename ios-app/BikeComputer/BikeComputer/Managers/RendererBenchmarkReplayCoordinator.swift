@@ -6,7 +6,6 @@ import UIKit
 @MainActor
 final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
     @Published private(set) var isRunning = false
-    @Published private(set) var isCadenceActive = false
     @Published private(set) var fixtureID = ""
     @Published private(set) var sampleIndex = 0
     @Published private(set) var sampleCount = 0
@@ -19,7 +18,7 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
     private weak var bleManager: BLEManager?
     private var fixture: RendererBenchmarkFixture?
     private var fixtureSHA256 = Data()
-    private var timer: Timer?
+    private let scheduler = RendererBenchmarkReplayScheduler()
     private var emittedSampleCount: UInt64 = 0
     private var capturedRendererRevision: UInt64 = 0
     private var ordinarySnapshots: [String] = []
@@ -27,13 +26,11 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
     private var idleTimerWasDisabled = false
     private var ownsIdleTimerOverride = false
     private var deviceGPSOverrideToken: UUID?
-    private var expectedReplayTimerUptime: TimeInterval?
     private var replayTimerCallbacks: UInt64 = 0
     private var lastReplayTimerLatenessMs: Int = 0
     private var maximumReplayTimerLatenessMs: Int = 0
 
     deinit {
-        timer?.invalidate()
         let manager = bleManager
         let token = deviceGPSOverrideToken
         let shouldRestoreIdleTimer = ownsIdleTimerOverride
@@ -53,51 +50,7 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
         return "Sample \(sampleIndex + 1)/\(sampleCount), loop \(loop + 1)"
     }
 
-    /// Manual developer replay keeps its historical one-tap behavior. The
-    /// secure sweep uses prepare(), then emits only after its HTTP measurement
-    /// window has been confirmed.
     func start(
-        bleManager: BLEManager,
-        isNavigationActive: Bool,
-        bundle: Bundle = .main
-    ) {
-        prepare(
-            bleManager: bleManager,
-            isNavigationActive: isNavigationActive,
-            bundle: bundle
-        )
-        guard isRunning, let loadedFixture = fixture else { return }
-
-        if !bleManager.supportsRemoteDeviceDebug {
-            advanceOrdinaryRepeatNumber()
-            guard bleManager.beginRendererBenchmarkWindow(
-                profile: selectedOrdinaryProfile,
-                repeatNumber: ordinaryRepeatNumber,
-                runNonce: UInt64.random(in: 1...UInt64.max),
-                fixtureSHA256: fixtureSHA256,
-                fixtureID: loadedFixture.id
-            ) else {
-                errorMessage = "The ordinary benchmark window could not be queued."
-                status = "Window failed"
-                stop(clearRoute: false, restoreCurrent: false)
-                return
-            }
-        }
-
-        guard emitInitialSample(), startCadence() else {
-            if isRunning {
-                errorMessage = "The renderer replay could not begin."
-                status = "Stopped"
-                stop()
-            }
-            return
-        }
-    }
-
-    /// Acquires and validates every replay resource, but deliberately emits no
-    /// route, GPS, or marker and starts no timer. This is the secure sweep's
-    /// armed state.
-    func prepare(
         bleManager: BLEManager,
         isNavigationActive: Bool,
         bundle: Bundle = .main
@@ -128,7 +81,6 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             sampleCount = loaded.fixture.points.count
             loop = 0
             emittedSampleCount = 0
-            expectedReplayTimerUptime = nil
             replayTimerCallbacks = 0
             lastReplayTimerLatenessMs = 0
             maximumReplayTimerLatenessMs = 0
@@ -142,65 +94,41 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
                 return
             }
             deviceGPSOverrideToken = overrideToken
+            if !bleManager.supportsRemoteDeviceDebug {
+                advanceOrdinaryRepeatNumber()
+                guard bleManager.beginRendererBenchmarkWindow(
+                    profile: selectedOrdinaryProfile,
+                    repeatNumber: ordinaryRepeatNumber,
+                    runNonce: UInt64.random(in: 1...UInt64.max),
+                    fixtureSHA256: loaded.sha256,
+                    fixtureID: loaded.fixture.id
+                ) else {
+                    errorMessage = "The ordinary benchmark window could not be queued."
+                    status = "Window failed"
+                    releaseDeviceGPSOverride()
+                    self.bleManager = nil
+                    return
+                }
+            }
             errorMessage = nil
-            status = "Armed"
+            status = "Running at 1 Hz"
             isRunning = true
-            isCadenceActive = false
             idleTimerWasDisabled = UIApplication.shared.isIdleTimerDisabled
             UIApplication.shared.isIdleTimerDisabled = true
             ownsIdleTimerOverride = true
+            scheduler.start { [weak self] latenessMs in
+                self?.handleReplayTick(latenessMs: latenessMs)
+            }
+            emitCurrentSample()
         } catch {
             errorMessage = error.localizedDescription
             status = "Fixture failed"
         }
     }
 
-    func pauseCadence() {
-        timer?.invalidate()
-        timer = nil
-        expectedReplayTimerUptime = nil
-        isCadenceActive = false
-        if isRunning {
-            status = "Armed"
-        }
-    }
-
-    /// Emits exactly one forced route-plus-RBS1 transaction while cadence is
-    /// paused. The controller calls this only after firmware confirms the
-    /// corresponding measurement window.
-    @discardableResult
-    func emitInitialSample() -> Bool {
-        guard isRunning, !isCadenceActive else { return false }
-        let previousCount = emittedSampleCount
-        emitCurrentSample(forceRoute: true)
-        return isRunning && emittedSampleCount == (previousCount &+ 1)
-    }
-
-    /// Starts the one-Hz timer without an immediate extra emission.
-    @discardableResult
-    func startCadence() -> Bool {
-        guard isRunning, !isCadenceActive, timer == nil else { return false }
-        let timer = Timer(
-            timeInterval: 1,
-            target: self,
-            selector: #selector(handleReplayTimer(_:)),
-            userInfo: nil,
-            repeats: true
-        )
-        timer.tolerance = 0.05
-        self.timer = timer
-        expectedReplayTimerUptime =
-            ProcessInfo.processInfo.systemUptime + 1
-        replayTimerCallbacks = 0
-        RunLoop.main.add(timer, forMode: .common)
-        isCadenceActive = true
-        status = "Running at 1 Hz"
-        return true
-    }
-
     func stop(clearRoute: Bool = true, restoreCurrent: Bool = true) {
         captureLatestOrdinarySnapshot()
-        pauseCadence()
+        scheduler.stop()
         if clearRoute, isRunning {
             bleManager?.clearRouteGeometry()
         }
@@ -213,8 +141,7 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             ownsIdleTimerOverride = false
         }
         isRunning = false
-        isCadenceActive = false
-        if status == "Armed" || status == "Running at 1 Hz" {
+        if status == "Running at 1 Hz" {
             status = "Stopped"
         }
         bleManager = nil
@@ -235,26 +162,12 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
         )
     }
 
-    @objc private func handleReplayTimer(_ timer: Timer) {
-        guard isRunning, isCadenceActive else { return }
-        let now = ProcessInfo.processInfo.systemUptime
-        if let expectedReplayTimerUptime {
-            let latenessMs = Int(max(
-                0,
-                (now - expectedReplayTimerUptime) * 1_000
-            ).rounded())
-            lastReplayTimerLatenessMs = latenessMs
-            maximumReplayTimerLatenessMs = max(
-                maximumReplayTimerLatenessMs,
-                latenessMs
-            )
-            self.expectedReplayTimerUptime = max(
-                expectedReplayTimerUptime + 1,
-                now + 1
-            )
-        } else {
-            expectedReplayTimerUptime = now + 1
-        }
+    private func handleReplayTick(latenessMs: Int) {
+        guard isRunning else { return }
+        lastReplayTimerLatenessMs = latenessMs
+        maximumReplayTimerLatenessMs = max(
+            maximumReplayTimerLatenessMs, latenessMs
+        )
         replayTimerCallbacks &+= 1
         emitCurrentSample()
     }
@@ -266,11 +179,12 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             emittedSamples: emittedSampleCount,
             timerCallbacks: replayTimerCallbacks,
             lastTimerLatenessMs: lastReplayTimerLatenessMs,
-            maximumTimerLatenessMs: maximumReplayTimerLatenessMs
+            maximumTimerLatenessMs: maximumReplayTimerLatenessMs,
+            schedulerActive: scheduler.isScheduled
         )
     }
 
-    private func emitCurrentSample(forceRoute: Bool = false) {
+    private func emitCurrentSample() {
         guard isRunning,
               let bleManager,
               bleManager.isConnected,
@@ -298,16 +212,16 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             from: point.coordinate,
             to: next.coordinate
         )
-        if forceRoute || emittedSampleCount % 2 == 0 {
-            guard bleManager.sendRendererBenchmarkRouteGeometry(routeData) else {
-                errorMessage =
-                    "The acknowledged benchmark route window could not be queued."
+        // Match normal navigation: GPS and the fixture marker are emitted at
+        // 1 Hz, while the route window is refreshed every two seconds.
+        if emittedSampleCount % 2 == 0 {
+            guard bleManager.sendRouteGeometry(routeData) else {
+                errorMessage = "The benchmark route window could not be queued."
                 status = "Stopped"
                 stop()
                 return
             }
         }
-
         let now = Date()
         let gpsPosition = DeviceGPSPacketBuilder.data(
             lat: point.latitude,
@@ -331,6 +245,9 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             includeRideDetectionQuality:
                 bleManager.supportsGPSPositionQualityV1
         )
+        // GPS and its marker share one authenticated GPS-channel write. This
+        // keeps their order atomic and consumes only one CoreBluetooth
+        // write-without-response credit per one-Hz replay tick.
         guard bleManager.sendRendererBenchmarkSample(
             gpsPosition: gpsPosition,
             fixtureSHA256: fixtureSHA256,
@@ -338,13 +255,13 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             sampleCount: fixture.points.count,
             loop: loop
         ) else {
-            errorMessage =
-                "The acknowledged atomic benchmark sample could not be queued."
+            errorMessage = "The atomic benchmark sample could not be queued."
             status = "Stopped"
             stop()
             return
         }
-
+        // HTTP owns the remote-debug sweep. Poll BLE only on ordinary
+        // diagnostics firmware so the ranking run is not perturbed twice.
         if !bleManager.supportsRemoteDeviceDebug &&
             emittedSampleCount > 0 &&
             emittedSampleCount % 5 == 0 {

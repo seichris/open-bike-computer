@@ -164,6 +164,14 @@ private:
 
   static constexpr uint16_t MAP_RENDER_OVERSCAN_PIXELS = 96;
   static constexpr uint16_t MAP_RENDER_SAFETY_PIXELS = 16;
+#if defined(WAVESHARE_AMOLED_175)
+  static constexpr bool MAP_RENDER_ROUND_VIEWPORT = true;
+  static constexpr uint16_t MAP_RENDER_MINIMUM_OVERSCAN_PIXELS = 64;
+#else
+  static constexpr bool MAP_RENDER_ROUND_VIEWPORT = false;
+  static constexpr uint16_t MAP_RENDER_MINIMUM_OVERSCAN_PIXELS =
+      MAP_RENDER_OVERSCAN_PIXELS;
+#endif
   static constexpr uint32_t MAP_RENDER_WORKER_STACK_BYTES = 24576;
   static constexpr uint32_t MAP_RENDER_DECLARED_SLICE_US = 50000;
 
@@ -287,6 +295,9 @@ private:
       MapBlock *mblock); // Build spatial grid for polygon culling
   bool fillPolygon(const Polygon &p,
                    map_surface::Rgb565Surface surface);
+  bool fillPolygon(
+      const Polygon &p, map_surface::Rgb565Surface surface,
+      std::vector<int16_t, PsramAllocator<int16_t>> &scanlineNodes);
   bool fillPolygon(const Polygon &p, lv_obj_t *canvas);
   void drawLine(map_surface::Rgb565Surface surface, int16_t x1, int16_t y1,
                 int16_t x2, int16_t y2, uint16_t color, uint8_t width);
@@ -699,6 +710,5 @@ public:
   renderer_tuning::Profile rendererTuningProfile() const {
     return rendererTuningProfile_;
   }
-  renderer_diagnostics::JobCounters rendererDiagnosticsJobCounters() const;
   bool takeStreetLabelRuntimeFailure(std::string &code);
 };

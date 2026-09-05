@@ -391,7 +391,6 @@ final class TestBLEManager: BLEManager {
     var sentPackets: [String] = []
     var sentRouteGeometry: [Data] = []
     var sentGPSPositions: [Data] = []
-    var sentRendererBenchmarkSamples: [Data] = []
 
     override func centralManagerDidUpdateState(_ central: CBCentralManager) {
         // Keep CoreBluetooth startup callbacks from changing test-controlled state.
@@ -413,10 +412,6 @@ final class TestBLEManager: BLEManager {
 
         sentRouteGeometry.append(data)
         return true
-    }
-
-    override func sendRendererBenchmarkRouteGeometry(_ data: Data) -> Bool {
-        sendRouteGeometry(data)
     }
 
     override func sendGPSPosition(
@@ -448,31 +443,6 @@ final class TestBLEManager: BLEManager {
             locationTimestamp: locationTimestamp,
             includeRideDetectionQuality: supportsGPSPositionQualityV1
         ))
-        return true
-    }
-
-    override func sendRendererBenchmarkSample(
-        gpsPosition: Data,
-        fixtureSHA256: Data,
-        sampleIndex: Int,
-        sampleCount: Int,
-        loop: UInt32
-    ) -> Bool {
-        guard isConnected, isNavigationReady,
-              let marker = RendererBenchmarkMarkerPacket.data(
-                fixtureSHA256: fixtureSHA256,
-                sampleIndex: sampleIndex,
-                sampleCount: sampleCount,
-                loop: loop
-              ),
-              let packet = RendererBenchmarkSamplePacket.data(
-                gpsPosition: gpsPosition,
-                marker: marker
-              ) else {
-            return false
-        }
-        sentRendererBenchmarkSamples.append(packet)
-        sentGPSPositions.append(gpsPosition)
         return true
     }
 }
@@ -711,8 +681,8 @@ final class TestLocationManagerClient: LocationManagerClient {
 }
 
 @main
+@MainActor
 struct NavigationProtocolTests {
-    @MainActor
     static func main() async {
         testIconMapping()
         testRouteEndpointExtraction()
@@ -751,17 +721,16 @@ struct NavigationProtocolTests {
         testRendererBenchmarkGPSOverrideSuppressesPhysicalFixes()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
-        testSharedNavigationQueueRendererStallReproduction()
-        testRendererLatestStateScheduling()
-        testRendererPendingSampleCannotOvertakeNewRoute()
-        testNavigationWriteAcknowledgementTimeoutPolicy()
-        testNavigationDrainIncludesAcknowledgement()
         testGPSQueuePolicy()
         testRendererBenchmarkProtocol()
-        testSecureRendererBenchmarkReadiness()
         testSecureRendererBenchmarkProtocol()
         testRendererCrossRunRetainedMemoryPolicy()
-        testSecureRendererReplayWindowOrdering()
+        testDeviceNetworkJoinTimeoutPolicy()
+        testSecureRendererBenchmarkReadiness()
+        testRendererBenchmarkAtomicDelivery()
+        testATTWriteSubmissionEvidence()
+        testRouteSnapshotManagerAdmission()
+        testNavigationDrainIncludesAcknowledgement()
         testDeviceBLEProtocolConstants()
         testWorkoutDeviceFrameVectors()
         testWorkoutDeviceFrameSentinelsAndSaturation()
@@ -774,6 +743,7 @@ struct NavigationProtocolTests {
         testDeviceTransferHandshakePolicy()
         testDeviceSoundProtocol()
         testDeviceCapabilitiesProtocol()
+        testWatchTransportDiagnosticFieldPolicy()
         testBatteryStatusScreenCapabilityNegotiation()
         testMapProfileCapabilityNegotiation()
         testDeviceCapabilitySynchronizesPowerButtonHonkOnce()
@@ -785,6 +755,7 @@ struct NavigationProtocolTests {
         testBLEManagerDiscoveryLifecycleTransitions()
         testDeviceOwnershipProtocol()
         testBLEManagerRequiresNavigationReadinessForWrites()
+        testRideApplicationAcknowledgementWaitsForATTCallback()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsSeparateMapProfileSettings()
         testBLEManagerFoldsExtendedVisibilityForLegacyFirmware()
@@ -940,6 +911,21 @@ struct NavigationProtocolTests {
         testFirmwareDeviceClientSendsSignedBeginRequest()
         await testOfflineMapRecoveryRoutes()
         print("NavigationProtocolTests passed")
+    }
+
+    static func testWatchTransportDiagnosticFieldPolicy() {
+        let watchTransportFields: Set<String> = [
+            "attemptId", "connectionGeneration", "controllerRole",
+            "highWater", "highWaterBytes", "latencyMs", "origin", "outcome", "phase",
+            "queueBytes", "queueDepth", "reason", "rejectedCount", "replacedCount",
+            "watchSequence", "watchUptimeMs",
+        ]
+        assert(
+            watchTransportFields.isSubset(
+                of: RideDiagnosticsFieldPolicy.allowedKeys
+            ),
+            "every Watch transport diagnostic field is admitted by the privacy policy"
+        )
     }
 
     static func testBikeMapStreamGoldenVector() {
@@ -5392,12 +5378,15 @@ struct NavigationProtocolTests {
             Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8),
             write: { concurrentTransferWrites.append($0) }
         ), "unacknowledged transfer control is admitted during an acknowledged write")
-        assertEqual(concurrentTransferWrites.count, 1,
-                    "transfer control bypasses an unrelated response callback")
+        assertEqual(concurrentTransferWrites.count, 0,
+                    "the unified writer holds transfer control behind an unidentified response callback")
         concurrentTransportReady = true
         concurrentManager.completeNavigationWriteForTesting(
             error: simulatedWriteError
         )
+        assert(waitForMainLoop(timeout: 1) {
+            concurrentTransferWrites.count == 1
+        }, "the unified writer releases transfer control after the matching callback")
         assert(waitForMainLoop(timeout: 3) {
             concurrentStatusWrites.count == 2
         }, "concurrent transfer control preserves the acknowledged write failure callback")
@@ -11339,33 +11328,6 @@ struct NavigationProtocolTests {
                 !remoteSource.contains(".sheet("),
             "the secure console stays in Settings navigation instead of presenting a nested sheet"
         )
-
-        let transferManagerURL = URL(fileURLWithPath:
-            "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift"
-        )
-        guard let transferManagerSource = try? String(
-            contentsOf: transferManagerURL,
-            encoding: .utf8
-        ), let remoteEntryStart = transferManagerSource.range(
-            of: "func enterRemoteDebug("
-        )?.lowerBound,
-        let remoteWaitStart = transferManagerSource.range(
-            of: "private func waitForRemoteDebugSession(",
-            range: remoteEntryStart..<transferManagerSource.endIndex
-        )?.lowerBound else {
-            assert(false, "remote-debug transfer source should be available")
-            return
-        }
-        let remoteEntrySource = String(
-            transferManagerSource[remoteEntryStart..<remoteWaitStart]
-        )
-        assert(
-            remoteEntrySource.contains("try await joinDeviceNetworkIfNeeded(") &&
-                remoteEntrySource.contains(
-                    "statusPath: \"device-debug/v1/info\""
-                ),
-            "hotspot remote debugging joins and probes the pinned device endpoint"
-        )
     }
 
     static func testStravaRouteCatalogUIWiring() {
@@ -13545,10 +13507,12 @@ struct NavigationProtocolTests {
         }
     }
 
-    static func runAsyncTest(_ operation: @escaping () async throws -> Void) {
+    nonisolated static func runAsyncTest(
+        _ operation: @escaping @Sendable () async throws -> Void
+    ) {
         let semaphore = DispatchSemaphore(value: 0)
         var failure: Error?
-        Task {
+        Task.detached {
             do {
                 try await operation()
             } catch {
@@ -13763,6 +13727,46 @@ struct NavigationProtocolTests {
         assertEqual(fullProtectedCoalescingQueue.count, 2,
                     "coalescing rejection preserves the full atomic batch")
 
+        var retainedReplacementWasDropped = false
+        var transactionalReplacementQueue = NavigationWriteQueue(
+            maxCount: 2,
+            maxPendingBytes: 5
+        )
+        assert(transactionalReplacementQueue.enqueueAtomically([
+            NavigationWrite(
+                data: Data([1, 2, 3]),
+                label: "protected-batch"
+            )
+        ]), "a protected batch leaves one small replaceable slot")
+        assert(transactionalReplacementQueue.enqueueCoalescing(
+            NavigationWrite(
+                data: Data([4]),
+                label: "retained-state",
+                onDrop: { retainedReplacementWasDropped = true },
+                coalescingKey: "latest-state"
+            ),
+            prioritized: false
+        ), "the first small replaceable state is admitted")
+        assert(!transactionalReplacementQueue.enqueueCoalescing(
+            NavigationWrite(
+                data: Data([5, 6, 7]),
+                label: "oversized-replacement",
+                coalescingKey: "latest-state"
+            ),
+            prioritized: false
+        ), "a larger replacement rejects transactionally at the byte ceiling")
+        assert(!retainedReplacementWasDropped,
+               "rejected replacement preserves the prior authoritative state")
+        var transactionalReplacementWrites: [Data] = []
+        transactionalReplacementQueue.flush(canSend: { true }) {
+            transactionalReplacementWrites.append($0.data)
+        }
+        assertEqual(
+            transactionalReplacementWrites,
+            [Data([1, 2, 3]), Data([4])],
+            "transactional rejection leaves the protected batch and old state intact"
+        )
+
         var prioritizedQueue = NavigationWriteQueue(maxCount: 3)
         var droppedRegularWrite = false
         prioritizedQueue.enqueue(NavigationWrite(
@@ -13890,7 +13894,7 @@ struct NavigationProtocolTests {
         metricsQueue.removeAll()
 
         let queueMetrics = metricsQueue.snapshotMetricsAndReset()
-        assertEqual(NavigationWriteQueueMetrics.schemaVersion, 2,
+        assertEqual(NavigationWriteQueueMetrics.schemaVersion, 3,
                     "queue metrics schema is explicitly versioned")
         assertEqual(queueMetrics.enqueuedFrames, 3,
                     "queue metrics distinguish accepted frames")
@@ -13914,15 +13918,28 @@ struct NavigationProtocolTests {
                     "queue interval metrics reset after a snapshot")
         assertEqual(metricsQueue.metrics.maxDepth, 0,
                     "an empty queue starts the next interval at zero depth")
-        let cumulativeQueueMetrics = metricsQueue.cumulativeMetrics
-        assertEqual(cumulativeQueueMetrics.enqueuedFrames, 3,
-                    "cumulative metrics survive interval export boundaries")
-        assertEqual(cumulativeQueueMetrics.flushedFrames, 1,
-                    "cumulative metrics retain acknowledged-queue writes")
-        assertEqual(cumulativeQueueMetrics.coalescedFrames(for: .gpsPosition), 1,
-                    "cumulative metrics retain GPS coalescing attribution")
-        assertEqual(cumulativeQueueMetrics.currentDepth, 0,
-                    "cumulative metrics report the live queue depth")
+
+        var byteQueue = NavigationWriteQueue(
+            maxCount: 4,
+            priorityMaxCount: 2,
+            maxPendingBytes: 4,
+            priorityMaxPendingBytes: 3
+        )
+        assert(byteQueue.enqueueAtomically([
+            NavigationWrite(data: Data([1, 2]), label: "byte-1"),
+            NavigationWrite(data: Data([3, 4]), label: "byte-2"),
+        ]), "an atomic batch may fill the regular byte ceiling")
+        assert(!byteQueue.enqueueAtomically([
+            NavigationWrite(data: Data([5]), label: "byte-overflow")
+        ]), "regular byte overflow rejects the entire new batch")
+        assert(byteQueue.enqueuePrioritizedAtomically([
+            NavigationWrite(data: Data([6, 7, 8]), label: "priority-bytes")
+        ]), "the independent priority byte lane admits its exact ceiling")
+        assert(!byteQueue.enqueuePrioritizedAtomically([
+            NavigationWrite(data: Data([9]), label: "priority-overflow")
+        ]), "priority byte overflow is rejected without eviction")
+        assertEqual(byteQueue.pendingByteCount, 7,
+                    "queue exposes the combined bounded byte footprint")
 
         var boundaryQueue = NavigationWriteQueue(maxCount: 3)
         boundaryQueue.enqueue(NavigationWrite(data: Data([6]), label: "pending-1"))
@@ -13953,12 +13970,21 @@ struct NavigationProtocolTests {
         assertEqual(GPSPositionWriteRouting.route(
             hasNativeWriteWithResponse: true,
             hasNativeWriteWithoutResponse: true,
+            payloadLength: 36,
+            protectionOverhead: 22,
+            withResponseMaximum: 58,
+            withoutResponseMaximum: 58
+        ), .nativeWithResponse,
+                    "protected 36-byte GPS quality packets fit the acknowledged route")
+        assertEqual(GPSPositionWriteRouting.route(
+            hasNativeWriteWithResponse: true,
+            hasNativeWriteWithoutResponse: true,
             payloadLength: 30,
             protectionOverhead: 22,
             withResponseMaximum: 512,
             withoutResponseMaximum: 512
         ), .nativeWithResponse,
-                    "ordinary GPS preserves acknowledged native delivery")
+                    "map-driving GPS prefers acknowledged native delivery")
         assertEqual(GPSPositionWriteRouting.route(
             hasNativeWriteWithResponse: true,
             hasNativeWriteWithoutResponse: false,
@@ -13985,7 +14011,7 @@ struct NavigationProtocolTests {
             withResponseMaximum: 20,
             withoutResponseMaximum: 512
         ), .nativeWithoutResponse,
-                    "GPS uses unacknowledged native delivery when the acknowledged MTU cannot fit")
+                    "GPS uses native write-without-response only when acknowledgment is unavailable")
         assertEqual(GPSPositionWriteRouting.route(
             hasNativeWriteWithResponse: true,
             hasNativeWriteWithoutResponse: true,
@@ -13995,28 +14021,6 @@ struct NavigationProtocolTests {
             withoutResponseMaximum: 20
         ), .navigationFallback,
                     "insufficient native MTU falls back without dropping current GPS")
-
-        assertEqual(RendererBenchmarkSampleWriteRouting.route(
-            hasNativeWriteWithResponse: true,
-            payloadLength: RendererBenchmarkSamplePacket.maximumByteCount,
-            protectionOverhead: AuthenticatedBLEWriteSession.frameOverhead,
-            withResponseMaximum: 107
-        ), .nativeWithResponse,
-                    "the protected atomic renderer sample requires acknowledged native delivery")
-        assertEqual(RendererBenchmarkSampleWriteRouting.route(
-            hasNativeWriteWithResponse: true,
-            payloadLength: RendererBenchmarkSamplePacket.maximumByteCount,
-            protectionOverhead: AuthenticatedBLEWriteSession.frameOverhead,
-            withResponseMaximum: 106
-        ), .unavailable,
-                    "an acknowledged sample that cannot fit fails closed")
-        assertEqual(RendererBenchmarkSampleWriteRouting.route(
-            hasNativeWriteWithResponse: false,
-            payloadLength: RendererBenchmarkSamplePacket.maximumByteCount,
-            protectionOverhead: AuthenticatedBLEWriteSession.frameOverhead,
-            withResponseMaximum: 512
-        ), .unavailable,
-                    "write-without-response is never a secure-sweep fallback")
 
         let channelManager = BLEManager()
         let writeSession = AuthenticatedBLEWriteSession(
@@ -14047,37 +14051,6 @@ struct NavigationProtocolTests {
         )
         assert(protectedGPS != protectedNavigation,
                "native GPS uses its characteristic-bound authenticated channel")
-
-        let gapSession = AuthenticatedBLEWriteSession(
-            ownerKey: Data((0..<32).map(UInt8.init)),
-            deviceID: "00112233445566778899aabbccddeeff",
-            clientNonce: "102132435465768798a9babbdcddedef",
-            serverNonce: "ffeeddccbbaa99887766554433221100"
-        )
-        let firstSubmittedGPS = gapSession.frame(
-            payload: Data([1]),
-            channel: .gps
-        )
-        let droppedAfterAssignmentGPS = gapSession.frame(
-            payload: Data([2]),
-            channel: .gps
-        )
-        let nextSubmittedGPS = gapSession.frame(
-            payload: Data([3]),
-            channel: .gps
-        )
-        func protectedSequence(_ frame: Data?) -> UInt32? {
-            guard let frame, frame.count >= 6 else { return nil }
-            return frame[2..<6].reduce(UInt32(0)) {
-                ($0 << 8) | UInt32($1)
-            }
-        }
-        assertEqual(protectedSequence(firstSubmittedGPS), 1,
-                    "the first GPS state starts channel-four sequencing")
-        assertEqual(protectedSequence(droppedAfterAssignmentGPS), 2,
-                    "a submitted but lost GPS state consumes its protected sequence")
-        assertEqual(protectedSequence(nextSubmittedGPS), 3,
-                    "later GPS state remains monotonic across an intentional gap")
 
         var transportReady = false
         var queue = NavigationWriteQueue(maxCount: 4, priorityMaxCount: 2)
@@ -14265,342 +14238,6 @@ struct NavigationProtocolTests {
                     "oldest age follows the newest pending GPS replacement")
         assertEqual(ageQueue.metrics.retryAgeMs, 750,
                     "retry age survives replacement while backpressure remains active")
-    }
-
-    static func testSharedNavigationQueueRendererStallReproduction() {
-        var acknowledgedWriteInFlight = true
-        var queue = NavigationWriteQueue(maxCount: 6)
-        var sent: [String] = []
-
-        assert(queue.enqueueAtomically([
-            NavigationWrite(
-                data: Data([0x40]),
-                label: "queued route",
-                transportExpectsWriteResponse: true,
-                writeClass: .route
-            )
-        ]), "an ordered route can wait behind an acknowledged settings write")
-
-        for sample in UInt8(223)...UInt8(226) {
-            assert(queue.enqueueCoalescing(NavigationWrite(
-                data: Data([sample]),
-                label: "gps-\(sample)",
-                transportExpectsWriteResponse: true,
-                writeClass: .gpsPosition,
-                coalescingKey: DeviceBLEProtocol.gpsPositionCoalescingKey
-            ), prioritized: false), "replay GPS remains bounded while transport is blocked")
-            assert(queue.enqueueCoalescing(NavigationWrite(
-                data: Data([sample]),
-                label: "marker-\(sample)",
-                transportExpectsWriteResponse: true,
-                writeClass: .settingsControl,
-                coalescingKey: "renderer.benchmark.marker"
-            ), prioritized: false), "replay marker remains bounded while transport is blocked")
-        }
-
-        queue.flush(canSend: { write in
-            write.transportExpectsWriteResponse != true ||
-                !acknowledgedWriteInFlight
-        }) { write in
-            sent.append(write.label)
-        }
-        assert(sent.isEmpty,
-               "one acknowledged settings write blocks route, GPS, and marker progress")
-        assertEqual(queue.count, 3,
-                    "blocked replay retains one route and only the newest GPS/marker pair")
-        assertEqual(queue.metrics.coalescedFrames(for: .gpsPosition), 3,
-                    "three stale GPS samples are coalesced during the observed stall")
-        assertEqual(queue.metrics.coalescedFrames(for: .settingsControl), 3,
-                    "three stale renderer markers are coalesced during the observed stall")
-
-        acknowledgedWriteInFlight = false
-        queue.flush(canSend: { _ in true }) { write in
-            sent.append(write.label)
-        }
-        assertEqual(sent, ["queued route", "gps-226", "marker-226"],
-                    "delivery recovers with the newest replay pair only after the ACK clears")
-    }
-
-    @MainActor
-    static func testRendererLatestStateScheduling() {
-        let manager = BLEManager()
-        manager.isConnected = true
-        manager.isNavigationReady = true
-        var transportReady = false
-        var writes: [UInt8] = []
-        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
-            maximumWriteLength: 512,
-            expectsWriteResponse: true,
-            canSend: { transportReady },
-            write: { data in
-                writes.append(data[0])
-                transportReady = false
-            }
-        ))
-
-        guard let replayToken = manager.beginDeviceGPSOverride() else {
-            assert(false, "renderer transaction fixture acquires the GPS lease")
-            return
-        }
-        assert(manager.enqueueRendererBenchmarkRouteWriteForTesting(
-            Data([0x40]),
-            canSend: { transportReady },
-            write: { data in
-                writes.append(data[0])
-                transportReady = false
-            }
-        ), "an earlier route enters the acknowledged ordered queue")
-        assert(manager.enqueueRendererBenchmarkSampleWriteForTesting(
-            Data([0x41]),
-            canSend: { transportReady },
-            write: { data in
-                writes.append(data[0])
-                transportReady = false
-            }
-        ), "the corresponding sample follows its route")
-
-        for value in UInt8(0x42)...UInt8(0x50) {
-            if value.isMultiple(of: 2) {
-                assert(manager.enqueueRendererBenchmarkRouteWriteForTesting(
-                    Data([value &+ 0x20]),
-                    canSend: { transportReady },
-                    write: { data in
-                        writes.append(data[0])
-                        transportReady = false
-                    }
-                ), "new route state coalesces while transport is blocked")
-            }
-            assert(manager.enqueueRendererBenchmarkSampleWriteForTesting(
-                Data([value]),
-                canSend: { transportReady },
-                write: { data in
-                    writes.append(data[0])
-                    transportReady = false
-                }
-            ), "new sample state coalesces while transport is blocked")
-        }
-
-        assertEqual(
-            manager.navigationPendingWriteCountForTesting,
-            2,
-            "prolonged backpressure retains one newest route and one newest sample"
-        )
-        assert(writes.isEmpty, "blocked transport submits no replay state")
-
-        transportReady = true
-        manager.flushPendingNavigationWritesForTesting()
-        assertEqual(
-            writes,
-            [0x70],
-            "the newest route advances before its corresponding newest sample"
-        )
-        assertEqual(
-            manager.navigationPendingWriteCountForTesting,
-            1,
-            "the sample remains pending until the route acknowledgement"
-        )
-
-        transportReady = true
-        manager.completeNavigationWriteForTesting(error: nil)
-        assertEqual(
-            writes,
-            [0x70, 0x50],
-            "the newest sample cannot overtake its acknowledged route"
-        )
-
-        transportReady = true
-        manager.completeNavigationWriteForTesting(error: nil)
-        assertEqual(
-            manager.navigationPendingWriteCountForTesting,
-            0,
-            "both halves settle after their acknowledgements"
-        )
-
-        let timeoutManager = BLEManager()
-        timeoutManager.isConnected = true
-        timeoutManager.isNavigationReady = true
-        var timeoutRecoveries = 0
-        timeoutManager.installNavigationWriteEndpoint(
-            NavigationWriteEndpoint(
-                maximumWriteLength: 512,
-                expectsWriteResponse: true,
-                canSend: { true },
-                write: { _ in }
-            )
-        )
-        timeoutManager.installNavigationWriteStallRecoveryForTesting(
-            timeout: 0.01,
-            recovery: { timeoutRecoveries += 1 }
-        )
-        assert(timeoutManager.enqueueRendererBenchmarkRouteWriteForTesting(
-            Data([0x71]),
-            canSend: { true },
-            write: { _ in }
-        ), "bounded-ack fixture submits a route")
-        assert(
-            waitForMainLoop(timeout: 1) { timeoutRecoveries == 1 },
-            "a missing renderer acknowledgement triggers bounded recovery"
-        )
-        assert(
-            !timeoutManager.isNavigationReady,
-            "bounded renderer recovery closes the unusable transport"
-        )
-
-        transportReady = false
-        assert(manager.enqueueRendererBenchmarkRouteWriteForTesting(
-            Data([0x72]),
-            canSend: { transportReady },
-            write: { _ in }
-        ), "cleanup fixture stages a route")
-        assert(manager.enqueueRendererBenchmarkSampleWriteForTesting(
-            Data([0x52]),
-            canSend: { transportReady },
-            write: { _ in }
-        ), "cleanup fixture stages a sample")
-        manager.endDeviceGPSOverride(replayToken)
-        assertEqual(
-            manager.navigationPendingWriteCountForTesting,
-            0,
-            "ending the replay lease clears every unsent benchmark transaction"
-        )
-    }
-
-    @MainActor
-    static func testRendererPendingSampleCannotOvertakeNewRoute() {
-        let manager = BLEManager()
-        manager.isConnected = true
-        manager.isNavigationReady = true
-        var transportReady = false
-        var writes: [UInt8] = []
-        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
-            maximumWriteLength: 512,
-            expectsWriteResponse: true,
-            canSend: { transportReady },
-            write: { data in
-                writes.append(data[0])
-                transportReady = false
-            }
-        ))
-        guard let replayToken = manager.beginDeviceGPSOverride() else {
-            assert(false, "sample-before-route fixture acquires the GPS lease")
-            return
-        }
-
-        assert(manager.enqueueRendererBenchmarkSampleWriteForTesting(
-            Data([0x41]),
-            canSend: { transportReady },
-            write: { data in
-                writes.append(data[0])
-                transportReady = false
-            }
-        ), "an old sample is initially pending")
-        assert(manager.enqueueRendererBenchmarkRouteWriteForTesting(
-            Data([0x60]),
-            canSend: { transportReady },
-            write: { data in
-                writes.append(data[0])
-                transportReady = false
-            }
-        ), "a newer route supersedes the old pending sample")
-        assert(manager.enqueueRendererBenchmarkSampleWriteForTesting(
-            Data([0x42]),
-            canSend: { transportReady },
-            write: { data in
-                writes.append(data[0])
-                transportReady = false
-            }
-        ), "the sample paired with the newer route is retained")
-        assertEqual(
-            manager.navigationPendingWriteCountForTesting,
-            2,
-            "only the newer route and its matching sample remain"
-        )
-
-        transportReady = true
-        manager.flushPendingNavigationWritesForTesting()
-        assertEqual(writes, [0x60],
-                    "the newer route reaches CoreBluetooth first")
-        transportReady = true
-        manager.completeNavigationWriteForTesting(error: nil)
-        assertEqual(writes, [0x60, 0x42],
-                    "the obsolete sample never overtakes the newer route")
-        transportReady = true
-        manager.completeNavigationWriteForTesting(error: nil)
-        manager.endDeviceGPSOverride(replayToken)
-    }
-
-    @MainActor
-    static func testNavigationDrainIncludesAcknowledgement() {
-        let manager = BLEManager()
-        manager.isConnected = true
-        manager.isNavigationReady = true
-        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
-            maximumWriteLength: 20,
-            expectsWriteResponse: true,
-            canSend: { true },
-            write: { _ in }
-        ))
-        assert(manager.requestDeviceCapabilities(),
-               "drain fixture starts one acknowledged setup write")
-        assert(manager.navigationHasUnsettledWritesForTesting,
-               "queue drain includes the outstanding acknowledgement")
-        manager.completeNavigationWriteForTesting(error: nil)
-        assert(!manager.navigationHasUnsettledWritesForTesting,
-               "queue drain settles after acknowledgement")
-        let successfulCheckpoint = manager.navigationWriteDrainCheckpoint()
-        assert(
-            !manager.navigationWriteDrainFailedForTesting(
-                since: successfulCheckpoint
-            ),
-            "a successful acknowledged transaction drains cleanly"
-        )
-
-        let failedManager = BLEManager()
-        failedManager.isConnected = true
-        failedManager.isNavigationReady = true
-        var failedWrites: [UInt8] = []
-        failedManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
-            maximumWriteLength: 512,
-            expectsWriteResponse: true,
-            canSend: { true },
-            write: { failedWrites.append($0[0]) }
-        ))
-        guard let replayToken = failedManager.beginDeviceGPSOverride() else {
-            assert(false, "failed-write fixture acquires the GPS lease")
-            return
-        }
-        let failedCheckpoint = failedManager.navigationWriteDrainCheckpoint()
-        assert(failedManager.enqueueRendererBenchmarkRouteWriteForTesting(
-            Data([0x61]),
-            canSend: { true },
-            write: { failedWrites.append($0[0]) }
-        ), "failed-write fixture submits its route")
-        assert(failedManager.enqueueRendererBenchmarkSampleWriteForTesting(
-            Data([0x62]),
-            canSend: { true },
-            write: { failedWrites.append($0[0]) }
-        ), "failed-write fixture stages the dependent sample")
-        failedManager.completeNavigationWriteForTesting(error: NSError(
-            domain: "RendererBenchmarkDrainTests",
-            code: 1
-        ))
-        assertEqual(
-            failedWrites,
-            [0x61],
-            "a failed route acknowledgement never releases its dependent sample"
-        )
-        assertEqual(
-            failedManager.navigationPendingWriteCountForTesting,
-            0,
-            "the invalid dependent sample is discarded after route failure"
-        )
-        assert(
-            failedManager.navigationWriteDrainFailedForTesting(
-                since: failedCheckpoint
-            ),
-            "a write error cannot be reported as a successful drain"
-        )
-        failedManager.endDeviceGPSOverride(replayToken)
     }
 
     static func testRendererBenchmarkProtocol() {
@@ -14920,6 +14557,385 @@ struct NavigationProtocolTests {
                     "a newer direct snapshot invalidates older partial chunks")
     }
 
+
+    static func testRendererBenchmarkAtomicDelivery() {
+        // Full-size atomic samples use the same protected native routing as
+        // ordinary GPS, including MTU boundaries and legacy compatibility.
+        for (withResponse, withoutResponse, acknowledgedLimit, creditLimit, expected) in [
+            (true, true, 107, 107, GPSPositionWriteRoute.nativeWithResponse),
+            (true, false, 107, 0, .nativeWithResponse),
+            (false, true, 0, 107, .nativeWithoutResponse),
+            (true, true, 106, 107, .nativeWithoutResponse),
+            (true, true, 106, 106, .navigationFallback),
+            (false, false, 512, 512, .navigationFallback),
+        ] {
+            assertEqual(GPSPositionWriteRouting.route(
+                hasNativeWriteWithResponse: withResponse,
+                hasNativeWriteWithoutResponse: withoutResponse,
+                payloadLength: 85, protectionOverhead: 22,
+                withResponseMaximum: acknowledgedLimit,
+                withoutResponseMaximum: creditLimit
+            ), expected, "atomic replay respects native properties and protected MTU")
+        }
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        var ready = false
+        var writes: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 185,
+            expectsWriteResponse: false,
+            canSend: { ready },
+            write: { writes.append($0) }
+        ))
+        let hash = Data(repeating: 0x12, count: 32)
+        func send(_ index: Int) -> Bool {
+            manager.sendRendererBenchmarkSample(
+                gpsPosition: Data(repeating: UInt8(index), count: 36),
+                fixtureSHA256: hash, sampleIndex: index,
+                sampleCount: 120, loop: 0
+            )
+        }
+        assert(!send(0), "atomic replay requires negotiated firmware capability")
+        var cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8)
+        cap2.append(contentsOf: [1, 0, 0, 0x84, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2),
+               "atomic replay capability is consumed")
+        assert(!send(0), "atomic replay requires the exclusive GPS lease")
+        guard let lease = manager.beginDeviceGPSOverride() else {
+            assert(false, "atomic replay acquires GPS lease")
+            return
+        }
+        assert(send(1), "first complete GPS and marker queue together")
+        assert(send(2), "latest complete sample replaces a backpressured sample")
+        assertEqual(writes.count, 0, "transport credit is respected")
+        ready = true
+        manager.flushPendingNavigationWritesForTesting()
+        assertEqual(writes.count, 1, "only the newest atomic sample is dispatched")
+        assertEqual(String(data: writes[0].prefix(4), encoding: .utf8), "RBS1",
+                    "native replay preserves atomic framing")
+        assertEqual(writes[0][5], 2, "latest GPS is paired with latest marker")
+        assertEqual(readUInt16LE(writes[0], offset: 77), 2,
+                    "marker index matches its GPS inside the same payload")
+        ready = false
+        assert(send(3), "another sample can wait for credit")
+        manager.endDeviceGPSOverride(lease)
+        ready = true
+        manager.flushPendingNavigationWritesForTesting()
+        assertEqual(writes.filter {
+            String(data: $0.prefix(4), encoding: .utf8) == "RBS1"
+        }.count, 1, "stop discards pending replay state")
+        assert(writes.count > 1, "stop preserves unrelated setup traffic")
+        assert(!send(4), "ended lease cannot emit stale replay")
+
+        let acknowledged = BLEManager()
+        assert(acknowledged.handleDeviceCapabilitiesNotification(cap2),
+               "acknowledged replay negotiates the same atomic capability")
+        acknowledged.isConnected = true
+        acknowledged.isNavigationReady = true
+        var acknowledgedWrites: [Data] = []
+        acknowledged.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 185, expectsWriteResponse: true,
+            canSend: { true }, write: { acknowledgedWrites.append($0) }
+        ))
+        guard let acknowledgedLease = acknowledged.beginDeviceGPSOverride() else {
+            assert(false, "acknowledged replay obtains exclusive GPS lease")
+            return
+        }
+        func sendAcknowledged(_ index: Int) -> Bool {
+            acknowledged.sendRendererBenchmarkSample(
+                gpsPosition: Data(repeating: UInt8(index), count: 36),
+                fixtureSHA256: hash, sampleIndex: index, sampleCount: 120, loop: 0
+            )
+        }
+        assert(sendAcknowledged(1), "acknowledged native replay is supported")
+        assert(acknowledged.hasPendingATTWriteForTesting,
+               "atomic replay enters the shared ATT response wait")
+        assert(sendAcknowledged(2) && sendAcknowledged(3),
+               "ticks during ATT wait retain the newest complete sample")
+        assertEqual(acknowledgedWrites.count, 1,
+                    "no sample bypasses the outstanding ATT response")
+        acknowledged.completeNavigationWriteForTesting(error: nil)
+        assertEqual(acknowledgedWrites.count, 2,
+                    "next sample progresses on ATT completion without a credit callback")
+        assertEqual(acknowledgedWrites[1][5], 3,
+                    "acknowledged coalescing retains the latest GPS")
+        assertEqual(readUInt16LE(acknowledgedWrites[1], offset: 77), 3,
+                    "acknowledged coalescing keeps GPS and marker paired")
+        assert(sendAcknowledged(4), "a later tick waits behind the second ATT write")
+        acknowledged.endDeviceGPSOverride(acknowledgedLease)
+        acknowledged.completeNavigationWriteForTesting(error: nil)
+        assertEqual(acknowledgedWrites.count, 2,
+                    "Stop drops pending samples without replaying completed writes")
+        assert(!acknowledged.hasPendingATTWriteForTesting,
+               "the final ATT completion releases the writer")
+        assert(!sendAcknowledged(5), "stopped acknowledged replay cannot emit")
+
+        var queue = NavigationWriteQueue(maxCount: 8)
+        _ = queue.enqueueCoalescing(NavigationWrite(
+            data: Data([1]), label: "one", writeClass: .gpsPosition,
+            coalescingKey: "sample"
+        ), prioritized: false)
+        _ = queue.snapshotMetricsAndReset()
+        _ = queue.enqueueCoalescing(NavigationWrite(
+            data: Data([2]), label: "two", writeClass: .gpsPosition,
+            coalescingKey: "sample"
+        ), prioritized: false)
+        assertEqual(queue.cumulativeMetrics.enqueuedFrames, 2,
+                    "benchmark counters survive logging interval reset")
+        assertEqual(queue.cumulativeMetrics.coalescedFrames, 1,
+                    "cumulative metrics retain coalescing")
+        _ = queue.snapshotMetricsAndReset()
+        assertEqual(queue.cumulativeMetrics.enqueuedFrames, 2,
+                    "repeated snapshots do not double-count")
+        assertEqual(queue.cumulativeMetrics.currentDepth, 1,
+                    "cumulative queue depth remains a live gauge")
+    }
+
+    static func testRouteSnapshotManagerAdmission() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        var writes: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 185, expectsWriteResponse: true,
+            canSend: { true }, write: { writes.append($0) }
+        ))
+        assert(manager.enqueueRouteSnapshotForTesting(Data([1])), "first route enters ATT")
+        let originalID = manager.rendererBenchmarkBLETransportEvidence().inFlightWriteID
+        for index in 2...100 {
+            assert(manager.enqueueRouteSnapshotForTesting(Data([UInt8(index)])),
+                   "new unsent route replaces obsolete snapshot through real admission")
+        }
+        let blocked = manager.rendererBenchmarkBLETransportEvidence()
+        assertEqual(writes.count, 1, "route replacement cannot bypass ATT wait")
+        assertEqual(blocked.inFlightWriteID, originalID, "pending identity unchanged")
+        assertEqual(blocked.queueDepth, 1, "manager bounds pending route backlog")
+        assertEqual(blocked.routeCoalescedFrames, 98, "manager uses snapshot admission")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(writes, [Data([1]), Data([100])], "only newest unsent route recovers")
+        assert(manager.enqueueRouteSnapshotForTesting(Data()), "empty clear remains admitted")
+        assert(manager.enqueueRouteSnapshotForTesting(Data([101])), "route after clear")
+        assert(manager.enqueueRouteSnapshotForTesting(Data([102])), "replace only after clear")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(writes.last, Data(), "clear boundary is not coalesced away")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(writes.last, Data([102]), "latest route follows clear")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assert(!manager.hasPendingATTWriteForTesting, "writer drains normally")
+    }
+
+    static func testATTWriteSubmissionEvidence() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 185, expectsWriteResponse: true,
+            canSend: { true }, write: { _ in }
+        ))
+        assert(manager.requestDeviceCapabilities(), "diagnostic test queues an ATT write")
+        let prepared = manager.rendererBenchmarkBLETransportEvidence()
+        guard let writeID = prepared.inFlightWriteID else {
+            assert(false, "ATT preparation assigns a correlation ID")
+            return
+        }
+        assertEqual(prepared.inFlightSubmissionStage, .prepared,
+                    "dequeuing is not proof of CoreBluetooth submission")
+        manager.noteATTWriteSubmissionForTesting(
+            writeID: writeID, stage: .submitted, matchingCharacteristic: false
+        )
+        assertEqual(manager.rendererBenchmarkBLETransportEvidence().inFlightSubmissionStage,
+                    .prepared, "a different characteristic cannot tag this write")
+        manager.noteATTWriteSubmissionForTesting(writeID: writeID, stage: .callingCoreBluetooth)
+        assertEqual(manager.rendererBenchmarkBLETransportEvidence().inFlightSubmissionStage,
+                    .callingCoreBluetooth, "API entry is distinct from return")
+        manager.noteATTWriteSubmissionForTesting(writeID: writeID, stage: .submitted)
+        manager.timeoutATTWriteForTesting()
+        let timedOut = manager.rendererBenchmarkBLETransportEvidence()
+        assert(timedOut.inFlightWriteID == nil && timedOut.lastTimedOutWriteID == writeID,
+               "timeout evidence survives clearing the pending write")
+        assertEqual(timedOut.lastTimedOutSubmissionStage, .submitted,
+                    "timeout records that CoreBluetooth returned without an ACK")
+        let timing = timedOut.lastWriteTiming!
+        assertEqual(timing.writeID, writeID, "timing uses the real pending ATT identity")
+        assert(timing.apiEntryAtUptimeMs != nil && timing.apiReturnAtUptimeMs != nil,
+               "actual manager stage transitions retain API timestamps")
+        assert(timing.delegateEntryAtUptimeMs == nil,
+               "timeout does not invent a delegate callback")
+        assertEqual(timing.outcome, "timeout", "timing retains completion reason")
+        assert(timedOut.slowestWriteTiming != nil, "tail evidence survives pending-slot removal")
+        assert(manager.requestDeviceCapabilities(), "next ATT write starts independently")
+        manager.noteATTWriteSubmissionForTesting(writeID: writeID, stage: .submitted)
+        assertEqual(manager.rendererBenchmarkBLETransportEvidence().inFlightSubmissionStage,
+                    .prepared, "a delayed return cannot mark a successor write submitted")
+        manager.ignoreATTWriteCallbackForTesting()
+        let next = manager.rendererBenchmarkBLETransportEvidence()
+        assertEqual(next.ignoredWriteCallbacks, 1, "unmatched callbacks are counted")
+        assertEqual(next.lastTimedOutSubmissionStage, .submitted,
+                    "new activity preserves the last timeout evidence")
+        guard let nextID = next.inFlightWriteID else { return }
+        manager.noteATTWriteSubmissionForTesting(writeID: nextID, stage: .rejectedBeforeSubmission)
+        manager.timeoutATTWriteForTesting()
+        let rejected = manager.rendererBenchmarkBLETransportEvidence()
+        assertEqual(rejected.lastTimedOutSubmissionStage, .rejectedBeforeSubmission,
+                    "a local preparation failure is distinguishable from a missing ACK")
+        guard let encoded = try? JSONEncoder().encode(rejected),
+              var legacy = try? JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        else { assert(false, "submission evidence encodes"); return }
+        assert(RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(jsonData: encoded),
+               "submission evidence contains no credentials or packet contents")
+        for key in ["inFlightWriteID", "inFlightSubmissionStage", "lastTimedOutWriteID",
+                    "lastTimedOutSubmissionStage", "ignoredWriteCallbacks",
+                    "lastWriteTiming", "slowestWriteTiming"] {
+            legacy.removeValue(forKey: key)
+        }
+        let legacyData = try! JSONSerialization.data(withJSONObject: legacy)
+        let decoded = try! JSONDecoder().decode(RendererBenchmarkBLETransportEvidence.self,
+                                                from: legacyData)
+        assert(decoded.lastTimedOutSubmissionStage == nil && decoded.ignoredWriteCallbacks == nil,
+               "legacy evidence remains unknown rather than inventing submission state")
+        assert(decoded.lastWriteTiming == nil && decoded.slowestWriteTiming == nil,
+               "older app traces need no new timing fields")
+        for key in ["attemptId", "connectionGeneration", "class", "bytes", "phase", "reason", "kind"] {
+            assert(RideDiagnosticsFieldPolicy.isAllowed(key),
+                   "submission trace metadata survives the recorder privacy filter")
+        }
+    }
+
+    static func testNavigationDrainIncludesAcknowledgement() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            expectsWriteResponse: true,
+            canSend: { true },
+            write: { _ in }
+        ))
+        assert(manager.requestDeviceCapabilities(), "setup request queues")
+        assert(manager.navigationHasUnsettledWritesForTesting,
+               "drain must include the outstanding ATT acknowledgement")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assert(!manager.navigationHasUnsettledWritesForTesting,
+               "setup settles only after its acknowledgement")
+    }
+
+    static func testDeviceNetworkJoinTimeoutPolicy() {
+        let transferManagerURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift"
+        )
+        guard let transferManagerSource = try? String(
+            contentsOf: transferManagerURL,
+            encoding: .utf8
+        ), let remoteEntryStart = transferManagerSource.range(
+            of: "func enterRemoteDebug("
+        )?.lowerBound,
+        let remoteWaitStart = transferManagerSource.range(
+            of: "private func waitForRemoteDebugSession(",
+            range: remoteEntryStart..<transferManagerSource.endIndex
+        )?.lowerBound else {
+            assert(false, "remote-debug transfer source should be available")
+            return
+        }
+        let remoteEntrySource = String(
+            transferManagerSource[remoteEntryStart..<remoteWaitStart]
+        )
+        assert(
+            remoteEntrySource.contains("try await joinDeviceNetworkIfNeeded(") &&
+                remoteEntrySource.contains(
+                    "statusPath: \"device-debug/v1/info\""
+                ),
+            "hotspot remote debugging joins and probes the pinned device endpoint"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.configurationApplyTimeout >= 10 &&
+                DeviceNetworkJoinPolicy.configurationApplyTimeout <= 30,
+            "the system hotspot prompt has a sufficient but bounded callback window"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.currentNetworkFetchTimeout > 0 &&
+                DeviceNetworkJoinPolicy.currentNetworkFetchTimeout <= 3,
+            "current-network inspection cannot stall accessory association"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.shouldRetry(
+                domain: DeviceNetworkJoinPolicy.joinErrorDomain,
+                code: DeviceNetworkJoinPolicy.configurationApplyTimeoutCode
+            ),
+            "an unresolved system apply cannot overlap a second apply"
+        )
+        let applyTimeout =
+            DeviceNetworkJoinPolicy.configurationApplyTimeoutError
+        assertEqual(
+            applyTimeout.domain,
+            DeviceNetworkJoinPolicy.joinErrorDomain,
+            "the bounded apply failure retains its typed diagnostic domain"
+        )
+        assertEqual(
+            applyTimeout.code,
+            DeviceNetworkJoinPolicy.configurationApplyTimeoutCode,
+            "the bounded apply failure retains its typed diagnostic code"
+        )
+    }
+
+    static func testRendererCrossRunRetainedMemoryPolicy() {
+        assert(
+            RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [46_000, 44_500, 43_000],
+                allowedDecline: 1_024
+            ),
+            "progressive retained DMA decline is rejected"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [46_000, 44_000, 43_990],
+                allowedDecline: 1_024
+            ),
+            "one-time transition followed by a plateau is accepted"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [46_000, 45_920, 46_010],
+                allowedDecline: 1_024
+            ),
+            "stable retained memory with jitter is accepted"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [39_307, 37_803, 37_779],
+                allowedDecline: 1_024
+            ),
+            "the physical three-point minimum series is not progressive"
+        )
+
+        let sourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift"
+        )
+        guard let source = try? String(
+            contentsOf: sourceURL,
+            encoding: .utf8
+        ), let start = source.range(
+            of: "    static func applyCrossRunMemoryGates("
+        ), let end = source.range(
+            of: "    static func aggregate(",
+            range: start.upperBound..<source.endIndex
+        ) else {
+            assert(false, "cross-run memory source contract is readable")
+            return
+        }
+        let body = String(source[start.lowerBound..<end.lowerBound])
+        assert(
+            body.contains("finalSnapshot.memory.dmaHeap.free") &&
+                body.contains("finalSnapshot.memory.dmaHeap.largestBlock"),
+            "cross-run DMA gates use terminal current state"
+        )
+        assert(
+            !body.contains(".summary.minimumDmaFree") &&
+                !body.contains(".summary.minimumDmaLargest"),
+            "heterogeneous window minima are not treated as retained state"
+        )
+    }
+
     static func testSecureRendererBenchmarkProtocol() {
         assertEqual(
             SecureRendererBenchmarkHTTPPolicy.connectionReuseHeaderName,
@@ -14993,6 +15009,10 @@ struct NavigationProtocolTests {
             "the in-app sweep uses the exact firmware benchmark gate contract"
         )
         assertEqual(gates.schema, 1, "secure benchmark gates retain schema 1")
+        assertEqual(gates.absolute.maximumCoverageRejectedRenders, 4,
+                    "temporary coverage allowance remains explicit until issue 402 is resolved")
+        assertEqual(gates.absolute.maximumStaleRenders, 3,
+                    "temporary coverage allowance does not relax the independent stale gate")
         assertEqual(
             gates.absolute.minimumMetricsSampleFraction,
             0.3,
@@ -15127,9 +15147,90 @@ struct NavigationProtocolTests {
             assert(false, "secure benchmark decodes the firmware metrics contract")
             return
         }
-        assert(
-            metrics.replayTransport == nil,
-            "the app remains compatible with firmware before replay-transport diagnostics"
+        let sample = RendererBenchmarkEvaluator.sample(
+            snapshot: metrics,
+            elapsedSeconds: 42
+        )
+        assertEqual(metrics.remoteDebug.lastFrameSnapshotWaitUs, 110,
+                    "secure benchmark retains frame snapshot wait evidence")
+        assertEqual(metrics.replayTransport?.markerRejectedNoActiveWindow, 221,
+                    "export retains the missing-window diagnostic counter")
+        assertEqual(metrics.memory.dmaHeap.windowMinimumFreeAttribution?.frameTransferActive, true,
+                    "export retains DMA minimum attribution")
+        let interrupted = RendererBenchmarkInterruptedEvidence(
+            schema: 1, source: "bicino-debug-secure-sweep-interrupted-v1",
+            automatedPassed: false, stopped: true, reason: "Stopped",
+            cleanupRestoredCurrent: true, completedRuns: [],
+            partialSamples: [], lastSnapshot: metrics
+        )
+        let interruptedData = try! JSONEncoder().encode(interrupted)
+        let interruptedObject = try! JSONSerialization.jsonObject(
+            with: interruptedData
+        ) as! [String: Any]
+        assertEqual(interruptedObject["automatedPassed"] as? Bool, false,
+                    "partial evidence cannot claim a completed passing run")
+        assert(RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
+            jsonData: interruptedData
+        ), "partial evidence uses the same secret-free export policy")
+        assertEqual(metrics.remoteDebug.lastHttpActualBytes, 434_344,
+                    "secure benchmark retains actual response body bytes")
+        assertEqual(metrics.remoteDebug.lastHttpZeroWriteCalls, 4,
+                    "secure benchmark retains TLS zero-write evidence")
+        assertEqual(metrics.remoteDebug.lastHttpActiveTlsWriteUs, 500_000,
+                    "secure benchmark retains active TLS-write time")
+        guard let summary = RendererBenchmarkEvaluator.summary(
+            snapshots: [metrics],
+            samples: [sample]
+        ) else {
+            assert(false, "secure benchmark summarizes a metrics window")
+            return
+        }
+        assertEqual(
+            summary.minimumDmaFree,
+            20_000,
+            "secure benchmark retains the firmware DMA minimum"
+        )
+        for (coverage, stale) in [(3, 3), (4, 0), (5, 0), (4, 4)] {
+            guard let summaryData = try? JSONEncoder().encode(summary),
+                  var object = try? JSONSerialization.jsonObject(with: summaryData)
+                    as? [String: Any] else {
+                assert(false, "coverage boundary fixture encodes")
+                return
+            }
+            object["coverageRejectedRenders"] = coverage
+            object["staleRenders"] = stale
+            guard let data = try? JSONSerialization.data(withJSONObject: object),
+                  let boundarySummary = try? JSONDecoder().decode(
+                    RendererBenchmarkRunSummary.self, from: data
+                  ) else {
+                assert(false, "coverage boundary fixture decodes")
+                return
+            }
+            let failures = RendererBenchmarkEvaluator.evaluate(
+                snapshots: [metrics], samples: [sample], summary: boundarySummary,
+                durationSeconds: 1, screenshotCount: 0, checkpointCount: 0,
+                expectedRouteSampleCount: 120, gates: gates
+            )
+            assertEqual(
+                failures.filter { $0.hasPrefix("coverage_rejections:") },
+                coverage > 4 ? ["coverage_rejections:5"] : [],
+                "coverage allowance accepts four but rejects five"
+            )
+            assertEqual(
+                failures.filter { $0.hasPrefix("stale_renders:") },
+                stale > 3 ? ["stale_renders:4"] : [],
+                "stale render gate remains independent of coverage allowance"
+            )
+        }
+        assertEqual(
+            summary.cryptoHeadroomRejections,
+            0,
+            "secure benchmark retains the zero crypto-rejection gate"
+        )
+        assertEqual(
+            summary.cryptoOperationFailures,
+            0,
+            "secure benchmark retains the zero crypto-failure gate"
         )
         guard var diagnosticMetricsObject = try? JSONSerialization.jsonObject(
             with: metricsData
@@ -15215,289 +15316,6 @@ struct NavigationProtocolTests {
                 .windowMinimumFreeAttribution?.frameTransferActive,
             true,
             "DMA attribution retains only the non-secret frame-overlap bit"
-        )
-        guard let replayDelta = RendererBenchmarkReplayTransportDelta(
-            baseline: nil,
-            latest: replayTransport
-        ) else {
-            assert(false, "replay transport diagnostics produce a failure delta")
-            return
-        }
-        assertEqual(
-            replayDelta.rbs1Detected,
-            4,
-            "the admission delta reports firmware RBS1 ingress"
-        )
-        assert(
-            replayDelta.observedFirmwareIngress,
-            "any authenticated or replay counter proves firmware ingress"
-        )
-        assert(
-            !RendererBenchmarkInitialAdmissionRetryPolicy
-                .shouldRetrySilentAttempt(
-                    completedAttempts: 1,
-                    attemptElapsedSeconds: 0.5,
-                    remainingSeconds: 1.5,
-                    delta: replayDelta
-                ),
-            "an explicit firmware admission or rejection is never retried as transport silence"
-        )
-        guard let silentDelta = RendererBenchmarkReplayTransportDelta(
-            baseline: replayTransport,
-            latest: replayTransport
-        ) else {
-            assert(false, "unchanged diagnostics produce a zero ingress delta")
-            return
-        }
-        assert(
-            !silentDelta.observedFirmwareIngress,
-            "unchanged synchronized counters prove a silent transport attempt"
-        )
-        assert(
-            RendererBenchmarkInitialAdmissionRetryPolicy
-                .shouldRetrySilentAttempt(
-                    completedAttempts: 1,
-                    attemptElapsedSeconds: 0.5,
-                    remainingSeconds: 1.5,
-                    delta: silentDelta
-                ),
-            "one silent attempt may retry inside the original freshness deadline"
-        )
-        assert(
-            !RendererBenchmarkInitialAdmissionRetryPolicy
-                .shouldRetrySilentAttempt(
-                    completedAttempts: 2,
-                    attemptElapsedSeconds: 0.5,
-                    remainingSeconds: 1.5,
-                    delta: silentDelta
-                ),
-            "the silent-ingress retry remains bounded to two total attempts"
-        )
-        assert(
-            !RendererBenchmarkInitialAdmissionRetryPolicy
-                .shouldRetrySilentAttempt(
-                    completedAttempts: 1,
-                    attemptElapsedSeconds: 0.5,
-                    remainingSeconds: 0.5,
-                    delta: silentDelta
-                ),
-            "a retry cannot extend or crowd the original 2.5-second gate"
-        )
-        assert(
-            replayDelta.failureDescription.contains(
-                "markerRejectedNoActiveWindow=1"
-            ) && replayDelta.failureDescription.contains(
-                "lastMarkerResult=accepted"
-            ),
-            "a failed warm-up exposes bounded non-secret admission evidence"
-        )
-        assert(
-            RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
-                jsonData: roundTripData
-            ),
-            "replay transport diagnostics remain eligible for evidence export"
-        )
-        let sample = RendererBenchmarkEvaluator.sample(
-            snapshot: diagnosticMetrics,
-            elapsedSeconds: 42
-        )
-        assertEqual(
-            sample.replayTransport,
-            diagnosticMetrics.replayTransport,
-            "each sampled evidence point retains replay admission diagnostics"
-        )
-        assertEqual(metrics.remoteDebug.lastFrameSnapshotWaitUs, 110,
-                    "secure benchmark retains frame snapshot wait evidence")
-        assertEqual(metrics.remoteDebug.lastHttpActualBytes, 434_344,
-                    "secure benchmark retains actual response body bytes")
-        assertEqual(metrics.remoteDebug.lastHttpZeroWriteCalls, 4,
-                    "secure benchmark retains TLS zero-write evidence")
-        assertEqual(metrics.remoteDebug.lastHttpActiveTlsWriteUs, 500_000,
-                    "secure benchmark retains active TLS-write time")
-        guard let summary = RendererBenchmarkEvaluator.summary(
-            snapshots: [metrics],
-            samples: [sample]
-        ) else {
-            assert(false, "secure benchmark summarizes a metrics window")
-            return
-        }
-        assertEqual(
-            summary.minimumDmaFree,
-            20_000,
-            "secure benchmark retains the firmware DMA minimum"
-        )
-        assertEqual(
-            summary.cryptoHeadroomRejections,
-            0,
-            "secure benchmark retains the zero crypto-rejection gate"
-        )
-        assertEqual(
-            summary.cryptoOperationFailures,
-            0,
-            "secure benchmark retains the zero crypto-failure gate"
-        )
-        assert(
-            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
-                [39_307, 37_803, 37_779],
-                allowedDecline: 1_024
-            ),
-            "the physical transient low-water step plus plateau is not a retained leak"
-        )
-        assert(
-            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
-                [45_251, 44_983, 44_907],
-                allowedDecline: 1_024
-            ),
-            "terminal jitter below the allowance is not a retained leak"
-        )
-        assert(
-            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
-                [45_000, 42_000, 41_900],
-                allowedDecline: 1_024
-            ),
-            "one allocator transition followed by bounded noise is not progressive"
-        )
-        assert(
-            RendererBenchmarkEvaluator.progressiveCrossRunDecline(
-                [45_000, 43_500, 42_000],
-                allowedDecline: 1_024
-            ),
-            "continued retained loss beyond the largest step remains a hard failure"
-        )
-        assert(
-            RendererBenchmarkEvaluator.progressiveCrossRunDecline(
-                [26_000, 25_000, 24_000],
-                allowedDecline: 1_024
-            ),
-            "progressive terminal largest-block fragmentation remains a hard failure"
-        )
-
-        func crossRunEvidence(
-            repeatNumber: Int,
-            terminalDmaFree: UInt32,
-            terminalDmaLargest: UInt32,
-            minimumDmaFree: UInt32,
-            minimumDmaLargest: UInt32
-        ) -> RendererBenchmarkRunEvidence? {
-            var snapshotObject = diagnosticMetricsObject
-            guard var window = snapshotObject["window"] as? [String: Any],
-                  var tuning = snapshotObject["tuning"] as? [String: Any],
-                  var memory = snapshotObject["memory"] as? [String: Any],
-                  var dmaHeap = memory["dmaHeap"] as? [String: Any],
-                  let encodedSummary = try? JSONEncoder().encode(summary),
-                  var summaryObject = try? JSONSerialization.jsonObject(
-                    with: encodedSummary
-                  ) as? [String: Any] else {
-                return nil
-            }
-            window["repeat"] = repeatNumber
-            tuning["profile"] = "high"
-            dmaHeap["free"] = terminalDmaFree
-            dmaHeap["largestBlock"] = terminalDmaLargest
-            dmaHeap["windowMinimumFree"] = minimumDmaFree
-            dmaHeap["windowMinimumLargestBlock"] = minimumDmaLargest
-            memory["dmaHeap"] = dmaHeap
-            snapshotObject["window"] = window
-            snapshotObject["tuning"] = tuning
-            snapshotObject["memory"] = memory
-            summaryObject["profile"] = "high"
-            summaryObject["repeat"] = repeatNumber
-            summaryObject["minimumDmaFree"] = minimumDmaFree
-            summaryObject["minimumDmaLargest"] = minimumDmaLargest
-            guard let snapshotData = try? JSONSerialization.data(
-                withJSONObject: snapshotObject
-            ), let terminalSnapshot = try? JSONDecoder().decode(
-                RendererBenchmarkMetricsSnapshot.self,
-                from: snapshotData
-            ), let summaryData = try? JSONSerialization.data(
-                withJSONObject: summaryObject
-            ), let runSummary = try? JSONDecoder().decode(
-                RendererBenchmarkRunSummary.self,
-                from: summaryData
-            ) else {
-                return nil
-            }
-            return RendererBenchmarkRunEvidence(
-                schema: 1,
-                runId: "cross-run-\(repeatNumber)",
-                windowId: UInt32(repeatNumber),
-                profile: "high",
-                repeatNumber: repeatNumber,
-                durationSeconds: 120,
-                soak: false,
-                passed: true,
-                failures: [],
-                summary: runSummary,
-                samples: [],
-                screenshots: [],
-                finalSnapshot: terminalSnapshot
-            )
-        }
-
-        guard let transientOne = crossRunEvidence(
-            repeatNumber: 1,
-            terminalDmaFree: 45_251,
-            terminalDmaLargest: 23_540,
-            minimumDmaFree: 39_307,
-            minimumDmaLargest: 23_540
-        ), let transientTwo = crossRunEvidence(
-            repeatNumber: 2,
-            terminalDmaFree: 44_983,
-            terminalDmaLargest: 21_492,
-            minimumDmaFree: 37_803,
-            minimumDmaLargest: 21_492
-        ), let transientThree = crossRunEvidence(
-            repeatNumber: 3,
-            terminalDmaFree: 44_907,
-            terminalDmaLargest: 21_492,
-            minimumDmaFree: 37_779,
-            minimumDmaLargest: 21_492
-        ), let leakOne = crossRunEvidence(
-            repeatNumber: 1,
-            terminalDmaFree: 45_000,
-            terminalDmaLargest: 26_000,
-            minimumDmaFree: 39_000,
-            minimumDmaLargest: 22_000
-        ), let leakTwo = crossRunEvidence(
-            repeatNumber: 2,
-            terminalDmaFree: 43_500,
-            terminalDmaLargest: 25_000,
-            minimumDmaFree: 39_000,
-            minimumDmaLargest: 22_000
-        ), let leakThree = crossRunEvidence(
-            repeatNumber: 3,
-            terminalDmaFree: 42_000,
-            terminalDmaLargest: 24_000,
-            minimumDmaFree: 39_000,
-            minimumDmaLargest: 22_000
-        ) else {
-            assert(false, "secure benchmark constructs cross-run evidence")
-            return
-        }
-        var transientRuns = [transientTwo, transientOne, transientThree]
-        RendererBenchmarkEvaluator.applyCrossRunMemoryGates(
-            runs: &transientRuns,
-            gates: gates
-        )
-        assert(
-            transientRuns.allSatisfy { run in
-                !run.failures.contains("cross_run_dma_decline") &&
-                    !run.failures.contains("cross_run_dma_largest_decline")
-            },
-            "interleaved run order uses stable terminal state, not transient minima"
-        )
-        var leakRuns = [leakTwo, leakThree, leakOne]
-        RendererBenchmarkEvaluator.applyCrossRunMemoryGates(
-            runs: &leakRuns,
-            gates: gates
-        )
-        assert(
-            leakRuns.allSatisfy { run in
-                run.failures.contains("cross_run_dma_decline") &&
-                    run.failures.contains("cross_run_dma_largest_decline") &&
-                    !run.passed
-            },
-            "interleaved terminal retained loss and fragmentation fail every profile run"
         )
         let baseline = RendererBenchmarkEvidenceIdentity(
             deviceId: metrics.identity.deviceId,
@@ -15673,6 +15491,44 @@ struct NavigationProtocolTests {
             ),
             "BLE queue and acknowledgement evidence contains no secret fields"
         )
+        let legacyTimingJSON = Data(#"{"schema":1,"emittedSamples":1,"timerCallbacks":0,"lastTimerLatenessMs":0,"maximumTimerLatenessMs":0}"#.utf8)
+        guard var timing = try? JSONDecoder().decode(
+            RendererBenchmarkReplayTimingEvidence.self, from: legacyTimingJSON
+        ) else {
+            assert(false, "legacy replay timing evidence decodes")
+            return
+        }
+        assert(timing.schedulerActive == nil,
+               "older evidence does not invent a scheduler state")
+        timing.schedulerActive = true
+        var startupTrace = RendererBenchmarkStartupTrace()
+        for index in 0..<(RendererBenchmarkStartupTrace.maximumSamples + 3) {
+            startupTrace.record(RendererBenchmarkStartupSample(
+                phase: "metrics_\(index)",
+                bleTransport: transportEvidence,
+                replayTiming: timing,
+                window: metrics.window,
+                routeReplay: metrics.routeReplay,
+                replayTransport: metrics.replayTransport
+            ))
+        }
+        assert(startupTrace.samples.count == 128 && startupTrace.droppedSamples == 3,
+               "startup trace remains bounded and counts discarded samples")
+        assert(startupTrace.samples.first?.phase == "metrics_3" &&
+               startupTrace.samples.last?.phase == "metrics_130",
+               "startup trace retains the latest failure context")
+        guard let traceData = try? JSONEncoder().encode(startupTrace),
+              let decodedTrace = try? JSONDecoder().decode(
+                RendererBenchmarkStartupTrace.self, from: traceData
+              ) else {
+            assert(false, "startup trace round trips")
+            return
+        }
+        assert(decodedTrace.samples == startupTrace.samples &&
+               decodedTrace.droppedSamples == startupTrace.droppedSamples,
+               "startup evidence preserves scheduler, queue, window and marker state")
+        assert(RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(jsonData: traceData),
+               "startup trace follows the same secret-free export policy")
         assert(
             !RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
                 jsonData: Data(#"{"sessionToken":"secret"}"#.utf8)
@@ -15687,159 +15543,6 @@ struct NavigationProtocolTests {
         )
     }
 
-    static func testRendererCrossRunRetainedMemoryPolicy() {
-        assert(
-            RendererBenchmarkEvaluator.progressiveCrossRunDecline(
-                [46_000, 44_500, 43_000],
-                allowedDecline: 1_024
-            ),
-            "progressive retained DMA decline is rejected"
-        )
-        assert(
-            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
-                [46_000, 44_000, 43_990],
-                allowedDecline: 1_024
-            ),
-            "one-time transition followed by a plateau is accepted"
-        )
-        assert(
-            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
-                [46_000, 45_920, 46_010],
-                allowedDecline: 1_024
-            ),
-            "stable retained memory with jitter is accepted"
-        )
-        assert(
-            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
-                [39_307, 37_803, 37_779],
-                allowedDecline: 1_024
-            ),
-            "the physical three-point minimum series is not progressive"
-        )
-
-        let sourceURL = URL(fileURLWithPath:
-            "ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift"
-        )
-        guard let source = try? String(
-            contentsOf: sourceURL,
-            encoding: .utf8
-        ), let start = source.range(
-            of: "    static func applyCrossRunMemoryGates("
-        ), let end = source.range(
-            of: "    static func aggregate(",
-            range: start.upperBound..<source.endIndex
-        ) else {
-            assert(false, "cross-run memory source contract is readable")
-            return
-        }
-        let body = String(source[start.lowerBound..<end.lowerBound])
-        assert(
-            body.contains("finalSnapshot.memory.dmaHeap.free") &&
-                body.contains("finalSnapshot.memory.dmaHeap.largestBlock"),
-            "cross-run DMA gates use terminal current state"
-        )
-        assert(
-            !body.contains(".summary.minimumDmaFree") &&
-                !body.contains(".summary.minimumDmaLargest"),
-            "heterogeneous window minima are not treated as retained state"
-        )
-    }
-
-    static func testSecureRendererReplayWindowOrdering() {
-        let replayURL = URL(fileURLWithPath:
-            "ios-app/BikeComputer/BikeComputer/Managers/RendererBenchmarkReplayCoordinator.swift"
-        )
-        let controllerURL = URL(fileURLWithPath:
-            "ios-app/BikeComputer/BikeComputer/Managers/SecureRendererBenchmarkController.swift"
-        )
-        guard let replaySource = try? String(
-            contentsOf: replayURL,
-            encoding: .utf8
-        ), let controllerSource = try? String(
-            contentsOf: controllerURL,
-            encoding: .utf8
-        ) else {
-            assert(false, "renderer replay sources are readable")
-            return
-        }
-
-        assert(
-            replaySource.contains("func prepare(") &&
-                replaySource.contains("func emitInitialSample()") &&
-                replaySource.contains("func startCadence()"),
-            "replay exposes an armed state separate from emission and cadence"
-        )
-        guard let activationStart = controllerSource.range(
-            of: "private func activateReplayWindow("
-        )?.lowerBound,
-        let warmUpStart = controllerSource.range(
-            of: "private func warmUp(",
-            range: activationStart..<controllerSource.endIndex
-        )?.lowerBound else {
-            assert(false, "secure controller contains the activation helper")
-            return
-        }
-        let activation = String(
-            controllerSource[activationStart..<warmUpStart]
-        )
-        guard let beginWindow = activation.range(
-            of: "beginTrackedWindow("
-        )?.lowerBound,
-        let confirmedWindow = activation.range(
-            of: "waitForWindow(",
-            range: beginWindow..<activation.endIndex
-        )?.lowerBound,
-        let firstSample = activation.range(
-            of: "emitInitialSample()",
-            range: confirmedWindow..<activation.endIndex
-        )?.lowerBound,
-        let firstDrain = activation.range(
-            of: "waitForNavigationWritesToDrain(",
-            range: firstSample..<activation.endIndex
-        )?.lowerBound,
-        let acceptedMarker = activation.range(
-            of: "snapshot.routeReplay.valid",
-            range: firstDrain..<activation.endIndex
-        )?.lowerBound,
-        let cadence = activation.range(
-            of: "startCadence()",
-            range: acceptedMarker..<activation.endIndex
-        )?.lowerBound else {
-            assert(false, "activation contains every ordered replay stage")
-            return
-        }
-        assert(
-            beginWindow < confirmedWindow &&
-                confirmedWindow < firstSample &&
-                firstSample < firstDrain &&
-                firstDrain < acceptedMarker &&
-                acceptedMarker < cadence,
-            "window confirmation, acknowledged submission, firmware acceptance, and cadence are ordered"
-        )
-        assert(
-            activation.contains(
-                "Double(gates.absolute.maximumRouteMarkerAgeMs) / 1_000"
-            ) &&
-                activation.contains("freshnessSeconds == 2.5"),
-            "initial transport and acceptance retain the exact 2.5-second gate"
-        )
-        guard let sweepArm = controllerSource.range(
-            of: "replay.prepare("
-        )?.lowerBound,
-        let comparisonStart = controllerSource.range(
-            of: "let rootRunID",
-            range: sweepArm..<controllerSource.endIndex
-        )?.lowerBound else {
-            assert(false, "secure sweep arms replay before its run plan")
-            return
-        }
-        let startup = String(controllerSource[sweepArm..<comparisonStart])
-        assert(
-            !startup.contains("emitInitialSample()") &&
-                !startup.contains("startCadence()"),
-            "secure sweep startup cannot emit before its first confirmed window"
-        )
-    }
 
     static func testSecureRendererBenchmarkReadiness() {
         func blocker(
@@ -15967,14 +15670,14 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.automaticDisplayOffCapabilityMask, 1 << 19, "CAP2 bit 19 advertises automatic display-off")
         assertEqual(DeviceBLEProtocol.rideDiagnosticsCapabilityMask, 1 << 20, "CAP2 bit 20 advertises persistent ride diagnostics")
         assertEqual(DeviceBLEProtocol.detailedRideDiagnosticsCapabilityMask, 1 << 21, "CAP2 bit 21 advertises detailed ride diagnostics")
-        assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
+        assertEqual(DeviceBLEProtocol.rideDeliveryAcknowledgementCapabilityMask, 1 << 22, "CAP2 bit 22 advertises reliable ride delivery")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
+        assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 21, "capability version negotiates atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
         assertEqual(DeviceBLEProtocol.rendererMetricsResponsePrefix, "RDMT", "renderer metrics responses use RDMT")
         assertEqual(DeviceBLEProtocol.rendererMetricsChunkPrefix, "RDMC", "renderer metrics chunks use RDMC")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkMarkerPrefix, "RBM1", "renderer replay markers use RBM1")
-        assertEqual(DeviceBLEProtocol.rendererBenchmarkSamplePrefix, "RBS1", "atomic renderer replay samples use RBS1")
         assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
                     "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
                     "workout telemetry uses the dedicated 128-bit characteristic")
@@ -17580,35 +17283,6 @@ struct NavigationProtocolTests {
         )
         assert(DeviceNetworkJoinPolicy.associationObservationTimeout >= 10,
                "an accepted local-only network gets time to become current")
-        assert(
-            DeviceNetworkJoinPolicy.configurationApplyTimeout >= 10 &&
-                DeviceNetworkJoinPolicy.configurationApplyTimeout <= 30,
-            "the system hotspot prompt has a sufficient but bounded callback window"
-        )
-        assert(
-            DeviceNetworkJoinPolicy.currentNetworkFetchTimeout > 0 &&
-                DeviceNetworkJoinPolicy.currentNetworkFetchTimeout <= 3,
-            "current-network inspection cannot stall accessory association"
-        )
-        assert(
-            !DeviceNetworkJoinPolicy.shouldRetry(
-                domain: DeviceNetworkJoinPolicy.joinErrorDomain,
-                code: DeviceNetworkJoinPolicy.configurationApplyTimeoutCode
-            ),
-            "an unresolved system apply cannot overlap a second apply"
-        )
-        let applyTimeout =
-            DeviceNetworkJoinPolicy.configurationApplyTimeoutError
-        assertEqual(
-            applyTimeout.domain,
-            DeviceNetworkJoinPolicy.joinErrorDomain,
-            "the bounded apply failure retains its typed diagnostic domain"
-        )
-        assertEqual(
-            applyTimeout.code,
-            DeviceNetworkJoinPolicy.configurationApplyTimeoutCode,
-            "the bounded apply failure retains its typed diagnostic code"
-        )
         assertEqual(
             DeviceTransferFreshFailurePolicy.failure(
                 after: 17,
@@ -19992,25 +19666,10 @@ struct NavigationProtocolTests {
                "watchdog fixture sends one acknowledged write")
         assertEqual(watchdogWrites.count, 1,
                     "watchdog starts only after the write reaches its transport")
-        let inFlightEvidence =
-            watchdogManager.rendererBenchmarkBLETransportEvidence()
-        assertEqual(
-            inFlightEvidence.inFlightClass,
-            NavigationWriteClass.settingsControl.rawValue,
-            "benchmark telemetry identifies the acknowledged write class"
-        )
-        assertEqual(inFlightEvidence.acknowledgementTimeouts, 0,
-                    "a live acknowledged write is not yet a timeout")
         assert(waitForMainLoop(timeout: 1) { watchdogRecoveries == 1 },
                "missing acknowledged completion triggers bounded recovery")
         assert(!watchdogManager.isNavigationReady,
                "stall recovery closes the unusable navigation session")
-        let timedOutEvidence =
-            watchdogManager.rendererBenchmarkBLETransportEvidence()
-        assertEqual(timedOutEvidence.acknowledgementTimeouts, 1,
-                    "benchmark telemetry retains the bounded ACK timeout")
-        assertEqual(timedOutEvidence.inFlightClass, nil,
-                    "timeout recovery clears the live in-flight class")
 
         let noResponseWatchdogManager = BLEManager()
         noResponseWatchdogManager.isConnected = true
@@ -20038,30 +19697,44 @@ struct NavigationProtocolTests {
                "no-response recovery closes the wedged navigation session")
     }
 
-    static func testNavigationWriteAcknowledgementTimeoutPolicy() {
-        assertEqual(
-            NavigationWriteAcknowledgementTimeoutPolicy.timeout(
-                isRemoteDebugActive: false
-            ),
-            3,
-            "ordinary acknowledged BLE writes retain the reliability deadline"
+    static func testRideApplicationAcknowledgementWaitsForATTCallback() {
+        let manager = BLEManager()
+        let commandID = UUID(
+            uuidString: "44444444-4444-4444-4444-444444444444"
+        )!
+        var completions = 0
+        manager.installRideApplicationAcknowledgementRaceForTesting(
+            commandID: commandID,
+            commandType: .navigationClear,
+            stateGeneration: 7,
+            completion: { completions += 1 }
         )
-        assertEqual(
-            NavigationWriteAcknowledgementTimeoutPolicy.timeout(
-                isRemoteDebugActive: true
-            ),
-            15,
-            "remote debugging tolerates bounded Wi-Fi and BLE coexistence latency"
-        )
-        assert(
-            NavigationWriteAcknowledgementTimeoutPolicy.remoteDebugTimeout >
-                NavigationWriteAcknowledgementTimeoutPolicy.normalTimeout,
-            "remote debugging receives additional acknowledgement headroom"
-        )
-        assert(
-            NavigationWriteAcknowledgementTimeoutPolicy.remoteDebugTimeout <= 15,
-            "remote-debug acknowledgement recovery remains bounded"
-        )
+        manager.handleRideApplicationAcknowledgementForTesting(.init(
+            commandType: .navigationClear,
+            result: .success,
+            commandID: commandID,
+            stateGeneration: 7,
+            leaseGeneration: 1
+        ))
+        assertEqual(completions, 1,
+                    "application ACK completes the logical command once")
+        assert(!manager.hasPendingRideApplicationDeliveryForTesting,
+               "application ACK retires the logical delivery")
+        assert(manager.hasPendingATTWriteForTesting,
+               "application ACK cannot retire an unidentified ATT callback slot")
+
+        manager.completeNavigationWriteForTesting(error: nil)
+        assert(!manager.hasPendingATTWriteForTesting,
+               "the matching ATT callback independently releases its slot")
+        manager.handleRideApplicationAcknowledgementForTesting(.init(
+            commandType: .navigationClear,
+            result: .success,
+            commandID: commandID,
+            stateGeneration: 7,
+            leaseGeneration: 1
+        ))
+        assertEqual(completions, 1,
+                    "a duplicated late application ACK remains idempotent")
     }
 
     static func testBLEManagerSendsFallbackMapSettings() {
@@ -22080,7 +21753,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","lastError":{"code":"transfer_busy","message":"another transfer mode is active","sequence":17},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","lastError":{"sequence":17,"code":"transfer_busy","message":"another transfer mode is active"},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 

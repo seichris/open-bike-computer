@@ -11,6 +11,7 @@ import Combine
 import MapKit
 import CoreLocation
 
+@MainActor
 class NavigationEngine: NSObject, ObservableObject {
     
     // MARK: - Published Properties
@@ -375,7 +376,7 @@ class NavigationEngine: NSObject, ObservableObject {
         lastSimulationUpdate = Date()
         
         simulationTimer?.invalidate()
-        simulationTimer = Timer.scheduledTimer(
+        simulationTimer = Timer.scheduledOnMainActor(
             withTimeInterval: devicePoseHeartbeatInterval,
             repeats: true
         ) { [weak self] _ in
@@ -652,7 +653,9 @@ class NavigationEngine: NSObject, ObservableObject {
         stopRideTelemetryTimer()
         let timer = Timer(timeInterval: devicePoseHeartbeatInterval,
                           repeats: true) { [weak self] _ in
-            self?.refreshRideTelemetry()
+            MainActor.assumeIsolated {
+                self?.refreshRideTelemetry()
+            }
         }
         rideTelemetryTimer = timer
         RunLoop.main.add(timer, forMode: .common)

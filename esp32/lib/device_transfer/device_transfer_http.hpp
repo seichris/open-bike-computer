@@ -49,6 +49,8 @@ struct HttpRequest {
   std::string contentType;
   uint64_t contentLength = 0;
   bool hasContentLength = false;
+  bool connectionClose = false;
+  bool connectionReuseRequested = false;
   uint32_t transferGeneration = 0;
 };
 
@@ -63,6 +65,7 @@ public:
   }
   virtual void responseDidComplete(const HttpRequest &request,
                                    bool peerClosedCleanly) {}
+  virtual void responseDidAbort(const HttpRequest &request) {}
 };
 
 class HttpTransferServer {
@@ -125,8 +128,9 @@ private:
   std::array<HandlerRegistration, 4> handlers_{};
   size_t handlerCount_ = 0;
   TaskHandle_t workerTask_ = nullptr;
+  TransferClient *activeClient_ = nullptr;
 
-  void handleClient(TransferClient &client);
+  bool handleClient(TransferClient &client, size_t requestIndex);
   void runWorker();
   bool startNetwork();
   void stopNetwork();
@@ -140,6 +144,7 @@ private:
   void unlockState() const;
   void lockTlsIdentity() const;
   void unlockTlsIdentity() const;
+  void interruptActiveClientLocked() const;
 };
 
 struct HttpResponseHeader {
@@ -154,7 +159,9 @@ bool sendHttpHead(TransferClient &client, int status,
                   size_t additionalHeaderCount = 0);
 bool writeHttpBytes(TransferClient &client, const uint8_t *data,
                     size_t length,
-                    uint32_t timeoutMs = 5000);
+                    uint32_t timeoutMs = 5000,
+                    size_t maximumChunkBytes = 4096,
+                    uint32_t interChunkDelayMs = 0);
 bool sendHttpJson(TransferClient &client, int status,
                   const std::string &body);
 bool sendHttpError(TransferClient &client, int status,

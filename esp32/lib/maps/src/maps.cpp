@@ -68,21 +68,6 @@ const char *TAG PROGMEM = "Maps";
 
 namespace {
 
-#if FIRMWARE_DIAGNOSTICS
-renderer_diagnostics::JobCounters rendererJobCounters(
-    const map_render_job::Diagnostics &value) {
-  return {
-      value.submitted,
-      value.started,
-      value.completed,
-      value.published,
-      value.stalePublications,
-      value.cancelled,
-      value.invariantFailures,
-  };
-}
-#endif
-
 // Keep the main-branch memory diagnostics stable while moving raster work off
 // the LVGL task. These samples are observational only and do not alter the
 // renderer's allocation or scheduling policy.
@@ -168,10 +153,10 @@ bool shouldCancelMapRenderWork() {
              !gMapRenderLongestSliceUs.compare_exchange_weak(
                  longest, elapsedUs, std::memory_order_relaxed)) {
       }
-      // IDLE0 feeds the production task watchdog. The renderer deliberately
-      // runs at idle priority, and this bounded block guarantees an idle
-      // window during CPU-heavy parsing/rasterization instead of relying on
-      // taskYIELD() semantics or waiting for an entire frame to finish.
+      // IDLE0 feeds the production task watchdog. The renderer runs one
+      // priority above idle to avoid losing every other tick to time slicing,
+      // while this bounded block guarantees an idle window during CPU-heavy
+      // parsing/rasterization instead of waiting for a full frame to finish.
       if (gMapRenderLastIdleReleaseUs == 0 ||
           static_cast<uint32_t>(nowUs - gMapRenderLastIdleReleaseUs) >=
               kMapRenderIdleReleaseIntervalUs) {
@@ -1831,6 +1816,13 @@ bool Maps::buildPolygonGrid(MapBlock *mblock) {
  */
 bool Maps::fillPolygon(const Polygon &p,
                        map_surface::Rgb565Surface surface) {
+  std::vector<int16_t, PsramAllocator<int16_t>> scanlineNodes;
+  return fillPolygon(p, surface, scanlineNodes);
+}
+
+bool Maps::fillPolygon(
+    const Polygon &p, map_surface::Rgb565Surface surface,
+    std::vector<int16_t, PsramAllocator<int16_t>> &scanlineNodes) {
   if (!surface.valid() || p.points.size() < 2)
     return true;
 
@@ -1839,9 +1831,9 @@ bool Maps::fillPolygon(const Polygon &p,
   if (minY >= maxY)
     return true;
 
-  std::vector<int16_t, PsramAllocator<int16_t>> nodeX;
   try {
-    nodeX.resize(p.points.size());
+    if (scanlineNodes.size() < p.points.size())
+      scanlineNodes.resize(p.points.size());
   } catch (const std::bad_alloc &) {
     return false;
   }
@@ -1857,21 +1849,22 @@ bool Maps::fillPolygon(const Polygon &p,
       const Point16 &end = p.points[index + 1];
       if ((start.y < pixelY && end.y >= pixelY) ||
           (start.y >= pixelY && end.y < pixelY)) {
-        if (nodes >= static_cast<int16_t>(nodeX.size()))
+        if (nodes >= static_cast<int16_t>(scanlineNodes.size()))
           return false;
-        nodeX[nodes++] = static_cast<int16_t>(
+        scanlineNodes[nodes++] = static_cast<int16_t>(
             start.x + static_cast<double>(pixelY - start.y) /
                           static_cast<double>(end.y - start.y) *
                           static_cast<double>(end.x - start.x));
       }
     }
-    std::sort(nodeX.begin(), nodeX.begin() + nodes);
+    std::sort(scanlineNodes.begin(), scanlineNodes.begin() + nodes);
     uint16_t *row = surface.row(pixelY);
     if (row == nullptr)
       continue;
     for (int16_t index = 0; index + 1 < nodes; index += 2) {
-      int32_t startX = std::max<int32_t>(0, nodeX[index]);
-      int32_t endX = std::min<int32_t>(surface.width, nodeX[index + 1]);
+      int32_t startX = std::max<int32_t>(0, scanlineNodes[index]);
+      int32_t endX =
+          std::min<int32_t>(surface.width, scanlineNodes[index + 1]);
       if (startX >= endX)
         continue;
       std::fill(row + startX, row + endX, p.color);
@@ -1920,7 +1913,7 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
   }
 
   // 1. Identify all required block offsets for the current viewport
-  std::vector<Point32> requiredOffsets;
+  std::vector<Point32, PsramAllocator<Point32>> requiredOffsets;
   const int32_t minBlockX = bbox.min.x & (~MAPBLOCK_MASK);
   const int32_t maxBlockX = bbox.max.x & (~MAPBLOCK_MASK);
   const int32_t minBlockY = bbox.min.y & (~MAPBLOCK_MASK);
@@ -2524,8 +2517,13 @@ bool Maps::readVectorMap(
   }
 
   Polygon projectedPolygon;
-  std::vector<map_projection::GroundPoint> groundPolygon;
-  std::vector<map_projection::GroundPoint> clippedGroundPolygon;
+  std::vector<int16_t, PsramAllocator<int16_t>> polygonScanlineNodes;
+  std::vector<map_projection::GroundPoint,
+              PsramAllocator<map_projection::GroundPoint>>
+      groundPolygon;
+  std::vector<map_projection::GroundPoint,
+              PsramAllocator<map_projection::GroundPoint>>
+      clippedGroundPolygon;
   uint32_t projectionClippedCount = 0;
   uint32_t projectionRejectedCount = 0;
 
@@ -2546,7 +2544,7 @@ bool Maps::readVectorMap(
     };
 
     const size_t polygonCount = block->polygons.size();
-    std::vector<bool> visited(polygonCount, false);
+    std::vector<uint8_t, PsramAllocator<uint8_t>> visited(polygonCount, 0);
     const int minCellX =
         std::max(0, static_cast<int>(localViewport.min.x >> CELL_SHIFT));
     const int maxCellX = std::min(
@@ -2630,7 +2628,7 @@ bool Maps::readVectorMap(
           area < static_cast<int32_t>(minimumSize) * minimumSize) {
         return true;
       }
-      return fillPolygon(projectedPolygon, surface);
+      return fillPolygon(projectedPolygon, surface, polygonScanlineNodes);
     };
 
     if (!block->polygonGrid.empty()) {
@@ -2944,7 +2942,8 @@ bool Maps::readVectorMap(
                 // A false result can mean cancellation or a small workspace
                 // allocation failure. Cancellation aborts the job; otherwise
                 // skip this footprint and preserve the rest of the flat city.
-                const bool filled = fillPolygon(buildingPolygon, surface);
+                const bool filled = fillPolygon(
+                    buildingPolygon, surface, polygonScanlineNodes);
                 drewFootprint = drewFootprint || filled;
                 return filled || !shouldCancelMapRenderWork();
               },
@@ -3087,14 +3086,24 @@ bool Maps::readVectorMap(
       }
       buildingProjectionMs = millis() - projectionStartMs;
 
-      // Exact ring projection is deliberately after nearest retention. At
-      // most kMaximumCandidateMetadata records can reach this phase, no matter
-      // how many building records intersect the loaded blocks.
+      // Exact ring projection is deliberately after nearest retention. Sort
+      // the inexpensive bounds-based candidates first, then stop projecting
+      // as soon as the total admission budget is full. Any farther record is
+      // guaranteed to lose the same nearest-first selection, so projecting all
+      // 384 retained candidates only adds latency without changing a pixel.
+      std::sort(candidates.begin(), candidates.end(),
+                [](const auto &left, const auto &right) {
+                  return map_building_admission::nearer(left.key, right.key);
+                });
+      const map_building_admission::Quotas &quotas = context.tuning.buildings;
       MapBuildingVector<map_projection::GroundPoint> areaGround;
       MapBuildingVector<map_projection::GroundPoint> areaClipped;
       size_t usefulCandidateCount = 0;
+      map_building_admission::BaseQuotaUsage provisionalUsage;
       for (size_t candidateIndex = 0; candidateIndex < candidates.size();
            ++candidateIndex) {
+        if (provisionalUsage.full(quotas))
+          break;
         if (shouldCancelMapRenderWork())
           return false;
         auto candidate = candidates[candidateIndex];
@@ -3130,22 +3139,20 @@ bool Maps::readVectorMap(
             map_building_renderer::eligibleExtrusionZoom(zoom) &&
             projectedArea >=
                 context.tuning.minimumExtrusionAreaPixels;
+        const auto baseFit = provisionalUsage.fit(candidate, quotas);
+        if (baseFit.accepted())
+          provisionalUsage.admit(candidate);
         candidates[usefulCandidateCount++] = candidate;
       }
       candidates.resize(usefulCandidateCount);
       buildingProjectionMs = millis() - projectionStartMs;
 
-      std::sort(candidates.begin(), candidates.end(),
-                [](const auto &left, const auto &right) {
-                  return map_building_admission::nearer(left.key, right.key);
-                });
       for (size_t index = 0; index < candidates.size(); ++index)
         candidates[index].sourceIndex = index;
 
       // The profile is copied into the immutable render request. A debug
       // session can therefore cancel and replace a job between bounded units,
       // but can never change its admission limits halfway through a pass.
-      const map_building_admission::Quotas &quotas = context.tuning.buildings;
       const auto decisions = map_building_admission::select(
           candidates, quotas, &admissionDiagnostics);
       candidateBuildings = visibleRecords;
@@ -3153,7 +3160,13 @@ bool Maps::readVectorMap(
           visibleRecords > candidates.size() ? visibleRecords - candidates.size()
                                              : 0U;
       metadataDeferredBuildings = static_cast<uint32_t>(metadataDeferred);
-      std::vector<uint8_t> admission(candidates.size(), 0);
+      if (metadataDeferred != 0 &&
+          admissionDiagnostics.selected >= quotas.maximumRecords) {
+        admissionDiagnostics.limiterFlags |=
+            map_building_admission::LimiterRecords;
+      }
+      std::vector<uint8_t, PsramAllocator<uint8_t>> admission(
+          candidates.size(), 0);
 #if FIRMWARE_DIAGNOSTICS
       std::array<uint32_t, 96> extrudedDistancesPx{};
       size_t extrudedDistanceCount = 0;
@@ -3395,7 +3408,8 @@ bool Maps::readVectorMap(
               buildingPolygon.color = color;
               buildingPolygon.bbox.min = Point16(minX, minY);
               buildingPolygon.bbox.max = Point16(maxX, maxY);
-              const bool filled = fillPolygon(buildingPolygon, surface);
+              const bool filled = fillPolygon(
+                  buildingPolygon, surface, polygonScanlineNodes);
               if (!filled && !shouldCancelMapRenderWork()) {
                 // fillPolygon uses a bounded PSRAM node workspace and reports
                 // allocation failure as false. Promote that result into the
@@ -3693,21 +3707,6 @@ bool Maps::setRendererTuningProfile(renderer_tuning::Profile profile,
   return true;
 }
 
-renderer_diagnostics::JobCounters Maps::rendererDiagnosticsJobCounters() const {
-#if !FIRMWARE_DIAGNOSTICS
-  return {};
-#else
-  if (renderStateMutex == nullptr ||
-      xSemaphoreTake(renderStateMutex, portMAX_DELAY) != pdTRUE) {
-    return {};
-  }
-  const renderer_diagnostics::JobCounters counters =
-      rendererJobCounters(renderJobs.diagnostics());
-  xSemaphoreGive(renderStateMutex);
-  return counters;
-#endif
-}
-
 uint64_t
 Maps::navigationSignatureForScreen(bool guidanceScreenActive) const {
   // Only state that changes the base-frame contract belongs here. Maneuver
@@ -3991,15 +3990,6 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
   request.zoom = requestedZoom;
   request.viewportWidth = mapScrWidth;
   request.viewportHeight = viewportHeight;
-  request.overscanPixels = MAP_RENDER_OVERSCAN_PIXELS;
-  request.renderWidth = static_cast<uint16_t>(
-      request.viewportWidth + request.overscanPixels * 2U);
-  request.renderHeight = static_cast<uint16_t>(
-      request.viewportHeight + request.overscanPixels * 2U);
-  request.renderStridePixels =
-      lv_draw_buf_width_to_stride(request.renderWidth,
-                                  LV_COLOR_FORMAT_RGB565) /
-      sizeof(uint16_t);
   request.birdsEye = navigation_content_mode::usesMapGuidanceBirdsEye(
       guidanceScreenActive,
       mapRenderSettings.mapNavigationBirdsEyeEnabled);
@@ -4023,6 +4013,46 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
           ? map_transform::WorldPoint{presentedPose.position.x,
                                       presentedPose.position.y}
           : request.context.measuredGpsWorld;
+
+  // A square display needs the full gutter so heading changes cannot expose a
+  // corner. The 1.75-inch panel is physically round: size its frame from the
+  // measured speed and the last completed render, while retaining a 64 px
+  // minimum and the original 96 px ceiling. This avoids rasterizing roughly a
+  // fifth of a dense 658 x 658 frame at ordinary cycling speed without
+  // spending the safety margin or weakening the publication coverage proof.
+  const uint32_t expectedLatencyMs =
+      std::max<uint32_t>(250U,
+                         std::min<uint32_t>(5000U,
+                                            lastCompletedRenderDurationMs));
+  const double speedMetersPerSecond =
+      std::max(0.0, static_cast<double>(gps.gpsData.speed) / 3.6);
+  const double latitudeRadians =
+      gps.gpsData.latitude * 3.14159265358979323846 / 180.0;
+  const double worldUnitsPerMeter =
+      1.0 / std::max(0.2, std::fabs(std::cos(latitudeRadians)));
+  const double pixelsPerMeter =
+      worldUnitsPerMeter * map_transform::worldToScreenScale(request.zoom);
+  const uint16_t minimumOverscanPixels = MAP_RENDER_ROUND_VIEWPORT
+      ? map_presentation::minimumRoundViewportOverscan(
+            request.viewportWidth, request.viewportHeight,
+            MAP_RENDER_SAFETY_PIXELS, MAP_RENDER_MINIMUM_OVERSCAN_PIXELS)
+      : MAP_RENDER_MINIMUM_OVERSCAN_PIXELS;
+  const double desiredOverscan = MAP_RENDER_ROUND_VIEWPORT
+      ? map_presentation::refreshLeadPixels(
+            speedMetersPerSecond, pixelsPerMeter, expectedLatencyMs,
+            MAP_RENDER_SAFETY_PIXELS + 8U,
+            minimumOverscanPixels,
+            MAP_RENDER_OVERSCAN_PIXELS)
+      : MAP_RENDER_OVERSCAN_PIXELS;
+  request.overscanPixels = static_cast<uint16_t>(std::ceil(desiredOverscan));
+  request.renderWidth = static_cast<uint16_t>(
+      request.viewportWidth + request.overscanPixels * 2U);
+  request.renderHeight = static_cast<uint16_t>(
+      request.viewportHeight + request.overscanPixels * 2U);
+  request.renderStridePixels =
+      lv_draw_buf_width_to_stride(request.renderWidth,
+                                  LV_COLOR_FORMAT_RGB565) /
+      sizeof(uint16_t);
 
   request.rotationRad = 0.0;
   if (rotationMode == ROT_COURSE_UP) {
@@ -4052,20 +4082,9 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
   // anchors the live rider at the normal screen point; only the source-frame
   // coverage is asymmetric in the direction of travel.
   if (followPosition && hasPresentedPose && presentedPose.headingValid) {
-    const double speedMetersPerSecond = gps.gpsData.speed / 3.6;
-    const double latitudeRadians =
-        gps.gpsData.latitude * 3.14159265358979323846 / 180.0;
-    const double worldUnitsPerMeter =
-        1.0 / std::max(0.2, std::fabs(std::cos(latitudeRadians)));
-    const double pixelsPerMeter =
-        worldUnitsPerMeter * map_transform::worldToScreenScale(request.zoom);
-    const uint32_t expectedLatencyMs =
-        std::max<uint32_t>(250U,
-                           std::min<uint32_t>(5000U,
-                                              lastCompletedRenderDurationMs));
     const double leadPixels = map_presentation::refreshLeadPixels(
         speedMetersPerSecond, pixelsPerMeter, expectedLatencyMs, 0.0, 0.0,
-        MAP_RENDER_OVERSCAN_PIXELS - MAP_RENDER_SAFETY_PIXELS);
+        request.overscanPixels - MAP_RENDER_SAFETY_PIXELS);
     if (pixelsPerMeter > 0.0 && leadPixels > 0.0) {
       const double leadWorld =
           leadPixels / pixelsPerMeter * worldUnitsPerMeter;
@@ -4082,6 +4101,8 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
   request.version.styleEpoch = styleEpoch;
   request.version.mapEpoch = mapEpoch;
   request.version.projectionEpoch = projectionEpoch;
+  request.version.diagnosticsWindowId =
+      request.context.rendererDiagnosticsWindowId;
   return true;
 }
 
@@ -4092,20 +4113,27 @@ bool Maps::submitRenderRequest(const RenderRequest &immutableRequest) {
   if (xSemaphoreTake(renderStateMutex, 0) != pdTRUE)
     return false;
   request.version = renderJobs.submit(request.version);
+#if FIRMWARE_DIAGNOSTICS
+  renderer_diagnostics::noteJobForWindow(
+      request.version.diagnosticsWindowId,
+      renderer_diagnostics::JobEvent::Requested);
+#endif
   latestRenderRequest = request;
   latestRenderRequestValid = true;
   if (renderJobs.state() == map_render_job::State::Ready &&
       !map_render_job::Version::sameFrame(renderJobs.ready(),
                                           request.version)) {
+#if FIRMWARE_DIAGNOSTICS
+    renderer_diagnostics::noteJobForWindow(
+        renderJobs.ready().diagnosticsWindowId,
+        renderer_diagnostics::JobEvent::Stale);
+#endif
     renderJobs.rejectReadyAsStale();
     readyRenderResultValid = false;
   }
   gMapRenderLatestSequence.store(request.version.sequence,
                                  std::memory_order_release);
   const TaskHandle_t worker = renderWorkerTaskHandle;
-#if FIRMWARE_DIAGNOSTICS
-  renderer_diagnostics::noteJobs(rendererJobCounters(renderJobs.diagnostics()));
-#endif
   xSemaphoreGive(renderStateMutex);
   if (worker != nullptr)
     xTaskNotifyGive(worker);
@@ -4138,13 +4166,20 @@ bool Maps::takeWorkerRequest(RenderRequest &request) {
       request.cancellationGeneration =
           gMapRenderCancellationGeneration.load(std::memory_order_acquire);
       lastTakenRenderSequence = request.version.sequence;
+#if FIRMWARE_DIAGNOSTICS
+      renderer_diagnostics::noteJobForWindow(
+          request.version.diagnosticsWindowId,
+          renderer_diagnostics::JobEvent::Started);
+#endif
     } else {
+#if FIRMWARE_DIAGNOSTICS
+      renderer_diagnostics::noteJobForWindow(
+          renderJobs.active().diagnosticsWindowId,
+          renderer_diagnostics::JobEvent::Cancelled);
+#endif
       renderJobs.cancelActive();
     }
   }
-#if FIRMWARE_DIAGNOSTICS
-  renderer_diagnostics::noteJobs(rendererJobCounters(renderJobs.diagnostics()));
-#endif
   xSemaphoreGive(renderStateMutex);
   return available;
 }
@@ -4212,12 +4247,13 @@ bool Maps::startRenderWorker() {
   // Wi-Fi driver before it has a chance to report an allocation failure. The
   // AMOLED boards have PSRAM and their SDK configuration explicitly permits
   // external task stacks, so reserve internal RAM for radio/driver work.
-  // IDLE0 is the only production TWDT subscriber. Keeping this continuously
-  // runnable worker at the same priority lets IDLE0 time-slice even if a
-  // preemptible FatFs/SPI read takes longer than a cooperative checkpoint.
+  // IDLE0 is the only production TWDT subscriber. The renderer runs one level
+  // above idle for deterministic progress, while its cooperative checkpoints
+  // block every 10 ms to give IDLE0 a bounded watchdog-feeding window. FatFs
+  // and SPI waits block independently and therefore also release the CPU.
   BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
       renderWorkerTaskThunk, "map_render", MAP_RENDER_WORKER_STACK_BYTES, this,
-      tskIDLE_PRIORITY, &renderWorkerTaskHandle, 0,
+      tskIDLE_PRIORITY + 1, &renderWorkerTaskHandle, 0,
       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (created != pdPASS) {
     renderWorkerTaskHandle = nullptr;
@@ -4424,10 +4460,20 @@ void Maps::renderWorkerLoop() {
             gMapRenderSliceCount.load(std::memory_order_relaxed),
             gMapRenderLongestSliceUs.load(std::memory_order_relaxed),
             MAP_RENDER_DECLARED_SLICE_US);
+#if FIRMWARE_DIAGNOSTICS
+        const bool activeJobStillTracked =
+            renderJobs.state() == map_render_job::State::Rendering &&
+            renderJobs.active() == request.version;
+#endif
         const map_render_job::StopReason stopReason = renderJobs.checkpoint(
             renderWorkerShutdown.load(std::memory_order_acquire));
         const bool latest = stopReason == map_render_job::StopReason::None;
         if (completed && latest && renderJobs.completeActive()) {
+#if FIRMWARE_DIAGNOSTICS
+          renderer_diagnostics::noteJobForWindow(
+              request.version.diagnosticsWindowId,
+              renderer_diagnostics::JobEvent::Completed);
+#endif
           readyRenderResult = result;
           readyRenderResultValid = true;
           MAPIO_LOG(
@@ -4447,10 +4493,21 @@ void Maps::renderWorkerLoop() {
               (unsigned long)result.psramFree,
               (unsigned long)result.psramLargest);
         } else {
+#if FIRMWARE_DIAGNOSTICS
+          // Screen teardown may already have invalidated and accounted for
+          // this active job while the worker was outside the mutex. Do not
+          // count the same cancellation again when it reaches this boundary.
+          if (activeJobStillTracked) {
+            renderer_diagnostics::noteJobForWindow(
+                request.version.diagnosticsWindowId,
+                renderer_diagnostics::JobEvent::Cancelled);
+          }
+#endif
           renderJobs.cancelActive();
 #if FIRMWARE_DIAGNOSTICS
           if (stopReason != map_render_job::StopReason::None)
-            renderer_diagnostics::noteInterrupted();
+            renderer_diagnostics::noteInterruptedForWindow(
+                request.version.diagnosticsWindowId);
 #endif
           // Supersession and shutdown are normal scheduling events. Only an
           // actual render/invariant failure asks the UI to retry the last good
@@ -4465,10 +4522,6 @@ void Maps::renderWorkerLoop() {
               completed ? 1U : 0U, static_cast<unsigned>(stopReason),
               (unsigned long)(millis() - startMs));
         }
-#if FIRMWARE_DIAGNOSTICS
-        renderer_diagnostics::noteJobs(
-            rendererJobCounters(renderJobs.diagnostics()));
-#endif
         xSemaphoreGive(renderStateMutex);
       }
 
@@ -4486,14 +4539,17 @@ void Maps::renderWorkerLoop() {
 
   if (renderStateMutex != nullptr &&
       xSemaphoreTake(renderStateMutex, portMAX_DELAY) == pdTRUE) {
+#if FIRMWARE_DIAGNOSTICS
+    if (renderJobs.state() == map_render_job::State::Rendering) {
+      renderer_diagnostics::noteJobForWindow(
+          renderJobs.active().diagnosticsWindowId,
+          renderer_diagnostics::JobEvent::Cancelled);
+    }
+#endif
     renderJobs.cancelActive();
     readyRenderResultValid = false;
     latestRenderRequestValid = false;
     renderWorkerTaskHandle = nullptr;
-#if FIRMWARE_DIAGNOSTICS
-    renderer_diagnostics::noteJobs(
-        rendererJobCounters(renderJobs.diagnostics()));
-#endif
     xSemaphoreGive(renderStateMutex);
   } else {
     renderWorkerTaskHandle = nullptr;
@@ -4519,12 +4575,13 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
     return false;
   }
   if (!renderResultStillCurrent(readyRenderResult)) {
+#if FIRMWARE_DIAGNOSTICS
+    renderer_diagnostics::noteJobForWindow(
+        readyRenderResult.version.diagnosticsWindowId,
+        renderer_diagnostics::JobEvent::Stale);
+#endif
     renderJobs.rejectReadyAsStale();
     readyRenderResultValid = false;
-#if FIRMWARE_DIAGNOSTICS
-    renderer_diagnostics::noteJobs(
-        rendererJobCounters(renderJobs.diagnostics()));
-#endif
     const TaskHandle_t worker = renderWorkerTaskHandle;
     xSemaphoreGive(renderStateMutex);
     if (worker != nullptr)
@@ -4556,17 +4613,20 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
                  readyRenderResult.overscanPixels,
              readyRenderResult.projection.anchorY() -
                  readyRenderResult.overscanPixels},
-            rotationDelta, MAP_RENDER_SAFETY_PIXELS);
+            rotationDelta, MAP_RENDER_SAFETY_PIXELS,
+            MAP_RENDER_ROUND_VIEWPORT);
     if (!covered) {
+#if FIRMWARE_DIAGNOSTICS
+      renderer_diagnostics::noteJobForWindow(
+          readyRenderResult.version.diagnosticsWindowId,
+          renderer_diagnostics::JobEvent::Stale);
+      renderer_diagnostics::noteCoverageRejectedForWindow(
+          readyRenderResult.version.diagnosticsWindowId);
+#endif
       renderJobs.rejectReadyAsStale();
       readyRenderResultValid = false;
       isPosMoved = true;
       redrawMap = true;
-#if FIRMWARE_DIAGNOSTICS
-      renderer_diagnostics::noteCoverageRejected();
-      renderer_diagnostics::noteJobs(
-          rendererJobCounters(renderJobs.diagnostics()));
-#endif
       const TaskHandle_t worker = renderWorkerTaskHandle;
       xSemaphoreGive(renderStateMutex);
       if (worker != nullptr)
@@ -4584,13 +4644,14 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
       bufMapScreen == nullptr || bufMapTemp == nullptr ||
       requiredFrameBytes > bufMapScreenSize ||
       requiredFrameBytes > bufMapTempSize) {
+#if FIRMWARE_DIAGNOSTICS
+    renderer_diagnostics::noteJobForWindow(
+        readyRenderResult.version.diagnosticsWindowId,
+        renderer_diagnostics::JobEvent::InvariantFailed);
+#endif
     renderJobs.rejectReadyAsInvariant();
     readyRenderResultValid = false;
     renderFailurePending = true;
-#if FIRMWARE_DIAGNOSTICS
-    renderer_diagnostics::noteJobs(
-        rendererJobCounters(renderJobs.diagnostics()));
-#endif
     const TaskHandle_t worker = renderWorkerTaskHandle;
     ESP_LOGE(TAG,
              "Map render publication invariant failed required=%u front=%u "
@@ -4611,14 +4672,16 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
     xSemaphoreGive(renderStateMutex);
     return false;
   }
+#if FIRMWARE_DIAGNOSTICS
+  renderer_diagnostics::noteJobForWindow(
+      publishedVersion.diagnosticsWindowId,
+      renderer_diagnostics::JobEvent::Published);
+#endif
   result = readyRenderResult;
   readyRenderResultValid = false;
   std::swap(bufMapScreen, bufMapTemp);
   std::swap(bufMapScreenSize, bufMapTempSize);
   const map_render_job::Diagnostics jobDiagnostics = renderJobs.diagnostics();
-#if FIRMWARE_DIAGNOSTICS
-  renderer_diagnostics::noteJobs(rendererJobCounters(jobDiagnostics));
-#endif
   xSemaphoreGive(renderStateMutex);
 
   const uint32_t swapStartedUs = micros();
@@ -4778,7 +4841,8 @@ void Maps::updatePresentedFrameTransform() {
       {projected.x, projected.y},
       {static_cast<double>(screenAnchorX),
        static_cast<double>(screenAnchorY)},
-      rotationDelta, MAP_RENDER_SAFETY_PIXELS);
+      rotationDelta, MAP_RENDER_SAFETY_PIXELS,
+      MAP_RENDER_ROUND_VIEWPORT);
 
   RenderRequest latestRequestSnapshot;
   bool latestRequestSnapshotValid = false;
@@ -4812,7 +4876,8 @@ void Maps::updatePresentedFrameTransform() {
                latestRequestSnapshot.overscanPixels,
            latestProjection.anchorY() -
                latestRequestSnapshot.overscanPixels},
-          latestRotationDelta, MAP_RENDER_SAFETY_PIXELS);
+          latestRotationDelta, MAP_RENDER_SAFETY_PIXELS,
+          MAP_RENDER_ROUND_VIEWPORT);
     }
   }
   if (!visibleCoversPose && !latestCoversPose) {
@@ -5502,6 +5567,11 @@ bool Maps::requestVectorMapFolderActivation(const std::string &folder) {
   gMapRenderCancellationGeneration.fetch_add(1, std::memory_order_acq_rel);
   renderJobs.requestCancellation();
   if (renderJobs.state() == map_render_job::State::Ready) {
+#if FIRMWARE_DIAGNOSTICS
+    renderer_diagnostics::noteJobForWindow(
+        renderJobs.ready().diagnosticsWindowId,
+        renderer_diagnostics::JobEvent::Stale);
+#endif
     renderJobs.rejectReadyAsStale();
     readyRenderResultValid = false;
   }
@@ -5625,6 +5695,17 @@ void Maps::deleteMapScrSprites() {
       xSemaphoreTake(renderStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
     gMapRenderCancellationGeneration.fetch_add(1, std::memory_order_acq_rel);
     renderJobs.requestCancellation();
+#if FIRMWARE_DIAGNOSTICS
+    if (renderJobs.state() == map_render_job::State::Rendering) {
+      renderer_diagnostics::noteJobForWindow(
+          renderJobs.active().diagnosticsWindowId,
+          renderer_diagnostics::JobEvent::Cancelled);
+    } else if (renderJobs.state() == map_render_job::State::Ready) {
+      renderer_diagnostics::noteJobForWindow(
+          renderJobs.ready().diagnosticsWindowId,
+          renderer_diagnostics::JobEvent::Stale);
+    }
+#endif
     const map_render_job::Version invalidated = renderJobs.invalidate();
     gMapRenderLatestSequence.store(invalidated.sequence,
                                    std::memory_order_release);

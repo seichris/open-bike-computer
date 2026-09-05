@@ -6,6 +6,9 @@ ESP32_ROOT = Path(__file__).resolve().parents[2]
 MAP_RENDERER_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "maps.cpp"
 ).read_text(encoding="utf-8")
+MAP_PROJECTION_SOURCE = (
+    ESP32_ROOT / "lib" / "maps" / "src" / "map_projection.hpp"
+).read_text(encoding="utf-8")
 PLATFORMIO_SOURCE = (ESP32_ROOT / "platformio.ini").read_text(encoding="utf-8")
 DIAGNOSTICS_DOC = (
     ESP32_ROOT.parent / "docs" / "firmware-map-memory-diagnostics.md"
@@ -13,6 +16,26 @@ DIAGNOSTICS_DOC = (
 
 
 class MapMemoryDiagnosticsTests(unittest.TestCase):
+    def test_frame_projection_caches_immutable_trigonometry(self):
+        ground_start = MAP_PROJECTION_SOURCE.index("GroundPoint groundForWorld")
+        ground_end = MAP_PROJECTION_SOURCE.index(
+            "map_transform::WorldPoint worldForGround", ground_start
+        )
+        ground_body = MAP_PROJECTION_SOURCE[ground_start:ground_end]
+        self.assertIn("rotationCosine_", ground_body)
+        self.assertIn("rotationSine_", ground_body)
+        self.assertIn("worldToScreenScale_", ground_body)
+        self.assertNotIn("map_transform::worldToScreen", ground_body)
+
+    def test_variable_frame_scratch_uses_psram(self):
+        for declaration in (
+            "std::vector<Point32, PsramAllocator<Point32>> requiredOffsets",
+            "PsramAllocator<map_projection::GroundPoint>>",
+            "std::vector<uint8_t, PsramAllocator<uint8_t>> visited",
+            "std::vector<uint8_t, PsramAllocator<uint8_t>> admission",
+        ):
+            self.assertIn(declaration, MAP_RENDERER_SOURCE)
+
     def test_structured_memory_snapshot_has_stable_fields(self):
         self.assertIn(
             '"MAPIO: memory phase=%s freeInternalHeap=%u "',

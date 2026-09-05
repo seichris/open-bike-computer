@@ -223,6 +223,37 @@ def snapshot(
 
 
 class RendererBenchmarkTests(unittest.TestCase):
+    def test_temporary_coverage_allowance_preserves_independent_stale_gate(self):
+        gates = renderer_benchmark.load_gates(TOOLS / "renderer_benchmark_gates.json")
+        self.assertEqual(gates["absolute"]["maximumCoverageRejectedRenders"], 4)
+        self.assertEqual(gates["absolute"]["maximumStaleRenders"], 3)
+        for coverage, stale in ((3, 3), (4, 0), (5, 0), (4, 4)):
+            with self.subTest(coverage=coverage, stale=stale):
+                value = snapshot(
+                    sequence=1, timestamp_ms=1000,
+                    map_fixture={"id": "shanghai-renderer-v1", "manifestReceipt": "a" * 64},
+                    route_id="shanghai-center-renderer-v1", route_sha256="b" * 64,
+                )
+                value["render"]["jobs"]["coverageRejected"] = coverage
+                value["render"]["jobs"]["stale"] = stale
+                samples = [renderer_benchmark.compact_sample(value, 0)]
+                summary = renderer_benchmark.summarize_run([value], samples)
+                failures = renderer_benchmark.evaluate_run(
+                    snapshots=[value], samples=samples, summary=summary,
+                    duration_seconds=1, poll_interval_seconds=1,
+                    screenshots=[], checkpoint_count=0,
+                    expected_route_sample_count=120, gates=gates,
+                    expect_remote_debug=False,
+                )
+                self.assertEqual(
+                    [failure for failure in failures if failure.startswith("coverage_rejections:")],
+                    ["coverage_rejections:5"] if coverage > 4 else [],
+                )
+                self.assertEqual(
+                    [failure for failure in failures if failure.startswith("stale_renders:")],
+                    ["stale_renders:4"] if stale > 3 else [],
+                )
+
     def test_balanced_schedule_rotates_first_order(self):
         self.assertEqual(
             renderer_benchmark.balanced_profile_schedule(3),

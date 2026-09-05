@@ -219,6 +219,19 @@ nonisolated struct RendererBenchmarkRunPlanItem: Equatable, Sendable {
     let repeatNumber: Int
 }
 
+/// Interrupted runs deliberately use a distinct report shape and cannot pass.
+nonisolated struct RendererBenchmarkInterruptedEvidence: Encodable {
+    let schema: Int
+    let source: String
+    let automatedPassed: Bool
+    let stopped: Bool
+    let reason: String
+    let cleanupRestoredCurrent: Bool
+    let completedRuns: [RendererBenchmarkRunEvidence]
+    let partialSamples: [RendererBenchmarkEvidenceSample]
+    let lastSnapshot: RendererBenchmarkMetricsSnapshot?
+}
+
 nonisolated struct SecureRendererBenchmarkReadinessInputs: Equatable, Sendable {
     let isConnected: Bool
     let isNavigationReady: Bool
@@ -540,23 +553,23 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
     }
 
     nonisolated struct DMAMemoryRegion: Codable, Equatable, Sendable {
-        nonisolated struct MinimumAttribution: Codable, Equatable, Sendable {
-            let phase: String
-            let observedAtMs: UInt32
-            let value: UInt32
-            let frameTransferActive: Bool
-        }
-
         let free: UInt32
         let minimumEverFree: UInt32
         let largestBlock: UInt32
         let windowMinimumFree: UInt32
         let windowMinimumLargestBlock: UInt32
-        let windowMinimumFreeAttribution: MinimumAttribution?
-        let windowMinimumLargestBlockAttribution: MinimumAttribution?
         let cryptoCountersScope: String?
         let cryptoHeadroomRejections: UInt32
         let cryptoOperationFailures: UInt32
+        let windowMinimumFreeAttribution: MemoryAttribution?
+        let windowMinimumLargestBlockAttribution: MemoryAttribution?
+    }
+
+    nonisolated struct MemoryAttribution: Codable, Equatable, Sendable {
+        let phase: String
+        let observedAtMs: UInt32
+        let value: UInt32
+        let frameTransferActive: Bool
     }
 
     nonisolated struct Memory: Codable, Equatable, Sendable {
@@ -648,9 +661,6 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
         let rejected: UInt32
     }
 
-    /// Session-scoped, non-secret firmware evidence for replay ingress and
-    /// marker admission. This is optional so an app built from this stack can
-    /// still decode metrics from the immediately preceding firmware head.
     nonisolated struct ReplayTransport: Codable, Equatable, Sendable {
         let gpsAuthenticationAccepted: UInt32
         let gpsAuthenticationRejected: UInt32
@@ -668,8 +678,8 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
         let lastTransportEventAtMs: UInt32
         let lastMarkerAtMs: UInt32
         let lastActiveWindowId: UInt32
-        let lastSampleIndex: UInt16
-        let lastSampleCount: UInt16
+        let lastSampleIndex: UInt32
+        let lastSampleCount: UInt32
         let lastLoop: UInt32
         let lastCandidateFixtureTag: UInt32
         let lastCandidateFixtureTagValid: Bool
@@ -722,6 +732,42 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
     let routeReplay: RouteReplay
     let replayTransport: ReplayTransport?
     let remoteDebug: RemoteDebug
+    var deliveryTiming: RendererDeliveryTimingEvidence? = nil
+}
+
+nonisolated struct RendererDeliveryTimingEvidence: Codable, Equatable, Sendable {
+    nonisolated struct Callback: Codable, Equatable, Sendable {
+        let session: UInt32
+        let ordinal: UInt32
+        let channel: UInt8
+        let startedAtMs: UInt32
+        let callbackUs: UInt32
+        let setupUs: UInt32
+        let authenticationUs: UInt32
+        let allocationUs: UInt32
+        let mailboxWaitUs: UInt32
+        let mailboxHoldUs: UInt32
+        let authenticated: Bool
+        let mailboxAccepted: Bool
+        let frameActiveAtEntry: Bool
+        let frameActiveAtExit: Bool
+    }
+    nonisolated struct Owner: Codable, Equatable, Sendable {
+        let session: UInt32
+        let ordinal: UInt32
+        let channel: UInt8
+        let startedAtMs: UInt32
+        let mailboxAgeUs: UInt32
+        let processingUs: UInt32
+    }
+    let schema: Int
+    let session: UInt32
+    let completed: UInt32
+    let latest: Callback
+    let slowestRoute: Callback
+    let slowestGps: Callback
+    let latestOwner: Owner
+    let slowestOwner: Owner
 }
 
 nonisolated struct RendererBenchmarkReplayTimingEvidence: Codable,
@@ -732,6 +778,32 @@ nonisolated struct RendererBenchmarkReplayTimingEvidence: Codable,
     let timerCallbacks: UInt64
     let lastTimerLatenessMs: Int
     let maximumTimerLatenessMs: Int
+    // Optional for compatibility with earlier schema-1 evidence. The legacy
+    // timer field names above now describe the async cadence callbacks.
+    var schedulerActive: Bool? = nil
+}
+
+nonisolated struct RendererBenchmarkStartupSample: Codable, Equatable, Sendable {
+    let phase: String
+    let bleTransport: RendererBenchmarkBLETransportEvidence
+    let replayTiming: RendererBenchmarkReplayTimingEvidence
+    let window: RendererBenchmarkMetricsSnapshot.Window?
+    let routeReplay: RendererBenchmarkMetricsSnapshot.RouteReplay?
+    let replayTransport: RendererBenchmarkMetricsSnapshot.ReplayTransport?
+}
+
+nonisolated struct RendererBenchmarkStartupTrace: Codable, Sendable {
+    static let maximumSamples = 128
+    private(set) var samples: [RendererBenchmarkStartupSample] = []
+    private(set) var droppedSamples: UInt64 = 0
+
+    mutating func record(_ sample: RendererBenchmarkStartupSample) {
+        if samples.count == Self.maximumSamples {
+            samples.removeFirst()
+            droppedSamples &+= 1
+        }
+        samples.append(sample)
+    }
 }
 
 nonisolated struct RendererBenchmarkEvidenceIdentity: Codable,
@@ -773,160 +845,13 @@ nonisolated struct RendererBenchmarkEvidenceSample: Codable,
     let renderCount: UInt32
     let buildings: RendererBenchmarkMetricsSnapshot.Buildings
     let routeReplay: RendererBenchmarkMetricsSnapshot.RouteReplay
-    let replayTransport: RendererBenchmarkMetricsSnapshot.ReplayTransport?
     let bleTransport: RendererBenchmarkBLETransportEvidence?
     let replayTiming: RendererBenchmarkReplayTimingEvidence?
-}
-
-/// A bounded, secret-free delta for one initial replay-admission attempt.
-/// Firmware counters are session-scoped, so the controller compares the last
-/// snapshot with the window-confirmation snapshot captured before it emits the
-/// route and RBS1 pair.
-nonisolated struct RendererBenchmarkReplayTransportDelta: Equatable, Sendable {
-    let gpsAuthenticationAccepted: UInt32
-    let gpsAuthenticationRejected: UInt32
-    let rbs1Detected: UInt32
-    let rbs1Decoded: UInt32
-    let rbs1Malformed: UInt32
-    let rbs1Unnegotiated: UInt32
-    let gpsMailboxAccepted: UInt32
-    let gpsMailboxRejected: UInt32
-    let markerAccepted: UInt32
-    let markerRejectedInvalid: UInt32
-    let markerRejectedNoActiveWindow: UInt32
-    let markerRejectedActiveFixtureUnavailable: UInt32
-    let markerRejectedFixtureMismatch: UInt32
-    let lastMarkerResult: String
-    let lastActiveWindowId: UInt32
-    let lastSampleIndex: UInt16
-    let lastSampleCount: UInt16
-
-    init?(
-        baseline: RendererBenchmarkMetricsSnapshot.ReplayTransport?,
-        latest: RendererBenchmarkMetricsSnapshot.ReplayTransport?
-    ) {
-        guard let latest else { return nil }
-        func delta(
-            _ value: UInt32,
-            _ keyPath: KeyPath<
-                RendererBenchmarkMetricsSnapshot.ReplayTransport,
-                UInt32
-            >
-        ) -> UInt32 {
-            value &- (baseline?[keyPath: keyPath] ?? 0)
-        }
-
-        gpsAuthenticationAccepted = delta(
-            latest.gpsAuthenticationAccepted,
-            \.gpsAuthenticationAccepted
-        )
-        gpsAuthenticationRejected = delta(
-            latest.gpsAuthenticationRejected,
-            \.gpsAuthenticationRejected
-        )
-        rbs1Detected = delta(latest.rbs1Detected, \.rbs1Detected)
-        rbs1Decoded = delta(latest.rbs1Decoded, \.rbs1Decoded)
-        rbs1Malformed = delta(latest.rbs1Malformed, \.rbs1Malformed)
-        rbs1Unnegotiated = delta(latest.rbs1Unnegotiated, \.rbs1Unnegotiated)
-        gpsMailboxAccepted = delta(
-            latest.gpsMailboxAccepted,
-            \.gpsMailboxAccepted
-        )
-        gpsMailboxRejected = delta(
-            latest.gpsMailboxRejected,
-            \.gpsMailboxRejected
-        )
-        markerAccepted = delta(latest.markerAccepted, \.markerAccepted)
-        markerRejectedInvalid = delta(
-            latest.markerRejectedInvalid,
-            \.markerRejectedInvalid
-        )
-        markerRejectedNoActiveWindow = delta(
-            latest.markerRejectedNoActiveWindow,
-            \.markerRejectedNoActiveWindow
-        )
-        markerRejectedActiveFixtureUnavailable = delta(
-            latest.markerRejectedActiveFixtureUnavailable,
-            \.markerRejectedActiveFixtureUnavailable
-        )
-        markerRejectedFixtureMismatch = delta(
-            latest.markerRejectedFixtureMismatch,
-            \.markerRejectedFixtureMismatch
-        )
-        lastMarkerResult = latest.lastMarkerResult
-        lastActiveWindowId = latest.lastActiveWindowId
-        lastSampleIndex = latest.lastSampleIndex
-        lastSampleCount = latest.lastSampleCount
-    }
-
-    var observedFirmwareIngress: Bool {
-        gpsAuthenticationAccepted > 0 ||
-            gpsAuthenticationRejected > 0 ||
-            rbs1Detected > 0 ||
-            rbs1Decoded > 0 ||
-            rbs1Malformed > 0 ||
-            rbs1Unnegotiated > 0 ||
-            gpsMailboxAccepted > 0 ||
-            gpsMailboxRejected > 0 ||
-            markerAccepted > 0 ||
-            markerRejectedInvalid > 0 ||
-            markerRejectedNoActiveWindow > 0 ||
-            markerRejectedActiveFixtureUnavailable > 0 ||
-            markerRejectedFixtureMismatch > 0
-    }
-
-    var failureDescription: String {
-        "Replay diagnostics for this attempt: " +
-            "authAccepted=\(gpsAuthenticationAccepted), " +
-            "authRejected=\(gpsAuthenticationRejected), " +
-            "rbs1Detected=\(rbs1Detected), " +
-            "rbs1Decoded=\(rbs1Decoded), " +
-            "rbs1Malformed=\(rbs1Malformed), " +
-            "rbs1Unnegotiated=\(rbs1Unnegotiated), " +
-            "gpsMailboxAccepted=\(gpsMailboxAccepted), " +
-            "gpsMailboxRejected=\(gpsMailboxRejected), " +
-            "markerAccepted=\(markerAccepted), " +
-            "markerRejectedInvalid=\(markerRejectedInvalid), " +
-            "markerRejectedNoActiveWindow=" +
-            "\(markerRejectedNoActiveWindow), " +
-            "markerRejectedActiveFixtureUnavailable=" +
-            "\(markerRejectedActiveFixtureUnavailable), " +
-            "markerRejectedFixtureMismatch=" +
-            "\(markerRejectedFixtureMismatch), " +
-            "lastMarkerResult=\(lastMarkerResult), " +
-            "lastActiveWindowId=\(lastActiveWindowId), " +
-            "lastSample=\(lastSampleIndex)/\(lastSampleCount)."
-    }
-}
-
-/// A single bounded retry is permitted only when the firmware's synchronized
-/// session counters prove that no part of the acknowledged RBS1 transaction
-/// reached the application. The original 2.5-second acceptance deadline is
-/// never extended.
-nonisolated enum RendererBenchmarkInitialAdmissionRetryPolicy {
-    static let maximumAttempts = 2
-    static let minimumSilentObservationSeconds: TimeInterval = 0.25
-    static let minimumRemainingBudgetSeconds: TimeInterval = 0.75
-
-    static func shouldRetrySilentAttempt(
-        completedAttempts: Int,
-        attemptElapsedSeconds: TimeInterval,
-        remainingSeconds: TimeInterval,
-        delta: RendererBenchmarkReplayTransportDelta?
-    ) -> Bool {
-        completedAttempts < maximumAttempts &&
-            attemptElapsedSeconds >= minimumSilentObservationSeconds &&
-            remainingSeconds >= minimumRemainingBudgetSeconds &&
-            delta?.observedFirmwareIngress == false
-    }
-
-    static func shouldRetryFailedWrite(
-        completedAttempts: Int,
-        remainingSeconds: TimeInterval
-    ) -> Bool {
-        completedAttempts < maximumAttempts &&
-            remainingSeconds >= minimumRemainingBudgetSeconds
-    }
+    // Optional, additive schema-1 fields: older archives still decode.
+    var gps: RendererBenchmarkMetricsSnapshot.GPS? = nil
+    var replayTransport: RendererBenchmarkMetricsSnapshot.ReplayTransport? = nil
+    var remoteDebug: RendererBenchmarkMetricsSnapshot.RemoteDebug? = nil
+    var deliveryTiming: RendererDeliveryTimingEvidence? = nil
 }
 
 nonisolated struct RendererBenchmarkRunSummary: Codable, Equatable, Sendable {
@@ -1179,9 +1104,12 @@ nonisolated enum RendererBenchmarkEvaluator {
             renderCount: snapshot.render.timings.total.count,
             buildings: snapshot.render.buildings,
             routeReplay: snapshot.routeReplay,
-            replayTransport: snapshot.replayTransport,
             bleTransport: bleTransport,
-            replayTiming: replayTiming
+            replayTiming: replayTiming,
+            gps: snapshot.gps,
+            replayTransport: snapshot.replayTransport,
+            remoteDebug: snapshot.remoteDebug,
+            deliveryTiming: snapshot.deliveryTiming
         )
     }
 
@@ -1561,36 +1489,29 @@ nonisolated enum RendererBenchmarkEvaluator {
         gates: RendererBenchmarkGates
     ) {
         struct Check {
-            let value: (RendererBenchmarkRunEvidence) -> UInt32
+            let value: (RendererBenchmarkRunSummary) -> UInt32
             let allowed: UInt32
             let label: String
         }
-        // Per-window minima remain authoritative for the unchanged absolute
-        // safety floors. Cross-run retention instead compares the standardized
-        // current heap state in each terminal metrics snapshot: a minimum may
-        // be set by any transient render, checkpoint, TLS, or polling phase and
-        // is therefore not evidence that memory remained allocated.
         let checks = [
-            Check(value: { $0.finalSnapshot.memory.internalHeap.free },
+            Check(value: { $0.minimumInternalFree },
                   allowed: gates.trend.crossRunInternalAllowedDeclineBytes,
                   label: "cross_run_internal_decline"),
-            Check(value: {
-                $0.finalSnapshot.memory.internalHeap.largestBlock
-            }, allowed: gates.trend.crossRunInternalAllowedDeclineBytes,
-               label: "cross_run_internal_largest_decline"),
-            Check(value: { $0.finalSnapshot.memory.psram.free },
+            Check(value: { $0.minimumInternalLargest },
+                  allowed: gates.trend.crossRunInternalAllowedDeclineBytes,
+                  label: "cross_run_internal_largest_decline"),
+            Check(value: { $0.minimumPsramFree },
                   allowed: gates.trend.crossRunPsramAllowedDeclineBytes,
                   label: "cross_run_psram_decline"),
-            Check(value: { $0.finalSnapshot.memory.psram.largestBlock },
+            Check(value: { $0.minimumPsramLargest },
                   allowed: gates.trend.crossRunPsramAllowedDeclineBytes,
                   label: "cross_run_psram_largest_decline"),
-            Check(value: { $0.finalSnapshot.memory.dmaHeap.free },
+            Check(value: { $0.minimumDmaFree },
                   allowed: gates.trend.crossRunDmaAllowedDeclineBytes,
                   label: "cross_run_dma_decline"),
-            Check(value: {
-                $0.finalSnapshot.memory.dmaHeap.largestBlock
-            }, allowed: gates.trend.crossRunDmaAllowedDeclineBytes,
-               label: "cross_run_dma_largest_decline"),
+            Check(value: { $0.minimumDmaLargest },
+                  allowed: gates.trend.crossRunDmaAllowedDeclineBytes,
+                  label: "cross_run_dma_largest_decline"),
         ]
         for profile in RendererBenchmarkProfile.allCases {
             let indexes = runs.indices.filter {
@@ -1598,16 +1519,17 @@ nonisolated enum RendererBenchmarkEvaluator {
             }.sorted {
                 runs[$0].repeatNumber < runs[$1].repeatNumber
             }
-            guard indexes.count >=
-                    SecureRendererBenchmarkPlan.comparisonRepeats else {
+            guard indexes.count >= SecureRendererBenchmarkPlan.comparisonRepeats else {
                 continue
             }
             for check in checks {
-                let values = indexes.map { check.value(runs[$0]) }
-                guard progressiveCrossRunDecline(
-                    values,
-                    allowedDecline: check.allowed
-                ) else { continue }
+                let values = indexes.map { check.value(runs[$0].summary) }
+                let strictlyDeclining = zip(values, values.dropFirst())
+                    .allSatisfy { $0 > $1 }
+                guard strictlyDeclining,
+                      let first = values.first,
+                      let last = values.last,
+                      first - last > check.allowed else { continue }
                 for index in indexes {
                     runs[index].failures = Array(Set(
                         runs[index].failures + [check.label]
@@ -1818,37 +1740,6 @@ nonisolated enum RendererBenchmarkEvaluator {
             idealDistances: distances,
             exclusions: exclusions
         )
-    }
-
-    static func progressiveCrossRunDecline(
-        _ values: [UInt32],
-        allowedDecline: UInt32
-    ) -> Bool {
-        guard values.count >= 3 else { return false }
-        let normalized = values.map(Int64.init)
-        let allowed = max(Int64(0), Int64(allowedDecline))
-        let continuationNoise = max(Int64(1), allowed / 4)
-        let totalDecline = normalized[0] - normalized[normalized.count - 1]
-        guard totalDecline > allowed else { return false }
-
-        var downwardSteps: [Int64] = []
-        downwardSteps.reserveCapacity(normalized.count - 1)
-        for (previous, current) in zip(
-            normalized,
-            normalized.dropFirst()
-        ) {
-            let delta = previous - current
-            // A rebound larger than the bounded noise allowance contradicts a
-            // progressive retained-state decline.
-            if delta < -continuationNoise { return false }
-            downwardSteps.append(max(Int64(0), delta))
-        }
-        guard let largestStep = downwardSteps.max() else { return false }
-        // Discount one one-time cache/session transition. A real progressive
-        // leak or fragmentation trend must continue beyond that single step.
-        let continuedDecline =
-            downwardSteps.reduce(Int64(0), +) - largestStep
-        return continuedDecline > continuationNoise
     }
 
     private static func median(_ values: [Double]) -> Double {
