@@ -1010,6 +1010,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceTransferLegacyArchivePolicy: String?
     @Published private(set) var deviceTransferLastErrorCode: String?
     @Published private(set) var deviceTransferLastErrorMessage: String?
+    @Published private(set) var deviceTransferLastErrorSequence: UInt64?
     @Published private(set) var deviceTransferStatusRevision: UInt64 = 0
     @Published private(set) var deviceStorageBackend: String?
     @Published private(set) var deviceStoragePowerCycleRequired: Bool?
@@ -6158,6 +6159,7 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferLegacyArchivePolicy = nil
         deviceTransferLastErrorCode = nil
         deviceTransferLastErrorMessage = nil
+        deviceTransferLastErrorSequence = nil
         deviceTransferStatusRevision = 0
         deviceStorageBackend = nil
         deviceStoragePowerCycleRequired = nil
@@ -10015,9 +10017,12 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         if let lastError = object["lastError"] as? [String: Any] {
             deviceTransferLastErrorCode = lastError["code"] as? String
             deviceTransferLastErrorMessage = lastError["message"] as? String
+            deviceTransferLastErrorSequence =
+                (lastError["sequence"] as? NSNumber)?.uint64Value
         } else {
             deviceTransferLastErrorCode = nil
             deviceTransferLastErrorMessage = nil
+            deviceTransferLastErrorSequence = nil
         }
         if let storage = object["storage"] as? [String: Any] {
             deviceStorageBackend = storage["backend"] as? String
@@ -10048,7 +10053,17 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             }
         }
 
-        log("Device transfer status: \(deviceTransferMode.isEmpty ? "none" : deviceTransferMode)")
+        let modeDescription = deviceTransferMode.isEmpty ? "none" : deviceTransferMode
+        if let code = deviceTransferLastErrorCode {
+            let sequence = deviceTransferLastErrorSequence.map(String.init) ?? "unknown"
+            let message = deviceTransferLastErrorMessage ?? "none"
+            log(
+                "Device transfer status: \(modeDescription) " +
+                "lastError=\(code) sequence=\(sequence) message=\(message)"
+            )
+        } else {
+            log("Device transfer status: \(modeDescription)")
+        }
         return true
     }
 
