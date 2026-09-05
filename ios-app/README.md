@@ -205,10 +205,14 @@ Detection** on iPhone:
   Workout app and does not backdate the workout.
 - **Auto-Pause** requests pause after a sustained stop and resumes only a ride
   that Bicino previously auto-paused. A manual pause stays manually paused.
-- The five-second pause path requires a fresh stopped wheel-speed source.
-  Cadence zero, cadence-only availability, missing sensors, and wheel dropout
-  use the ten-second qualified GPS-plus-IMU fallback; trustworthy movement
-  cancels the stopped candidate.
+- Qualified raw Watch workout GPS is the primary pause/resume source: five
+  seconds of distinct stopped samples pauses, and two seconds of moving samples
+  resumes only a ride Bicino automatically paused. Fresh wheel or cadence
+  movement vetoes a contradictory Watch-driven pause.
+- When Watch GPS is unavailable, a fresh stopped wheel uses the five-second
+  path. Cadence zero, cadence-only availability, missing sensors, and wheel
+  dropout use the ten-second qualified device GPS-plus-IMU fallback;
+  trustworthy movement cancels the stopped candidate.
 - HealthKit cycling speed is displayed as HealthKit data unless its paired
   sensor provenance is explicitly confirmed. It never silently sets the paired
   speed source bit.

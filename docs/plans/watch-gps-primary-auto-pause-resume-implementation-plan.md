@@ -19,7 +19,7 @@ profile-3 coasting and route-continuity safety fixes:
   rejected. This repairs a false-pause without creating a route gap.
 
 Older trace schemas remain replayable for compatibility but are not the current
-acceptance contract. The new transport uses CAP2 bit `23`, client version `21`,
+acceptance contract. The new transport uses CAP2 bit `24`, client version `22`,
 workout schema `1.6`, and remains internal-control-only until the physical gates
 pass.
 
@@ -237,13 +237,12 @@ GPS. Source switching is explicit and traceable.
    identity across process recovery. The iPhone relay must build this evidence
    from the authoritative raw Watch envelope, never from a presentation
    snapshot that may contain iPhone location fallback.
-8. Continue location reception while automatically paused, but keep paused
-   samples out of HealthKit route insertion, route distance, and moving-time
-   metrics.
-9. Allocate CAP2 bit `23` and client version `21` for
-   `WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE`, based on the next free values on the
-   baseline commit. Re-check the allocation against current `main` immediately
-   before implementation.
+8. Continue location reception while automatically paused. Keep stationary,
+   delayed, or poor-quality paused samples out of HealthKit route insertion and
+   route distance, while retaining qualified movement through a false pause.
+9. Allocate CAP2 bit `24` and client version `22` for
+   `WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE`, after preserving current `main`'s
+   renderer replay allocation at bit `23` and client version `21`.
 10. Preserve all existing core, extended, origin, legacy GPS, and quality GPS
     frame forms. Unsupported peers continue current behavior and fall back to
     existing detector sources.
@@ -340,8 +339,8 @@ samples. Measure the battery impact before production enablement.
 
 Add, subject to the implementation-time allocation recheck:
 
-- `WATCH_GPS_MOTION_EVIDENCE_V1_CLIENT_VERSION = 20`;
-- `WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE = 1UL << 22`;
+- `WATCH_GPS_MOTION_EVIDENCE_V1_CLIENT_VERSION = 22`;
+- `WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE = 1UL << 24`;
 - iPhone `supportsWatchGPSMotionEvidenceV1`; and
 - direct Watch `supportsWatchGPSMotionEvidenceV1`.
 
@@ -588,7 +587,7 @@ These buckets distinguish detector latency from BLE and HealthKit latency.
 
 1. Add the optional Watch motion sample epoch and sequence to
    `WorkoutLocationV1` and preserve old snapshot/recovery decoding.
-2. Add capability client version `21` and CAP2 bit `23`, after rechecking the
+2. Add capability client version `22` and CAP2 bit `24`, after rechecking the
    live allocation.
 3. Add kind-4 frame builder/decoder, golden vectors, authenticated native and
    fallback handling, and reset semantics.
@@ -835,8 +834,9 @@ The feature is complete only when all of these pass:
 7. **Lifecycle precedence:** no motion candidate carries evidence across a
    confirmed running/automatically-paused change, manual pause, finish,
    discard, recovery, or session-generation boundary.
-8. **Route integrity:** zero paused points or paused-distance growth in saved
-   HealthKit workouts, including recovery and delayed batches.
+8. **Route integrity:** stationary drift, delayed batches, and poor-quality
+   paused points add no route or distance, while qualified physical movement
+   during a false pause remains continuous in saved HealthKit workouts.
 9. **Fallback:** mixed-version peers and Watch evidence loss preserve the
    existing direct and GPS plus IMU behavior without carrying candidate time
    across sources.

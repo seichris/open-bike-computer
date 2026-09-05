@@ -15,6 +15,7 @@ constexpr uint32_t kPointerMinimumIntervalMs = 8;
 constexpr uint32_t kPointerFailSafeMs = 1500;
 constexpr uint64_t kPointerBodyMaximumBytes = 256;
 inline constexpr char kFrameRoutePrefix[] = "/device-debug/v1/frame?after=";
+inline constexpr char kFrameCaptureFloorParameter[] = "&capturedAtOrAfter=";
 
 enum class PointerEnvelopeResult : uint8_t {
   Accepted,
@@ -35,12 +36,13 @@ inline PointerEnvelopeResult validatePointerEnvelope(
   return PointerEnvelopeResult::Accepted;
 }
 
-inline bool parseFrameAfterPath(const std::string &path,
-                                uint32_t &afterSequence) {
-  constexpr size_t kPrefixLength = sizeof(kFrameRoutePrefix) - 1;
-  if (path.compare(0, kPrefixLength, kFrameRoutePrefix) != 0)
-    return false;
-  const std::string value = path.substr(kPrefixLength);
+struct FrameRequestQuery {
+  uint32_t afterSequence = 0;
+  bool hasCapturedAtOrAfter = false;
+  uint32_t capturedAtOrAfterMs = 0;
+};
+
+inline bool parseUint32Decimal(const std::string &value, uint32_t &result) {
   if (value.empty() || value.size() > 10)
     return false;
   uint64_t parsed = 0;
@@ -51,8 +53,38 @@ inline bool parseFrameAfterPath(const std::string &path,
     if (parsed > std::numeric_limits<uint32_t>::max())
       return false;
   }
-  afterSequence = static_cast<uint32_t>(parsed);
+  result = static_cast<uint32_t>(parsed);
   return true;
+}
+
+inline bool parseFrameRequestPath(const std::string &path,
+                                  FrameRequestQuery &query) {
+  query = {};
+  constexpr size_t kPrefixLength = sizeof(kFrameRoutePrefix) - 1;
+  if (path.compare(0, kPrefixLength, kFrameRoutePrefix) != 0)
+    return false;
+  const std::string parameters = path.substr(kPrefixLength);
+  const std::string captureFloorParameter = kFrameCaptureFloorParameter;
+  const size_t captureFloorOffset = parameters.find(captureFloorParameter);
+  const std::string after = parameters.substr(0, captureFloorOffset);
+  if (!parseUint32Decimal(after, query.afterSequence))
+    return false;
+  if (captureFloorOffset == std::string::npos)
+    return true;
+  if (parameters.find(captureFloorParameter,
+                      captureFloorOffset + captureFloorParameter.size()) !=
+      std::string::npos)
+    return false;
+  const std::string captureFloor = parameters.substr(
+      captureFloorOffset + captureFloorParameter.size());
+  if (!parseUint32Decimal(captureFloor, query.capturedAtOrAfterMs))
+    return false;
+  query.hasCapturedAtOrAfter = true;
+  return true;
+}
+
+inline bool timestampAtOrAfter(uint32_t capturedAtMs, uint32_t floorMs) {
+  return static_cast<uint32_t>(capturedAtMs - floorMs) < 0x80000000U;
 }
 
 struct TargetGeometry {

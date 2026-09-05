@@ -428,6 +428,191 @@ class SourceCacheTests(unittest.TestCase):
                 stale_digest,
             )
 
+    def test_incomplete_declared_response_resumes_exact_bytes(self):
+        class Response:
+            def __init__(self, *, headers, chunks, status=None):
+                self.headers = headers
+                self.chunks = iter(chunks)
+                self.status = status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                return next(self.chunks, b"")
+
+            def geturl(self):
+                return "https://example.invalid/test-20260825.osm.pbf"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            region = SourceRegion(
+                id="test-region",
+                provider="test",
+                name="Test",
+                url="https://example.invalid/test-latest.osm.pbf",
+                bounds=Bounds(0, 0, 1, 1),
+                local_path="map-platform/backend/data/source-pbf/test.osm.pbf",
+            )
+            cache = SourceCache(
+                root / "repo",
+                root / "cache.json",
+                data_root=root / "data",
+            )
+            first = Response(
+                headers={
+                    "Content-Length": "10",
+                    "ETag": '"fresh-etag"',
+                    "Last-Modified": "Tue, 25 Aug 2026 00:00:00 GMT",
+                },
+                chunks=[b"fresh"],
+            )
+            resumed = Response(
+                headers={
+                    "Content-Length": "5",
+                    "Content-Range": "bytes 5-9/10",
+                    "ETag": '"fresh-etag"',
+                    "Last-Modified": "Tue, 25 Aug 2026 00:00:00 GMT",
+                },
+                chunks=[b"-data"],
+                status=206,
+            )
+
+            with patch(
+                "map_platform.source_cache.urllib.request.urlopen",
+                side_effect=[first, resumed],
+            ) as download:
+                cached = cache.ensure(region)
+
+            self.assertEqual(cached.bytes, 10)
+            self.assertEqual(cached.path.read_bytes(), b"fresh-data")
+            self.assertEqual(download.call_count, 2)
+            self.assertEqual(download.call_args_list[0].args[0], region.url)
+            resume_request = download.call_args_list[1].args[0]
+            self.assertIsInstance(resume_request, urllib.request.Request)
+            self.assertEqual(
+                resume_request.full_url,
+                "https://example.invalid/test-20260825.osm.pbf",
+            )
+            self.assertEqual(resume_request.get_header("Range"), "bytes=5-")
+            self.assertEqual(
+                resume_request.get_header("If-range"),
+                '"fresh-etag"',
+            )
+
+    def test_incomplete_response_without_validator_preserves_stable_target(self):
+        class Response:
+            headers = {"Content-Length": "10"}
+
+            def __init__(self):
+                self.done = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                if self.done:
+                    return b""
+                self.done = True
+                return b"short"
+
+            def geturl(self):
+                return "https://example.invalid/test.osm.pbf"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "data" / "source-pbf" / "test.osm.pbf"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"stable")
+            region = SourceRegion(
+                id="test-region",
+                provider="test",
+                name="Test",
+                url="https://example.invalid/test.osm.pbf",
+                bounds=Bounds(0, 0, 1, 1),
+                local_path="map-platform/backend/data/source-pbf/test.osm.pbf",
+            )
+            cache = SourceCache(
+                root / "repo",
+                root / "cache.json",
+                data_root=root / "data",
+            )
+
+            with patch(
+                "map_platform.source_cache.urllib.request.urlopen",
+                return_value=Response(),
+            ), self.assertRaisesRegex(SourceCacheError, "cannot be resumed safely"):
+                cache.ensure(region, force=True)
+
+            self.assertEqual(target.read_bytes(), b"stable")
+            self.assertFalse(target.with_suffix(target.suffix + ".tmp").exists())
+
+    def test_resume_rejects_changed_total_and_preserves_stable_target(self):
+        class Response:
+            def __init__(self, *, headers, chunks, status=None):
+                self.headers = headers
+                self.chunks = iter(chunks)
+                self.status = status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                return next(self.chunks, b"")
+
+            def geturl(self):
+                return "https://example.invalid/test-20260825.osm.pbf"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "data" / "source-pbf" / "test.osm.pbf"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"stable")
+            region = SourceRegion(
+                id="test-region",
+                provider="test",
+                name="Test",
+                url="https://example.invalid/test-latest.osm.pbf",
+                bounds=Bounds(0, 0, 1, 1),
+                local_path="map-platform/backend/data/source-pbf/test.osm.pbf",
+            )
+            cache = SourceCache(
+                root / "repo",
+                root / "cache.json",
+                data_root=root / "data",
+            )
+            first = Response(
+                headers={"Content-Length": "10", "ETag": '"fresh-etag"'},
+                chunks=[b"fresh"],
+            )
+            changed = Response(
+                headers={
+                    "Content-Length": "6",
+                    "Content-Range": "bytes 5-10/11",
+                    "ETag": '"fresh-etag"',
+                },
+                chunks=[b"-data!"],
+                status=206,
+            )
+
+            with patch(
+                "map_platform.source_cache.urllib.request.urlopen",
+                side_effect=[first, changed],
+            ), self.assertRaisesRegex(SourceCacheError, "size changed"):
+                cache.ensure(region, force=True)
+
+            self.assertEqual(target.read_bytes(), b"stable")
+            self.assertFalse(target.with_suffix(target.suffix + ".tmp").exists())
+
     def test_stale_mutable_snapshot_uses_validators_and_preserves_304_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

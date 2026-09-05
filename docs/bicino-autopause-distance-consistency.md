@@ -1,13 +1,15 @@
 # Bicino auto-pause and distance consistency
 
-This contract closes the August 29 false-pause/distance-gap class and adds the
-profile-4 Watch-GPS-primary path without enabling ride automation in production
-profiles. It covers sensorless rides, coasting, sensor dropout, uncertain
-workout provenance, and route continuity.
+This contract addresses the code-level false-pause/distance-gap class reported
+after the August 29 ride and adds the profile-4 Watch-GPS-primary path without
+enabling ride automation in production profiles. No immutable sensor trace from
+that ride is available, so this document does not claim its exact historical
+cause. It covers sensorless rides, coasting, sensor dropout, uncertain workout
+provenance, and route continuity.
 
-## Root cause
+## Demonstrated code-level risks
 
-Three independent shortcuts combined into one inconsistent outcome:
+Three independent shortcuts can combine into an inconsistent outcome:
 
 1. Watch `HKQuantityTypeIdentifier.cyclingSpeed` aggregates were labelled as a
    paired cycling sensor even though HealthKit delivery alone did not prove the
@@ -77,10 +79,12 @@ schema-1 markers remain readable; partial schema-2 bundles fail closed.
 ## Replay and acceptance evidence
 
 The privacy-safe fixtures contain no coordinates or raw HealthKit data.
-`aug-29-coasting-regression.jsonl` covers cadence-zero coasting, wheel dropout,
-and a genuine fallback stopped control. `watch-gps-sensorless-regression.jsonl`
-simulates a sensorless Watch ride and proves the five-second pause and
-two-second resume paths from distinct source samples.
+`aug-29-coasting-regression.jsonl` is a synthetic, normalized scenario shaped
+to the reported failure class; it is not a capture from the historical ride.
+It covers cadence-zero coasting, wheel dropout, and a genuine fallback stopped
+control. `watch-gps-sensorless-regression.jsonl` simulates a sensorless Watch
+ride and proves the five-second pause and two-second resume paths from distinct
+source samples.
 
 Host acceptance covers the sensor matrix, trace replay, wire origin values,
 HealthKit-versus-paired provenance, transition recovery diagnostics, paused

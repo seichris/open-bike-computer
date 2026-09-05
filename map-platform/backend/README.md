@@ -192,6 +192,12 @@ without that provenance falls back to its modification time and is replaced
 atomically once it becomes due. Jobs continue to bind their work to the
 verified file SHA-256.
 
+When an HTTP source declares `Content-Length`, the cache publishes it only
+after receiving exactly that many bytes. A premature EOF is resumed from the
+resolved source URL with `Range` plus a stable `ETag` or `Last-Modified`
+validator. Conflicting range, size, URL, or validator responses fail closed and
+leave the previous stable snapshot untouched.
+
 ## Coolify
 
 Use `map-platform/deploy/compose.yaml` for Coolify production. It independently

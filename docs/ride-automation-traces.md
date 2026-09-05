@@ -59,12 +59,13 @@ The Python wrapper validates privacy/schema rules and compiles the small replay
 driver. The driver executes `RideAutomationPolicy`, so replay does not maintain
 a second detector implementation.
 
-`aug-29-coasting-regression.jsonl` is the privacy-safe regression trace for the
-reported false pause. Its cadence is zero while trustworthy GPS plus IMU still
-show movement, then wheel evidence drops out before a genuine stopped control.
-The pre-profile-3 direct-sensor rule would have paused after five seconds of
-zero cadence; profile 3 keeps the ride running and pauses only after ten
-continuous seconds of qualified GPS-plus-IMU stopped evidence.
+`aug-29-coasting-regression.jsonl` is a synthetic, privacy-safe model of the
+reported false-pause class, not a capture from the historical ride. Its cadence
+is zero while trustworthy GPS plus IMU still show movement, then wheel evidence
+drops out before a genuine stopped control. The pre-profile-3 direct-sensor
+rule would have paused after five seconds of zero cadence under those modeled
+inputs; profile 3 keeps the ride running and pauses only after ten continuous
+seconds of qualified GPS-plus-IMU stopped evidence.
 `watch-gps-sensorless-regression.jsonl` covers profile 4's primary five-second
 Watch stop and two-second Watch resume without wheel, cadence, power, or IMU.
 

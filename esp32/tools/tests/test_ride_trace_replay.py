@@ -49,10 +49,12 @@ class RideTraceReplayTests(unittest.TestCase):
         self.assertEqual(summary["resume_latency_ms_total"], 2_000)
 
     def test_aug_29_coasting_regression_and_true_stop_control(self):
-        # Under profile 2, the cadence-zero rows entered the five-second direct
-        # stop path and produced a false pause while GPS+IMU showed movement.
-        # Profile 3 keeps every coasting/dropout row running, then proves the
-        # independent sustained GPS+IMU true-stop control still pauses.
+        # This synthetic scenario models the reported failure class; it is not
+        # a retained trace from the historical ride. Under profile 2, the
+        # cadence-zero rows enter the five-second direct stop path while
+        # GPS+IMU show movement. Profile 3 keeps every coasting/dropout row
+        # running, then proves the independent sustained GPS+IMU true-stop
+        # control still pauses.
         trace = (
             Path(__file__).parent
             / "fixtures"

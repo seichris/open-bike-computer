@@ -449,4 +449,13 @@ void RideDiagnosticsHttp::responseDidComplete(
   }
 }
 
+void RideDiagnosticsHttp::responseDidAbort(
+    const device_transfer::HttpRequest &request) {
+  if (request.method == "POST" &&
+      http_policy::parseRoute(request.method, request.path, kPrefix).kind ==
+          http_policy::RouteKind::Exit) {
+    exitAfterResponse_ = false;
+  }
+}
+
 } // namespace ride_diagnostics

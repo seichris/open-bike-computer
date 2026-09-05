@@ -2043,13 +2043,11 @@ void loop() {
         Serial.println(
             "RENDERER_DIAGNOSTICS: rejected window restored current profile");
       } else {
-        const renderer_diagnostics::JobCounters currentJobs =
-            mapView.rendererDiagnosticsJobCounters();
         const uint32_t currentGpsPacketSequence =
             bleNavServer.getDebugStats().gpsPacketCount;
         if (!renderer_diagnostics::beginWindow(
                 rendererRunRequest.requestId, rendererRunRequest.identity,
-                rendererRunRequest.profile, now, currentJobs,
+                rendererRunRequest.profile, now,
                 currentGpsPacketSequence)) {
           mapView.setRendererTuningProfile(
               renderer_tuning::Profile::Current, now);
@@ -2306,8 +2304,6 @@ void loop() {
         const renderer_tuning::Profile profile =
             static_cast<renderer_tuning::Profile>(
                 ordinaryWindowRequest.profile);
-        const renderer_diagnostics::JobCounters currentJobs =
-            mapView.rendererDiagnosticsJobCounters();
         const uint32_t currentGpsPacketSequence =
             bleNavServer.getDebugStats().gpsPacketCount;
         ordinaryRendererWindowSequence =
@@ -2317,7 +2313,7 @@ void loop() {
         const uint32_t windowId =
             ordinaryRendererWindowSequence | 0x80000000U;
         if (renderer_diagnostics::beginWindow(
-                windowId, identity, profile, now, currentJobs,
+                windowId, identity, profile, now,
                 currentGpsPacketSequence)) {
           mapView.setRendererTuningProfile(profile, now);
           ordinaryRendererSessionActive = true;

@@ -9,7 +9,7 @@ candidate selection, not permission to change the default profile.
 ## What is automated
 
 - one checked-in Shanghai route with 120 exact 1 Hz GPS samples and a SHA-256
-  marker on every sample, serialized after that sample's GPS write;
+  marker on every sample, carried together in one authenticated atomic write;
 - `flat`, `current`, `medium`, and `high` profiles in a balanced order, with at
   least three complete 120-second fixture loops per profile;
 - authenticated, rate-limited snapshots from the same bounded firmware state
@@ -22,6 +22,13 @@ candidate selection, not permission to change the default profile.
   building selection/reach, quota limiters, allocation fallback, GPS packet
   cadence, route-marker freshness, reset identity, and remote-debug capture
   overhead;
+- DEBUG-app replay-timer lateness plus cumulative, class-bounded BLE queue,
+  coalescing, backpressure, in-flight acknowledged-write, completion, error,
+  and timeout evidence; these fields contain no characteristic values,
+  credentials, network details, or protected payloads;
+- frame-service snapshot-lock wait, CRC time, expected/actual body bytes, TLS
+  write calls, short/zero writes, active TLS-write time, no-progress wait, and
+  intentional inter-chunk delay;
 - four deterministic screenshots per comparison window, each captured after
   and timestamp-bound to its observed route marker;
 - absolute and relative rejection gates, a Pareto frontier, and a 300-second or
@@ -55,6 +62,16 @@ changes the production default. Firmware likewise restores `current` if a
 queued window cannot be applied because its session or active-map identity is
 no longer valid.
 
+The total quotas remain authoritative even in dense scenes. Firmware sorts the
+bounded bounds-based candidate set by rider distance and stops exact ring
+projection once those same record/point/pixel quotas are full; farther records
+cannot affect nearest-first admission. Polygon scanline workspace is reused for
+the frame. The immutable frame projection caches its zoom and rotation
+coefficients instead of repeating double-precision trigonometry for every
+feature point, and variable frame scratch plus JSON escaping avoid short-lived
+internal-RAM allocations. These are output-preserving latency and headroom
+controls, not hidden profile or gate changes.
+
 ## Prerequisites
 
 1. Identify whether the connected device is the 1.75-inch or 2.06-inch board.
@@ -70,7 +87,9 @@ no longer valid.
    leave that Developer Settings page open; replay keeps the iPhone awake while
    active. Put the Bike Computer itself on the map-backed navigation screen
    with 3D buildings enabled. The iPhone sends the route window on the app's
-   normal two-second cadence and sends GPS plus the fixture marker at 1 Hz.
+   normal two-second cadence and sends the atomic GPS-plus-marker sample at
+   1 Hz. CAP2 bit `23` is mandatory so older two-write replay firmware fails
+   readiness instead of running an unreliable fallback.
    Stop any active navigation first. While replay is active, a scoped GPS
    override prevents live Core Location fixes from interleaving with the
    fixture; starting navigation stops replay and releases the override.
@@ -131,8 +150,12 @@ The checked-in gate file is
 DMA-capable block, and 1.5 MB free/750 KiB largest PSRAM block. The DMA floor
 protects task-stack and hardware-crypto allocations that cannot fall back to
 PSRAM; any crypto headroom rejection or operation failure also rejects the
-run. Firmware baselines the lifetime diagnostics when each window begins, so a
-prior run cannot be attributed to every later profile. It requires a dense view
+run. Every render request captures its diagnostics-window ID and only job
+events carrying the active ID enter that window's counters. Work started before
+a profile transition therefore cannot appear as a completion or publication
+in the next run. The snapshot envelope timestamp is captured under the same
+critical section as the copied route marker, so a snapshot cannot contain a
+marker newer than its own timestamp. It requires a dense view
 (at least 40 median candidates, 24
 selected buildings, and 16 extrusions in every non-flat profile), so a wrong
 map, screen, or disabled-3D setup cannot pass as a useful baseline. It also
@@ -151,8 +174,9 @@ in a separate reviewed change before rerunning the experiment.
 
 After a remote-debug report selects a Pareto candidate, flash the corresponding
 ordinary developer/diagnostic build for the same board and firmware commit.
-The browser service is absent, but CAP2 bit 18 exposes the bounded metrics over
-the authenticated BLE session. Keep map, firmware, and debug transfers stopped;
+The browser service is absent, but CAP2 bits 18 and 23 expose bounded metrics
+and atomic replay over the authenticated BLE session. Keep map, firmware, and
+debug transfers stopped;
 firmware rejects a new ordinary window and ends an active one if any device
 transfer becomes active.
 

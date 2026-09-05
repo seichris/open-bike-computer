@@ -667,7 +667,7 @@ last valid origin frame in RAM and marks it stale with the associated workout.
 
 ### Watch motion frame, kind `4`
 
-This frame is accepted only after CAP2 bit `23` is negotiated. It transports
+This frame is accepted only after CAP2 bit `24` is negotiated. It transports
 raw Watch workout-location speed rather than the presentation-selected speed.
 
 | Offset | Size | Field |
@@ -1125,7 +1125,8 @@ connected-display automatic inactivity control (setting ID `36`), and bit `20`
 negotiates persistent, privacy-bounded ride diagnostics and the authenticated
 device-log transfer mode. Bit `21` reports support for the optional detailed
 one-Hz ride-automation trace. Bit `22` reports the application-confirmed
-critical ride-delivery contract described above. Bit `23` reports the Watch GPS
+critical ride-delivery contract described above. Bit `23` reports the atomic
+renderer replay sample described below. Bit `24` reports the Watch GPS
 motion-evidence frame and is advertised only with internal ride control. Client version `11` requests
 bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
@@ -1133,8 +1134,8 @@ version `15` requests bit `17`. Version `10` remains a valid CAP2 client
 without the newer features. Client version `16` requests bits `18` and `19`,
 including the authenticated renderer-diagnostics contract and the already
 released automatic-display setting. Version `18` requests bit `20`, version
-`19` requests bit `21`, version `20` requests bit `22`, and version `21`
-requests bit `23`.
+`19` requests bit `21`, version `20` requests bit `22`, version `21`
+requests bit `23`, and version `22` requests bit `24`.
 Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
@@ -1193,8 +1194,11 @@ Detailed ride diagnostics, CAP2 schema 1, only feature bit 21:
 Application-confirmed ride delivery, CAP2 schema 1, only feature bit 22:
 43 41 50 32 01 00 00 40 00
 
-Watch GPS motion evidence, CAP2 schema 1, only feature bit 23:
+Atomic renderer replay sample, CAP2 schema 1, only feature bit 23:
 43 41 50 32 01 00 00 80 00
+
+Watch GPS motion evidence, CAP2 schema 1, only feature bit 24:
+43 41 50 32 01 00 00 00 01
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -1256,6 +1260,25 @@ marker. Firmware accepts a marker only when its hash matches the active
 measurement window. This prevents an otherwise plausible GPS stream from being
 attributed to the pinned fixture and lets a later checkpoint frame be tied to
 the intended position sample.
+
+Client version `21` and CAP2 feature bit `23` replace the two-write replay pair
+with one GPS-characteristic payload:
+
+```text
+"RBS1" | GPSLength: UInt8 | GPSPosition: GPSLength bytes |
+         RendererMarker: complete 44-byte RBM1 frame
+```
+
+`GPSLength` must be one of the canonical GPS packet lengths (`8`, `10`, `14`,
+`30`, or `36`), and the complete unprotected frame is at most 85 bytes. The
+frame uses the existing authenticated GPS channel and requires a native
+write-without-response that fits together with its protected-frame overhead;
+there is no acknowledged or navigation-characteristic fallback. Firmware
+validates both members, queues the GPS state first, and accepts the marker only
+if that queue operation succeeded. iOS retains at most one unsent complete
+sample, so coalescing cannot split, reorder, or mismatch GPS and marker state.
+This uses one CoreBluetooth credit per one-Hz tick and prevents the marker from
+being stranded behind the GPS half of the same logical sample.
 
 For confirmation on an ordinary diagnostic build, iOS starts a session-scoped
 measurement window with:
