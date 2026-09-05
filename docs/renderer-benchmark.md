@@ -82,10 +82,8 @@ controls, not hidden profile or gate changes.
    `manifest.json`, or the retained manifest JSON. The runner reproduces the
    receipt used by that install path and refuses to start a measurement window
    unless the active map ID and receipt match.
-3. Connect an authenticated Debug build of the iPhone app. In **Developer
-   Settings → Renderer Benchmark Replay**, tap **Start Pinned 1 Hz Replay** and
-   leave that Developer Settings page open; replay keeps the iPhone awake while
-   active. Put the Bike Computer itself on the map-backed navigation screen
+3. Connect an authenticated Debug build of the iPhone app. Put the Bike Computer
+   itself on the map-backed navigation screen
    with 3D buildings enabled. The iPhone sends the route window on the app's
    normal two-second cadence and sends the atomic GPS-plus-marker sample at
    1 Hz. CAP2 bit `23` is mandatory so older two-write replay firmware fails
@@ -93,7 +91,24 @@ controls, not hidden profile or gate changes.
    Stop any active navigation first. While replay is active, a scoped GPS
    override prevents live Core Location fixes from interleaving with the
    fixture; starting navigation stops replay and releases the override.
-4. Start **Remote Device Debugging**. For a separately authorized automation
+4. Start **Remote Device Debugging**. Return from its display console to
+   **Developer Settings → Renderer Benchmark Replay**, then tap **Run Secure
+   Full Sweep**. Keep Settings open and the authenticated iPhone connected;
+   the runner keeps the phone awake. Use **Refresh Sweep Readiness** if active
+   map or storage status has not arrived. The runner verifies signed map
+   coverage and opens and verifies an HTTPS measurement window before replay.
+   The manual **Start Pinned 1 Hz Replay** control is for ordinary diagnostics
+   firmware, which opens its window over BLE; it is disabled for remote-debug
+   builds to prevent accidentally collecting an unmeasured replay.
+5. Let the sweep finish automatically (roughly 35 minutes including warmups
+   and the five-minute soak), then tap **Share Benchmark Evidence ZIP**.
+   **Stop Secure Full Sweep** or leaving Settings requests bounded cleanup and
+   exports partial evidence rather than claiming acceptance. Partial exports
+   contain an explicitly failed interrupted report and available samples;
+   they do not replace a complete sweep. Opening the live console leaves
+   Settings and therefore stops the sweep; do not stream it simultaneously.
+
+For a separately authorized external automation
    harness, put the Mac on the reported LAN or device-hotspot network and store
    `baseUrl`, `tlsCertificateSha256`, and `token` in a mode-`0600` JSON session
    file as described in [Remote device debugging](remote-device-debugging.md).
@@ -102,10 +117,15 @@ controls, not hidden profile or gate changes.
 
 The built-in route fixture is
 `ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-shanghai-v1.json`.
-Its ID is `shanghai-center-renderer-v1`; its SHA-256 is
-`d5171f6b30478a09948381bbdb86da33752bc646fa6077153f69a4bd840eb36e`.
+Its ID is `shanghai-jingan-renderer-v1`; its SHA-256 is
+`0fec6228e89cdb6841b971226c5fdedcc5e711dcb9b0e72bcaf95da4f6452f64`.
 
-## Run the automated sweep
+## External automation harness
+
+The app's built-in sweep above needs no exported credentials or Mac runner.
+The CLI below additionally requires a separately provisioned, authenticated
+atomic replay source. The app's ordinary manual replay button is not that
+source on remote-debug firmware. Never run two window controllers together.
 
 From the repository root:
 

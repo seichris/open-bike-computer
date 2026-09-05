@@ -1271,6 +1271,14 @@ sample, so coalescing cannot split, reorder, or mismatch GPS and marker state.
 This uses one CoreBluetooth credit per one-Hz tick and prevents the marker from
 being stranded behind the GPS half of the same logical sample.
 
+The iOS secure sweep waits for setup writes and their acknowledgements to
+settle, opens and verifies the HTTPS measurement window and fixture identities,
+then acquires the replay GPS lease. Atomic samples use the existing shared
+writer and a single coalescing key; they do not bypass authentication, ATT, or
+application-acknowledgement ordering. Releasing the lease discards any unsent
+sample. A secure sweep requires both renderer diagnostics and atomic-sample
+capabilities; it never falls back to the legacy two-write pair.
+
 For confirmation on an ordinary diagnostic build, iOS starts a session-scoped
 measurement window with:
 

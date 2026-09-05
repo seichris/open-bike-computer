@@ -37,6 +37,28 @@ struct NavigationWriteQueueMetrics: Equatable {
     func coalescedFrames(for writeClass: NavigationWriteClass) -> Int {
         coalescedFramesByClass[writeClass, default: 0]
     }
+
+    /// Combine completed diagnostic intervals without changing live gauges.
+    func accumulating(_ earlier: Self) -> Self {
+        var result = self
+        result.enqueuedFrames += earlier.enqueuedFrames
+        result.flushedFrames += earlier.flushedFrames
+        result.droppedFrames += earlier.droppedFrames
+        result.rejectedFrames += earlier.rejectedFrames
+        result.coalescedFrames += earlier.coalescedFrames
+        result.clearedFrames += earlier.clearedFrames
+        result.retrySchedules += earlier.retrySchedules
+        result.backpressureStops += earlier.backpressureStops
+        result.maxDepth = max(maxDepth, earlier.maxDepth)
+        result.maxBytes = max(maxBytes, earlier.maxBytes)
+        for writeClass in NavigationWriteClass.allCases {
+            result.droppedFramesByClass[writeClass, default: 0] +=
+                earlier.droppedFrames(for: writeClass)
+            result.coalescedFramesByClass[writeClass, default: 0] +=
+                earlier.coalescedFrames(for: writeClass)
+        }
+        return result
+    }
 }
 
 struct NavigationWrite {
@@ -152,6 +174,7 @@ struct NavigationWriteQueue {
     private var pendingWrites: [NavigationWrite] = []
     private var pendingPriorityWrites: [NavigationWrite] = []
     private var diagnosticMetrics = NavigationWriteQueueMetrics()
+    private var completedDiagnosticIntervals = NavigationWriteQueueMetrics()
     private var retryStartedAtUptime: TimeInterval?
     private let now: () -> TimeInterval
 
@@ -193,6 +216,9 @@ struct NavigationWriteQueue {
     mutating func snapshotMetricsAndReset() -> NavigationWriteQueueMetrics {
         let snapshot = metrics
 #if DEBUG || HOST_TESTING
+        completedDiagnosticIntervals = snapshot.accumulating(
+            completedDiagnosticIntervals
+        )
         diagnosticMetrics = NavigationWriteQueueMetrics()
         diagnosticMetrics.currentDepth = count
         diagnosticMetrics.maxDepth = count
@@ -200,6 +226,10 @@ struct NavigationWriteQueue {
         diagnosticMetrics.maxBytes = pendingByteCount
 #endif
         return snapshot
+    }
+
+    var cumulativeMetrics: NavigationWriteQueueMetrics {
+        metrics.accumulating(completedDiagnosticIntervals)
     }
 
     init(

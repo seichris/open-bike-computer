@@ -338,6 +338,8 @@ enum DeviceBLEProtocol {
     static let rendererMetricsResponsePrefix = "RDMT"
     static let rendererMetricsChunkPrefix = "RDMC"
     static let rendererBenchmarkMarkerPrefix = "RBM1"
+    static let rendererBenchmarkSamplePrefix = "RBS1"
+    static let rendererBenchmarkSampleCoalescingKey = "renderer.benchmark.sample"
     static let rendererBenchmarkWindowPrefix = "RBW1"
     static let deviceCapabilitiesPrefix =
         RideBLEGeneratedProtocolV1.capabilityRequestMagic
@@ -924,6 +926,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsRemoteDeviceDebug: Bool = false
     @Published private(set) var supportsGPSPositionQualityV1: Bool = false
     @Published private(set) var supportsRendererDiagnostics: Bool = false
+    @Published private(set) var supportsRendererBenchmarkSample: Bool = false
     @Published private(set) var supportsRideDiagnostics: Bool = false
     @Published private(set) var supportsDetailedRideDiagnostics: Bool = false
     @Published private(set) var supportsRideDeliveryAcknowledgement: Bool = false
@@ -1234,6 +1237,13 @@ class BLEManager: NSObject, ObservableObject {
     private var rendererDiagnosticsChunks =
         RendererDiagnosticsChunkReassembler()
     private var deviceGPSOverrideToken: UUID?
+#if DEBUG || HOST_TESTING
+    private var navigationWriteAcknowledgementCompletions: UInt64 = 0
+    private var navigationWriteAcknowledgementErrors: UInt64 = 0
+    private var navigationWriteAcknowledgementTimeouts: UInt64 = 0
+    private var lastNavigationWriteAcknowledgementMs = 0
+    private var maximumNavigationWriteAcknowledgementMs = 0
+#endif
     private enum ATTWriteOwner: Equatable {
         case authentication
         case ride
@@ -3767,11 +3777,17 @@ class BLEManager: NSObject, ObservableObject {
         }
         let token = UUID()
         deviceGPSOverrideToken = token
+        // Physical fixes queued before the lease must not follow the first
+        // fixture marker and make that marker describe the wrong position.
+        navigationWriteQueue.removePendingWrites(ofClass: .gpsPosition)
         return token
     }
 
     func endDeviceGPSOverride(_ token: UUID) {
         guard deviceGPSOverrideToken == token else { return }
+        navigationWriteQueue.removePendingWrites(
+            withCoalescingKey: DeviceBLEProtocol.rendererBenchmarkSampleCoalescingKey
+        )
         deviceGPSOverrideToken = nil
         onDeviceGPSOverrideEnded?()
     }
@@ -4992,6 +5008,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
         supportsRendererDiagnostics = false
+        supportsRendererBenchmarkSample = false
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
@@ -5604,6 +5621,69 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
+    func sendRendererBenchmarkSample(
+        gpsPosition: Data,
+        fixtureSHA256: Data,
+        sampleIndex: Int,
+        sampleCount: Int,
+        loop: UInt32
+    ) -> Bool {
+        guard isConnected, isNavigationReady,
+              supportsRendererDiagnostics, supportsRendererBenchmarkSample,
+              deviceGPSOverrideToken != nil,
+              let marker = RendererBenchmarkMarkerPacket.data(
+                fixtureSHA256: fixtureSHA256,
+                sampleIndex: sampleIndex, sampleCount: sampleCount, loop: loop
+              ),
+              let packet = RendererBenchmarkSamplePacket.data(
+                gpsPosition: gpsPosition, marker: marker
+              ) else { return false }
+#if HOST_TESTING
+        guard let endpoint = navigationWriteEndpoint,
+              !endpoint.expectsWriteResponse,
+              packet.count <= endpoint.maximumWriteLength else { return false }
+        return enqueueNavigationWrite(
+            packet, endpoint: endpoint, label: "renderer benchmark sample",
+            writeClass: .gpsPosition,
+            coalescingKey: DeviceBLEProtocol.rendererBenchmarkSampleCoalescingKey,
+            prioritized: true,
+            transportWrite: endpoint.write,
+            transportCanSend: endpoint.canSend,
+            transportExpectsWriteResponse: false
+        )
+#else
+        guard let peripheral = connectedPeripheral,
+              let characteristic = gpsPositionCharacteristic,
+              let endpoint = navigationWriteEndpoint,
+              characteristic.properties.contains(.writeWithoutResponse),
+              packet.count + (authenticatedWriteSession == nil ? 0 :
+                AuthenticatedBLEWriteSession.frameOverhead) <=
+                peripheral.maximumWriteValueLength(for: .withoutResponse)
+        else { return false }
+        // One authenticated GPS-channel payload, coalesced as a complete unit.
+        // Retain the shared writer's authentication, ATT and application-ACK
+        // ordering instead of introducing a second writer around it.
+        return enqueueNavigationWrite(
+            packet, endpoint: endpoint, label: "native renderer benchmark sample",
+            writeClass: .gpsPosition,
+            coalescingKey: DeviceBLEProtocol.rendererBenchmarkSampleCoalescingKey,
+            prioritized: true,
+            transportWrite: { [weak self, weak peripheral, weak characteristic] data in
+                guard let self, let peripheral, let characteristic else { return }
+                self.writeDeviceData(
+                    data, to: characteristic, on: peripheral, type: .withoutResponse
+                )
+            },
+            transportCanSend: { [weak peripheral] in
+                peripheral?.canSendWriteWithoutResponse ?? false
+            },
+            transportExpectsWriteResponse: false,
+            transportCharacteristicUUIDString: characteristic.uuid.uuidString
+        )
+#endif
+    }
+
+    @discardableResult
     func sendRendererBenchmarkMarker(
         fixtureSHA256: Data,
         sampleIndex: Int,
@@ -6082,6 +6162,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
         supportsRendererDiagnostics = false
+        supportsRendererBenchmarkSample = false
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
@@ -7615,16 +7696,22 @@ class BLEManager: NSObject, ObservableObject {
         return true
     }
 
+    private var navigationHasUnsettledWrites: Bool {
+        navigationWriteQueue.count > 0 || writeWithResponseInFlight ||
+            authWriteInFlight || !queuedAuthMessages.isEmpty ||
+            isWaitingForRideApplicationAcknowledgement
+    }
+
     func waitForNavigationWritesToDrain(timeoutSeconds: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while navigationWriteQueue.count > 0 {
+        while navigationHasUnsettledWrites {
             if Task.isCancelled {
                 return false
             }
             if let endpoint = navigationWriteEndpoint {
                 flushPendingNavigationWrites(endpoint: endpoint)
             }
-            if navigationWriteQueue.count == 0 {
+            if !navigationHasUnsettledWrites {
                 return true
             }
             if Date() >= deadline {
@@ -7846,6 +7933,49 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
+#if DEBUG || HOST_TESTING
+    func rendererBenchmarkBLETransportEvidence()
+        -> RendererBenchmarkBLETransportEvidence {
+        let metrics = navigationWriteQueue.cumulativeMetrics
+        let uptime = ProcessInfo.processInfo.systemUptime
+        let capturedAtMs = UInt64(max(0, uptime * 1_000).rounded())
+        let ageMs: Int
+        if let pending = pendingATTWrite {
+            ageMs = Int(max(0, (uptime - pending.startedAtUptime) * 1_000).rounded())
+        } else {
+            ageMs = 0
+        }
+        return RendererBenchmarkBLETransportEvidence(
+            schema: 1,
+            capturedAtUptimeMs: capturedAtMs,
+            queueDepth: metrics.currentDepth,
+            queueMaximumDepth: metrics.maxDepth,
+            oldestPendingAgeMs: metrics.oldestPendingAgeMs,
+            retryAgeMs: metrics.retryAgeMs,
+            enqueuedFrames: metrics.enqueuedFrames,
+            flushedFrames: metrics.flushedFrames,
+            droppedFrames: metrics.droppedFrames,
+            rejectedFrames: metrics.rejectedFrames,
+            coalescedFrames: metrics.coalescedFrames,
+            retrySchedules: metrics.retrySchedules,
+            backpressureStops: metrics.backpressureStops,
+            gpsCoalescedFrames: metrics.coalescedFrames(for: .gpsPosition),
+            routeCoalescedFrames: metrics.coalescedFrames(for: .route),
+            settingsCoalescedFrames:
+                metrics.coalescedFrames(for: .settingsControl),
+            inFlightClass: pendingATTWrite?.writeClass.rawValue,
+            inFlightAgeMs: ageMs,
+            acknowledgementCompletions:
+                navigationWriteAcknowledgementCompletions,
+            acknowledgementErrors: navigationWriteAcknowledgementErrors,
+            acknowledgementTimeouts: navigationWriteAcknowledgementTimeouts,
+            lastAcknowledgementMs: lastNavigationWriteAcknowledgementMs,
+            maximumAcknowledgementMs:
+                maximumNavigationWriteAcknowledgementMs
+        )
+    }
+#endif
+
     private func finishPendingATTWrite(
         error: Error?,
         timedOut: Bool = false
@@ -7856,6 +7986,20 @@ class BLEManager: NSObject, ObservableObject {
             Int(((ProcessInfo.processInfo.systemUptime -
                 pending.startedAtUptime) * 1_000).rounded())
         )
+#if DEBUG || HOST_TESTING
+        if pending.owner == .ride {
+            if timedOut {
+                navigationWriteAcknowledgementTimeouts &+= 1
+            } else {
+                navigationWriteAcknowledgementCompletions &+= 1
+                if error != nil { navigationWriteAcknowledgementErrors &+= 1 }
+            }
+            lastNavigationWriteAcknowledgementMs = latencyMs
+            maximumNavigationWriteAcknowledgementMs = max(
+                maximumNavigationWriteAcknowledgementMs, latencyMs
+            )
+        }
+#endif
         diagnosticsRecorder?.record(
             level: error == nil && !timedOut ? .info : .warning,
             category: .ble,
@@ -8033,6 +8177,10 @@ class BLEManager: NSObject, ObservableObject {
 
     var hasPendingATTWriteForTesting: Bool {
         pendingATTWrite != nil
+    }
+
+    var navigationHasUnsettledWritesForTesting: Bool {
+        navigationHasUnsettledWrites
     }
 
     func completeNavigationWriteForTesting(error: Error?) {
@@ -9033,6 +9181,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsRemoteDeviceDebug = false
         supportsGPSPositionQualityV1 = false
         supportsRendererDiagnostics = false
+        supportsRendererBenchmarkSample = false
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
@@ -9264,6 +9413,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsRemoteDeviceDebug = hasRemoteDeviceDebug
         supportsGPSPositionQualityV1 = hasGPSPositionQualityV1
         supportsRendererDiagnostics = hasRendererDiagnostics
+        supportsRendererBenchmarkSample = hasRendererDiagnostics &&
+            flags & DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask != 0
         supportsRideDiagnostics = hasRideDiagnostics
         supportsDetailedRideDiagnostics = hasDetailedRideDiagnostics
         if supportsRideDeliveryAcknowledgement &&
