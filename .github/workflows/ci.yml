@@ -76,6 +76,8 @@ jobs:
           args: -shellcheck=
       - name: Test CI component routing
         run: python3 -m unittest discover -s .github/scripts/tests
+      - name: Verify generated ride BLE contract
+        run: python3 tools/generate_ride_ble_contract.py --check
       - id: policy
         name: Select CI cost policy
         env:
@@ -192,6 +194,10 @@ jobs:
             echo "Non-debug firmware contains remote-debug routes"
             exit 1
           fi
+          if grep -aFq "map-dev-2026-08" ".pio/build/${{ matrix.target }}/firmware.elf"; then
+            echo "Non-debug firmware contains the development map signer"
+            exit 1
+          fi
       - name: Verify ordinary artifacts include persistent diagnostics capability
         if: ${{ !contains(matrix.target, '_REMOTE_DEBUG') }}
         run: |
@@ -232,6 +238,8 @@ jobs:
           ]
           if missing:
               raise SystemExit(f"Missing remote-debug routes: {', '.join(missing)}")
+          if b"map-dev-2026-08\0" not in firmware:
+              raise SystemExit("Missing remote-debug development map signer")
           PY
 
   ios-fast:
@@ -252,6 +260,9 @@ jobs:
         working-directory: ios-app
       - name: Run shared route and Watch BLE contract tests
         run: ./scripts/run-ride-shared-tests.sh
+        working-directory: ios-app
+      - name: Type-check the complete Watch source graph
+        run: ./scripts/run-watch-source-typecheck.sh
         working-directory: ios-app
       - name: Run Watch offline navigation persistence tests
         run: ./scripts/run-watch-offline-navigation-tests.sh
@@ -517,6 +528,7 @@ jobs:
             test_map_route_geometry \
             test_map_building_workspace \
             test_renderer_diagnostics \
+            test_renderer_delivery_timing \
             test_renderer_diagnostics_ble_protocol \
             test_renderer_diagnostics_request; do
             g++ -std=c++17 -Wall -Wextra -Werror \
@@ -546,6 +558,10 @@ jobs:
             tools/tests/test_scoped_watch_payload_policy.cpp \
             -o /tmp/test_scoped_watch_payload_policy
           /tmp/test_scoped_watch_payload_policy
+          g++ -std=c++17 -Wall -Wextra -Werror -DVERSION=\"ci-host\" \
+            tools/tests/test_ride_delivery_protocol.cpp \
+            -o /tmp/test_ride_delivery_protocol
+          /tmp/test_ride_delivery_protocol
       - name: Remote device debug host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \
@@ -703,6 +719,37 @@ jobs:
             $(pkg-config --cflags --libs mbedcrypto) \
             -o /tmp/test_map_stream_format
           /tmp/test_map_stream_format
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            lib/map_transfer/map_transfer.cpp \
+            lib/maps/src/mapBlockFormat.cpp \
+            lib/maps/src/mapLabelBlock.cpp \
+            lib/maps/src/mapFontAsset.cpp \
+            lib/maps/src/mapFontAssetFormat.cpp \
+            lib/map_transfer/map_stream_format.cpp \
+            lib/map_transfer/map_stream_crypto.cpp \
+            lib/map_transfer/map_stream_sha.cpp \
+            lib/map_transfer/map_stream_trust.cpp \
+            lib/map_transfer/map_stream_compiled_trust.cpp \
+            tools/tests/test_map_stream_compiled_trust.cpp \
+            $(pkg-config --cflags --libs mbedcrypto) \
+            -o /tmp/test_map_stream_compiled_trust_production
+          /tmp/test_map_stream_compiled_trust_production
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -DMAP_STREAM_DEVELOPMENT_TRUST=1 \
+            lib/map_transfer/map_transfer.cpp \
+            lib/maps/src/mapBlockFormat.cpp \
+            lib/maps/src/mapLabelBlock.cpp \
+            lib/maps/src/mapFontAsset.cpp \
+            lib/maps/src/mapFontAssetFormat.cpp \
+            lib/map_transfer/map_stream_format.cpp \
+            lib/map_transfer/map_stream_crypto.cpp \
+            lib/map_transfer/map_stream_sha.cpp \
+            lib/map_transfer/map_stream_trust.cpp \
+            lib/map_transfer/map_stream_compiled_trust.cpp \
+            tools/tests/test_map_stream_compiled_trust.cpp \
+            $(pkg-config --cflags --libs mbedcrypto) \
+            -o /tmp/test_map_stream_compiled_trust_development
+          /tmp/test_map_stream_compiled_trust_development
           g++ -std=c++17 -Wall -Wextra -Werror \
             lib/map_transfer/map_transfer.cpp \
             lib/map_transfer/map_stream_format.cpp \

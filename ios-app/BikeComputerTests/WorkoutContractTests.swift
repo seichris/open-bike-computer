@@ -68,6 +68,8 @@ private struct WorkoutContractTestSuite {
         testUnsupportedMajorVersionIsRejected()
         testOptionalMetricsRemainUnavailable()
         testWorkoutDevicePairGenerationStamp()
+        testWorkoutDeviceTerminalForwardingBoundary()
+        testWorkoutDeviceSharedTerminalMapping()
         testInvalidEnvelopeIdentityIsRejected()
         testInvalidNumbersAndCoordinatesAreRejected()
         testMetricUnitsAndAvailabilityMustMatchPayload()
@@ -808,6 +810,152 @@ private struct WorkoutContractTestSuite {
             stamped.core[1] & 0x3F == frames.core[1] &&
                 stamped.extended[1] & 0x3F == frames.extended[1],
             "pair stamping preserves state and source bits"
+        )
+    }
+
+    private mutating func testWorkoutDeviceTerminalForwardingBoundary() {
+        let sessionID = UUID(
+            uuidString: "22222222-2222-2222-2222-222222222222"
+        )!
+        let capturedAt = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        var state = WorkoutDeviceForwardingStateV1()
+        let running = makeEnvelope(
+            sessionID: sessionID,
+            sessionToken: 42,
+            sequence: 1,
+            capturedAt: capturedAt,
+            snapshot: WorkoutSnapshotV1(
+                state: .running,
+                startDate: capturedAt.addingTimeInterval(-30)
+            )
+        )
+        guard case let .forward(_, runningID, runningToken) =
+                state.receive(running) else {
+            expect(false, "an active Watch workout is forwarded to the device")
+            return
+        }
+        expect(
+            runningID == sessionID && runningToken == 42,
+            "device forwarding preserves the workout identity"
+        )
+
+        let ended = makeEnvelope(
+            sessionID: sessionID,
+            sessionToken: 42,
+            sequence: 2,
+            capturedAt: capturedAt.addingTimeInterval(30),
+            snapshot: WorkoutSnapshotV1(
+                state: .ended,
+                startDate: capturedAt.addingTimeInterval(-30),
+                terminalOutcome: .saved
+            )
+        )
+        guard case let .forward(terminal, terminalID, terminalToken) =
+                state.receive(ended) else {
+            expect(false, "an ended Watch workout remains visible on the device")
+            return
+        }
+        expect(
+            terminal.state == .ended && terminalID == sessionID &&
+                terminalToken == 42,
+            "terminal forwarding retains the final session identity"
+        )
+        expect(
+            state.receive(nil) == .clear && state.receive(nil) == .ignore,
+            "only the explicit summary-dismissal boundary clears the device"
+        )
+
+        var failedState = WorkoutDeviceForwardingStateV1()
+        let failed = makeEnvelope(
+            sessionID: sessionID,
+            sessionToken: 43,
+            sequence: 1,
+            capturedAt: capturedAt,
+            snapshot: WorkoutSnapshotV1(
+                state: .failed,
+                errorCode: .sessionFailed
+            )
+        )
+        guard case let .forward(failure, _, token) =
+                failedState.receive(failed) else {
+            expect(false, "a failed direct-Watch workout is forwarded")
+            return
+        }
+        expect(
+            failure.state == .failed && token == 43,
+            "failed workout state is not collapsed to idle"
+        )
+    }
+
+    private mutating func testWorkoutDeviceSharedTerminalMapping() {
+        let sessionID = UUID(
+            uuidString: "33333333-3333-3333-3333-333333333333"
+        )!
+        let capturedAt = Date(timeIntervalSinceReferenceDate: 800_000_100)
+        func snapshot(_ state: WorkoutSessionStateV1) -> WorkoutSnapshotV1 {
+            WorkoutSnapshotV1(
+                state: state,
+                startDate: state.requiresStartDate
+                    ? capturedAt.addingTimeInterval(-60)
+                    : nil,
+                elapsedTime: state == .failed
+                    ? nil
+                    : WorkoutMetricV1(
+                        value: 60,
+                        unit: .seconds,
+                        capturedAt: capturedAt,
+                        source: .healthKit
+                    ),
+                availability: state == .failed ? [] : [.elapsedTime],
+                errorCode: state == .failed ? .sessionFailed : nil,
+                terminalOutcome: state == .ended ? .saved : nil
+            )
+        }
+
+        let running = WorkoutDeviceTelemetrySampleMapperV1.directWatchSample(
+            snapshot: snapshot(.running),
+            sessionToken: 90,
+            sessionID: sessionID
+        )
+        expect(
+            running?.state == .running && running?.hasLiveNumerics == true
+                && running?.elapsedSeconds == 60,
+            "shared mapper keeps authoritative running numerics live"
+        )
+
+        let ending = WorkoutDeviceTelemetrySampleMapperV1.directWatchSample(
+            snapshot: snapshot(.ending),
+            sessionToken: 90,
+            sessionID: sessionID
+        )
+        expect(
+            ending?.state == .ending && ending?.hasLiveNumerics == false
+                && ending?.isCurrentSnapshot == true
+                && ending?.elapsedSeconds == nil,
+            "shared mapper marks ending current without replaying frozen numerics"
+        )
+
+        let ended = WorkoutDeviceTelemetrySampleMapperV1.directWatchSample(
+            snapshot: snapshot(.ended),
+            sessionToken: 90,
+            sessionID: sessionID
+        )
+        expect(
+            ended?.state == .ended && ended?.hasLiveNumerics == true
+                && ended?.isCurrentSnapshot == true
+                && ended?.elapsedSeconds == 60,
+            "shared mapper preserves authoritative final numerics"
+        )
+
+        let failed = WorkoutDeviceTelemetrySampleMapperV1.directWatchSample(
+            snapshot: snapshot(.failed),
+            sessionToken: 91,
+            sessionID: sessionID
+        )
+        expect(
+            failed?.state == .failed && failed?.hasLiveNumerics == false
+                && failed?.isCurrentSnapshot == true,
+            "shared mapper keeps an authoritative failure current and numeric-free"
         )
     }
 

@@ -18,6 +18,7 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     var onDirectRidePreparationRequest:
         ((WatchDirectRidePreparationRequestV1) ->
             WatchDirectRidePreparationResponseV1)?
+    weak var diagnosticsRecorder: RideDiagnosticsRecorder?
 
     private let session: WCSession?
     private let defaults: UserDefaults
@@ -38,6 +39,8 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         "watchNavigation.routeDisplayNamesEnvelope.v1"
     private static let selectedBikeComputerDefaultsKey =
         "watchNavigation.selectedBikeComputerEnvelope.v1"
+    private static let receivedTransportDiagnosticIDsDefaultsKey =
+        "watchBLETransportDiagnostics.receivedIDs.v1"
 
     var workoutState: WorkoutWatchConnectivityStateV1 {
         WorkoutWatchConnectivityStateV1(
@@ -255,6 +258,78 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             WatchSelectedBikeComputerV1.applicationContextKey:
                 try envelope.encoded(),
         ])
+    }
+
+    @discardableResult
+    private func receiveTransportDiagnostics(
+        _ userInfo: [String: Any]
+    ) -> Bool {
+        guard let data = userInfo[
+            WatchBLETransportDiagnosticBatchV1.userInfoPayloadKey
+        ] as? Data else { return false }
+        guard let batch = WatchBLETransportDiagnosticBatchV1.decode(data) else {
+            diagnosticsRecorder?.record(
+                level: .warning,
+                category: .ble,
+                event: "watch_ble_diagnostics_rejected",
+                fields: ["origin": "watch", "reason": "malformed"]
+            )
+            return true
+        }
+        let storedReceived = defaults.stringArray(
+            forKey: Self.receivedTransportDiagnosticIDsDefaultsKey
+        ) ?? []
+        var received: [String] = []
+        var receivedSet = Set<String>()
+        for eventID in storedReceived.suffix(512)
+            where receivedSet.insert(eventID).inserted {
+            received.append(eventID)
+        }
+        for event in batch.events {
+            let eventID = "\(event.attemptID.uuidString):\(event.sequence)"
+            guard receivedSet.insert(eventID).inserted else { continue }
+            received.append(eventID)
+            var fields: [String: String] = [
+                "origin": "watch",
+                "controllerRole": "scoped_watch",
+                "attemptId": event.attemptID.uuidString,
+                "watchSequence": String(event.sequence),
+                "watchUptimeMs": String(event.uptimeMs),
+                "connectionGeneration":
+                    String(event.connectionGeneration),
+                "phase": event.phase,
+                "queueDepth": String(event.queueDepth),
+                "highWater": String(event.queueHighWater),
+                "replacedCount": String(event.replacedGroups),
+                "rejectedCount": String(event.rejectedGroups),
+            ]
+            if let queueBytes = event.queueBytes {
+                fields["queueBytes"] = String(queueBytes)
+            }
+            if let queueHighWaterBytes = event.queueHighWaterBytes {
+                fields["highWaterBytes"] = String(queueHighWaterBytes)
+            }
+            if let reason = event.reason { fields["reason"] = reason }
+            if let latencyMs = event.latencyMs {
+                fields["latencyMs"] = String(latencyMs)
+            }
+            let warningKinds: Set<WatchBLETransportDiagnosticKindV1> = [
+                .attTimeout, .applicationTimeout, .recovery,
+            ]
+            diagnosticsRecorder?.record(
+                level: warningKinds.contains(event.kind)
+                    ? .warning : .info,
+                category: .ble,
+                event: "watch_ble_\(event.kind.rawValue)",
+                fields: fields
+            )
+        }
+        received = Array(received.suffix(512))
+        defaults.set(
+            received,
+            forKey: Self.receivedTransportDiagnosticIDsDefaultsKey
+        )
+        return true
     }
 
     nonisolated func sendWatchControllerRequest(
@@ -678,7 +753,10 @@ extension PhoneWatchConnectivityCoordinator: WCSessionDelegate {
         didReceiveUserInfo userInfo: [String: Any]
     ) {
         Task { @MainActor [weak self] in
-            self?.receiveAcknowledgement(userInfo)
+            guard let self else { return }
+            if !self.receiveTransportDiagnostics(userInfo) {
+                self.receiveAcknowledgement(userInfo)
+            }
         }
     }
 

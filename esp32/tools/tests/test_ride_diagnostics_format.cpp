@@ -96,6 +96,11 @@ int main() {
       "{\"durationMs\":91,\"blockLoadMs\":17}";
   assert(validateFieldsJson(validRenderTiming,
                             std::strlen(validRenderTiming)));
+  const char *validRideCommandAcknowledgement =
+      "{\"commandClass\":2,\"result\":\"0\",\"members\":3,"
+      "\"leaseGeneration\":9,\"outcome\":\"applied\"}";
+  assert(validateFieldsJson(validRideCommandAcknowledgement,
+                            std::strlen(validRideCommandAcknowledgement)));
 
   std::cout << "ride diagnostics format tests passed\n";
   return 0;

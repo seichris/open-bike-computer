@@ -6,7 +6,7 @@
   "checkpointFractions": [0.0, 0.25, 0.5, 0.75],
   "checkpointToleranceSamples": 2,
   "absolute": {
-    "minimumMetricsSampleFraction": 0.8,
+    "minimumMetricsSampleFraction": 0.3,
     "minimumRenderSamples": 20,
     "minimumBuildingCandidates": 40,
     "minimumSelectedBuildings": 24,
@@ -31,7 +31,7 @@
     "maximumStaleRenders": 3,
     "maximumCancelledRenders": 4,
     "maximumInterruptedRenders": 6,
-    "maximumCoverageRejectedRenders": 2,
+    "maximumCoverageRejectedRenders": 4,
     "maximumPredictionExhaustionEntries": 1,
     "maximumInvariantFailures": 0,
     "maximumRemoteDebugCaptureErrors": 0

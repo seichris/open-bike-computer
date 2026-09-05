@@ -22,6 +22,7 @@ IMG_WIDTH, IMG_HEIGHT = pow( 2, 12), pow( 2, 12) # 4096 x 4096
 BACKGROUND_COLOR = 0xDDDDDD
 MAX_GENERIC_POLYGON_PIECES_PER_SOURCE = 2048
 MAX_GENERIC_POLYGON_PIECES_PER_BLOCK = 32768
+MAX_GEOMETRY_DROP_SAMPLES = 8
 _GEOMETRY_EQUIVALENCE_RELATIVE_TOLERANCE = 1e-9
 _GEOMETRY_EQUIVALENCE_ABSOLUTE_TOLERANCE = 1e-7
 _FMB_COORDINATE_GRID_SIZE = 1.0
@@ -60,12 +61,16 @@ def parse_tags(tags_str):
     return res
 
 
-def _record_geometry_drop(diagnostics, code):
+def _record_geometry_drop(diagnostics, code, *, sample=None):
     if diagnostics is None:
         return
     diagnostics["droppedGeometryCount"] = diagnostics.get("droppedGeometryCount", 0) + 1
     dropped_by_code = diagnostics.setdefault("droppedByCode", {})
     dropped_by_code[code] = dropped_by_code.get(code, 0) + 1
+    if sample is not None:
+        samples = diagnostics.setdefault("droppedGeometrySamples", [])
+        if len(samples) < MAX_GEOMETRY_DROP_SAMPLES:
+            samples.append(sample)
 
 
 def _ring_area(coordinates):
@@ -499,6 +504,7 @@ def clip_polygons(
     *,
     max_pieces_per_source=MAX_GENERIC_POLYGON_PIECES_PER_SOURCE,
     max_pieces_per_block=MAX_GENERIC_POLYGON_PIECES_PER_BLOCK,
+    geometry_diagnostics=None,
 ):
     """ Clip polygons to the bbox area. Each polygon can be splitted into one or several polygons.
         Returns a list of polygons
@@ -507,49 +513,92 @@ def clip_polygons(
     source_piece_counts = {}
     min_x, min_y = bbox.bounds[:2]
     for feat in features:
-        polygon = feat['geom']
-        if not isinstance(polygon, Polygon):
-            raise GenericGeometryError("generic polygon feature is not a Polygon")
-        if not bbox.intersects( polygon) or bbox.touches( polygon): continue
-        parts = intersection( polygon, bbox)
-        if not parts.is_valid:
-            raise GenericGeometryError("clipping produced invalid generic geometry")
         source_key = feat.get('_source_geometry_key', str(feat.get('id', '')))
-        polygonal_parts = [
-            _canonicalize_shapely_polygon(part)
-            for part in _polygonal_parts(parts)
-        ]
-        for clipped_part in sorted(polygonal_parts, key=_polygon_sort_key):
-            for part in _snap_to_fmb_precision(clipped_part):
-                source_count = source_piece_counts.get(source_key, 0)
-                remaining_source = max_pieces_per_source - source_count
-                remaining_block = max_pieces_per_block - len(clipped)
-                if remaining_source <= 0 or remaining_block <= 0:
-                    raise GenericGeometryLimitError(
-                        "generic polygon decomposition exceeded its piece budget"
-                    )
-                pieces = _decompose_hole_free(
-                    part, min(remaining_source, remaining_block)
+        source_count = source_piece_counts.get(source_key, 0)
+        feature_clipped = []
+        try:
+            polygon = feat['geom']
+            if not isinstance(polygon, Polygon):
+                raise GenericGeometryError(
+                    "generic polygon feature is not a Polygon"
                 )
-                _validate_quantized_decomposition(part, pieces, min_x, min_y)
-                source_piece_counts[source_key] = source_count + len(pieces)
-                if source_piece_counts[source_key] > max_pieces_per_source:
-                    raise GenericGeometryLimitError(
-                        "generic polygon decomposition exceeded the per-source limit"
+            if not bbox.intersects(polygon) or bbox.touches(polygon):
+                continue
+            parts = intersection(polygon, bbox)
+            if not parts.is_valid:
+                raise GenericGeometryError(
+                    "clipping produced invalid generic geometry"
+                )
+            polygonal_parts = [
+                _canonicalize_shapely_polygon(part)
+                for part in _polygonal_parts(parts)
+            ]
+            for clipped_part in sorted(polygonal_parts, key=_polygon_sort_key):
+                for part in _snap_to_fmb_precision(clipped_part):
+                    remaining_source = max_pieces_per_source - source_count
+                    remaining_block = (
+                        max_pieces_per_block
+                        - len(clipped)
+                        - len(feature_clipped)
                     )
-                if len(clipped) + len(pieces) > max_pieces_per_block:
-                    raise GenericGeometryLimitError(
-                        "generic polygon decomposition exceeded the per-block limit"
-                    )
-                for p in pieces:
-                    if p.interiors:
-                        raise GenericGeometryError(
-                            "generic polygon output retained an interior ring"
+                    if remaining_source <= 0 or remaining_block <= 0:
+                        raise GenericGeometryLimitError(
+                            "generic polygon decomposition exceeded its piece budget"
                         )
-                    new_feat = dict(feat)
-                    new_feat['geom'] = p
-                    new_feat['bbox'] = p.bounds
-                    clipped.append(new_feat)
+                    pieces = _decompose_hole_free(
+                        part, min(remaining_source, remaining_block)
+                    )
+                    _validate_quantized_decomposition(part, pieces, min_x, min_y)
+                    source_count += len(pieces)
+                    if source_count > max_pieces_per_source:
+                        raise GenericGeometryLimitError(
+                            "generic polygon decomposition exceeded the per-source limit"
+                        )
+                    if (
+                        len(clipped) + len(feature_clipped) + len(pieces)
+                        > max_pieces_per_block
+                    ):
+                        raise GenericGeometryLimitError(
+                            "generic polygon decomposition exceeded the per-block limit"
+                        )
+                    for p in pieces:
+                        if p.interiors:
+                            raise GenericGeometryError(
+                                "generic polygon output retained an interior ring"
+                            )
+                        new_feat = dict(feat)
+                        new_feat['geom'] = p
+                        new_feat['bbox'] = p.bounds
+                        feature_clipped.append(new_feat)
+        except GenericGeometryLimitError:
+            # Piece limits protect worker memory and artifact size. They must
+            # remain hard failures instead of silently omitting large areas.
+            raise
+        except (GenericGeometryError, GEOSException) as exc:
+            # Generic OSM polygons are decorative map context. One malformed
+            # source component must not make an otherwise valid regional map
+            # unavailable. Keep the drop atomic so a failed component is
+            # never partially encoded, and retain bounded source/block detail
+            # for later diagnosis.
+            reason = (
+                str(exc)[:160]
+                if isinstance(exc, GenericGeometryError)
+                else "GEOS operation failed while clipping generic polygon"
+            )
+            _record_geometry_drop(
+                geometry_diagnostics,
+                "invalid_block_polygon",
+                sample={
+                    "blockOrigin": [int(min_x), int(min_y)],
+                    "component": int(feat.get('_source_geometry_component', 0)),
+                    "reason": reason,
+                    "sourceGeometryKey": str(source_key)[:80],
+                },
+            )
+            continue
+
+        source_piece_counts[source_key] = source_count
+        clipped.extend(feature_clipped)
         # if len( new_feat['geom'].coords) <= 2: continue
     return clipped
 

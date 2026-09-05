@@ -61,18 +61,61 @@
       "largestBlock": 12000,
       "windowMinimumFree": 20000,
       "windowMinimumLargestBlock": 10000,
+      "cryptoCountersScope": "window",
       "cryptoHeadroomRejections": 0,
-      "cryptoOperationFailures": 0
+      "cryptoOperationFailures": 0,
+      "windowMinimumFreeAttribution": {
+        "phase": "periodic",
+        "observedAtMs": 1000,
+        "value": 20000,
+        "frameTransferActive": true
+      }
     }
   },
   "render": {
     "timings": {
-      "total": {"count": 30, "lastMs": 100, "p50Ms": 100, "p95Ms": 200, "maximumMs": 250},
-      "blockLoad": {"count": 30, "lastMs": 100, "p50Ms": 100, "p95Ms": 200, "maximumMs": 250},
-      "draw": {"count": 30, "lastMs": 100, "p50Ms": 100, "p95Ms": 200, "maximumMs": 250},
-      "buildingProjection": {"count": 30, "lastMs": 100, "p50Ms": 100, "p95Ms": 200, "maximumMs": 250},
-      "buildingDraw": {"count": 30, "lastMs": 100, "p50Ms": 100, "p95Ms": 200, "maximumMs": 250},
-      "buildingTotal": {"count": 30, "lastMs": 100, "p50Ms": 100, "p95Ms": 200, "maximumMs": 250}
+      "total": {
+        "count": 30,
+        "lastMs": 100,
+        "p50Ms": 100,
+        "p95Ms": 200,
+        "maximumMs": 250
+      },
+      "blockLoad": {
+        "count": 30,
+        "lastMs": 100,
+        "p50Ms": 100,
+        "p95Ms": 200,
+        "maximumMs": 250
+      },
+      "draw": {
+        "count": 30,
+        "lastMs": 100,
+        "p50Ms": 100,
+        "p95Ms": 200,
+        "maximumMs": 250
+      },
+      "buildingProjection": {
+        "count": 30,
+        "lastMs": 100,
+        "p50Ms": 100,
+        "p95Ms": 200,
+        "maximumMs": 250
+      },
+      "buildingDraw": {
+        "count": 30,
+        "lastMs": 100,
+        "p50Ms": 100,
+        "p95Ms": 200,
+        "maximumMs": 250
+      },
+      "buildingTotal": {
+        "count": 30,
+        "lastMs": 100,
+        "p50Ms": 100,
+        "p95Ms": 200,
+        "maximumMs": 250
+      }
     },
     "buildings": {
       "candidates": 70,
@@ -107,8 +150,16 @@
       "invariantFailed": 0
     }
   },
-  "ui": {"maximumGapMs": 100},
-  "displayFlush": {"count": 30, "lastMs": 80, "p50Ms": 80, "p95Ms": 100, "maximumMs": 120},
+  "ui": {
+    "maximumGapMs": 100
+  },
+  "displayFlush": {
+    "count": 30,
+    "lastMs": 80,
+    "p50Ms": 80,
+    "p95Ms": 100,
+    "maximumMs": 120
+  },
   "gps": {
     "packets": 42,
     "latestPacketGapMs": 1000,
@@ -138,9 +189,47 @@
     "maximumCopyUs": 1200,
     "lastHttpResponseMs": 20,
     "maximumHttpResponseMs": 30,
+    "lastFrameSnapshotWaitUs": 110,
+    "maximumFrameSnapshotWaitUs": 220,
+    "lastFrameCrcUs": 330,
+    "maximumFrameCrcUs": 440,
+    "lastHttpExpectedBytes": 434344,
+    "lastHttpActualBytes": 434344,
+    "lastHttpWriteCalls": 215,
+    "lastHttpZeroWriteCalls": 4,
+    "lastHttpShortWriteCalls": 3,
+    "lastHttpActiveTlsWriteUs": 500000,
+    "lastHttpNoProgressWaitMs": 1200,
+    "lastHttpIntentionalDelayMs": 212,
     "freeBefore": 2500000,
     "largestBefore": 1500000,
     "freeAfterAllocate": 2000000,
     "largestAfterAllocate": 1400000
+  },
+  "replayTransport": {
+    "gpsAuthenticationAccepted": 0,
+    "gpsAuthenticationRejected": 0,
+    "rbs1Detected": 0,
+    "rbs1Decoded": 0,
+    "rbs1Malformed": 0,
+    "rbs1Unnegotiated": 0,
+    "gpsMailboxAccepted": 0,
+    "gpsMailboxRejected": 0,
+    "markerAccepted": 0,
+    "markerRejectedInvalid": 0,
+    "markerRejectedNoActiveWindow": 221,
+    "markerRejectedActiveFixtureUnavailable": 0,
+    "markerRejectedFixtureMismatch": 0,
+    "lastTransportEventAtMs": 0,
+    "lastMarkerAtMs": 0,
+    "lastActiveWindowId": 0,
+    "lastSampleIndex": 0,
+    "lastSampleCount": 0,
+    "lastLoop": 0,
+    "lastCandidateFixtureTag": 0,
+    "lastExpectedFixtureTag": 0,
+    "lastCandidateFixtureTagValid": true,
+    "lastExpectedFixtureTagValid": false,
+    "lastMarkerResult": "no_active_window"
   }
 }
