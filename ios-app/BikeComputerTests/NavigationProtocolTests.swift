@@ -16931,8 +16931,62 @@ struct NavigationProtocolTests {
             domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
             code: 7
         ), "user denial never triggers a second join prompt")
-        assert(DeviceNetworkJoinPolicy.reachabilityTimeout >= 30,
-               "an accepted local-only accessory network gets a stable association window")
+        assert(
+            DeviceNetworkJoinPolicy.hasAnotherAssociationAttempt(after: 0),
+            "an unconfirmed first association has one bounded retry slot"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.hasAnotherAssociationAttempt(after: 1),
+            "device Wi-Fi association remains bounded to two attempts"
+        )
+        assert(DeviceNetworkJoinPolicy.associationObservationTimeout >= 10,
+               "an accepted local-only network gets time to become current")
+        assertEqual(
+            DeviceTransferFreshFailurePolicy.failure(
+                after: 17,
+                currentSequence: 17,
+                code: "tls_handshake_allocation_failed",
+                message: "non-secret allocator telemetry"
+            ),
+            nil,
+            "retained transfer history never replaces a new network failure"
+        )
+        assertEqual(
+            DeviceTransferFreshFailurePolicy.failure(
+                after: nil,
+                currentSequence: nil,
+                code: "legacy_error",
+                message: "legacy firmware has no sequence"
+            ),
+            nil,
+            "legacy firmware keeps the generic endpoint diagnostic"
+        )
+        assertEqual(
+            DeviceTransferFreshFailurePolicy.failure(
+                after: 17,
+                currentSequence: 18,
+                code: "tls_handshake_allocation_failed",
+                message: "non-secret allocator telemetry"
+            ),
+            DeviceTransferFreshFailure(
+                code: "tls_handshake_allocation_failed",
+                message: "non-secret allocator telemetry"
+            ),
+            "a new authenticated sequence surfaces its device-side rejection"
+        )
+        assertEqual(
+            DeviceTransferFreshFailurePolicy.failure(
+                after: UInt64(UInt32.max),
+                currentSequence: 1,
+                code: "sd_unavailable",
+                message: ""
+            ),
+            DeviceTransferFreshFailure(
+                code: "sd_unavailable",
+                message: "sd_unavailable"
+            ),
+            "sequence wrap and empty messages retain the classified failure"
+        )
         assertEqual(DeviceNetworkJoinPolicy.diagnosticMessage(
             domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
             code: 17,
@@ -20657,16 +20711,220 @@ struct NavigationProtocolTests {
         assert(!configuration.allowsCellularAccess,
                "local device probes stay on the Wi-Fi route")
         assert(!configuration.waitsForConnectivity,
-               "failed local routes return in time for retry")
+               "an exact accessory association starts the local request immediately")
+        assertEqual(configuration.httpMaximumConnectionsPerHost, 1,
+                    "the constrained accessory receives one connection at a time")
         assertEqual(
             configuration.timeoutIntervalForRequest,
             DeviceTransferServerProbePolicy.requestTimeout,
-            "local device probe request timeout is bounded"
+            "local device probe request timeout exceeds the firmware TLS budget"
         )
         assertEqual(
             configuration.timeoutIntervalForResource,
-            DeviceTransferServerProbePolicy.requestTimeout,
-            "local device probe resource timeout is bounded"
+            DeviceTransferServerProbePolicy.resourceTimeout,
+            "the complete local request remains bounded by the resource timeout"
+        )
+        assert(DeviceTransferServerProbePolicy.requestTimeout > 5,
+               "iOS must not abandon a handshake before the firmware timeout")
+        assertEqual(DeviceTransferServerProbePolicy.maximumAttemptCount, 3,
+                    "pinned preflight attempts remain tightly bounded")
+        assertEqual(
+            DeviceTransferServerProbePolicy.retryDelaysNanoseconds.count,
+            DeviceTransferServerProbePolicy.maximumAttemptCount,
+            "every bounded probe attempt has an explicit delay"
+        )
+        assertEqual(DeviceTransferServerProbePolicy.absoluteTimeout, 20,
+                    "the complete pinned preflight has one absolute deadline")
+
+        assertEqual(
+            DeviceTransferNetworkObservation.classify(
+                currentSSID: "BikeComputer-Transfer",
+                expectedSSID: "BikeComputer-Transfer"
+            ),
+            .target,
+            "an exact current SSID confirms accessory association"
+        )
+        assertEqual(
+            DeviceTransferNetworkObservation.classify(
+                currentSSID: "home-network",
+                expectedSSID: "BikeComputer-Transfer"
+            ),
+            .other,
+            "a different current SSID disproves accessory association"
+        )
+        assertEqual(
+            DeviceTransferNetworkObservation.classify(
+                currentSSID: nil,
+                expectedSSID: "BikeComputer-Transfer"
+            ),
+            .unavailable,
+            "missing Wi-Fi information remains unknown rather than mismatched"
+        )
+
+        let timeout = DeviceTransferServerProbeResult(
+            outcome: .transportError(
+                domain: NSURLErrorDomain,
+                code: NSURLErrorTimedOut
+            ),
+            diagnostics: DeviceTransferPinnedSessionSnapshot()
+        )
+        assert(timeout.shouldRetry,
+               "a pre-pin transport timeout receives a bounded retry")
+        assertEqual(timeout.diagnosticCode, "network_not_started",
+                    "missing connection metrics retain the earliest known layer")
+
+        let secureConnectionFailure = DeviceTransferServerProbeResult(
+            outcome: .transportError(
+                domain: NSURLErrorDomain,
+                code: NSURLErrorSecureConnectionFailed
+            ),
+            diagnostics: DeviceTransferPinnedSessionSnapshot()
+        )
+        assertEqual(
+            secureConnectionFailure.diagnosticCode,
+            "tls_secure_connection_failed_before_challenge",
+            "a secure-connection error is not mislabeled as an unstarted network"
+        )
+        let underlyingDiagnostics = DeviceTransferPinnedSessionDiagnostics()
+        underlyingDiagnostics.record(error: NSError(
+            domain: NSURLErrorDomain,
+            code: NSURLErrorSecureConnectionFailed,
+            userInfo: [
+                NSUnderlyingErrorKey: NSError(
+                    domain: "kCFErrorDomainCFNetwork",
+                    code: -9806
+                ),
+            ]
+        ))
+        assertEqual(
+            underlyingDiagnostics.snapshot().underlyingErrorDomain,
+            "kCFErrorDomainCFNetwork",
+            "only the underlying transport error domain is retained"
+        )
+        assertEqual(
+            underlyingDiagnostics.snapshot().underlyingErrorCode,
+            -9806,
+            "only the underlying transport error code is retained"
+        )
+
+        let connectivityWait = DeviceTransferServerProbeResult(
+            outcome: .transportError(
+                domain: NSURLErrorDomain,
+                code: NSURLErrorTimedOut
+            ),
+            diagnostics: DeviceTransferPinnedSessionSnapshot(
+                waitedForConnectivity: true
+            )
+        )
+        assertEqual(
+            connectivityWait.diagnosticCode,
+            "connectivity_wait_without_network_load",
+            "a connectivity wait remains distinct from a started network load"
+        )
+
+        let pinMismatch = DeviceTransferServerProbeResult(
+            outcome: .transportError(
+                domain: NSURLErrorDomain,
+                code: NSURLErrorServerCertificateUntrusted
+            ),
+            diagnostics: DeviceTransferPinnedSessionSnapshot(
+                tlsChallengeOutcome: .certificateMismatch
+            )
+        )
+        assert(!pinMismatch.shouldRetry,
+               "a BLE-pin mismatch fails closed without association churn")
+        assertEqual(pinMismatch.diagnosticCode, "tls_certificate_mismatch",
+                    "pin failures retain their security layer")
+
+        let unauthorized = DeviceTransferServerProbeResult(
+            outcome: .httpStatus(401),
+            diagnostics: DeviceTransferPinnedSessionSnapshot(
+                tlsChallengeOutcome: .accepted,
+                connectStarted: true,
+                connectCompleted: true,
+                tlsStarted: true,
+                tlsCompleted: true,
+                remoteEndpointMatched: true
+            )
+        )
+        assert(!unauthorized.shouldRetry,
+               "an authenticated HTTP response never triggers Wi-Fi reapply")
+        assertEqual(unauthorized.diagnosticCode, "http_401",
+                    "HTTP authorization failures stay distinct from reachability")
+        let safeFields = unauthorized.diagnostics.diagnosticFields
+        assertEqual(safeFields["tlsChallenge"], "accepted",
+                    "safe diagnostics retain the pin outcome")
+        assertEqual(safeFields["remoteEndpointMatched"], "true",
+                    "safe diagnostics retain only endpoint equality")
+        assert(safeFields["certificateSha256"] == nil &&
+               safeFields["sessionToken"] == nil &&
+               safeFields["hotspotPassphrase"] == nil,
+               "credentials and certificate material are never diagnostic fields")
+
+        let completeSafeFields = DeviceTransferPinnedSessionSnapshot(
+            tlsChallengeOutcome: .accepted,
+            waitedForConnectivity: true,
+            connectStarted: true,
+            connectCompleted: true,
+            tlsStarted: true,
+            tlsCompleted: true,
+            connectDurationMilliseconds: 12,
+            tlsDurationMilliseconds: 34,
+            remoteEndpointMatched: true,
+            localAddressInAccessorySubnet: true,
+            networkProtocolName: "http/1.1",
+            reusedConnection: false,
+            proxyConnection: false,
+            underlyingErrorDomain: "kCFErrorDomainCFNetwork",
+            underlyingErrorCode: -9806
+        ).diagnosticFields
+        assert(
+            completeSafeFields.keys.allSatisfy(
+                RideDiagnosticsFieldPolicy.isAllowed
+            ),
+            "the privacy allowlist must preserve every non-secret probe field"
+        )
+        let transferEnvelopeFields = [
+            "attempt", "networkObservation", "outcome", "httpStatus",
+            "errorDomain", "errorCode", "applyResult", "applyErrorDomain",
+            "applyErrorCode",
+        ]
+        assert(
+            transferEnvelopeFields.allSatisfy(
+                RideDiagnosticsFieldPolicy.isAllowed
+            ),
+            "the privacy allowlist must preserve transfer envelope fields"
+        )
+
+        assert(
+            OfflineMapPlatformError.transferWiFiJoinFailed(
+                "BikeComputer-Transfer",
+                "association was not confirmed"
+            ).errorDescription?.hasPrefix("Could not join device Wi-Fi") == true,
+            "association failures remain distinct from endpoint failures"
+        )
+        assert(
+            OfflineMapPlatformError.transferServerProbeFailed(
+                "BikeComputer-Transfer",
+                "pinned HTTPS returned HTTP 401"
+            ).errorDescription?.hasPrefix("Device transfer over") == true,
+            "pinned endpoint failures retain their own classification"
+        )
+
+        let entitlementURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(
+                "ios-app/BikeComputer/BikeComputer/BikeComputer.entitlements"
+            )
+        let entitlementData = try! Data(contentsOf: entitlementURL)
+        let entitlements = try! PropertyListSerialization.propertyList(
+            from: entitlementData,
+            options: [],
+            format: nil
+        ) as! [String: Any]
+        assertEqual(
+            entitlements["com.apple.developer.networking.wifi-info"] as? Bool,
+            true,
+            "the signed app can distinguish the current accessory Wi-Fi"
         )
     }
 
@@ -21153,7 +21411,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","lastError":{"code":"transfer_busy","message":"another transfer mode is active"},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","lastError":{"sequence":17,"code":"transfer_busy","message":"another transfer mode is active"},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -21171,6 +21429,8 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceTransferSessionToken, "abc123", "status parser exposes session token")
         assertEqual(manager.deviceTransferLastErrorCode, "transfer_busy", "status parser exposes transfer error code")
         assertEqual(manager.deviceTransferLastErrorMessage, "another transfer mode is active", "status parser exposes transfer error message")
+        assertEqual(manager.deviceTransferLastErrorSequence, 17,
+                    "status parser exposes the monotonic transfer error sequence")
         assertEqual(manager.deviceStorageBackend,
                     "legacy_spi_migration",
                     "status parser exposes the active storage backend")
@@ -21184,6 +21444,13 @@ struct NavigationProtocolTests {
         assertEqual(manager.firmwareUpdateReceivedBytes, 1024, "status parser exposes received bytes")
         assertEqual(manager.firmwareUpdateTotalBytes, 2048, "status parser exposes total bytes")
         assertEqual(manager.firmwareUpdateLastError, "previous: previous update failed", "status parser exposes firmware error")
+
+        let clearedPacket = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+            Data("{\"enabled\":false}".utf8)
+        assert(manager.handleDeviceTransferStatusNotification(clearedPacket),
+               "a status without lastError is consumed")
+        assertEqual(manager.deviceTransferLastErrorSequence, nil,
+                    "legacy or clear status resets the optional error sequence")
 
         let invalidPacket = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data("{".utf8)
         assert(manager.handleDeviceTransferStatusNotification(invalidPacket), "invalid DSTS notification should be consumed")

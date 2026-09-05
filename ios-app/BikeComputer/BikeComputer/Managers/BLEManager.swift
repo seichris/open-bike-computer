@@ -10024,6 +10024,17 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             deviceTransferLastErrorMessage = nil
             deviceTransferLastErrorSequence = nil
         }
+#if DEBUG
+        if let code = deviceTransferLastErrorCode, !code.isEmpty {
+            // Firmware limits this authenticated status field to non-secret
+            // failure classification and memory telemetry. Transfer tokens,
+            // hotspot credentials, and TLS identity material are never part
+            // of the retained error message.
+            let message = deviceTransferLastErrorMessage
+                .flatMap { $0.isEmpty ? nil : $0 }
+            log("Device transfer error: \(message.map { "\(code): \($0)" } ?? code)")
+        }
+#endif
         if let storage = object["storage"] as? [String: Any] {
             deviceStorageBackend = storage["backend"] as? String
             deviceStoragePowerCycleRequired =

@@ -379,35 +379,171 @@ enum DeviceTransferHandshakePolicy {
 }
 
 enum DeviceTransferServerProbePolicy {
-    static let requestTimeout: TimeInterval = 2
+    // Firmware permits a pinned TLS handshake to occupy the single transfer
+    // worker for five seconds. The client must outlive that server budget.
+    static let requestTimeout: TimeInterval = 8
+    static let resourceTimeout: TimeInterval = 10
+    static let absoluteTimeout: TimeInterval = 20
+    static let maximumAttemptCount = 3
+    static let retryDelaysNanoseconds: [UInt64] = [
+        0,
+        750_000_000,
+        2_000_000_000,
+    ]
 
-    static func makeSessionConfiguration() -> URLSessionConfiguration {
+    static func makeSessionConfiguration(
+        resourceTimeout: TimeInterval = resourceTimeout
+    ) -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
-        // A shared session can retain the route or proxy state from before the
-        // ESP joins the LAN. Create a fresh, proxy-free Wi-Fi session for each
-        // probe so local accessory traffic never follows a VPN/proxy route.
+        // Keep one attempt-scoped, proxy-free session. The device closes each
+        // HTTP response, but retaining the session avoids client-side route and
+        // delegate churn while the accepted Wi-Fi configuration settles. The
+        // exact accessory SSID is observed before this session is created, so
+        // start each local request immediately. Waiting for system connectivity
+        // can otherwise consume the full probe window on an accessory AP with
+        // no internet path without starting a network load.
         configuration.connectionProxyDictionary = [:]
         configuration.allowsCellularAccess = false
         configuration.waitsForConnectivity = false
+        configuration.httpMaximumConnectionsPerHost = 1
         configuration.timeoutIntervalForRequest = requestTimeout
-        configuration.timeoutIntervalForResource = requestTimeout
+        configuration.timeoutIntervalForResource = resourceTimeout
         return configuration
+    }
+}
+
+enum DeviceTransferNetworkObservation: String, Equatable, Sendable {
+    case target
+    case other
+    case unavailable
+
+    static func classify(
+        currentSSID: String?,
+        expectedSSID: String
+    ) -> DeviceTransferNetworkObservation {
+        guard let currentSSID, !currentSSID.isEmpty else { return .unavailable }
+        return currentSSID == expectedSSID ? .target : .other
+    }
+}
+
+enum DeviceTransferServerProbeOutcome: Equatable, Sendable {
+    case ready
+    case invalidPinnedSession
+    case invalidResponse
+    case httpStatus(Int)
+    case transportError(domain: String, code: Int)
+}
+
+struct DeviceTransferServerProbeResult: Equatable, Sendable {
+    let outcome: DeviceTransferServerProbeOutcome
+    let diagnostics: DeviceTransferPinnedSessionSnapshot
+
+    var isReady: Bool {
+        outcome == .ready
+    }
+
+    var shouldRetry: Bool {
+        guard case .transportError = outcome else { return false }
+        switch diagnostics.tlsChallengeOutcome {
+        case .hostMismatch,
+             .invalidExpectedFingerprint,
+             .missingServerTrust,
+             .certificateMismatch,
+             .defaultHandling:
+            return false
+        case .accepted, nil:
+            return true
+        }
+    }
+
+    var diagnosticCode: String {
+        switch outcome {
+        case .ready:
+            return "ready"
+        case .invalidPinnedSession:
+            return "invalid_pinned_session"
+        case .invalidResponse:
+            return "invalid_http_response"
+        case .httpStatus(let status):
+            return "http_\(status)"
+        case .transportError(let domain, let code):
+            switch diagnostics.tlsChallengeOutcome {
+            case .hostMismatch:
+                return "tls_host_mismatch"
+            case .invalidExpectedFingerprint:
+                return "invalid_pinned_session"
+            case .missingServerTrust:
+                return "tls_trust_missing"
+            case .certificateMismatch:
+                return "tls_certificate_mismatch"
+            case .defaultHandling:
+                return "tls_challenge_unexpected"
+            case .accepted:
+                return "pinned_tls_transport_failed"
+            case nil:
+                if diagnostics.tlsStarted && !diagnostics.tlsCompleted {
+                    return "tls_incomplete"
+                }
+                if diagnostics.tlsCompleted {
+                    return "tls_completed_transport_failed"
+                }
+                if diagnostics.connectStarted &&
+                    !diagnostics.connectCompleted {
+                    return "connection_incomplete"
+                }
+                if diagnostics.connectCompleted {
+                    return "tcp_connected_tls_not_started"
+                }
+                if domain == NSURLErrorDomain &&
+                    code == NSURLErrorSecureConnectionFailed {
+                    return "tls_secure_connection_failed_before_challenge"
+                }
+                if diagnostics.waitedForConnectivity {
+                    return "connectivity_wait_without_network_load"
+                }
+                return "network_not_started"
+            }
+        }
+    }
+
+    func diagnosticMessage(
+        networkObservation: DeviceTransferNetworkObservation
+    ) -> String {
+        let networkPrefix: String
+        switch networkObservation {
+        case .target:
+            networkPrefix = "accessory Wi-Fi association confirmed"
+        case .other:
+            return "accessory Wi-Fi association was not confirmed"
+        case .unavailable:
+            networkPrefix = "current Wi-Fi information was unavailable"
+        }
+
+        switch outcome {
+        case .ready:
+            return "device transfer server is ready"
+        case .invalidPinnedSession:
+            return "\(networkPrefix); the BLE-pinned HTTPS session was invalid"
+        case .invalidResponse:
+            return "\(networkPrefix); the pinned endpoint returned an invalid HTTP response"
+        case .httpStatus(let status):
+            return "\(networkPrefix); pinned HTTPS returned HTTP \(status)"
+        case .transportError(let domain, let code):
+            return "\(networkPrefix); no authenticated pinned HTTP 200 " +
+                "(\(diagnosticCode), \(domain) \(code))"
+        }
     }
 }
 
 enum DeviceNetworkJoinPolicy {
     static let applyAttemptCount = 2
     static let configurationSettleDelayNanoseconds: UInt64 = 500_000_000
-    // iOS can take more than the hotspot configuration callback to move from
-    // an internet-connected network to a local-only accessory AP. Keep one
-    // accepted configuration stable while that association settles; removing
-    // and reapplying it here can restart the switch indefinitely.
-    static let reachabilityTimeout: TimeInterval = 30
-    static let reachabilityRetryNanoseconds: UInt64 = 250_000_000
+    static let associationObservationTimeout: TimeInterval = 12
+    static let associationObservationRetryNanoseconds: UInt64 = 250_000_000
     static let hotspotErrorDomain = "NEHotspotConfigurationErrorDomain"
 
     static func isAlreadyAssociated(
@@ -425,6 +561,10 @@ enum DeviceNetworkJoinPolicy {
         // public NEHotspotConfiguration error contract. User/policy/validation
         // failures require intervention and must not show a second join prompt.
         return code == 8 || code == 9 || code == 11
+    }
+
+    static func hasAnotherAssociationAttempt(after attempt: Int) -> Bool {
+        attempt + 1 < applyAttemptCount
     }
 
     static func diagnosticMessage(
@@ -462,6 +602,30 @@ enum DeviceNetworkJoinPolicy {
         )
     }
 #endif
+}
+
+struct DeviceTransferFreshFailure: Equatable {
+    let code: String
+    let message: String
+}
+
+enum DeviceTransferFreshFailurePolicy {
+    static func failure(
+        after initialSequence: UInt64?,
+        currentSequence: UInt64?,
+        code: String?,
+        message: String?
+    ) -> DeviceTransferFreshFailure? {
+        guard let currentSequence,
+              currentSequence != 0,
+              currentSequence != initialSequence,
+              let code,
+              !code.isEmpty else { return nil }
+        return DeviceTransferFreshFailure(
+            code: code,
+            message: message.flatMap { $0.isEmpty ? nil : $0 } ?? code
+        )
+    }
 }
 
 @MainActor
@@ -553,6 +717,8 @@ final class DeviceTransferManager {
         }
         let initialDeviceTransferStatusRevision =
             bleManager.deviceTransferStatusRevision
+        let initialDeviceTransferErrorSequence =
+            bleManager.deviceTransferLastErrorSequence
 
         // DTRN enter is the authoritative handshake: current firmware applies
         // map mode and publishes the token-bearing DSTS response from this one
@@ -579,8 +745,13 @@ final class DeviceTransferManager {
                         status: status
                     )
                 } catch {
+                    let freshDeviceError = await freshMapTransferRejection(
+                        after: initialDeviceTransferErrorSequence,
+                        networkError: error,
+                        bleManager: bleManager
+                    )
                     await exitMapTransfer(bleManager: bleManager)
-                    throw error
+                    throw freshDeviceError ?? error
                 }
                 record(
                     mode: .map,
@@ -617,6 +788,99 @@ final class DeviceTransferManager {
             throw OfflineMapPlatformError.deviceMapTransferRejected(message)
         }
         throw OfflineMapPlatformError.missingTransferBaseURL
+    }
+
+    private func freshMapTransferRejection(
+        after initialErrorSequence: UInt64?,
+        networkError: Error,
+        bleManager: BLEManager
+    ) async -> OfflineMapPlatformError? {
+        guard let platformError = networkError as? OfflineMapPlatformError,
+              case .transferServerProbeFailed = platformError
+        else { return nil }
+
+        if let rejection = currentMapTransferRejection(
+            after: initialErrorSequence,
+            bleManager: bleManager
+        ) {
+            recordMapTransferStatusProbe(
+                result: "fresh_error",
+                includeCurrentError: true,
+                bleManager: bleManager
+            )
+            return rejection
+        }
+
+        let initialStatusRevision = bleManager.deviceTransferStatusRevision
+        guard bleManager.requestDeviceTransferStatus() else {
+            recordMapTransferStatusProbe(
+                result: "request_not_queued",
+                bleManager: bleManager
+            )
+            return nil
+        }
+        var observedStatusResponse = false
+        for _ in 0..<8 {
+            if Task.isCancelled { return nil }
+            try? await Task.sleep(
+                nanoseconds:
+                    DeviceTransferHandshakePolicy.retryIntervalNanoseconds
+            )
+            if bleManager.deviceTransferStatusRevision !=
+                    initialStatusRevision,
+               let rejection = currentMapTransferRejection(
+                    after: initialErrorSequence,
+                    bleManager: bleManager
+               ) {
+                recordMapTransferStatusProbe(
+                    result: "fresh_error",
+                    includeCurrentError: true,
+                    bleManager: bleManager
+                )
+                return rejection
+            }
+            observedStatusResponse =
+                observedStatusResponse ||
+                bleManager.deviceTransferStatusRevision != initialStatusRevision
+        }
+        recordMapTransferStatusProbe(
+            result: observedStatusResponse ? "no_fresh_error" : "no_response",
+            bleManager: bleManager
+        )
+        return nil
+    }
+
+    private func recordMapTransferStatusProbe(
+        result: String,
+        includeCurrentError: Bool = false,
+        bleManager: BLEManager
+    ) {
+        var fields = ["result": result]
+        if includeCurrentError {
+            if let code = bleManager.deviceTransferLastErrorCode, !code.isEmpty {
+                fields["code"] = code
+            }
+            if let sequence = bleManager.deviceTransferLastErrorSequence {
+                fields["sequence"] = String(sequence)
+            }
+        }
+        record(mode: .map, event: "device_status_probe", fields: fields)
+    }
+
+    private func currentMapTransferRejection(
+        after initialErrorSequence: UInt64?,
+        bleManager: BLEManager
+    ) -> OfflineMapPlatformError? {
+        guard let failure = DeviceTransferFreshFailurePolicy.failure(
+            after: initialErrorSequence,
+            currentSequence: bleManager.deviceTransferLastErrorSequence,
+            code: bleManager.deviceTransferLastErrorCode,
+            message: bleManager.deviceTransferLastErrorMessage
+        ) else { return nil }
+        if failure.code == "sd_unavailable" {
+            return .deviceSDCardUnavailable
+        }
+        return .deviceMapTransferRejected(failure.message)
     }
 
     func exitMapTransfer(bleManager: BLEManager) async {
@@ -721,12 +985,12 @@ final class DeviceTransferManager {
             )
             if session.networkTransport == "lan" {
                 status("checking local Wi-Fi")
-                let reachable = try await waitForTransferServer(
+                let probeResult = try await waitForTransferServer(
                     session: session,
                     statusPath: "device-diagnostics/v1/status",
                     timeout: 4
                 )
-                if !reachable {
+                if !probeResult.isReady {
                     status("switching to device hotspot")
                     try await stopDiagnostics(bleManager: bleManager)
                     enterWasQueued = false
@@ -1024,21 +1288,37 @@ final class DeviceTransferManager {
         }
 
 #if os(iOS)
-        if await isTransferServerReachable(
-            session: session,
-            statusPath: statusPath
-        ) {
+        let initialNetworkObservation = await currentNetworkObservation(
+            expectedSSID: ssid
+        )
+        if initialNetworkObservation == .target {
             joinedAccessPointSSID = ssid
-            return
+            status("checking device transfer server")
+            let result = try await waitForTransferServer(
+                session: session,
+                statusPath: statusPath,
+                networkObservation: initialNetworkObservation
+            )
+            if result.isReady {
+                return
+            }
+            throw OfflineMapPlatformError.transferServerProbeFailed(
+                ssid,
+                result.diagnosticMessage(
+                    networkObservation: initialNetworkObservation
+                )
+            )
         }
 
         status("joining device Wi-Fi")
         var lastApplyError: NSError?
-        var associationAccepted = false
+        var lastDiagnostic: String?
+        var lastFailureWasServerProbe = false
 
-        // Clear a saved configuration once before joining. After iOS accepts
-        // the replacement, leave it installed until the transfer finishes so
-        // the system has one uninterrupted local-only association window.
+        // Clear a saved configuration before the first bounded association
+        // attempt. An accepted configuration gets a complete association and
+        // pinned-probe window before one fresh application is allowed. Never
+        // re-prompt after user, policy, or validation denial.
         Self.removeAccessoryNetworkConfiguration(ssid: ssid)
         try await Task.sleep(
             nanoseconds:
@@ -1046,6 +1326,7 @@ final class DeviceTransferManager {
         )
 
         for attempt in 0..<DeviceNetworkJoinPolicy.applyAttemptCount {
+            lastFailureWasServerProbe = false
             let configuration = DeviceNetworkJoinPolicy.hotspotConfiguration(
                 ssid: ssid,
                 passphrase: session.accessPointPassphrase
@@ -1059,10 +1340,7 @@ final class DeviceTransferManager {
 
             let applyError = await apply(configuration: configuration)
             lastApplyError = applyError
-            if applyError == nil {
-                associationAccepted = true
-                break
-            }
+            var associationAccepted = applyError == nil
 
             if let applyError {
                 print(
@@ -1081,47 +1359,81 @@ final class DeviceTransferManager {
                     )
                 if alreadyAssociated {
                     associationAccepted = true
-                    break
-                }
-
-                // A configuration error can race with a successful
-                // association. Preserve a server that is already reachable
-                // instead of tearing its network configuration back down.
-                if await isTransferServerReachable(
-                    session: session,
-                    statusPath: statusPath
-                ) {
-                    associationAccepted = true
-                    break
-                }
-
-                if !DeviceNetworkJoinPolicy.shouldRetry(
-                       domain: applyError.domain,
-                       code: applyError.code
-                   ) {
-                    break
                 }
             }
 
-            if attempt + 1 < DeviceNetworkJoinPolicy.applyAttemptCount {
+            let networkObservation: DeviceTransferNetworkObservation
+            if associationAccepted {
+                networkObservation = try await waitForNetworkObservation(
+                    expectedSSID: ssid,
+                    timeout:
+                        DeviceNetworkJoinPolicy.associationObservationTimeout
+                )
+            } else {
+                // A configuration error can race with an already-completed
+                // association. Observe the active network once before deciding
+                // whether the typed apply error is terminal.
+                networkObservation = await currentNetworkObservation(
+                    expectedSSID: ssid
+                )
+            }
+            var observationFields = [
+                "attempt": String(attempt + 1),
+                "result": networkObservation.rawValue,
+                "applyResult": applyError == nil ? "accepted" : "error",
+            ]
+            if let applyError {
+                observationFields["applyErrorDomain"] = applyError.domain
+                observationFields["applyErrorCode"] = String(applyError.code)
+            }
+            record(
+                mode: session.mode,
+                event: "wifi_observation",
+                fields: observationFields
+            )
+
+            if networkObservation == .other {
+                lastDiagnostic =
+                    "accessory Wi-Fi association was not confirmed"
+                lastApplyError = nil
+            } else if associationAccepted || networkObservation == .target {
+                joinedAccessPointSSID = ssid
+                status("waiting for device transfer server")
+                let result = try await waitForTransferServer(
+                    session: session,
+                    statusPath: statusPath,
+                    networkObservation: networkObservation
+                )
+                if result.isReady {
+                    print("Device Wi-Fi ready: \(ssid)")
+                    return
+                }
+                lastApplyError = nil
+                lastDiagnostic = result.diagnosticMessage(
+                    networkObservation: networkObservation
+                )
+                lastFailureWasServerProbe = true
+                if !result.shouldRetry || networkObservation == .target {
+                    break
+                }
+            } else if let applyError,
+                      !DeviceNetworkJoinPolicy.shouldRetry(
+                        domain: applyError.domain,
+                        code: applyError.code
+                      ) {
+                break
+            }
+
+            if DeviceNetworkJoinPolicy.hasAnotherAssociationAttempt(
+                after: attempt
+            ) {
                 status("retrying device Wi-Fi")
                 Self.removeAccessoryNetworkConfiguration(ssid: ssid)
+                joinedAccessPointSSID = nil
                 try await Task.sleep(
                     nanoseconds:
                         DeviceNetworkJoinPolicy.configurationSettleDelayNanoseconds
                 )
-            }
-        }
-
-        if associationAccepted {
-            joinedAccessPointSSID = ssid
-            status("waiting for device transfer server")
-            if try await waitForTransferServer(
-                session: session,
-                statusPath: statusPath
-            ) {
-                print("Device Wi-Fi ready: \(ssid)")
-                return
             }
         }
 
@@ -1133,8 +1445,15 @@ final class DeviceTransferManager {
                 code: $0.code,
                 message: $0.localizedDescription
             )
-        } ?? "accessory network joined but its transfer server was unreachable"
+        } ?? lastDiagnostic ??
+            "no authenticated pinned HTTP 200 before the deadline"
         print("Device Wi-Fi unavailable: \(ssid): \(diagnostic)")
+        if lastFailureWasServerProbe {
+            throw OfflineMapPlatformError.transferServerProbeFailed(
+                ssid,
+                diagnostic
+            )
+        }
         throw OfflineMapPlatformError.transferWiFiJoinFailed(ssid, diagnostic)
 #endif
     }
@@ -1149,31 +1468,122 @@ final class DeviceTransferManager {
             }
         }
     }
+
+    private func currentNetworkObservation(
+        expectedSSID: String
+    ) async -> DeviceTransferNetworkObservation {
+        await withCheckedContinuation { continuation in
+            NEHotspotNetwork.fetchCurrent { network in
+                continuation.resume(returning:
+                    DeviceTransferNetworkObservation.classify(
+                        currentSSID: network?.ssid,
+                        expectedSSID: expectedSSID
+                    )
+                )
+            }
+        }
+    }
+
+    private func waitForNetworkObservation(
+        expectedSSID: String,
+        timeout: TimeInterval
+    ) async throws -> DeviceTransferNetworkObservation {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        var latest = DeviceTransferNetworkObservation.unavailable
+        while true {
+            latest = await currentNetworkObservation(expectedSSID: expectedSSID)
+            if latest == .target ||
+                ProcessInfo.processInfo.systemUptime >= deadline {
+                return latest
+            }
+            try await Task.sleep(
+                nanoseconds:
+                    DeviceNetworkJoinPolicy
+                        .associationObservationRetryNanoseconds
+            )
+        }
+    }
 #endif
 
     private func waitForTransferServer(
         session: DeviceTransferSession,
         statusPath: String,
-        timeout: TimeInterval? = nil
-    ) async throws -> Bool {
-        let deadline = Date().addingTimeInterval(
-            timeout ?? DeviceNetworkJoinPolicy.reachabilityTimeout
+        timeout: TimeInterval? = nil,
+        networkObservation: DeviceTransferNetworkObservation = .unavailable
+    ) async throws -> DeviceTransferServerProbeResult {
+        let absoluteTimeout = max(
+            1,
+            timeout ?? DeviceTransferServerProbePolicy.absoluteTimeout
         )
-        while true {
-            if await isTransferServerReachable(
-                session: session,
-                statusPath: statusPath
-            ) {
-                return true
-            }
-            guard Date() < deadline else {
-                return false
-            }
-            try await Task.sleep(
-                nanoseconds:
-                    DeviceNetworkJoinPolicy.reachabilityRetryNanoseconds
+        let deadline = ProcessInfo.processInfo.systemUptime + absoluteTimeout
+        let diagnostics = DeviceTransferPinnedSessionDiagnostics()
+        guard let urlSession = DeviceTransferPinnedSessionFactory.make(
+            configuration: DeviceTransferServerProbePolicy
+                .makeSessionConfiguration(
+                    resourceTimeout: min(
+                        DeviceTransferServerProbePolicy.resourceTimeout,
+                        absoluteTimeout
+                    )
+                ),
+            baseURL: session.baseURL,
+            certificateSHA256: session.tlsCertificateSHA256,
+            diagnostics: diagnostics
+        ) else {
+            let result = DeviceTransferServerProbeResult(
+                outcome: .invalidPinnedSession,
+                diagnostics: diagnostics.snapshot()
             )
+            recordProbe(
+                session: session,
+                attempt: 1,
+                networkObservation: networkObservation,
+                result: result
+            )
+            return result
         }
+        defer { urlSession.invalidateAndCancel() }
+
+        var lastResult = DeviceTransferServerProbeResult(
+            outcome: .transportError(
+                domain: NSURLErrorDomain,
+                code: NSURLErrorTimedOut
+            ),
+            diagnostics: diagnostics.snapshot()
+        )
+        for attempt in 0..<DeviceTransferServerProbePolicy.maximumAttemptCount {
+            let delay = DeviceTransferServerProbePolicy
+                .retryDelaysNanoseconds[attempt]
+            if delay > 0 {
+                let remaining = deadline - ProcessInfo.processInfo.systemUptime
+                guard remaining > 0,
+                      Double(delay) / 1_000_000_000 < remaining else { break }
+                try await Task.sleep(nanoseconds: delay)
+            }
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { break }
+
+            diagnostics.reset()
+            lastResult = try await probeTransferServer(
+                transferSession: session,
+                statusPath: statusPath,
+                urlSession: urlSession,
+                diagnostics: diagnostics,
+                requestTimeout: min(
+                    DeviceTransferServerProbePolicy.requestTimeout,
+                    remaining
+                )
+            )
+            recordProbe(
+                session: session,
+                attempt: attempt + 1,
+                networkObservation: networkObservation,
+                result: lastResult
+            )
+            if lastResult.isReady || !lastResult.shouldRetry {
+                return lastResult
+            }
+        }
+        return lastResult
     }
 
     private func removeJoinedAccessPointIfNeeded() {
@@ -1191,14 +1601,17 @@ final class DeviceTransferManager {
 #endif
     }
 
-    private func isTransferServerReachable(
-        session transferSession: DeviceTransferSession,
-        statusPath: String
-    ) async -> Bool {
+    private func probeTransferServer(
+        transferSession: DeviceTransferSession,
+        statusPath: String,
+        urlSession: URLSession,
+        diagnostics: DeviceTransferPinnedSessionDiagnostics,
+        requestTimeout: TimeInterval
+    ) async throws -> DeviceTransferServerProbeResult {
         let url = transferSession.baseURL.appendingPathComponent(statusPath)
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        request.timeoutInterval = DeviceTransferServerProbePolicy.requestTimeout
+        request.timeoutInterval = requestTimeout
         if let sessionToken = transferSession.sessionToken,
            !sessionToken.isEmpty {
             request.setValue(
@@ -1207,26 +1620,58 @@ final class DeviceTransferManager {
             )
         }
 
-        guard let session = DeviceTransferPinnedSessionFactory.make(
-            configuration:
-                DeviceTransferServerProbePolicy.makeSessionConfiguration(),
-            baseURL: transferSession.baseURL,
-            certificateSHA256: transferSession.tlsCertificateSHA256
-        ) else {
-            return false
-        }
-        defer { session.invalidateAndCancel() }
         do {
-            let (_, response) = try await session.data(for: request)
-            let statusCode = (response as? HTTPURLResponse)?.statusCode
-            if statusCode != 200 {
-                print("Device transfer server probe returned HTTP \(statusCode ?? -1)")
+            let (_, response) = try await urlSession.data(for: request)
+            guard let response = response as? HTTPURLResponse else {
+                return DeviceTransferServerProbeResult(
+                    outcome: .invalidResponse,
+                    diagnostics: diagnostics.snapshot()
+                )
             }
-            return statusCode == 200
+            return DeviceTransferServerProbeResult(
+                outcome: response.statusCode == 200
+                    ? .ready
+                    : .httpStatus(response.statusCode),
+                diagnostics: diagnostics.snapshot()
+            )
         } catch {
+            try Task.checkCancellation()
             let error = error as NSError
-            print("Device transfer server probe failed: \(error.domain) \(error.code)")
-            return false
+            diagnostics.record(error: error)
+            return DeviceTransferServerProbeResult(
+                outcome: .transportError(
+                    domain: error.domain,
+                    code: error.code
+                ),
+                diagnostics: diagnostics.snapshot()
+            )
         }
+    }
+
+    private func recordProbe(
+        session: DeviceTransferSession,
+        attempt: Int,
+        networkObservation: DeviceTransferNetworkObservation,
+        result: DeviceTransferServerProbeResult
+    ) {
+        var fields = result.diagnostics.diagnosticFields
+        fields["attempt"] = String(attempt)
+        fields["networkObservation"] = networkObservation.rawValue
+        fields["outcome"] = result.diagnosticCode
+        switch result.outcome {
+        case .httpStatus(let status):
+            fields["httpStatus"] = String(status)
+        case .transportError(let domain, let code):
+            fields["errorDomain"] = domain
+            fields["errorCode"] = String(code)
+        case .ready, .invalidPinnedSession, .invalidResponse:
+            break
+        }
+        record(mode: session.mode, event: "server_probe", fields: fields)
+        print(
+            "Device transfer probe attempt=\(attempt) " +
+            "network=\(networkObservation.rawValue) " +
+            "outcome=\(result.diagnosticCode)"
+        )
     }
 }
