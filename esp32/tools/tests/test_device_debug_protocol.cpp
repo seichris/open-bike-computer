@@ -87,17 +87,34 @@ int main() {
   assert(!captureRequestDue(true, true, 100, 299));
   assert(captureRequestDue(true, true, 100, 300));
 
-  uint32_t after = 99;
-  assert(parseFrameAfterPath("/device-debug/v1/frame?after=0", after));
-  assert(after == 0);
-  assert(parseFrameAfterPath(
-      "/device-debug/v1/frame?after=4294967295", after));
-  assert(after == UINT32_MAX);
-  assert(!parseFrameAfterPath("/device-debug/v1/frame?after=", after));
-  assert(!parseFrameAfterPath("/device-debug/v1/frame?after=-1", after));
-  assert(!parseFrameAfterPath(
-      "/device-debug/v1/frame?after=4294967296", after));
-  assert(!parseFrameAfterPath("/device-debug/v1/frame?after=1&extra=1", after));
+  FrameRequestQuery frameQuery;
+  assert(parseFrameRequestPath("/device-debug/v1/frame?after=0", frameQuery));
+  assert(frameQuery.afterSequence == 0);
+  assert(!frameQuery.hasCapturedAtOrAfter);
+  assert(parseFrameRequestPath(
+      "/device-debug/v1/frame?after=4294967295&capturedAtOrAfter=4294967295",
+      frameQuery));
+  assert(frameQuery.afterSequence == UINT32_MAX);
+  assert(frameQuery.hasCapturedAtOrAfter);
+  assert(frameQuery.capturedAtOrAfterMs == UINT32_MAX);
+  assert(!parseFrameRequestPath("/device-debug/v1/frame?after=", frameQuery));
+  assert(!parseFrameRequestPath("/device-debug/v1/frame?after=-1", frameQuery));
+  assert(!parseFrameRequestPath(
+      "/device-debug/v1/frame?after=4294967296", frameQuery));
+  assert(!parseFrameRequestPath(
+      "/device-debug/v1/frame?after=1&capturedAtOrAfter=", frameQuery));
+  assert(!parseFrameRequestPath(
+      "/device-debug/v1/frame?after=1&capturedAtOrAfter=-1", frameQuery));
+  assert(!parseFrameRequestPath(
+      "/device-debug/v1/frame?after=1&capturedAtOrAfter=4294967296",
+      frameQuery));
+  assert(!parseFrameRequestPath(
+      "/device-debug/v1/frame?after=1&extra=1", frameQuery));
+  assert(timestampAtOrAfter(1000, 1000));
+  assert(timestampAtOrAfter(1005, 1000));
+  assert(!timestampAtOrAfter(995, 1000));
+  assert(timestampAtOrAfter(3, UINT32_MAX - 2));
+  assert(!timestampAtOrAfter(UINT32_MAX - 2, 3));
 
   assert(validatePointerEnvelope(true, 64, "application/json") ==
          PointerEnvelopeResult::Accepted);

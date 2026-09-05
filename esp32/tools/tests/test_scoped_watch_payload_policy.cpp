@@ -11,6 +11,29 @@ static bool allowed(const std::string &value) {
 }
 
 int main() {
+  using scoped_watch_payload_policy::OwnerOnlyRequestPresentation;
+  using scoped_watch_payload_policy::RequestSessionRole;
+  assert(scoped_watch_payload_policy::allowsOwnerOnlyRequest(
+      true, true, true, RequestSessionRole::Owner));
+  assert(!scoped_watch_payload_policy::allowsOwnerOnlyRequest(
+      true, true, true, RequestSessionRole::ScopedWatch));
+  assert(!scoped_watch_payload_policy::allowsOwnerOnlyRequest(
+      true, true, true, RequestSessionRole::Unreadable));
+  assert(!scoped_watch_payload_policy::allowsOwnerOnlyRequest(
+      false, true, true, RequestSessionRole::Owner));
+  assert(!scoped_watch_payload_policy::allowsOwnerOnlyRequest(
+      true, false, true, RequestSessionRole::Owner));
+  assert(!scoped_watch_payload_policy::allowsOwnerOnlyRequest(
+      true, true, false, RequestSessionRole::Owner));
+  assert(scoped_watch_payload_policy::ownerOnlyRequestPresentation(
+             true, true, true, RequestSessionRole::Owner) ==
+         OwnerOnlyRequestPresentation::OwnerAction);
+  assert(scoped_watch_payload_policy::ownerOnlyRequestPresentation(
+             true, true, true, RequestSessionRole::ScopedWatch) ==
+         OwnerOnlyRequestPresentation::ScopedWatchAction);
+  assert(scoped_watch_payload_policy::ownerOnlyRequestPresentation(
+             true, true, true, RequestSessionRole::Unreadable) ==
+         OwnerOnlyRequestPresentation::Unavailable);
   assert(allowed("3|120|Turn right"));
   assert(allowed("0|0|"));
   assert(allowed("MAPR\x01\x02"));

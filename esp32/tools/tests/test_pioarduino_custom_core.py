@@ -12,6 +12,7 @@ from pioarduino_custom_core import (
     CORRECTED_PENV_URLLIB3_REQUIREMENT,
     IDF_EXACT_REQUIREMENTS,
     UPSTREAM_AMBIENT_UV_FALLBACK,
+    UPSTREAM_COMPONENT_ARCHIVE_COPY,
     UPSTREAM_ESPTOOL_MATCH,
     UPSTREAM_EXTERNAL_UV_INSTALL,
     UPSTREAM_IDF_INSTALL_COMMAND,
@@ -21,6 +22,7 @@ from pioarduino_custom_core import (
     UPSTREAM_PLATFORMIO_REQUIREMENT,
     UPSTREAM_ROOT_INSTALL_COMMAND,
     VERIFIED_LOCKED_UV_FALLBACK,
+    VERIFIED_COMPONENT_ARCHIVE_COPY,
     UPSTREAM_EDITABLE_ESPTOOL,
     VERIFIED_ESPTOOL_MATCH,
     VERIFIED_EXTERNAL_UV_INSTALL,
@@ -42,6 +44,7 @@ from pioarduino_custom_core import (
     UPSTREAM_NESTED_PIO_BLOCK,
     VERIFIED_NESTED_PIO_BLOCK,
     correct_nested_pio_command,
+    correct_component_archive_copy,
     correct_generated_project_cleanup,
     correct_espidf_setup_text,
     correct_penv_setup_text,
@@ -227,6 +230,33 @@ class CorrectGeneratedProjectCleanupTests(unittest.TestCase):
                 "b" * 64,
             )
         )
+
+
+class CorrectComponentArchiveCopyTests(unittest.TestCase):
+    def test_copies_nested_mbedtls_products_with_package_names(self):
+        corrected = correct_component_archive_copy(
+            f"before\n{UPSTREAM_COMPONENT_ARCHIVE_COPY}\nafter"
+        )
+
+        self.assertIn(VERIFIED_COMPONENT_ARCHIVE_COPY, corrected)
+        self.assertNotIn(UPSTREAM_COMPONENT_ARCHIVE_COPY, corrected)
+        self.assertIn('("libmbedtls.a", "libmbedtls_2.a")', corrected)
+        self.assertIn("archive.is_symlink()", corrected)
+        self.assertIn("raise RuntimeError(", corrected)
+
+    def test_is_idempotent(self):
+        source = f"before\n{VERIFIED_COMPONENT_ARCHIVE_COPY}\nafter"
+
+        self.assertEqual(correct_component_archive_copy(source), source)
+
+    def test_rejects_unknown_or_ambiguous_copy_logic(self):
+        with self.assertRaisesRegex(ValueError, "component archive copy"):
+            correct_component_archive_copy("no component archive copy")
+        with self.assertRaisesRegex(ValueError, "component archive copy"):
+            correct_component_archive_copy(
+                f"{UPSTREAM_COMPONENT_ARCHIVE_COPY}\n"
+                f"{UPSTREAM_COMPONENT_ARCHIVE_COPY}"
+            )
 
 
 class CorrectPenvSetupTextTests(unittest.TestCase):

@@ -74,6 +74,20 @@ class MapActivationHandoffTests(unittest.TestCase):
             DEVICE_TRANSFER_SOURCE,
         )
 
+    def test_remote_debug_worker_stack_preserves_internal_crypto_headroom(self):
+        self.assertIn("xTaskCreateWithCaps(", DEVICE_TRANSFER_SOURCE)
+        self.assertIn(
+            'requestedMode == "debug"\n'
+            "            ? static_cast<UBaseType_t>(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)",
+            DEVICE_TRANSFER_SOURCE,
+        )
+        self.assertIn(
+            "static_cast<UBaseType_t>(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)",
+            DEVICE_TRANSFER_SOURCE,
+        )
+        self.assertIn("vTaskDeleteWithCaps(nullptr);", DEVICE_TRANSFER_SOURCE)
+        self.assertNotIn("vTaskDelete(nullptr);", DEVICE_TRANSFER_SOURCE)
+
     def test_activation_progress_yields_to_the_idle_task(self):
         body = method_body("updateActivationProgress")
         self.assertIn("vTaskDelay(pdMS_TO_TICKS(1));", body)
