@@ -130,6 +130,7 @@ def snapshot(
                 "largestBlock": 12_000,
                 "windowMinimumFree": 20_000,
                 "windowMinimumLargestBlock": 10_000,
+                "cryptoCountersScope": "window",
                 "cryptoHeadroomRejections": 0,
                 "cryptoOperationFailures": 0,
             },
@@ -795,7 +796,7 @@ class RendererBenchmarkTests(unittest.TestCase):
         runner.restore_current_profile()
         self.assertEqual(len(client.requests), 2)
 
-    def test_checkpoint_screenshot_forces_a_new_frame_after_observation(self):
+    def test_checkpoint_screenshot_accepts_first_timestamp_bound_frame(self):
         route = renderer_benchmark.validate_route_fixture(
             renderer_benchmark.DEFAULT_ROUTE_FIXTURE
         )
@@ -803,15 +804,69 @@ class RendererBenchmarkTests(unittest.TestCase):
         class FrameClient:
             def __init__(self):
                 self.after = []
+                self.capture_floors = []
                 self.frames = [
                     ({"sequence": 1, "capturedAtMs": 1005,
+                      "width": 1, "height": 1, "stride": 2}, b"\0\0"),
+                ]
+
+            def frame(self, *, after=0, captured_at_or_after=None):
+                self.after.append(after)
+                self.capture_floors.append(captured_at_or_after)
+                return self.frames.pop(0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "screenshots").mkdir()
+            client = FrameClient()
+            runner = renderer_benchmark.BenchmarkRunner(
+                client=client,
+                output=output,
+                gates=renderer_benchmark.load_gates(
+                    TOOLS / "renderer_benchmark_gates.json"
+                ),
+                map_fixture_id="shanghai-map",
+                map_fixture_sha256="a" * 64,
+                route_fixture=route,
+                route_fixture_sha256="b" * 64,
+                route_mode="ios-fixture-1hz",
+                warmup_seconds=0,
+                poll_interval_seconds=1,
+                capture_screenshots=True,
+            )
+            result = runner._capture_screenshot(
+                profile="current",
+                repeat=1,
+                checkpoint=0,
+                sample_index=0,
+                marker_received_at_ms=1000,
+            )
+
+        self.assertEqual(client.after, [0])
+        self.assertEqual(client.capture_floors, [1000])
+        self.assertEqual(result["frameSequence"], 1)
+        self.assertEqual(result["markerReceivedAtMs"], 1000)
+        self.assertEqual(result["captureLagMs"], 5)
+
+    def test_checkpoint_screenshot_skips_pre_marker_frame(self):
+        route = renderer_benchmark.validate_route_fixture(
+            renderer_benchmark.DEFAULT_ROUTE_FIXTURE
+        )
+
+        class FrameClient:
+            def __init__(self):
+                self.after = []
+                self.capture_floors = []
+                self.frames = [
+                    ({"sequence": 1, "capturedAtMs": 995,
                       "width": 1, "height": 1, "stride": 2}, b"\0\0"),
                     ({"sequence": 2, "capturedAtMs": 1010,
                       "width": 1, "height": 1, "stride": 2}, b"\0\0"),
                 ]
 
-            def frame(self, *, after=0):
+            def frame(self, *, after=0, captured_at_or_after=None):
                 self.after.append(after)
+                self.capture_floors.append(captured_at_or_after)
                 return self.frames.pop(0)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -842,8 +897,8 @@ class RendererBenchmarkTests(unittest.TestCase):
             )
 
         self.assertEqual(client.after, [0, 1])
+        self.assertEqual(client.capture_floors, [1000, 1000])
         self.assertEqual(result["frameSequence"], 2)
-        self.assertEqual(result["markerReceivedAtMs"], 1000)
         self.assertEqual(result["captureLagMs"], 10)
 
     def test_uint32_forward_delta_accepts_clock_wrap(self):
