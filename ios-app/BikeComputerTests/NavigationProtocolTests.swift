@@ -14747,6 +14747,10 @@ struct NavigationProtocolTests {
             "the in-app sweep uses the exact firmware benchmark gate contract"
         )
         assertEqual(gates.schema, 1, "secure benchmark gates retain schema 1")
+        assertEqual(gates.absolute.maximumCoverageRejectedRenders, 4,
+                    "temporary coverage allowance remains explicit until issue 402 is resolved")
+        assertEqual(gates.absolute.maximumStaleRenders, 3,
+                    "temporary coverage allowance does not relax the independent stale gate")
         assertEqual(
             gates.absolute.minimumMetricsSampleFraction,
             0.3,
@@ -14924,6 +14928,38 @@ struct NavigationProtocolTests {
             20_000,
             "secure benchmark retains the firmware DMA minimum"
         )
+        for (coverage, stale) in [(3, 3), (4, 0), (5, 0), (4, 4)] {
+            guard let summaryData = try? JSONEncoder().encode(summary),
+                  var object = try? JSONSerialization.jsonObject(with: summaryData)
+                    as? [String: Any] else {
+                assert(false, "coverage boundary fixture encodes")
+                return
+            }
+            object["coverageRejectedRenders"] = coverage
+            object["staleRenders"] = stale
+            guard let data = try? JSONSerialization.data(withJSONObject: object),
+                  let boundarySummary = try? JSONDecoder().decode(
+                    RendererBenchmarkRunSummary.self, from: data
+                  ) else {
+                assert(false, "coverage boundary fixture decodes")
+                return
+            }
+            let failures = RendererBenchmarkEvaluator.evaluate(
+                snapshots: [metrics], samples: [sample], summary: boundarySummary,
+                durationSeconds: 1, screenshotCount: 0, checkpointCount: 0,
+                expectedRouteSampleCount: 120, gates: gates
+            )
+            assertEqual(
+                failures.filter { $0.hasPrefix("coverage_rejections:") },
+                coverage > 4 ? ["coverage_rejections:5"] : [],
+                "coverage allowance accepts four but rejects five"
+            )
+            assertEqual(
+                failures.filter { $0.hasPrefix("stale_renders:") },
+                stale > 3 ? ["stale_renders:4"] : [],
+                "stale render gate remains independent of coverage allowance"
+            )
+        }
         assertEqual(
             summary.cryptoHeadroomRejections,
             0,

@@ -72,6 +72,29 @@ feature point, and variable frame scratch plus JSON escaping avoid short-lived
 internal-RAM allocations. These are output-preserving latency and headroom
 controls, not hidden profile or gate changes.
 
+## Temporary coverage-rejection allowance (2026-09-05)
+
+At the maintainer's explicit request, both gate contracts temporarily allow
+`maximumCoverageRejectedRenders = 4` (previously 2). Follow-up
+[issue #402](https://github.com/seichris/open-bike-computer/issues/402) tracks
+rejection-event diagnostics, reproduction, a root-cause fix if needed, and
+revisiting this allowance. All other gates and production defaults are unchanged.
+In particular, `maximumStaleRenders` remains 3: coverage rejection also increments
+stale renders, so four coverage rejections may still fail that independent gate.
+
+The retained `Bicino-Renderer-Benchmark-1788584238-4276c709.zip` has SHA-256
+`09a18353bbce96911e2dab26c879add5a6bd8ea5639d99164eb4fb57d8246b46`.
+It tested app/firmware source `88cd0e8b9bdb699e82f37839872f95e837747d8f` on
+the 1.75-inch remote-debug target: all 12 comparisons passed, and the completed
+300-second High repeat-4 soak failed only `coverage_rejections:3`. Its 111
+completed jobs included 108 publications and three stale/coverage rejections;
+Current was restored. The maintainer accepts this completed run for continued
+PR integration under the revised policy. Its original failed report remains
+unchanged; this is a policy reassessment, not a new hardware run or a renderer
+fix. The installed app's historical result does not retroactively change.
+This does not qualify a factory/golden image or the 2.06-inch target, nor waive
+CI or the remaining manual hardware gates.
+
 ## Prerequisites
 
 1. Identify whether the connected device is the 1.75-inch or 2.06-inch board.
@@ -179,7 +202,8 @@ trace. A stuck callback has no completion record. Slow firmware stages support
 targeted software investigation; short firmware stages with a long app wait
 still require host/HCI metadata to separate callback dispatch from link/radio
 delay. Neither correlation with TLS activity nor these tests prove RF causality.
-Keep all gates, workload and production defaults unchanged. After confirming
+Except for the documented temporary coverage allowance above, keep all gates,
+workload and production defaults unchanged. After confirming
 and flashing the exact debug target, repeat paired full sweeps, retain every
 failure, and inspect both clocks separately before choosing a root-cause fix.
 
