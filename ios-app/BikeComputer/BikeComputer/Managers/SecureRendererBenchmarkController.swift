@@ -307,6 +307,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
     private var expectedSession: DeviceTransferSession?
     private var lastMeasuredSnapshot: RendererBenchmarkMetricsSnapshot?
     private var partialSamples: [RendererBenchmarkEvidenceSample] = []
+    private var startupTrace = RendererBenchmarkStartupTrace()
+    private var collectingStartupEvidence = false
 
     var progressDescription: String {
         guard isRunning else { return status }
@@ -370,6 +372,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
         expectedSession = deviceSession
         lastMeasuredSnapshot = nil
         partialSamples = []
+        startupTrace = RendererBenchmarkStartupTrace()
+        collectingStartupEvidence = true
         self.replay = replay
         self.bleManager = bleManager
         stopRequested = false
@@ -397,6 +401,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
 
     func stop(clearRoute: Bool = true) {
         guard isRunning else { return }
+        captureStartupEvidence(phase: "stop_requested")
         stopRequested = true
         // Stop GPS immediately; HTTPS cleanup may take several seconds.
         replay?.stop(clearRoute: clearRoute, restoreCurrent: false)
@@ -647,6 +652,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
             errorMessage = passed ? nil :
                 "One or more automated gates failed; review the exported report."
         } catch {
+            captureStartupEvidence(phase: "failure_before_cleanup")
             if profileMayNeedRestoration {
                 status = "Restoring Current profile"
                 cleanupRestoredCurrent = await restoreCurrentProfile(
@@ -960,6 +966,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
         routeFixture: RendererBenchmarkRouteFixtureIdentity,
         gates: RendererBenchmarkGates
     ) async throws {
+        collectingStartupEvidence = true
+        captureStartupEvidence(phase: "opening_\(profile.wireName)_warmup")
         let windowID = try await beginTrackedWindow(
             client: client,
             profile: profile,
@@ -977,6 +985,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
             timeoutSeconds: 10
         )
         let markerDeadline = Date().addingTimeInterval(12)
+        status = "Warm-up: waiting for 1 Hz marker (\(profile.title))"
         var markerConfirmed = false
         while Date() < markerDeadline {
             try checkContinuity()
@@ -992,6 +1001,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
                 "The device did not confirm the in-app 1 Hz route marker."
             )
         }
+        status = "Warming up \(profile.title)"
         let warmDeadline = Date().addingTimeInterval(
             Double(gates.warmupSeconds)
         )
@@ -1003,6 +1013,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
                 max(warmDeadline.timeIntervalSinceNow, 0)
             ))
         }
+        collectingStartupEvidence = false
+        status = "Measuring \(profile.title), repeat \(repeatNumber)"
     }
 
     private func waitForWindow(
@@ -1056,6 +1068,9 @@ final class SecureRendererBenchmarkController: ObservableObject {
         var lastError: Error?
         repeat {
             if enforceContinuity { try checkContinuity() }
+            if collectingStartupEvidence {
+                captureStartupEvidence(phase: "before_metrics")
+            }
             do {
                 let snapshot = try await client.metrics(
                     timeoutInterval: min(
@@ -1064,6 +1079,9 @@ final class SecureRendererBenchmarkController: ObservableObject {
                     )
                 )
                 if enforceContinuity { lastMeasuredSnapshot = snapshot }
+                if collectingStartupEvidence {
+                    captureStartupEvidence(phase: "metrics_received", snapshot: snapshot)
+                }
                 return snapshot
             } catch {
                 lastError = error
@@ -1299,6 +1317,12 @@ final class SecureRendererBenchmarkController: ObservableObject {
         forbiddenValues: [String]
     ) throws -> URL {
         var entries = initialEntries
+        let traceEncoder = JSONEncoder()
+        traceEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        entries.append((
+            "renderer-benchmark-startup.json",
+            try traceEncoder.encode(startupTrace)
+        ))
         for (path, data) in entries where path.hasSuffix(".json") {
             guard RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
                 jsonData: data
@@ -1346,6 +1370,21 @@ final class SecureRendererBenchmarkController: ObservableObject {
         )
         try RideDiagnosticsStoredZipWriter.write(entries: entries, to: url)
         return url
+    }
+
+    private func captureStartupEvidence(
+        phase: String,
+        snapshot: RendererBenchmarkMetricsSnapshot? = nil
+    ) {
+        guard let bleManager, let replay else { return }
+        startupTrace.record(RendererBenchmarkStartupSample(
+            phase: phase,
+            bleTransport: bleManager.rendererBenchmarkBLETransportEvidence(),
+            replayTiming: replay.rendererBenchmarkReplayTimingEvidence(),
+            window: snapshot?.window,
+            routeReplay: snapshot?.routeReplay,
+            replayTransport: snapshot?.replayTransport
+        ))
     }
 
     private static func validateTextEvidence(

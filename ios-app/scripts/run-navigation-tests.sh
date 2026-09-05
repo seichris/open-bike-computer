@@ -8,6 +8,13 @@ OUT="${TMPDIR:-/tmp}/open-bike-navigation-tests"
 
 cd "${REPO_DIR}"
 
+RENDERER_SCHEDULER_OUT="${TMPDIR:-/tmp}/open-bike-renderer-scheduler-tests"
+xcrun swiftc -D HOST_TESTING -parse-as-library \
+  -o "${RENDERER_SCHEDULER_OUT}" \
+  ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkReplayScheduler.swift \
+  ios-app/BikeComputerTests/RendererBenchmarkReplaySchedulerTests.swift
+"${RENDERER_SCHEDULER_OUT}"
+
 xcrun swiftc \
   -D HOST_TESTING \
   -o "${OUT}" \

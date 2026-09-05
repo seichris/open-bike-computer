@@ -14935,6 +14935,44 @@ struct NavigationProtocolTests {
             ),
             "BLE queue and acknowledgement evidence contains no secret fields"
         )
+        let legacyTimingJSON = Data(#"{"schema":1,"emittedSamples":1,"timerCallbacks":0,"lastTimerLatenessMs":0,"maximumTimerLatenessMs":0}"#.utf8)
+        guard var timing = try? JSONDecoder().decode(
+            RendererBenchmarkReplayTimingEvidence.self, from: legacyTimingJSON
+        ) else {
+            assert(false, "legacy replay timing evidence decodes")
+            return
+        }
+        assert(timing.schedulerActive == nil,
+               "older evidence does not invent a scheduler state")
+        timing.schedulerActive = true
+        var startupTrace = RendererBenchmarkStartupTrace()
+        for index in 0..<(RendererBenchmarkStartupTrace.maximumSamples + 3) {
+            startupTrace.record(RendererBenchmarkStartupSample(
+                phase: "metrics_\(index)",
+                bleTransport: transportEvidence,
+                replayTiming: timing,
+                window: metrics.window,
+                routeReplay: metrics.routeReplay,
+                replayTransport: metrics.replayTransport
+            ))
+        }
+        assert(startupTrace.samples.count == 128 && startupTrace.droppedSamples == 3,
+               "startup trace remains bounded and counts discarded samples")
+        assert(startupTrace.samples.first?.phase == "metrics_3" &&
+               startupTrace.samples.last?.phase == "metrics_130",
+               "startup trace retains the latest failure context")
+        guard let traceData = try? JSONEncoder().encode(startupTrace),
+              let decodedTrace = try? JSONDecoder().decode(
+                RendererBenchmarkStartupTrace.self, from: traceData
+              ) else {
+            assert(false, "startup trace round trips")
+            return
+        }
+        assert(decodedTrace.samples == startupTrace.samples &&
+               decodedTrace.droppedSamples == startupTrace.droppedSamples,
+               "startup evidence preserves scheduler, queue, window and marker state")
+        assert(RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(jsonData: traceData),
+               "startup trace follows the same secret-free export policy")
         assert(
             !RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(
                 jsonData: Data(#"{"sessionToken":"secret"}"#.utf8)

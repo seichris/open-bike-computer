@@ -742,6 +742,32 @@ nonisolated struct RendererBenchmarkReplayTimingEvidence: Codable,
     let timerCallbacks: UInt64
     let lastTimerLatenessMs: Int
     let maximumTimerLatenessMs: Int
+    // Optional for compatibility with earlier schema-1 evidence. The legacy
+    // timer field names above now describe the async cadence callbacks.
+    var schedulerActive: Bool? = nil
+}
+
+nonisolated struct RendererBenchmarkStartupSample: Codable, Equatable, Sendable {
+    let phase: String
+    let bleTransport: RendererBenchmarkBLETransportEvidence
+    let replayTiming: RendererBenchmarkReplayTimingEvidence
+    let window: RendererBenchmarkMetricsSnapshot.Window?
+    let routeReplay: RendererBenchmarkMetricsSnapshot.RouteReplay?
+    let replayTransport: RendererBenchmarkMetricsSnapshot.ReplayTransport?
+}
+
+nonisolated struct RendererBenchmarkStartupTrace: Codable, Sendable {
+    static let maximumSamples = 128
+    private(set) var samples: [RendererBenchmarkStartupSample] = []
+    private(set) var droppedSamples: UInt64 = 0
+
+    mutating func record(_ sample: RendererBenchmarkStartupSample) {
+        if samples.count == Self.maximumSamples {
+            samples.removeFirst()
+            droppedSamples &+= 1
+        }
+        samples.append(sample)
+    }
 }
 
 nonisolated struct RendererBenchmarkEvidenceIdentity: Codable,

@@ -108,6 +108,17 @@ controls, not hidden profile or gate changes.
    they do not replace a complete sweep. Opening the live console leaves
    Settings and therefore stops the sweep; do not stream it simultaneously.
 
+Replay cadence is owned by a cancellable main-actor async loop, armed before
+the first sample. Missed ticks are coalesced instead of sent as a catch-up
+burst; stopping or restarting invalidates callbacks from the previous run.
+Exports also include `renderer-benchmark-startup.json`: a bounded trace of the
+latest 128 startup/warm-up observations, with a discarded-sample count. It
+records app scheduler activity, callback/sample counters, BLE queue state,
+and device window/marker state when a metrics response is available. Failure
+and manual-stop observations are captured before cleanup clears replay state.
+These diagnostics distinguish app emission from BLE delivery without exporting
+session credentials; they do not substitute for a successful physical sweep.
+
 For a separately authorized external automation
    harness, put the Mac on the reported LAN or device-hotspot network and store
    `baseUrl`, `tlsCertificateSha256`, and `token` in a mode-`0600` JSON session
