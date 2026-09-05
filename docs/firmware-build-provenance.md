@@ -59,6 +59,13 @@ historical; a new producer never rewrites or relabels it.
 
 ## Stable Python state during cache reuse
 
+Verified Waveshare builds also exclude the final ELF link target from SCons
+artifact caching. SCons does not restore the linker's `firmware.map` side output
+alongside a cached ELF. Re-running the link preserves the required dynamic-TLS
+link evidence and link timing while keeping objects and libraries cacheable.
+The wrapper still rejects a missing or invalid map; it never substitutes a map
+from another build.
+
 The sanitized build environment forces `PYTHONDONTWRITEBYTECODE=1` for
 compilation, recursive custom-core subprocesses, and upload. Runtime startup's
 inherited setting is not sufficient: environment sanitization must explicitly
