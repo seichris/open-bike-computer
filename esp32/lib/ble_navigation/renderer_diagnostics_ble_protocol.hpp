@@ -10,12 +10,17 @@ constexpr char METRICS_REQUEST_PREFIX[] = "RDMS";
 constexpr char METRICS_RESPONSE_PREFIX[] = "RDMT";
 constexpr char METRICS_CHUNK_PREFIX[] = "RDMC";
 constexpr char ROUTE_MARKER_PREFIX[] = "RBM1";
+constexpr char REPLAY_SAMPLE_PREFIX[] = "RBS1";
 constexpr char WINDOW_REQUEST_PREFIX[] = "RBW1";
 
 constexpr size_t PREFIX_BYTES = 4;
 constexpr size_t SHA256_BYTES = 32;
 constexpr size_t ROUTE_MARKER_BYTES =
     PREFIX_BYTES + SHA256_BYTES + 2 + 2 + 4;
+constexpr size_t MAX_GPS_PAYLOAD_BYTES = 36;
+constexpr size_t REPLAY_SAMPLE_HEADER_BYTES = PREFIX_BYTES + 1;
+constexpr size_t REPLAY_SAMPLE_MAX_BYTES =
+    REPLAY_SAMPLE_HEADER_BYTES + MAX_GPS_PAYLOAD_BYTES + ROUTE_MARKER_BYTES;
 constexpr size_t WINDOW_ROUTE_ID_MAX_BYTES = 48;
 constexpr size_t WINDOW_REQUEST_FIXED_BYTES =
     PREFIX_BYTES + 1 + 1 + 2 + 8 + SHA256_BYTES + 1;
@@ -28,6 +33,19 @@ struct RouteMarker {
   uint16_t sampleIndex = 0;
   uint16_t sampleCount = 0;
   uint32_t loop = 0;
+};
+
+struct ReplaySample {
+  uint8_t gpsPayload[MAX_GPS_PAYLOAD_BYTES]{};
+  size_t gpsPayloadLength = 0;
+  RouteMarker marker{};
+};
+
+enum class ReplaySampleDispatchResult : uint8_t {
+  Accepted = 0,
+  Malformed,
+  GpsRejected,
+  MarkerRejected,
 };
 
 struct WindowRequest {
@@ -95,6 +113,16 @@ inline bool isMetricsRequest(const uint8_t *data, size_t length) {
 inline bool hasRouteMarkerPrefix(const uint8_t *data, size_t length) {
   return data != nullptr && length >= PREFIX_BYTES &&
          std::memcmp(data, ROUTE_MARKER_PREFIX, PREFIX_BYTES) == 0;
+}
+
+inline bool hasReplaySamplePrefix(const uint8_t *data, size_t length) {
+  return data != nullptr && length >= PREFIX_BYTES &&
+         std::memcmp(data, REPLAY_SAMPLE_PREFIX, PREFIX_BYTES) == 0;
+}
+
+inline bool validGpsPayloadLength(size_t length) {
+  return length == 8 || length == 10 || length == 14 || length == 30 ||
+         length == 36;
 }
 
 inline bool hasWindowRequestPrefix(const uint8_t *data, size_t length) {
@@ -192,6 +220,68 @@ inline bool decodeRouteMarker(const uint8_t *data, size_t length,
     return false;
   marker = decoded;
   return true;
+}
+
+inline bool encodeReplaySample(const uint8_t *gpsPayload,
+                               size_t gpsPayloadLength,
+                               const RouteMarker &marker, uint8_t *output,
+                               size_t capacity, size_t &written) {
+  written = 0;
+  const size_t required =
+      REPLAY_SAMPLE_HEADER_BYTES + gpsPayloadLength + ROUTE_MARKER_BYTES;
+  if (gpsPayload == nullptr || !validGpsPayloadLength(gpsPayloadLength) ||
+      output == nullptr || capacity < required ||
+      !encodeRouteMarker(marker,
+                         output + REPLAY_SAMPLE_HEADER_BYTES + gpsPayloadLength,
+                         capacity - REPLAY_SAMPLE_HEADER_BYTES -
+                             gpsPayloadLength)) {
+    return false;
+  }
+  std::memcpy(output, REPLAY_SAMPLE_PREFIX, PREFIX_BYTES);
+  output[PREFIX_BYTES] = static_cast<uint8_t>(gpsPayloadLength);
+  std::memcpy(output + REPLAY_SAMPLE_HEADER_BYTES, gpsPayload,
+              gpsPayloadLength);
+  written = required;
+  return true;
+}
+
+inline bool decodeReplaySample(const uint8_t *data, size_t length,
+                               ReplaySample &sample) {
+  if (!hasReplaySamplePrefix(data, length) ||
+      length < REPLAY_SAMPLE_HEADER_BYTES + ROUTE_MARKER_BYTES ||
+      length > REPLAY_SAMPLE_MAX_BYTES) {
+    return false;
+  }
+  const size_t gpsPayloadLength = data[PREFIX_BYTES];
+  if (!validGpsPayloadLength(gpsPayloadLength) ||
+      length !=
+          REPLAY_SAMPLE_HEADER_BYTES + gpsPayloadLength + ROUTE_MARKER_BYTES) {
+    return false;
+  }
+  ReplaySample decoded;
+  decoded.gpsPayloadLength = gpsPayloadLength;
+  std::memcpy(decoded.gpsPayload, data + REPLAY_SAMPLE_HEADER_BYTES,
+              gpsPayloadLength);
+  if (!decodeRouteMarker(data + REPLAY_SAMPLE_HEADER_BYTES + gpsPayloadLength,
+                         ROUTE_MARKER_BYTES, decoded.marker)) {
+    return false;
+  }
+  sample = decoded;
+  return true;
+}
+
+template <typename QueueGps, typename AcceptMarker>
+inline ReplaySampleDispatchResult
+dispatchReplaySample(const uint8_t *data, size_t length, QueueGps queueGps,
+                     AcceptMarker acceptMarker) {
+  ReplaySample sample;
+  if (!decodeReplaySample(data, length, sample))
+    return ReplaySampleDispatchResult::Malformed;
+  if (!queueGps(sample.gpsPayload, sample.gpsPayloadLength))
+    return ReplaySampleDispatchResult::GpsRejected;
+  if (!acceptMarker(sample.marker))
+    return ReplaySampleDispatchResult::MarkerRejected;
+  return ReplaySampleDispatchResult::Accepted;
 }
 
 } // namespace renderer_diagnostics_ble_protocol

@@ -10,6 +10,24 @@ constexpr size_t HTTP_MAX_LINE_BYTES = 512;
 constexpr size_t HTTP_MAX_HEADER_BYTES = 8192;
 constexpr size_t HTTP_MAX_HEADER_LINES = 64;
 constexpr uint32_t HTTP_REQUEST_HEADER_TIMEOUT_MS = 5000;
+// A TLS client that completes its handshake but sends no HTTP bytes is a
+// speculative/preconnection socket, not useful debug traffic. Release it
+// quickly enough that the single worker can still serve the app's pinned
+// request before its five-second deadline. The normal header deadline still
+// bounds the remaining header lines after a complete request line arrives.
+constexpr uint32_t HTTP_INITIAL_REQUEST_IDLE_TIMEOUT_MS = 1000;
+// The transfer server has one TLS/HTTP worker. A completed authenticated
+// request may reuse that worker, but an idle persistent client must release it
+// well before the iOS client's five-second request deadline so a different
+// pinned URLSession (for example the secure sweep after closing WKWebView) can
+// connect without being starved behind the old socket.
+constexpr uint32_t HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS = 2000;
+constexpr size_t HTTP_MAX_REQUESTS_PER_TLS_CONNECTION = 4096;
+
+inline uint32_t httpRequestLineTimeoutMs(size_t requestIndex) {
+  return requestIndex == 0 ? HTTP_INITIAL_REQUEST_IDLE_TIMEOUT_MS
+                           : HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS;
+}
 
 inline uint32_t nextHttpTransferGeneration(uint32_t current) {
   current++;
@@ -19,6 +37,13 @@ inline uint32_t nextHttpTransferGeneration(uint32_t current) {
 inline bool isHttpTransferGenerationCurrent(bool enabled, uint32_t current,
                                             uint32_t request) {
   return enabled && current != 0 && current == request;
+}
+
+inline bool shouldReuseAuthenticatedHttpConnection(
+    bool authorized, bool generationStillCurrent, bool clientRequestedClose,
+    bool responseKeepAlive, bool connected) {
+  return authorized && generationStillCurrent && !clientRequestedClose &&
+         responseKeepAlive && connected;
 }
 
 struct HttpResponseCompletionToken {
@@ -112,6 +137,44 @@ struct HttpSecurityHeaders {
   bool contentTypeSeen = false;
   bool contentLengthSeen = false;
   bool transferEncodingSeen = false;
+  bool connectionSeen = false;
+  bool connectionClose = false;
+  bool connectionReuseSeen = false;
+  bool connectionReuseRequested = false;
+
+  static bool containsConnectionToken(const std::string &value,
+                                      const char *expected) {
+    size_t tokenStart = 0;
+    while (tokenStart <= value.size()) {
+      const size_t comma = value.find(',', tokenStart);
+      size_t begin = tokenStart;
+      size_t end = comma == std::string::npos ? value.size() : comma;
+      while (begin < end && (value[begin] == ' ' || value[begin] == '\t'))
+        begin++;
+      while (end > begin &&
+             (value[end - 1] == ' ' || value[end - 1] == '\t'))
+        end--;
+      const size_t expectedLength = std::char_traits<char>::length(expected);
+      if (end - begin == expectedLength) {
+        bool matches = true;
+        for (size_t index = 0; index < expectedLength; ++index) {
+          char character = value[begin + index];
+          if (character >= 'A' && character <= 'Z')
+            character = static_cast<char>(character - 'A' + 'a');
+          if (character != expected[index]) {
+            matches = false;
+            break;
+          }
+        }
+        if (matches)
+          return true;
+      }
+      if (comma == std::string::npos)
+        break;
+      tokenStart = comma + 1;
+    }
+    return false;
+  }
 
   void accept(const std::string &name, const std::string &value) {
     if (name == "content-length") {
@@ -128,6 +191,20 @@ struct HttpSecurityHeaders {
       transferTokenSeen = true;
     } else if (name == "transfer-encoding") {
       transferEncodingSeen = true;
+    } else if (name == "connection") {
+      // Duplicate Connection fields are unnecessary for the app and make a
+      // persistent-session decision harder to audit. Fail closed to the
+      // one-request behavior without rejecting the otherwise valid request.
+      connectionClose = connectionClose || connectionSeen ||
+                        containsConnectionToken(value, "close");
+      connectionSeen = true;
+    } else if (name == "x-bikecomputer-connection-reuse") {
+      // Persistence is an explicit app-client capability. WebKit may open
+      // parallel or speculative connections for the secure console, which
+      // cannot safely share this single HTTP worker. Duplicate or unexpected
+      // values fail closed to one response per TLS connection.
+      connectionReuseRequested = !connectionReuseSeen && value == "1";
+      connectionReuseSeen = true;
     }
   }
 

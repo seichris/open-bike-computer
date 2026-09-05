@@ -159,6 +159,14 @@ enum RendererBenchmarkProfile: UInt8, CaseIterable, Identifiable {
     }
 }
 
+enum RendererBenchmarkCleanupPolicy {
+    static func requiresCurrentProfileRestore(
+        after profile: RendererBenchmarkProfile
+    ) -> Bool {
+        profile != .current
+    }
+}
+
 enum RendererBenchmarkRouteGeometry {
     static let maximumPointCount = 40
 
@@ -219,6 +227,25 @@ enum RendererBenchmarkMarkerPacket {
         data.appendUInt16LE(UInt16(sampleCount))
         data.appendUInt32LE(loop)
         return data.count == byteCount ? data : nil
+    }
+}
+
+enum RendererBenchmarkSamplePacket {
+    static let supportedGPSByteCounts: Set<Int> = [8, 10, 14, 30, 36]
+    static let maximumByteCount = 4 + 1 + 36 + RendererBenchmarkMarkerPacket.byteCount
+
+    static func data(gpsPosition: Data, marker: Data) -> Data? {
+        guard supportedGPSByteCounts.contains(gpsPosition.count),
+              marker.count == RendererBenchmarkMarkerPacket.byteCount,
+              String(data: marker.prefix(4), encoding: .utf8) ==
+                DeviceBLEProtocol.rendererBenchmarkMarkerPrefix else {
+            return nil
+        }
+        var data = Data(DeviceBLEProtocol.rendererBenchmarkSamplePrefix.utf8)
+        data.append(UInt8(gpsPosition.count))
+        data.append(gpsPosition)
+        data.append(marker)
+        return data.count <= maximumByteCount ? data : nil
     }
 }
 

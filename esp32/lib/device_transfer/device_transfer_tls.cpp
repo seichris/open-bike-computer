@@ -192,6 +192,8 @@ const char *transferTlsFailureStageName(TransferTlsFailureStage stage) {
     return "socket";
   case TransferTlsFailureStage::ContextAllocation:
     return "context_allocation";
+  case TransferTlsFailureStage::Setup:
+    return "setup";
   case TransferTlsFailureStage::Handshake:
     return "handshake";
   }
@@ -202,6 +204,13 @@ const char *transferTlsFailureCode(
     const TransferTlsHandshakeDiagnostics &diagnostics) {
   if (diagnostics.stage == TransferTlsFailureStage::ContextAllocation)
     return "tls_context_allocation_failed";
+  if (diagnostics.stage == TransferTlsFailureStage::Setup) {
+    if (diagnostics.sessionResult == MBEDTLS_ERR_SSL_ALLOC_FAILED ||
+        diagnostics.tlsErrorCode == -MBEDTLS_ERR_SSL_ALLOC_FAILED) {
+      return "tls_setup_allocation_failed";
+    }
+    return "tls_setup_failed";
+  }
   if (diagnostics.stage == TransferTlsFailureStage::Handshake) {
     if (diagnostics.sessionResult ==
         ESP_ERR_ESP_TLS_SERVER_HANDSHAKE_TIMEOUT) {
@@ -574,6 +583,10 @@ bool TransferClient::begin(WiFiClient &accepted,
       handshakeDiagnostics_.tlsErrorCode = tlsErrorCode;
       handshakeDiagnostics_.tlsFlags = tlsFlags;
     }
+    if (handshakeDiagnostics_.lastEspError ==
+        ESP_ERR_MBEDTLS_SSL_SETUP_FAILED) {
+      handshakeDiagnostics_.stage = TransferTlsFailureStage::Setup;
+    }
     handshakeDiagnostics_.after = captureTlsMemory();
     esp_tls_server_session_delete(tls_);
     tls_ = nullptr;
@@ -626,7 +639,16 @@ int TransferClient::read(uint8_t *buffer, size_t length) {
 size_t TransferClient::write(const uint8_t *buffer, size_t length) {
   if (!connected_ || tls_ == nullptr || (buffer == nullptr && length != 0))
     return 0;
+  const uint32_t startedUs = micros();
   const ssize_t result = esp_tls_conn_write(tls_, buffer, length);
+  if (responseWriteStarted_) {
+    ++responseWriteCalls_;
+    responseActiveTlsWriteUs_ += micros() - startedUs;
+    if (result <= 0)
+      ++responseZeroWriteCalls_;
+    else if (static_cast<size_t>(result) < length)
+      ++responseShortWriteCalls_;
+  }
   if (result > 0)
     return static_cast<size_t>(result);
   if (result != ESP_TLS_ERR_SSL_WANT_READ &&
@@ -645,6 +667,30 @@ uint8_t TransferClient::connected() {
     connected_ = false;
   }
   return connected_ ? 1 : 0;
+}
+
+void TransferClient::resetHttpResponsePolicy(bool persistenceAllowed) {
+  responsePersistenceAllowed_ = persistenceAllowed;
+  responseKeepAlive_ = false;
+  requestBodyConsumed_ = true;
+  responseWriteStarted_ = false;
+  responseWriteFailed_ = false;
+  responseBytesWritten_ = 0;
+  responseWriteCalls_ = 0;
+  responseZeroWriteCalls_ = 0;
+  responseShortWriteCalls_ = 0;
+  responseActiveTlsWriteUs_ = 0;
+  responseNoProgressWaitMs_ = 0;
+  responseIntentionalDelayMs_ = 0;
+}
+
+void TransferClient::requestHttpResponseKeepAlive() {
+  responseKeepAlive_ = responsePersistenceAllowed_;
+}
+
+void TransferClient::interruptSocket() const {
+  if (socket_ >= 0)
+    ::shutdown(socket_, SHUT_RDWR);
 }
 
 bool TransferClient::finishResponse(uint32_t timeoutMs) {
@@ -704,6 +750,13 @@ bool TransferClient::finishResponse(uint32_t timeoutMs) {
 
 void TransferClient::stop() {
   connected_ = false;
+  responsePersistenceAllowed_ = false;
+  responseKeepAlive_ = false;
+  requestBodyConsumed_ = true;
+  // Keep response outcome/diagnostics intact until the next request policy is
+  // initialized. A handler can deliberately stop a revoked or failed stream;
+  // the server must still distinguish that abort from an unhandled path and
+  // must not append a second response.
   if (tls_ != nullptr) {
     esp_tls_server_session_delete(tls_);
     tls_ = nullptr;

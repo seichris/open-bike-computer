@@ -57,6 +57,10 @@ FIRMWARE_MANIFEST_PATHS = {
     "tools/tests/test_firmware_manifest.py",
 }
 RIDE_DIAGNOSTICS_TOOL_PATHS = {"tools/ride_diagnostics.py"}
+SHARED_RIDE_BLE_CONTRACT_PATHS = {
+    "protocol/ride-ble-contract-v1.json",
+    "tools/generate_ride_ble_contract.py",
+}
 FIRMWARE_RELEASE_TOOL_PATHS = {
     ".github/scripts/firmware_release_gate.py",
     "tools/factory_release_manifest.py",
@@ -115,6 +119,11 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
 
         if path in FIRMWARE_MANIFEST_PATHS:
             # The release producer and the shipped iOS verifier share this contract.
+            selected["firmware_host"] = True
+            selected["ios"] = True
+
+        if path in SHARED_RIDE_BLE_CONTRACT_PATHS:
+            selected["firmware_build"] = True
             selected["firmware_host"] = True
             selected["ios"] = True
 
