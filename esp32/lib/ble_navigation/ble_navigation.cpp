@@ -931,30 +931,41 @@ public:
     const uint32_t now = micros();
     value_.setupUs = now - startedUs_;
     phaseUs_ = now;
+    progress(renderer_diagnostics::DeliveryCallbackPhase::Authenticating);
   }
   void authenticated(bool accepted) {
     value_.authenticationUs = micros() - phaseUs_;
     value_.authenticated = accepted;
     authFinished_ = true;
+    progress(renderer_diagnostics::DeliveryCallbackPhase::AuthenticationFinished);
   }
-  void beginMailbox() { phaseUs_ = micros(); }
+  void beginMailbox() {
+    phaseUs_ = micros();
+    progress(renderer_diagnostics::DeliveryCallbackPhase::Allocating);
+  }
   void allocated() {
     const uint32_t now = micros();
     value_.allocationUs = now - phaseUs_;
     phaseUs_ = now;
+    progress(renderer_diagnostics::DeliveryCallbackPhase::WaitingForMailbox);
   }
   void locked() {
     const uint32_t now = micros();
     value_.mailboxWaitUs = now - phaseUs_;
     phaseUs_ = now;
+    progress(renderer_diagnostics::DeliveryCallbackPhase::HoldingMailbox);
   }
   void released() {
     value_.mailboxHoldUs = micros() - phaseUs_;
     value_.mailboxAccepted = true;
+    progress(renderer_diagnostics::DeliveryCallbackPhase::Dispatching);
   }
   uint32_t session() const { return value_.session; }
   uint32_t ordinal() const { return value_.ordinal; }
 private:
+  void progress(renderer_diagnostics::DeliveryCallbackPhase phase) {
+    renderer_diagnostics::noteDeliveryCallbackProgress(value_, phase, millis());
+  }
   uint32_t startedUs_;
   uint32_t phaseUs_;
   renderer_diagnostics::DeliveryCallbackTiming value_;

@@ -736,6 +736,14 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
 }
 
 nonisolated struct RendererDeliveryTimingEvidence: Codable, Equatable, Sendable {
+    nonisolated struct Progress: Codable, Equatable, Sendable {
+        let session: UInt32
+        let ordinal: UInt32
+        let channel: UInt8
+        let startedAtMs: UInt32
+        let updatedAtMs: UInt32
+        let phase: String
+    }
     nonisolated struct Callback: Codable, Equatable, Sendable {
         let session: UInt32
         let ordinal: UInt32
@@ -768,6 +776,9 @@ nonisolated struct RendererDeliveryTimingEvidence: Codable, Equatable, Sendable 
     let slowestGps: Callback
     let latestOwner: Owner
     let slowestOwner: Owner
+    // Additive schema-1 diagnostics; preserve older firmware evidence.
+    var started: UInt32? = nil
+    var latestStarted: Progress? = nil
 }
 
 nonisolated struct RendererBenchmarkReplayTimingEvidence: Codable,
@@ -790,12 +801,32 @@ nonisolated struct RendererBenchmarkStartupSample: Codable, Equatable, Sendable 
     let window: RendererBenchmarkMetricsSnapshot.Window?
     let routeReplay: RendererBenchmarkMetricsSnapshot.RouteReplay?
     let replayTransport: RendererBenchmarkMetricsSnapshot.ReplayTransport?
+    var renderCount: UInt32? = nil
+    var psramFree: UInt32? = nil
+    var psramLargest: UInt32? = nil
+    var deliveryTiming: RendererDeliveryTimingEvidence? = nil
 }
 
 nonisolated struct RendererBenchmarkStartupTrace: Codable, Sendable {
     static let maximumSamples = 128
     private(set) var samples: [RendererBenchmarkStartupSample] = []
     private(set) var droppedSamples: UInt64 = 0
+    // Keep early warm-up evidence independently of the rolling failure trace.
+    // Optional to decode older schema-1 exports without inventing observations.
+    private(set) var warmupBoundaries: [RendererBenchmarkStartupSample]? = nil
+    private(set) var networkTransport: String? = nil
+
+    mutating func recordNetworkTransport(_ value: String?) {
+        networkTransport = value.flatMap { ["lan", "hotspot"].contains($0) ? $0 : nil }
+    }
+
+    mutating func recordWarmupBoundary(_ sample: RendererBenchmarkStartupSample) {
+        if warmupBoundaries == nil { warmupBoundaries = [] }
+        // Thirteen planned runs require 26 boundaries. Keep the first 32 if
+        // an unexpected caller exceeds that bound; never evict first warm-up.
+        guard (warmupBoundaries?.count ?? 0) < 32 else { return }
+        warmupBoundaries?.append(sample)
+    }
 
     mutating func record(_ sample: RendererBenchmarkStartupSample) {
         if samples.count == Self.maximumSamples {

@@ -389,6 +389,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
         lastMeasuredSnapshot = nil
         partialSamples = []
         startupTrace = RendererBenchmarkStartupTrace()
+        startupTrace.recordNetworkTransport(deviceSession.networkTransport)
         collectingStartupEvidence = true
         self.replay = replay
         self.bleManager = bleManager
@@ -1026,7 +1027,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
             mapFixture: mapFixture,
             routeFixture: routeFixture
         )
-        _ = try await waitForWindow(
+        var warmupSnapshot = try await waitForWindow(
             client: client,
             windowID: windowID,
             runID: runID,
@@ -1034,12 +1035,15 @@ final class SecureRendererBenchmarkController: ObservableObject {
             profile: profile,
             timeoutSeconds: 10
         )
+        captureStartupEvidence(phase: "warmup_opened", snapshot: warmupSnapshot,
+                               preserveWarmupBoundary: true)
         let markerDeadline = Date().addingTimeInterval(12)
         status = "Warm-up: waiting for 1 Hz marker (\(profile.title))"
         var markerConfirmed = false
         while Date() < markerDeadline {
             try checkContinuity()
             let snapshot = try await metricsWithRetry(client: client)
+            warmupSnapshot = snapshot
             if snapshot.routeReplay.valid && snapshot.routeReplay.fixtureMatches {
                 markerConfirmed = true
                 break
@@ -1057,12 +1061,14 @@ final class SecureRendererBenchmarkController: ObservableObject {
         )
         while Date() < warmDeadline {
             try checkContinuity()
-            _ = try await metricsWithRetry(client: client)
+            warmupSnapshot = try await metricsWithRetry(client: client)
             try await pause(seconds: min(
                 gates.pollIntervalSeconds,
                 max(warmDeadline.timeIntervalSinceNow, 0)
             ))
         }
+        captureStartupEvidence(phase: "warmup_completed", snapshot: warmupSnapshot,
+                               preserveWarmupBoundary: true)
         collectingStartupEvidence = false
         status = "Measuring \(profile.title), repeat \(repeatNumber)"
     }
@@ -1549,17 +1555,24 @@ final class SecureRendererBenchmarkController: ObservableObject {
 
     private func captureStartupEvidence(
         phase: String,
-        snapshot: RendererBenchmarkMetricsSnapshot? = nil
+        snapshot: RendererBenchmarkMetricsSnapshot? = nil,
+        preserveWarmupBoundary: Bool = false
     ) {
         guard let bleManager, let replay else { return }
-        startupTrace.record(RendererBenchmarkStartupSample(
+        let sample = RendererBenchmarkStartupSample(
             phase: phase,
             bleTransport: bleManager.rendererBenchmarkBLETransportEvidence(),
             replayTiming: replay.rendererBenchmarkReplayTimingEvidence(),
             window: snapshot?.window,
             routeReplay: snapshot?.routeReplay,
-            replayTransport: snapshot?.replayTransport
-        ))
+            replayTransport: snapshot?.replayTransport,
+            renderCount: snapshot?.render.jobs.completed,
+            psramFree: snapshot?.memory.psram.free,
+            psramLargest: snapshot?.memory.psram.largestBlock,
+            deliveryTiming: snapshot?.deliveryTiming
+        )
+        startupTrace.record(sample)
+        if preserveWarmupBoundary { startupTrace.recordWarmupBoundary(sample) }
     }
 
     private static func validateTextEvidence(

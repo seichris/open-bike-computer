@@ -14,10 +14,14 @@ namespace renderer_diagnostics {
 
 #if FIRMWARE_DIAGNOSTICS && defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
 DeliveryCallbackTiming beginDeliveryCallback(uint8_t channel, uint32_t nowMs);
+void noteDeliveryCallbackProgress(const DeliveryCallbackTiming &value,
+                                 DeliveryCallbackPhase phase, uint32_t nowMs);
 void completeDeliveryCallback(DeliveryCallbackTiming value);
 void noteDeliveryOwner(const DeliveryOwnerTiming &value);
 #else
 inline DeliveryCallbackTiming beginDeliveryCallback(uint8_t, uint32_t) { return {}; }
+inline void noteDeliveryCallbackProgress(const DeliveryCallbackTiming &,
+                                        DeliveryCallbackPhase, uint32_t) {}
 inline void completeDeliveryCallback(DeliveryCallbackTiming) {}
 inline void noteDeliveryOwner(const DeliveryOwnerTiming &) {}
 #endif

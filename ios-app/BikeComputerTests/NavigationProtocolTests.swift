@@ -14937,6 +14937,47 @@ struct NavigationProtocolTests {
     }
 
     static func testSecureRendererBenchmarkProtocol() {
+        // Additive timing fields must survive evidence export while older
+        // schema-1 snapshots remain readable.
+        let callback: [String: Any] = [
+            "session": 3, "ordinal": 694, "channel": 2, "startedAtMs": 100,
+            "callbackUs": 120, "setupUs": 1, "authenticationUs": 80,
+            "allocationUs": 1, "mailboxWaitUs": 1, "mailboxHoldUs": 1,
+            "authenticated": true, "mailboxAccepted": true,
+            "frameActiveAtEntry": false, "frameActiveAtExit": false
+        ]
+        let owner: [String: Any] = [
+            "session": 3, "ordinal": 694, "channel": 2, "startedAtMs": 100,
+            "mailboxAgeUs": 10, "processingUs": 20
+        ]
+        var timing: [String: Any] = [
+            "schema": 1, "session": 3, "completed": 694,
+            "latest": callback, "slowestRoute": callback,
+            "slowestGps": callback, "latestOwner": owner, "slowestOwner": owner
+        ]
+        do {
+            let old = try JSONDecoder().decode(RendererDeliveryTimingEvidence.self,
+                from: JSONSerialization.data(withJSONObject: timing))
+            assert(old.latestStarted == nil && old.started == nil,
+                   "old timing evidence does not fabricate callback entry proof")
+            timing["started"] = 695
+            timing["latestStarted"] = [
+                "session": 3, "ordinal": 695, "channel": 2,
+                "startedAtMs": 200, "updatedAtMs": 201,
+                "phase": "waiting_for_mailbox"
+            ]
+            let updated = try JSONDecoder().decode(RendererDeliveryTimingEvidence.self,
+                from: JSONSerialization.data(withJSONObject: timing))
+            assertEqual(updated.latestStarted?.ordinal, 695,
+                        "incomplete callback remains distinct from latest completed callback")
+            assertEqual(updated.latestStarted?.phase, "waiting_for_mailbox",
+                        "callback progress is retained")
+            let exported = try JSONDecoder().decode(RendererDeliveryTimingEvidence.self,
+                from: JSONEncoder().encode(updated))
+            assertEqual(exported, updated, "entry evidence survives export round trip")
+        } catch {
+            assert(false, "delivery timing compatibility: \(error)")
+        }
         assertEqual(
             SecureRendererBenchmarkHTTPPolicy.connectionReuseHeaderName,
             "X-BikeComputer-Connection-Reuse",
@@ -15502,21 +15543,34 @@ struct NavigationProtocolTests {
                "older evidence does not invent a scheduler state")
         timing.schedulerActive = true
         var startupTrace = RendererBenchmarkStartupTrace()
+        startupTrace.recordNetworkTransport("hotspot")
+        assertEqual(startupTrace.networkTransport, "hotspot", "record network mode, not network identity")
+        startupTrace.recordNetworkTransport("private-network-name")
+        assert(startupTrace.networkTransport == nil, "unknown transport cannot export an SSID or URL")
+        startupTrace.recordNetworkTransport("lan")
         for index in 0..<(RendererBenchmarkStartupTrace.maximumSamples + 3) {
-            startupTrace.record(RendererBenchmarkStartupSample(
+            let startupSample = RendererBenchmarkStartupSample(
                 phase: "metrics_\(index)",
                 bleTransport: transportEvidence,
                 replayTiming: timing,
                 window: metrics.window,
                 routeReplay: metrics.routeReplay,
-                replayTransport: metrics.replayTransport
-            ))
+                replayTransport: metrics.replayTransport,
+                renderCount: metrics.render.jobs.completed,
+                psramFree: metrics.memory.psram.free,
+                psramLargest: metrics.memory.psram.largestBlock
+            )
+            startupTrace.record(startupSample)
+            startupTrace.recordWarmupBoundary(startupSample)
         }
         assert(startupTrace.samples.count == 128 && startupTrace.droppedSamples == 3,
                "startup trace remains bounded and counts discarded samples")
         assert(startupTrace.samples.first?.phase == "metrics_3" &&
                startupTrace.samples.last?.phase == "metrics_130",
                "startup trace retains the latest failure context")
+        assert(startupTrace.warmupBoundaries?.count == 32 &&
+               startupTrace.warmupBoundaries?.first?.phase == "metrics_0",
+               "bounded warm-up evidence survives failure-ring eviction")
         guard let traceData = try? JSONEncoder().encode(startupTrace),
               let decodedTrace = try? JSONDecoder().decode(
                 RendererBenchmarkStartupTrace.self, from: traceData
@@ -15527,6 +15581,14 @@ struct NavigationProtocolTests {
         assert(decodedTrace.samples == startupTrace.samples &&
                decodedTrace.droppedSamples == startupTrace.droppedSamples,
                "startup evidence preserves scheduler, queue, window and marker state")
+        assert(decodedTrace.warmupBoundaries == startupTrace.warmupBoundaries &&
+               decodedTrace.networkTransport == "lan",
+               "warm-up boundaries and sanitized network mode survive export")
+        let oldTrace = Data(#"{"samples":[],"droppedSamples":0}"#.utf8)
+        let decodedOldTrace = try? JSONDecoder().decode(RendererBenchmarkStartupTrace.self,
+                                                       from: oldTrace)
+        assert(decodedOldTrace != nil && decodedOldTrace?.warmupBoundaries == nil,
+               "older startup exports remain readable")
         assert(RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(jsonData: traceData),
                "startup trace follows the same secret-free export policy")
         assert(

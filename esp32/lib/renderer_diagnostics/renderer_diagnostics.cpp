@@ -448,11 +448,21 @@ DeliveryCallbackTiming beginDeliveryCallback(uint8_t channel, uint32_t nowMs) {
   return value;
 }
 
-void completeDeliveryCallback(DeliveryCallbackTiming value) {
-  value.frameActiveAtExit = frameTransferActive.load();
+void noteDeliveryCallbackProgress(const DeliveryCallbackTiming &value,
+                                 DeliveryCallbackPhase phase, uint32_t nowMs) {
   portENTER_CRITICAL(&diagnosticsMux);
   if (diagnosticsState != nullptr && diagnosticsState->sessionActive())
-    deliveryTiming.complete(value);
+    deliveryTiming.progress(value, phase, nowMs);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+void completeDeliveryCallback(DeliveryCallbackTiming value) {
+  value.frameActiveAtExit = frameTransferActive.load();
+  const uint32_t nowMs = millis();
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr && diagnosticsState->sessionActive()) {
+    deliveryTiming.complete(value, nowMs);
+  }
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
@@ -711,7 +721,14 @@ std::string toJson(const Snapshot &value) {
        << value.remoteDebug.largestAfterAllocate << "}";
 #if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
     body << ",\"deliveryTiming\":{\"schema\":1,\"session\":" << value.deliveryTiming.session
-         << ",\"completed\":" << value.deliveryTiming.completed << ",\"latest\":";
+         << ",\"started\":" << value.deliveryTiming.started
+         << ",\"latestStarted\":{\"session\":" << value.deliveryTiming.latestStarted.session
+         << ",\"ordinal\":" << value.deliveryTiming.latestStarted.ordinal
+         << ",\"channel\":" << static_cast<unsigned>(value.deliveryTiming.latestStarted.channel)
+         << ",\"startedAtMs\":" << value.deliveryTiming.latestStarted.startedAtMs
+         << ",\"updatedAtMs\":" << value.deliveryTiming.latestStarted.updatedAtMs
+         << ",\"phase\":\"" << deliveryCallbackPhaseName(value.deliveryTiming.latestStarted.phase)
+         << "\"},\"completed\":" << value.deliveryTiming.completed << ",\"latest\":";
     appendDeliveryTiming(body, value.deliveryTiming.latest);
     body << ",\"slowestRoute\":";
     appendDeliveryTiming(body, value.deliveryTiming.slowestRoute);
