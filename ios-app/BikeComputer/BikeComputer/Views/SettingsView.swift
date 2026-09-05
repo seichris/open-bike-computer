@@ -2748,6 +2748,35 @@ private struct RemoteDeviceDebugWebView: UIViewRepresentable {
     }
 }
 
+private struct RemoteDeviceDebugConsoleView: View {
+    @EnvironmentObject private var bleManager: BLEManager
+    @Environment(\.dismiss) private var dismiss
+    let session: DeviceTransferSession
+
+    var body: some View {
+        RemoteDeviceDebugWebView(session: session)
+            .navigationTitle("Device Debug Console")
+            .navigationBarTitleDisplayMode(.inline)
+            .onAppear(perform: dismissIfAuthorizationChanged)
+            .onChange(of: sessionIsAuthorized) { authorized in
+                if !authorized { dismiss() }
+            }
+    }
+
+    private var sessionIsAuthorized: Bool {
+        RemoteDeviceDebugSessionPolicy.hasSameAuthorizationIdentity(
+            RemoteDeviceDebugSessionPolicy.activeSession(
+                bleManager: bleManager
+            ),
+            as: session
+        )
+    }
+
+    private func dismissIfAuthorizationChanged() {
+        if !sessionIsAuthorized { dismiss() }
+    }
+}
+
 @MainActor
 private struct RemoteDeviceDebugSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
@@ -2755,7 +2784,6 @@ private struct RemoteDeviceDebugSettingsSection: View {
     @State private var isWorking = false
     @State private var statusMessage = "Idle"
     @State private var errorMessage: String?
-    @State private var showsDebugConsole = false
     @State private var copiedHotspotPassphrase: String?
     @State private var revealsHotspotPassphrase = false
     @State private var lanSSID = ""
@@ -2826,15 +2854,15 @@ private struct RemoteDeviceDebugSettingsSection: View {
                         .textSelection(.enabled)
                 }
 
-                Button {
-                    showsDebugConsole = true
+                NavigationLink {
+                    RemoteDeviceDebugConsoleView(session: session)
                 } label: {
                     Label(
                         "Open Secure Debug Console",
                         systemImage: "lock.rectangle"
                     )
                 }
-                .disabled(isWorking || pageURL == nil)
+                .disabled(isWorking)
 
                 Button(action: copySessionDetails) {
                     Label("Copy Session Details", systemImage: "doc.on.doc")
@@ -2901,33 +2929,11 @@ private struct RemoteDeviceDebugSettingsSection: View {
         .onAppear(perform: loadLANCredentialsIfNeeded)
         .onChange(of: bleManager.deviceTransferMode) { mode in
             if mode != DeviceTransferSession.Mode.debug.rawValue {
-                showsDebugConsole = false
                 clearCopiedHotspotPassphraseIfOwned()
                 revealsHotspotPassphrase = false
                 if !isWorking {
                     statusMessage = "Idle"
                     errorMessage = nil
-                }
-            }
-        }
-        .onChange(of: bleManager.deviceTransferSessionToken) { _ in
-            if activeSession == nil {
-                showsDebugConsole = false
-            }
-        }
-        .sheet(isPresented: $showsDebugConsole) {
-            if let session = activeSession {
-                NavigationStack {
-                    RemoteDeviceDebugWebView(session: session)
-                        .navigationTitle("Device Debug Console")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("Done") {
-                                    showsDebugConsole = false
-                                }
-                            }
-                        }
                 }
             }
         }
@@ -2949,12 +2955,6 @@ private struct RemoteDeviceDebugSettingsSection: View {
 
     private var activeSession: DeviceTransferSession? {
         RemoteDeviceDebugSessionPolicy.activeSession(bleManager: bleManager)
-    }
-
-    private var pageURL: URL? {
-        activeSession.flatMap {
-            RemoteDeviceDebugSessionPolicy.pageURL(for: $0)
-        }
     }
 
     private var debugModeIsActive: Bool {
@@ -3125,7 +3125,6 @@ private struct RemoteDeviceDebugSettingsSection: View {
                 try await DeviceTransferManager().exitRemoteDebug(
                     bleManager: bleManager
                 )
-                showsDebugConsole = false
                 clearCopiedHotspotPassphraseIfOwned()
                 revealsHotspotPassphrase = false
                 statusMessage = "Session ended"
@@ -3219,13 +3218,19 @@ private struct RendererBenchmarkReplaySettingsSection: View {
                     )
                 }
 
-                if let exportURL = secureSweep.exportURL {
-                    ShareLink(item: exportURL) {
-                        Label(
-                            "Share Benchmark Evidence ZIP",
-                            systemImage: "square.and.arrow.up"
-                        )
-                    }
+            }
+
+            if secureSweep.canRetryEvidenceExport {
+                Button("Retry Evidence Export", action: secureSweep.retryEvidenceExport)
+                    .disabled(secureSweep.isRunning)
+            }
+            // Keep the result available even if disconnect resets capabilities.
+            if let exportURL = secureSweep.exportURL {
+                ShareLink(item: exportURL) {
+                    Label(
+                        "Share Benchmark Evidence ZIP",
+                        systemImage: "square.and.arrow.up"
+                    )
                 }
             }
 
@@ -3298,24 +3303,24 @@ private struct RendererBenchmarkReplaySettingsSection: View {
         }
         .onChange(of: bleManager.isNavigationReady) { ready in
             if !ready {
-                secureSweep.stop()
+                secureSweep.stop(reason: .transport)
                 if !secureSweep.isRunning { replay.stop(clearRoute: false) }
             }
         }
         .onChange(of: bleManager.supportsRendererDiagnostics) { supported in
             if !supported {
-                secureSweep.stop()
+                secureSweep.stop(reason: .transport)
                 if !secureSweep.isRunning { replay.stop(clearRoute: false) }
             }
         }
         .onChange(of: isNavigationActive) { active in
             if active {
-                secureSweep.stop()
-                if !secureSweep.isRunning { replay.stop() }
+                secureSweep.stop(clearRoute: false, reason: .lifecycle)
+                if !secureSweep.isRunning { replay.stop(clearRoute: false) }
             }
         }
         .onChange(of: bleManager.deviceTransferSessionToken) { _ in
-            if activeSession == nil { secureSweep.stop() }
+            if activeSession == nil { secureSweep.stop(reason: .transport) }
         }
         .onChange(of: bleManager.deviceTransferMode) { mode in
             if mode == DeviceTransferSession.Mode.debug.rawValue {
@@ -3323,11 +3328,11 @@ private struct RendererBenchmarkReplaySettingsSection: View {
             }
         }
         .onChange(of: bleManager.activeDeviceMap) { _ in
-            if secureSweep.isRunning { secureSweep.stop() }
+            if secureSweep.isRunning { secureSweep.stop(reason: .lifecycle) }
         }
         .onAppear(perform: refreshSecureSweepReadiness)
         .onDisappear {
-            secureSweep.stop()
+            secureSweep.stop(reason: .lifecycle)
             if !secureSweep.isRunning { replay.stop() }
         }
     }
@@ -3338,7 +3343,8 @@ private struct RendererBenchmarkReplaySettingsSection: View {
     }
 
     private var canStartReplay: Bool {
-        canRequestSnapshot && !isNavigationActive
+        canRequestSnapshot && bleManager.supportsRendererBenchmarkSample &&
+            !isNavigationActive && !bleManager.supportsRemoteDeviceDebug
     }
 
     private var activeSession: DeviceTransferSession? {
@@ -3352,6 +3358,8 @@ private struct RendererBenchmarkReplaySettingsSection: View {
                 isNavigationReady: bleManager.isNavigationReady,
                 supportsRendererDiagnostics:
                     bleManager.supportsRendererDiagnostics,
+                supportsRendererBenchmarkSample:
+                    bleManager.supportsRendererBenchmarkSample,
                 isNavigationActive: isNavigationActive,
                 hasSecureSession: activeSession != nil,
                 hasActiveMap: bleManager.activeDeviceMap != nil,
