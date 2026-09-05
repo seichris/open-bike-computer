@@ -10,21 +10,31 @@ final class WatchConnectivityCoordinator: NSObject {
     var onDirectRidePreparationResponse:
         ((WatchDirectRidePreparationRequestV1,
           WatchDirectRidePreparationResponseV1) -> Void)?
+    var onDirectRidePreparationSubmissionFailure:
+        ((WatchDirectRidePreparationRequestV1) -> Void)?
+    var onDirectRidePreparationAvailabilityChanged: (() -> Void)?
 
     private let session: WCSession?
     private let routeLibrary: WatchRouteLibrary
     private let controllerCredentialStore: WatchControllerCredentialStore
+    private let defaults: UserDefaults
     private var hasActivated = false
     private var workoutHealthSetupSnapshot:
         WorkoutHealthSetupSnapshotV1?
+    private let pendingTransportDiagnosticsKey =
+        "watchConnectivity.pendingBLETransportDiagnostics.v1"
+    private let inFlightTransportDiagnosticsKey =
+        "watchConnectivity.inFlightBLETransportDiagnostics.v1"
 
     init(
         routeLibrary: WatchRouteLibrary,
         controllerCredentialStore: WatchControllerCredentialStore,
+        defaults: UserDefaults = .standard,
         session: WCSession? = WCSession.isSupported() ? .default : nil
     ) {
         self.routeLibrary = routeLibrary
         self.controllerCredentialStore = controllerCredentialStore
+        self.defaults = defaults
         self.session = session
         super.init()
     }
@@ -33,6 +43,7 @@ final class WatchConnectivityCoordinator: NSObject {
         guard let session else { return }
         if hasActivated {
             if session.activationState == .activated {
+                flushPendingTransportDiagnostics(using: session)
                 publishDeviceMetadata(using: session)
             }
             return
@@ -57,49 +68,205 @@ final class WatchConnectivityCoordinator: NSObject {
         publishDeviceMetadata(using: session)
     }
 
+    func recordTransportDiagnostic(
+        _ event: WatchBLETransportDiagnosticEventV1
+    ) {
+        let existing = defaults.data(
+            forKey: pendingTransportDiagnosticsKey
+        ).flatMap {
+            WatchBLETransportDiagnosticBatchV1.decode($0)?.events
+        } ?? []
+        let batch = WatchBLETransportDiagnosticBatchV1(
+            events: existing + [event]
+        )
+        if let data = try? batch.encoded() {
+            defaults.set(data, forKey: pendingTransportDiagnosticsKey)
+        }
+        guard let session else { return }
+        flushPendingTransportDiagnostics(using: session)
+    }
+
     func sendDirectRidePreparation(
         operation: WatchDirectRidePreparationOperationV1,
         deviceID: String,
         preparationID: UUID
-    ) {
-        guard let session,
-              session.activationState == .activated,
-              let request = try? WatchDirectRidePreparationRequestV1(
-                preparationID: preparationID,
-                operation: operation,
-                deviceID: deviceID
-              ),
-              let payload = try? request.encoded() else { return }
+    ) -> WatchDirectRidePreparationSubmissionDispositionV1 {
+        guard let intent = try? WatchDirectRidePreparationIntentV1(
+            preparationID: preparationID,
+            operation: operation,
+            deviceID: deviceID
+        ), let request = try? intent.request(),
+              let payload = try? request.encoded() else {
+            return .encodingFailed
+        }
+        guard let session else { return .transportUnavailable }
 
         if operation == .release {
-            // The release is idempotent and durable so an iPhone that was
-            // temporarily unreachable can resume its prior reconnect policy.
-            session.transferUserInfo([
-                WatchDirectRidePreparationRequestV1.userInfoPayloadKey:
-                    payload,
-            ])
+            // Admit releases into a local outbox even before WCSession has
+            // activated. Once handed to transferUserInfo, WatchConnectivity
+            // owns the durable delivery across temporary unreachability.
+            enqueuePendingDirectRideRelease(payload)
+            flushPendingDirectRideReleases(using: session)
+            return .submitted
         }
-        guard session.isReachable else { return }
+        guard session.activationState == .activated else {
+            return .activationPending
+        }
+        guard session.isReachable else { return .counterpartUnreachable }
         session.sendMessageData(payload) { [weak self] responseData in
-            guard let response = try?
-                    WatchDirectRidePreparationResponseV1.decode(responseData),
-                  response.requestID == request.requestID else { return }
             Task { @MainActor [weak self] in
-                self?.onDirectRidePreparationResponse?(request, response)
+                guard let self else { return }
+                guard let response = try?
+                        WatchDirectRidePreparationResponseV1.decode(
+                            responseData
+                        ), response.requestID == request.requestID else {
+                    self.onDirectRidePreparationSubmissionFailure?(request)
+                    return
+                }
+                self.onDirectRidePreparationResponse?(request, response)
             }
-        } errorHandler: { _ in
-            // The firmware lease remains authoritative when the iPhone is
-            // absent, and release also has the queued fallback above.
+        } errorHandler: { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.onDirectRidePreparationSubmissionFailure?(request)
+            }
         }
+        return .submitted
     }
 
     fileprivate func activationDidComplete(
         _ state: WCSessionActivationState,
         error: Error?
     ) {
+        onDirectRidePreparationAvailabilityChanged?()
         guard error == nil, state == .activated, let session else { return }
+        flushPendingDirectRideReleases(using: session)
+        flushPendingTransportDiagnostics(using: session)
         publishDeviceMetadata(using: session)
         onApplicationContext?(session.receivedApplicationContext)
+    }
+
+    fileprivate func reachabilityDidChange() {
+        onDirectRidePreparationAvailabilityChanged?()
+        if let session {
+            flushPendingTransportDiagnostics(using: session)
+        }
+    }
+
+    private let pendingDirectRideReleaseKey =
+        "watchConnectivity.pendingDirectRideReleases.v1"
+
+    private func enqueuePendingDirectRideRelease(_ payload: Data) {
+        var pending = defaults.array(
+            forKey: pendingDirectRideReleaseKey
+        ) as? [Data] ?? []
+        let incoming = try? WatchDirectRidePreparationRequestV1.decode(payload)
+        pending.removeAll { existing in
+            guard let incoming,
+                  let decoded = try?
+                    WatchDirectRidePreparationRequestV1.decode(existing) else {
+                return false
+            }
+            return decoded.operation == .release &&
+                decoded.deviceID == incoming.deviceID &&
+                decoded.preparationID == incoming.preparationID
+        }
+        pending.append(payload)
+        if pending.count > 16 {
+            pending.removeFirst(pending.count - 16)
+        }
+        defaults.set(pending, forKey: pendingDirectRideReleaseKey)
+    }
+
+    private func flushPendingDirectRideReleases(using session: WCSession) {
+        guard session.activationState == .activated else { return }
+        let pending = defaults.array(
+            forKey: pendingDirectRideReleaseKey
+        ) as? [Data] ?? []
+        guard !pending.isEmpty else { return }
+        for payload in pending {
+            session.transferUserInfo([
+                WatchDirectRidePreparationRequestV1.userInfoPayloadKey:
+                    payload,
+            ])
+        }
+        defaults.removeObject(forKey: pendingDirectRideReleaseKey)
+    }
+
+    private func flushPendingTransportDiagnostics(using session: WCSession) {
+        guard session.activationState == .activated else { return }
+        reconcileTransportDiagnosticsInFlight(using: session)
+        guard defaults.data(forKey: inFlightTransportDiagnosticsKey) == nil,
+              let data = defaults.data(
+                forKey: pendingTransportDiagnosticsKey
+              ),
+              WatchBLETransportDiagnosticBatchV1.decode(data) != nil else {
+            return
+        }
+        defaults.set(data, forKey: inFlightTransportDiagnosticsKey)
+        defaults.removeObject(forKey: pendingTransportDiagnosticsKey)
+        session.transferUserInfo([
+            WatchBLETransportDiagnosticBatchV1.userInfoPayloadKey: data,
+        ])
+    }
+
+    private func reconcileTransportDiagnosticsInFlight(
+        using session: WCSession
+    ) {
+        let outstandingData = session.outstandingUserInfoTransfers
+            .compactMap {
+                $0.userInfo[
+                    WatchBLETransportDiagnosticBatchV1.userInfoPayloadKey
+                ] as? Data
+            }
+            .first(where: {
+                WatchBLETransportDiagnosticBatchV1.decode($0) != nil
+            })
+        if let outstandingData {
+            defaults.set(
+                outstandingData,
+                forKey: inFlightTransportDiagnosticsKey
+            )
+            return
+        }
+        guard let abandoned = defaults.data(
+            forKey: inFlightTransportDiagnosticsKey
+        ) else { return }
+        defaults.removeObject(forKey: inFlightTransportDiagnosticsKey)
+        mergePendingTransportDiagnostics(abandoned)
+    }
+
+    private func transportDiagnosticsDidFinish(
+        data: Data,
+        error: Error?
+    ) {
+        if defaults.data(forKey: inFlightTransportDiagnosticsKey) == data {
+            defaults.removeObject(forKey: inFlightTransportDiagnosticsKey)
+        }
+        if error != nil {
+            mergePendingTransportDiagnostics(data)
+            return
+        }
+        guard let session else { return }
+        flushPendingTransportDiagnostics(using: session)
+    }
+
+    private func mergePendingTransportDiagnostics(_ data: Data) {
+        guard let incoming = WatchBLETransportDiagnosticBatchV1.decode(data)
+        else { return }
+        let pending = defaults.data(
+            forKey: pendingTransportDiagnosticsKey
+        ).flatMap {
+            WatchBLETransportDiagnosticBatchV1.decode($0)?.events
+        } ?? []
+        var seen = Set<String>()
+        let merged = (incoming.events + pending).filter { event in
+            seen.insert("\(event.attemptID.uuidString):\(event.sequence)")
+                .inserted
+        }
+        guard let encoded = try? WatchBLETransportDiagnosticBatchV1(
+            events: merged
+        ).encoded() else { return }
+        defaults.set(encoded, forKey: pendingTransportDiagnosticsKey)
     }
 
     private func publishDeviceMetadata(using session: WCSession) {
@@ -363,6 +530,12 @@ extension WatchConnectivityCoordinator: WCSessionDelegate {
         }
     }
 
+    nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
+        Task { @MainActor [weak self] in
+            self?.reachabilityDidChange()
+        }
+    }
+
     nonisolated func session(
         _ session: WCSession,
         didReceiveMessageData messageData: Data,
@@ -442,6 +615,19 @@ extension WatchConnectivityCoordinator: WCSessionDelegate {
     ) {
         Task { @MainActor [weak self] in
             self?.receiveUserInfo(userInfo)
+        }
+    }
+
+    nonisolated func session(
+        _ session: WCSession,
+        didFinish userInfoTransfer: WCSessionUserInfoTransfer,
+        error: Error?
+    ) {
+        guard let data = userInfoTransfer.userInfo[
+            WatchBLETransportDiagnosticBatchV1.userInfoPayloadKey
+        ] as? Data else { return }
+        Task { @MainActor [weak self] in
+            self?.transportDiagnosticsDidFinish(data: data, error: error)
         }
     }
 }

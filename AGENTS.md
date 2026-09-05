@@ -125,12 +125,12 @@ BLE `DSTS` `networkTransport`, `baseUrl`, and `networkSsid` fields instead of
 assuming `192.168.4.1`: open a `lan` URL from a browser on the same local
 network, and join the advertised AP only for `hotspot`. Debug hotspots use a
 fresh WPA2 password delivered only in authenticated BLE `DSTS`; never copy it
-into logs or task notes. LAN debug uses plain HTTP and is permitted only on a
-trusted local network. LAN credentials are
-owned by the iPhone app's device-only Keychain, sent through the authenticated
-BLE command for one session, and held only in device RAM. Never put the
-password in source, shell history, logs, status payloads, screenshots, or task
-notes.
+into logs or task notes. LAN and hotspot debug both use HTTPS with the exact
+BLE-delivered leaf pin. Use LAN debugging only on a trusted local network. LAN
+credentials are owned by the iPhone app's device-only Keychain, sent through
+the authenticated BLE command for one session, and held only in device RAM.
+Never put the password in source, shell history, logs, status payloads,
+screenshots, or task notes.
 Keep the authenticated iPhone connected over BLE during browser debugging; a
 BLE disconnect revokes the session. Use `hotspotFallbackReason` to distinguish
 SSID, authentication, association-timeout, and endpoint-reachability fallback.

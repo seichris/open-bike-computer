@@ -22,11 +22,6 @@ RunIdentity runIdentity(const char *routeHash) {
   return identity;
 }
 
-JobCounters jobs(uint32_t offset) {
-  return {10U + offset, 9U + offset, 8U + offset, 7U + offset,
-          6U + offset, 5U + offset, 4U + offset};
-}
-
 } // namespace
 
 int main() {
@@ -57,6 +52,15 @@ int main() {
   assert(timing.p95Ms == 11001);
   assert(timing.maximumMs == 11001);
 
+  TimingHistogram gateAlignedHistogram;
+  for (uint32_t index = 0; index < 19; ++index)
+    gateAlignedHistogram.note(1249);
+  gateAlignedHistogram.note(1300);
+  assert(gateAlignedHistogram.summary().p95Ms == 1250);
+  TimingHistogram aboveGateHistogram;
+  aboveGateHistogram.note(1251);
+  assert(aboveGateHistogram.summary().p95Ms == 1500);
+
   State state;
   BuildIdentity build;
   assert(build.deviceId.assign("0123456789abcdef"));
@@ -66,23 +70,46 @@ int main() {
   build.bootId = 0x12345678;
   build.resetReason = 1;
   state.configureBuild(build);
-  state.noteJobs(jobs(0));
   state.beginSession(true);
+
+  uint8_t preWindowRouteHash[32]{};
+  state.noteGpsAuthentication(false, 900);
+  state.noteGpsAuthentication(true, 901);
+  state.noteReplaySampleDetected(902);
+  state.noteReplaySampleDecoded(true, 903);
+  state.noteReplayGpsMailbox(true, 904);
+  assert(!state.noteRouteMarker(preWindowRouteHash,
+                                sizeof(preWindowRouteHash), 1, 90, 0, 905));
+  const ReplayTransportDiagnostics preWindowDiagnostics =
+      state.replayTransportDiagnostics();
+  assert(preWindowDiagnostics.gpsAuthenticationRejected == 1);
+  assert(preWindowDiagnostics.gpsAuthenticationAccepted == 1);
+  assert(preWindowDiagnostics.rbs1Detected == 1);
+  assert(preWindowDiagnostics.rbs1Decoded == 1);
+  assert(preWindowDiagnostics.gpsMailboxAccepted == 1);
+  assert(preWindowDiagnostics.markerRejectedNoActiveWindow == 1);
+  assert(preWindowDiagnostics.lastMarkerResult ==
+         ReplayMarkerResult::NoActiveWindow);
+  assert(preWindowDiagnostics.lastActiveWindowId == 0);
+  assert(preWindowDiagnostics.lastCandidateFixtureTagValid);
+  assert(!preWindowDiagnostics.lastExpectedFixtureTagValid);
 
   constexpr const char *kRouteHash =
       "000102030405060708090a0b0c0d0e0f"
       "101112131415161718191a1b1c1d1e1f";
   assert(state.beginWindow(41, runIdentity(kRouteHash), Profile::Medium, 1000,
-                           jobs(0), 10));
+                           10));
   assert(state.measurementWindowId() == 41);
+  assert(state.replayTransportDiagnostics()
+             .markerRejectedNoActiveWindow == 1);
   assert(!state.noteRenderForWindow(40, Profile::Medium, {}));
   assert(!state.noteRenderForWindow(41, Profile::High, {}));
   state.noteMemory(
       {48000, 41000, 30000, 2800000, 1900000, 24576, 20000, 12288,
-       0, 0});
+       7, 11});
   state.noteMemory(
       {47000, 40000, 29000, 2700000, 1800000, 23552, 19000, 11264,
-       1, 2});
+       8, 13});
   state.noteUiLoopGap(87);
   state.noteUiLoopGap(42);
   state.noteDisplayFlushUs(84001);
@@ -95,8 +122,10 @@ int main() {
   state.notePrediction(true, false);
   state.notePrediction(true, false);
   state.notePrediction(false, true);
-  state.noteInterrupted();
-  state.noteCoverageRejected();
+  state.noteInterruptedForWindow(40);
+  state.noteCoverageRejectedForWindow(40);
+  state.noteInterruptedForWindow(41);
+  state.noteCoverageRejectedForWindow(41);
 
   RenderSample render;
   render.totalMs = 620;
@@ -109,7 +138,13 @@ int main() {
                                            LimiterExtrudedPixels),
                       false};
   assert(state.noteRenderForWindow(41, Profile::Medium, render));
-  state.noteJobs(jobs(3));
+  for (int index = 0; index < 3; ++index) {
+    assert(state.noteJobForWindow(41, JobEvent::Requested));
+    assert(state.noteJobForWindow(41, JobEvent::Started));
+    assert(state.noteJobForWindow(41, JobEvent::Completed));
+    assert(state.noteJobForWindow(41, JobEvent::Published));
+  }
+  assert(!state.noteJobForWindow(40, JobEvent::Requested));
 
   uint8_t routeHash[32]{};
   for (size_t index = 0; index < sizeof(routeHash); ++index)
@@ -119,8 +154,33 @@ int main() {
   assert(!state.noteRouteMarker(routeHash, sizeof(routeHash), 12, 90, 1, 2000));
   routeHash[0] = 0;
   assert(state.noteRouteMarker(routeHash, sizeof(routeHash), 12, 90, 1, 2001));
-  state.noteRemoteDebug({true, 434312, 7, 1, 2, 0, 1500, 2300, 12, 18,
-                         3000000, 2100000, 2550000, 1800000});
+  RemoteDebugOverhead remoteDebug;
+  remoteDebug.active = true;
+  remoteDebug.snapshotBytes = 434312;
+  remoteDebug.captured = 7;
+  remoteDebug.skippedCadence = 1;
+  remoteDebug.skippedLocked = 2;
+  remoteDebug.lastCopyUs = 1500;
+  remoteDebug.maximumCopyUs = 2300;
+  remoteDebug.lastHttpResponseMs = 12;
+  remoteDebug.maximumHttpResponseMs = 18;
+  remoteDebug.lastFrameSnapshotWaitUs = 110;
+  remoteDebug.maximumFrameSnapshotWaitUs = 220;
+  remoteDebug.lastFrameCrcUs = 330;
+  remoteDebug.maximumFrameCrcUs = 440;
+  remoteDebug.lastHttpExpectedBytes = 434344;
+  remoteDebug.lastHttpActualBytes = 434344;
+  remoteDebug.lastHttpWriteCalls = 215;
+  remoteDebug.lastHttpZeroWriteCalls = 4;
+  remoteDebug.lastHttpShortWriteCalls = 3;
+  remoteDebug.lastHttpActiveTlsWriteUs = 500000;
+  remoteDebug.lastHttpNoProgressWaitMs = 1200;
+  remoteDebug.lastHttpIntentionalDelayMs = 212;
+  remoteDebug.freeBefore = 3000000;
+  remoteDebug.largestBefore = 2100000;
+  remoteDebug.freeAfterAllocate = 2550000;
+  remoteDebug.largestAfterAllocate = 1800000;
+  state.noteRemoteDebug(remoteDebug);
 
   const Snapshot snapshot = state.snapshot(2500);
   assert(snapshot.sequence == 1);
@@ -146,6 +206,8 @@ int main() {
   assert(snapshot.predictionGraceEntries == 1);
   assert(snapshot.predictionExhaustionEntries == 1);
   assert(snapshot.jobs.requested == 3);
+  assert(snapshot.jobs.started == 3);
+  assert(snapshot.jobs.completed == 3);
   assert(snapshot.jobs.published == 3);
   assert(snapshot.interrupted == 1);
   assert(snapshot.coverageRejected == 1);
@@ -155,7 +217,23 @@ int main() {
   assert(snapshot.routeMarker.accepted == 1);
   assert(snapshot.routeMarker.rejected == 2);
   assert(snapshot.routeFixtureMatches);
+  assert(snapshot.replayTransport.markerAccepted == 1);
+  assert(snapshot.replayTransport.markerRejectedInvalid == 1);
+  assert(snapshot.replayTransport.markerRejectedFixtureMismatch == 1);
+  assert(snapshot.replayTransport.markerRejectedNoActiveWindow == 1);
+  assert(snapshot.replayTransport.lastMarkerResult ==
+         ReplayMarkerResult::Accepted);
+  assert(snapshot.replayTransport.lastActiveWindowId == 41);
+  assert(snapshot.replayTransport.lastSampleIndex == 12);
+  assert(snapshot.replayTransport.lastExpectedFixtureTagValid);
+  assert(snapshot.replayTransport.lastCandidateFixtureTagValid);
+  assert(snapshot.replayTransport.lastExpectedFixtureTag == 0x00010203U);
+  assert(snapshot.replayTransport.lastCandidateFixtureTag == 0x00010203U);
   assert(snapshot.remoteDebug.snapshotBytes == 434312);
+  assert(snapshot.remoteDebug.lastHttpExpectedBytes == 434344);
+  assert(snapshot.remoteDebug.lastHttpActualBytes == 434344);
+  assert(snapshot.remoteDebug.lastHttpZeroWriteCalls == 4);
+  assert(snapshot.remoteDebug.lastHttpActiveTlsWriteUs == 500000);
 
   RenderSample allocationFailure;
   allocationFailure.buildings.allocationFallback = true;
@@ -165,9 +243,10 @@ int main() {
   assert(latchedFailure.buildings.allocationFallback);
 
   assert(state.beginWindow(42, runIdentity(kRouteHash), Profile::Flat, 3000,
-                           jobs(3), 13));
-  state.noteMemory({0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
-  state.noteMemory({100, 100, 100, 100, 100, 100, 100, 100, 0, 0});
+                           13));
+  assert(!state.noteJobForWindow(41, JobEvent::Completed));
+  state.noteMemory({0, 0, 0, 0, 0, 0, 0, 0, 8, 13});
+  state.noteMemory({100, 100, 100, 100, 100, 100, 100, 100, 9, 15});
   const Snapshot reset = state.snapshot(3001);
   assert(reset.measurementWindowId == 42);
   assert(reset.sequence == 3);
@@ -175,20 +254,75 @@ int main() {
   assert(reset.jobs.requested == 0);
   assert(reset.maximumUiGapMs == 0);
   assert(reset.routeMarker.accepted == 0);
+  assert(reset.replayTransport.markerRejectedNoActiveWindow == 1);
+  assert(reset.replayTransport.markerAccepted == 1);
   assert(reset.windowMinimumInternalFree == 0);
   assert(reset.windowMinimumPsramFree == 0);
   assert(reset.windowMinimumDmaFree == 0);
+  assert(reset.memory.cryptoHeadroomRejections == 1);
+  assert(reset.memory.cryptoOperationFailures == 2);
   assert(!reset.buildings.allocationFallback);
   assert(reset.profile == Profile::Flat);
   assert(reset.remoteDebug.active);
+
+  assert(std::strcmp(
+             memoryObservationPhaseName(MemoryObservationPhase::SessionEnd),
+             "session_end") == 0);
+  State attributionState;
+  attributionState.beginSession(true);
+  assert(attributionState.beginWindow(
+      77, runIdentity(kRouteHash), Profile::High, 5000, 0));
+  attributionState.noteMemory(
+      {50000, 49000, 30000, 2800000, 1900000, 40000, 39000, 24000,
+       0, 0},
+      MemoryObservationPhase::WindowStart, 5000, false);
+  attributionState.noteMemory(
+      {50000, 49000, 30000, 2800000, 1900000, 40000, 39000, 24000,
+       0, 0},
+      MemoryObservationPhase::Periodic, 5050, true);
+  attributionState.noteMemory(
+      {50000, 49000, 30000, 2800000, 1900000, 38000, 37000, 24000,
+       0, 0},
+      MemoryObservationPhase::RenderComplete, 5100, true);
+  attributionState.noteMemory(
+      {50000, 49000, 30000, 2800000, 1900000, 38500, 37000, 22000,
+       0, 0},
+      MemoryObservationPhase::MetricsSnapshot, 5200, false);
+  const Snapshot attributed = attributionState.snapshot(5250);
+  assert(attributed.windowMinimumDmaFreeAttribution.phase ==
+         MemoryObservationPhase::RenderComplete);
+  assert(attributed.windowMinimumDmaFreeAttribution.observedAtMs == 5100);
+  assert(attributed.windowMinimumDmaFreeAttribution.value == 38000);
+  assert(attributed.windowMinimumDmaFreeAttribution.frameTransferActive);
+  assert(attributed.windowMinimumDmaLargestAttribution.phase ==
+         MemoryObservationPhase::MetricsSnapshot);
+  assert(attributed.windowMinimumDmaLargestAttribution.observedAtMs == 5200);
+  assert(attributed.windowMinimumDmaLargestAttribution.value == 22000);
+  assert(!attributed.windowMinimumDmaLargestAttribution.frameTransferActive);
+  assert(attributionState.beginWindow(
+      78, runIdentity(kRouteHash), Profile::Current, 6000, 0));
+  const Snapshot attributionReset = attributionState.snapshot(6001);
+  assert(attributionReset.windowMinimumDmaFreeAttribution.phase ==
+         MemoryObservationPhase::Unknown);
+  assert(attributionReset.windowMinimumDmaFreeAttribution.value == 0);
 
   state.endSession();
   const Snapshot ended = state.snapshot(4000);
   assert(ended.profile == Profile::Current);
   assert(ended.measurementWindowId == 0);
   assert(!ended.remoteDebug.active);
+  assert(ended.replayTransport.rbs1Detected == 0);
+  assert(ended.replayTransport.markerRejectedNoActiveWindow == 0);
+  assert(!state.noteRouteMarker(routeHash, sizeof(routeHash), 12, 90, 1,
+                                4001));
+  const ReplayTransportDiagnostics postSessionReplay =
+      state.replayTransportDiagnostics();
+  assert(postSessionReplay.lastTransportEventAtMs == 0);
+  assert(postSessionReplay.lastMarkerAtMs == 0);
+  assert(postSessionReplay.markerAccepted == 0);
+  assert(postSessionReplay.markerRejectedNoActiveWindow == 0);
   assert(!state.beginWindow(43, runIdentity(kRouteHash), Profile::High, 4001,
-                            jobs(3), 13));
+                            13));
   assert(state.measurementWindowId() == 0);
 
   BoundedText<5> bounded;

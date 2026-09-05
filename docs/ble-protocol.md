@@ -1,5 +1,11 @@
 # BLE Protocol
 
+Remote-debug renderer metrics may additionally expose schema-1 `deliveryTiming`
+records; see [delivery-stage timing](renderer-benchmark.md#completed-results-and-delivery-stage-timing).
+These payload-free, device-clock diagnostic fields do not change BLE framing,
+authentication, UUIDs, capability negotiation, or ATT/application-ACK semantics.
+Ordinary and production profiles omit them; clients must accept their absence.
+
 The ESP32 advertises BLE service UUID
 `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800` under its user-assigned device name.
 An unregistered device uses `BikeComputer XXYY`, where `XXYY` is derived from
@@ -269,6 +275,103 @@ and preparation ID both match, so a delayed release from an older ride cannot
 cancel a newer preparation. This coordination does not grant write authority:
 the authenticated firmware lease remains final. A persisted iPhone yield
 expires after 24 hours if its release never arrives.
+
+### Application-confirmed critical ride delivery
+
+Client version `20` requests capability bit `22` (`0x00400000`). When that bit
+is present, an authenticated owner iPhone or scoped Watch wraps critical ride
+state in a version-1 logical command envelope. This distinguishes physical ATT
+acceptance from firmware acceptance. Peers without bit `22` continue to use the
+existing unwrapped compatibility path.
+
+The machine-readable source for these constants is
+`protocol/ride-ble-contract-v1.json`. Running
+`tools/generate_ride_ble_contract.py` produces the checked-in Swift and C++
+constants; `tools/generate_ride_ble_contract.py --check` is a CI drift gate.
+The lifecycle and compatibility rules in this document remain authoritative
+human-readable protocol text.
+
+An `RCM1` command member has this binary layout:
+
+```text
+Offset  Size  Field
+0       4     ASCII "RCM1"
+4       1     Version = 1
+5       1     CommandType
+6       1     MemberIndex, zero based
+7       1     MemberCount, 1...8
+8       16    CommandID, UUID bytes in network/display order
+24      4     StateGeneration, UInt32 little-endian, non-zero
+28      ...   Existing characteristic payload for this member
+```
+
+Command type `1` is `navigationClear`; type `2` is `workoutState`. A navigation
+clear is one owner member (empty route) or two Watch members (empty route plus
+the canonical `1|0|Navigation idle` maneuver). A workout group contains the
+canonical core, extended, and optional origin frames in their existing order.
+Only terminal/idle workout state and explicit navigation clear require this
+application acknowledgement; replaceable GPS, route windows, maneuvers, and
+ordinary live workout snapshots retain latest-state resynchronization semantics.
+
+Firmware validates and admits each member under the same authenticated role,
+lease, command ID, state generation, type, and member count before mutating
+that member's retained state. The tracker serializes one group at a time;
+completed duplicates, in-flight duplicates, and interleaved groups are rejected
+or replayed at admission, so a member cannot apply state a second time. Members
+can become visible one by one while a group is arriving, but an interrupted
+group remains pending and the controller retries or resynchronizes the complete
+logical state. Firmware emits no success acknowledgement for a partial group.
+It revalidates the authoritative controller lease immediately before a queued
+route is retained. When the complete operation has been validated and retained
+by the corresponding firmware state owner, it
+notifies the controller on protected navigation channel `2` with exactly 32
+bytes:
+
+```text
+Offset  Size  Field
+0       4     ASCII "RAK1"
+4       1     Version = 1
+5       1     CommandType
+6       1     Result
+7       1     Reserved = 0
+8       16    CommandID
+24      4     StateGeneration, UInt32 little-endian
+28      4     Current lease generation, UInt32 little-endian, non-zero
+```
+
+Results are `0=success`, `1=stale`, `2=busy`, `3=unauthorized`,
+`4=malformed`, and `5=resource-rejected`. `success` and an exactly matching
+`stale` result complete the logical command. Other results are typed failures;
+in particular `resource-rejected` is not reported as a radio timeout. Clients
+match type, command ID, state generation, their local connection generation,
+and a non-zero firmware lease proof before completing a command. The numeric
+lease generation is firmware-owned: current authentication and lease responses
+do not expose that generation to clients for an equality comparison. Protected
+notification sequencing plus command and connection identity prevent delayed,
+duplicate, or old-connection acknowledgements from completing newer work.
+
+Firmware retains the eight most recent completed command results and replays
+the matching `RAK1` for a duplicate command ID without applying the state
+twice. A client may retry one application-ack timeout with the same command ID
+and state generation, but it creates a new protected `S2` frame and sequence.
+Disconnect discards encrypted transport bytes; the controller reconnects,
+reauthenticates, reacquires its lease, and regenerates a complete latest-state
+resynchronization from logical state. Each client admits a critical group to its
+outbound queue atomically, and replaceable telemetry cannot evict it; firmware
+then serializes and tracks its individual members through completion.
+
+Golden vectors (command payload bytes `aa bb`):
+
+```text
+RCM1 workout member 1/3, command 00112233-4455-6677-8899-aabbccddeeff,
+state generation 0x12345678:
+52 43 4d 31 01 02 01 03 00 11 22 33 44 55 66 77
+88 99 aa bb cc dd ee ff 78 56 34 12 aa bb
+
+RAK1 success for the same command/state, lease generation 9:
+52 41 4b 31 01 02 00 00 00 11 22 33 44 55 66 77
+88 99 aa bb cc dd ee ff 78 56 34 12 09 00 00 00
+```
 
 ### Rename, deregistration, and recovery
 
@@ -1001,13 +1104,17 @@ renderer diagnostics. Bit `19` reports
 connected-display automatic inactivity control (setting ID `36`), and bit `20`
 negotiates persistent, privacy-bounded ride diagnostics and the authenticated
 device-log transfer mode. Bit `21` reports support for the optional detailed
-one-Hz ride-automation trace. Client version `11` requests bit `13`, version `12` requests
+one-Hz ride-automation trace. Bit `22` reports the application-confirmed
+critical ride-delivery contract described above. Bit `23` reports the atomic
+renderer replay sample described below. Client version `11` requests
+bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
 without the newer features. Client version `16` requests bits `18` and `19`,
 including the authenticated renderer-diagnostics contract and the already
-released automatic-display setting. Version `18` requests bit `20`, and
-version `19` requests bit `21`.
+released automatic-display setting. Version `18` requests bit `20`, version
+`19` requests bit `21`, version `20` requests bit `22`, and version `21`
+requests bit `23`.
 Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
@@ -1062,6 +1169,12 @@ Persistent ride diagnostics, CAP2 schema 1, only feature bit 20:
 
 Detailed ride diagnostics, CAP2 schema 1, only feature bit 21:
 43 41 50 32 01 00 00 20 00
+
+Application-confirmed ride delivery, CAP2 schema 1, only feature bit 22:
+43 41 50 32 01 00 00 40 00
+
+Atomic renderer replay sample, CAP2 schema 1, only feature bit 23:
+43 41 50 32 01 00 00 80 00
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -1106,6 +1219,31 @@ render-job outcomes, UI/display/GPS gaps, prediction state, fixture-marker
 freshness, and remote-debug overhead. It intentionally contains no route
 coordinates, network credentials, or transfer token.
 
+Diagnostic firmware also includes a session-scoped `replayTransport` object.
+Its bounded counters distinguish authenticated GPS envelope acceptance,
+RBS1 detection and decoding, GPS-mailbox admission, and marker acceptance or
+rejection (`invalid`, `no_active_window`, `active_fixture_unavailable`, or
+`fixture_mismatch`). Last-event state contains only monotonic timestamps,
+window/sample/loop identifiers, and four-byte fixture-hash tags. It is reset at
+diagnostics-session end, is not reset by a new measurement window, and contains
+no owner key, ciphertext, plaintext GPS payload, network credential, transfer
+token, certificate, or pin.
+The DMA-crypto rejection and operation-failure fields are deltas from the
+counter baseline captured at the start of the active measurement window; the
+DMA object identifies that contract as `cryptoCountersScope: "window"`. The
+separate authenticated device-status diagnostics retain their lifetime scope.
+
+Each diagnostic DMA region also includes
+`windowMinimumFreeAttribution` and
+`windowMinimumLargestBlockAttribution`. Both bounded objects contain `phase`,
+`observedAtMs`, `value`, and `frameTransferActive`. The allowed phase values are
+`unknown`, `session_start`, `session_end`, `window_start`, `periodic`,
+`render_complete`, and `metrics_snapshot`. Attribution changes only when a
+strictly lower window minimum is observed, so equal allocator readings retain
+the first phase. The frame field is only a correlation bit; no frame bytes,
+HTTP authorization material, token, certificate, pin, SSID, or password is
+retained.
+
 The checked-in benchmark replay marks every exact 1 Hz GPS sample with:
 
 ```text
@@ -1119,6 +1257,38 @@ marker. Firmware accepts a marker only when its hash matches the active
 measurement window. This prevents an otherwise plausible GPS stream from being
 attributed to the pinned fixture and lets a later checkpoint frame be tied to
 the intended position sample.
+
+Client version `21` and CAP2 feature bit `23` replace the two-write replay pair
+with one GPS-characteristic payload:
+
+```text
+"RBS1" | GPSLength: UInt8 | GPSPosition: GPSLength bytes |
+         RendererMarker: complete 44-byte RBM1 frame
+```
+
+`GPSLength` must be one of the canonical GPS packet lengths (`8`, `10`, `14`,
+`30`, or `36`), and the complete unprotected frame is at most 85 bytes. The
+frame uses the existing authenticated GPS channel and a native write that fits
+together with its protected-frame overhead. Like ordinary GPS, iOS prefers
+acknowledged writes when advertised and fitting, retaining native
+write-without-response with CoreBluetooth flow control for compatibility.
+There is no navigation-characteristic fallback. Both native ATT write modes
+already enter the firmware's same authenticated GPS callback. Firmware
+validates both members, queues the GPS state first, and accepts the marker only
+if that queue operation succeeded. iOS retains at most one unsent complete
+sample, so coalescing cannot split, reorder, or mismatch GPS and marker state.
+This uses one atomic payload per one-Hz tick and prevents the marker from
+being stranded behind the GPS half of the same logical sample. An ATT response
+only confirms transport completion; benchmark acceptance still requires a
+matching marker in the active firmware measurement window.
+
+The iOS secure sweep waits for setup writes and their acknowledgements to
+settle, opens and verifies the HTTPS measurement window and fixture identities,
+then acquires the replay GPS lease. Atomic samples use the existing shared
+writer and a single coalescing key; they do not bypass authentication, ATT, or
+application-acknowledgement ordering. Releasing the lease discards any unsent
+sample. A secure sweep requires both renderer diagnostics and atomic-sample
+capabilities; it never falls back to the legacy two-write pair.
 
 For confirmation on an ordinary diagnostic build, iOS starts a session-scoped
 measurement window with:
@@ -1256,15 +1426,22 @@ retries.
 
 ### Device workout start request
 
-When Ride Stats has no active workout, its **Start Workout** button notifies the
-authenticated iPhone app on `2A6E`:
+When Ride Stats has no active workout, an authenticated owner session shows an
+enabled **Start Workout** button and notifies the iPhone app on `2A6E`:
 
 ```text
 "WREQ"
 ```
 
-The request is ownership-v2 protected on the navigation channel. iOS accepts
-only the exact four-byte payload after the BLE session is authenticated, then
+The request is ownership-v2 protected on the navigation channel. Firmware
+emits it only for a role it can read as owner. A scoped Watch session instead
+shows disabled **Start on Apple Watch** guidance and emits no `WREQ`; an
+unreadable or unavailable role fails closed with a disabled control. Watch
+also treats an exact legacy `WREQ` as a harmless ignored owner notification so
+a cached/older firmware behavior cannot tear down Watch navigation, while
+malformed or unknown notification data still fails closed.
+
+iOS accepts only the exact four-byte payload after the BLE session is authenticated, then
 uses the same Watch-owned outdoor-cycling launch flow as the app's Start Workout
 controls. Older apps safely ignore the unknown notification. `WREQ` remains the
 manual button fallback when either peer does not advertise RAUT; detected ride
@@ -1328,6 +1505,8 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `DTRN` | iOS -> ESP32 | `tls\|cancel` | Delete a staged identity without changing the active identity. |
 | `DTRN` | iOS -> ESP32 | `exit` | Exit the active map, firmware, debug, or diagnostics transfer mode. |
 | `DSTS` | iOS -> ESP32 | empty | Request generic device-transfer status and the current HTTPS credential/pin. |
+| `DSTS` | ESP32 -> iOS | UTF-8 JSON | Complete generic device-transfer status when it fits one authenticated notification. |
+| `DSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Chunked generic device-transfer status. |
 
 The device preserves a detailed binding through short BLE gaps. If the last
 confirmed workout lifecycle was active and workout telemetry remains stale for
@@ -1361,6 +1540,13 @@ continues to use it. Otherwise `MSTC` responses fit the minimum BLE notification
 payload: ASCII `MSTC`, a one-byte transfer id, zero-based chunk index, chunk
 count, and up to 13 JSON bytes (20 bytes total). The app reassembles chunks by
 transfer id and accepts both forms.
+
+Generic device-transfer status uses the equivalent `DSTS{...}` direct response
+or `DSTC` chunk header. Firmware keeps an incomplete `DSTC` snapshot on the
+owner task and resumes it only as the bounded authenticated-notification queue
+drains. A request received while that snapshot is pending continues the same
+transfer instead of assigning a new transfer id and stranding the iOS
+reassembler with another partial response.
 
 The HTTPS credential is not part of the map-status payload. Current iOS clients
 send `DTRNenter|map`, which applies map mode and publishes a fresh generic
@@ -1555,10 +1741,15 @@ Status responses should include:
   verification key is compiled into firmware. Version `1` is never advertised.
 - `streamFormatVersions`: accepted device-native stream versions when protocol
   v2 is available.
-- `streamTrust`: exact production verification capabilities, each encoded as
-  `keyId=SHA256(X9.63 public key)`. iOS selects v2 only when the artifact's key
-  identity matches one of these entries; a device with an older or rotated-out
-  trust set rejects installation until firmware or the artifact is updated.
+- `streamTrust`: exact verification capabilities compiled into the running
+  profile, each encoded as `keyId=SHA256(X9.63 public key)`. Ordinary and
+  production firmware advertise only the production registry. Opt-in
+  `*_REMOTE_DEBUG` profiles additionally advertise the Bicino Dev public signer
+  so development-signed streams can be tested on dedicated hardware; release
+  workflows never build those profiles. iOS selects v2 only when the artifact's
+  key identity matches one of these entries; a device with an older or
+  rotated-out trust set rejects installation until firmware or the artifact is
+  updated.
 - `baseUrl`: temporary HTTPS base URL when transfer mode is enabled.
 - `transferGeneration`: nonzero boot-local authorization generation. BLE
   disconnect, exit, or mode replacement increments it so in-flight requests

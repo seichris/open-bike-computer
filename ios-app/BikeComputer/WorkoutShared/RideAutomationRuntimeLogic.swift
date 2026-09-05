@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 
+@MainActor
 protocol RideAutomationBLETransport: AnyObject {
     var onRideAutomationFrame: ((RideAutomationFrame) -> Void)? { get set }
     var connectedDeviceID: String? { get }

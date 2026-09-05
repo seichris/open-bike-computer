@@ -8,6 +8,28 @@ OUT="${TMPDIR:-/tmp}/open-bike-navigation-tests"
 
 cd "${REPO_DIR}"
 
+RENDERER_SCHEDULER_OUT="${TMPDIR:-/tmp}/open-bike-renderer-scheduler-tests"
+xcrun swiftc -D HOST_TESTING -parse-as-library \
+  -o "${RENDERER_SCHEDULER_OUT}" \
+  ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkReplayScheduler.swift \
+  ios-app/BikeComputerTests/RendererBenchmarkReplaySchedulerTests.swift
+"${RENDERER_SCHEDULER_OUT}"
+
+RENDERER_WINDOW_OUT="${TMPDIR:-/tmp}/open-bike-renderer-window-tests"
+xcrun swiftc -D HOST_TESTING -parse-as-library \
+  -o "${RENDERER_WINDOW_OUT}" \
+  ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkWindowAdmission.swift \
+  ios-app/BikeComputerTests/RendererBenchmarkWindowAdmissionTests.swift
+"${RENDERER_WINDOW_OUT}"
+
+RENDERER_DELIVERY_OUT="${TMPDIR:-/tmp}/open-bike-renderer-delivery-tests"
+xcrun swiftc -D HOST_TESTING -parse-as-library \
+  -o "${RENDERER_DELIVERY_OUT}" \
+  ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkOutcome.swift \
+  ios-app/BikeComputerTests/RendererDeliveryRegressionTests.swift
+"${RENDERER_DELIVERY_OUT}"
+
 xcrun swiftc \
   -D HOST_TESTING \
   -o "${OUT}" \
@@ -51,6 +73,9 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/NavigationGeometry.swift \
   ios-app/BikeComputer/RideShared/NavigationRuntime.swift \
   ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
+  ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
+  ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
@@ -173,6 +198,9 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/NavigationGeometry.swift \
   ios-app/BikeComputer/RideShared/NavigationRuntime.swift \
   ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
+  ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
+  ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputerTests/SavedMapPreviewCatalystTests.swift
 
 "${PREVIEW_CATALYST_OUT}"
