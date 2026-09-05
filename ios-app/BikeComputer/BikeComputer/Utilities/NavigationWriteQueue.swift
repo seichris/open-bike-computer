@@ -61,6 +61,36 @@ struct NavigationWriteQueueMetrics: Equatable {
     }
 }
 
+#if DEBUG || HOST_TESTING
+nonisolated struct RendererBenchmarkBLETransportEvidence: Codable,
+                                                              Equatable,
+                                                              Sendable {
+    let schema: Int
+    let capturedAtUptimeMs: UInt64
+    let queueDepth: Int
+    let queueMaximumDepth: Int
+    let oldestPendingAgeMs: Int
+    let retryAgeMs: Int
+    let enqueuedFrames: Int
+    let flushedFrames: Int
+    let droppedFrames: Int
+    let rejectedFrames: Int
+    let coalescedFrames: Int
+    let retrySchedules: Int
+    let backpressureStops: Int
+    let gpsCoalescedFrames: Int
+    let routeCoalescedFrames: Int
+    let settingsCoalescedFrames: Int
+    let inFlightClass: String?
+    let inFlightAgeMs: Int
+    let acknowledgementCompletions: UInt64
+    let acknowledgementErrors: UInt64
+    let acknowledgementTimeouts: UInt64
+    let lastAcknowledgementMs: Int
+    let maximumAcknowledgementMs: Int
+}
+#endif
+
 struct NavigationWrite {
     let data: Data
     let label: String
