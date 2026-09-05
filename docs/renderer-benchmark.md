@@ -319,6 +319,17 @@ These are intentionally predeclared so results cannot be judged against a
 moving target. If physical evidence shows a threshold should change, update it
 in a separate reviewed change before rerunning the experiment.
 
+The first complete pinned-HTTPS iPhone sweep showed that each uncompressed
+434312-byte checkpoint frame occupies the device's single secure HTTP worker
+for roughly five seconds. Metrics collection is intentionally serialized with
+those frame responses, and the TLS setup/response time also extends each
+one-second polling delay. The checked-in sample-fraction floor is therefore
+30%, or at least 36 successful snapshots in a 120-second comparison window.
+This remains above the separate 20-sample memory-trend floor; exact fixture
+markers, GPS cadence, window/build/boot identity, terminal counters, and all
+resource/performance gates remain mandatory. The transport calibration does
+not relax any renderer, memory, DMA, crypto, or continuity threshold.
+
 Per-window memory minima remain the absolute-floor and within-window trend
 evidence: a transient low watermark can still fail the run or expose unsafe
 headroom. Cross-run retained-allocation and fragmentation checks use each
