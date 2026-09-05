@@ -1262,14 +1262,19 @@ with one GPS-characteristic payload:
 
 `GPSLength` must be one of the canonical GPS packet lengths (`8`, `10`, `14`,
 `30`, or `36`), and the complete unprotected frame is at most 85 bytes. The
-frame uses the existing authenticated GPS channel and requires a native
-write-without-response that fits together with its protected-frame overhead;
-there is no acknowledged or navigation-characteristic fallback. Firmware
+frame uses the existing authenticated GPS channel and a native write that fits
+together with its protected-frame overhead. Like ordinary GPS, iOS prefers
+acknowledged writes when advertised and fitting, retaining native
+write-without-response with CoreBluetooth flow control for compatibility.
+There is no navigation-characteristic fallback. Both native ATT write modes
+already enter the firmware's same authenticated GPS callback. Firmware
 validates both members, queues the GPS state first, and accepts the marker only
 if that queue operation succeeded. iOS retains at most one unsent complete
 sample, so coalescing cannot split, reorder, or mismatch GPS and marker state.
-This uses one CoreBluetooth credit per one-Hz tick and prevents the marker from
-being stranded behind the GPS half of the same logical sample.
+This uses one atomic payload per one-Hz tick and prevents the marker from
+being stranded behind the GPS half of the same logical sample. An ATT response
+only confirms transport completion; benchmark acceptance still requires a
+matching marker in the active firmware measurement window.
 
 The iOS secure sweep waits for setup writes and their acknowledgements to
 settle, opens and verifies the HTTPS measurement window and fixture identities,

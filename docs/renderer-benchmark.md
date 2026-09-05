@@ -125,6 +125,11 @@ with at most three attempts per admission. Other HTTP failures and ambiguous
 network failures are not automatically retried by window admission. Stop or
 session revocation during pacing prevents the next normal-run window POST;
 bounded cleanup remains separately responsible for restoring Current.
+Atomic replay uses the same native GPS write selection as ordinary positions:
+acknowledged writes are preferred when supported and fitting. A legacy
+write-without-response-only endpoint still respects transport credits, and a
+sample that fits neither native mode is rejected rather than split or sent on
+the navigation channel. ATT completion never substitutes for a device marker.
 
 For a separately authorized external automation
    harness, put the Mac on the reported LAN or device-hotspot network and store

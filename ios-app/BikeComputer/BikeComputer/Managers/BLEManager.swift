@@ -5640,7 +5640,6 @@ class BLEManager: NSObject, ObservableObject {
               ) else { return false }
 #if HOST_TESTING
         guard let endpoint = navigationWriteEndpoint,
-              !endpoint.expectsWriteResponse,
               packet.count <= endpoint.maximumWriteLength else { return false }
         return enqueueNavigationWrite(
             packet, endpoint: endpoint, label: "renderer benchmark sample",
@@ -5649,18 +5648,35 @@ class BLEManager: NSObject, ObservableObject {
             prioritized: true,
             transportWrite: endpoint.write,
             transportCanSend: endpoint.canSend,
-            transportExpectsWriteResponse: false
+            transportExpectsWriteResponse: endpoint.expectsWriteResponse
         )
 #else
         guard let peripheral = connectedPeripheral,
               let characteristic = gpsPositionCharacteristic,
-              let endpoint = navigationWriteEndpoint,
-              characteristic.properties.contains(.writeWithoutResponse),
-              packet.count + (authenticatedWriteSession == nil ? 0 :
-                AuthenticatedBLEWriteSession.frameOverhead) <=
-                peripheral.maximumWriteValueLength(for: .withoutResponse)
+              let endpoint = navigationWriteEndpoint
         else { return false }
+        let route = GPSPositionWriteRouting.route(
+            hasNativeWriteWithResponse: characteristic.properties.contains(.write),
+            hasNativeWriteWithoutResponse:
+                characteristic.properties.contains(.writeWithoutResponse),
+            payloadLength: packet.count,
+            protectionOverhead: authenticatedWriteSession == nil
+                ? 0 : AuthenticatedBLEWriteSession.frameOverhead,
+            withResponseMaximum: peripheral.maximumWriteValueLength(for: .withResponse),
+            withoutResponseMaximum: peripheral.maximumWriteValueLength(for: .withoutResponse)
+        )
+        let writeType: CBCharacteristicWriteType
+        switch route {
+        case .nativeWithResponse: writeType = .withResponse
+        case .nativeWithoutResponse: writeType = .withoutResponse
+        case .navigationFallback:
+            // RBS1 belongs to the authenticated GPS channel only.
+            return false
+        }
+        let expectsWriteResponse = writeType == .withResponse
         // One authenticated GPS-channel payload, coalesced as a complete unit.
+        // Match ordinary GPS transport selection: prefer an ATT response over
+        // depending on write-without-response credits recovering after setup.
         // Retain the shared writer's authentication, ATT and application-ACK
         // ordering instead of introducing a second writer around it.
         return enqueueNavigationWrite(
@@ -5671,13 +5687,16 @@ class BLEManager: NSObject, ObservableObject {
             transportWrite: { [weak self, weak peripheral, weak characteristic] data in
                 guard let self, let peripheral, let characteristic else { return }
                 self.writeDeviceData(
-                    data, to: characteristic, on: peripheral, type: .withoutResponse
+                    data, to: characteristic, on: peripheral, type: writeType
                 )
             },
-            transportCanSend: { [weak peripheral] in
-                peripheral?.canSendWriteWithoutResponse ?? false
+            transportCanSend: { [weak self, weak peripheral] in
+                if expectsWriteResponse {
+                    return self?.writeWithResponseInFlight == false
+                }
+                return peripheral?.canSendWriteWithoutResponse ?? false
             },
-            transportExpectsWriteResponse: false,
+            transportExpectsWriteResponse: expectsWriteResponse,
             transportCharacteristicUUIDString: characteristic.uuid.uuidString
         )
 #endif

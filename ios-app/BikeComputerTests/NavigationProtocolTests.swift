@@ -14411,6 +14411,24 @@ struct NavigationProtocolTests {
 
 
     static func testRendererBenchmarkAtomicDelivery() {
+        // Full-size atomic samples use the same protected native routing as
+        // ordinary GPS, including MTU boundaries and legacy compatibility.
+        for (withResponse, withoutResponse, acknowledgedLimit, creditLimit, expected) in [
+            (true, true, 107, 107, GPSPositionWriteRoute.nativeWithResponse),
+            (true, false, 107, 0, .nativeWithResponse),
+            (false, true, 0, 107, .nativeWithoutResponse),
+            (true, true, 106, 107, .nativeWithoutResponse),
+            (true, true, 106, 106, .navigationFallback),
+            (false, false, 512, 512, .navigationFallback),
+        ] {
+            assertEqual(GPSPositionWriteRouting.route(
+                hasNativeWriteWithResponse: withResponse,
+                hasNativeWriteWithoutResponse: withoutResponse,
+                payloadLength: 85, protectionOverhead: 22,
+                withResponseMaximum: acknowledgedLimit,
+                withoutResponseMaximum: creditLimit
+            ), expected, "atomic replay respects native properties and protected MTU")
+        }
         let manager = BLEManager()
         manager.isConnected = true
         manager.isNavigationReady = true
@@ -14461,6 +14479,49 @@ struct NavigationProtocolTests {
         }.count, 1, "stop discards pending replay state")
         assert(writes.count > 1, "stop preserves unrelated setup traffic")
         assert(!send(4), "ended lease cannot emit stale replay")
+
+        let acknowledged = BLEManager()
+        assert(acknowledged.handleDeviceCapabilitiesNotification(cap2),
+               "acknowledged replay negotiates the same atomic capability")
+        acknowledged.isConnected = true
+        acknowledged.isNavigationReady = true
+        var acknowledgedWrites: [Data] = []
+        acknowledged.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 185, expectsWriteResponse: true,
+            canSend: { true }, write: { acknowledgedWrites.append($0) }
+        ))
+        guard let acknowledgedLease = acknowledged.beginDeviceGPSOverride() else {
+            assert(false, "acknowledged replay obtains exclusive GPS lease")
+            return
+        }
+        func sendAcknowledged(_ index: Int) -> Bool {
+            acknowledged.sendRendererBenchmarkSample(
+                gpsPosition: Data(repeating: UInt8(index), count: 36),
+                fixtureSHA256: hash, sampleIndex: index, sampleCount: 120, loop: 0
+            )
+        }
+        assert(sendAcknowledged(1), "acknowledged native replay is supported")
+        assert(acknowledged.hasPendingATTWriteForTesting,
+               "atomic replay enters the shared ATT response wait")
+        assert(sendAcknowledged(2) && sendAcknowledged(3),
+               "ticks during ATT wait retain the newest complete sample")
+        assertEqual(acknowledgedWrites.count, 1,
+                    "no sample bypasses the outstanding ATT response")
+        acknowledged.completeNavigationWriteForTesting(error: nil)
+        assertEqual(acknowledgedWrites.count, 2,
+                    "next sample progresses on ATT completion without a credit callback")
+        assertEqual(acknowledgedWrites[1][5], 3,
+                    "acknowledged coalescing retains the latest GPS")
+        assertEqual(readUInt16LE(acknowledgedWrites[1], offset: 77), 3,
+                    "acknowledged coalescing keeps GPS and marker paired")
+        assert(sendAcknowledged(4), "a later tick waits behind the second ATT write")
+        acknowledged.endDeviceGPSOverride(acknowledgedLease)
+        acknowledged.completeNavigationWriteForTesting(error: nil)
+        assertEqual(acknowledgedWrites.count, 2,
+                    "Stop drops pending samples without replaying completed writes")
+        assert(!acknowledged.hasPendingATTWriteForTesting,
+               "the final ATT completion releases the writer")
+        assert(!sendAcknowledged(5), "stopped acknowledged replay cannot emit")
 
         var queue = NavigationWriteQueue(maxCount: 8)
         _ = queue.enqueueCoalescing(NavigationWrite(
