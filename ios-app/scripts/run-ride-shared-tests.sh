@@ -22,6 +22,8 @@ xcrun swiftc \
   BikeComputer/RideShared/NavigationRuntime.swift \
   BikeComputer/RideShared/WatchRouteSyncContract.swift \
   BikeComputer/RideShared/WatchControllerContract.swift \
+  BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  BikeComputer/RideShared/RideBLETransportStateMachine.swift \
   BikeComputer/RideShared/WatchDirectBLEContract.swift \
   BikeComputer/RideShared/NavigationRouteFileStore.swift \
   BikeComputer/RideShared/GPXRouteImporter.swift \

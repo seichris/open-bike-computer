@@ -14,6 +14,21 @@ struct CompiledKey {
 };
 
 #include "map_stream_compiled_keys.generated.inc"
+#if defined(MAP_STREAM_DEVELOPMENT_TRUST) && MAP_STREAM_DEVELOPMENT_TRUST
+#include "map_stream_development_compiled_key.generated.inc"
+#endif
+
+template <typename Callback> bool forEachCompiledKey(Callback callback) {
+  for (const CompiledKey &key : kCompiledKeys) {
+    if (!callback(key))
+      return false;
+  }
+#if defined(MAP_STREAM_DEVELOPMENT_TRUST) && MAP_STREAM_DEVELOPMENT_TRUST
+  if (!callback(kDevelopmentCompiledKey))
+    return false;
+#endif
+  return true;
+}
 
 bool decodeHex(const char *hex, std::array<uint8_t, 65> &bytes) {
   if (hex == nullptr || std::char_traits<char>::length(hex) != bytes.size() * 2)
@@ -41,25 +56,29 @@ bool decodeHex(const char *hex, std::array<uint8_t, 65> &bytes) {
 
 MapStreamTrustStore compiledMapStreamTrustStore() {
   MapStreamTrustStore trust;
-  for (const CompiledKey &key : kCompiledKeys) {
+  const bool valid = forEachCompiledKey([&trust](const CompiledKey &key) {
     std::array<uint8_t, 65> publicKey = {};
     if (!decodeHex(key.publicKeyX963Hex, publicKey) ||
         !trust.add(key.keyId, publicKey.data(), publicKey.size())) {
-      return MapStreamTrustStore();
+      return false;
     }
-  }
+    return true;
+  });
+  if (!valid)
+    return MapStreamTrustStore();
   return trust;
 }
 
 std::string compiledMapStreamTrustCapabilitiesJson() {
   std::string json = "[";
   bool first = true;
-  for (const CompiledKey &key : kCompiledKeys) {
+  forEachCompiledKey([&json, &first](const CompiledKey &key) {
     if (!first)
       json += ",";
     first = false;
     json += "\"" + std::string(key.keyId) + "=" + key.publicKeySha256 + "\"";
-  }
+    return true;
+  });
   json += "]";
   return json;
 }

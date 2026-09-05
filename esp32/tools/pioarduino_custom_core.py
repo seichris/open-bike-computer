@@ -55,6 +55,42 @@ VERIFIED_GENERATED_PROJECT_CLEANUP = '''        for generated_project_name in ("
                     f"{generated_project_path}"
                 ) from error'''
 
+UPSTREAM_COMPONENT_ARCHIVE_COPY = '''        src = [str(Path(lib_src) / x) for x in os.listdir(lib_src)]
+        src = [folder for folder in src if not os.path.isfile(folder)] # folders only
+        for folder in src:
+            files = [str(Path(folder) / x) for x in os.listdir(folder)]
+            for file in files:
+                if file.strip().endswith(".a"):
+                    shutil.copyfile(file, str(Path(lib_dst) / file.split(os.path.sep)[-1]))'''
+VERIFIED_COMPONENT_ARCHIVE_COPY = '''        component_dirs = sorted(
+            path for path in Path(lib_src).iterdir() if path.is_dir()
+        )
+        for component_dir in component_dirs:
+            for archive in sorted(component_dir.iterdir()):
+                if archive.is_file() and archive.suffix == ".a":
+                    shutil.copyfile(archive, Path(lib_dst) / archive.name)
+
+        # The MbedTLS project creates its configurable core archives below the
+        # component directory. The upstream one-level copy leaves the stock
+        # archives in place even though sdkconfig.h advertises the custom core.
+        # Preserve the package's collision-safe libmbedtls_2.a name while
+        # replacing all three libraries with the products of this exact build.
+        nested_mbedtls_dir = (
+            Path(lib_src) / "mbedtls" / "mbedtls" / "library"
+        )
+        for source_name, destination_name in (
+            ("libmbedcrypto.a", "libmbedcrypto.a"),
+            ("libmbedtls.a", "libmbedtls_2.a"),
+            ("libmbedx509.a", "libmbedx509.a"),
+        ):
+            archive = nested_mbedtls_dir / source_name
+            if archive.is_symlink() or not archive.is_file():
+                raise RuntimeError(
+                    "pioarduino custom MbedTLS archive is missing or unsafe: "
+                    f"{archive}"
+                )
+            shutil.copyfile(archive, Path(lib_dst) / destination_name)'''
+
 UPSTREAM_PENV_URLLIB3_REQUIREMENT = '    "urllib3": "<2",'
 CORRECTED_PENV_URLLIB3_REQUIREMENT = '    "urllib3": ">=1.26,<3",'
 
@@ -241,6 +277,23 @@ def correct_generated_project_cleanup(source: str) -> str:
     )
 
 
+def correct_component_archive_copy(source: str) -> str:
+    """Copy nested configurable MbedTLS products into the custom core.
+
+    pioarduino flattens only archives directly below each ESP-IDF component.
+    MbedTLS emits its core TLS, X.509, and crypto archives one level deeper, so
+    without this correction a custom sdkconfig can be paired with stock binary
+    code. Keep the pinned package's established destination names and fail
+    closed if the expected exact build outputs are absent.
+    """
+    return _replace_exactly_once(
+        source,
+        UPSTREAM_COMPONENT_ARCHIVE_COPY,
+        VERIFIED_COMPONENT_ARCHIVE_COPY,
+        "component archive copy",
+    )
+
+
 def pioarduino_transform_source_sha256() -> str:
     """Identify the exact repository-owned pre-execution transform source."""
     source = Path(__file__)
@@ -366,7 +419,9 @@ def correct_espidf_setup_text(source: str) -> str:
 def correct_espidf_text(source: str) -> str:
     """Apply every verified transform to pioarduino's ESP-IDF builder."""
     return correct_generated_project_cleanup(
-        correct_espidf_setup_text(correct_nested_pio_command(source))
+        correct_component_archive_copy(
+            correct_espidf_setup_text(correct_nested_pio_command(source))
+        )
     )
 
 

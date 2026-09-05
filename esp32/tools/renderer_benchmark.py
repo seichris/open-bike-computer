@@ -44,9 +44,9 @@ DEFAULT_ROUTE_FIXTURE = (
     / "renderer-benchmark-shanghai-v1.json"
 )
 DEFAULT_GATES = Path(__file__).with_name("renderer_benchmark_gates.json")
-PINNED_ROUTE_ID = "shanghai-center-renderer-v1"
+PINNED_ROUTE_ID = "shanghai-jingan-renderer-v1"
 PINNED_ROUTE_SHA256 = (
-    "d5171f6b30478a09948381bbdb86da33752bc646fa6077153f69a4bd840eb36e"
+    "0fec6228e89cdb6841b971226c5fdedcc5e711dcb9b0e72bcaf95da4f6452f64"
 )
 
 
@@ -629,6 +629,28 @@ def monotonic_decline(
     )
 
 
+def progressive_cross_run_decline(
+    values: list[int], *, allowed_decline: int
+) -> bool:
+    if len(values) < 3:
+        return False
+    normalized = [int(value) for value in values]
+    allowed = max(0, int(allowed_decline))
+    continuation_noise = max(1, allowed // 4)
+    downward_steps: list[int] = []
+    for previous, current in zip(normalized, normalized[1:]):
+        delta = previous - current
+        if delta < -continuation_noise:
+            return False
+        downward_steps.append(max(0, delta))
+    if normalized[0] - normalized[-1] <= allowed:
+        return False
+    largest_step = max(downward_steps, default=0)
+    # One cache/allocation transition is not progressive leakage. A failure
+    # requires meaningful continued decline beyond that step.
+    return sum(downward_steps) - largest_step > continuation_noise
+
+
 def expected_checkpoint_indexes(
     sample_count: int, fractions: Iterable[float]
 ) -> list[int]:
@@ -1107,45 +1129,50 @@ def apply_cross_run_memory_gates(
     trend = gates["trend"]
     checks = (
         (
-            "minimumInternalFree",
+            ("internalHeap", "free"),
             "crossRunInternalAllowedDeclineBytes",
             "cross_run_internal_decline",
         ),
         (
-            "minimumInternalLargest",
+            ("internalHeap", "largestBlock"),
             "crossRunInternalAllowedDeclineBytes",
             "cross_run_internal_largest_decline",
         ),
         (
-            "minimumPsramFree",
+            ("psram", "free"),
             "crossRunPsramAllowedDeclineBytes",
             "cross_run_psram_decline",
         ),
         (
-            "minimumPsramLargest",
+            ("psram", "largestBlock"),
             "crossRunPsramAllowedDeclineBytes",
             "cross_run_psram_largest_decline",
         ),
         (
-            "minimumDmaFree",
+            ("dmaHeap", "free"),
             "crossRunDmaAllowedDeclineBytes",
             "cross_run_dma_decline",
         ),
         (
-            "minimumDmaLargest",
+            ("dmaHeap", "largestBlock"),
             "crossRunDmaAllowedDeclineBytes",
             "cross_run_dma_largest_decline",
         ),
     )
     for profile in PROFILES:
-        profile_runs = [run for run in runs if run["profile"] == profile]
+        profile_runs = sorted(
+            (run for run in runs if run["profile"] == profile),
+            key=lambda run: run["repeat"],
+        )
         if len(profile_runs) < 3:
             continue
-        for metric, allowed_key, label in checks:
-            values = [run["summary"][metric] for run in profile_runs]
-            if (
-                all(right < left for left, right in zip(values, values[1:]))
-                and values[0] - values[-1] > trend[allowed_key]
+        for memory_path, allowed_key, label in checks:
+            values = [
+                nested(run["finalSnapshot"], "memory", *memory_path)
+                for run in profile_runs
+            ]
+            if progressive_cross_run_decline(
+                values, allowed_decline=trend[allowed_key]
             ):
                 for run in profile_runs:
                     run["failures"] = sorted(set(run["failures"] + [label]))

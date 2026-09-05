@@ -311,6 +311,34 @@ enum RemoteDeviceDebugSessionPolicy {
             .appendingPathComponent("device-debug", isDirectory: true)
     }
 
+    static func hasSameAuthorizationIdentity(
+        _ candidate: DeviceTransferSession?,
+        as expected: DeviceTransferSession
+    ) -> Bool {
+        guard let candidate,
+              candidate.mode == .debug,
+              expected.mode == .debug,
+              let candidateToken = candidate.sessionToken,
+              let expectedToken = expected.sessionToken,
+              DeviceTransferSecurityPolicy.normalizedTransferToken(
+                candidateToken
+              ) == candidateToken,
+              DeviceTransferSecurityPolicy.normalizedTransferToken(
+                expectedToken
+              ) == expectedToken,
+              pageURL(for: candidate) != nil,
+              pageURL(for: expected) != nil else {
+            return false
+        }
+        return candidate.baseURL == expected.baseURL &&
+            candidateToken == expectedToken &&
+            candidate.tlsCertificateSHA256 ==
+                expected.tlsCertificateSHA256 &&
+            candidate.tlsIdentityVersion == expected.tlsIdentityVersion &&
+            candidate.transferGeneration == expected.transferGeneration &&
+            candidate.secureTransferV1 == expected.secureTransferV1
+    }
+
     static func sessionDetails(
         for session: DeviceTransferSession,
         target: String,

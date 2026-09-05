@@ -42,6 +42,8 @@ _NON_RETRYABLE_BUILD_ERROR_CODES = frozenset(
         "building_storage_admission",
         "building_worker_oom",
         "building_workload_receipt_mismatch",
+        "generic_geometry_amplification_limit",
+        "generic_geometry_invalid",
     }
 )
 

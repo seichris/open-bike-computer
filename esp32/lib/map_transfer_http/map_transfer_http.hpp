@@ -75,6 +75,8 @@ private:
                      device_transfer::TransferClient &client) override;
   void responseDidComplete(const device_transfer::HttpRequest &request,
                            bool peerClosedCleanly) override;
+  void responseDidAbort(
+      const device_transfer::HttpRequest &request) override;
   bool handleInstallStream(const device_transfer::HttpRequest &request,
                            device_transfer::TransferClient &client);
   void handleStatus(device_transfer::TransferClient &client);
