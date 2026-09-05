@@ -306,10 +306,6 @@ def record_link_finish(target, source, env):
 
 if deterministic_build and firmware_target.startswith("WAVESHARE_AMOLED_"):
     link_target = "$BUILD_DIR/${PROGNAME}.elf"
-    # SCons caches the ELF but not the linker's firmware.map side output.
-    # Always link this target so TLS verification and link timing describe
-    # this build; object files and libraries remain cacheable.
-    env.NoCache(link_target)
     env.AddPreAction(link_target, record_link_start)
     env.AddPostAction(link_target, record_link_finish)
 
