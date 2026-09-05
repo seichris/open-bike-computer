@@ -12,6 +12,16 @@
 
 namespace renderer_diagnostics {
 
+#if FIRMWARE_DIAGNOSTICS && defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+DeliveryCallbackTiming beginDeliveryCallback(uint8_t channel, uint32_t nowMs);
+void completeDeliveryCallback(DeliveryCallbackTiming value);
+void noteDeliveryOwner(const DeliveryOwnerTiming &value);
+#else
+inline DeliveryCallbackTiming beginDeliveryCallback(uint8_t, uint32_t) { return {}; }
+inline void completeDeliveryCallback(DeliveryCallbackTiming) {}
+inline void noteDeliveryOwner(const DeliveryOwnerTiming &) {}
+#endif
+
 #if FIRMWARE_DIAGNOSTICS
 void configureBuildIdentity(const char *deviceId, const char *firmwareCommit,
                             const char *board, const char *buildProfile,

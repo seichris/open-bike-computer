@@ -1,5 +1,7 @@
 #pragma once
 
+#include "renderer_delivery_timing.hpp"
+
 #include "../renderer_tuning/renderer_tuning.hpp"
 
 #include <algorithm>
@@ -363,6 +365,9 @@ struct Snapshot {
   bool routeFixtureMatches = false;
   ReplayTransportDiagnostics replayTransport{};
   RemoteDebugOverhead remoteDebug{};
+#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+  DeliveryTimingSnapshot deliveryTiming{};
+#endif
 };
 
 class State {

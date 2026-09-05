@@ -1,5 +1,11 @@
 # BLE Protocol
 
+Remote-debug renderer metrics may additionally expose schema-1 `deliveryTiming`
+records; see [delivery-stage timing](renderer-benchmark.md#completed-results-and-delivery-stage-timing).
+These payload-free, device-clock diagnostic fields do not change BLE framing,
+authentication, UUIDs, capability negotiation, or ATT/application-ACK semantics.
+Ordinary and production profiles omit them; clients must accept their absence.
+
 The ESP32 advertises BLE service UUID
 `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800` under its user-assigned device name.
 An unregistered device uses `BikeComputer XXYY`, where `XXYY` is derived from

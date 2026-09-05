@@ -803,6 +803,11 @@ struct PendingMapInput {
   uint32_t payloadGeneration = 0;
   uint8_t *data = nullptr;
   gps_input_freshness::ArrivalBatch gpsArrivals{};
+#if FIRMWARE_DIAGNOSTICS && defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+  uint32_t timingSession = 0;
+  uint32_t timingOrdinal = 0;
+  uint32_t admittedAtUs = 0;
+#endif
 };
 struct PendingRouteRideDelivery {
   bool pending = false;
@@ -908,13 +913,72 @@ static void advanceRidePayloadGeneration() {
   }
 }
 
+// Native route/GPS timing only; ordinary/production builds optimize this away.
+// Declared before ScopedNimbleCallback at callsites so its MTU query and teardown
+// remain inside callbackUs. No allocation, logging, or payload capture here.
+class DeliveryCallbackScope {
+public:
+#if FIRMWARE_DIAGNOSTICS && defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+  explicit DeliveryCallbackScope(uint8_t channel)
+      : startedUs_(micros()), phaseUs_(startedUs_),
+        value_(renderer_diagnostics::beginDeliveryCallback(channel, millis())) {}
+  ~DeliveryCallbackScope() {
+    if (!authFinished_) authenticated(false);
+    value_.callbackUs = micros() - startedUs_;
+    renderer_diagnostics::completeDeliveryCallback(value_);
+  }
+  void setupComplete() {
+    const uint32_t now = micros();
+    value_.setupUs = now - startedUs_;
+    phaseUs_ = now;
+  }
+  void authenticated(bool accepted) {
+    value_.authenticationUs = micros() - phaseUs_;
+    value_.authenticated = accepted;
+    authFinished_ = true;
+  }
+  void beginMailbox() { phaseUs_ = micros(); }
+  void allocated() {
+    const uint32_t now = micros();
+    value_.allocationUs = now - phaseUs_;
+    phaseUs_ = now;
+  }
+  void locked() {
+    const uint32_t now = micros();
+    value_.mailboxWaitUs = now - phaseUs_;
+    phaseUs_ = now;
+  }
+  void released() {
+    value_.mailboxHoldUs = micros() - phaseUs_;
+    value_.mailboxAccepted = true;
+  }
+  uint32_t session() const { return value_.session; }
+  uint32_t ordinal() const { return value_.ordinal; }
+private:
+  uint32_t startedUs_;
+  uint32_t phaseUs_;
+  renderer_diagnostics::DeliveryCallbackTiming value_;
+  bool authFinished_ = false;
+#else
+  explicit DeliveryCallbackScope(uint8_t) {}
+  void setupComplete() {}
+  void authenticated(bool) {}
+  void beginMailbox() {}
+  void allocated() {}
+  void locked() {}
+  void released() {}
+#endif
+};
+
 static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
                           size_t len, const char *source,
                           const ride_delivery_protocol::CommandMember
                               *rideDeliveryMember = nullptr,
                           uint32_t rideDeliveryLeaseGeneration = 0,
                           ride_delivery_protocol::Result rideDeliveryResult =
-                              ride_delivery_protocol::Result::Success) {
+                              ride_delivery_protocol::Result::Success,
+                          DeliveryCallbackScope *timing = nullptr) {
+  if (timing != nullptr) timing->beginMailbox();
   if (pendingMapInputMutex == nullptr || len > MAX_PENDING_MAP_INPUT_BYTES ||
       (len > 0 && data == nullptr)) {
     Serial.printf("BLE: rejected queued map input type=%u len=%u\n",
@@ -972,10 +1036,12 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
     break;
   }
 
+  if (timing != nullptr) timing->allocated();
   if (xSemaphoreTake(pendingMapInputMutex, portMAX_DELAY) != pdTRUE) {
     free(input.data);
     return false;
   }
+  if (timing != nullptr) timing->locked();
   PendingMapInput replaced = *slot;
   PendingRouteRideDelivery replacedRouteDelivery{};
   bool rejectedReplacedRouteDelivery = false;
@@ -1001,6 +1067,13 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
     input.gpsArrivals = replaced.gpsArrivals;
     input.gpsArrivals.observe(gpsReceivedAtMs);
   }
+#if FIRMWARE_DIAGNOSTICS && defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+  if (timing != nullptr) {
+    input.timingSession = timing->session();
+    input.timingOrdinal = timing->ordinal();
+    input.admittedAtUs = micros();
+  }
+#endif
   *slot = input;
   if (!replaced.pending) {
     pendingMapInputCount.fetch_add(1, std::memory_order_release);
@@ -1011,6 +1084,7 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
         static_cast<uint8_t>(1U << (settingId % 8));
   }
   xSemaphoreGive(pendingMapInputMutex);
+  if (timing != nullptr) timing->released();
   // Latest-state mailboxes make periodic GPS and repeated route/settings
   // updates bounded without ever dropping the newest authoritative value.
   free(replaced.data);
@@ -4643,6 +4717,10 @@ static void processPendingMapInputs() {
     }
 
     const char *source = input.fallback ? "fallback" : "native";
+#if FIRMWARE_DIAGNOSTICS && defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+    const uint32_t ownerStartedUs = micros();
+    const uint32_t ownerStartedMs = millis();
+#endif
     switch (input.type) {
     case PendingMapInputType::Route:
       handleRouteGeometryPayload(input.data, input.length, source);
@@ -4654,6 +4732,18 @@ static void processPendingMapInputs() {
       handleMapSettingPayload(input.data, input.length, source);
       break;
     }
+#if FIRMWARE_DIAGNOSTICS && defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+    if (input.timingSession != 0) {
+      renderer_diagnostics::DeliveryOwnerTiming value{};
+      value.session = input.timingSession;
+      value.ordinal = input.timingOrdinal;
+      value.channel = input.type == PendingMapInputType::Route ? 1 : 2;
+      value.startedAtMs = ownerStartedMs;
+      value.mailboxAgeUs = ownerStartedUs - input.admittedAtUs;
+      value.processingUs = micros() - ownerStartedUs;
+      renderer_diagnostics::noteDeliveryOwner(value);
+    }
+#endif
     free(input.data);
     return true;
   };
@@ -5197,7 +5287,9 @@ public:
 class MyRouteCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    DeliveryCallbackScope timing(1);
     ScopedNimbleCallback callbackScope;
+    timing.setupComplete();
     const std::string frame = pChar->getValue();
     std::string value;
     if (!unwrapOwnerAuthenticatedPayload(
@@ -5209,6 +5301,7 @@ public:
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Route);
       return;
     }
+    timing.authenticated(true);
     ride_delivery_protocol::CommandMember deliveryMember{};
     const RideDeliveryDecodeResult deliveryDecode = decodeRideDeliveryPayload(
         value, ride_delivery_protocol::CommandType::NavigationClear,
@@ -5244,7 +5337,8 @@ public:
     const bool accepted = queueMapInput(
         PendingMapInputType::Route, payload, payloadLength, "native",
         hasDeliveryMember ? &deliveryMember : nullptr,
-        deliveryLeaseGeneration);
+        deliveryLeaseGeneration, ride_delivery_protocol::Result::Success,
+        &timing);
     if (hasDeliveryMember && !accepted) {
       noteRideDeliveryMember(
           deliveryMember, ride_delivery_protocol::Result::ResourceRejected,
@@ -5256,7 +5350,9 @@ public:
 class MyGPSCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    DeliveryCallbackScope timing(2);
     ScopedNimbleCallback callbackScope;
+    timing.setupComplete();
     const std::string frame = pChar->getValue();
     const uint32_t receivedAtMs = millis();
     std::string value;
@@ -5278,6 +5374,7 @@ public:
 #if FIRMWARE_DIAGNOSTICS
     renderer_diagnostics::noteGpsAuthentication(true, receivedAtMs);
 #endif
+    timing.authenticated(true);
 
 #if FIRMWARE_DIAGNOSTICS
     const uint8_t *bytes = reinterpret_cast<const uint8_t *>(value.data());
@@ -5294,10 +5391,11 @@ public:
       const auto result =
           renderer_diagnostics_ble_protocol::dispatchReplaySample(
               bytes, value.length(),
-              [](const uint8_t *gpsPayload, size_t gpsPayloadLength) {
+              [&timing](const uint8_t *gpsPayload, size_t gpsPayloadLength) {
                 const bool accepted = queueMapInput(
                     PendingMapInputType::Gps, gpsPayload, gpsPayloadLength,
-                    "native");
+                    "native", nullptr, 0, ride_delivery_protocol::Result::Success,
+                    &timing);
                 renderer_diagnostics::noteReplayGpsMailbox(accepted, millis());
                 return accepted;
               },
@@ -5333,7 +5431,8 @@ public:
 #endif
 
     queueMapInput(PendingMapInputType::Gps, (const uint8_t *)value.data(),
-                  value.length(), "native");
+                  value.length(), "native", nullptr, 0,
+                  ride_delivery_protocol::Result::Success, &timing);
   }
 };
 

@@ -1246,6 +1246,8 @@ class BLEManager: NSObject, ObservableObject {
     private var lastTimedOutWriteID: UInt64?
     private var lastTimedOutSubmissionStage: BLEWriteSubmissionStage?
     private var ignoredATTWriteCallbacks: UInt64 = 0
+    private var lastATTWriteTiming: RendererATTWriteTiming?
+    private var slowestATTWriteTiming: RendererATTWriteTiming?
 #endif
     private enum ATTWriteOwner: Equatable {
         case authentication
@@ -1264,6 +1266,9 @@ class BLEManager: NSObject, ObservableObject {
         let applicationCommandID: UUID?
 #if DEBUG || HOST_TESTING
         var submissionStage: BLEWriteSubmissionStage = .prepared
+        var apiEntryAtUptimeMs: UInt64?
+        var apiReturnAtUptimeMs: UInt64?
+        var delegateEntryAtUptimeMs: UInt64?
 #endif
     }
     private var pendingATTWrite: PendingATTWrite?
@@ -3635,6 +3640,7 @@ class BLEManager: NSObject, ObservableObject {
                 endpoint: endpoint,
                 label: "native route geometry",
                 writeClass: .route,
+                coalescingKey: data.isEmpty ? nil : "route-geometry-snapshot",
                 atomically: true,
                 transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
                     guard let self, let peripheral, let characteristic else { return }
@@ -6319,6 +6325,19 @@ class BLEManager: NSObject, ObservableObject {
         flushPendingNavigationWrites(endpoint: endpoint)
     }
 
+    @discardableResult
+    func enqueueRouteSnapshotForTesting(_ data: Data) -> Bool {
+        guard let endpoint = navigationWriteEndpoint else { return false }
+        return enqueueNavigationWrite(
+            data, endpoint: endpoint, label: "test native route snapshot",
+            writeClass: .route,
+            coalescingKey: data.isEmpty ? nil : "route-geometry-snapshot",
+            atomically: true, transportWrite: endpoint.write,
+            transportCanSend: endpoint.canSend,
+            transportExpectsWriteResponse: endpoint.expectsWriteResponse
+        )
+    }
+
     func installNavigationWriteStallRecoveryForTesting(
         timeout: TimeInterval,
         recovery: @escaping () -> Void
@@ -7487,7 +7506,10 @@ class BLEManager: NSObject, ObservableObject {
             coalescingKey: coalescingKey
         )
         let didEnqueue: Bool
-        if coalescingKey != nil {
+        if writeClass == .route, atomically, !prioritized,
+           applicationCommandID == nil, coalescingKey != nil {
+            didEnqueue = navigationWriteQueue.enqueueLatestRouteSnapshot(write)
+        } else if coalescingKey != nil {
             didEnqueue = navigationWriteQueue.enqueueCoalescing(
                 write,
                 prioritized: prioritized
@@ -8001,7 +8023,9 @@ class BLEManager: NSObject, ObservableObject {
             inFlightSubmissionStage: pendingATTWrite?.submissionStage,
             lastTimedOutWriteID: lastTimedOutWriteID,
             lastTimedOutSubmissionStage: lastTimedOutSubmissionStage,
-            ignoredWriteCallbacks: ignoredATTWriteCallbacks
+            ignoredWriteCallbacks: ignoredATTWriteCallbacks,
+            lastWriteTiming: lastATTWriteTiming,
+            slowestWriteTiming: slowestATTWriteTiming
         )
     }
 #endif
@@ -8018,6 +8042,22 @@ class BLEManager: NSObject, ObservableObject {
         )
 #if DEBUG || HOST_TESTING
         if pending.owner == .ride {
+            let timing = RendererATTWriteTiming(
+                writeID: pending.writeID,
+                connectionGeneration: pending.connectionGeneration,
+                writeClass: pending.writeClass.rawValue,
+                preparedAtUptimeMs: UInt64(max(0, pending.startedAtUptime * 1_000)),
+                apiEntryAtUptimeMs: pending.apiEntryAtUptimeMs,
+                apiReturnAtUptimeMs: pending.apiReturnAtUptimeMs,
+                delegateEntryAtUptimeMs: pending.delegateEntryAtUptimeMs,
+                completedAtUptimeMs: UInt64(ProcessInfo.processInfo.systemUptime * 1_000),
+                outcome: timedOut ? "timeout" : (error == nil ? "success" : "error")
+            )
+            lastATTWriteTiming = timing
+            if slowestATTWriteTiming == nil ||
+                timing.durationMs > (slowestATTWriteTiming?.durationMs ?? 0) {
+                slowestATTWriteTiming = timing
+            }
             if timedOut {
                 navigationWriteAcknowledgementTimeouts &+= 1
                 lastTimedOutWriteID = pending.writeID
@@ -8354,6 +8394,12 @@ class BLEManager: NSObject, ObservableObject {
               pending.connectionGeneration == rideDeliveryConnectionGeneration,
               pending.characteristicUUID == characteristicUUID else { return }
         pendingATTWrite?.submissionStage = stage
+        let nowMs = UInt64(ProcessInfo.processInfo.systemUptime * 1_000)
+        if stage == .callingCoreBluetooth {
+            pendingATTWrite?.apiEntryAtUptimeMs = nowMs
+        } else if stage == .submitted {
+            pendingATTWrite?.apiReturnAtUptimeMs = nowMs
+        }
         var fields = [
             "attemptId": String(writeID),
             "connectionGeneration": String(pending.connectionGeneration),
@@ -9145,6 +9191,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, 
                    didWriteValueFor characteristic: CBCharacteristic, 
                    error: Error?) {
+#if DEBUG || HOST_TESTING
+        let delegateEntryMs = UInt64(ProcessInfo.processInfo.systemUptime * 1_000)
+#endif
         guard BLELocalForgetPolicy.acceptsCallback(
             peripheralIdentifier: peripheral.identifier,
             currentIdentifier: connectedPeripheral?.identifier,
@@ -9162,6 +9211,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
 #endif
             return
         }
+ #if DEBUG || HOST_TESTING
+        pendingATTWrite?.delegateEntryAtUptimeMs = delegateEntryMs
+ #endif
         if let error = error {
             log("Error writing characteristic \(characteristic.uuid): \(error.localizedDescription); props=\(characteristic.properties.debugDescription)")
             if pending.owner == .authentication {

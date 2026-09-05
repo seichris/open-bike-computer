@@ -120,6 +120,69 @@ and device window/marker state when a metrics response is available. Failure
 and manual-stop observations are captured before cleanup clears replay state.
 These diagnostics distinguish app emission from BLE delivery without exporting
 session credentials; they do not substitute for a successful physical sweep.
+
+### Completed results and delivery-stage timing
+
+The result model separates completed measurements, user/lifecycle cancellation,
+transport abort, Current-profile restoration, and evidence-export failure.
+`renderer-benchmark-outcome.json` preserves this result alongside the existing
+report. A completed sweep with one failed comparison remains failed even if the
+selected candidate's soak passed. Known freshness failures show profile/repeat,
+observed value and unchanged limit; marker age is a sampled maximum. Unknown
+gate strings remain visible. A ZIP write failure retains checked evidence for
+**Retry Evidence Export**, without requiring a live BLE session. Starting a new
+sweep replaces the retained previous result/retry.
+
+Native ordinary route snapshots may replace only obsolete unsent snapshots
+after the last route/clear boundary. Application-command members, protected
+traffic, GPS priority, framing and the pending acknowledged ATT slot retain
+their existing semantics. This bounds recovery backlog; it cannot shorten
+an already submitted ATT transaction or fix a 3.391-second service interval
+against a 2.5-second freshness gate.
+
+Per-poll samples retain optional `gps`, `replayTransport`, `remoteDebug`, and
+`deliveryTiming` objects from the same metrics response. Older archives and
+firmware may omit the additions. App transport evidence includes the latest
+and slowest completed ride-write timings since BLEManager creation, including
+write ID, connection generation, class, preparation, API entry/return, Swift
+delegate entry, completion and outcome. A timeout has no fabricated delegate
+timestamp. Compare within the app monotonic clock only; API return is not proof
+of radio transmission and delegate entry is not an iOS-host receipt timestamp.
+
+Only `DEVICE_REMOTE_DEBUG` firmware collects `deliveryTiming` (schema 1).
+It retains the latest completed native route/GPS callback and the slowest of
+each channel for the diagnostic session, plus latest/slowest owner processing.
+The fixed collector is at most 256 bytes, plus three UInt32 metadata fields
+per mailbox slot and bounded callback/snapshot stack copies. Settings slots
+share the mailbox type, so their existing PSRAM allocation also grows by
+12 bytes per slot even though settings callbacks are not traced. There is no
+callback allocation or logging by this instrumentation. Session reset fences old in-flight timing records;
+window reset does not erase a recovered stall during the remaining soak.
+Records contain only numeric metadata and booleans, never payloads or secrets.
+Channel 1 is route and 2 is GPS. Firmware ordinal/session identifiers correlate
+mailbox admission and owner processing, not app write IDs.
+
+`callbackUs` encloses `ScopedNimbleCallback` setup/MTU query and teardown.
+`setupUs` measures entry through setup; `authenticationUs` includes value copy,
+unwrap and authorization; `allocationUs` includes mailbox validation/allocation
+and slot selection; `mailboxWaitUs` and `mailboxHoldUs` bracket the mutex.
+Callback remainder includes protocol parsing, replaced-buffer release and
+notifications. Owner `mailboxAgeUs` ends at processing entry; `processingUs`
+covers the payload handler, not render publication. Superseded, rejected or
+generation-invalid inputs need not have an owner record. Durations use unsigned
+device micros subtraction (one wrap supported); device milliseconds provide
+coarse local ordering. Frame-active booleans sample callback entry/exit only,
+not complete overlap. No extra HTTP requests or screenshot changes are made.
+
+These are completed-operation records, not a complete event ring or live stack
+trace. A stuck callback has no completion record. Slow firmware stages support
+targeted software investigation; short firmware stages with a long app wait
+still require host/HCI metadata to separate callback dispatch from link/radio
+delay. Neither correlation with TLS activity nor these tests prove RF causality.
+Keep all gates, workload and production defaults unchanged. After confirming
+and flashing the exact debug target, repeat paired full sweeps, retain every
+failure, and inspect both clocks separately before choosing a root-cause fix.
+
 All app window changes (including setup and cleanup) share a 1.1-second
 response-to-request cooldown to respect the firmware's one-second admission
 limit. Only explicit `429 renderer_window_rate_limited` responses are retried,

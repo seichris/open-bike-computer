@@ -727,6 +727,7 @@ struct NavigationProtocolTests {
         testSecureRendererBenchmarkReadiness()
         testRendererBenchmarkAtomicDelivery()
         testATTWriteSubmissionEvidence()
+        testRouteSnapshotManagerAdmission()
         testNavigationDrainIncludesAcknowledgement()
         testDeviceBLEProtocolConstants()
         testWorkoutDeviceFrameVectors()
@@ -14545,6 +14546,39 @@ struct NavigationProtocolTests {
                     "cumulative queue depth remains a live gauge")
     }
 
+    static func testRouteSnapshotManagerAdmission() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        var writes: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 185, expectsWriteResponse: true,
+            canSend: { true }, write: { writes.append($0) }
+        ))
+        assert(manager.enqueueRouteSnapshotForTesting(Data([1])), "first route enters ATT")
+        let originalID = manager.rendererBenchmarkBLETransportEvidence().inFlightWriteID
+        for index in 2...100 {
+            assert(manager.enqueueRouteSnapshotForTesting(Data([UInt8(index)])),
+                   "new unsent route replaces obsolete snapshot through real admission")
+        }
+        let blocked = manager.rendererBenchmarkBLETransportEvidence()
+        assertEqual(writes.count, 1, "route replacement cannot bypass ATT wait")
+        assertEqual(blocked.inFlightWriteID, originalID, "pending identity unchanged")
+        assertEqual(blocked.queueDepth, 1, "manager bounds pending route backlog")
+        assertEqual(blocked.routeCoalescedFrames, 98, "manager uses snapshot admission")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(writes, [Data([1]), Data([100])], "only newest unsent route recovers")
+        assert(manager.enqueueRouteSnapshotForTesting(Data()), "empty clear remains admitted")
+        assert(manager.enqueueRouteSnapshotForTesting(Data([101])), "route after clear")
+        assert(manager.enqueueRouteSnapshotForTesting(Data([102])), "replace only after clear")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(writes.last, Data(), "clear boundary is not coalesced away")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(writes.last, Data([102]), "latest route follows clear")
+        manager.completeNavigationWriteForTesting(error: nil)
+        assert(!manager.hasPendingATTWriteForTesting, "writer drains normally")
+    }
+
     static func testATTWriteSubmissionEvidence() {
         let manager = BLEManager()
         manager.isConnected = true
@@ -14576,6 +14610,14 @@ struct NavigationProtocolTests {
                "timeout evidence survives clearing the pending write")
         assertEqual(timedOut.lastTimedOutSubmissionStage, .submitted,
                     "timeout records that CoreBluetooth returned without an ACK")
+        let timing = timedOut.lastWriteTiming!
+        assertEqual(timing.writeID, writeID, "timing uses the real pending ATT identity")
+        assert(timing.apiEntryAtUptimeMs != nil && timing.apiReturnAtUptimeMs != nil,
+               "actual manager stage transitions retain API timestamps")
+        assert(timing.delegateEntryAtUptimeMs == nil,
+               "timeout does not invent a delegate callback")
+        assertEqual(timing.outcome, "timeout", "timing retains completion reason")
+        assert(timedOut.slowestWriteTiming != nil, "tail evidence survives pending-slot removal")
         assert(manager.requestDeviceCapabilities(), "next ATT write starts independently")
         manager.noteATTWriteSubmissionForTesting(writeID: writeID, stage: .submitted)
         assertEqual(manager.rendererBenchmarkBLETransportEvidence().inFlightSubmissionStage,
@@ -14597,7 +14639,8 @@ struct NavigationProtocolTests {
         assert(RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(jsonData: encoded),
                "submission evidence contains no credentials or packet contents")
         for key in ["inFlightWriteID", "inFlightSubmissionStage", "lastTimedOutWriteID",
-                    "lastTimedOutSubmissionStage", "ignoredWriteCallbacks"] {
+                    "lastTimedOutSubmissionStage", "ignoredWriteCallbacks",
+                    "lastWriteTiming", "slowestWriteTiming"] {
             legacy.removeValue(forKey: key)
         }
         let legacyData = try! JSONSerialization.data(withJSONObject: legacy)
@@ -14605,6 +14648,8 @@ struct NavigationProtocolTests {
                                                 from: legacyData)
         assert(decoded.lastTimedOutSubmissionStage == nil && decoded.ignoredWriteCallbacks == nil,
                "legacy evidence remains unknown rather than inventing submission state")
+        assert(decoded.lastWriteTiming == nil && decoded.slowestWriteTiming == nil,
+               "older app traces need no new timing fields")
         for key in ["attemptId", "connectionGeneration", "class", "bytes", "phase", "reason", "kind"] {
             assert(RideDiagnosticsFieldPolicy.isAllowed(key),
                    "submission trace metadata survives the recorder privacy filter")

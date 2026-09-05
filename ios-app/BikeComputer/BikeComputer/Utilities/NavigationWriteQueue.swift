@@ -69,6 +69,25 @@ nonisolated enum BLEWriteSubmissionStage: String, Codable, Sendable {
     case rejectedBeforeSubmission = "rejected_before_submission"
 }
 
+/// App monotonic clock only. Delegate entry is the Swift callback boundary,
+/// not the time an ATT response reached the radio or the iOS Bluetooth host.
+nonisolated struct RendererATTWriteTiming: Codable, Equatable, Sendable {
+    let writeID: UInt64
+    let connectionGeneration: UInt64
+    let writeClass: String
+    let preparedAtUptimeMs: UInt64
+    let apiEntryAtUptimeMs: UInt64?
+    let apiReturnAtUptimeMs: UInt64?
+    let delegateEntryAtUptimeMs: UInt64?
+    let completedAtUptimeMs: UInt64
+    let outcome: String
+
+    var durationMs: UInt64 {
+        completedAtUptimeMs >= preparedAtUptimeMs ?
+            completedAtUptimeMs - preparedAtUptimeMs : 0
+    }
+}
+
 nonisolated struct RendererBenchmarkBLETransportEvidence: Codable,
                                                               Equatable,
                                                               Sendable {
@@ -101,6 +120,8 @@ nonisolated struct RendererBenchmarkBLETransportEvidence: Codable,
     var lastTimedOutWriteID: UInt64? = nil
     var lastTimedOutSubmissionStage: BLEWriteSubmissionStage? = nil
     var ignoredWriteCallbacks: UInt64? = nil
+    var lastWriteTiming: RendererATTWriteTiming? = nil
+    var slowestWriteTiming: RendererATTWriteTiming? = nil
 }
 #endif
 
@@ -405,6 +426,56 @@ struct NavigationWriteQueue {
         })
         recordEnqueuedFrames(writes.count)
         recordDepth()
+        return true
+    }
+
+    /// Replaces only an unsent, complete route snapshot. Unlike ordinary
+    /// coalescing, this never evicts unrelated traffic or weakens the admitted
+    /// frame's protection. Application-command members and route-clear/state
+    /// boundaries are not replaceable. The outstanding ATT slot is untouched.
+    @discardableResult
+    mutating func enqueueLatestRouteSnapshot(_ write: NavigationWrite) -> Bool {
+        guard write.writeClass == .route,
+              write.applicationCommandID == nil,
+              let key = write.coalescingKey, !key.isEmpty,
+              !write.data.isEmpty,
+              write.data.count <= Self.maximumFrameBytes,
+              !pendingPriorityWrites.contains(where: {
+                  $0.coalescingKey == key
+              }) else {
+            recordRejectedFrames(1)
+            return false
+        }
+        // Do not move an old snapshot across a clear or a command boundary.
+        let boundary = pendingWrites.lastIndex(where: {
+            $0.writeClass == .route &&
+                ($0.applicationCommandID != nil || $0.coalescingKey != key)
+        }) ?? -1
+        let matches = pendingWrites.indices.filter {
+            $0 > boundary && pendingWrites[$0].writeClass == .route &&
+                pendingWrites[$0].applicationCommandID == nil &&
+                pendingWrites[$0].coalescingKey == key
+        }
+        let replacedBytes = matches.reduce(0) {
+            $0 + pendingWrites[$1].data.count
+        }
+        guard pendingWrites.count - matches.count + 1 <= maxCount,
+              regularPendingByteCount - replacedBytes + write.data.count <=
+                maxPendingBytes else {
+            // Reject transactionally: retain the previous admitted snapshot.
+            recordRejectedFrames(1)
+            return false
+        }
+        beginEnqueueIfEmpty()
+        var removed: [NavigationWrite] = []
+        for index in matches.reversed() {
+            removed.append(pendingWrites.remove(at: index))
+        }
+        pendingWrites.append(write.enqueued(at: now()).protectingAtomicBatch())
+        recordEnqueuedFrames(1)
+        for old in removed { recordCoalesced(write: old) }
+        recordDepth()
+        for old in removed { old.onDrop?() }
         return true
     }
 

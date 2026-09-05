@@ -27,6 +27,9 @@ portMUX_TYPE diagnosticsMux = portMUX_INITIALIZER_UNLOCKED;
 State *diagnosticsState = nullptr;
 uint32_t lastPeriodicMemorySampleMs = 0;
 std::atomic<bool> frameTransferActive{false};
+#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+DeliveryTimingState deliveryTiming;
+#endif
 
 State *allocateDiagnosticsState() {
   void *storage = heap_caps_calloc(
@@ -211,6 +214,9 @@ void configureBuildIdentity(const char *deviceId, const char *firmwareCommit,
 
 void beginSession(bool remoteDebugActive, uint32_t nowMs) {
   portENTER_CRITICAL(&diagnosticsMux);
+#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+  deliveryTiming.reset();
+#endif
   if (diagnosticsState != nullptr)
     diagnosticsState->beginSession(remoteDebugActive);
   lastPeriodicMemorySampleMs = nowMs;
@@ -424,10 +430,59 @@ Snapshot snapshot() {
     diagnosticsState->noteMemory(
         memory, MemoryObservationPhase::MetricsSnapshot, nowMs, frameActive);
     value = diagnosticsState->snapshot(nowMs);
+#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+    value.deliveryTiming = deliveryTiming.snapshot();
+#endif
   }
   portEXIT_CRITICAL(&diagnosticsMux);
   return value;
 }
+
+#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+DeliveryCallbackTiming beginDeliveryCallback(uint8_t channel, uint32_t nowMs) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  DeliveryCallbackTiming value{};
+  if (diagnosticsState != nullptr && diagnosticsState->sessionActive())
+    value = deliveryTiming.begin(channel, nowMs, frameTransferActive.load());
+  portEXIT_CRITICAL(&diagnosticsMux);
+  return value;
+}
+
+void completeDeliveryCallback(DeliveryCallbackTiming value) {
+  value.frameActiveAtExit = frameTransferActive.load();
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr && diagnosticsState->sessionActive())
+    deliveryTiming.complete(value);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+void noteDeliveryOwner(const DeliveryOwnerTiming &value) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr && diagnosticsState->sessionActive())
+    deliveryTiming.consumed(value);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+static void appendOwnerTiming(JsonBuilder &body, const DeliveryOwnerTiming &v) {
+  body << "{\"session\":" << v.session << ",\"ordinal\":" << v.ordinal
+       << ",\"channel\":" << static_cast<unsigned>(v.channel)
+       << ",\"startedAtMs\":" << v.startedAtMs << ",\"mailboxAgeUs\":" << v.mailboxAgeUs
+       << ",\"processingUs\":" << v.processingUs << "}";
+}
+
+static void appendDeliveryTiming(JsonBuilder &body, const DeliveryCallbackTiming &v) {
+  body << "{\"session\":" << v.session << ",\"ordinal\":" << v.ordinal
+       << ",\"channel\":" << static_cast<unsigned>(v.channel)
+       << ",\"startedAtMs\":" << v.startedAtMs << ",\"callbackUs\":" << v.callbackUs
+       << ",\"setupUs\":" << v.setupUs << ",\"authenticationUs\":" << v.authenticationUs
+       << ",\"allocationUs\":" << v.allocationUs << ",\"mailboxWaitUs\":" << v.mailboxWaitUs
+       << ",\"mailboxHoldUs\":" << v.mailboxHoldUs
+       << ",\"authenticated\":" << (v.authenticated ? "true" : "false")
+       << ",\"mailboxAccepted\":" << (v.mailboxAccepted ? "true" : "false")
+       << ",\"frameActiveAtEntry\":" << (v.frameActiveAtEntry ? "true" : "false")
+       << ",\"frameActiveAtExit\":" << (v.frameActiveAtExit ? "true" : "false") << "}";
+}
+#endif
 
 std::string toJson(const Snapshot &value) {
   try {
@@ -653,7 +708,22 @@ std::string toJson(const Snapshot &value) {
        << ",\"freeAfterAllocate\":"
        << value.remoteDebug.freeAfterAllocate
        << ",\"largestAfterAllocate\":"
-       << value.remoteDebug.largestAfterAllocate << "}}";
+       << value.remoteDebug.largestAfterAllocate << "}";
+#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+    body << ",\"deliveryTiming\":{\"schema\":1,\"session\":" << value.deliveryTiming.session
+         << ",\"completed\":" << value.deliveryTiming.completed << ",\"latest\":";
+    appendDeliveryTiming(body, value.deliveryTiming.latest);
+    body << ",\"slowestRoute\":";
+    appendDeliveryTiming(body, value.deliveryTiming.slowestRoute);
+    body << ",\"slowestGps\":";
+    appendDeliveryTiming(body, value.deliveryTiming.slowestGps);
+    body << ",\"latestOwner\":";
+    appendOwnerTiming(body, value.deliveryTiming.latestOwner);
+    body << ",\"slowestOwner\":";
+    appendOwnerTiming(body, value.deliveryTiming.slowestOwner);
+    body << "}";
+#endif
+    body << "}";
     return body.take();
   } catch (const std::bad_alloc &) {
     return {};

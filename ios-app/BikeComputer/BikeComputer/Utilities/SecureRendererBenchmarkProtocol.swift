@@ -732,6 +732,42 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
     let routeReplay: RouteReplay
     let replayTransport: ReplayTransport?
     let remoteDebug: RemoteDebug
+    var deliveryTiming: RendererDeliveryTimingEvidence? = nil
+}
+
+nonisolated struct RendererDeliveryTimingEvidence: Codable, Equatable, Sendable {
+    nonisolated struct Callback: Codable, Equatable, Sendable {
+        let session: UInt32
+        let ordinal: UInt32
+        let channel: UInt8
+        let startedAtMs: UInt32
+        let callbackUs: UInt32
+        let setupUs: UInt32
+        let authenticationUs: UInt32
+        let allocationUs: UInt32
+        let mailboxWaitUs: UInt32
+        let mailboxHoldUs: UInt32
+        let authenticated: Bool
+        let mailboxAccepted: Bool
+        let frameActiveAtEntry: Bool
+        let frameActiveAtExit: Bool
+    }
+    nonisolated struct Owner: Codable, Equatable, Sendable {
+        let session: UInt32
+        let ordinal: UInt32
+        let channel: UInt8
+        let startedAtMs: UInt32
+        let mailboxAgeUs: UInt32
+        let processingUs: UInt32
+    }
+    let schema: Int
+    let session: UInt32
+    let completed: UInt32
+    let latest: Callback
+    let slowestRoute: Callback
+    let slowestGps: Callback
+    let latestOwner: Owner
+    let slowestOwner: Owner
 }
 
 nonisolated struct RendererBenchmarkReplayTimingEvidence: Codable,
@@ -811,6 +847,11 @@ nonisolated struct RendererBenchmarkEvidenceSample: Codable,
     let routeReplay: RendererBenchmarkMetricsSnapshot.RouteReplay
     let bleTransport: RendererBenchmarkBLETransportEvidence?
     let replayTiming: RendererBenchmarkReplayTimingEvidence?
+    // Optional, additive schema-1 fields: older archives still decode.
+    var gps: RendererBenchmarkMetricsSnapshot.GPS? = nil
+    var replayTransport: RendererBenchmarkMetricsSnapshot.ReplayTransport? = nil
+    var remoteDebug: RendererBenchmarkMetricsSnapshot.RemoteDebug? = nil
+    var deliveryTiming: RendererDeliveryTimingEvidence? = nil
 }
 
 nonisolated struct RendererBenchmarkRunSummary: Codable, Equatable, Sendable {
@@ -1064,7 +1105,11 @@ nonisolated enum RendererBenchmarkEvaluator {
             buildings: snapshot.render.buildings,
             routeReplay: snapshot.routeReplay,
             bleTransport: bleTransport,
-            replayTiming: replayTiming
+            replayTiming: replayTiming,
+            gps: snapshot.gps,
+            replayTransport: snapshot.replayTransport,
+            remoteDebug: snapshot.remoteDebug,
+            deliveryTiming: snapshot.deliveryTiming
         )
     }
 
