@@ -118,6 +118,13 @@ and device window/marker state when a metrics response is available. Failure
 and manual-stop observations are captured before cleanup clears replay state.
 These diagnostics distinguish app emission from BLE delivery without exporting
 session credentials; they do not substitute for a successful physical sweep.
+All app window changes (including setup and cleanup) share a 1.1-second
+response-to-request cooldown to respect the firmware's one-second admission
+limit. Only explicit `429 renderer_window_rate_limited` responses are retried,
+with at most three attempts per admission. Other HTTP failures and ambiguous
+network failures are not automatically retried by window admission. Stop or
+session revocation during pacing prevents the next normal-run window POST;
+bounded cleanup remains separately responsible for restoring Current.
 
 For a separately authorized external automation
    harness, put the Mac on the reported LAN or device-hotspot network and store

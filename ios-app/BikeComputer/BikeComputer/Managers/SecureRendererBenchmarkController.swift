@@ -309,6 +309,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
     private var partialSamples: [RendererBenchmarkEvidenceSample] = []
     private var startupTrace = RendererBenchmarkStartupTrace()
     private var collectingStartupEvidence = false
+    private let windowAdmission = RendererBenchmarkWindowAdmission()
 
     var progressDescription: String {
         guard isRunning else { return status }
@@ -1194,12 +1195,14 @@ final class SecureRendererBenchmarkController: ObservableObject {
         while Date() < deadline {
             do {
                 let runID = "\(rootRunID)-cleanup"
-                let windowID = try await client.beginWindow(
+                let windowID = try await beginPacedWindow(
+                    client: client,
                     profile: .current,
                     runId: runID,
                     repeatNumber: 1,
                     mapFixture: mapFixture,
-                    routeFixture: routeFixture
+                    routeFixture: routeFixture,
+                    enforceContinuity: false
                 )
                 _ = try await waitForWindow(
                     client: client,
@@ -1229,7 +1232,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
     ) async throws -> UInt32 {
         let restorationWasAlreadyNeeded = profileMayNeedRestoration
         do {
-            let requestID = try await client.beginWindow(
+            let requestID = try await beginPacedWindow(
+                client: client,
                 profile: profile,
                 runId: runId,
                 repeatNumber: repeatNumber,
@@ -1249,6 +1253,39 @@ final class SecureRendererBenchmarkController: ObservableObject {
             profileMayNeedRestoration = true
             throw error
         }
+    }
+
+    private func beginPacedWindow(
+        client: SecureRendererBenchmarkHTTPClient,
+        profile: RendererBenchmarkProfile,
+        runId: String,
+        repeatNumber: Int,
+        mapFixture: RendererBenchmarkMapFixtureIdentity,
+        routeFixture: RendererBenchmarkRouteFixtureIdentity,
+        enforceContinuity: Bool = true
+    ) async throws -> UInt32 {
+        try await windowAdmission.execute(
+            check: {
+                // Setup precedes replay. Cleanup intentionally runs after Stop,
+                // but still uses the same pinned client and bounded pacing.
+                if enforceContinuity { try self.checkSecureSessionContinuity() }
+            },
+            isRateLimited: { error in
+                guard let error = error as? SecureRendererBenchmarkControllerError,
+                      case .httpStatus(let status, let code) = error else {
+                    return false
+                }
+                return RendererBenchmarkWindowAdmission.isRetryable(
+                    status: status, code: code
+                )
+            },
+            operation: {
+                try await client.beginWindow(
+                    profile: profile, runId: runId, repeatNumber: repeatNumber,
+                    mapFixture: mapFixture, routeFixture: routeFixture
+                )
+            }
+        )
     }
 
     private func checkContinuity() throws {

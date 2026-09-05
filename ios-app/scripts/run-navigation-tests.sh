@@ -15,6 +15,13 @@ xcrun swiftc -D HOST_TESTING -parse-as-library \
   ios-app/BikeComputerTests/RendererBenchmarkReplaySchedulerTests.swift
 "${RENDERER_SCHEDULER_OUT}"
 
+RENDERER_WINDOW_OUT="${TMPDIR:-/tmp}/open-bike-renderer-window-tests"
+xcrun swiftc -D HOST_TESTING -parse-as-library \
+  -o "${RENDERER_WINDOW_OUT}" \
+  ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkWindowAdmission.swift \
+  ios-app/BikeComputerTests/RendererBenchmarkWindowAdmissionTests.swift
+"${RENDERER_WINDOW_OUT}"
+
 xcrun swiftc \
   -D HOST_TESTING \
   -o "${OUT}" \
