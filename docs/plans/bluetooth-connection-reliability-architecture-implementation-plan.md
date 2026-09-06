@@ -1,8 +1,22 @@
 # Bluetooth controller reliability and architecture implementation plan
 
-## Status and baseline
+## Current status — 2026-09-06
 
-Status: **deep-review repairs implemented in a local PR worktree; repaired-head
+PR [#339](https://github.com/seichris/open-bike-computer/pull/339) and
+[#366](https://github.com/seichris/open-bike-computer/pull/366) both merged on
+2026-08-30 and are ancestors of the main SHA reviewed on 2026-09-06.
+The [current Bluetooth reassessment](bluetooth-reliability-reassessment-2026-09-06.md)
+reconciles the implemented work, documents remaining shutdown/recovery findings,
+and defines follow-up implementation and physical acceptance gates.
+
+The remainder of this document is preserved as historical design and pre-merge
+implementation evidence. Its pending-merge/rebase/CI statements describe that
+earlier snapshot, not current GitHub status. Do not treat the original findings
+as still unimplemented or infer physical qualification from their software fixes.
+
+## Historical status and baseline
+
+Historical status: **deep-review repairs implemented in a local PR worktree; repaired-head
 GitHub CI, post-merge rebase, and physical validation pending**. The original
 PR #366 GitHub CI run failed before these repairs.
 
