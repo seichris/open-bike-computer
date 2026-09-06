@@ -706,6 +706,16 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(blocked.json()["detail"], "request rate limit exceeded")
         self.assertGreater(int(blocked.headers["Retry-After"]), 0)
 
+    def test_legacy_installation_enrollment_preserves_owner(self):
+        old_id, old_token = self.client.app.state.installation_store.issue()
+        old = {"clientInstallationId": old_id, "clientInstallationToken": old_token}
+        credential = self.app_attest.issue_installation(self.client, existing_credential=old)
+        self.assertIsInstance(credential, dict)
+        self.assertEqual(credential["clientInstallationId"], old_id)
+        self.assertEqual(credential["clientInstallationToken"], old_token)
+        rejected = self.app_attest.issue_installation(self.client, existing_credential=old)
+        self.assertEqual(rejected.status_code, 401)
+
     def test_installation_issuance_requires_app_attest(self):
         response = self.client.post("/v1/installations")
 
