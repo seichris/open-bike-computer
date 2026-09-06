@@ -60,6 +60,13 @@ enum RideBLETransportPhaseV1: String, Equatable, Sendable {
     case recovering
 }
 
+/// Shutdown is a connection-lifecycle boundary, not a second adapter Boolean.
+/// The old peripheral must finish cancellation before a successor can reuse it.
+enum RideBLEStopStageV1: Equatable, Sendable {
+    case releasingLease
+    case awaitingDisconnect
+}
+
 enum RideBLEWriterStateV1: Equatable, Sendable {
     case idle
     case waitingForWithoutResponseReadiness
@@ -92,6 +99,7 @@ enum RideBLETransportEventV1: Equatable, Sendable {
     case writerChanged(generation: UInt64, state: RideBLEWriterStateV1)
     case stopRequested(generation: UInt64)
     case leaseReleased(generation: UInt64)
+    case disconnectRequested(generation: UInt64)
     case failed(generation: UInt64, reason: RideBLETransportFailureReasonV1)
     case disconnected(generation: UInt64)
 }
@@ -112,6 +120,7 @@ struct RideBLETransportStateMachineV1: Equatable, Sendable {
     let role: RideBLEControllerRoleV1
     private(set) var generation: UInt64 = 0
     private(set) var phase: RideBLETransportPhaseV1 = .idle
+    private(set) var stopStage: RideBLEStopStageV1?
     private(set) var isLinkConnected = false
     private(set) var isAuthenticated = false
     private(set) var leaseGeneration: UInt32?
@@ -123,6 +132,15 @@ struct RideBLETransportStateMachineV1: Equatable, Sendable {
         phase == .ready && isLinkConnected && isAuthenticated &&
             leaseGeneration != nil && capabilitySchemaVersion != nil &&
             !writerIsRecovering
+    }
+
+    var acceptsReadinessCallbacks: Bool {
+        phase == .negotiating || phase == .ready
+    }
+
+    var acceptsWriterCallbacks: Bool {
+        phase != .idle && phase != .recovering &&
+            stopStage != .awaitingDisconnect
     }
 
     private var writerIsRecovering: Bool {
@@ -142,6 +160,9 @@ struct RideBLETransportStateMachineV1: Equatable, Sendable {
         let applied: Bool
         switch event {
         case .beginConnection:
+            guard phase != .stopping else {
+                return .rejectedInvalidTransition
+            }
             generation &+= 1
             resetConnectionState(phase: .connecting)
             applied = true
@@ -173,7 +194,9 @@ struct RideBLETransportStateMachineV1: Equatable, Sendable {
             guard eventGeneration == generation else {
                 return .ignoredStaleGeneration
             }
-            guard isAuthenticated, leaseGeneration != 0 else {
+            guard acceptsReadinessCallbacks,
+                  isAuthenticated, leaseGeneration != 0,
+                  phase != .ready || self.leaseGeneration == leaseGeneration else {
                 return .rejectedInvalidTransition
             }
             self.leaseGeneration = leaseGeneration
@@ -186,7 +209,8 @@ struct RideBLETransportStateMachineV1: Equatable, Sendable {
             guard eventGeneration == generation else {
                 return .ignoredStaleGeneration
             }
-            guard isAuthenticated,
+            guard acceptsReadinessCallbacks,
+                  isAuthenticated,
                   leaseGeneration != nil,
                   schemaVersion != 0 else {
                 return .rejectedInvalidTransition
@@ -199,12 +223,13 @@ struct RideBLETransportStateMachineV1: Equatable, Sendable {
             guard eventGeneration == generation else {
                 return .ignoredStaleGeneration
             }
-            guard phase != .idle else {
+            guard acceptsWriterCallbacks else {
                 return .rejectedInvalidTransition
             }
             writerState = state
             if case .recovering(let reason) = state {
                 phase = .recovering
+                stopStage = nil
                 lastFailure = reason
             }
             applied = true
@@ -213,20 +238,33 @@ struct RideBLETransportStateMachineV1: Equatable, Sendable {
             guard eventGeneration == generation else {
                 return .ignoredStaleGeneration
             }
-            guard phase != .idle else {
-                return .rejectedInvalidTransition
+            // Phone preparation and scanning can need shutdown even before
+            // a BLE connection exists. Repeated stops must not rewind an
+            // in-progress peripheral cancellation.
+            if phase != .stopping {
+                phase = .stopping
+                stopStage = .releasingLease
             }
-            phase = .stopping
             applied = true
 
         case .leaseReleased(let eventGeneration):
             guard eventGeneration == generation else {
                 return .ignoredStaleGeneration
             }
-            guard phase == .stopping else {
+            guard phase == .stopping, stopStage == .releasingLease else {
                 return .rejectedInvalidTransition
             }
             leaseGeneration = nil
+            applied = true
+
+        case .disconnectRequested(let eventGeneration):
+            guard eventGeneration == generation else {
+                return .ignoredStaleGeneration
+            }
+            guard phase == .stopping else {
+                return .rejectedInvalidTransition
+            }
+            stopStage = .awaitingDisconnect
             applied = true
 
         case .failed(let eventGeneration, let reason):
@@ -237,6 +275,7 @@ struct RideBLETransportStateMachineV1: Equatable, Sendable {
                 return .rejectedInvalidTransition
             }
             phase = .recovering
+            stopStage = nil
             writerState = .recovering(reason: reason)
             lastFailure = reason
             applied = true
@@ -259,6 +298,7 @@ struct RideBLETransportStateMachineV1: Equatable, Sendable {
         phase: RideBLETransportPhaseV1
     ) {
         self.phase = phase
+        stopStage = nil
         isLinkConnected = false
         isAuthenticated = false
         leaseGeneration = nil
