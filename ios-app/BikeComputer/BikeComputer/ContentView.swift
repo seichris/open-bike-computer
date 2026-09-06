@@ -34,9 +34,10 @@ private enum ContentSheetDestination: Identifiable, Equatable {
 
 private struct RideMetricsCompactDetent: CustomPresentationDetent {
     static func height(in context: Context) -> CGFloat? {
-        let preferredHeight: CGFloat =
-            context.dynamicTypeSize.isAccessibilitySize ? 360 : 280
-        return min(preferredHeight, context.maxDetentValue * 0.72)
+        RideSheetLayoutPolicy.compactHeight(
+            isAccessibilitySize: context.dynamicTypeSize.isAccessibilitySize,
+            maximumHeight: context.maxDetentValue
+        )
     }
 }
 
@@ -73,6 +74,7 @@ struct ContentView: View {
     private let workoutMirrorManager: WorkoutMirrorManager
     private let onApplicationActiveChange: (Bool) -> Void
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
@@ -225,7 +227,13 @@ struct ContentView: View {
                 let selectionFrame = offlineMapSelectionFrame(in: proxy.size)
                 let isCompactHeight = proxy.size.height < 600
 
-                mapView(selectionFrame: offlineMapManager.isMapAreaSelectionActive ? selectionFrame : nil)
+                mapView(
+                    selectionFrame: offlineMapManager.isMapAreaSelectionActive
+                        ? selectionFrame
+                        : nil,
+                    routePlanningBottomPadding:
+                        mapRoutePlanningBottomPadding(in: proxy)
+                )
                     .ignoresSafeArea()
 
                 if offlineMapManager.isMapAreaSelectionActive {
@@ -287,7 +295,18 @@ struct ContentView: View {
                         mapControlCluster
                     }
                     .padding(.trailing, 12)
-                    .padding(.bottom, 12)
+                    .padding(
+                        .bottom,
+                        mapControlsBottomPadding(in: proxy)
+                    )
+                    .animation(
+                        .easeInOut(duration: 0.25),
+                        value: rideMetricsDetent
+                    )
+                    .animation(
+                        .easeInOut(duration: 0.25),
+                        value: presentedSheet
+                    )
                     .zIndex(10)
 
                     bottomOverlay(
@@ -720,10 +739,17 @@ struct ContentView: View {
             .presentationBackgroundInteraction(.disabled)
 
         case .rideMetrics:
-            rideMetricsPanel(
-                isCompactHeight: false,
-                isSheetExpanded: rideMetricsDetent == .large
-            )
+            Group {
+                if coordinator.routeAlternatives.isEmpty ||
+                    coordinator.isNavigating {
+                    rideMetricsPanel(
+                        isCompactHeight: false,
+                        isSheetExpanded: rideMetricsDetent == .large
+                    )
+                } else {
+                    rideRoutePlanSheet
+                }
+            }
             .presentationDetents(
                 [.rideMetricsCompact, .large],
                 selection: $rideMetricsDetent
@@ -1013,6 +1039,16 @@ struct ContentView: View {
         }
     }
 
+    private func mapControlsBottomPadding(in proxy: GeometryProxy) -> CGFloat {
+        RideSheetLayoutPolicy.mapControlsBottomPadding(
+            isRideSheetPresented: presentedSheet == .rideMetrics,
+            isCompactDetent: rideMetricsDetent == .rideMetricsCompact,
+            isAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
+            maximumHeight: proxy.size.height,
+            safeAreaBottom: proxy.safeAreaInsets.bottom
+        )
+    }
+
     private var mapControlRail: some View {
         mapControlRailContent
             .mapOverlayGlassSurface(cornerRadius: 26)
@@ -1147,13 +1183,10 @@ struct ContentView: View {
         isSheetExpanded: Bool? = nil
     ) -> some View {
         RideMetricsPanel(
+            coordinator: coordinator,
             workoutStore: workoutStore,
             watchAvailability: watchAvailability,
-            isNavigating: coordinator.isNavigating,
             isCompactHeight: isCompactHeight,
-            arrivalDate: coordinator.expectedArrivalDate,
-            remainingTime: coordinator.routeRemainingTime,
-            remainingDistance: coordinator.routeRemainingDistance,
             onStopNavigation: { coordinator.stopNavigation() },
             onStartWorkout: {
                 _ = workoutMirrorManager.startOutdoorCyclingOnWatch()
@@ -1172,6 +1205,49 @@ struct ContentView: View {
                 cyclingSensorDetectionCoordinator.dismissPrompt,
             isSheetExpanded: isSheetExpanded
         )
+    }
+
+    private var rideRoutePlanSheet: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Label("Choose a route", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                        .font(.headline)
+                    Spacer()
+                    Button("Cancel", role: .cancel) {
+                        coordinator.cancelRoutePlan()
+                    }
+                    .font(.subheadline)
+                }
+
+                routeAlternativePicker
+                selectedRouteAdvisory
+
+                Text("Tap a route on the map, or choose below. Your workout keeps running.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 24)
+            .padding(.bottom, 12)
+
+            Spacer(minLength: 0)
+            Divider()
+
+            Button {
+                coordinator.startSelectedRoute()
+            } label: {
+                Label("Start navigation", systemImage: "location.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(coordinator.selectedRouteAlternativeID == nil)
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("rideRoutePlanSheet")
     }
 
     private func rideControlPanel(isCompactHeight: Bool) -> some View {
@@ -1244,42 +1320,11 @@ struct ContentView: View {
                 .font(.subheadline)
             }
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(coordinator.routeAlternatives) { alternative in
-                        let selected =
-                            coordinator.selectedRouteAlternativeID == alternative.id
-                        Button {
-                            coordinator.selectRouteAlternative(alternative.id)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(alternative.title)
-                                    .font(.subheadline.weight(.semibold))
-                                    .lineLimit(1)
-                                Text(routeAlternativeDetails(alternative))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 9)
-                            .background(
-                                selected ? Color.blue.opacity(0.18) :
-                                    Color.secondary.opacity(0.1),
-                                in: RoundedRectangle(cornerRadius: 12)
-                            )
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(
-                                        selected ? Color.blue : Color.clear,
-                                        lineWidth: 2
-                                    )
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityAddTraits(selected ? .isSelected : [])
-                    }
-                }
-            }
+            Text("Tap a route on the map, or choose below.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            routeAlternativePicker
 
             HStack(spacing: 8) {
                 Button {
@@ -1301,17 +1346,7 @@ struct ContentView: View {
                 )
             }
 
-            if let selected = coordinator.routeAlternatives.first(where: {
-                $0.id == coordinator.selectedRouteAlternativeID
-            }), !selected.advisoryNotices.isEmpty {
-                Label(
-                    selected.advisoryNotices.joined(separator: " · "),
-                    systemImage: "exclamationmark.triangle"
-                )
-                .font(.caption2)
-                .foregroundStyle(.orange)
-                .lineLimit(2)
-            }
+            selectedRouteAdvisory
 
             Text("Offline saving needs an approved route source.")
                 .font(.caption2)
@@ -1323,6 +1358,60 @@ struct ContentView: View {
             in: RoundedRectangle(cornerRadius: 20, style: .continuous)
         )
         .shadow(color: .black.opacity(0.16), radius: 14, y: 6)
+    }
+
+    private var routeAlternativePicker: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(coordinator.routeAlternatives) { alternative in
+                    let selected =
+                        coordinator.selectedRouteAlternativeID == alternative.id
+                    Button {
+                        coordinator.selectRouteAlternative(alternative.id)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(alternative.title)
+                                .font(.subheadline.weight(.semibold))
+                                .lineLimit(1)
+                            Text(routeAlternativeDetails(alternative))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(
+                            selected ? Color.blue.opacity(0.18) :
+                                Color.secondary.opacity(0.1),
+                            in: RoundedRectangle(cornerRadius: 12)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(
+                                    selected ? Color.blue : Color.clear,
+                                    lineWidth: 2
+                                )
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var selectedRouteAdvisory: some View {
+        if let selected = coordinator.routeAlternatives.first(where: {
+            $0.id == coordinator.selectedRouteAlternativeID
+        }), !selected.advisoryNotices.isEmpty {
+            Label(
+                selected.advisoryNotices.joined(separator: " · "),
+                systemImage: "exclamationmark.triangle"
+            )
+            .font(.caption2)
+            .foregroundStyle(.orange)
+            .lineLimit(2)
+        }
     }
 
     private func routeAlternativeDetails(
@@ -1408,14 +1497,23 @@ struct ContentView: View {
     
     // MARK: - Map View
     
-    private func mapView(selectionFrame: CGRect?) -> some View {
+    private func mapView(
+        selectionFrame: CGRect?,
+        routePlanningBottomPadding: CGFloat
+    ) -> some View {
         let canSelectDestination = !coordinator.isNavigating && !offlineMapManager.isMapAreaSelectionActive
 
         return MapViewContainer(
             appearance: mapAppearance,
             controlState: mapViewControlState,
             location: coordinator.currentLocation,
-            route: coordinator.currentRoute ?? coordinator.routePreview,
+            route: coordinator.currentRoute,
+            routeAlternatives: coordinator.routeAlternatives.map {
+                MapRouteAlternative(id: $0.id, route: $0.route)
+            },
+            selectedRouteAlternativeID:
+                coordinator.selectedRouteAlternativeID,
+            routePlanningBottomPadding: routePlanningBottomPadding,
             simulatedPosition: coordinator.simulatedPosition,
             isSimulationMode: coordinator.isSimulationMode,
             isNavigating: coordinator.isNavigating,
@@ -1425,6 +1523,9 @@ struct ContentView: View {
                 if isSearchPanelExpanded {
                     isSearchPanelExpanded = false
                 }
+            },
+            onRouteAlternativeSelected: {
+                coordinator.selectRouteAlternative($0)
             },
             onOfflineMapSelectionBoundsChanged: { bounds in
                 offlineMapManager.updateMapAreaSelection(bounds: bounds)
@@ -1436,6 +1537,18 @@ struct ContentView: View {
                 }
             ) : nil
         )
+    }
+
+    private func mapRoutePlanningBottomPadding(
+        in proxy: GeometryProxy
+    ) -> CGFloat {
+        guard workoutStore.presentation.isWorkoutActive else {
+            return 280
+        }
+        return RideSheetLayoutPolicy.compactHeight(
+            isAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
+            maximumHeight: proxy.size.height
+        ) + proxy.safeAreaInsets.bottom + 32
     }
 
     private func offlineMapSelectionFrame(in size: CGSize) -> CGRect {

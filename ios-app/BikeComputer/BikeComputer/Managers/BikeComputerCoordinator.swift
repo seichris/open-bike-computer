@@ -480,19 +480,21 @@ class BikeComputerCoordinator: ObservableObject {
     }
 
     private func processNavigationLocation(_ location: CLLocation) {
-        let acceptedForNavigation = navEngine.processExternalLocation(location)
-        if acceptedForNavigation {
-            if ongoingRerouteDirections != nil,
-               routeDeviationDetector.isEligible(
-                   horizontalAccuracy: location.horizontalAccuracy
-               ) {
-                let routeLocation = CoordinateConverter.mapKitRouteLocation(
-                    fromGPSLocation: location
-                )
-                latestRerouteLocation = routeLocation
-            }
-            evaluateRerouting(for: location)
+        _ = navEngine.processExternalLocation(location)
+        guard navEngine.isNavigating, !navEngine.isSimulationMode else {
+            return
         }
+
+        if ongoingRerouteDirections != nil,
+           routeDeviationDetector.isEligible(
+               horizontalAccuracy: location.horizontalAccuracy
+           ) {
+            let routeLocation = CoordinateConverter.mapKitRouteLocation(
+                fromGPSLocation: location
+            )
+            latestRerouteLocation = routeLocation
+        }
+        evaluateRerouting(for: location)
     }
 
     private static func workoutFallbackLocation(

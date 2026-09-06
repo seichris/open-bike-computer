@@ -691,6 +691,7 @@ struct NavigationProtocolTests {
         testReplacementStepSelectionUsesUnambiguousGeometry()
         testCoordinatorPreviewsAndSelectsAlternateRoutes()
         testCoordinatorReroutesAndAppliesLatestRoute()
+        testCoordinatorReroutesWhenProgressRejectsFarLocation()
         testWorkoutAndNavigationLifecyclesStayIndependent()
         testRideActivityRuntimeIntegration()
         testCoordinatorRejectsStaleRerouteLocations()
@@ -798,7 +799,7 @@ struct NavigationProtocolTests {
         testNavigationEngineRestoresPhysicalGPSAfterSimulation()
         testNavigationEngineKeepsPhysicalGPSAfterSimulationStepCompletion()
         testNavigationEngineOmitsRideTelemetryWhenIdle()
-        testNavigationEngineIgnoresLiveLocationFarFromRouteStart()
+        testNavigationEngineIgnoresFarLocationForRouteProgress()
         testNavigationEngineReplacesRouteWithoutResettingTelemetry()
         testOfflineMapCustomBBoxRequest()
         testOfflineMapServiceConfigChannels()
@@ -3883,6 +3884,87 @@ struct NavigationProtocolTests {
             coordinator.processNavigationLocationForTesting(cooldownDeviation)
         }
         assertEqual(factory.tasks.count, 2, "cooldown suppresses an immediate repeated reroute")
+    }
+
+    @MainActor
+    static func testCoordinatorReroutesWhenProgressRejectsFarLocation() {
+        let suite = "CoordinatorRerouteTests.FarStart.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let factory = TestNavigationDirectionsFactory()
+        let coordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: defaults),
+            directionsFactory: factory.makeTask,
+            startServices: false
+        )
+
+        let sourceCoordinate = CLLocationCoordinate2D(
+            latitude: 37.0000,
+            longitude: -122.0000
+        )
+        let destinationCoordinate = CLLocationCoordinate2D(
+            latitude: 37.0100,
+            longitude: -122.0000
+        )
+        let source = MKMapItem(
+            placemark: MKPlacemark(coordinate: sourceCoordinate)
+        )
+        let destination = MKMapItem(
+            placemark: MKPlacemark(coordinate: destinationCoordinate)
+        )
+        let initialRoute = TestRoute(
+            instructions: "Continue on original route",
+            coordinates: [sourceCoordinate, destinationCoordinate]
+        )
+
+        coordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling
+        )
+        assertEqual(factory.tasks.count, 1, "initial navigation creates one directions request")
+        factory.tasks[0].succeed(with: [initialRoute])
+        assert(
+            waitForMainLoop(timeout: 2) {
+                !coordinator.routeCalculation.isCalculating
+            },
+            "initial route calculation should finish before far-location reroute evaluation"
+        )
+
+        let farOffRouteLocation = testLocation(
+            latitude: 37.0040,
+            longitude: -121.9950,
+            horizontalAccuracy: 5
+        )
+        let routeStart = CLLocation(
+            latitude: sourceCoordinate.latitude,
+            longitude: sourceCoordinate.longitude
+        )
+        assert(
+            farOffRouteLocation.distance(from: routeStart) > 150,
+            "the regression location must remain outside the progress-acceptance gate"
+        )
+
+        for _ in 0..<3 {
+            coordinator.processNavigationLocationForTesting(farOffRouteLocation)
+        }
+
+        assertEqual(
+            factory.tasks.count,
+            2,
+            "accurate off-route fixes reroute even when route progress rejects the location"
+        )
+        guard let rerouteSource = factory.tasks[1].request.source else {
+            assert(false, "far-location reroute should include a source")
+            return
+        }
+        assertCoordinate(
+            rerouteSource.placemark.coordinate,
+            latitude: farOffRouteLocation.coordinate.latitude,
+            longitude: farOffRouteLocation.coordinate.longitude,
+            "far-location reroute starts from the current GPS fix"
+        )
     }
 
     @MainActor
@@ -23501,6 +23583,63 @@ struct NavigationProtocolTests {
             .none,
             "a selected long-press destination should remain visible while GPS updates"
         )
+        assertEqual(
+            RideSheetLayoutPolicy.compactHeight(
+                isAccessibilitySize: false,
+                maximumHeight: 1_000
+            ),
+            280,
+            "the standard compact ride sheet retains its intended height"
+        )
+        assertEqual(
+            RideSheetLayoutPolicy.compactHeight(
+                isAccessibilitySize: true,
+                maximumHeight: 1_000
+            ),
+            360,
+            "accessibility sizes retain the taller compact ride sheet"
+        )
+        assertEqual(
+            RideSheetLayoutPolicy.compactHeight(
+                isAccessibilitySize: false,
+                maximumHeight: 300
+            ),
+            216,
+            "compact sheet height remains bounded on short screens"
+        )
+        assertEqual(
+            RideSheetLayoutPolicy.mapControlsBottomPadding(
+                isRideSheetPresented: true,
+                isCompactDetent: true,
+                isAccessibilitySize: false,
+                maximumHeight: 1_000,
+                safeAreaBottom: 34
+            ),
+            326,
+            "map controls clear the compact ride sheet and bottom safe area"
+        )
+        assertEqual(
+            RideSheetLayoutPolicy.mapControlsBottomPadding(
+                isRideSheetPresented: true,
+                isCompactDetent: false,
+                isAccessibilitySize: false,
+                maximumHeight: 1_000,
+                safeAreaBottom: 34
+            ),
+            12,
+            "expanded ride sheets do not reserve unreachable background space"
+        )
+        assertEqual(
+            RideSheetLayoutPolicy.mapControlsBottomPadding(
+                isRideSheetPresented: false,
+                isCompactDetent: true,
+                isAccessibilitySize: false,
+                maximumHeight: 1_000,
+                safeAreaBottom: 34
+            ),
+            12,
+            "map controls use their standard inset without the ride sheet"
+        )
     }
 
     @MainActor
@@ -23790,7 +23929,7 @@ struct NavigationProtocolTests {
         )
     }
 
-    static func testNavigationEngineIgnoresLiveLocationFarFromRouteStart() {
+    static func testNavigationEngineIgnoresFarLocationForRouteProgress() {
         let manager = TestBLEManager()
         manager.isConnected = true
         manager.isNavigationReady = true
@@ -23811,7 +23950,7 @@ struct NavigationProtocolTests {
         let unrelatedDeviceLocation = CLLocation(latitude: 32.2304, longitude: 121.4737)
         let accepted = engine.processExternalLocation(unrelatedDeviceLocation)
 
-        assert(!accepted, "far live GPS should not be accepted for rerouting")
+        assert(!accepted, "far live GPS should not advance route progress")
         assertEqual(manager.sentPackets.count, 1, "far live GPS should not overwrite a route started from another source")
     }
 
