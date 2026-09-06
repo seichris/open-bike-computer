@@ -18,6 +18,10 @@ SPEC.loader.exec_module(update_image)
 class UpdateImageTests(unittest.TestCase):
     def test_optional_promoter_requires_immutable_identity_and_fixed_role(self):
         text = MODULE_PATH.with_name("compose.yaml").read_text()
+        if "  map-platform-promotion:" in text:
+            body = update_image._service_body(text, "map-platform-promotion")
+            text = text.replace("  map-platform-promotion:\n" + body, "", 1)
+            text = "\n".join(line for line in text.split("\n") if not line.startswith("# promotion-source-commit:"))
         source = "a" * 40
         reference = update_image.IMAGE_REPOSITORY + "@sha256:" + "b" * 64
         converter = update_image.IMAGE_REPOSITORY + "@sha256:142957ae0d5f08d366b657f9bacb0ce17d85bfac9c5d98c644bc1b02188a59c8"
@@ -41,6 +45,18 @@ class UpdateImageTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 update_image.validate_manifest_text(invalid)
+
+    def test_committed_promoter_preserves_isolation_and_converter_identity(self):
+        text = MODULE_PATH.with_name("compose.yaml").read_text()
+        deployment = update_image.validate_manifest_text(text)
+        self.assertIsNotNone(deployment.promotion_reference)
+        body = update_image._service_body(text, "map-platform-promotion")
+        self.assertIn("      - map-platform-promotion-data:/data", body)
+        self.assertNotIn("      - map-platform-data:/data", body)
+        self.assertIn("    mem_limit: 2g", body)
+        self.assertIn("    cpus: 1", body)
+        self.assertIn("      MAP_PLATFORM_ARTIFACT_STORE: s3", body)
+        self.assertNotIn("    ports:", body)
 
     def setUp(self) -> None:
         self.compose = MODULE_PATH.with_name("compose.yaml")

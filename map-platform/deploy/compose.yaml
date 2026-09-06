@@ -1,5 +1,6 @@
 # control-plane-source-commit: b40b825b137e8c5d3e00c11b8914850bba5fd391
 # worker-source-commit: e739dfe6c0612e95db8241249dcc2edfe52d8372
+# promotion-source-commit: 8c3a14c3c0f619a91863af99429a21a6af663830
 
 # These digest-pinned images are the production deployment manifest. The API
 # and maintenance control plane may advance to carry a rollout approval while
@@ -14,6 +15,47 @@ x-map-platform-images:
   worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:142957ae0d5f08d366b657f9bacb0ce17d85bfac9c5d98c644bc1b02188a59c8
 
 services:
+  map-platform-promotion:
+    image: ghcr.io/seichris/open-bike-computer-map-platform@sha256:0184002724c7ec96f2c7edd60662af2527fcbbebcb505229b082e919e7c09bb8
+    mem_limit: 2g
+    cpus: 1
+    environment:
+      MAP_PLATFORM_REPO_ROOT: /app
+      MAP_PLATFORM_DATA_ROOT: /data
+      MAP_PLATFORM_AUTO_PROMOTION_ENABLED: '1'
+      MAP_PLATFORM_DEPLOYMENT_CHANNEL: production
+      MAP_PLATFORM_CATALOG_CHANNEL: production
+      MAP_PLATFORM_CATALOG_URL: ${MAP_PLATFORM_CATALOG_URL:-}
+      MAP_PLATFORM_CATALOG_SERVICE_KEY_ID: ${MAP_PLATFORM_CATALOG_SERVICE_KEY_ID:-}
+      MAP_PLATFORM_CATALOG_SERVICE_SECRET: ${MAP_PLATFORM_CATALOG_SERVICE_SECRET:-}
+      MAP_PLATFORM_CATALOG_TIMEOUT_SECONDS: ${MAP_PLATFORM_CATALOG_TIMEOUT_SECONDS:-10}
+      MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_VERSION: ${MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_VERSION:-}
+      MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_BUILD: ${MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_BUILD:-}
+      MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_GIT_SHA: ${MAP_PLATFORM_CATALOG_REQUIRED_FIRMWARE_GIT_SHA:-}
+      MAP_PLATFORM_MAP_STREAM_ENABLED: '1'
+      MAP_PLATFORM_MAP_SIGNING_KEY_ID: ${MAP_PLATFORM_MAP_SIGNING_KEY_ID:-}
+      MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64: ${MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64:-}
+      # This converter stays fixed even if the generation worker later advances.
+      MAP_PLATFORM_WORKER_IMAGE_REFERENCE: ghcr.io/seichris/open-bike-computer-map-platform@sha256:142957ae0d5f08d366b657f9bacb0ce17d85bfac9c5d98c644bc1b02188a59c8
+      MAP_PLATFORM_ARTIFACT_STORE: s3
+      MAP_PLATFORM_S3_BUCKET: ${MAP_PLATFORM_S3_BUCKET:-}
+      MAP_PLATFORM_S3_PREFIX: ${MAP_PLATFORM_S3_PREFIX:-map-artifacts}
+      MAP_PLATFORM_S3_ENDPOINT_URL: ${MAP_PLATFORM_S3_ENDPOINT_URL:-}
+      MAP_PLATFORM_S3_CHECKSUM_MODE: ${MAP_PLATFORM_S3_CHECKSUM_MODE:-sha256}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_REGION: ${AWS_REGION:-}
+    volumes:
+      - map-platform-promotion-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time; from pathlib import Path; assert time.time()-json.loads(Path('/data/automatic-promotion/heartbeat.json').read_text())['timestamp'] < 1900"]
+      start_period: 1900s
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
   map-platform-api:
     image: *map-platform-control-plane-image
     environment:
@@ -250,3 +292,4 @@ services:
 
 volumes:
   map-platform-data:
+  map-platform-promotion-data:
