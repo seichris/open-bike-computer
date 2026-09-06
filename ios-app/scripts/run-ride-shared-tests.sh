@@ -30,3 +30,5 @@ xcrun swiftc \
   BikeComputerTests/RideSharedTests.swift
 
 "${OUT}"
+
+"${SCRIPT_DIR}/run-watch-device-link-tests.sh"
