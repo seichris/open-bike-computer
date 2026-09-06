@@ -847,6 +847,7 @@ struct NavigationProtocolTests {
         await testOfflineMapInstallationCredentialClient()
         testOfflineMapAppAttestGoldenVector()
         await testManagedOfflineMapAppAttestContract()
+        await testManagedInstallationMigration()
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
         testOfflineMapJobPhaseOnlyProgressDecoding()
@@ -3030,6 +3031,90 @@ struct NavigationProtocolTests {
         } catch {
             assert(false, "installation credential client contract succeeds: \(error)")
         }
+    }
+
+    @MainActor
+    static func testManagedInstallationMigration() async {
+        let suite = "Migration-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel(); OfflineMapTestURLProtocol.reset() }
+        let origin = OfflineMapServiceConfig.productionServerURLString
+        let keyID = Data(repeating: 0x63, count: 32).base64EncodedString()
+        let old = OfflineMapInstallationCredential(
+            clientInstallationId: "inst_v2_1234567890abcdef1234567890abcdef",
+            clientInstallationToken: "v1." + String(repeating: "A", count: 43)
+        )
+        let migrated = OfflineMapInstallationCredential(
+            clientInstallationId: old.clientInstallationId,
+            clientInstallationToken: old.clientInstallationToken,
+            appAttestKeyId: keyID
+        )
+        let store = OfflineMapInstallationCredentialStore(defaults: defaults)
+        let service = BicinoServiceSession(defaults: defaults, urlSession: urlSession,
+            appAttestService: TestOfflineMapAppAttestService(keyID: keyID), appAttestAppBuild: "123")
+        var committed = false
+        var enrollments = 0
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/installations/app-attest/challenges" {
+                let challenge = OfflineMapAppAttestChallenge(
+                    challengeId: String(repeating: "a", count: 32),
+                    challenge: Data(repeating: 1, count: 32).base64EncodedString()
+                        .replacingOccurrences(of: "=", with: ""),
+                    purpose: "attestation", expiresAt: Int64(Date().timeIntervalSince1970) + 300, keyId: nil)
+                return (200, try! JSONEncoder().encode(challenge))
+            }
+            assertEqual(request.value(forHTTPHeaderField: "X-Installation-Token"), old.clientInstallationToken,
+                "migration and refresh prove possession of the old token")
+            if OfflineMapTestURLProtocol.bodyData(from: request).isEmpty {
+                assertEqual(request.value(forHTTPHeaderField: "X-Bicino-App-Attest"), "required",
+                    "managed refresh explicitly selects the attested migration contract")
+            }
+            assert(request.url!.query!.contains(old.clientInstallationId), "migration keeps the old identity")
+            if !OfflineMapTestURLProtocol.bodyData(from: request).isEmpty {
+                enrollments += 1
+                committed = true
+                return (503, Data("lost enrollment response".utf8))
+            }
+            if committed { return (200, try! JSONEncoder().encode(migrated)) }
+            return (401, Data(#"{"detail":{"code":"installation_attestation_required"}}"#.utf8))
+        }
+        do {
+            try store.save(old, serverURLString: origin)
+            let client = try service.makeOfflineMapClient(serverURLString: origin)
+            do {
+                _ = try await service.ensureRegisteredInstallation(client: client)
+                assert(false, "lost response must fail without deleting credentials")
+            } catch {}
+            assertEqual(store.load(serverURLString: origin), old, "failed migration preserves old credentials")
+            let recovered = try await service.ensureRegisteredInstallation(client: client)
+            assertEqual(recovered.clientInstallationId, old.clientInstallationId, "refresh recovers the same owner")
+            assertEqual(store.load(serverURLString: origin), migrated, "refresh commits the recovered key")
+            assertEqual(enrollments, 1, "lost response does not trigger another enrollment")
+            for status in [401, 503] {
+                try store.save(old, serverURLString: origin)
+                OfflineMapTestURLProtocol.configure { _ in
+                    (status, Data(#"{"detail":"invalid installation credential"}"#.utf8))
+                }
+                do {
+                    _ = try await service.ensureRegisteredInstallation(client: client, honorRefreshBackoff: false)
+                    assert(false, "unrelated authentication/server errors must fail closed")
+                } catch {}
+                assertEqual(store.load(serverURLString: origin), old, "server errors never erase the owner credential")
+            }
+            let foreign = OfflineMapInstallationCredential(
+                clientInstallationId: "inst_v2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                clientInstallationToken: old.clientInstallationToken, appAttestKeyId: keyID)
+            OfflineMapTestURLProtocol.configure { _ in (200, try! JSONEncoder().encode(foreign)) }
+            do {
+                _ = try await service.ensureRegisteredInstallation(client: client, honorRefreshBackoff: false)
+                assert(false, "refresh must reject a different installation identity")
+            } catch {}
+            assertEqual(store.load(serverURLString: origin), old, "foreign refresh cannot replace the owner credential")
+        } catch { assert(false, "migration recovery succeeds: \(error)") }
     }
 
     @MainActor

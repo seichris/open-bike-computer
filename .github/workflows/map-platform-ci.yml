@@ -140,6 +140,11 @@ jobs:
         run: |
           python -m unittest discover -s tests
           python -m unittest discover -s ../deploy/tests
+      - name: Production authentication compatibility image
+        working-directory: .
+        run: >-
+          docker build --platform linux/amd64 --target validation
+          -f map-platform/deploy/compatibility/Dockerfile .
       - name: Production Compose config
         env:
           MAP_PLATFORM_DOWNLOAD_SECRET: ci-download-secret

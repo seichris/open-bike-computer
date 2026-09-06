@@ -97,6 +97,18 @@ class CIWorkflowSplitTests(unittest.TestCase):
 
         self.assertIn("  push:\n    branches:\n      - main\n", image_workflow)
 
+    def test_authentication_compatibility_is_candidate_only(self) -> None:
+        workflow = workflow_source("map-platform-image.yml")
+        excluded = "inputs.release_profile != 'production-auth-compatibility'"
+        self.assertEqual(workflow.count(excluded), 3)
+        self.assertIn("'-auth-compat' || ''", workflow)
+        self.assertIn("'runtime' || ''", workflow)
+        self.assertIn('test "$SOURCE_REF" = "refs/heads/$DEFAULT_BRANCH"', workflow)
+        self.assertIn("--target validation", workflow)
+        for job in ("propose-production", "propose-development"):
+            section = workflow.split(f"  {job}:\n", 1)[1].split("    runs-on:", 1)[0]
+            self.assertIn(excluded, section)
+
 
 if __name__ == "__main__":
     unittest.main()
