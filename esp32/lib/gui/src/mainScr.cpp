@@ -33,11 +33,6 @@
 
 bool isMainScreen = false; // Flag to indicate main screen is selected
 
-#if DEVICE_REMOTE_DEBUG
-renderer_diagnostics::CameraSample device_debug::captureMapCameraForPanelFrame() {
-  return mapView.captureCameraMetadata();
-}
-#endif
 bool isScrolled = true;    // Flag to indicate when tileview was scrolled
 bool isReady = false;      // Flag to indicate when tileview scroll was finished
 bool isScrollingMap = false;  // Flag to indicate if map is scrolling
@@ -345,6 +340,12 @@ void setImageAngleIfChanged(lv_obj_t *image, int16_t angle) {
 } // namespace
 
 Maps mapView;
+
+#if DEVICE_REMOTE_DEBUG
+renderer_diagnostics::CameraSample device_debug::captureMapCameraForPanelFrame() {
+  return mapView.captureCameraMetadata();
+}
+#endif
 static map_tap_arbiter::Controller mapTapController;
 static bool currentCourseUpHeading(uint16_t &headingDegrees);
 

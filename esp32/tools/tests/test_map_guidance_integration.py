@@ -126,6 +126,8 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertNotIn("mainScr.hpp", capture)
         self.assertIn("captureMapCameraForPanelFrame()", capture)
         self.assertIn("device_debug::captureMapCameraForPanelFrame()", MAIN_SCREEN_SOURCE)
+        self.assertLess(MAIN_SCREEN_SOURCE.index("Maps mapView;"),
+                        MAIN_SCREEN_SOURCE.index("device_debug::captureMapCameraForPanelFrame()"))
         widgets = (ESP32_ROOT / "lib/gui/src/widgets.hpp").read_text()
         self.assertIn('"../../utils/src/gpsMath.hpp"', widgets)
 
