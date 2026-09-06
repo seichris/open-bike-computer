@@ -140,6 +140,12 @@ jobs:
         run: |
           python -m unittest discover -s tests
           python -m unittest discover -s ../deploy/tests
+      - name: Production promotion scheduler image
+        working-directory: .
+        run: >-
+          docker build --platform linux/amd64 --target validation
+          -f map-platform/deploy/promotion/Dockerfile .
+
       - name: Production authentication compatibility image
         working-directory: .
         run: >-

@@ -23,13 +23,14 @@ on:
   workflow_dispatch:
     inputs:
       release_profile:
-        description: Standard release or authentication-only compatibility candidate (no automatic promotion)
+        description: Standard release or isolated production compatibility candidate
         required: true
         default: standard
         type: choice
         options:
           - standard
           - production-auth-compatibility
+          - production-map-promotion
       pending_worker:
         description: How to handle an open worker-moving promotion
         required: true
@@ -81,19 +82,29 @@ jobs:
           docker build --platform linux/amd64 --target validation \
             -f map-platform/deploy/compatibility/Dockerfile .
 
+      - name: Validate isolated production promotion candidate
+        if: inputs.release_profile == 'production-map-promotion'
+        env:
+          SOURCE_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          test "$SOURCE_REF" = "refs/heads/$DEFAULT_BRANCH"
+          docker build --platform linux/amd64 --target validation \
+            -f map-platform/deploy/promotion/Dockerfile .
+
       - id: metadata
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/open-bike-computer-map-platform
-          tags: type=raw,value=${{ github.sha }}${{ inputs.release_profile == 'production-auth-compatibility' && '-auth-compat' || '' }}
+          tags: type=raw,value=${{ github.sha }}${{ inputs.release_profile == 'production-auth-compatibility' && '-auth-compat' || inputs.release_profile == 'production-map-promotion' && '-map-promotion' || '' }}
 
       - id: image
         name: Build and publish image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          file: ${{ inputs.release_profile == 'production-auth-compatibility' && 'map-platform/deploy/compatibility/Dockerfile' || 'map-platform/backend/Dockerfile' }}
-          target: ${{ inputs.release_profile == 'production-auth-compatibility' && 'runtime' || '' }}
+          file: ${{ inputs.release_profile == 'production-auth-compatibility' && 'map-platform/deploy/compatibility/Dockerfile' || inputs.release_profile == 'production-map-promotion' && 'map-platform/deploy/promotion/Dockerfile' || 'map-platform/backend/Dockerfile' }}
+          target: ${{ (inputs.release_profile == 'production-auth-compatibility' || inputs.release_profile == 'production-map-promotion') && 'runtime' || '' }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
@@ -108,7 +119,7 @@ jobs:
           push-to-registry: true
 
       - name: Move latest to the successful default-branch image
-        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.release_profile != 'production-auth-compatibility'
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (inputs.release_profile == '' || inputs.release_profile == 'standard')
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
@@ -139,7 +150,7 @@ jobs:
   propose-production:
     name: Propose production image
     needs: publish
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.release_profile != 'production-auth-compatibility'
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (inputs.release_profile == '' || inputs.release_profile == 'standard')
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -446,7 +457,7 @@ jobs:
   propose-development:
     name: Propose development image
     needs: publish
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.release_profile != 'production-auth-compatibility'
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (inputs.release_profile == '' || inputs.release_profile == 'standard')
     runs-on: ubuntu-latest
     permissions:
       actions: write
