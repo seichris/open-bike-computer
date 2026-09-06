@@ -159,8 +159,9 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
         capturedAtOrAfter timestampMs: UInt32,
         timeoutInterval: TimeInterval =
             SecureRendererBenchmarkHTTPPolicy.frameRequestTimeout
-    ) async throws -> Data? {
-        try await request(
+    ) async throws -> (data: Data, camera: RendererCameraEvidence?)? {
+        var camera: RendererCameraEvidence?
+        let data = try await request(
             path: "device-debug/v1/frame",
             queryItems: [
                 URLQueryItem(name: "after", value: String(sequence)),
@@ -171,8 +172,19 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
             ],
             allowNoContent: true,
             maximumBytes: 1_048_576,
-            timeoutInterval: timeoutInterval
+            timeoutInterval: timeoutInterval,
+            responseObserver: { response in
+                if let header = response.value(forHTTPHeaderField: "X-BikeComputer-Map-Camera") {
+                    guard let decoded = RendererCameraEvidence.frameHeader(header) else {
+                        throw SecureRendererBenchmarkControllerError.invalidResponse(
+                            "The captured frame has invalid camera metadata."
+                        )
+                    }
+                    camera = decoded
+                }
+            }
         )
+        return data.map { ($0, camera) }
     }
 
     private func decodeJSON<T: Decodable>(
@@ -201,7 +213,8 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
         acceptedStatusCode: Int = 200,
         maximumBytes: Int = 262_144,
         timeoutInterval: TimeInterval =
-            SecureRendererBenchmarkHTTPPolicy.controlRequestTimeout
+            SecureRendererBenchmarkHTTPPolicy.controlRequestTimeout,
+        responseObserver: ((HTTPURLResponse) throws -> Void)? = nil
     ) async throws -> Data? {
         var components = URLComponents(
             url: baseURL.appendingPathComponent(path),
@@ -251,6 +264,7 @@ private final class SecureRendererBenchmarkHTTPClient: @unchecked Sendable {
                     "The secure device response exceeded its size limit."
                 )
             }
+            try responseObserver?(response)
             return data
         } catch let error as SecureRendererBenchmarkControllerError {
             throw error
@@ -1172,7 +1186,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
         while Date() < deadline {
             try checkContinuity()
             do {
-                guard let data = try await client.frame(
+                guard let frame = try await client.frame(
                     after: lastFrameSequence,
                     capturedAtOrAfter: routeReplay.receivedAtMs,
                     timeoutInterval: min(
@@ -1184,7 +1198,7 @@ final class SecureRendererBenchmarkController: ObservableObject {
                     continue
                 }
                 let decoded = try RendererBenchmarkFrameDecoder.decode(
-                    data,
+                    frame.data,
                     expectedPanelWidth: geometry.width,
                     expectedPanelHeight: geometry.height,
                     rotationQuarters: geometry.rotation
@@ -1224,7 +1238,8 @@ final class SecureRendererBenchmarkController: ObservableObject {
                         captureLagMs: lag,
                         path: path,
                         bytes: png.count,
-                        sha256: Self.sha256Hex(Data(SHA256.hash(data: png)))
+                        sha256: Self.sha256Hex(Data(SHA256.hash(data: png))),
+                        camera: frame.camera
                     )
                 }
             } catch {

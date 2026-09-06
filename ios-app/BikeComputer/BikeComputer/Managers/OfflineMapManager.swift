@@ -2477,7 +2477,8 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func savedMapListItems(
-        activeDeviceMap: DeviceActiveMapDescriptor?
+        activeDeviceMap: DeviceActiveMapDescriptor?,
+        scope: SavedMapListScope = .savedMaps
     ) -> [SavedMapListItem] {
         var remainingRecords = cachedMapRecords
         var remainingCatalogMaps = catalogMaps
@@ -2574,7 +2575,10 @@ final class OfflineMapManager: ObservableObject {
                 catalogMap: map
             )
         })
-        return items
+        let channel = OfflineMapCatalogConfig.channel(
+            generationServerURLString: serverURLString
+        )
+        return items.filter { scope.includes($0.catalogMap, channel: channel) }
     }
 
 #if canImport(UIKit)

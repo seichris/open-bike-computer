@@ -100,6 +100,25 @@ int main() {
   assert(state.beginWindow(41, runIdentity(kRouteHash), Profile::Medium, 1000,
                            10));
   assert(state.measurementWindowId() == 41);
+  CameraSample camera;
+  camera.enabled = true;
+  camera.updateRequired = true;
+  camera.frameSequence = 7;
+  camera.lagMs = 200;
+  camera.effectiveMode = 1;
+  camera.markerAngleTenths = 3590;
+  State cameraState;
+  cameraState.beginSession(true);
+  assert(cameraState.beginWindow(41, runIdentity(kRouteHash), Profile::Medium, 1000, 10));
+  assert(!cameraState.noteCameraForWindow(40, camera));
+  assert(cameraState.noteCameraForWindow(41, camera));
+  const auto cameraSnapshot = cameraState.snapshot(1200);
+  assert(cameraSnapshot.camera.frameSequence == 7);
+  assert(cameraSnapshot.cameraLag.count == 1);
+  assert(cameraSnapshot.maximumMarkerResidualTenths == 10);
+  assert(cameraState.beginWindow(42, runIdentity(kRouteHash), Profile::Medium, 1300, 10));
+  assert(!cameraState.snapshot(1400).camera.enabled);
+  assert(cameraState.snapshot(1400).cameraLag.count == 0);
   assert(state.replayTransportDiagnostics()
              .markerRejectedNoActiveWindow == 1);
   assert(!state.noteRenderForWindow(40, Profile::Medium, {}));
@@ -248,6 +267,8 @@ int main() {
   state.noteMemory({0, 0, 0, 0, 0, 0, 0, 0, 8, 13});
   state.noteMemory({100, 100, 100, 100, 100, 100, 100, 100, 9, 15});
   const Snapshot reset = state.snapshot(3001);
+  assert(!reset.camera.enabled);
+  assert(reset.cameraLag.count == 0);
   assert(reset.measurementWindowId == 42);
   assert(reset.sequence == 3);
   assert(reset.totalRender.count == 0);

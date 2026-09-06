@@ -1082,16 +1082,24 @@ private struct SavedMapsSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
     @FocusState.Binding var focusedPackFilename: String?
+    var scope: SavedMapListScope = .savedMaps
     @State private var renameInteraction = SavedMapRenameInteraction()
 
     var body: some View {
         let savedMaps = manager.savedMapListItems(
-            activeDeviceMap: bleManager.activeDeviceMap
+            activeDeviceMap: bleManager.activeDeviceMap,
+            scope: scope
         )
-        Section(header: Text("Saved Maps")) {
+        Section(header: Text(scope == .developerMaps ? "Development Maps" : "Saved Maps")) {
             if savedMaps.isEmpty {
-                Text("No offline maps yet")
-                    .foregroundColor(.secondary)
+                Group {
+                    if scope == .developerMaps {
+                        Text("No development-only maps")
+                    } else {
+                        Text("No offline maps yet")
+                    }
+                }
+                .foregroundColor(.secondary)
             } else {
                 ForEach(savedMaps) { item in
                     SavedMapRow(
@@ -1105,17 +1113,19 @@ private struct SavedMapsSettingsSection: View {
                 }
             }
 
-            Button {
-                if let commit = renameInteraction.finish() {
-                    commitRename(commit)
+            if scope == .savedMaps {
+                Button {
+                    if let commit = renameInteraction.finish() {
+                        commitRename(commit)
+                    }
+                    focusedPackFilename = nil
+                    manager.beginMapAreaSelection()
+                    if manager.isMapAreaSelectionActive {
+                        dismiss()
+                    }
+                } label: {
+                    Label("Download a new Map", systemImage: "rectangle.dashed")
                 }
-                focusedPackFilename = nil
-                manager.beginMapAreaSelection()
-                if manager.isMapAreaSelectionActive {
-                    dismiss()
-                }
-            } label: {
-                Label("Download a new Map", systemImage: "rectangle.dashed")
             }
         }
         .onChange(of: focusedPackFilename) { newValue in
@@ -1181,6 +1191,28 @@ private struct SavedMapsSettingsSection: View {
             return
         }
         manager.renameCachedPack(at: packURL, to: commit.proposedName)
+    }
+}
+
+private struct DevelopmentMapsSettingsView: View {
+    @ObservedObject var manager: OfflineMapManager
+    @FocusState private var focusedPackFilename: String?
+
+    var body: some View {
+        Form {
+            SavedMapsSettingsSection(
+                manager: manager,
+                focusedPackFilename: $focusedPackFilename,
+                scope: .developerMaps
+            )
+            Section {
+                Text("These maps are in your shared library but have not been published for production. Production downloads still require a compatible, production-signed artifact.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .navigationTitle("Development Maps")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -2133,6 +2165,25 @@ private struct MapStyleSettingsView: View {
             }
 
             if screen == .mapPlusNavigation {
+                Section(header: Text("Map Mode"), footer: Text(
+                    bleManager.supportsMapNavigationOrientation
+                        ? "Course Up follows your direction of travel. North Up keeps the map bearing fixed. Label orientation is configured separately."
+                        : "Independent navigation orientation requires supported development firmware. Your selection is retained for a compatible device."
+                )) {
+                    Picker("Rotation", selection: $bleManager.mapPlusNavigationRotationMode) {
+                        Text("North Up").tag(0)
+                        Text("Course Up").tag(1)
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(!bleManager.hasReceivedDeviceCapabilities ||
+                              !bleManager.supportsMapNavigationOrientation)
+                    .onChange(of: bleManager.mapPlusNavigationRotationMode) { value in
+                        bleManager.sendSetting(
+                            id: DeviceBLEProtocol.mapPlusNavigationRotationSettingID,
+                            value: Int32(value)
+                        )
+                    }
+                }
                 Section(header: Text("View"), footer: Text(birdsEyeFooter)) {
                     Toggle(
                         "Bird's-Eye View",
@@ -3418,6 +3469,11 @@ private struct DeveloperSettingsView: View {
                     MapLibrarySettingsView(manager: offlineMapManager)
                 } label: {
                     Label("Map Library", systemImage: "map.circle")
+                }
+                NavigationLink {
+                    DevelopmentMapsSettingsView(manager: offlineMapManager)
+                } label: {
+                    Label("Development Maps", systemImage: "hammer")
                 }
             } footer: {
                 Text(
