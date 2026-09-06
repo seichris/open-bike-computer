@@ -1,6 +1,6 @@
 # control-plane-source-commit: b40b825b137e8c5d3e00c11b8914850bba5fd391
 # worker-source-commit: e739dfe6c0612e95db8241249dcc2edfe52d8372
-# promotion-source-commit: 2bff706c442865ef9c07c2d5c5589991d0010ddf
+# promotion-source-commit: 8c3a14c3c0f619a91863af99429a21a6af663830
 
 # These digest-pinned images are the production deployment manifest. The API
 # and maintenance control plane may advance to carry a rollout approval while
@@ -16,7 +16,7 @@ x-map-platform-images:
 
 services:
   map-platform-promotion:
-    image: ghcr.io/seichris/open-bike-computer-map-platform@sha256:2be730596caad6dd911a488fe22d52c48a6a702fdba559393edfb18523d98593
+    image: ghcr.io/seichris/open-bike-computer-map-platform@sha256:0184002724c7ec96f2c7edd60662af2527fcbbebcb505229b082e919e7c09bb8
     mem_limit: 2g
     cpus: 1
     environment:
