@@ -3231,6 +3231,9 @@ struct OfflineMapPlatformClient {
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        if managedAppAttestClient != nil {
+            request.setValue("required", forHTTPHeaderField: "X-Bicino-App-Attest")
+        }
         authorizeInstallation(&request)
         let credential: OfflineMapInstallationCredential = try await send(request: request)
         let appAttestKeyIsValid = credential.appAttestKeyId.map(

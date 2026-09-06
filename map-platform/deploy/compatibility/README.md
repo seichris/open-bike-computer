@@ -1,6 +1,6 @@
 # Production authentication compatibility candidate
 
-Status: **draft, not approved for deployment**. This prepares the dedicated
+Status: **rollout candidate; deploy only through a reviewed lock**. This prepares the dedicated
 compatibility release allowed by the deployment runbook. It does not waive the
 worker gates or enable a new-API/old-worker override.
 
@@ -11,7 +11,7 @@ The runtime starts from the exact production image digest
 source `e739dfe6c0612e95db8241249dcc2edfe52d8372`. No runtime packages are
 installed or upgraded. The builder checks the base API's SHA-256 before making
 changes and transplants only authentication handlers and assertion checks
-from the reviewed current source. All job-creation, idempotency, rate-limit,
+from the reviewed current source. All non-authentication job-creation, idempotency, rate-limit,
 storage, pipeline, source-cache, generator, signing, and maintenance code stays
 at the base version. Existing catalog requests use the backward compatibility
 deployed in PR 405.
@@ -28,6 +28,25 @@ The base producer-identity file is retained solely for the unchanged worker's
 control-plane checks; this compatibility image is never a signing candidate.
 
 ## Local verification
+
+### Coexistence with the published app
+
+The published app predates App Attest. This compatibility image retains the
+exact base installation issuance/refresh contract for requests without an
+enrollment body or `X-Bicino-App-Attest: required`. Updated managed clients send
+that header on refresh and use the authenticated same-owner migration when
+needed. A malformed enrollment body never falls back to legacy issuance.
+
+Unbound installations retain the existing token-authenticated map-create path.
+Once enrolled, the server requires assertions regardless of client headers;
+removing the header or downgrading the app cannot unbind the key. Apple bundle,
+environment, category, certificate and assertion verification remain unchanged.
+
+This is a staged compatibility rollout, NOT global App Attest enforcement.
+Health explicitly advertises `legacyCompatibility: true` and
+`requiredForAttestedInstallations: true`. Ending legacy issuance requires a
+separate coordinated supported-app-version rollout, not a silent policy flip
+as part of a sharing repair. Current-main API enforcement is unchanged.
 
 Use OrbStack on macOS, from the repository root:
 
@@ -46,7 +65,7 @@ It compares every file under `/app` with the base: the only permitted changes
 are `api.py`, `app_attest.py`, and the Apple certificate. HTTP test dependencies
 exist only in the `validation` stage, never the `runtime` stage.
 
-## Existing-download migration is a deployment blocker
+## Existing-download verification and recovery
 
 The previously installed app deletes an installation credential without a usable
 App Attest key before enrollment succeeds. Enrollment issues a new installation
@@ -56,7 +75,7 @@ their own jobs, but the API cannot recover a credential already deleted from
 the phone's Keychain.
 
 Therefore a successful challenge endpoint is NOT proof that old downloaded maps
-can attach. Before release:
+can attach. Keep these evidence boundaries through the rollout:
 
 1. Ship the credential-preserving app upgrade in this candidate together with
    the authenticated enrollment migration. It retains the old installation ID
@@ -64,16 +83,18 @@ can attach. Before release:
    Apple attestation. Existing bindings cannot be replaced. The app keeps its
    old credential on failure and persists the generated key before submission,
    allowing authenticated refresh to recover a lost enrollment response.
-2. For phones that already lost that token, define and obtain approval for a
+2. For phones that already lost that token, do not claim this rollout recovers
+   their historical access. Define and obtain approval for a
    scoped recovery flow. Do not infer ownership from a map ID, filename, or
    public hash; do not reassign jobs or insert catalog references directly.
 3. Verify the affected production downloads on the actual phone, including
    catalog attachment and Share-button visibility. Test fixture success is not
    physical-app evidence.
 
-No iOS credential mutation, data migration, production restart, or deployment
-is part of this preparation. The current production maps and generator remain
-unchanged.
+The compatibility deployment itself does not reassign ownership, mutate iOS
+credentials, or recover deleted credentials. Existing maps and the generator
+remain unchanged. Unresolved historical recovery must be reported separately;
+it must never be disguised by inserting catalog references or editing sidecars.
 
 ## Publish only after review and migration gates
 
@@ -96,8 +117,9 @@ the existing tooling. Prepare a dedicated reviewed Compose-lock PR changing
 only the control-plane source/digest and retaining the exact worker source/digest.
 Never substitute the standard image built at the same source SHA.
 
-Do not merge that deployment PR until its exact CI Gate passes and all migration
-gates above have evidence. After deployment, verify API and maintenance health,
+Do not merge that deployment PR until its exact CI Gate passes and the legacy,
+migration and no-downgrade regression tests pass against the candidate image.
+Record any unresolved phone recovery separately. After deployment, verify API and maintenance health,
 the unchanged worker image, production App Attest enrollment, existing-map
 attachment, and the app UI. Roll back through a PR restoring the complete prior
 Compose lock; preserve the new App Attest database and do not restore an older
