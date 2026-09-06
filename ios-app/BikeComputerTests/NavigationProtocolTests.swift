@@ -7100,6 +7100,7 @@ struct NavigationProtocolTests {
             tier: String,
             requiredBuild: String?,
             sha256: String = String(repeating: "c", count: 64),
+            artifactFormat: String = OfflineMapArtifact.bikeMapStreamFormat,
             includesReaderRequirements: Bool = true,
             readerSchemaVersion: Int = 1,
             streamFormat: String = OfflineMapArtifact.bikeMapStreamFormat,
@@ -7110,7 +7111,7 @@ struct NavigationProtocolTests {
             OfflineMapCatalogArtifact(
                 artifactId: id,
                 objectKey: "maps/test/\(id).bmap",
-                format: OfflineMapArtifact.bikeMapStreamFormat,
+                format: artifactFormat,
                 mediaType: "application/vnd.openbikecomputer.map-stream",
                 filename: "test.bmap",
                 bytes: 100,
@@ -7236,6 +7237,58 @@ struct NavigationProtocolTests {
         )
         let developmentSHA256 = String(repeating: "2", count: 64)
         let productionSHA256 = String(repeating: "3", count: 64)
+        let zip = artifact(
+            id: "prod-zip", tier: "production", requiredBuild: nil,
+            sha256: String(repeating: "4", count: 64),
+            artifactFormat: OfflineMapArtifact.storedZipFormat
+        )
+        let stream = artifact(
+            id: "prod-stream", tier: "production", requiredBuild: nil,
+            sha256: productionSHA256
+        )
+        let freshMap = map(deliveryState: "production", artifacts: [zip, stream])
+        assert(
+            !OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+                localArtifactSHA256s: [zip.sha256],
+                localPrimaryArtifact: zip.platformArtifact,
+                map: freshMap, channel: "production", trustStore: .production
+            ),
+            "a freshly downloaded production ZIP is current despite a different BMAP hash"
+        )
+        assert(
+            OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+                localArtifactSHA256s: [zip.sha256],
+                localPrimaryArtifact: zip.platformArtifact,
+                map: map(deliveryState: "production", artifacts: [stream]),
+                channel: "production", trustStore: .production
+            ),
+            "an unknown or superseded ZIP still needs a verified current download"
+        )
+        let devZip = artifact(
+            id: "dev-zip", tier: "development", requiredBuild: nil,
+            sha256: zip.sha256, artifactFormat: OfflineMapArtifact.storedZipFormat
+        )
+        assert(
+            OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+                localArtifactSHA256s: [devZip.sha256],
+                localPrimaryArtifact: devZip.platformArtifact,
+                map: map(deliveryState: "production", artifacts: [devZip, stream]),
+                channel: "production", trustStore: .production
+            ),
+            "a development ZIP does not bypass production-tier refresh"
+        )
+        let oldStream = artifact(
+            id: "old-stream", tier: "production", requiredBuild: nil,
+            sha256: String(repeating: "5", count: 64)
+        )
+        assert(
+            OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+                localArtifactSHA256s: [oldStream.sha256, zip.sha256],
+                localPrimaryArtifact: oldStream.platformArtifact,
+                map: freshMap, channel: "production", trustStore: .production
+            ),
+            "a current fallback ZIP cannot hide a stale primary BMAP"
+        )
         let mixedTierMap = map(
             deliveryState: "production",
             artifacts: [
@@ -11292,11 +11345,21 @@ struct NavigationProtocolTests {
         )
         assert(
             source.contains("presentedPreview = SavedMapPreviewPresentation(") &&
-                source.contains(".sheet(item: $presentedPreview)") &&
+                source.contains(".sheet(item: $presentedPreview, onDismiss:") &&
                 source.contains("SavedMapPreviewSheet(manager: manager, preview: preview)") &&
                 source.contains(".accessibilityLabel(\"Show preview for \\(displayName)\")") &&
                 source.contains("Button(\"Close\")"),
             "tapping an available saved-map thumbnail opens an accessible preview modal"
+        )
+        let previewSource = String(source.components(separatedBy: "private struct SavedMapPreviewSheet: View {").last ?? "")
+        assert(
+            previewSource.contains("Label(\"Share this map\", systemImage: \"square.and.arrow.up\")") &&
+                previewSource.contains(".font(.subheadline.weight(.semibold))") &&
+                previewSource.contains("RoundedRectangle(cornerRadius: 24, style: .continuous)") &&
+                previewSource.contains("onShareRequested()") &&
+                source.contains("guard shareAfterPreviewDismissal else { return }") &&
+                !source.contains(".accessibilityLabel(\"Share \\(displayName)\")"),
+            "sharing lives beneath the preview with workout styling and waits for modal dismissal"
         )
         assert(
             source.contains("manager.detailPreviewImage(for: preview.item)") &&
