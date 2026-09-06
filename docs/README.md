@@ -23,6 +23,7 @@
 
 | Plan | Status |
 | --- | --- |
+| [Bluetooth reliability reassessment — 2026-09-06](plans/bluetooth-reliability-reassessment-2026-09-06.md) | Current-main analysis; three shutdown/readiness findings open, prior merged fixes reconciled, implementation and physical acceptance plan |
 | [iPhone MapKit appearance switcher](plans/iphone-mapkit-appearance-switcher-implementation-plan.md) | Implemented in software; redesigned control rail pending physical validation |
 | [Opportunistic Bicino discovery and single-session BLE scanning](plans/opportunistic-bicino-discovery-implementation-plan.md) | Implemented in software; physical validation pending |
 | [Geofabrik/OSM 3D buildings](plans/geofabrik-osm-3d-buildings-implementation-plan.md) | Implemented; physical rendering validated on the 1.75-inch device |
