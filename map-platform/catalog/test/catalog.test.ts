@@ -16,6 +16,7 @@ import {
   finalizePublication,
   getLibraryMap,
   listLibraryMaps,
+  listPromotionCandidates,
   listShares,
   prepareRetentionAuthorizations,
   quarantinePublication,
@@ -2342,6 +2343,47 @@ describe("validation", () => {
 });
 
 describe("catalog lifecycle boundaries", () => {
+  it("discovers development maps with bounded keyset pagination and excludes blocked maps", async () => {
+    const maps = [
+      developmentPublication("auto-a"),
+      developmentPublication("auto-b"),
+      developmentPublication("auto-c"),
+    ];
+    for (const candidate of maps) {
+      await finalizePublication(
+        env,
+        candidate,
+        candidate.publicationId,
+        await sha256Hex(JSON.stringify(candidate)),
+        null,
+        verifyTestArtifact,
+      );
+    }
+    const ids = maps.map((map) => map.mapEntryId).sort();
+    const first = await listPromotionCandidates(env, null, 1);
+    expect(first).toEqual({ mapEntryIds: [ids[0]], nextCursor: ids[0] });
+    expect(await listPromotionCandidates(env, first.nextCursor, 100)).toEqual({
+      mapEntryIds: ids.slice(1),
+      nextCursor: null,
+    });
+    await env.DB.prepare(
+      "UPDATE map_entries SET delivery_state='blocked' WHERE id=?",
+    )
+      .bind(ids[0])
+      .run();
+    expect((await listPromotionCandidates(env, null, 100)).mapEntryIds).toEqual(
+      ids.slice(1),
+    );
+    await expect(createPromotionGrant(env, ids[0])).rejects.toMatchObject({
+      status: 409,
+    });
+    await expect(listPromotionCandidates(env, null, 101)).rejects.toMatchObject(
+      { status: 400 },
+    );
+    await expect(listPromotionCandidates(env, "bad", 50)).rejects.toMatchObject(
+      { status: 400 },
+    );
+  });
   it("leases promotion atomically, renews it, recovers stale work, and finalizes once", async () => {
     const development = developmentPublication("promotion-lease");
     await finalizePublication(
@@ -2850,11 +2892,13 @@ describe("catalog lifecycle boundaries", () => {
       undefined,
       "production",
     );
+    const dayMilliseconds = 24 * 60 * 60 * 1000;
+    const shareExpiry = new Date(Date.now() + dayMilliseconds);
     await createShare(
       env,
       library.libraryId,
       shared.mapEntryId,
-      "2026-09-01T00:00:00.000Z",
+      shareExpiry.toISOString(),
     );
     await detachLibraryMap(env, library.libraryId, shared.mapEntryId);
     await env.DB.prepare("UPDATE map_entries SET updated_at = ? WHERE id = ?")
@@ -2865,7 +2909,7 @@ describe("catalog lifecycle boundaries", () => {
       { ...env, RETENTION_GRACE_DAYS: "30" },
       "production",
       10,
-      new Date("2026-09-15T00:00:00.000Z"),
+      new Date(shareExpiry.getTime() + 14 * dayMilliseconds),
     );
     const protectedArtifact = await env.DB.prepare(
       "SELECT state FROM artifacts WHERE id = ?",
@@ -2878,7 +2922,7 @@ describe("catalog lifecycle boundaries", () => {
       { ...env, RETENTION_GRACE_DAYS: "30" },
       "production",
       10,
-      new Date("2026-10-02T00:00:00.000Z"),
+      new Date(shareExpiry.getTime() + 31 * dayMilliseconds),
     );
     const tombstonedArtifact = await env.DB.prepare(
       "SELECT state FROM artifacts WHERE id = ?",

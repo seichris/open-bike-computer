@@ -888,13 +888,13 @@ enum RideSharedTests {
         var cap2 = Data("CAP2".utf8)
         cap2.append(1)
         expect(
-            WatchDirectBLEProtocolV1.capabilityClientVersion == 20 &&
+            WatchDirectBLEProtocolV1.capabilityClientVersion == 22 &&
                 WatchDirectBLEProtocolV1.scopedControllerFeature == 1 << 14 &&
                 WatchDirectBLEProtocolV1.rideAutomationFeature == 1 << 15 &&
                 WatchDirectBLEProtocolV1.gpsPositionQualityV1Feature == 1 << 17 &&
                 WatchDirectBLEProtocolV1.rideDeliveryAcknowledgementFeature ==
                     1 << 22,
-            "Watch requests reliable ride delivery without moving existing capabilities"
+            "Watch requests reliable ride delivery at the current protocol version without moving existing capabilities"
         )
         let flags = WatchDirectBLEProtocolV1.scopedControllerFeature |
             WatchDirectBLEProtocolV1.workoutTelemetryFeature |
@@ -2260,6 +2260,34 @@ enum RideSharedTests {
         expect(
             WatchRouteSyncMessageV1(propertyList: message.propertyList) == message,
             "route transfer metadata round-trips through property-list values"
+        )
+        expect(
+            WatchRouteSyncMessageV1.isInstallTransfer(
+                message.propertyList,
+                matching: identity
+            ),
+            "the exact queued install is cancellable"
+        )
+        expect(
+            !WatchRouteSyncMessageV1.isInstallTransfer(
+                WatchRouteSyncMessageV1(
+                    operation: .delete,
+                    identity: identity
+                ).propertyList,
+                matching: identity
+            ),
+            "a queued deletion cannot be cancelled as an install"
+        )
+        expect(
+            !WatchRouteSyncMessageV1.isInstallTransfer(
+                message.propertyList,
+                matching: WatchRouteIdentityV1(
+                    routeID: UUID(),
+                    revision: identity.revision,
+                    contentHash: identity.contentHash
+                )
+            ),
+            "route cancellation is bound to the exact identity"
         )
         let renamedEntry = try WatchRouteDisplayNameV1(
             identity: identity,

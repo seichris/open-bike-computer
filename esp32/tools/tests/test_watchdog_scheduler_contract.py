@@ -14,14 +14,14 @@ PLATFORMIO = (PROJECT_DIR / "platformio.ini").read_text(encoding="utf-8")
 
 
 class WatchdogSchedulerContractTests(unittest.TestCase):
-    def test_map_worker_cannot_outrank_watched_idle_task(self):
+    def test_map_worker_outranks_idle_only_between_bounded_release_windows(self):
         creation = re.search(
             r'xTaskCreatePinnedToCoreWithCaps\(\s*renderWorkerTaskThunk,.*?;\n',
             MAP_SOURCE,
             re.DOTALL,
         )
         self.assertIsNotNone(creation)
-        self.assertIn("tskIDLE_PRIORITY", creation.group(0))
+        self.assertIn("tskIDLE_PRIORITY + 1", creation.group(0))
         self.assertRegex(creation.group(0), r"renderWorkerTaskHandle,\s*0,")
 
     def test_cpu_heavy_rendering_opens_a_bounded_idle_window(self):

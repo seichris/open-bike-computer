@@ -9,7 +9,7 @@ candidate selection, not permission to change the default profile.
 ## What is automated
 
 - one checked-in Shanghai route with 120 exact 1 Hz GPS samples and a SHA-256
-  marker on every sample, serialized after that sample's GPS write;
+  marker on every sample, carried together in one authenticated atomic write;
 - `flat`, `current`, `medium`, and `high` profiles in a balanced order, with at
   least three complete 120-second fixture loops per profile;
 - authenticated, rate-limited snapshots from the same bounded firmware state
@@ -22,6 +22,13 @@ candidate selection, not permission to change the default profile.
   building selection/reach, quota limiters, allocation fallback, GPS packet
   cadence, route-marker freshness, reset identity, and remote-debug capture
   overhead;
+- DEBUG-app replay-timer lateness plus cumulative, class-bounded BLE queue,
+  coalescing, backpressure, in-flight acknowledged-write, completion, error,
+  and timeout evidence; these fields contain no characteristic values,
+  credentials, network details, or protected payloads;
+- frame-service snapshot-lock wait, CRC time, expected/actual body bytes, TLS
+  write calls, short/zero writes, active TLS-write time, no-progress wait, and
+  intentional inter-chunk delay;
 - four deterministic screenshots per comparison window, each captured after
   and timestamp-bound to its observed route marker;
 - absolute and relative rejection gates, a Pareto frontier, and a 300-second or
@@ -55,6 +62,39 @@ changes the production default. Firmware likewise restores `current` if a
 queued window cannot be applied because its session or active-map identity is
 no longer valid.
 
+The total quotas remain authoritative even in dense scenes. Firmware sorts the
+bounded bounds-based candidate set by rider distance and stops exact ring
+projection once those same record/point/pixel quotas are full; farther records
+cannot affect nearest-first admission. Polygon scanline workspace is reused for
+the frame. The immutable frame projection caches its zoom and rotation
+coefficients instead of repeating double-precision trigonometry for every
+feature point, and variable frame scratch plus JSON escaping avoid short-lived
+internal-RAM allocations. These are output-preserving latency and headroom
+controls, not hidden profile or gate changes.
+
+## Temporary coverage-rejection allowance (2026-09-05)
+
+At the maintainer's explicit request, both gate contracts temporarily allow
+`maximumCoverageRejectedRenders = 4` (previously 2). Follow-up
+[issue #402](https://github.com/seichris/open-bike-computer/issues/402) tracks
+rejection-event diagnostics, reproduction, a root-cause fix if needed, and
+revisiting this allowance. All other gates and production defaults are unchanged.
+In particular, `maximumStaleRenders` remains 3: coverage rejection also increments
+stale renders, so four coverage rejections may still fail that independent gate.
+
+The retained `Bicino-Renderer-Benchmark-1788584238-4276c709.zip` has SHA-256
+`09a18353bbce96911e2dab26c879add5a6bd8ea5639d99164eb4fb57d8246b46`.
+It tested app/firmware source `88cd0e8b9bdb699e82f37839872f95e837747d8f` on
+the 1.75-inch remote-debug target: all 12 comparisons passed, and the completed
+300-second High repeat-4 soak failed only `coverage_rejections:3`. Its 111
+completed jobs included 108 publications and three stale/coverage rejections;
+Current was restored. The maintainer accepts this completed run for continued
+PR integration under the revised policy. Its original failed report remains
+unchanged; this is a policy reassessment, not a new hardware run or a renderer
+fix. The installed app's historical result does not retroactively change.
+This does not qualify a factory/golden image or the 2.06-inch target, nor waive
+CI or the remaining manual hardware gates.
+
 ## Prerequisites
 
 1. Identify whether the connected device is the 1.75-inch or 2.06-inch board.
@@ -65,16 +105,153 @@ no longer valid.
    `manifest.json`, or the retained manifest JSON. The runner reproduces the
    receipt used by that install path and refuses to start a measurement window
    unless the active map ID and receipt match.
-3. Connect an authenticated Debug build of the iPhone app. In **Developer
-   Settings → Renderer Benchmark Replay**, tap **Start Pinned 1 Hz Replay** and
-   leave that Developer Settings page open; replay keeps the iPhone awake while
-   active. Put the Bike Computer itself on the map-backed navigation screen
+3. Connect an authenticated Debug build of the iPhone app. Put the Bike Computer
+   itself on the map-backed navigation screen
    with 3D buildings enabled. The iPhone sends the route window on the app's
-   normal two-second cadence and sends GPS plus the fixture marker at 1 Hz.
+   normal two-second cadence and sends the atomic GPS-plus-marker sample at
+   1 Hz. CAP2 bit `23` is mandatory so older two-write replay firmware fails
+   readiness instead of running an unreliable fallback.
    Stop any active navigation first. While replay is active, a scoped GPS
    override prevents live Core Location fixes from interleaving with the
    fixture; starting navigation stops replay and releases the override.
-4. Start **Remote Device Debugging**. For a separately authorized automation
+4. Start **Remote Device Debugging**. Return from its display console to
+   **Developer Settings → Renderer Benchmark Replay**, then tap **Run Secure
+   Full Sweep**. Keep Settings open and the authenticated iPhone connected;
+   the runner keeps the phone awake. Use **Refresh Sweep Readiness** if active
+   map or storage status has not arrived. The runner verifies signed map
+   coverage and opens and verifies an HTTPS measurement window before replay.
+   The manual **Start Pinned 1 Hz Replay** control is for ordinary diagnostics
+   firmware, which opens its window over BLE; it is disabled for remote-debug
+   builds to prevent accidentally collecting an unmeasured replay.
+5. Let the sweep finish automatically (roughly 35 minutes including warmups
+   and the five-minute soak), then tap **Share Benchmark Evidence ZIP**.
+   **Stop Secure Full Sweep** or leaving Settings requests bounded cleanup and
+   exports partial evidence rather than claiming acceptance. Partial exports
+   contain an explicitly failed interrupted report and available samples;
+   they do not replace a complete sweep. Opening the live console leaves
+   Settings and therefore stops the sweep; do not stream it simultaneously.
+
+Replay cadence is owned by a cancellable main-actor async loop, armed before
+the first sample. Deadlines stay on the original monotonic one-second grid;
+ordinary wake-up jitter and callback work do not accumulate into cadence drift.
+Missed ticks are coalesced instead of sent as a catch-up
+burst; stopping or restarting invalidates callbacks from the previous run.
+Exports also include `renderer-benchmark-startup.json`: a bounded trace of the
+latest 128 startup/warm-up observations, with a discarded-sample count. It
+records app scheduler activity, callback/sample counters, BLE queue state,
+and device window/marker state when a metrics response is available. Failure
+and manual-stop observations are captured before cleanup clears replay state.
+These diagnostics distinguish app emission from BLE delivery without exporting
+session credentials; they do not substitute for a successful physical sweep.
+The trace also records only the advertised `lan`/`hotspot` network mode (never
+SSID, address or credentials), and retains the first 32 warm-up boundary
+observations separately from its rolling samples. Boundaries include render
+count and current PSRAM free/largest block, so a later failure cannot evict
+the first warm-up's readiness evidence. This does not lengthen warm-up or
+exclude early measurement samples from memory/performance gates.
+
+### Completed results and delivery-stage timing
+
+Remote-debug metrics additionally retain `deliveryTiming.started` and
+`latestStarted` (session, ordinal, native channel, device start/update times,
+and phase). The record is published on native route/GPS callback entry before
+the MTU lookup, then at authentication and mailbox boundaries; `completed`
+marks callback exit. An unchanged completed record no longer hides a newer
+unfinished callback. Old schema-1 firmware omits these optional fields; absence
+is not proof that no callback entered. iOS preserves them in exported evidence.
+These fixed-size, payload-free records are debug-only and do not change the
+ATT watchdog, renderer quotas or acceptance gates. They are not radio traces:
+an entry not observed in a sampled response cannot rule out a later entry, and
+another BLE callback blocking the host can prevent the native callback entirely.
+Phases identify code regions, not the exact operation or root cause within them.
+
+The result model separates completed measurements, user/lifecycle cancellation,
+transport abort, Current-profile restoration, and evidence-export failure.
+`renderer-benchmark-outcome.json` preserves this result alongside the existing
+report. A completed sweep with one failed comparison remains failed even if the
+selected candidate's soak passed. Known freshness failures show profile/repeat,
+observed value and unchanged limit; marker age is a sampled maximum. Unknown
+gate strings remain visible. A ZIP write failure retains checked evidence for
+**Retry Evidence Export**, without requiring a live BLE session. Starting a new
+sweep replaces the retained previous result/retry.
+
+Native ordinary route snapshots may replace only obsolete unsent snapshots
+after the last route/clear boundary. Application-command members, protected
+traffic, GPS priority, framing and the pending acknowledged ATT slot retain
+their existing semantics. This bounds recovery backlog; it cannot shorten
+an already submitted ATT transaction or fix a 3.391-second service interval
+against a 2.5-second freshness gate.
+
+Per-poll samples retain optional `gps`, `replayTransport`, `remoteDebug`, and
+`deliveryTiming` objects from the same metrics response. Older archives and
+firmware may omit the additions. App transport evidence includes the latest
+and slowest completed ride-write timings since BLEManager creation, including
+write ID, connection generation, class, preparation, API entry/return, Swift
+delegate entry, completion and outcome. A timeout has no fabricated delegate
+timestamp. Compare within the app monotonic clock only; API return is not proof
+of radio transmission and delegate entry is not an iOS-host receipt timestamp.
+
+Only `DEVICE_REMOTE_DEBUG` firmware collects `deliveryTiming` (schema 1).
+It retains the latest completed native route/GPS callback and the slowest of
+each channel for the diagnostic session, plus latest/slowest owner processing.
+The fixed collector is at most 256 bytes, plus three UInt32 metadata fields
+per mailbox slot and bounded callback/snapshot stack copies. Settings slots
+share the mailbox type, so their existing PSRAM allocation also grows by
+12 bytes per slot even though settings callbacks are not traced. There is no
+callback allocation or logging by this instrumentation. Session reset fences old in-flight timing records;
+window reset does not erase a recovered stall during the remaining soak.
+Records contain only numeric metadata and booleans, never payloads or secrets.
+Channel 1 is route and 2 is GPS. Firmware ordinal/session identifiers correlate
+mailbox admission and owner processing, not app write IDs.
+
+`callbackUs` encloses `ScopedNimbleCallback` setup/MTU query and teardown.
+`setupUs` measures entry through setup; `authenticationUs` includes value copy,
+unwrap and authorization; `allocationUs` includes mailbox validation/allocation
+and slot selection; `mailboxWaitUs` and `mailboxHoldUs` bracket the mutex.
+Callback remainder includes protocol parsing, replaced-buffer release and
+notifications. Owner `mailboxAgeUs` ends at processing entry; `processingUs`
+covers the payload handler, not render publication. Superseded, rejected or
+generation-invalid inputs need not have an owner record. Durations use unsigned
+device micros subtraction (one wrap supported); device milliseconds provide
+coarse local ordering. Frame-active booleans sample callback entry/exit only,
+not complete overlap. No extra HTTP requests or screenshot changes are made.
+
+These are completed-operation records, not a complete event ring or live stack
+trace. A stuck callback has no completion record. Slow firmware stages support
+targeted software investigation; short firmware stages with a long app wait
+still require host/HCI metadata to separate callback dispatch from link/radio
+delay. Neither correlation with TLS activity nor these tests prove RF causality.
+Except for the documented temporary coverage allowance above, keep all gates,
+workload and production defaults unchanged. After confirming
+and flashing the exact debug target, repeat paired full sweeps, retain every
+failure, and inspect both clocks separately before choosing a root-cause fix.
+
+All app window changes (including setup and cleanup) share a 1.1-second
+response-to-request cooldown to respect the firmware's one-second admission
+limit. Only explicit `429 renderer_window_rate_limited` responses are retried,
+with at most three attempts per admission. Other HTTP failures and ambiguous
+network failures are not automatically retried by window admission. Stop or
+session revocation during pacing prevents the next normal-run window POST;
+bounded cleanup remains separately responsible for restoring Current.
+Atomic replay uses the same native GPS write selection as ordinary positions:
+acknowledged writes are preferred when supported and fitting. A legacy
+write-without-response-only endpoint still respects transport credits, and a
+sample that fits neither native mode is rejected rather than split or sent on
+the navigation channel. ATT completion never substitutes for a device marker.
+
+Debug-build BLE evidence includes the in-flight write ID and submission stage,
+the last timed-out write's ID/stage, and a cumulative ignored-callback count.
+Stages distinguish queue preparation, entering CoreBluetooth, returning from
+`writeValue`, and a local rejection before submission. `submitted` means only
+that the API returned, not that a packet reached the radio or firmware. App
+diagnostic events correlate submission and completion by `attemptId` and
+connection generation. They contain byte-size buckets and fixed stage/reason
+labels, never payload bytes, coordinates, tokens, or keys. The last timeout is
+retained after reconnect/cleanup so an interrupted ZIP preserves that boundary.
+Older schema-1 exports omit these optional fields and cannot establish the
+submission stage. This tracing does not alter retries, watchdogs, or gates.
+
+For a separately authorized external automation
    harness, put the Mac on the reported LAN or device-hotspot network and store
    `baseUrl`, `tlsCertificateSha256`, and `token` in a mode-`0600` JSON session
    file as described in [Remote device debugging](remote-device-debugging.md).
@@ -83,10 +260,20 @@ no longer valid.
 
 The built-in route fixture is
 `ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-shanghai-v1.json`.
-Its ID is `shanghai-center-renderer-v1`; its SHA-256 is
-`d5171f6b30478a09948381bbdb86da33752bc646fa6077153f69a4bd840eb36e`.
+Its ID is `shanghai-jingan-renderer-v1`; its SHA-256 is
+`0fec6228e89cdb6841b971226c5fdedcc5e711dcb9b0e72bcaf95da4f6452f64`.
+The deterministic loop passes just east of Jing'an Temple and spans
+`31.2245400...31.2258900` latitude and
+`121.4409173...121.4436673` longitude. It preserves the original shape and
+cadence while keeping more than 50 metres inside the signed benchmark map's
+western boundary.
 
-## Run the automated sweep
+## External automation harness
+
+The app's built-in sweep above needs no exported credentials or Mac runner.
+The CLI below additionally requires a separately provisioned, authenticated
+atomic replay source. The app's ordinary manual replay button is not that
+source on remote-debug firmware. Never run two window controllers together.
 
 From the repository root:
 
@@ -131,8 +318,12 @@ The checked-in gate file is
 DMA-capable block, and 1.5 MB free/750 KiB largest PSRAM block. The DMA floor
 protects task-stack and hardware-crypto allocations that cannot fall back to
 PSRAM; any crypto headroom rejection or operation failure also rejects the
-run. Firmware baselines the lifetime diagnostics when each window begins, so a
-prior run cannot be attributed to every later profile. It requires a dense view
+run. Every render request captures its diagnostics-window ID and only job
+events carrying the active ID enter that window's counters. Work started before
+a profile transition therefore cannot appear as a completion or publication
+in the next run. The snapshot envelope timestamp is captured under the same
+critical section as the copied route marker, so a snapshot cannot contain a
+marker newer than its own timestamp. It requires a dense view
 (at least 40 median candidates, 24
 selected buildings, and 16 extrusions in every non-flat profile), so a wrong
 map, screen, or disabled-3D setup cannot pass as a useful baseline. It also
@@ -147,12 +338,41 @@ These are intentionally predeclared so results cannot be judged against a
 moving target. If physical evidence shows a threshold should change, update it
 in a separate reviewed change before rerunning the experiment.
 
+The first complete pinned-HTTPS iPhone sweep showed that each uncompressed
+434312-byte checkpoint frame occupies the device's single secure HTTP worker
+for roughly five seconds. Metrics collection is intentionally serialized with
+those frame responses, and the TLS setup/response time also extends each
+one-second polling delay. The checked-in sample-fraction floor is therefore
+30%, or at least 36 successful snapshots in a 120-second comparison window.
+This remains above the separate 20-sample memory-trend floor; exact fixture
+markers, GPS cadence, window/build/boot identity, terminal counters, and all
+resource/performance gates remain mandatory. The transport calibration does
+not relax any renderer, memory, DMA, crypto, or continuity threshold.
+
+Per-window memory minima remain the absolute-floor and within-window trend
+evidence: a transient low watermark can still fail the run or expose unsafe
+headroom. Cross-run retained-allocation and fragmentation checks use each
+run's terminal current free and largest-block values, ordered by repeat. They
+ignore one largest step as a possible bounded cache or allocator transition,
+but fail when meaningful decline continues beyond that step and the existing
+per-region allowance. This distinction does not weaken the absolute floors or
+the 20-sample within-window leak detector.
+
+New diagnostic firmware also attributes the first observation of each DMA
+window minimum to a bounded phase (`session_start`, `session_end`,
+`window_start`, `periodic`, `render_complete`, or `metrics_snapshot`), device
+uptime, the observed value, and whether a checkpoint frame transfer was active.
+Equal observations retain the original attribution. These fields identify
+where transient pressure was first observed without exporting credentials,
+payloads, certificates, pins, or allocator traces.
+
 ## Confirm the winner without remote-debug overhead
 
 After a remote-debug report selects a Pareto candidate, flash the corresponding
 ordinary developer/diagnostic build for the same board and firmware commit.
-The browser service is absent, but CAP2 bit 18 exposes the bounded metrics over
-the authenticated BLE session. Keep map, firmware, and debug transfers stopped;
+The browser service is absent, but CAP2 bits 18 and 23 expose bounded metrics
+and atomic replay over the authenticated BLE session. Keep map, firmware, and
+debug transfers stopped;
 firmware rejects a new ordinary window and ends an active one if any device
 transfer becomes active.
 

@@ -1108,6 +1108,11 @@ def _deterministic_build_environment(
             "PIP_NO_INDEX": "1",
             "PIP_DISABLE_PIP_VERSION_CHECK": "1",
             "UV_NO_INDEX": "1",
+            # Cache hydration preserves attested Python bytecode, but source
+            # mtimes can differ. Neither compilation (including recursive
+            # custom-core tools) nor upload may rewrite those executable trees.
+            # Set this after sanitizing the inherited runtime environment.
+            "PYTHONDONTWRITEBYTECODE": "1",
             "IDF_TOOLS_PATH": str(store_root),
             "GIT_CONFIG_GLOBAL": str(isolated_git_config),
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -1985,11 +1990,8 @@ def upload_firmware(
                 )
             except GeneratedSdkconfigError as error:
                 raise BuildError(str(error)) from error
-            # The attested private esptool environment must remain reusable after
-            # both successful uploads and connection failures. Importing pyserial
-            # can otherwise create new bytecode inside the attested penv and make
-            # an unchanged build fail its next validation.
-            os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+            # The shared deterministic environment already prevents resolver
+            # and uploader imports from mutating the attested Python trees.
             resolved_port = upload_port
             if device_serial is not None:
                 resolved_port = _resolved_device_port(

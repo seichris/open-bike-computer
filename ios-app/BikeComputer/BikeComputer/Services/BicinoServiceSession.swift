@@ -280,14 +280,11 @@ final class BicinoServiceSession {
                 client.clientAppAttestKeyId,
                 serverURLString: client.baseURL.absoluteString
             )
-        guard hasUsableCredential else {
-            installationCredentialStore.delete(
-                serverURLString: client.baseURL.absoluteString
-            )
+        guard client.clientInstallationToken?.isEmpty == false else {
             return try await enrollManagedInstallation(replacing: client)
         }
 
-        if honorRefreshBackoff,
+        if hasUsableCredential, honorRefreshBackoff,
            OfflineMapInstallationRefreshBackoff.shouldDefer(
                 serverURLString: client.baseURL.absoluteString,
                 defaults: defaults
@@ -316,13 +313,7 @@ final class BicinoServiceSession {
                     credential.appAttestKeyId,
                     serverURLString: client.baseURL.absoluteString
                   ) else {
-                managedAppAttestClient.invalidate(
-                    serverURLString: client.baseURL.absoluteString
-                )
-                installationCredentialStore.delete(
-                    serverURLString: client.baseURL.absoluteString
-                )
-                return try await enrollManagedInstallation(replacing: client)
+                throw ManagedAppAttestError.invalidCredential
             }
             OfflineMapInstallationRefreshBackoff.clear(
                 serverURLString: client.baseURL.absoluteString,
@@ -330,25 +321,34 @@ final class BicinoServiceSession {
             )
             return try registeredClient(credential, replacing: client)
         } catch let error as OfflineMapPlatformError {
-            guard case .serverStatus(let status, _) = error,
-                  status == 401 else {
+            guard case .serverStatus(let status, let body) = error,
+                  status == 401,
+                  client.clientAppAttestKeyId == nil,
+                  let data = body.data(using: .utf8),
+                  let envelope = try? JSONDecoder().decode(InstallationMigrationError.self, from: data),
+                  envelope.detail.code == "installation_attestation_required" else {
                 throw error
             }
-            managedAppAttestClient.invalidate(
-                serverURLString: client.baseURL.absoluteString
-            )
-            installationCredentialStore.delete(
-                serverURLString: client.baseURL.absoluteString
-            )
-            return try await enrollManagedInstallation(replacing: client)
+            return try await enrollManagedInstallation(replacing: client, preservingCredential: true)
         }
     }
 
+    private struct InstallationMigrationError: Decodable {
+        struct Detail: Decodable { let code: String }
+        let detail: Detail
+    }
+
     private func enrollManagedInstallation(
-        replacing client: OfflineMapPlatformClient
+        replacing client: OfflineMapPlatformClient,
+        preservingCredential: Bool = false
     ) async throws -> OfflineMapPlatformClient {
         let credential = try await managedAppAttestClient.enroll(
-            baseURL: client.baseURL
+            baseURL: client.baseURL,
+            existingCredential: preservingCredential ? OfflineMapInstallationCredential(
+                clientInstallationId: client.clientInstallationId,
+                clientInstallationToken: client.clientInstallationToken!,
+                appAttestKeyId: client.clientAppAttestKeyId
+            ) : nil
         )
         OfflineMapInstallationRefreshBackoff.clear(
             serverURLString: client.baseURL.absoluteString,

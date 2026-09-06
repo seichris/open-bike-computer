@@ -20,6 +20,7 @@
 #include "mapTransform.hpp"
 #include "map_projection.hpp"
 #include "mapPresentation.hpp"
+#include "mapCamera.hpp"
 #include "mapPoseInputPolicy.hpp"
 #include "mapProbeDiagnostics.hpp"
 #include "mapRenderJob.hpp"
@@ -160,10 +161,22 @@ private:
     bool buildings3DEnabled = false;
     uint8_t markerScale = 1;
     uint8_t birdsEyePerspective = 0;
+    uint16_t labelViewportWidth = 0;
+    uint16_t labelViewportHeight = 0;
+    uint16_t labelGutter = 0;
+    uint8_t effectiveRotationMode = 0;
   };
 
   static constexpr uint16_t MAP_RENDER_OVERSCAN_PIXELS = 96;
   static constexpr uint16_t MAP_RENDER_SAFETY_PIXELS = 16;
+#if defined(WAVESHARE_AMOLED_175)
+  static constexpr bool MAP_RENDER_ROUND_VIEWPORT = true;
+  static constexpr uint16_t MAP_RENDER_MINIMUM_OVERSCAN_PIXELS = 64;
+#else
+  static constexpr bool MAP_RENDER_ROUND_VIEWPORT = false;
+  static constexpr uint16_t MAP_RENDER_MINIMUM_OVERSCAN_PIXELS =
+      MAP_RENDER_OVERSCAN_PIXELS;
+#endif
   static constexpr uint32_t MAP_RENDER_WORKER_STACK_BYTES = 24576;
   static constexpr uint32_t MAP_RENDER_DECLARED_SLICE_US = 50000;
 
@@ -185,6 +198,7 @@ private:
 
   struct RenderRequest {
     map_render_job::Version version{};
+    uint32_t requestedAtMs = 0;
     map_transform::WorldPoint center{};
     RenderContext context{};
     uint64_t styleSignature = 0;
@@ -204,6 +218,12 @@ private:
 
   struct RenderResult {
     map_render_job::Version version{};
+    uint32_t requestedAtMs = 0;
+    uint32_t sceneGeneration = 0;
+    bool sceneReused = false;
+    uint8_t effectiveRotationMode = 0;
+    uint8_t labelDensity = 0;
+    uint8_t labelOrientation = 0;
     map_projection::Projection projection{};
     ViewPort viewport{};
     map_transform::WorldPoint center{};
@@ -228,6 +248,7 @@ private:
   };
 
   MemCache memCache;               // Worker-owned memory cache
+  map_camera::PreparedScene preparedScene;
   std::atomic<size_t> cachedBlockCount{0};
   String vectorMapFolder = "/sdcard/VECTMAP/";
   map_font_asset::Asset labelFontAsset;
@@ -254,6 +275,7 @@ private:
     uint8_t markerScale = 0;
     bool markerVisible = false;
     bool guidance = false;
+    uint64_t cameraSignature = 0;
 
     bool operator==(const LabelLayoutCacheKey &other) const;
   };
@@ -287,6 +309,9 @@ private:
       MapBlock *mblock); // Build spatial grid for polygon culling
   bool fillPolygon(const Polygon &p,
                    map_surface::Rgb565Surface surface);
+  bool fillPolygon(
+      const Polygon &p, map_surface::Rgb565Surface surface,
+      std::vector<int16_t, PsramAllocator<int16_t>> &scanlineNodes);
   bool fillPolygon(const Polygon &p, lv_obj_t *canvas);
   void drawLine(map_surface::Rgb565Surface surface, int16_t x1, int16_t y1,
                 int16_t x2, int16_t y2, uint16_t color, uint8_t width);
@@ -340,7 +365,8 @@ private:
   double visibleMapRotation() const;
   bool drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
                         map_surface::LabelSurface surface, uint8_t zoom,
-                        double rotation, const RenderContext &context);
+                        double rotation, const RenderContext &context,
+                        const map_projection::Projection *projection = nullptr);
   bool drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
                         lv_obj_t *canvas, uint8_t zoom, double rotation,
                         const ScreenMapRenderSettings &style);
@@ -385,6 +411,8 @@ private:
   void updatePresentedPoseForScreen(uint32_t nowMs, bool mapVisible);
   void updatePresentedFrameTransform();
   void renderLiveForeground();
+  void serviceStableCamera(uint32_t nowMs);
+  bool prepareMapScene(const RenderRequest &request, RenderResult &result);
   void invalidateRenderSemantics(uint32_t nowMs);
   void invalidateRenderSemanticsForScreen(uint32_t nowMs, uint8_t zoom,
                                           bool mapVisible,
@@ -442,6 +470,11 @@ private:
   uint64_t lastFramePresentationSignature = 0;
   uint64_t lastForegroundPresentationSignature = 0;
   RenderResult visibleRenderResult{};
+  map_camera::Lag cameraLag;
+  uint32_t lastCameraRequestMs = 0;
+  bool stableCameraHidden = false;
+  lv_obj_t *cameraStatusLabel = nullptr;
+  renderer_diagnostics::CameraSample cameraEvidence{};
   std::atomic<bool> renderWorkerShutdown{false};
   std::atomic<bool> renderWorkerExited{true};
   std::atomic<bool> renderWorkerRestartAfterExit{false};
@@ -605,6 +638,7 @@ public:
   bool takeVectorMapFolderActivationResult(VectorMapActivationResult &result);
   void deleteMapScrSprites();
   void createMapScrSprites();
+  renderer_diagnostics::CameraSample captureCameraMetadata() const;
   void generateRenderMap(uint8_t zoom);
   bool generateVectorMap(uint8_t zoom);
   bool prepareVectorMapForScreen(uint8_t zoom, bool guidanceScreenActive);
@@ -699,6 +733,5 @@ public:
   renderer_tuning::Profile rendererTuningProfile() const {
     return rendererTuningProfile_;
   }
-  renderer_diagnostics::JobCounters rendererDiagnosticsJobCounters() const;
   bool takeStreetLabelRuntimeFailure(std::string &code);
 };

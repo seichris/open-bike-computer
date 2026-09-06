@@ -97,6 +97,8 @@ def verify_deployment(deployment: DeploymentImages) -> None:
         deployment.control_plane_source_commit,
     )
     verify_image(deployment.worker_reference, deployment.worker_source_commit)
+    if deployment.promotion_reference is not None:
+        verify_image(deployment.promotion_reference, deployment.promotion_source_commit)
 
 
 def main() -> int:

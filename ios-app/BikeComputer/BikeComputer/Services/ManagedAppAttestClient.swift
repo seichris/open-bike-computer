@@ -349,7 +349,10 @@ final class ManagedOfflineMapAppAttestClient {
         return keyStore.load(serverURLString: serverURLString) == keyID
     }
 
-    func enroll(baseURL: URL) async throws -> OfflineMapInstallationCredential {
+    func enroll(
+        baseURL: URL,
+        existingCredential: OfflineMapInstallationCredential? = nil
+    ) async throws -> OfflineMapInstallationCredential {
         guard service.isSupported else {
             throw ManagedAppAttestError.unsupported
         }
@@ -359,7 +362,6 @@ final class ManagedOfflineMapAppAttestClient {
         ) != nil else {
             throw ManagedAppAttestError.invalidConfiguration
         }
-        keyStore.delete(serverURLString: baseURL.absoluteString)
         let challenge = try await fetchChallenge(
             baseURL: baseURL,
             purpose: "attestation",
@@ -391,15 +393,28 @@ final class ManagedOfflineMapAppAttestClient {
         var request = URLRequest(
             url: try endpointURL(baseURL: baseURL, path: "/v1/installations")
         )
+        if let existingCredential {
+            var components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+            components.queryItems = [URLQueryItem(
+                name: "clientInstallationId", value: existingCredential.clientInstallationId
+            )]
+            request.url = components.url
+            request.setValue(existingCredential.clientInstallationToken, forHTTPHeaderField: "X-Installation-Token")
+        }
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONEncoder.offlineMap.encode(body)
+        // Keep the key before submission so an authenticated refresh can recover
+        // an enrollment that committed on the server but lost its response.
+        try keyStore.save(keyID, serverURLString: baseURL.absoluteString)
         let credential: OfflineMapInstallationCredential = try await send(request)
-        guard credential.appAttestKeyId == keyID else {
+        guard credential.appAttestKeyId == keyID,
+              credential.clientInstallationId.range(of: "^inst_v2_[0-9a-f]{32}$", options: .regularExpression) != nil,
+              credential.clientInstallationToken.range(of: "^v1\\.[A-Za-z0-9_-]{43}$", options: .regularExpression) != nil,
+              existingCredential == nil || credential.clientInstallationId == existingCredential?.clientInstallationId else {
             throw ManagedAppAttestError.invalidCredential
         }
-        try keyStore.save(keyID, serverURLString: baseURL.absoluteString)
         return credential
     }
 

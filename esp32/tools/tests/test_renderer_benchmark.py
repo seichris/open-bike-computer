@@ -130,6 +130,7 @@ def snapshot(
                 "largestBlock": 12_000,
                 "windowMinimumFree": 20_000,
                 "windowMinimumLargestBlock": 10_000,
+                "cryptoCountersScope": "window",
                 "cryptoHeadroomRejections": 0,
                 "cryptoOperationFailures": 0,
             },
@@ -222,6 +223,37 @@ def snapshot(
 
 
 class RendererBenchmarkTests(unittest.TestCase):
+    def test_temporary_coverage_allowance_preserves_independent_stale_gate(self):
+        gates = renderer_benchmark.load_gates(TOOLS / "renderer_benchmark_gates.json")
+        self.assertEqual(gates["absolute"]["maximumCoverageRejectedRenders"], 4)
+        self.assertEqual(gates["absolute"]["maximumStaleRenders"], 3)
+        for coverage, stale in ((3, 3), (4, 0), (5, 0), (4, 4)):
+            with self.subTest(coverage=coverage, stale=stale):
+                value = snapshot(
+                    sequence=1, timestamp_ms=1000,
+                    map_fixture={"id": "shanghai-renderer-v1", "manifestReceipt": "a" * 64},
+                    route_id="shanghai-center-renderer-v1", route_sha256="b" * 64,
+                )
+                value["render"]["jobs"]["coverageRejected"] = coverage
+                value["render"]["jobs"]["stale"] = stale
+                samples = [renderer_benchmark.compact_sample(value, 0)]
+                summary = renderer_benchmark.summarize_run([value], samples)
+                failures = renderer_benchmark.evaluate_run(
+                    snapshots=[value], samples=samples, summary=summary,
+                    duration_seconds=1, poll_interval_seconds=1,
+                    screenshots=[], checkpoint_count=0,
+                    expected_route_sample_count=120, gates=gates,
+                    expect_remote_debug=False,
+                )
+                self.assertEqual(
+                    [failure for failure in failures if failure.startswith("coverage_rejections:")],
+                    ["coverage_rejections:5"] if coverage > 4 else [],
+                )
+                self.assertEqual(
+                    [failure for failure in failures if failure.startswith("stale_renders:")],
+                    ["stale_renders:4"] if stale > 3 else [],
+                )
+
     def test_balanced_schedule_rotates_first_order(self):
         self.assertEqual(
             renderer_benchmark.balanced_profile_schedule(3),
@@ -238,6 +270,9 @@ class RendererBenchmarkTests(unittest.TestCase):
         )
         gates = renderer_benchmark.load_gates(
             TOOLS / "renderer_benchmark_gates.json"
+        )
+        self.assertEqual(
+            gates["absolute"]["minimumMetricsSampleFraction"], 0.3
         )
         renderer_benchmark.validate_acceptance_inputs(
             route_fixture=route,
@@ -342,6 +377,98 @@ class RendererBenchmarkTests(unittest.TestCase):
             )
         )
 
+    def test_cross_run_memory_uses_terminal_state_and_continued_decline(self):
+        self.assertFalse(
+            renderer_benchmark.progressive_cross_run_decline(
+                [39_307, 37_803, 37_779], allowed_decline=1_024
+            )
+        )
+        self.assertFalse(
+            renderer_benchmark.progressive_cross_run_decline(
+                [45_251, 44_983, 44_907], allowed_decline=1_024
+            )
+        )
+        self.assertFalse(
+            renderer_benchmark.progressive_cross_run_decline(
+                [45_000, 42_000, 41_900], allowed_decline=1_024
+            )
+        )
+        self.assertTrue(
+            renderer_benchmark.progressive_cross_run_decline(
+                [45_000, 43_500, 42_000], allowed_decline=1_024
+            )
+        )
+        self.assertTrue(
+            renderer_benchmark.progressive_cross_run_decline(
+                [26_000, 25_000, 24_000], allowed_decline=1_024
+            )
+        )
+
+        def run(
+            repeat: int,
+            terminal_dma_free: int,
+            terminal_dma_largest: int,
+            minimum_dma_free: int,
+            minimum_dma_largest: int,
+        ) -> dict:
+            return {
+                "profile": "high",
+                "repeat": repeat,
+                "passed": True,
+                "failures": [],
+                "summary": {
+                    "minimumDmaFree": minimum_dma_free,
+                    "minimumDmaLargest": minimum_dma_largest,
+                },
+                "finalSnapshot": {
+                    "memory": {
+                        "internalHeap": {
+                            "free": 50_000,
+                            "largestBlock": 30_000,
+                        },
+                        "psram": {
+                            "free": 2_500_000,
+                            "largestBlock": 1_500_000,
+                        },
+                        "dmaHeap": {
+                            "free": terminal_dma_free,
+                            "largestBlock": terminal_dma_largest,
+                        },
+                    }
+                },
+            }
+
+        gates = renderer_benchmark.load_gates(
+            TOOLS / "renderer_benchmark_gates.json"
+        )
+        transient_runs = [
+            run(2, 44_983, 21_492, 37_803, 21_492),
+            run(1, 45_251, 23_540, 39_307, 23_540),
+            run(3, 44_907, 21_492, 37_779, 21_492),
+        ]
+        renderer_benchmark.apply_cross_run_memory_gates(
+            transient_runs, gates
+        )
+        self.assertTrue(all(item["passed"] for item in transient_runs))
+        self.assertTrue(
+            all(not item["failures"] for item in transient_runs)
+        )
+
+        leak_runs = [
+            run(2, 43_500, 25_000, 39_000, 22_000),
+            run(3, 42_000, 24_000, 39_000, 22_000),
+            run(1, 45_000, 26_000, 39_000, 22_000),
+        ]
+        renderer_benchmark.apply_cross_run_memory_gates(leak_runs, gates)
+        self.assertTrue(
+            all(
+                "cross_run_dma_decline" in item["failures"]
+                and "cross_run_dma_largest_decline" in item["failures"]
+                and not item["passed"]
+                for item in leak_runs
+            )
+        )
+
     def test_dma_floor_and_decline_are_hard_failures(self):
         fixture = {
             "id": "shanghai-renderer-v1",
@@ -354,7 +481,7 @@ class RendererBenchmarkTests(unittest.TestCase):
                 sequence=index + 1,
                 timestamp_ms=1000 + index * 1000,
                 map_fixture=fixture,
-                route_id="shanghai-center-renderer-v1",
+                route_id="shanghai-jingan-renderer-v1",
                 route_sha256=route_hash,
             )
             dma_free = 24_000 - index * 750
@@ -399,7 +526,7 @@ class RendererBenchmarkTests(unittest.TestCase):
                 "id": "shanghai-renderer-v1",
                 "manifestReceipt": "a" * 64,
             },
-            route_id="shanghai-center-renderer-v1",
+            route_id="shanghai-jingan-renderer-v1",
             route_sha256="b" * 64,
         )
         value["memory"]["dmaHeap"]["cryptoHeadroomRejections"] = 1
@@ -470,7 +597,7 @@ class RendererBenchmarkTests(unittest.TestCase):
                 sequence=index + 1,
                 timestamp_ms=1000 + index * 5000,
                 map_fixture=fixture,
-                route_id="shanghai-center-renderer-v1",
+                route_id="shanghai-jingan-renderer-v1",
                 route_sha256=route_hash,
             )
             for index in range(13)
@@ -513,7 +640,7 @@ class RendererBenchmarkTests(unittest.TestCase):
                 sequence=index + 1,
                 timestamp_ms=1000 + index * 1000,
                 map_fixture=fixture,
-                route_id="shanghai-center-renderer-v1",
+                route_id="shanghai-jingan-renderer-v1",
                 route_sha256=route_hash,
             )
             for index in range(121)
@@ -555,7 +682,7 @@ class RendererBenchmarkTests(unittest.TestCase):
                 sequence=index + 1,
                 timestamp_ms=1000 + index * 1000,
                 map_fixture=fixture,
-                route_id="shanghai-center-renderer-v1",
+                route_id="shanghai-jingan-renderer-v1",
                 route_sha256=route_hash,
             )
             for index in range(61)
@@ -669,7 +796,7 @@ class RendererBenchmarkTests(unittest.TestCase):
         runner.restore_current_profile()
         self.assertEqual(len(client.requests), 2)
 
-    def test_checkpoint_screenshot_forces_a_new_frame_after_observation(self):
+    def test_checkpoint_screenshot_accepts_first_timestamp_bound_frame(self):
         route = renderer_benchmark.validate_route_fixture(
             renderer_benchmark.DEFAULT_ROUTE_FIXTURE
         )
@@ -677,15 +804,69 @@ class RendererBenchmarkTests(unittest.TestCase):
         class FrameClient:
             def __init__(self):
                 self.after = []
+                self.capture_floors = []
                 self.frames = [
                     ({"sequence": 1, "capturedAtMs": 1005,
+                      "width": 1, "height": 1, "stride": 2}, b"\0\0"),
+                ]
+
+            def frame(self, *, after=0, captured_at_or_after=None):
+                self.after.append(after)
+                self.capture_floors.append(captured_at_or_after)
+                return self.frames.pop(0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "screenshots").mkdir()
+            client = FrameClient()
+            runner = renderer_benchmark.BenchmarkRunner(
+                client=client,
+                output=output,
+                gates=renderer_benchmark.load_gates(
+                    TOOLS / "renderer_benchmark_gates.json"
+                ),
+                map_fixture_id="shanghai-map",
+                map_fixture_sha256="a" * 64,
+                route_fixture=route,
+                route_fixture_sha256="b" * 64,
+                route_mode="ios-fixture-1hz",
+                warmup_seconds=0,
+                poll_interval_seconds=1,
+                capture_screenshots=True,
+            )
+            result = runner._capture_screenshot(
+                profile="current",
+                repeat=1,
+                checkpoint=0,
+                sample_index=0,
+                marker_received_at_ms=1000,
+            )
+
+        self.assertEqual(client.after, [0])
+        self.assertEqual(client.capture_floors, [1000])
+        self.assertEqual(result["frameSequence"], 1)
+        self.assertEqual(result["markerReceivedAtMs"], 1000)
+        self.assertEqual(result["captureLagMs"], 5)
+
+    def test_checkpoint_screenshot_skips_pre_marker_frame(self):
+        route = renderer_benchmark.validate_route_fixture(
+            renderer_benchmark.DEFAULT_ROUTE_FIXTURE
+        )
+
+        class FrameClient:
+            def __init__(self):
+                self.after = []
+                self.capture_floors = []
+                self.frames = [
+                    ({"sequence": 1, "capturedAtMs": 995,
                       "width": 1, "height": 1, "stride": 2}, b"\0\0"),
                     ({"sequence": 2, "capturedAtMs": 1010,
                       "width": 1, "height": 1, "stride": 2}, b"\0\0"),
                 ]
 
-            def frame(self, *, after=0):
+            def frame(self, *, after=0, captured_at_or_after=None):
                 self.after.append(after)
+                self.capture_floors.append(captured_at_or_after)
                 return self.frames.pop(0)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -716,8 +897,8 @@ class RendererBenchmarkTests(unittest.TestCase):
             )
 
         self.assertEqual(client.after, [0, 1])
+        self.assertEqual(client.capture_floors, [1000, 1000])
         self.assertEqual(result["frameSequence"], 2)
-        self.assertEqual(result["markerReceivedAtMs"], 1000)
         self.assertEqual(result["captureLagMs"], 10)
 
     def test_uint32_forward_delta_accepts_clock_wrap(self):

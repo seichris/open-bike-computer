@@ -742,6 +742,21 @@ nonisolated enum OfflineMapServerIdentity {
     }
 }
 
+nonisolated enum SavedMapReaderRequirementsMigrationPolicy {
+    static func shouldDeriveFromSignedManifest(
+        generationServerURLString: String?,
+        isDevelopmentBuild: Bool
+    ) -> Bool {
+        guard isDevelopmentBuild, let generationServerURLString else {
+            return false
+        }
+        return OfflineMapServerIdentity.normalized(generationServerURLString) ==
+            OfflineMapServerIdentity.normalized(
+                OfflineMapServiceConfig.developmentServerURLString
+            )
+    }
+}
+
 nonisolated enum MapActivationDecision: Equatable {
     case pending(String)
     case installed
@@ -2462,7 +2477,8 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func savedMapListItems(
-        activeDeviceMap: DeviceActiveMapDescriptor?
+        activeDeviceMap: DeviceActiveMapDescriptor?,
+        scope: SavedMapListScope = .savedMaps
     ) -> [SavedMapListItem] {
         var remainingRecords = cachedMapRecords
         var remainingCatalogMaps = catalogMaps
@@ -2559,7 +2575,10 @@ final class OfflineMapManager: ObservableObject {
                 catalogMap: map
             )
         })
-        return items
+        let channel = OfflineMapCatalogConfig.channel(
+            generationServerURLString: serverURLString
+        )
+        return items.filter { scope.includes($0.catalogMap, channel: channel) }
     }
 
 #if canImport(UIKit)
@@ -4247,7 +4266,8 @@ final class OfflineMapManager: ObservableObject {
     ) throws -> OfflineMapPlatformClient {
         let value = serverURLString ?? self.serverURLString
         return try bicinoServiceSession.makeOfflineMapClient(
-            serverURLString: value
+            serverURLString: value,
+            mapStreamTrustCapabilities: mapStreamTrustStore.capabilityHeaderValue
         )
     }
 
@@ -4858,12 +4878,24 @@ final class OfflineMapManager: ObservableObject {
                         "signed map metadata is missing or does not match"
                     )
                 }
+#if DEBUG
+                let deriveReaderRequirementsFromSignedManifest =
+                    SavedMapReaderRequirementsMigrationPolicy
+                        .shouldDeriveFromSignedManifest(
+                            generationServerURLString: metadata.serverURLString,
+                            isDevelopmentBuild: true
+                        )
+#else
+                let deriveReaderRequirementsFromSignedManifest = false
+#endif
                 let verified = try BikeMapStreamArtifactValidator.validate(
                     url: packURL,
                     artifact: artifact,
                     expectedMapID: metadata.mapID,
                     trustStore: trustStore,
-                    readerRequirements: metadata.readerRequirements
+                    readerRequirements: metadata.readerRequirements,
+                    deriveReaderRequirementsFromSignedManifest:
+                        deriveReaderRequirementsFromSignedManifest
                 )
                 return PreparedMapTransfer(artifact: verified)
             }
@@ -5016,7 +5048,7 @@ final class OfflineMapManager: ObservableObject {
                     )
                 }
                 let artifact = prepared.artifact
-                if MapInstallProtocolSelector.select(
+                let protocolEvaluation = MapInstallProtocolSelector.evaluate(
                        isBikeMapStream: true,
                        signatureTrustCapability:
                            "\(artifact.signatureKeyID)=\(artifact.signatureKeySHA256)",
@@ -5035,8 +5067,11 @@ final class OfflineMapManager: ObservableObject {
                        requiredFirmwareBuild: artifact.requiredFirmwareBuild,
                        requiredFirmwareGitSha: artifact.requiredFirmwareGitSHA,
                        deviceStatus: initialDeviceStatus
-                   ) == .legacyArtifactRequired {
-                    throw OfflineMapPlatformError.firmwareMapStreamUnsupported
+                   )
+                if let rejection = protocolEvaluation.rejection {
+                    throw OfflineMapPlatformError.mapStreamCompatibilityRejected(
+                        rejection
+                    )
                 }
                 let disposition = ExistingMapStreamAttemptDisposition.evaluate(
                     expectedSessionID: sessionId,

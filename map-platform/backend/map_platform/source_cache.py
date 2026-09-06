@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import logging
 import math
 import os
-import fcntl
+import re
 import shutil
 import time
 import urllib.error
@@ -15,6 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import SourceRegion, utc_now_iso
+from .osmfr_fallback import (
+    OSMFR_BASE, fallback_url, is_upstream_unavailable, validate_pbf_header,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class SourceCacheError(RuntimeError):
@@ -30,6 +37,7 @@ class SourceCacheStorageError(SourceCacheError):
 
 
 DEFAULT_SOURCE_REVALIDATE_SECONDS = 24 * 60 * 60
+MAX_SOURCE_DOWNLOAD_REQUESTS = 512
 
 
 @dataclass(frozen=True)
@@ -94,6 +102,9 @@ class SourceCache:
             else self.data_root / "source-cache.json"
         )
         self.lock_stale_seconds = lock_stale_seconds
+        self.osmfr_fallback_enabled = os.environ.get(
+            "MAP_PLATFORM_OSMFR_FALLBACK", "1"
+        ).lower() not in {"0", "false", "no", "off"}
         raw_revalidation_seconds = revalidate_after_seconds
         if raw_revalidation_seconds is None:
             raw_revalidation_seconds = os.environ.get(
@@ -114,6 +125,55 @@ class SourceCache:
         self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
 
     def ensure(
+        self,
+        region: SourceRegion,
+        *,
+        force: bool = False,
+        cancellation_check=None,
+        minimum_free_bytes: int | None = None,
+    ) -> CachedSource:
+        """Try the primary, then one known alternative on upstream failure.
+
+        Each attempt uses the same locking, reserve, hashing and atomic-replace
+        path. The failed attempt has closed its response and removed its .tmp
+        before failover; validators and partial bytes never cross providers.
+        """
+        options = {
+            "force": force,
+            "cancellation_check": cancellation_check,
+            "minimum_free_bytes": minimum_free_bytes,
+        }
+        try:
+            return self._ensure(region, **options)
+        except (SourceCacheCancelled, SourceCacheStorageError):
+            raise
+        except SourceCacheError as primary_error:
+            alternative_url = (
+                fallback_url(region) if self.osmfr_fallback_enabled else None
+            )
+            if (
+                alternative_url is None
+                or not is_upstream_unavailable(primary_error.__cause__)
+            ):
+                raise
+            _raise_if_cancelled(cancellation_check)
+            logger.warning(
+                "Source %s unavailable from Geofabrik; trying OpenStreetMap France: %s",
+                region.id,
+                alternative_url,
+            )
+            alternative = replace(region, url=alternative_url, published_at=None)
+            try:
+                return self._ensure(alternative, **options)
+            except (SourceCacheCancelled, SourceCacheStorageError):
+                raise
+            except SourceCacheError as fallback_error:
+                raise SourceCacheError(
+                    f"both source providers failed for {region.id}; "
+                    f"Geofabrik: {primary_error}; OpenStreetMap France: {fallback_error}"
+                ) from fallback_error
+
+    def _ensure(
         self,
         region: SourceRegion,
         *,
@@ -216,63 +276,153 @@ class SourceCache:
                             if existing is not None and not force
                             else {}
                         )
-                        request = (
-                            urllib.request.Request(
-                                region.url,
-                                headers=conditional_headers,
+                        download_url = region.url
+                        request_headers = conditional_headers
+                        downloaded_bytes = 0
+                        expected_bytes = None
+                        resolved_url = region.url
+                        response_etag = None
+                        response_last_modified = None
+                        for request_number in range(
+                            1,
+                            MAX_SOURCE_DOWNLOAD_REQUESTS + 1,
+                        ):
+                            request = (
+                                urllib.request.Request(
+                                    download_url,
+                                    headers=request_headers,
+                                )
+                                if request_headers
+                                else download_url
                             )
-                            if conditional_headers
-                            else region.url
-                        )
-                        with urllib.request.urlopen(
-                            request, timeout=60
-                        ) as response, tmp_path.open("wb") as output:
-                            headers = getattr(response, "headers", None)
-                            content_length = (
-                                headers.get("Content-Length")
-                                if headers is not None
-                                else None
-                            )
-                            if content_length is not None:
-                                try:
-                                    incoming_bytes = int(content_length)
-                                except ValueError as exc:
-                                    raise SourceCacheStorageError(
-                                        "source response Content-Length is invalid"
-                                    ) from exc
-                                if incoming_bytes < 0:
-                                    raise SourceCacheStorageError(
-                                        "source response Content-Length is invalid"
+                            with urllib.request.urlopen(
+                                request, timeout=60
+                            ) as response:
+                                headers = getattr(response, "headers", None)
+                                content_length = _content_length(headers)
+                                content_range = _content_range(headers)
+                                if downloaded_bytes:
+                                    status = _response_status(response)
+                                    if status != 206 or content_range is None:
+                                        raise SourceCacheError(
+                                            "source server did not honor a safe resume request"
+                                        )
+                                    range_start, range_end, range_total = content_range
+                                    if range_start != downloaded_bytes:
+                                        raise SourceCacheError(
+                                            "source resume range does not match partial download"
+                                        )
+                                    if expected_bytes != range_total:
+                                        raise SourceCacheError(
+                                            "source size changed during resumed download"
+                                        )
+                                    if (
+                                        content_length is not None
+                                        and content_length != range_end - range_start + 1
+                                    ):
+                                        raise SourceCacheError(
+                                            "source resume Content-Length does not match Content-Range"
+                                        )
+                                    output_mode = "ab"
+                                else:
+                                    if content_range is not None:
+                                        raise SourceCacheError(
+                                            "source returned an unexpected partial response"
+                                        )
+                                    expected_bytes = content_length
+                                    output_mode = "wb"
+
+                                if content_length is not None:
+                                    self._require_download_capacity(
+                                        target.parent,
+                                        minimum_free_bytes=minimum_free_bytes,
+                                        incoming_bytes=content_length,
                                     )
-                                self._require_download_capacity(
-                                    target.parent,
-                                    minimum_free_bytes=minimum_free_bytes,
-                                    incoming_bytes=incoming_bytes,
+
+                                observed_etag = (
+                                    headers.get("ETag")
+                                    if headers is not None
+                                    else None
                                 )
-                            while True:
+                                observed_last_modified = (
+                                    headers.get("Last-Modified")
+                                    if headers is not None
+                                    else None
+                                )
+                                if (
+                                    response_etag is not None
+                                    and observed_etag is not None
+                                    and observed_etag != response_etag
+                                ):
+                                    raise SourceCacheError(
+                                        "source ETag changed during resumed download"
+                                    )
+                                if (
+                                    response_last_modified is not None
+                                    and observed_last_modified is not None
+                                    and observed_last_modified != response_last_modified
+                                ):
+                                    raise SourceCacheError(
+                                        "source Last-Modified changed during resumed download"
+                                    )
+                                response_etag = response_etag or observed_etag
+                                response_last_modified = (
+                                    response_last_modified or observed_last_modified
+                                )
+                                observed_url = (
+                                    response.geturl()
+                                    if hasattr(response, "geturl")
+                                    else download_url
+                                )
+                                if downloaded_bytes and observed_url != resolved_url:
+                                    raise SourceCacheError(
+                                        "source URL changed during resumed download"
+                                    )
+                                resolved_url = observed_url
+
+                                with tmp_path.open(output_mode) as output:
+                                    while True:
+                                        _raise_if_cancelled(cancellation_check)
+                                        chunk = response.read(1024 * 1024)
+                                        if not chunk:
+                                            break
+                                        self._require_download_capacity(
+                                            target.parent,
+                                            minimum_free_bytes=minimum_free_bytes,
+                                            incoming_bytes=len(chunk),
+                                        )
+                                        output.write(chunk)
                                 _raise_if_cancelled(cancellation_check)
-                                chunk = response.read(1024 * 1024)
-                                if not chunk:
-                                    break
-                                self._require_download_capacity(
-                                    target.parent,
-                                    minimum_free_bytes=minimum_free_bytes,
-                                    incoming_bytes=len(chunk),
+
+                            received_bytes = tmp_path.stat().st_size
+                            if expected_bytes is None or received_bytes == expected_bytes:
+                                break
+                            if received_bytes > expected_bytes:
+                                raise SourceCacheError(
+                                    "source response exceeded its declared Content-Length"
                                 )
-                                output.write(chunk)
-                            _raise_if_cancelled(cancellation_check)
-                            resolved_url = (
-                                response.geturl()
-                                if hasattr(response, "geturl")
-                                else region.url
+                            if received_bytes <= downloaded_bytes:
+                                raise SourceCacheError(
+                                    "source response ended before Content-Length without progress"
+                                )
+                            validator = _if_range_validator(
+                                response_etag,
+                                response_last_modified,
                             )
-                            response_etag = (
-                                headers.get("ETag") if headers is not None else None
-                            )
-                            response_last_modified = (
-                                headers.get("Last-Modified")
-                                if headers is not None
-                                else None
+                            if validator is None:
+                                raise SourceCacheError(
+                                    "source response ended before Content-Length and cannot be resumed safely"
+                                )
+                            downloaded_bytes = received_bytes
+                            download_url = resolved_url
+                            request_headers = {
+                                "Range": f"bytes={downloaded_bytes}-",
+                                "If-Range": validator,
+                            }
+                        else:
+                            raise SourceCacheError(
+                                "source response remained incomplete after "
+                                f"{MAX_SOURCE_DOWNLOAD_REQUESTS} requests"
                             )
                     except urllib.error.HTTPError as exc:
                         if (
@@ -295,11 +445,13 @@ class SourceCache:
                                     else None
                                 ),
                             )
+                            exc.close()
                             self._record(
                                 validated,
                                 cancellation_check=cancellation_check,
                             )
                             return validated
+                        exc.close()
                         raise SourceCacheError(
                             f"failed to download source PBF for {region.id}: {exc}"
                         ) from exc
@@ -310,6 +462,13 @@ class SourceCache:
                             f"failed to download source PBF for {region.id}: {exc}"
                         ) from exc
 
+                    if region.url.startswith(OSMFR_BASE):
+                        if not resolved_url.startswith(OSMFR_BASE):
+                            raise SourceCacheError("fallback redirected outside the trusted HTTPS source")
+                        try:
+                            validate_pbf_header(tmp_path)
+                        except ValueError as exc:
+                            raise SourceCacheError(str(exc)) from exc
                     downloaded_at = utc_now_iso()
                     cached = self._cached_source(
                         region,
@@ -460,7 +619,10 @@ class SourceCache:
     ) -> bool:
         if region.checksum:
             return False
-        if cached.source_url is not None and cached.source_url != region.url:
+        accepted_urls = {region.url}
+        if self.osmfr_fallback_enabled and (alternative := fallback_url(region)):
+            accepted_urls.add(alternative)
+        if cached.source_url is not None and cached.source_url not in accepted_urls:
             return True
         if (
             region.published_at is not None
@@ -612,6 +774,49 @@ class SourceCache:
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
+
+def _content_length(headers) -> int | None:
+    value = headers.get("Content-Length") if headers is not None else None
+    if value is None:
+        return None
+    try:
+        length = int(value)
+    except (TypeError, ValueError) as exc:
+        raise SourceCacheStorageError(
+            "source response Content-Length is invalid"
+        ) from exc
+    if length < 0:
+        raise SourceCacheStorageError(
+            "source response Content-Length is invalid"
+        )
+    return length
+
+
+def _content_range(headers) -> tuple[int, int, int] | None:
+    value = headers.get("Content-Range") if headers is not None else None
+    if value is None:
+        return None
+    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", value.strip())
+    if match is None:
+        raise SourceCacheError("source response Content-Range is invalid")
+    start, end, total = (int(part) for part in match.groups())
+    if start > end or end >= total:
+        raise SourceCacheError("source response Content-Range is invalid")
+    return start, end, total
+
+
+def _response_status(response) -> int | None:
+    status = getattr(response, "status", None)
+    if status is None and hasattr(response, "getcode"):
+        status = response.getcode()
+    return status if isinstance(status, int) else None
+
+
+def _if_range_validator(etag: str | None, last_modified: str | None) -> str | None:
+    if etag is not None and not etag.strip().startswith("W/"):
+        return etag
+    return last_modified
 
 
 def _raise_if_cancelled(cancellation_check) -> None:

@@ -15,15 +15,75 @@ HTTP_SOURCE = (
 HTTP_HEADER = (
     ROOT / "lib/device_transfer/device_transfer_http.hpp"
 ).read_text(encoding="utf-8")
+HTTP_LIMITS_HEADER = (
+    ROOT / "lib/device_transfer/device_transfer_http_limits.hpp"
+).read_text(encoding="utf-8")
+DEBUG_HTTP_SOURCE = (
+    ROOT / "lib/device_debug/device_debug_http.cpp"
+).read_text(encoding="utf-8")
+BLE_SOURCE = (
+    ROOT / "lib/ble_navigation/ble_navigation.cpp"
+).read_text(encoding="utf-8")
 
 
 class DeviceTransferTLSContractTests(unittest.TestCase):
+    def test_generic_status_resumes_when_notification_queue_is_full(self):
+        notify = BLE_SOURCE[
+            BLE_SOURCE.index("static void notifyGenericTransferStatus(") :
+            BLE_SOURCE.index("static void notifyRendererDiagnosticsStatus(")
+        ]
+        pump = notify[
+            notify.index("static void pumpPendingDeviceTransferStatusChunks(") :
+        ]
+        self.assertIn("pendingDeviceTransferStatusChunks.active()", notify)
+        self.assertIn(
+            "map_transfer_status_protocol::chunkPayloadBytes(peerMtu)",
+            notify,
+        )
+        self.assertIn("pendingDeviceTransferStatusChunks.begin(", notify)
+        self.assertIn(
+            "pendingDeviceTransferStatusContinuation.store(true", notify
+        )
+        self.assertIn("deferredNotificationAvailableCapacity()", pump)
+        self.assertIn('nextFrame("DSTC")', pump)
+        self.assertIn("pendingDeviceTransferStatusChunks.advance()", pump)
+        self.assertNotIn("delay(2)", notify)
+
+        deferred_handler = BLE_SOURCE[
+            BLE_SOURCE.index("static void deferredNotificationEventHandler(") :
+            BLE_SOURCE.index("static void notifyAuthResponse(")
+        ]
+        self.assertIn(
+            "pendingDeviceTransferStatusContinuation.load(", deferred_handler
+        )
+        process_loop = BLE_SOURCE[
+            BLE_SOURCE.index("void BLENavigationServer::process()") :
+            BLE_SOURCE.index("void BLENavigationServer::noteUserWake()")
+        ]
+        self.assertIn("pumpPendingDeviceTransferStatusChunks();", process_loop)
+
+    def test_busy_diagnostics_entry_returns_a_generic_status(self):
+        process = BLE_SOURCE[
+            BLE_SOURCE.index("static void processPendingTransferControl()") :
+            BLE_SOURCE.index("static void notifyDeviceCapabilities(")
+        ]
+        self.assertIn("request.disconnectCleanup ||", process)
+        self.assertIn("resetPendingDeviceTransferStatusChunks();", process)
+        busy = process[
+            process.index("diagnosticsSessionStartInProgress.load(") :
+            process.index("switch (request.action)")
+        ]
+        self.assertIn("notifyGenericTransferStatus(", busy)
+
     def test_tls_handshake_precedes_http_parsing(self):
         worker = HTTP_SOURCE[
             HTTP_SOURCE.index("void HttpTransferServer::runWorker()") :
             HTTP_SOURCE.index("void HttpTransferServer::workerTaskThunk")
         ]
-        self.assertLess(worker.index("client.begin("), worker.index("handleClient(client)"))
+        self.assertLess(
+            worker.index("client.begin("),
+            worker.index("handleClient(client, requestIndex)"),
+        )
         begin = TLS_SOURCE[
             TLS_SOURCE.index("bool TransferClient::begin") :
             TLS_SOURCE.index("int TransferClient::available")
@@ -168,6 +228,108 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
         self.assertIn("mbedtls_ssl_close_notify", finish)
         self.assertIn("esp_tls_conn_read", finish)
         self.assertIn("client.finishResponse(timeoutMs)", HTTP_SOURCE)
+
+    def test_remote_debug_reuses_only_bounded_authenticated_tls_connections(self):
+        worker = HTTP_SOURCE[
+            HTTP_SOURCE.index("void HttpTransferServer::runWorker()") :
+            HTTP_SOURCE.index("void HttpTransferServer::workerTaskThunk")
+        ]
+        self.assertIn("HTTP_MAX_REQUESTS_PER_TLS_CONNECTION", worker)
+        self.assertIn("client.resetHttpResponsePolicy(", worker)
+        self.assertIn("activeClient_ = &client;", worker)
+        self.assertIn("activeClient_ = nullptr;", worker)
+        self.assertIn("client.httpResponseKeepAlive()", HTTP_SOURCE)
+        self.assertIn("client.httpResponseConnectionValue()", HTTP_SOURCE)
+        self.assertIn("client.requestHttpResponseKeepAlive();", DEBUG_HTTP_SOURCE)
+        self.assertIn("request.connectionReuseRequested", DEBUG_HTTP_SOURCE)
+        self.assertIn("x-bikecomputer-connection-reuse", HTTP_LIMITS_HEADER)
+        self.assertIn("server_->isRequestAuthorized(request)", DEBUG_HTTP_SOURCE)
+        exit_policy = DEBUG_HTTP_SOURCE[
+            DEBUG_HTTP_SOURCE.index("// Every request remains independently") :
+            DEBUG_HTTP_SOURCE.index(
+                'if (request.method == "GET" && request.path == "/device-debug/v1/info")'
+            )
+        ]
+        self.assertIn('/device-debug/v1/session/exit', exit_policy)
+
+    def test_partial_http_response_forces_close_without_a_second_status(self):
+        handle_client = HTTP_SOURCE[
+            HTTP_SOURCE.index("bool HttpTransferServer::handleClient") :
+            HTTP_SOURCE.index("HttpRequestHandler *\nHttpTransferServer::handlerForPath")
+        ]
+        self.assertIn("client.httpResponseWriteFailed()", handle_client)
+        self.assertIn("client.httpResponseWriteStarted() && !handled", handle_client)
+        abort = handle_client.index("handler->responseDidAbort(request)")
+        not_found = handle_client.index(
+            'sendError(client, 404, "not_found"', abort
+        )
+        self.assertLess(abort, not_found)
+        self.assertIn("noteHttpResponseWriteFailed", HTTP_SOURCE)
+        self.assertIn("responseWriteFailed_ = true", TLS_HEADER)
+        self.assertIn("responseKeepAlive_ = false", TLS_HEADER)
+        self.assertIn("responseDidAbort", HTTP_HEADER)
+        self.assertIn("handler != nullptr && !client.connected()", handle_client)
+        stop = TLS_SOURCE[
+            TLS_SOURCE.index("void TransferClient::stop") :
+            TLS_SOURCE.index("} // namespace device_transfer")
+        ]
+        self.assertNotIn("responseWriteStarted_ = false", stop)
+        self.assertNotIn("responseWriteFailed_ = false", stop)
+        reset = TLS_SOURCE[
+            TLS_SOURCE.index("void TransferClient::resetHttpResponsePolicy") :
+            TLS_SOURCE.index("void TransferClient::requestHttpResponseKeepAlive")
+        ]
+        self.assertIn("responseWriteStarted_ = false", reset)
+        self.assertIn("responseWriteFailed_ = false", reset)
+
+    def test_json_response_streams_body_without_rebuilding_it(self):
+        send_json = HTTP_SOURCE[
+            HTTP_SOURCE.index("bool sendHttpJson") :
+            HTTP_SOURCE.index("bool sendHttpError")
+        ]
+        self.assertIn("sendHttpHead(client, status, body.size()", send_json)
+        self.assertIn("writeHttpBytes(client", send_json)
+        self.assertNotIn("+ body", send_json)
+        self.assertLess(
+            send_json.index("sendHttpHead(client"),
+            send_json.index("writeHttpBytes(client"),
+        )
+
+    def test_idle_reused_connection_cannot_starve_a_new_pinned_client(self):
+        handle_client = HTTP_SOURCE[
+            HTTP_SOURCE.index("bool HttpTransferServer::handleClient") :
+            HTTP_SOURCE.index("HttpRequestHandler *\nHttpTransferServer::handlerForPath")
+        ]
+        self.assertIn("httpRequestLineTimeoutMs(requestIndex)", handle_client)
+        self.assertIn(
+            "requestLineResult == ReadLineResult::Disconnected &&",
+            handle_client,
+        )
+        self.assertIn("headerBudget.totalBytes == 0", handle_client)
+        timeout_block = handle_client[
+            handle_client.index("requestLineResult == ReadLineResult::Timeout") :
+            handle_client.index("requestLineResult == ReadLineResult::TooLarge")
+        ]
+        self.assertIn("headerBudget.totalBytes != 0", timeout_block)
+        self.assertNotIn("requestIndex == 0", timeout_block)
+        self.assertLess(
+            handle_client.index("headerBudget.totalBytes == 0"),
+            handle_client.index('sendError(client, 400, "bad_request"'),
+        )
+
+    def test_ble_and_mode_revocation_interrupt_the_active_tls_socket(self):
+        clear_ble = HTTP_SOURCE[
+            HTTP_SOURCE.index("void HttpTransferServer::clearAuthenticatedBleSession") :
+            HTTP_SOURCE.index("bool HttpTransferServer::prepareTlsIdentityRotation")
+        ]
+        disable = HTTP_SOURCE[
+            HTTP_SOURCE.index("bool HttpTransferServer::setEnabled(bool enabled, std::string mode)") :
+            HTTP_SOURCE.index("void HttpTransferServer::setLastError")
+        ]
+        self.assertIn("interruptActiveClientLocked();", clear_ble)
+        self.assertIn("interruptActiveClientLocked();", disable)
+        self.assertIn("::shutdown(socket_, SHUT_RDWR);", TLS_SOURCE)
+        self.assertIn("activeClient_->interruptSocket();", HTTP_SOURCE)
 
     def test_all_hotspots_are_protected_and_status_advertises_https(self):
         self.assertIn("apPassphrase_ = generateSessionToken().substr(0, 24);", HTTP_SOURCE)

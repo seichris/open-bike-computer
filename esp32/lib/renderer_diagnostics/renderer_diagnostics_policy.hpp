@@ -1,5 +1,7 @@
 #pragma once
 
+#include "renderer_delivery_timing.hpp"
+
 #include "../renderer_tuning/renderer_tuning.hpp"
 
 #include <algorithm>
@@ -71,6 +73,43 @@ struct MemorySample {
   uint32_t cryptoOperationFailures = 0;
 };
 
+enum class MemoryObservationPhase : uint8_t {
+  Unknown = 0,
+  SessionStart,
+  SessionEnd,
+  WindowStart,
+  Periodic,
+  RenderComplete,
+  MetricsSnapshot,
+};
+
+inline const char *memoryObservationPhaseName(MemoryObservationPhase phase) {
+  switch (phase) {
+  case MemoryObservationPhase::SessionStart:
+    return "session_start";
+  case MemoryObservationPhase::SessionEnd:
+    return "session_end";
+  case MemoryObservationPhase::WindowStart:
+    return "window_start";
+  case MemoryObservationPhase::Periodic:
+    return "periodic";
+  case MemoryObservationPhase::RenderComplete:
+    return "render_complete";
+  case MemoryObservationPhase::MetricsSnapshot:
+    return "metrics_snapshot";
+  case MemoryObservationPhase::Unknown:
+  default:
+    return "unknown";
+  }
+}
+
+struct MemoryMinimumAttribution {
+  MemoryObservationPhase phase = MemoryObservationPhase::Unknown;
+  uint32_t observedAtMs = 0;
+  uint32_t value = 0;
+  bool frameTransferActive = false;
+};
+
 struct TimingSummary {
   uint32_t count = 0;
   uint32_t lastMs = 0;
@@ -106,10 +145,10 @@ public:
   }
 
 private:
-  static constexpr std::array<uint32_t, 27> kUpperBoundsMs{{
+  static constexpr std::array<uint32_t, 28> kUpperBoundsMs{{
       1,    2,    4,    8,    12,   16,   24,   32,   48,
       64,   80,   100,  125,  150,  200,  250,  350,  500,
-      750,  1000, 1500, 2000, 3000, 5000, 7500, 10000,
+      750,  1000, 1250, 1500, 2000, 3000, 5000, 7500, 10000,
       std::numeric_limits<uint32_t>::max(),
   }};
 
@@ -178,6 +217,16 @@ struct JobCounters {
   uint32_t invariantFailed = 0;
 };
 
+enum class JobEvent : uint8_t {
+  Requested,
+  Started,
+  Completed,
+  Published,
+  Stale,
+  Cancelled,
+  InvariantFailed,
+};
+
 struct RemoteDebugOverhead {
   bool active = false;
   uint32_t snapshotBytes = 0;
@@ -189,6 +238,18 @@ struct RemoteDebugOverhead {
   uint32_t maximumCopyUs = 0;
   uint32_t lastHttpResponseMs = 0;
   uint32_t maximumHttpResponseMs = 0;
+  uint32_t lastFrameSnapshotWaitUs = 0;
+  uint32_t maximumFrameSnapshotWaitUs = 0;
+  uint32_t lastFrameCrcUs = 0;
+  uint32_t maximumFrameCrcUs = 0;
+  uint32_t lastHttpExpectedBytes = 0;
+  uint32_t lastHttpActualBytes = 0;
+  uint32_t lastHttpWriteCalls = 0;
+  uint32_t lastHttpZeroWriteCalls = 0;
+  uint32_t lastHttpShortWriteCalls = 0;
+  uint32_t lastHttpActiveTlsWriteUs = 0;
+  uint32_t lastHttpNoProgressWaitMs = 0;
+  uint32_t lastHttpIntentionalDelayMs = 0;
   uint32_t freeBefore = 0;
   uint32_t largestBefore = 0;
   uint32_t freeAfterAllocate = 0;
@@ -205,6 +266,84 @@ struct RouteMarker {
   uint32_t rejected = 0;
   bool valid = false;
 };
+
+enum class ReplayMarkerResult : uint8_t {
+  None,
+  Accepted,
+  Invalid,
+  NoActiveWindow,
+  ActiveFixtureUnavailable,
+  FixtureMismatch,
+};
+
+inline const char *replayMarkerResultName(ReplayMarkerResult result) {
+  switch (result) {
+  case ReplayMarkerResult::Accepted:
+    return "accepted";
+  case ReplayMarkerResult::Invalid:
+    return "invalid";
+  case ReplayMarkerResult::NoActiveWindow:
+    return "no_active_window";
+  case ReplayMarkerResult::ActiveFixtureUnavailable:
+    return "active_fixture_unavailable";
+  case ReplayMarkerResult::FixtureMismatch:
+    return "fixture_mismatch";
+  case ReplayMarkerResult::None:
+  default:
+    return "none";
+  }
+}
+
+// Session-scoped, non-secret transport evidence. Unlike RouteMarker, this is
+// deliberately not cleared by beginWindow(), so an RBS1 received before the
+// first measurement window remains observable after that window is created.
+struct ReplayTransportDiagnostics {
+  uint32_t gpsAuthenticationAccepted = 0;
+  uint32_t gpsAuthenticationRejected = 0;
+  uint32_t rbs1Detected = 0;
+  uint32_t rbs1Decoded = 0;
+  uint32_t rbs1Malformed = 0;
+  uint32_t rbs1Unnegotiated = 0;
+  uint32_t gpsMailboxAccepted = 0;
+  uint32_t gpsMailboxRejected = 0;
+  uint32_t markerAccepted = 0;
+  uint32_t markerRejectedInvalid = 0;
+  uint32_t markerRejectedNoActiveWindow = 0;
+  uint32_t markerRejectedActiveFixtureUnavailable = 0;
+  uint32_t markerRejectedFixtureMismatch = 0;
+  uint32_t lastTransportEventAtMs = 0;
+  uint32_t lastMarkerAtMs = 0;
+  uint32_t lastActiveWindowId = 0;
+  uint16_t lastSampleIndex = 0;
+  uint16_t lastSampleCount = 0;
+  uint32_t lastLoop = 0;
+  uint32_t lastCandidateFixtureTag = 0;
+  uint32_t lastExpectedFixtureTag = 0;
+  bool lastCandidateFixtureTagValid = false;
+  bool lastExpectedFixtureTagValid = false;
+  ReplayMarkerResult lastMarkerResult = ReplayMarkerResult::None;
+};
+
+struct CameraSample {
+  uint32_t frameSequence = 0;
+  uint32_t sceneGeneration = 0;
+  uint32_t requestedAtMs = 0;
+  uint32_t observedAtMs = 0;
+  uint32_t lagMs = 0;
+  int16_t displayedBearingTenths = 0;
+  int16_t targetBearingTenths = 0;
+  uint16_t markerAngleTenths = 0;
+  uint16_t effectiveTopScalePermille = 0;
+  uint8_t requestedMode = 0;
+  uint8_t effectiveMode = 0;
+  uint8_t labelDensity = 0;
+  uint8_t labelOrientation = 0;
+  bool enabled = false;
+  bool hidden = false;
+  bool updateRequired = false;
+  bool sceneReused = false;
+};
+static_assert(sizeof(CameraSample) <= 40, "bounded camera telemetry");
 
 struct Snapshot {
   uint8_t schema = kSchemaVersion;
@@ -223,6 +362,8 @@ struct Snapshot {
   uint32_t windowMinimumPsramLargest = 0;
   uint32_t windowMinimumDmaFree = 0;
   uint32_t windowMinimumDmaLargest = 0;
+  MemoryMinimumAttribution windowMinimumDmaFreeAttribution{};
+  MemoryMinimumAttribution windowMinimumDmaLargestAttribution{};
   TimingSummary totalRender{};
   TimingSummary blockLoad{};
   TimingSummary draw{};
@@ -230,6 +371,9 @@ struct Snapshot {
   TimingSummary buildingDraw{};
   TimingSummary buildingTotal{};
   TimingSummary displayFlush{};
+  CameraSample camera{};
+  TimingSummary cameraLag{};
+  uint16_t maximumMarkerResidualTenths = 0;
   BuildingPassSample buildings{};
   std::array<uint32_t, 6> limiterPasses{};
   JobCounters jobs{};
@@ -243,7 +387,11 @@ struct Snapshot {
   uint32_t predictionExhaustionEntries = 0;
   RouteMarker routeMarker{};
   bool routeFixtureMatches = false;
+  ReplayTransportDiagnostics replayTransport{};
   RemoteDebugOverhead remoteDebug{};
+#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+  DeliveryTimingSnapshot deliveryTiming{};
+#endif
 };
 
 class State {
@@ -255,6 +403,7 @@ public:
     profile_ = renderer_tuning::Profile::Current;
     remoteDebug_ = {};
     remoteDebug_.active = remoteDebugActive;
+    replayTransport_ = {};
     resetWindowState();
   }
 
@@ -262,6 +411,7 @@ public:
     sessionActive_ = false;
     profile_ = renderer_tuning::Profile::Current;
     remoteDebug_ = {};
+    replayTransport_ = {};
     resetWindowState();
   }
 
@@ -269,7 +419,6 @@ public:
 
   bool beginWindow(uint32_t windowId, const RunIdentity &identity,
                    renderer_tuning::Profile profile, uint32_t nowMs,
-                   const JobCounters &currentJobs,
                    uint32_t currentGpsPacketSequence) {
     if (!sessionActive_ || windowId == 0)
       return false;
@@ -278,8 +427,7 @@ public:
     windowStartedAtMs_ = nowMs;
     run_ = identity;
     profile_ = profile;
-    jobs_ = currentJobs;
-    jobBaseline_ = currentJobs;
+    jobs_ = {};
     lastGpsPacketSequence_ = currentGpsPacketSequence;
     return true;
   }
@@ -292,8 +440,30 @@ public:
 
   JobCounters currentJobs() const { return jobs_; }
 
-  void noteMemory(const MemorySample &sample) {
+  bool noteCameraForWindow(uint32_t windowId, const CameraSample &sample) {
+    if (!sessionActive_ || windowId == 0 || windowId != measurementWindowId_)
+      return false;
+    camera_ = sample;
+    if (sample.updateRequired)
+      cameraLag_.note(sample.lagMs);
+    if (sample.effectiveMode == 1) {
+      maximumMarkerResidualTenths_ = std::max<uint16_t>(
+          maximumMarkerResidualTenths_,
+          std::min<uint16_t>(sample.markerAngleTenths,
+                             3600 - sample.markerAngleTenths));
+    }
+    return true;
+  }
+
+  void noteMemory(
+      const MemorySample &sample,
+      MemoryObservationPhase phase = MemoryObservationPhase::Unknown,
+      uint32_t nowMs = 0, bool frameTransferActive = false) {
     memory_ = sample;
+    const MemoryMinimumAttribution freeAttribution{
+        phase, nowMs, sample.dmaFree, frameTransferActive};
+    const MemoryMinimumAttribution largestAttribution{
+        phase, nowMs, sample.dmaLargest, frameTransferActive};
     if (!memoryObserved_) {
       cryptoHeadroomRejectionsBaseline_ = sample.cryptoHeadroomRejections;
       cryptoOperationFailuresBaseline_ = sample.cryptoOperationFailures;
@@ -303,6 +473,8 @@ public:
       windowMinimumPsramLargest_ = sample.psramLargest;
       windowMinimumDmaFree_ = sample.dmaFree;
       windowMinimumDmaLargest_ = sample.dmaLargest;
+      windowMinimumDmaFreeAttribution_ = freeAttribution;
+      windowMinimumDmaLargestAttribution_ = largestAttribution;
       memoryObserved_ = true;
       return;
     }
@@ -314,10 +486,14 @@ public:
         std::min(windowMinimumPsramFree_, sample.psramFree);
     windowMinimumPsramLargest_ =
         std::min(windowMinimumPsramLargest_, sample.psramLargest);
-    windowMinimumDmaFree_ =
-        std::min(windowMinimumDmaFree_, sample.dmaFree);
-    windowMinimumDmaLargest_ =
-        std::min(windowMinimumDmaLargest_, sample.dmaLargest);
+    if (sample.dmaFree < windowMinimumDmaFree_) {
+      windowMinimumDmaFree_ = sample.dmaFree;
+      windowMinimumDmaFreeAttribution_ = freeAttribution;
+    }
+    if (sample.dmaLargest < windowMinimumDmaLargest_) {
+      windowMinimumDmaLargest_ = sample.dmaLargest;
+      windowMinimumDmaLargestAttribution_ = largestAttribution;
+    }
   }
 
   bool noteRenderForWindow(uint32_t windowId,
@@ -331,10 +507,49 @@ public:
     return true;
   }
 
-  void noteJobs(const JobCounters &jobs) { jobs_ = jobs; }
+  bool noteJobForWindow(uint32_t windowId, JobEvent event) {
+    if (!sessionActive_ || windowId == 0 ||
+        windowId != measurementWindowId_) {
+      return false;
+    }
+    switch (event) {
+    case JobEvent::Requested:
+      ++jobs_.requested;
+      break;
+    case JobEvent::Started:
+      ++jobs_.started;
+      break;
+    case JobEvent::Completed:
+      ++jobs_.completed;
+      break;
+    case JobEvent::Published:
+      ++jobs_.published;
+      break;
+    case JobEvent::Stale:
+      ++jobs_.stale;
+      break;
+    case JobEvent::Cancelled:
+      ++jobs_.cancelled;
+      break;
+    case JobEvent::InvariantFailed:
+      ++jobs_.invariantFailed;
+      break;
+    }
+    return true;
+  }
 
-  void noteInterrupted() { ++interrupted_; }
-  void noteCoverageRejected() { ++coverageRejected_; }
+  void noteInterruptedForWindow(uint32_t windowId) {
+    if (sessionActive_ && windowId != 0 &&
+        windowId == measurementWindowId_) {
+      ++interrupted_;
+    }
+  }
+  void noteCoverageRejectedForWindow(uint32_t windowId) {
+    if (sessionActive_ && windowId != 0 &&
+        windowId == measurementWindowId_) {
+      ++coverageRejected_;
+    }
+  }
 
   void noteUiLoopGap(uint32_t milliseconds) {
     maximumUiGapMs_ = std::max(maximumUiGapMs_, milliseconds);
@@ -365,14 +580,101 @@ public:
     lastPredictionExhausted_ = exhausted;
   }
 
+  void noteGpsAuthentication(bool accepted, uint32_t nowMs) {
+    if (!sessionActive_)
+      return;
+    if (accepted)
+      ++replayTransport_.gpsAuthenticationAccepted;
+    else
+      ++replayTransport_.gpsAuthenticationRejected;
+    replayTransport_.lastTransportEventAtMs = nowMs;
+  }
+
+  void noteReplaySampleDetected(uint32_t nowMs) {
+    if (!sessionActive_)
+      return;
+    ++replayTransport_.rbs1Detected;
+    replayTransport_.lastTransportEventAtMs = nowMs;
+  }
+
+  void noteReplaySampleDecoded(bool accepted, uint32_t nowMs) {
+    if (!sessionActive_)
+      return;
+    if (accepted)
+      ++replayTransport_.rbs1Decoded;
+    else
+      ++replayTransport_.rbs1Malformed;
+    replayTransport_.lastTransportEventAtMs = nowMs;
+  }
+
+  void noteReplaySampleUnnegotiated(uint32_t nowMs) {
+    if (!sessionActive_)
+      return;
+    ++replayTransport_.rbs1Unnegotiated;
+    replayTransport_.lastTransportEventAtMs = nowMs;
+  }
+
+  void noteReplayGpsMailbox(bool accepted, uint32_t nowMs) {
+    if (!sessionActive_)
+      return;
+    if (accepted)
+      ++replayTransport_.gpsMailboxAccepted;
+    else
+      ++replayTransport_.gpsMailboxRejected;
+    replayTransport_.lastTransportEventAtMs = nowMs;
+  }
+
+  ReplayTransportDiagnostics replayTransportDiagnostics() const {
+    return replayTransport_;
+  }
+
   bool noteRouteMarker(const uint8_t *fixtureSha256, size_t hashBytes,
                        uint16_t sampleIndex, uint16_t sampleCount,
                        uint32_t loop, uint32_t nowMs) {
+    if (!sessionActive_)
+      return false;
+    replayTransport_.lastTransportEventAtMs = nowMs;
+    replayTransport_.lastMarkerAtMs = nowMs;
+    replayTransport_.lastActiveWindowId = measurementWindowId_;
+    replayTransport_.lastSampleIndex = sampleIndex;
+    replayTransport_.lastSampleCount = sampleCount;
+    replayTransport_.lastLoop = loop;
+    replayTransport_.lastCandidateFixtureTagValid =
+        fixtureSha256 != nullptr &&
+        hashBytes == routeMarker_.fixtureSha256.size();
+    replayTransport_.lastCandidateFixtureTag =
+        replayTransport_.lastCandidateFixtureTagValid
+            ? fixtureTag(fixtureSha256)
+            : 0;
+    uint32_t expectedFixtureTag = 0;
+    replayTransport_.lastExpectedFixtureTagValid =
+        expectedRouteHashTag(expectedFixtureTag);
+    replayTransport_.lastExpectedFixtureTag = expectedFixtureTag;
+
+    auto reject = [this](ReplayMarkerResult result, uint32_t &counter) {
+      ++routeMarker_.rejected;
+      ++counter;
+      replayTransport_.lastMarkerResult = result;
+      return false;
+    };
     if (fixtureSha256 == nullptr ||
         hashBytes != routeMarker_.fixtureSha256.size() || sampleCount == 0 ||
-        sampleIndex >= sampleCount || !routeHashMatches(fixtureSha256)) {
-      ++routeMarker_.rejected;
-      return false;
+        sampleIndex >= sampleCount) {
+      return reject(ReplayMarkerResult::Invalid,
+                    replayTransport_.markerRejectedInvalid);
+    }
+    if (measurementWindowId_ == 0) {
+      return reject(ReplayMarkerResult::NoActiveWindow,
+                    replayTransport_.markerRejectedNoActiveWindow);
+    }
+    if (!replayTransport_.lastExpectedFixtureTagValid) {
+      return reject(
+          ReplayMarkerResult::ActiveFixtureUnavailable,
+          replayTransport_.markerRejectedActiveFixtureUnavailable);
+    }
+    if (!routeHashMatches(fixtureSha256)) {
+      return reject(ReplayMarkerResult::FixtureMismatch,
+                    replayTransport_.markerRejectedFixtureMismatch);
     }
     std::copy(fixtureSha256, fixtureSha256 + hashBytes,
               routeMarker_.fixtureSha256.begin());
@@ -382,6 +684,8 @@ public:
     routeMarker_.receivedAtMs = nowMs;
     ++routeMarker_.accepted;
     routeMarker_.valid = true;
+    ++replayTransport_.markerAccepted;
+    replayTransport_.lastMarkerResult = ReplayMarkerResult::Accepted;
     return true;
   }
 
@@ -411,6 +715,10 @@ public:
     result.windowMinimumPsramLargest = windowMinimumPsramLargest_;
     result.windowMinimumDmaFree = windowMinimumDmaFree_;
     result.windowMinimumDmaLargest = windowMinimumDmaLargest_;
+    result.windowMinimumDmaFreeAttribution =
+        windowMinimumDmaFreeAttribution_;
+    result.windowMinimumDmaLargestAttribution =
+        windowMinimumDmaLargestAttribution_;
     result.totalRender = totalRender_.summary();
     result.blockLoad = blockLoad_.summary();
     result.draw = draw_.summary();
@@ -418,10 +726,13 @@ public:
     result.buildingDraw = buildingDraw_.summary();
     result.buildingTotal = buildingTotal_.summary();
     result.displayFlush = displayFlush_.summary();
+    result.camera = camera_;
+    result.cameraLag = cameraLag_.summary();
+    result.maximumMarkerResidualTenths = maximumMarkerResidualTenths_;
     result.buildings = buildings_;
     result.buildings.allocationFallback = allocationFallbackObserved_;
     result.limiterPasses = limiterPasses_;
-    result.jobs = subtractJobs(jobs_, jobBaseline_);
+    result.jobs = jobs_;
     result.interrupted = interrupted_;
     result.coverageRejected = coverageRejected_;
     result.maximumUiGapMs = maximumUiGapMs_;
@@ -432,6 +743,7 @@ public:
     result.predictionExhaustionEntries = predictionExhaustionEntries_;
     result.routeMarker = routeMarker_;
     result.routeFixtureMatches = routeHashMatches();
+    result.replayTransport = replayTransport_;
     result.remoteDebug = remoteDebug_;
     return result;
   }
@@ -457,19 +769,6 @@ private:
     return value >= baseline ? value - baseline : 0;
   }
 
-  static JobCounters subtractJobs(const JobCounters &value,
-                                  const JobCounters &baseline) {
-    return {
-        subtract(value.requested, baseline.requested),
-        subtract(value.started, baseline.started),
-        subtract(value.completed, baseline.completed),
-        subtract(value.published, baseline.published),
-        subtract(value.stale, baseline.stale),
-        subtract(value.cancelled, baseline.cancelled),
-        subtract(value.invariantFailed, baseline.invariantFailed),
-    };
-  }
-
   static int hexNibble(char value) {
     if (value >= '0' && value <= '9')
       return value - '0';
@@ -478,6 +777,33 @@ private:
     if (value >= 'A' && value <= 'F')
       return value - 'A' + 10;
     return -1;
+  }
+
+  static uint32_t fixtureTag(const uint8_t *hash) {
+    if (hash == nullptr)
+      return 0;
+    return (static_cast<uint32_t>(hash[0]) << 24U) |
+           (static_cast<uint32_t>(hash[1]) << 16U) |
+           (static_cast<uint32_t>(hash[2]) << 8U) |
+           static_cast<uint32_t>(hash[3]);
+  }
+
+  bool expectedRouteHashTag(uint32_t &tag) const {
+    const char *expected = run_.routeFixtureSha256.c_str();
+    if (std::strlen(expected) != 64)
+      return false;
+    tag = 0;
+    for (size_t index = 0; index < 32; ++index) {
+      const int high = hexNibble(expected[index * 2]);
+      const int low = hexNibble(expected[index * 2 + 1]);
+      if (high < 0 || low < 0)
+        return false;
+      if (index < 4) {
+        tag = (tag << 8U) |
+              static_cast<uint32_t>((high << 4) | low);
+      }
+    }
+    return true;
   }
 
   bool routeHashMatches(const uint8_t *candidate) const {
@@ -515,6 +841,8 @@ private:
     windowMinimumPsramLargest_ = 0;
     windowMinimumDmaFree_ = 0;
     windowMinimumDmaLargest_ = 0;
+    windowMinimumDmaFreeAttribution_ = {};
+    windowMinimumDmaLargestAttribution_ = {};
     totalRender_.reset();
     blockLoad_.reset();
     draw_.reset();
@@ -522,10 +850,13 @@ private:
     buildingDraw_.reset();
     buildingTotal_.reset();
     displayFlush_.reset();
+    camera_ = {};
+    cameraLag_.reset();
+    maximumMarkerResidualTenths_ = 0;
     buildings_ = {};
     allocationFallbackObserved_ = false;
     limiterPasses_.fill(0);
-    jobBaseline_ = jobs_;
+    jobs_ = {};
     interrupted_ = 0;
     coverageRejected_ = 0;
     maximumUiGapMs_ = 0;
@@ -557,6 +888,8 @@ private:
   uint32_t windowMinimumPsramLargest_ = 0;
   uint32_t windowMinimumDmaFree_ = 0;
   uint32_t windowMinimumDmaLargest_ = 0;
+  MemoryMinimumAttribution windowMinimumDmaFreeAttribution_{};
+  MemoryMinimumAttribution windowMinimumDmaLargestAttribution_{};
   TimingHistogram totalRender_{};
   TimingHistogram blockLoad_{};
   TimingHistogram draw_{};
@@ -564,11 +897,13 @@ private:
   TimingHistogram buildingDraw_{};
   TimingHistogram buildingTotal_{};
   TimingHistogram displayFlush_{};
+  CameraSample camera_{};
+  TimingHistogram cameraLag_{};
+  uint16_t maximumMarkerResidualTenths_ = 0;
   BuildingPassSample buildings_{};
   bool allocationFallbackObserved_ = false;
   std::array<uint32_t, 6> limiterPasses_{};
   JobCounters jobs_{};
-  JobCounters jobBaseline_{};
   uint32_t interrupted_ = 0;
   uint32_t coverageRejected_ = 0;
   uint32_t maximumUiGapMs_ = 0;
@@ -581,6 +916,7 @@ private:
   bool lastPredictionGraceActive_ = false;
   bool lastPredictionExhausted_ = false;
   RouteMarker routeMarker_{};
+  ReplayTransportDiagnostics replayTransport_{};
   RemoteDebugOverhead remoteDebug_{};
 };
 

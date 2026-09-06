@@ -29,7 +29,7 @@
     "request_magic": "CAPS",
     "response_magic": "CAP2",
     "response_schema_version": 1,
-    "current_client_version": 20,
+    "current_client_version": 22,
     "features": {
       "device_sounds": {"bit": 0, "minimum_client_version": 1},
       "power_button_honk": {"bit": 1, "minimum_client_version": 1},
@@ -53,7 +53,9 @@
       "automatic_display_off": {"bit": 19, "minimum_client_version": 16},
       "ride_diagnostics": {"bit": 20, "minimum_client_version": 18},
       "detailed_ride_diagnostics": {"bit": 21, "minimum_client_version": 19},
-      "ride_delivery_ack": {"bit": 22, "minimum_client_version": 20}
+      "ride_delivery_ack": {"bit": 22, "minimum_client_version": 20},
+      "renderer_benchmark_sample": {"bit": 23, "minimum_client_version": 21},
+      "map_navigation_orientation": {"bit": 24, "minimum_client_version": 22}
     }
   },
   "device_requests": {
