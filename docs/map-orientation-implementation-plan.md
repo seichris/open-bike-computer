@@ -441,6 +441,13 @@ rolled-back forced Course Up renderer still supports independent orientation.
 
 ## 8. Research boundary
 
+Implementation follow-up: the development-gated path, settings and captured-frame
+evidence are now implemented on this branch. See
+[implementation and outstanding qualification](map-stable-camera.md). The
+paragraph below describes the original planning-only research, not a claim that
+the branch still contains no implementation. Physical and performance acceptance
+remain pending; production is disabled on both targets.
+
 This plan is based on fetched source, merged history, and existing checked-in
 contracts. No firmware, app, map, or physical device was changed or tested for
 this document. Historical sweep evidence remains evidence for its recorded

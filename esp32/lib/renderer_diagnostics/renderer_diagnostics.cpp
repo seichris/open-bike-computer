@@ -322,6 +322,13 @@ bool noteRenderForWindow(uint32_t windowId,
   return accepted;
 }
 
+void noteCameraForWindow(uint32_t windowId, const CameraSample &sample) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteCameraForWindow(windowId, sample);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
 bool noteJobForWindow(uint32_t windowId, JobEvent event) {
   portENTER_CRITICAL(&diagnosticsMux);
   const bool accepted = diagnosticsState != nullptr &&
@@ -564,8 +571,29 @@ std::string toJson(const Snapshot &value) {
        << ",\"cryptoHeadroomRejections\":"
        << value.memory.cryptoHeadroomRejections
        << ",\"cryptoOperationFailures\":"
-       << value.memory.cryptoOperationFailures << "}}"
-       << ",\"render\":{\"timings\":{\"total\":";
+       << value.memory.cryptoOperationFailures << "}}";
+    const auto &camera = value.camera;
+    body << ",\"camera\":{\"schema\":1,\"enabled\":" << (camera.enabled ? "true" : "false")
+       << ",\"frameSequence\":" << camera.frameSequence
+       << ",\"sceneGeneration\":" << camera.sceneGeneration
+       << ",\"requestedAtMs\":" << camera.requestedAtMs
+       << ",\"observedAtMs\":" << camera.observedAtMs
+       << ",\"lagMs\":" << camera.lagMs
+       << ",\"displayedBearingTenths\":" << camera.displayedBearingTenths
+       << ",\"targetBearingTenths\":" << camera.targetBearingTenths
+       << ",\"markerAngleTenths\":" << camera.markerAngleTenths
+       << ",\"maximumMarkerResidualTenths\":" << value.maximumMarkerResidualTenths
+       << ",\"effectiveTopScalePermille\":" << camera.effectiveTopScalePermille
+       << ",\"requestedMode\":" << camera.requestedMode
+       << ",\"effectiveMode\":" << camera.effectiveMode
+       << ",\"labelDensity\":" << camera.labelDensity
+       << ",\"labelOrientation\":" << camera.labelOrientation
+       << ",\"hidden\":" << (camera.hidden ? "true" : "false")
+       << ",\"updateRequired\":" << (camera.updateRequired ? "true" : "false")
+       << ",\"sceneReused\":" << (camera.sceneReused ? "true" : "false")
+       << ",\"lag\":";
+    appendTiming(body, value.cameraLag);
+    body << "},\"render\":{\"timings\":{\"total\":";
     appendTiming(body, value.totalRender);
     body << ",\"blockLoad\":";
     appendTiming(body, value.blockLoad);

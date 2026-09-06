@@ -252,6 +252,7 @@ uint64_t settingsSignature() {
   hashScreenMapSettings(hash, mapRenderSettings.mapStyle);
   hashScreenMapSettings(hash, mapRenderSettings.mapNavigationStyle);
   hashScalar(hash, mapRenderSettings.mapRotationMode);
+  hashScalar(hash, mapRenderSettings.mapNavigationRotationMode);
   hashScalar(hash, mapRenderSettings.tapToSwitchScreens);
   hashScalar(hash, mapRenderSettings.enabledScreensMask);
   hashScalar(hash, mapRenderSettings.defaultScreen);
@@ -756,7 +757,9 @@ static void setNavigationDistanceLabel(lv_obj_t *label,
 static void applyMapRotationForTile(tileName tile) {
   if (tile == MAP_GUIDANCE) {
     const Maps::RotationMode desiredMode =
-        isGuidanceNavigating() ? Maps::ROT_COURSE_UP : Maps::ROT_NORTH_UP;
+        map_profile_protocol::guidanceCourseUp(
+            isGuidanceNavigating(), mapRenderSettings.mapNavigationRotationMode)
+            ? Maps::ROT_COURSE_UP : Maps::ROT_NORTH_UP;
     if (mapView.rotationMode != desiredMode) {
       mapView.rotationMode = desiredMode;
       if (desiredMode == Maps::ROT_NORTH_UP) {

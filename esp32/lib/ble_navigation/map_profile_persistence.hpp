@@ -7,6 +7,17 @@
 namespace map_profile_persistence {
 
 template <typename Store>
+inline uint8_t loadNavigationRotation(Store &store) {
+  return map_profile_protocol::navigationRotation(
+      store.getUChar("navRotMode", 1));
+}
+
+template <typename Store>
+inline void persistNavigationRotation(Store &store, uint8_t value) {
+  store.putUChar("navRotMode", map_profile_protocol::navigationRotation(value));
+}
+
+template <typename Store>
 inline bool loadBirdsEyeEnabled(Store &store) {
   return store.getBool("navBirdEye", true);
 }

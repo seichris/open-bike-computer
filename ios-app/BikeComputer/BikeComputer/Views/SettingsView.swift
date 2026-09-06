@@ -2133,6 +2133,25 @@ private struct MapStyleSettingsView: View {
             }
 
             if screen == .mapPlusNavigation {
+                Section(header: Text("Map Mode"), footer: Text(
+                    bleManager.supportsMapNavigationOrientation
+                        ? "Course Up follows your direction of travel. North Up keeps the map bearing fixed. Label orientation is configured separately."
+                        : "Independent navigation orientation requires supported development firmware. Your selection is retained for a compatible device."
+                )) {
+                    Picker("Rotation", selection: $bleManager.mapPlusNavigationRotationMode) {
+                        Text("North Up").tag(0)
+                        Text("Course Up").tag(1)
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(!bleManager.hasReceivedDeviceCapabilities ||
+                              !bleManager.supportsMapNavigationOrientation)
+                    .onChange(of: bleManager.mapPlusNavigationRotationMode) { value in
+                        bleManager.sendSetting(
+                            id: DeviceBLEProtocol.mapPlusNavigationRotationSettingID,
+                            value: Int32(value)
+                        )
+                    }
+                }
                 Section(header: Text("View"), footer: Text(birdsEyeFooter)) {
                     Toggle(
                         "Bird's-Eye View",
