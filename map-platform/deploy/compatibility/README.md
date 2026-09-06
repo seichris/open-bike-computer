@@ -48,7 +48,7 @@ exist only in the `validation` stage, never the `runtime` stage.
 
 ## Existing-download migration is a deployment blocker
 
-The installed app currently deletes an installation credential without a usable
+The previously installed app deletes an installation credential without a usable
 App Attest key before enrollment succeeds. Enrollment issues a new installation
 identity. The compatibility API correctly refuses to give that new identity
 access to another installation's jobs. Old credentials remain valid for reading
@@ -58,9 +58,12 @@ the phone's Keychain.
 Therefore a successful challenge endpoint is NOT proof that old downloaded maps
 can attach. Before release:
 
-1. Implement and test a credential-preserving app upgrade plus an authenticated
-   enrollment migration that preserves the old installation ID when the caller
-   proves possession of its existing token and a valid new Apple attestation.
+1. Ship the credential-preserving app upgrade in this candidate together with
+   the authenticated enrollment migration. It retains the old installation ID
+   only when the caller proves possession of its existing token and a valid new
+   Apple attestation. Existing bindings cannot be replaced. The app keeps its
+   old credential on failure and persists the generated key before submission,
+   allowing authenticated refresh to recover a lost enrollment response.
 2. For phones that already lost that token, define and obtain approval for a
    scoped recovery flow. Do not infer ownership from a map ID, filename, or
    public hash; do not reassign jobs or insert catalog references directly.

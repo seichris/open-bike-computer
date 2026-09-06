@@ -61,6 +61,46 @@ class CompatibilityRuntimeTests(unittest.TestCase):
             "X-Installation-Token": credential["clientInstallationToken"],
         }).status_code, 401)
 
+    def test_legacy_migration_preserves_identity_and_rejects_rebinding(self):
+        old_id, old_token = self.app.state.installation_store.issue()
+        old = {"clientInstallationId": old_id, "clientInstallationToken": old_token}
+        fixture_owner = self.attest.issue_installation(self.client)
+        created = self.attest.post_map_job(self.client, credential=fixture_owner, payload={
+            "mode": "custom_bbox", "bbox": [103.85, 1.29, 103.86, 1.30],
+            "clientInstallationId": fixture_owner["clientInstallationId"],
+            "clientRequestId": "legacy-owner-fixture",
+        })
+        self.assertEqual(created.status_code, 200, created.text)
+        job_id = created.json()["jobId"]
+        # Seed a pre-attestation owner in this temporary test store only.
+        job = self.app.state.job_store.get(job_id)
+        job.client_installation_id = old_id
+        self.app.state.job_store.save(job)
+        migrated = self.attest.issue_installation(self.client, existing_credential=old)
+        self.assertIsInstance(migrated, dict)
+        self.assertEqual(migrated["clientInstallationId"], old_id)
+        self.assertEqual(migrated["clientInstallationToken"], old_token)
+        refreshed = self.client.post("/v1/installations", params={
+            "clientInstallationId": old_id,
+        }, headers={"X-Installation-Token": old_token})
+        self.assertEqual(refreshed.json(), migrated)
+        listing = self.client.get("/v1/map-jobs", params={"clientInstallationId": old_id},
+                                  headers={"X-Installation-Token": old_token})
+        self.assertEqual(listing.status_code, 200, listing.text)
+        self.assertIn(job_id, listing.text)
+        rejected = self.attest.issue_installation(self.client, existing_credential=old)
+        self.assertEqual(rejected.status_code, 401, rejected.text)
+        self.assertEqual(self.app.state.app_attest_store.key_id_for_installation(old_id), migrated["appAttestKeyId"])
+
+    def test_migration_requires_the_existing_owner_token(self):
+        old_id, _ = self.app.state.installation_store.issue()
+        _, other_token = self.app.state.installation_store.issue()
+        rejected = self.attest.issue_installation(self.client, existing_credential={
+            "clientInstallationId": old_id, "clientInstallationToken": other_token,
+        })
+        self.assertEqual(rejected.status_code, 401, rejected.text)
+        self.assertIsNone(self.app.state.app_attest_store.key_id_for_installation(old_id))
+
     def test_missing_assertion_cannot_create_a_map(self):
         credential = self.attest.issue_installation(self.client)
         payload = {
