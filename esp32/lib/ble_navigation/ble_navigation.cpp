@@ -120,6 +120,7 @@ static bool bleSessionAuthenticated = false;
 static bool bleSessionUsesIndependentMapProfiles = false;
 static bool bleSessionSupportsStreetLabels = false;
 static bool bleSessionSupports3DBuildings = false;
+static bool bleSessionSupportsMapNavigationOrientation = false;
 static std::atomic<bool> bleSessionSupportsExplicitInvalidGpsHeading{false};
 static std::atomic<bool> bleSessionSupportsRendererDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRendererBenchmarkSample{false};
@@ -2012,6 +2013,7 @@ static void handleAuthPayload(const std::string &frame) {
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
+    bleSessionSupportsMapNavigationOrientation = false;
     bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
@@ -3434,6 +3436,10 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
         device_capabilities_protocol::BIRDS_EYE_PERSPECTIVE_FEATURE |
         device_capabilities_protocol::BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE |
         device_capabilities_protocol::OSM_3D_BUILDINGS_FEATURE;
+    if (device_capabilities_protocol::supportsMapNavigationOrientation(
+            clientVersion, map_profile_protocol::STABLE_CAMERA_ENABLED)) {
+      featureFlags |= device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE;
+    }
 #ifdef USE_ARDUINO_GFX
     if (clientVersion >= device_capabilities_protocol::
                              AUTOMATIC_DISPLAY_OFF_CLIENT_VERSION) {
@@ -3570,6 +3576,9 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
     bleSessionSupportsStreetLabels =
         clientVersion >= device_capabilities_protocol::CAP2_CLIENT_VERSION;
     bleSessionSupports3DBuildings = bleSessionSupportsStreetLabels;
+    bleSessionSupportsMapNavigationOrientation =
+        device_capabilities_protocol::supportsMapNavigationOrientation(
+            clientVersion, map_profile_protocol::STABLE_CAMERA_ENABLED);
     bleSessionSupportsRideDeliveryAck.store(
         clientVersion >=
             device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION,
@@ -4318,6 +4327,10 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                              const char *source) {
   bleDebugStats.settingsPacketCount++;
   bleDebugStats.lastSettingsPacketMs = millis();
+  if (settingId == map_profile_protocol::MAP_NAVIGATION_ROTATION_SETTING_ID &&
+      (!map_profile_protocol::STABLE_CAMERA_ENABLED ||
+       !bleSessionSupportsMapNavigationOrientation))
+    return;
   if (map_profile_protocol::isLabelSetting(settingId) &&
       !bleSessionSupportsStreetLabels) {
     Serial.printf("BLE Settings: ignored unnegotiated label setting %u\n",
@@ -4671,6 +4684,14 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
         settingsPrefs, mapRenderSettings.mapNavigation3DBuildingsEnabled);
     settingsPrefs.end();
     break;
+  case map_profile_protocol::MAP_NAVIGATION_ROTATION_SETTING_ID:
+    mapRenderSettings.mapNavigationRotationMode =
+        map_profile_protocol::navigationRotation(settingValue);
+    settingsPrefs.begin("mapSettings", false);
+    map_profile_persistence::persistNavigationRotation(
+        settingsPrefs, mapRenderSettings.mapNavigationRotationMode);
+    settingsPrefs.end();
+    break;
   default:
     Serial.printf("BLE Settings: Unknown setting ID %d from %s\n", settingId,
                   source == nullptr ? "unknown" : source);
@@ -4946,6 +4967,7 @@ public:
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
+    bleSessionSupportsMapNavigationOrientation = false;
     bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
@@ -5030,6 +5052,7 @@ public:
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
+    bleSessionSupportsMapNavigationOrientation = false;
     bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
@@ -5691,6 +5714,8 @@ static void loadSettingsFromNVS() {
   mapRenderSettings.mapNavigation3DBuildingsEnabled =
       map_profile_persistence::load3DBuildingsEnabled(prefs);
   mapRenderSettings.mapRotationMode = prefs.getUChar("mapRotMode", 0);
+  mapRenderSettings.mapNavigationRotationMode =
+      map_profile_persistence::loadNavigationRotation(prefs);
   mapRenderSettings.tapToSwitchScreens = prefs.getUChar("tapSwitch", 0);
   uint8_t storedScreenMask =
       prefs.getUChar("screenMask", DEVICE_SCREEN_SUPPORTED_MASK);

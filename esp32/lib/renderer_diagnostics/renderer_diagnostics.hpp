@@ -45,6 +45,7 @@ bool noteRenderForWindow(uint32_t windowId,
                          renderer_tuning::Profile profile,
                          const RenderSample &sample);
 bool noteJobForWindow(uint32_t windowId, JobEvent event);
+void noteCameraForWindow(uint32_t windowId, const CameraSample &sample);
 void noteInterruptedForWindow(uint32_t windowId);
 void noteCoverageRejectedForWindow(uint32_t windowId);
 void noteGpsPacket(uint32_t packetSequence, uint32_t packetGapMs);
@@ -84,6 +85,7 @@ inline bool noteRenderForWindow(uint32_t, renderer_tuning::Profile,
   return false;
 }
 inline bool noteJobForWindow(uint32_t, JobEvent) { return false; }
+inline void noteCameraForWindow(uint32_t, const CameraSample &) {}
 inline void noteInterruptedForWindow(uint32_t) {}
 inline void noteCoverageRejectedForWindow(uint32_t) {}
 inline void noteGpsPacket(uint32_t, uint32_t) {}

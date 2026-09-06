@@ -74,6 +74,15 @@ constexpr uint32_t RIDE_DELIVERY_ACK_FEATURE =
     ride_ble_protocol_generated::RIDE_DELIVERY_ACK_FEATURE;
 constexpr uint32_t RENDERER_BENCHMARK_SAMPLE_FEATURE =
     ride_ble_protocol_generated::RENDERER_BENCHMARK_SAMPLE_FEATURE;
+constexpr uint32_t MAP_NAVIGATION_ORIENTATION_FEATURE =
+    ride_ble_protocol_generated::MAP_NAVIGATION_ORIENTATION_FEATURE;
+constexpr uint8_t MAP_NAVIGATION_ORIENTATION_CLIENT_VERSION =
+    ride_ble_protocol_generated::MAP_NAVIGATION_ORIENTATION_MINIMUM_CLIENT_VERSION;
+inline bool supportsMapNavigationOrientation(uint8_t clientVersion,
+                                              bool implementationEnabled) {
+  return implementationEnabled &&
+         clientVersion >= MAP_NAVIGATION_ORIENTATION_CLIENT_VERSION;
+}
 constexpr uint8_t POWER_BUTTON_CONFIG_TLV = 1;
 constexpr size_t POWER_BUTTON_CONFIG_BYTES = 3;
 constexpr size_t CAP2_BASE_BYTES = 9;

@@ -1116,7 +1116,10 @@ without the newer features. Client version `16` requests bits `18` and `19`,
 including the authenticated renderer-diagnostics contract and the already
 released automatic-display setting. Version `18` requests bit `20`, version
 `19` requests bit `21`, version `20` requests bit `22`, and version `21`
-requests bit `23`.
+requests bit `23`. Version `22` requests bit `24`, independent Map + Navigation
+orientation (setting ID `37`). Firmware advertises bit `24` only with
+`MAP_STABLE_CAMERA=1`; production profiles keep it clear pending per-target
+physical qualification. This capability is independent of label orientation.
 Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
@@ -1336,6 +1339,24 @@ ID `36` is sent only after a valid `CAP2` response advertises bit `19`.
 Firmware without that bit is never offered the Automatic Display Off toggle;
 the setting remains app-local until a compatible connected display is
 negotiated.
+
+### Independent navigation orientation setting
+
+ID `37` selects Map + Navigation rotation: `0` North Up, `1` Course Up.
+Other values normalize to Course Up. Firmware rejects this ID unless the
+authenticated session negotiated client version 22 or newer and the stable
+camera implementation is enabled. iOS sends it only with CAP2 bit 24 and
+independent-profile support; missing support keeps the preference app-local.
+A newly advertised capability resynchronizes the retained preference.
+
+The firmware NVS key is `mapSettings/navRotMode`, default `1`; the app key is
+`mapPlusNavigationSettings.rotationMode`, default `1`. Neither migration nor
+writes modify Map's existing rotation setting. Idle guidance is North Up;
+active guidance uses the selected mode. Legacy/production firmware retains
+its existing forced Course Up behavior while navigating.
+
+Keep Upright / Follow Roads remains the separate label setting ID `34`.
+See [stable camera implementation and qualification](map-stable-camera.md).
 
 ## Destination Picker
 

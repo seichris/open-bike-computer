@@ -15022,6 +15022,21 @@ struct NavigationProtocolTests {
     }
 
     static func testSecureRendererBenchmarkProtocol() {
+        let cameraHeader = "1,1,7,3,100,120,20,-900,-910,3590,600,1,1,2,1,0,1,1"
+        let camera = RendererCameraEvidence.frameHeader(cameraHeader)
+        assertEqual(camera?.frameSequence, 7, "captured frame keeps camera identity")
+        assertEqual(camera?.displayedBearingTenths, -900, "camera uses signed bearing")
+        assertEqual(camera?.markerAngleTenths, 3590, "camera keeps residual marker angle")
+        assertEqual(RendererCameraEvidence.frameHeader("1,1"), nil, "truncated camera header fails closed")
+        assertEqual(RendererCameraEvidence.frameHeader(cameraHeader + ",0"), nil, "extra camera field fails closed")
+        assertEqual(RendererCameraEvidence.frameHeader(cameraHeader.replacingOccurrences(of: "3590", with: "3600")), nil, "camera angle range is validated")
+        if let camera {
+            do {
+                let roundTrip = try JSONDecoder().decode(RendererCameraEvidence.self,
+                    from: JSONEncoder().encode(camera))
+                assertEqual(roundTrip, camera, "camera evidence survives export")
+            } catch { fatalError("camera evidence round trip failed: \(error)") }
+        }
         // Additive timing fields must survive evidence export while older
         // schema-1 snapshots remain readable.
         let callback: [String: Any] = [
@@ -15820,7 +15835,9 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rideDeliveryAcknowledgementCapabilityMask, 1 << 22, "CAP2 bit 22 advertises reliable ride delivery")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 21, "capability version negotiates atomic renderer replay samples")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 22, "capability version negotiates independent navigation orientation")
+        assertEqual(DeviceBLEProtocol.mapPlusNavigationRotationSettingID, 37, "navigation orientation has an independent setting")
+        assertEqual(RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature, 1 << 24, "orientation capability has its own bit")
         assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
         assertEqual(DeviceBLEProtocol.rendererMetricsResponsePrefix, "RDMT", "renderer metrics responses use RDMT")
         assertEqual(DeviceBLEProtocol.rendererMetricsChunkPrefix, "RDMC", "renderer metrics chunks use RDMC")
@@ -17850,6 +17867,31 @@ struct NavigationProtocolTests {
         let independentDetail = independentPackets().first { $0[4] == 17 }
         assertEqual(readInt32LE(independentDetail!, offset: 5), 0,
                     "independent Map + Navigation detail remains distinct")
+
+        let rotationKey = "mapPlusNavigationSettings.rotationMode"
+        let savedRotation = UserDefaults.standard.object(forKey: rotationKey)
+        defer {
+            if let savedRotation { UserDefaults.standard.set(savedRotation, forKey: rotationKey) }
+            else { UserDefaults.standard.removeObject(forKey: rotationKey) }
+        }
+        UserDefaults.standard.removeObject(forKey: rotationKey)
+        assertEqual(BLEManager().mapPlusNavigationRotationMode, 1, "missing orientation defaults Course Up")
+        assert(!independentManager.sendSetting(id: 37, value: 0), "legacy firmware never receives orientation")
+        assertEqual(BLEManager().mapPlusNavigationRotationMode, 0, "unsupported device retains local preference")
+        assert(!independentPackets().contains { $0.count == 9 && $0[4] == 37 }, "no unsupported orientation packet")
+        let orientationCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 8, 0, 0, 1])
+        assert(independentManager.handleDeviceCapabilitiesNotification(orientationCapabilities), "late orientation capability is accepted")
+        assert(independentManager.supportsMapNavigationOrientation, "orientation capability is exposed")
+        let rotationPacket = independentPackets().last { $0.count == 9 && $0[4] == 37 }
+        assert(rotationPacket != nil, "late capability resynchronizes retained orientation")
+        assertEqual(readInt32LE(rotationPacket!, offset: 5), 0, "retained North Up is sent")
+        assert(independentManager.sendSetting(id: 37, value: -1), "supported orientation is sent")
+        let normalizedRotation = independentPackets().last { $0.count == 9 && $0[4] == 37 }
+        assertEqual(readInt32LE(normalizedRotation!, offset: 5), 1, "invalid orientation normalizes on wire")
+        assert(independentManager.handleDeviceCapabilitiesNotification(independentFlags), "capability downgrade is accepted")
+        assert(!independentManager.supportsMapNavigationOrientation, "downgrade clears support")
+        assert(!independentManager.sendSetting(id: 37, value: 0), "downgraded session does not send orientation")
 
         let (birdsEyeManager, birdsEyePackets) = configuredManager()
         birdsEyeManager.mapPlusNavigationBirdsEyeViewEnabled = false

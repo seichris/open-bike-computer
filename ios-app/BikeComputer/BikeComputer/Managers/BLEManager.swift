@@ -463,6 +463,7 @@ enum DeviceBLEProtocol {
     static let mapPlusNavigationLabelTextSizeSettingID: UInt8 = 33
     static let mapPlusNavigationLabelOrientationSettingID: UInt8 = 34
     static let mapPlusNavigation3DBuildingsSettingID: UInt8 = 35
+    static let mapPlusNavigationRotationSettingID: UInt8 = 37
     static let automaticDisplayOffSettingID: UInt8 = 36
     static let currentScreenMaskMarker: Int32 = 1 << 30
     static let defaultMapStreetLabelsEnabled = true
@@ -916,6 +917,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsRideAutomation: Bool = false
     @Published private(set) var supportsStreetLabels: Bool = false
     @Published private(set) var supports3DBuildings: Bool = false
+    @Published private(set) var supportsMapNavigationOrientation = false
     @Published private(set) var supportsExplicitInvalidGPSHeading: Bool = false
     @Published private(set) var supportsScopedWatchController: Bool = false
     @Published private(set) var watchControllerIDHex: String?
@@ -1048,6 +1050,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapPlusNavigationBirdsEyeViewEnabled = true
     @Published var mapPlusNavigationBirdsEyePerspective: MapNavigationBirdsEyePerspective = .standard
     @Published var mapPlusNavigation3DBuildingsEnabled = true
+    @Published var mapPlusNavigationRotationMode: Int = 1
     @Published var mapPlusNavigationLabelsEnabled =
         DeviceBLEProtocol.defaultMapPlusNavigationStreetLabelsEnabled
     @Published var mapPlusNavigationLabelDensity = DeviceBLEProtocol.defaultStreetLabelDensity
@@ -1366,6 +1369,7 @@ class BLEManager: NSObject, ObservableObject {
         static let mapPlusNavigationBirdsEyeViewEnabled = "mapPlusNavigationSettings.birdsEyeViewEnabled"
         static let mapPlusNavigationBirdsEyePerspective = "mapPlusNavigationSettings.birdsEyePerspective"
         static let mapPlusNavigation3DBuildingsEnabled = "mapPlusNavigationSettings.3dBuildingsEnabled"
+        static let mapPlusNavigationRotationMode = "mapPlusNavigationSettings.rotationMode"
         static let mapPlusNavigationLabelsEnabled = "mapPlusNavigationSettings.labelsEnabled"
         static let mapPlusNavigationLabelDensity = "mapPlusNavigationSettings.labelDensity"
         static let mapPlusNavigationLabelLanguageMode = "mapPlusNavigationSettings.labelLanguageMode"
@@ -1782,6 +1786,9 @@ class BLEManager: NSObject, ObservableObject {
         mapPlusNavigation3DBuildingsEnabled = defaults.object(
             forKey: SettingsKeys.mapPlusNavigation3DBuildingsEnabled
         ) as? Bool ?? true
+        mapPlusNavigationRotationMode = defaults.object(
+            forKey: SettingsKeys.mapPlusNavigationRotationMode
+        ) as? Int == 0 ? 0 : 1
         let shouldMigrateRecommendedDefaults = !defaults.bool(
             forKey: SettingsKeys.recommendedMapDefaultsMigrated
         )
@@ -1892,6 +1899,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(mapPlusNavigationBirdsEyeViewEnabled, forKey: SettingsKeys.mapPlusNavigationBirdsEyeViewEnabled)
         defaults.set(mapPlusNavigationBirdsEyePerspective.rawValue, forKey: SettingsKeys.mapPlusNavigationBirdsEyePerspective)
         defaults.set(mapPlusNavigation3DBuildingsEnabled, forKey: SettingsKeys.mapPlusNavigation3DBuildingsEnabled)
+        defaults.set(mapPlusNavigationRotationMode, forKey: SettingsKeys.mapPlusNavigationRotationMode)
         defaults.set(mapPlusNavigationLabelsEnabled, forKey: SettingsKeys.mapPlusNavigationLabelsEnabled)
         defaults.set(mapPlusNavigationLabelDensity, forKey: SettingsKeys.mapPlusNavigationLabelDensity)
         defaults.set(mapPlusNavigationLabelLanguageMode, forKey: SettingsKeys.mapPlusNavigationLabelLanguageMode)
@@ -4700,6 +4708,8 @@ class BLEManager: NSObject, ObservableObject {
             )
         } else if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
             automaticDisplayOffEnabled = value != 0
+        } else if id == DeviceBLEProtocol.mapPlusNavigationRotationSettingID {
+            mapPlusNavigationRotationMode = value == 0 ? 0 : 1
         }
         if hasReceivedDeviceCapabilities,
            !supportsIndependentMapProfiles,
@@ -4709,6 +4719,10 @@ class BLEManager: NSObject, ObservableObject {
             synchronizeMapPlusNavigationProfileWithMap(for: id)
         }
         saveSettings()
+        if id == DeviceBLEProtocol.mapPlusNavigationRotationSettingID,
+           (!hasReceivedDeviceCapabilities || !supportsMapNavigationOrientation) {
+            return false
+        }
         if id == DeviceBLEProtocol.automaticDisplayOffSettingID,
            (!hasReceivedDeviceCapabilities || !supportsAutomaticDisplayOff) {
             log("Automatic display-off setting not sent: connected firmware does not advertise support")
@@ -4742,6 +4756,8 @@ class BLEManager: NSObject, ObservableObject {
         let deviceValue: Int32
         if id == DeviceBLEProtocol.brightnessSettingID {
             deviceValue = Int32(deviceBrightnessPercent)
+        } else if id == DeviceBLEProtocol.mapPlusNavigationRotationSettingID {
+            deviceValue = Int32(mapPlusNavigationRotationMode)
         } else if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
             deviceValue = value == 0 ? 0 : 1
         } else if id == DeviceBLEProtocol.mapPlusNavigationBirdsEyePerspectiveSettingID {
@@ -4882,7 +4898,8 @@ class BLEManager: NSObject, ObservableObject {
         (id >= DeviceBLEProtocol.mapPlusNavigationMinPolygonSizeSettingID &&
             id <= DeviceBLEProtocol.mapPlusNavigationPositionMarkerScaleSettingID) ||
             (id >= DeviceBLEProtocol.mapPlusNavigationLabelDensitySettingID &&
-                id <= DeviceBLEProtocol.mapPlusNavigationLabelOrientationSettingID)
+                id <= DeviceBLEProtocol.mapPlusNavigationLabelOrientationSettingID) ||
+            id == DeviceBLEProtocol.mapPlusNavigationRotationSettingID
     }
 
     private static func isStreetLabelSetting(_ id: UInt8) -> Bool {
@@ -4977,6 +4994,10 @@ class BLEManager: NSObject, ObservableObject {
                     value: mapPlusNavigation3DBuildingsEnabled ? 1 : 0
                 )
             }
+            if supportsMapNavigationOrientation {
+                sendSetting(id: DeviceBLEProtocol.mapPlusNavigationRotationSettingID,
+                            value: Int32(mapPlusNavigationRotationMode))
+            }
         }
 
         if shouldSendMap {
@@ -5012,6 +5033,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsDestinationPicker = false
         supportsStreetLabels = false
         supports3DBuildings = false
+        supportsMapNavigationOrientation = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -6184,6 +6206,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsDestinationPicker = false
         supportsStreetLabels = false
         supports3DBuildings = false
+        supportsMapNavigationOrientation = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -9364,6 +9387,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsDestinationPicker = false
         supportsStreetLabels = false
         supports3DBuildings = false
+        supportsMapNavigationOrientation = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -9577,6 +9601,10 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         if hasReceivedDeviceCapabilities && !supports3DBuildings && has3DBuildings {
             hasSentMapNavigationProfileForConnection = false
         }
+        if hasReceivedDeviceCapabilities && !supportsMapNavigationOrientation &&
+            flags & RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature != 0 {
+            hasSentMapNavigationProfileForConnection = false
+        }
         if hasReceivedDeviceCapabilities &&
             supportsBatteryStatusScreen != hasBatteryStatusScreen {
             hasSentScreenSettingsForConnection = false
@@ -9599,6 +9627,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsDestinationPicker = hasDestinationPicker
         supportsStreetLabels = hasStreetLabels
         supports3DBuildings = has3DBuildings
+        supportsMapNavigationOrientation = flags &
+            RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature != 0
         supportsRideAutomation = hasRideAutomation
         supportsExplicitInvalidGPSHeading = hasExplicitInvalidGPSHeading
         supportsScopedWatchController = hasScopedWatchController

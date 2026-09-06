@@ -34,6 +34,7 @@ constexpr bool invalidatesMap(uint8_t settingId) {
   case map_profile_protocol::MAP_NAVIGATION_LABEL_TEXT_SIZE_SETTING_ID:
   case map_profile_protocol::MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID:
   case map_profile_protocol::MAP_NAVIGATION_3D_BUILDINGS_SETTING_ID:
+  case map_profile_protocol::MAP_NAVIGATION_ROTATION_SETTING_ID:
     return true;
   default:
     return false;

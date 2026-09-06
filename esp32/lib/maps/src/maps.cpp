@@ -284,7 +284,8 @@ bool Maps::LabelLayoutCacheKey::operator==(
          textSize == other.textSize && orientation == other.orientation &&
          markerX == other.markerX && markerY == other.markerY &&
          markerScale == other.markerScale &&
-         markerVisible == other.markerVisible && guidance == other.guidance;
+         markerVisible == other.markerVisible && guidance == other.guidance &&
+         cameraSignature == other.cameraSignature;
 }
 
 enum class VisibilityClass : uint8_t {
@@ -1899,6 +1900,7 @@ void Maps::drawLine(lv_obj_t *canvas, int16_t x1, int16_t y1, int16_t x2,
  * @param bbox
  */
 bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
+  preparedScene.invalidate(); // The sole worker may now evict decoded blocks.
   ESP_LOGI(TAG, "getMapBlocks %i", millis());
   if (shouldCancelMapRenderWork()) {
     return false;
@@ -2058,7 +2060,8 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
 
 bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
                             map_surface::LabelSurface surface, uint8_t zoom,
-                            double rotation, const RenderContext &context) {
+                            double rotation, const RenderContext &context,
+                            const map_projection::Projection *projection) {
   const ScreenMapRenderSettings &style = context.style;
   if (style.labelDensity == 0 || !labelFontAsset.healthy())
     return true;
@@ -2078,7 +2081,15 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
   float markerY = screenAnchorY;
   bool markerVisible = false;
   if (context.showCurrentPosition) {
-    if (!context.followPosition) {
+    if (projection != nullptr) {
+      const auto marker = projection->projectWorld(context.presentedWorld);
+      markerX = static_cast<float>(marker.x - context.labelGutter);
+      markerY = static_cast<float>(marker.y - context.labelGutter);
+      if (!marker.valid) {
+        markerX = -10000;
+        markerY = -10000;
+      }
+    } else if (!context.followPosition) {
       const auto markerDelta = map_transform::worldToScreen(
           {context.measuredGpsWorld.x - viewPort.center.x,
            context.measuredGpsWorld.y - viewPort.center.y},
@@ -2148,7 +2159,8 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
       markerVisible ? static_cast<int16_t>(std::lround(markerY)) : 0,
       style.positionMarkerScale,
       markerVisible,
-      guidance};
+      guidance,
+      projection != nullptr ? map_camera::projectionSignature(*projection) : 0};
 
   struct RenderItem {
     uint32_t key = 0;
@@ -2269,13 +2281,31 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
               transformed(Point16(candidate.endX, candidate.endY), blockCenter);
           const float dx = static_cast<float>(end.x - start.x);
           const float dy = static_cast<float>(end.y - start.y);
-          if (std::hypot(dx, dy) < measuredWidth + 12.0F)
-            continue;
+          float centerX = (start.x + end.x) * 0.5F;
+          float centerY = (start.y + end.y) * 0.5F;
+          float length = std::hypot(dx, dy);
           float angle = style.labelOrientation == 0 ? std::atan2(dy, dx) : 0;
           if (angle > LABEL_PI * 0.5F)
             angle -= LABEL_PI;
           else if (angle < -LABEL_PI * 0.5F)
             angle += LABEL_PI;
+          if (projection != nullptr) {
+            const auto segment = map_camera::projectLabel(
+                *projection,
+                {double(block->offset.x) + candidate.startX,
+                 double(block->offset.y) + candidate.startY},
+                {double(block->offset.x) + candidate.endX,
+                 double(block->offset.y) + candidate.endY},
+                style.labelOrientation == 0);
+            if (!segment.valid)
+              continue;
+            centerX = static_cast<float>(segment.x - context.labelGutter);
+            centerY = static_cast<float>(segment.y - context.labelGutter);
+            angle = static_cast<float>(segment.angle);
+            length = static_cast<float>(segment.length);
+          }
+          if (length < measuredWidth + 12.0F)
+            continue;
           options.push_back(
               {item.key,
                label.repeatGroup,
@@ -2283,8 +2313,8 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
                static_cast<uint16_t>(labelIndex),
                label.rank,
                candidate.quality,
-               (start.x + end.x) * 0.5F,
-               (start.y + end.y) * 0.5F,
+               centerX,
+               centerY,
                angle,
                measuredWidth + 6.0F,
                measuredHeight});
@@ -3529,8 +3559,21 @@ bool Maps::readVectorMap(
   if (drawLabels) {
     map_surface::LabelSurface labelSurface;
     labelSurface.color = surface;
+    const map_projection::Projection *labelProjection = nullptr;
+    if (map_profile_protocol::STABLE_CAMERA_ENABLED &&
+        context.labelViewportWidth > 0 && context.labelViewportHeight > 0) {
+      // Layout and raster in the visible crop, not the overscan gutter.
+      const size_t gutter = context.labelGutter;
+      if (gutter * 2 + context.labelViewportWidth > size_t(surface.width) ||
+          gutter * 2 + context.labelViewportHeight > size_t(surface.height))
+        return false;
+      labelSurface.color.pixels += gutter * surface.stridePixels + gutter;
+      labelSurface.color.width = context.labelViewportWidth;
+      labelSurface.color.height = context.labelViewportHeight;
+      labelProjection = &projection;
+    }
     if (!drawStreetLabels(viewPort, memCache, labelSurface, zoom, rotation,
-                          context)) {
+                          context, labelProjection)) {
       return false;
     }
   }
@@ -3987,6 +4030,7 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
     return false;
 
   request = {};
+  request.requestedAtMs = nowMs;
   request.zoom = requestedZoom;
   request.viewportWidth = mapScrWidth;
   request.viewportHeight = viewportHeight;
@@ -4053,6 +4097,10 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
       lv_draw_buf_width_to_stride(request.renderWidth,
                                   LV_COLOR_FORMAT_RGB565) /
       sizeof(uint16_t);
+  request.context.labelViewportWidth = request.viewportWidth;
+  request.context.labelViewportHeight = request.viewportHeight;
+  request.context.labelGutter = request.overscanPixels;
+  request.context.effectiveRotationMode = rotationMode == ROT_COURSE_UP ? 1 : 0;
 
   request.rotationRad = 0.0;
   if (rotationMode == ROT_COURSE_UP) {
@@ -4081,7 +4129,8 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
   // while capping the lead to the proven overscan budget. Presentation still
   // anchors the live rider at the normal screen point; only the source-frame
   // coverage is asymmetric in the direction of travel.
-  if (followPosition && hasPresentedPose && presentedPose.headingValid) {
+  if (!map_profile_protocol::STABLE_CAMERA_ENABLED && followPosition &&
+      hasPresentedPose && presentedPose.headingValid) {
     const double leadPixels = map_presentation::refreshLeadPixels(
         speedMetersPerSecond, pixelsPerMeter, expectedLatencyMs, 0.0, 0.0,
         request.overscanPixels - MAP_RENDER_SAFETY_PIXELS);
@@ -4319,6 +4368,50 @@ void Maps::renderWorkerTaskThunk(void *argument) {
   vTaskDeleteWithCaps(nullptr);
 }
 
+bool Maps::prepareMapScene(const RenderRequest &request, RenderResult &result) {
+  const auto &bounds = result.viewport.bbox;
+  if (map_profile_protocol::STABLE_CAMERA_ENABLED &&
+      preparedScene.covers(request.version.mapEpoch, bounds.min.x, bounds.min.y,
+                           bounds.max.x, bounds.max.y)) {
+    result.sceneReused = true;
+    result.sceneGeneration = preparedScene.generation;
+    return true;
+  }
+  if (!getMapBlocks(result.viewport.bbox, memCache))
+    return false;
+  if (!map_profile_protocol::STABLE_CAMERA_ENABLED)
+    return true;
+
+  // A scene never owns another copy of the decoded geometry. The single
+  // worker cannot mutate this block set until the view pass has finished.
+  const int32_t minX = bounds.min.x & ~MAPBLOCK_MASK;
+  const int32_t minY = bounds.min.y & ~MAPBLOCK_MASK;
+  const int32_t maxX = bounds.max.x & ~MAPBLOCK_MASK;
+  const int32_t maxY = bounds.max.y & ~MAPBLOCK_MASK;
+  bool complete = true;
+  for (int64_t y = minY; y <= maxY; y += (1 << MAPBLOCK_SIZE_BITS)) {
+    for (int64_t x = minX; x <= maxX; x += (1 << MAPBLOCK_SIZE_BITS)) {
+      const auto block = std::find_if(memCache.blocks.begin(), memCache.blocks.end(),
+          [x, y](const MapBlock *b) { return b->offset.x == x && b->offset.y == y; });
+      complete = complete && block != memCache.blocks.end();
+    }
+  }
+  // Missing blocks are retried by the loader, never cached as a complete scene.
+  if (complete) {
+    preparedScene.prepared(request.version.mapEpoch, minX, minY,
+                           maxX + MAPBLOCK_MASK, maxY + MAPBLOCK_MASK);
+  }
+  std::sort(memCache.blocks.begin(), memCache.blocks.end(),
+      [](const MapBlock *a, const MapBlock *b) {
+        return a->offset.y != b->offset.y ? a->offset.y < b->offset.y
+                                         : a->offset.x < b->offset.x;
+      });
+  // Zero explicitly identifies an incomplete, non-reusable preparation rather
+  // than attributing these pixels to a previous complete scene's generation.
+  result.sceneGeneration = preparedScene.valid ? preparedScene.generation : 0;
+  return true;
+}
+
 void Maps::renderWorkerLoop() {
   gMapRenderWorkerTaskHandle = xTaskGetCurrentTaskHandle();
   runtime_watchdog_diagnostics::registerCurrentTask(
@@ -4347,6 +4440,10 @@ void Maps::renderWorkerLoop() {
       const uint32_t startMs = millis();
       RenderResult result;
       result.version = request.version;
+      result.requestedAtMs = request.requestedAtMs;
+      result.effectiveRotationMode = request.context.effectiveRotationMode;
+      result.labelDensity = request.context.style.labelDensity;
+      result.labelOrientation = request.context.style.labelOrientation;
       result.center = request.center;
       result.styleSignature = request.styleSignature;
       result.navigationSignature = request.navigationSignature;
@@ -4385,8 +4482,7 @@ void Maps::renderWorkerLoop() {
             runtime_watchdog_diagnostics::Phase::MapBlockPlanning,
             request.version.sequence);
         const uint32_t blocksStartMs = millis();
-        const bool blocksLoaded =
-            getMapBlocks(result.viewport.bbox, memCache);
+        const bool blocksLoaded = prepareMapScene(request, result);
         result.blocksMs = millis() - blocksStartMs;
         result.mapFound = isMapFound.load(std::memory_order_acquire);
         if (blocksLoaded && !shouldCancelMapRenderWork()) {
@@ -4604,8 +4700,13 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
         readyRenderResult.rotationRad * 180.0 / 3.14159265358979323846,
         desiredRotation * 180.0 / 3.14159265358979323846) *
         3.14159265358979323846 / 180.0;
-    const bool covered = projected.valid &&
-        map_presentation::frameCoversViewport(
+    const bool covered = map_profile_protocol::STABLE_CAMERA_ENABLED
+        ? map_camera::cropCovered(
+            readyRenderResult.renderWidth, readyRenderResult.renderHeight,
+            readyRenderResult.viewportWidth, readyRenderResult.viewportHeight,
+            readyRenderResult.overscanPixels, MAP_RENDER_SAFETY_PIXELS,
+            MAP_RENDER_ROUND_VIEWPORT)
+        : projected.valid && map_presentation::frameCoversViewport(
             readyRenderResult.renderWidth, readyRenderResult.renderHeight,
             readyRenderResult.viewportWidth, readyRenderResult.viewportHeight,
             {projected.x, projected.y},
@@ -4699,12 +4800,14 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
   lv_image_set_scale(canvasMap, LV_SCALE_NONE);
   lv_obj_clear_flag(canvasMap, LV_OBJ_FLAG_HIDDEN);
   visibleRenderResult = result;
+  cameraLag.reflected(result.requestedAtMs);
   lastCompletedRenderDurationMs = std::max<uint32_t>(250U, result.durationMs);
   visibleProjection = result.projection;
   hasVisibleProjection = true;
   viewPort = result.viewport;
   publishedMapFound = result.mapFound;
   publishedMapFrame = true;
+  stableCameraHidden = false;
   framePublicationPending = true;
   if (!mapAvailabilityKnown || mapAvailabilityAvailable != result.mapFound) {
     mapAvailabilityKnown = true;
@@ -4754,6 +4857,21 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
 void Maps::updatePresentedFrameTransform() {
   if (!publishedMapFrame || canvasMap == nullptr || !hasVisibleProjection)
     return;
+  if (map_profile_protocol::STABLE_CAMERA_ENABLED) {
+    // The frame is an accepted camera, not a texture to rotate into another
+    // perspective. Centering crops its symmetric overscan exactly once.
+    if (lv_img_get_angle(canvasMap) != 0 ||
+        lv_obj_get_x_aligned(canvasMap) != 0 ||
+        lv_obj_get_y_aligned(canvasMap) != 0) {
+      lv_img_set_angle(canvasMap, 0);
+      lv_obj_center(canvasMap);
+    }
+    if (stableCameraHidden)
+      lv_obj_add_flag(canvasMap, LV_OBJ_FLAG_HIDDEN);
+    else
+      lv_obj_clear_flag(canvasMap, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
   const map_transform::WorldPoint current =
       visibleRenderResult.followPosition && hasPresentedPose
           ? map_transform::WorldPoint{presentedPose.position.x,
@@ -4902,7 +5020,8 @@ void Maps::renderLiveForeground() {
     return;
   }
   const RouteSnapshot route = routeOverlay.snapshot();
-  if (!publishedMapFrame || !hasVisibleProjection || !route.hasRoute() ||
+  if ((map_profile_protocol::STABLE_CAMERA_ENABLED && stableCameraHidden) ||
+      !publishedMapFrame || !hasVisibleProjection || !route.hasRoute() ||
       !isRouteOverlayVisible(mapRenderSettings) || !hasPresentedPose) {
     hideForeground();
     return;
@@ -4918,7 +5037,8 @@ void Maps::renderLiveForeground() {
   const map_transform::WorldPoint presented{presentedPose.position.x,
                                              presentedPose.position.y};
   const map_transform::WorldPoint presentationPivotWorld =
-      visibleRenderResult.followPosition ? presented : visibleRenderResult.center;
+      visibleRenderResult.followPosition && !map_profile_protocol::STABLE_CAMERA_ENABLED
+          ? presented : visibleRenderResult.center;
   const auto projectedPivot =
       visibleProjection.projectWorld(presentationPivotWorld);
   if (!projectedPivot.valid) {
@@ -4927,10 +5047,12 @@ void Maps::renderLiveForeground() {
   }
 
   double desiredRotation = visibleRenderResult.rotationRad;
-  if (rotationMode == ROT_COURSE_UP && presentedPose.headingValid) {
+  if (!map_profile_protocol::STABLE_CAMERA_ENABLED &&
+      rotationMode == ROT_COURSE_UP && presentedPose.headingValid) {
     desiredRotation =
         -presentedPose.headingDegrees * 3.14159265358979323846 / 180.0;
-  } else if (rotationMode == ROT_NORTH_UP) {
+  } else if (!map_profile_protocol::STABLE_CAMERA_ENABLED &&
+             rotationMode == ROT_NORTH_UP) {
     desiredRotation = 0.0;
   }
   const double rotationDelta = map_presentation::signedHeadingDelta(
@@ -5010,6 +5132,85 @@ bool Maps::presentationGestureOwnsTransforms() const {
          pinchPresentation.active || pinchPresentation.settlementPending;
 }
 
+void Maps::serviceStableCamera(uint32_t nowMs) {
+  if (!map_profile_protocol::STABLE_CAMERA_ENABLED ||
+      !publishedMapFrame || !hasVisibleProjection)
+    return;
+  const bool current = renderResultStillCurrent(visibleRenderResult);
+  const auto target = visibleRenderResult.followPosition && hasPresentedPose
+      ? map_transform::WorldPoint{presentedPose.position.x, presentedPose.position.y}
+      : visibleRenderResult.center;
+  double bearing = visibleRenderResult.rotationRad;
+  if (rotationMode == ROT_NORTH_UP)
+    bearing = 0;
+  else if (hasPresentedPose && presentedPose.headingValid)
+    bearing = -presentedPose.headingDegrees * map_presentation::kPi / 180.0;
+  const bool required = !current ||
+      map_camera::needsRefresh(visibleProjection, target, bearing);
+  cameraLag.observe(required, nowMs);
+  const auto rider = visibleProjection.projectWorld(target);
+  const double x = rider.x - visibleRenderResult.overscanPixels;
+  const double y = rider.y - visibleRenderResult.overscanPixels;
+  stableCameraHidden = !current || cameraLag.expired(nowMs) ||
+      !rider.valid || x < 0 || y < 0 ||
+      x >= visibleRenderResult.viewportWidth || y >= visibleRenderResult.viewportHeight;
+  if (cameraStatusLabel != nullptr) {
+    if (stableCameraHidden)
+      lv_obj_clear_flag(cameraStatusLabel, LV_OBJ_FLAG_HIDDEN);
+    else
+      lv_obj_add_flag(cameraStatusLabel, LV_OBJ_FLAG_HIDDEN);
+  }
+  renderer_diagnostics::CameraSample sample;
+  sample.enabled = true;
+  sample.hidden = stableCameraHidden;
+  sample.updateRequired = required;
+  sample.frameSequence = visibleRenderResult.version.sequence;
+  sample.sceneGeneration = visibleRenderResult.sceneGeneration;
+  sample.sceneReused = visibleRenderResult.sceneReused;
+  sample.requestedAtMs = visibleRenderResult.requestedAtMs;
+  sample.observedAtMs = nowMs;
+  sample.lagMs = cameraLag.age(nowMs);
+  sample.displayedBearingTenths = static_cast<int16_t>(std::lround(
+      visibleRenderResult.rotationRad * 1800 / map_presentation::kPi));
+  sample.targetBearingTenths = static_cast<int16_t>(std::lround(
+      bearing * 1800 / map_presentation::kPi));
+  sample.markerAngleTenths = hasPresentedPose && presentedPose.headingValid
+      ? static_cast<uint16_t>(std::lround(map_camera::markerAngle(
+            visibleProjection, {presentedPose.position.x, presentedPose.position.y},
+            presentedPose.headingDegrees) * 10)) % 3600
+      : 0;
+  sample.effectiveTopScalePermille = visibleProjection.isBirdsEye()
+      ? static_cast<uint16_t>(std::lround(visibleProjection.config().topEdgeScale * 1000))
+      : 1000;
+  sample.requestedMode = isMapGuidanceScreenActive()
+      ? mapRenderSettings.mapNavigationRotationMode : mapRenderSettings.mapRotationMode;
+  sample.effectiveMode = visibleRenderResult.effectiveRotationMode;
+  sample.labelDensity = visibleRenderResult.labelDensity;
+  sample.labelOrientation = visibleRenderResult.labelOrientation;
+  renderer_diagnostics::noteCameraForWindow(
+      visibleRenderResult.version.diagnosticsWindowId, sample);
+  cameraEvidence = sample;
+  if (required && uint32_t(nowMs - lastCameraRequestMs) >= map_camera::kRefreshIntervalMs) {
+    RenderRequest request;
+    if (buildRenderRequest(zoom, nowMs, request) && submitRenderRequest(request))
+      lastCameraRequestMs = nowMs;
+  }
+}
+
+renderer_diagnostics::CameraSample Maps::captureCameraMetadata() const {
+  // Called only by the UI task at the completed full-panel flush boundary.
+  // A gesture or another screen does not inherit stale map evidence.
+  if (!map_profile_protocol::STABLE_CAMERA_ENABLED ||
+      !isMainScreen || (!isMapScreenActive() && !isMapGuidanceScreenActive()) ||
+      presentationGestureOwnsTransforms() || !publishedMapFrame ||
+      cameraEvidence.frameSequence != visibleRenderResult.version.sequence)
+    return {};
+  auto sample = cameraEvidence;
+  sample.hidden = stableCameraHidden || canvasMap == nullptr ||
+      lv_obj_has_flag(canvasMap, LV_OBJ_FLAG_HIDDEN);
+  return sample;
+}
+
 bool Maps::serviceRenderPipeline(uint32_t nowMs) {
   (void)recoverRenderWorkerIfNeeded();
   if (canvasMap == nullptr)
@@ -5028,6 +5229,7 @@ bool Maps::serviceRenderPipeline(uint32_t nowMs) {
   const bool published = gestureActive ? false : publishReadyFrame(nowMs);
   if (gestureActive || (settlementPending && !published))
     return false;
+  serviceStableCamera(nowMs);
   updatePresentedFrameTransform();
   renderLiveForeground();
   return published;
@@ -5413,6 +5615,7 @@ bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
   for (MapBlock *block : memCache.blocks)
     delete block;
   memCache.blocks.clear();
+  preparedScene.invalidate();
   cachedBlockCount.store(0, std::memory_order_release);
   labelFontAsset = std::move(candidateFont);
   streetLabelFontHealthy.store(labelFontAsset.healthy(),
@@ -5722,12 +5925,19 @@ void Maps::deleteMapScrSprites() {
 
   hasVisibleProjection = false;
   publishedMapFrame = false;
+  cameraLag = {};
+  cameraEvidence = {};
+  stableCameraHidden = false;
+  lastCameraRequestMs = 0;
   publishedMapFound = false;
   framePublicationPending = false;
   lastFramePresentationSignature = 0;
   lastForegroundPresentationSignature = 0;
   if (Maps::canvasArrow)
     lv_obj_delete(Maps::canvasArrow);
+  if (cameraStatusLabel)
+    lv_obj_delete(cameraStatusLabel);
+  cameraStatusLabel = nullptr;
   if (Maps::canvasMap)
     lv_obj_delete(Maps::canvasMap);
   if (Maps::canvasMapTemp)
@@ -5837,6 +6047,13 @@ void Maps::createMapScrSprites() {
   lv_obj_add_event_cb(Maps::canvasArrow, drawCurrentPositionMarker,
                       LV_EVENT_DRAW_MAIN, nullptr);
   updateCurrentPositionMarker(Maps::canvasArrow, 0.0, true);
+
+  if (map_profile_protocol::STABLE_CAMERA_ENABLED) {
+    cameraStatusLabel = lv_label_create(mapTile);
+    lv_label_set_text_static(cameraStatusLabel, "Updating map...");
+    lv_obj_center(cameraStatusLabel);
+    lv_obj_add_flag(cameraStatusLabel, LV_OBJ_FLAG_HIDDEN);
+  }
 
   if (!startRenderWorker()) {
     ESP_LOGE(TAG, "Map render worker unavailable");
@@ -6306,6 +6523,7 @@ bool Maps::buildRollingRasterWindow(uint8_t requestedZoom,
     for (MapBlock *block : Maps::memCache.blocks)
       delete block;
     Maps::memCache.blocks.clear();
+    preparedScene.invalidate();
     cachedBlockCount.store(0, std::memory_order_release);
   }
   if (!ensureMapScreenBuffer(gridSize)) {
@@ -7338,6 +7556,35 @@ void Maps::updatePositionOverlay() {
       // hiding it is the only honest presentation; zero degrees would recreate
       // the false-north bug that the explicit heading contract removes.
       lv_obj_add_flag(Maps::canvasArrow, LV_OBJ_FLAG_HIDDEN);
+      return;
+    }
+
+    if (map_profile_protocol::STABLE_CAMERA_ENABLED && hasVisibleProjection) {
+      if (stableCameraHidden || !hasPresentedPose) {
+        lv_obj_add_flag(canvasArrow, LV_OBJ_FLAG_HIDDEN);
+        return;
+      }
+      const map_transform::WorldPoint rider{presentedPose.position.x,
+                                            presentedPose.position.y};
+      const auto projected = visibleProjection.projectWorld(rider);
+      const double x = projected.x - visibleRenderResult.overscanPixels;
+      const double y = projected.y - visibleRenderResult.overscanPixels;
+      if (!projected.valid || x < 0 || y < 0 ||
+          x >= visibleRenderResult.viewportWidth || y >= visibleRenderResult.viewportHeight) {
+        lv_obj_add_flag(canvasArrow, LV_OBJ_FLAG_HIDDEN);
+        return;
+      }
+      updateCurrentPositionMarker(canvasArrow, presentedPose.headingValid
+          ? map_camera::markerAngle(visibleProjection, rider, presentedPose.headingDegrees)
+          : 0.0);
+      const int half = currentMarkerSize() / 2;
+      const int originX = gui_layout::centeredViewportOrigin(
+          lv_obj_get_width(mapTile), visibleRenderResult.viewportWidth);
+      const int originY = gui_layout::centeredViewportOrigin(
+          lv_obj_get_height(mapTile), visibleRenderResult.viewportHeight);
+      lv_obj_set_pos(canvasArrow, originX + map_transform::quantizePixel(x) - half,
+                     originY + map_transform::quantizePixel(y) - half);
+      lv_obj_clear_flag(canvasArrow, LV_OBJ_FLAG_HIDDEN);
       return;
     }
 
