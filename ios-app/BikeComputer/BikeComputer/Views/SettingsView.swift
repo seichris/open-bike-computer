@@ -1092,8 +1092,14 @@ private struct SavedMapsSettingsSection: View {
         )
         Section(header: Text(scope == .developerMaps ? "Development Maps" : "Saved Maps")) {
             if savedMaps.isEmpty {
-                Text(scope == .developerMaps ? "No development-only maps" : "No offline maps yet")
-                    .foregroundColor(.secondary)
+                Group {
+                    if scope == .developerMaps {
+                        Text("No development-only maps")
+                    } else {
+                        Text("No offline maps yet")
+                    }
+                }
+                .foregroundColor(.secondary)
             } else {
                 ForEach(savedMaps) { item in
                     SavedMapRow(
