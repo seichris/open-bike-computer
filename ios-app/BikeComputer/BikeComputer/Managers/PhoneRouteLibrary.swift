@@ -294,6 +294,22 @@ final class PhoneRouteLibrary: ObservableObject {
         connectivity.sendRouteImmediately(record)
     }
 
+    @discardableResult
+    func cancelSendToWatch(_ summary: PlannedRouteSummaryV1) -> Bool {
+        let identity = identity(for: summary)
+        let key = Self.receiptKey(identity)
+        guard pendingInstallKeys.contains(key) else { return true }
+        guard connectivity.cancelRouteTransfers(identity) > 0 else {
+            return false
+        }
+        pendingInstallKeys.remove(key)
+        persistPendingInstalls()
+        watchSyncState[identity] = readyReceiptKeys.contains(key)
+            ? .ready
+            : .localOnly
+        return true
+    }
+
     func displayName(for summary: PlannedRouteSummaryV1) -> String {
         displayNames.displayName(
             routeID: summary.id,

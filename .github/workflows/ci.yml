@@ -522,12 +522,14 @@ jobs:
             test_map_render_job \
             test_map_probe_diagnostics \
             test_map_presentation \
+            test_map_camera \
             test_map_pose_input_policy \
             test_gps_input_freshness \
             test_map_building_admission \
             test_map_route_geometry \
             test_map_building_workspace \
             test_renderer_diagnostics \
+            test_renderer_delivery_timing \
             test_renderer_diagnostics_ble_protocol \
             test_renderer_diagnostics_request; do
             g++ -std=c++17 -Wall -Wextra -Werror \
@@ -537,6 +539,9 @@ jobs:
           done
       - name: Map profile protocol host tests
         run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -DMAP_STABLE_CAMERA=1 \
+            tools/tests/test_map_camera.cpp -o /tmp/test_map_camera_enabled
+          /tmp/test_map_camera_enabled
           g++ -std=c++17 \
             tools/tests/test_map_profile_protocol.cpp \
             -o /tmp/test_map_profile_protocol

@@ -28,6 +28,19 @@ constexpr uint32_t kFrameResponseMinimumIntervalMs = 80;
 constexpr uint32_t kMetricsResponseMinimumIntervalMs = 250;
 constexpr uint32_t kRendererWindowMinimumIntervalMs = 1000;
 
+class RendererFrameTransferScope {
+public:
+  RendererFrameTransferScope() {
+    renderer_diagnostics::setFrameTransferActive(true);
+  }
+  ~RendererFrameTransferScope() {
+    renderer_diagnostics::setFrameTransferActive(false);
+  }
+  RendererFrameTransferScope(const RendererFrameTransferScope &) = delete;
+  RendererFrameTransferScope &
+  operator=(const RendererFrameTransferScope &) = delete;
+};
+
 const char *displayStateName(display_power::State state) {
   switch (state) {
   case display_power::State::Active:
@@ -537,6 +550,7 @@ bool DeviceDebugHttp::handleFrame(
       lastFrameResponseMs_ = nowMs;
     return sent;
   }
+  RendererFrameTransferScope frameTransferScope;
   const uint32_t responseStartedMs = millis();
   const uint32_t crcStartedUs = micros();
   const uint32_t checksum = crc32(snapshot.pixels, snapshot.payloadBytes);
@@ -555,9 +569,28 @@ bool DeviceDebugHttp::handleFrame(
   char sequenceHeader[11] = {};
   std::snprintf(sequenceHeader, sizeof(sequenceHeader), "%lu",
                 static_cast<unsigned long>(snapshot.sequence));
+  // Captured with the pixel copy under the frame mutex, not sampled later by
+  // the HTTP task. Additive metadata leaves the binary frame format unchanged.
+  char cameraHeader[256] = {};
+  const auto &camera = snapshot.camera;
+  std::snprintf(cameraHeader, sizeof(cameraHeader),
+      "1,%u,%lu,%lu,%lu,%lu,%lu,%d,%d,%u,%u,%u,%u,%u,%u,%u,%u,%u",
+      camera.enabled ? 1U : 0U,
+      static_cast<unsigned long>(camera.frameSequence),
+      static_cast<unsigned long>(camera.sceneGeneration),
+      static_cast<unsigned long>(camera.requestedAtMs),
+      static_cast<unsigned long>(camera.observedAtMs),
+      static_cast<unsigned long>(camera.lagMs),
+      int(camera.displayedBearingTenths), int(camera.targetBearingTenths),
+      unsigned(camera.markerAngleTenths), unsigned(camera.effectiveTopScalePermille),
+      unsigned(camera.requestedMode), unsigned(camera.effectiveMode),
+      unsigned(camera.labelDensity), unsigned(camera.labelOrientation),
+      camera.hidden ? 1U : 0U, camera.updateRequired ? 1U : 0U,
+      camera.sceneReused ? 1U : 0U);
   const device_transfer::HttpResponseHeader responseHeaders[] = {
       {"Cache-Control", "no-store"},
       {"X-BikeComputer-Frame-Sequence", sequenceHeader},
+      {"X-BikeComputer-Map-Camera", cameraHeader},
   };
   bool sent = device_transfer::sendHttpHead(
       client, 200, encoded.size() + snapshot.payloadBytes,

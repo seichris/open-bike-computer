@@ -1043,6 +1043,24 @@ int main() {
   assert(!wire.unwrapAuthenticatedPayload(AuthenticatedChannel::Auth,
                                           goldenWriteFrame, plaintext));
 
+  DeviceOwnership gappedGPSWire;
+  gappedGPSWire.setAuthenticatedSessionKeysForTesting(goldenWriteKey,
+                                                       goldenNotifyKey);
+  assert(gappedGPSWire.unwrapAuthenticatedPayload(
+      AuthenticatedChannel::Gps,
+      writeFrame(goldenWriteKey, AuthenticatedChannel::Gps, 1, "gps-one"),
+      plaintext));
+  assert(plaintext == "gps-one");
+  assert(gappedGPSWire.unwrapAuthenticatedPayload(
+      AuthenticatedChannel::Gps,
+      writeFrame(goldenWriteKey, AuthenticatedChannel::Gps, 3, "gps-three"),
+      plaintext));
+  assert(plaintext == "gps-three");
+  assert(!gappedGPSWire.unwrapAuthenticatedPayload(
+      AuthenticatedChannel::Gps,
+      writeFrame(goldenWriteKey, AuthenticatedChannel::Gps, 2, "gps-two"),
+      plaintext));
+
   DeviceOwnership tamperedWire;
   tamperedWire.setAuthenticatedSessionKeysForTesting(goldenWriteKey,
                                                       goldenNotifyKey);

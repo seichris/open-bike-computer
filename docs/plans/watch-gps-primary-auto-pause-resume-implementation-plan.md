@@ -19,7 +19,7 @@ profile-3 coasting and route-continuity safety fixes:
   rejected. This repairs a false-pause without creating a route gap.
 
 Older trace schemas remain replayable for compatibility but are not the current
-acceptance contract. The new transport uses CAP2 bit `24`, client version `22`,
+acceptance contract. The new transport uses CAP2 bit `25`, client version `23`,
 workout schema `1.6`, and remains internal-control-only until the physical gates
 pass.
 
@@ -240,9 +240,10 @@ GPS. Source switching is explicit and traceable.
 8. Continue location reception while automatically paused. Keep stationary,
    delayed, or poor-quality paused samples out of HealthKit route insertion and
    route distance, while retaining qualified movement through a false pause.
-9. Allocate CAP2 bit `24` and client version `22` for
+9. Allocate CAP2 bit `25` and client version `23` for
    `WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE`, after preserving current `main`'s
-   renderer replay allocation at bit `23` and client version `21`.
+   renderer replay allocation at bit `23` and client version `21`, and map
+   navigation orientation at bit `24` and client version `22`.
 10. Preserve all existing core, extended, origin, legacy GPS, and quality GPS
     frame forms. Unsupported peers continue current behavior and fall back to
     existing detector sources.
@@ -339,8 +340,8 @@ samples. Measure the battery impact before production enablement.
 
 Add, subject to the implementation-time allocation recheck:
 
-- `WATCH_GPS_MOTION_EVIDENCE_V1_CLIENT_VERSION = 22`;
-- `WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE = 1UL << 24`;
+- `WATCH_GPS_MOTION_EVIDENCE_V1_CLIENT_VERSION = 23`;
+- `WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE = 1UL << 25`;
 - iPhone `supportsWatchGPSMotionEvidenceV1`; and
 - direct Watch `supportsWatchGPSMotionEvidenceV1`.
 
@@ -587,7 +588,7 @@ These buckets distinguish detector latency from BLE and HealthKit latency.
 
 1. Add the optional Watch motion sample epoch and sequence to
    `WorkoutLocationV1` and preserve old snapshot/recovery decoding.
-2. Add capability client version `22` and CAP2 bit `24`, after rechecking the
+2. Add capability client version `23` and CAP2 bit `25`, after rechecking the
    live allocation.
 3. Add kind-4 frame builder/decoder, golden vectors, authenticated native and
    fallback handling, and reset semantics.

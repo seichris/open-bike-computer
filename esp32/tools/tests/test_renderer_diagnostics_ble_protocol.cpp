@@ -132,7 +132,7 @@ int main() {
   window.runNonce = 0x0102030405060708ULL;
   for (size_t index = 0; index < protocol::SHA256_BYTES; ++index)
     window.routeFixtureSha256[index] = static_cast<uint8_t>(31 - index);
-  std::strcpy(window.routeFixtureId, "shanghai-center-renderer-v1");
+  std::strcpy(window.routeFixtureId, "shanghai-jingan-renderer-v1");
   uint8_t windowBytes[protocol::WINDOW_REQUEST_MAX_BYTES]{};
   size_t windowLength = 0;
   assert(protocol::encodeWindowRequest(window, windowBytes,

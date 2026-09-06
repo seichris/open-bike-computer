@@ -72,10 +72,15 @@ int main() {
       (1UL << 23));
   static_assert(
       device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_CLIENT_VERSION ==
-      22);
+      23);
   static_assert(
       device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE ==
-      (1UL << 24));
+      (1UL << 25));
+  static_assert(device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE ==
+                (1UL << 24));
+  static_assert(device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_CLIENT_VERSION == 22);
+  static_assert((device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE &
+                 device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE) == 0);
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
@@ -183,7 +188,7 @@ int main() {
       device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE,
       nullptr, false, output, sizeof(output));
   const uint8_t expectedWatchMotion[] = {
-      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x00, 0x01};
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x00, 0x02};
   assert(watchMotionSize == sizeof(expectedWatchMotion));
   for (size_t index = 0; index < watchMotionSize; ++index)
     assert(output[index] == expectedWatchMotion[index]);

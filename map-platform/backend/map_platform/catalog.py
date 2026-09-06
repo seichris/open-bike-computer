@@ -344,14 +344,22 @@ class CatalogClient:
         payload: dict[str, Any] = {"libraryCredential": library_credential}
         if alias is not None:
             payload["alias"] = alias
+        # The catalog accepts at most 128 characters in a service request key.
+        # Hash the full attachment identity: a publication ID plus a credential
+        # hash already exceeds that bound for normal generated publications.
+        attachment_identity = _canonical_sha256(
+            {
+                "publicationId": publication_id_value,
+                "libraryCredentialSha256": hashlib.sha256(
+                    library_credential.encode("utf-8")
+                ).hexdigest(),
+            }
+        )
         return self._request(
             "/v1/internal/publications/"
             f"{quote(publication_id_value, safe='')}/attach-library",
             payload,
-            idempotency_key=(
-                f"attach:{publication_id_value}:"
-                f"{hashlib.sha256(library_credential.encode('utf-8')).hexdigest()}"
-            ),
+            idempotency_key=f"attach:{attachment_identity}",
         )
 
     def promotion_grant(self, entry_id: str) -> dict[str, Any]:

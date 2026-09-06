@@ -45,8 +45,9 @@ async function serviceRequest(
   path: string,
   keyID: string,
   secret: string,
+  payload: Record<string, unknown> = {},
 ): Promise<Request> {
-  const body = "{}";
+  const body = JSON.stringify(payload);
   const timestamp = String(Math.floor(Date.now() / 1000));
   const idempotencyKey = `test-request:${keyID}`;
   const bodySha256 = hex(
@@ -438,6 +439,22 @@ describe("worker public surfaces", () => {
     );
     expect(production.status).toBe(404);
     expect(promotionKeys).toEqual([`promotion:map_v1_${"m".repeat(43)}`]);
+  });
+
+  it("restricts automatic promotion discovery to production services", async () => {
+    const path = "/v1/internal/promotions/candidates";
+    const payload = { cursor: null, limit: 50 };
+    const denied = await worker.fetch(
+      await serviceRequest(path, "test-development", "s".repeat(48), payload),
+      workerEnv(),
+    );
+    expect(denied.status).toBe(403);
+    const allowed = await worker.fetch(
+      await serviceRequest(path, "test-production", "p".repeat(48), payload),
+      workerEnv(),
+    );
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toEqual({ mapEntryIds: [], nextCursor: null });
   });
 
   it("isolates trusted service mutations from exhausted public counters", async () => {

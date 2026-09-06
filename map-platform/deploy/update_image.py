@@ -55,6 +55,8 @@ class DeploymentImages:
     control_plane_reference: str
     worker_source_commit: str
     worker_reference: str
+    promotion_source_commit: str | None = None
+    promotion_reference: str | None = None
 
     @staticmethod
     def _digest(reference: str) -> str:
@@ -163,6 +165,30 @@ def validate_manifest_text(text: str) -> DeploymentImages:
         raise ValueError("only API and maintenance may use the control-plane image")
     if len(WORKER_SERVICE_IMAGE_PATTERN.findall(text)) != 1:
         raise ValueError("only the worker service may use the worker image")
+    promotion_source = None
+    promotion_reference = None
+    has_promotion = "  map-platform-promotion:" in text
+    if has_promotion:
+        promotion = _service_body(text, "map-platform-promotion")
+        promotion_environment = _service_mapping_body(promotion, "environment", "promotion")
+        promotion_source = _single_match(re.compile(
+            r"^# promotion-source-commit: (?P<commit>[0-9a-f]{40})$", re.MULTILINE,
+        ), text, "promotion source marker").group("commit")
+        promotion_reference = _single_match(re.compile(
+            rf"^    image: (?P<reference>{re.escape(IMAGE_REPOSITORY)}@sha256:[0-9a-f]{{64}})$",
+            re.MULTILINE,
+        ), promotion, "pinned promotion image").group("reference")
+        _require_service_line(promotion_environment, re.compile(
+            rf"^      MAP_PLATFORM_WORKER_IMAGE_REFERENCE: {re.escape(IMAGE_REPOSITORY)}@sha256:142957ae0d5f08d366b657f9bacb0ce17d85bfac9c5d98c644bc1b02188a59c8$", re.MULTILINE,
+        ), "promotion must retain the qualified converter identity")
+        if "    command:" in promotion or "    entrypoint:" in promotion:
+            raise ValueError("promotion must use its fixed scheduler entrypoint")
+        if "      MAP_PLATFORM_AUTO_PROMOTION_ENABLED: '1'" not in promotion_environment:
+            raise ValueError("promotion must be explicitly enabled")
+        if "      MAP_PLATFORM_CATALOG_CHANNEL: production" not in promotion_environment:
+            raise ValueError("promotion requires production catalog credentials")
+    elif "# promotion-source-commit:" in text:
+        raise ValueError("promotion source requires a promotion service")
     if len(IDENTITY_ENV_PATTERN.findall(text)) != 2:
         raise ValueError("only API and worker may receive the worker image identity")
     if "MAP_PLATFORM_WORKER_IMAGE}" in text or "MAP_PLATFORM_WORKER_IMAGE:-" in text:
@@ -179,6 +205,8 @@ def validate_manifest_text(text: str) -> DeploymentImages:
         control_plane_reference=control_reference,
         worker_source_commit=worker_source.group("commit"),
         worker_reference=worker_reference,
+        promotion_source_commit=promotion_source,
+        promotion_reference=promotion_reference,
     )
 
 

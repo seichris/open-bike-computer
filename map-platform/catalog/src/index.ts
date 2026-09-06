@@ -13,6 +13,7 @@ import {
   finalizePublication,
   getLibraryMap,
   listLibraryMaps,
+  listPromotionCandidates,
   listShares,
   prepareRetentionAuthorizations,
   quarantinePublication,
@@ -542,6 +543,19 @@ async function handle(request: Request, env: Env): Promise<Response> {
         },
       ),
     );
+  }
+  if (
+    request.method === "POST" &&
+    path === "/v1/internal/promotions/candidates"
+  ) {
+    const verified = await verifyServiceRequest(request, env);
+    if (verified.channel !== "production") {
+      throw new HttpError(403, "production service authorization required");
+    }
+    await enforceServiceMutationRateLimit(env, verified.channel);
+    const body = parseObject<Record<string, unknown>>(verified.bodyText);
+    requireExactKeys(body, ["cursor", "limit"]);
+    return json(await listPromotionCandidates(env, body.cursor, body.limit));
   }
   const promotionGrant = match(
     path,

@@ -149,6 +149,23 @@ nonisolated struct OfflineMapCatalogCredential: Codable, Equatable {
     let credential: String
 }
 
+nonisolated enum SavedMapListScope: Equatable, Sendable {
+    case savedMaps
+    case developerMaps
+
+    func includes(_ map: OfflineMapCatalogMap?, channel: String) -> Bool {
+        // Filter after local/catalog reconciliation so a map cannot reappear
+        // as a duplicate local row. Unknown legacy provenance stays visible.
+        let isDeveloperOnly = channel == "production" &&
+            map?.originChannel == "development" &&
+            map?.deliveryState != "production"
+        switch self {
+        case .savedMaps: return !isDeveloperOnly
+        case .developerMaps: return isDeveloperOnly
+        }
+    }
+}
+
 nonisolated enum OfflineMapCatalogAvailability: Equatable, Sendable {
     case available
     case awaitingProductionPromotion
@@ -162,7 +179,7 @@ nonisolated enum OfflineMapCatalogAvailability: Equatable, Sendable {
         case .available:
             return nil
         case .awaitingProductionPromotion:
-            return "Awaiting production promotion"
+            return "Development map — not published for production"
         case .incompatible:
             return "Not compatible with this app build"
         case .unavailable:
@@ -225,6 +242,7 @@ nonisolated enum OfflineMapCatalogAvailabilityPolicy {
 
     static func localArtifactNeedsRefresh(
         localArtifactSHA256s: Set<String>,
+        localPrimaryArtifact: OfflineMapArtifact? = nil,
         map: OfflineMapCatalogMap,
         channel: String,
         trustStore: BikeMapStreamTrustStore,
@@ -241,6 +259,21 @@ nonisolated enum OfflineMapCatalogAvailabilityPolicy {
             readerCapabilities: readerCapabilities
         )
         guard !preferredArtifacts.isEmpty else { return false }
+        // ZIP and BMAP are different containers, not different map content.
+        // Only accept the actual local primary ZIP when the catalog still lists
+        // its exact hash as a live head in the preferred delivery tier. A legacy
+        // fallback must not mask a stale/untrusted primary BMAP. This freshness
+        // check does not change download eligibility or device validation.
+        if let primary = localPrimaryArtifact, primary.isStoredZip, !primary.sha256.isEmpty,
+           map.artifacts.contains(where: { artifact in
+               artifact.platformArtifact.isStoredZip &&
+                   artifact.sha256.lowercased() == primary.sha256.lowercased() &&
+                   preferredArtifacts.contains {
+                       $0.deliveryTier.lowercased() == artifact.deliveryTier.lowercased()
+                   }
+           }) {
+            return false
+        }
         let localSHA256s = Set(localArtifactSHA256s.map { $0.lowercased() })
         return preferredArtifacts.allSatisfy {
             !localSHA256s.contains($0.sha256.lowercased())

@@ -8107,7 +8107,7 @@ private struct WorkoutContractTestSuite {
                     ".presentationDetents([.rideMetricsCompact,.large],selection:$rideMetricsDetent)"
                 )
                 && compactContent.contains(
-                    "context.dynamicTypeSize.isAccessibilitySize?360:280"
+                    "RideSheetLayoutPolicy.compactHeight(isAccessibilitySize:context.dynamicTypeSize.isAccessibilitySize,maximumHeight:context.maxDetentValue)"
                 )
                 && compactContent.contains(
                     ".presentationDragIndicator(.visible)"
@@ -8126,6 +8126,61 @@ private struct WorkoutContractTestSuite {
                 && !compactNavigation.contains("chevron.down")
                 && !compactNavigation.contains("onToggleExpansion"),
             "active workouts must own the expandable native stats sheet while navigation-only keeps the compact overlay"
+        )
+        expect(
+            compactContent.contains(
+                "ifcoordinator.routeAlternatives.isEmpty||coordinator.isNavigating{rideMetricsPanel("
+            )
+                && compactContent.contains("else{rideRoutePlanSheet}")
+                && compactContent.contains(
+                    "Label(\"Startnavigation\",systemImage:\"location.fill\")"
+                )
+                && compactContent.contains("coordinator.startSelectedRoute()")
+                && compactContent.contains(
+                    ".accessibilityIdentifier(\"rideRoutePlanSheet\")"
+                ),
+            "a pending workout route must replace covered metrics with an explicit route-selection and start surface"
+        )
+        expect(
+            compactContent.contains("route:coordinator.currentRoute")
+                && compactContent.contains(
+                    "routeAlternatives:coordinator.routeAlternatives.map{MapRouteAlternative(id:$0.id,route:$0.route)}"
+                )
+                && compactContent.contains(
+                    "selectedRouteAlternativeID:coordinator.selectedRouteAlternativeID"
+                )
+                && compactContent.contains(
+                    "onRouteAlternativeSelected:{coordinator.selectRouteAlternative($0)}"
+                )
+                && compactContent.contains(
+                    "Taparouteonthemap,orchoosebelow.Yourworkoutkeepsrunning."
+                ),
+            "route alternatives must render and remain selectable on the map while the buttons stay available"
+        )
+        expect(
+            compactContent.contains("mapControlsBottomPadding(in:proxy)")
+                && compactContent.contains(
+                    "RideSheetLayoutPolicy.mapControlsBottomPadding("
+                )
+                && compactContent.contains(
+                    "isRideSheetPresented:presentedSheet==.rideMetrics"
+                )
+                && compactContent.contains(
+                    "isCompactDetent:rideMetricsDetent==.rideMetricsCompact"
+                ),
+            "the right-side map control cluster must clear the half-open ride sheet"
+        )
+        expect(
+            compactNavigation.contains(
+                "@ObservedObjectvarcoordinator:BikeComputerCoordinator"
+            )
+                && compactNavigation.contains(
+                    "privatevarisNavigating:Bool{coordinator.isNavigating}"
+                )
+                && compactNavigation.contains(
+                    "privatevarnavigationControl:someView{ifisNavigating{Button(action:onStopNavigation)"
+                ),
+            "the ride sheet must observe live navigation state and place End navigation before workout controls"
         )
         expect(
             compactNavigation.contains(

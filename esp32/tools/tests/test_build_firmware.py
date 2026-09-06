@@ -4,8 +4,10 @@ import hashlib
 import io
 import json
 import os
+import py_compile
 import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 import types
@@ -23,6 +25,7 @@ from build_firmware import (
     _resolved_device_port,
     _custom_core_project_text,
     _consume_link_timing,
+    _deterministic_build_environment,
     _require_dynamic_tls_link,
     _verified_platformio_project_config,
     _seed_pinned_scons_package,
@@ -41,6 +44,7 @@ from generated_sdkconfig import (
     FLASH_PLAN_PORT_PLACEHOLDER,
     FLASH_PLAN_SCHEMA,
     GeneratedSdkconfigError,
+    _execution_tree_sha256,
     WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     WAVESHARE_PLATFORM_PACKAGES,
     WAVESHARE_PLATFORM_PACKAGES_SHA256,
@@ -947,6 +951,67 @@ build_src_filter =
         self.assertTrue(firmware.is_file())
         self.assertIn("uploadEligible=0", output.getvalue())
 
+    def test_build_subprocesses_preserve_hydrated_bytecode(self):
+        # Hydration gives source files new mtimes but retains attested .pyc
+        # contents. Real recursive Python imports must not rewrite that tree.
+        root = self.project_dir / ".pio/hydrated-python"
+        root.mkdir()
+        module = root / "cached_probe.py"
+        module.write_text("VALUE = 7\n", encoding="utf-8")
+        uncached = root / "uncached_probe.py"
+        uncached.write_text("VALUE = 9\n", encoding="utf-8")
+        bytecode = Path(py_compile.compile(str(module), doraise=True))
+        original = bytecode.read_bytes()
+        os.utime(module, (1, 1))
+        before = _execution_tree_sha256(root)
+        identity = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=self.project_dir, text=True
+        ).strip()
+        probe = (
+            "import sys; "
+            f"sys.path.insert(0, {str(root)!r}); "
+            "import cached_probe, uncached_probe; "
+            "assert cached_probe.VALUE == 7 and uncached_probe.VALUE == 9"
+        )
+        recursive_probe = (
+            "import subprocess, sys; assert sys.dont_write_bytecode; "
+            f"subprocess.run([sys.executable, '-c', {probe!r}], check=True)"
+        )
+        with patch.dict(os.environ, {"PYTHONDONTWRITEBYTECODE": ""}):
+            with _deterministic_build_environment(
+                self.project_dir, self.environment, identity,
+                self.platform_archive, self.project_dir / "platformio.ini"
+            ):
+                self.assertEqual(os.environ.get("PYTHONDONTWRITEBYTECODE"), "1")
+                subprocess.run([sys.executable, "-c", recursive_probe], check=True)
+            self.assertEqual(os.environ["PYTHONDONTWRITEBYTECODE"], "")
+        self.assertEqual(bytecode.read_bytes(), original)
+        self.assertEqual(_execution_tree_sha256(root), before)
+
+        # Positive control: the stale timestamp really would rewrite bytecode
+        # without the build policy, and a source-only import would add a file.
+        unprotected_environment = dict(os.environ)
+        unprotected_environment.pop("PYTHONDONTWRITEBYTECODE", None)
+        subprocess.run([sys.executable, "-c", probe], env=unprotected_environment,
+                       check=True)
+        self.assertNotEqual(bytecode.read_bytes(), original)
+        self.assertNotEqual(_execution_tree_sha256(root), before)
+
+    def test_build_bytecode_policy_restores_environment_after_exception(self):
+        identity = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=self.project_dir, text=True
+        ).strip()
+        with patch.dict(os.environ):
+            os.environ.pop("PYTHONDONTWRITEBYTECODE", None)
+            with self.assertRaisesRegex(RuntimeError, "test failure"):
+                with _deterministic_build_environment(
+                    self.project_dir, self.environment, identity,
+                    self.platform_archive, self.project_dir / "platformio.ini"
+                ):
+                    self.assertEqual(os.environ.get("PYTHONDONTWRITEBYTECODE"), "1")
+                    raise RuntimeError("test failure")
+            self.assertNotIn("PYTHONDONTWRITEBYTECODE", os.environ)
+
     def test_removes_a_stale_target_artifact_before_building(self):
         self.write_firmware()
         stale_firmware = (
@@ -983,6 +1048,7 @@ build_src_filter =
             nonlocal calls
             calls += 1
             self.assertEqual(os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD"), "1")
+            self.assertEqual(os.environ.get("PYTHONDONTWRITEBYTECODE"), "1")
             isolated_git_config = Path(os.environ["GIT_CONFIG_GLOBAL"])
             self.assertEqual(isolated_git_config.read_text(encoding="utf-8"), "")
             self.assertEqual(os.environ.get("GIT_CONFIG_NOSYSTEM"), "1")
