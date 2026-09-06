@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 
-from .catalog import CatalogClient
+from map_platform.catalog import CatalogClient
 
 LOG = logging.getLogger(__name__)
 MAP_ID = re.compile(r"map_v1_[A-Za-z0-9_-]{43}")
@@ -112,7 +112,7 @@ def main() -> None:
     catalog = CatalogClient.from_environment()
     if catalog is None or catalog.channel != "production":
         raise SystemExit("production catalog configuration is required")
-    from .map_signing import load_map_artifact_signer_from_environment
+    from map_platform.map_signing import load_map_artifact_signer_from_environment
     if load_map_artifact_signer_from_environment() is None:
         raise SystemExit("production map signing configuration is required")
     root = Path(os.environ.get("MAP_PLATFORM_DATA_ROOT", "/data")) / "automatic-promotion"

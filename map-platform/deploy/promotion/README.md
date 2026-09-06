@@ -24,9 +24,10 @@ Successful publication is idempotent if its response is lost.
 
 ## Release and activation
 
-The dedicated Dockerfile adds only the scheduling module to the exact qualified
-production image. Its validation stage compares every `/app` file against the
-base and runs both scheduler and existing promotion tests. The original
+The dedicated Dockerfile puts the scheduling module under `/opt/bicino-promotion`,
+outside the qualified converter's hashed `/app` source tree. Its validation stage
+requires every `/app` file to match the base, runs the real converter identity
+check, and runs both scheduler and existing promotion tests. The original
 converter/signer producer identity remains accurate because that code is unchanged.
 No API or map-generation worker image is replaced by this candidate.
 
