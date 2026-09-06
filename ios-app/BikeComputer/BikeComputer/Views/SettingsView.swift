@@ -1255,6 +1255,7 @@ private struct SavedMapRow: View {
     @State private var isShowingDeleteConfirmation = false
     @State private var isShowingLibraryRemovalConfirmation = false
     @State private var presentedPreview: SavedMapPreviewPresentation?
+    @State private var shareAfterPreviewDismissal = false
     @State private var isShowingCatalogRename = false
     @State private var catalogRenameDraft = ""
 
@@ -1451,20 +1452,6 @@ private struct SavedMapRow: View {
                     )
                 }
 
-                if item.isAvailableInLibrary {
-                    Button {
-                        finishRenaming()
-                        focusedPackFilename = nil
-                        manager.createShare(for: item)
-                    } label: {
-                        Image(systemName: "square.and.arrow.up")
-                            .frame(width: 32, height: 32)
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(manager.isBusy)
-                    .accessibilityLabel("Share \(displayName)")
-                }
-
                 if packURL != nil {
                     Button(role: .destructive) {
                         finishRenaming()
@@ -1569,8 +1556,14 @@ private struct SavedMapRow: View {
                 )
             )
         }
-        .sheet(item: $presentedPreview) { preview in
-            SavedMapPreviewSheet(manager: manager, preview: preview)
+        .sheet(item: $presentedPreview, onDismiss: {
+            guard shareAfterPreviewDismissal else { return }
+            shareAfterPreviewDismissal = false
+            manager.createShare(for: item)
+        }) { preview in
+            SavedMapPreviewSheet(manager: manager, preview: preview) {
+                shareAfterPreviewDismissal = true
+            }
                 .presentationDetents([.large])
         }
     }
@@ -1594,28 +1587,54 @@ private struct SavedMapPreviewSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var manager: OfflineMapManager
     let preview: SavedMapPreviewPresentation
+    let onShareRequested: () -> Void
 
     var body: some View {
         let image = manager.detailPreviewImage(for: preview.item) ??
             preview.fallbackImage
 
         NavigationView {
-            ZStack(alignment: .bottom) {
-                Image(uiImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
-                    .padding()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityLabel("\(preview.displayName) map preview")
+            VStack(spacing: 16) {
+                ZStack(alignment: .bottom) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                        .padding()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityLabel("\(preview.displayName) map preview")
 
-                if manager.isDetailPreviewLoading(for: preview.item) {
-                    Label("Loading high-resolution preview", systemImage: "sparkles")
-                        .font(.caption)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(.thinMaterial, in: Capsule())
-                        .padding(.bottom, 12)
+                    if manager.isDetailPreviewLoading(for: preview.item) {
+                        Label("Loading high-resolution preview", systemImage: "sparkles")
+                            .font(.caption)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.thinMaterial, in: Capsule())
+                            .padding(.bottom, 12)
+                    }
+                }
+
+                if preview.item.isAvailableInLibrary {
+                    Button {
+                        onShareRequested()
+                        dismiss()
+                    } label: {
+                        Label("Share this map", systemImage: "square.and.arrow.up")
+                            .labelStyle(.titleAndIcon)
+                            .font(.subheadline.weight(.semibold))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 15)
+                            .foregroundColor(.white)
+                            .background(
+                                Color.blue,
+                                in: RoundedRectangle(cornerRadius: 24, style: .continuous)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(manager.isBusy)
+                    .opacity(manager.isBusy ? 0.5 : 1)
+                    .accessibilityIdentifier("saved-map-preview-share")
+                    .padding(.bottom, 20)
                 }
             }
             .background(Color(uiColor: .systemBackground))
