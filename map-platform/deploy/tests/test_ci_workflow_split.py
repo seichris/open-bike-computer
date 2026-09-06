@@ -99,9 +99,11 @@ class CIWorkflowSplitTests(unittest.TestCase):
 
     def test_authentication_compatibility_is_candidate_only(self) -> None:
         workflow = workflow_source("map-platform-image.yml")
-        excluded = "inputs.release_profile != 'production-auth-compatibility'"
+        excluded = "(inputs.release_profile == '' || inputs.release_profile == 'standard')"
         self.assertEqual(workflow.count(excluded), 3)
-        self.assertIn("'-auth-compat' || ''", workflow)
+        self.assertIn("'-auth-compat'", workflow)
+        self.assertIn("'-map-promotion'", workflow)
+        self.assertIn("map-platform/deploy/promotion/Dockerfile", workflow)
         self.assertIn("'runtime' || ''", workflow)
         self.assertIn('test "$SOURCE_REF" = "refs/heads/$DEFAULT_BRANCH"', workflow)
         self.assertIn("--target validation", workflow)
