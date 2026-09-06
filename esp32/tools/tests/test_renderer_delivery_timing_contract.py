@@ -31,6 +31,17 @@ class DeliveryTimingContractTests(unittest.TestCase):
         self.assertLess(body.index("deliveryTiming.complete"), body.index("portEXIT_CRITICAL"))
         self.assertIn("value.deliveryTiming = deliveryTiming.snapshot();", DIAGNOSTICS)
 
+    def test_incomplete_progress_is_published_without_payload(self):
+        body = DIAGNOSTICS.split("void noteDeliveryCallbackProgress", 1)[1].split(
+            "void completeDeliveryCallback", 1)[0]
+        self.assertLess(body.index("portENTER_CRITICAL"), body.index("deliveryTiming.progress"))
+        self.assertLess(body.index("deliveryTiming.progress"), body.index("portEXIT_CRITICAL"))
+        for phase in ("Authenticating", "AuthenticationFinished", "Allocating",
+                      "WaitingForMailbox", "HoldingMailbox", "Dispatching"):
+            self.assertIn("DeliveryCallbackPhase::" + phase, BLE)
+        self.assertIn("value.deliveryTiming.latestStarted.phase", DIAGNOSTICS)
+        self.assertIn("value.deliveryTiming.started", DIAGNOSTICS)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -724,6 +724,7 @@ struct NavigationProtocolTests {
         testGPSQueuePolicy()
         testRendererBenchmarkProtocol()
         testSecureRendererBenchmarkProtocol()
+        testRendererCrossRunRetainedMemoryPolicy()
         testDeviceNetworkJoinTimeoutPolicy()
         testSecureRendererBenchmarkReadiness()
         testRendererBenchmarkAtomicDelivery()
@@ -14877,7 +14878,106 @@ struct NavigationProtocolTests {
         )
     }
 
+    static func testRendererCrossRunRetainedMemoryPolicy() {
+        assert(
+            RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [46_000, 44_500, 43_000],
+                allowedDecline: 1_024
+            ),
+            "progressive retained DMA decline is rejected"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [46_000, 44_000, 43_990],
+                allowedDecline: 1_024
+            ),
+            "one-time transition followed by a plateau is accepted"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [46_000, 45_920, 46_010],
+                allowedDecline: 1_024
+            ),
+            "stable retained memory with jitter is accepted"
+        )
+        assert(
+            !RendererBenchmarkEvaluator.progressiveCrossRunDecline(
+                [39_307, 37_803, 37_779],
+                allowedDecline: 1_024
+            ),
+            "the physical three-point minimum series is not progressive"
+        )
+
+        let sourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift"
+        )
+        guard let source = try? String(
+            contentsOf: sourceURL,
+            encoding: .utf8
+        ), let start = source.range(
+            of: "    static func applyCrossRunMemoryGates("
+        ), let end = source.range(
+            of: "    static func aggregate(",
+            range: start.upperBound..<source.endIndex
+        ) else {
+            assert(false, "cross-run memory source contract is readable")
+            return
+        }
+        let body = String(source[start.lowerBound..<end.lowerBound])
+        assert(
+            body.contains("finalSnapshot.memory.dmaHeap.free") &&
+                body.contains("finalSnapshot.memory.dmaHeap.largestBlock"),
+            "cross-run DMA gates use terminal current state"
+        )
+        assert(
+            !body.contains(".summary.minimumDmaFree") &&
+                !body.contains(".summary.minimumDmaLargest"),
+            "heterogeneous window minima are not treated as retained state"
+        )
+    }
+
     static func testSecureRendererBenchmarkProtocol() {
+        // Additive timing fields must survive evidence export while older
+        // schema-1 snapshots remain readable.
+        let callback: [String: Any] = [
+            "session": 3, "ordinal": 694, "channel": 2, "startedAtMs": 100,
+            "callbackUs": 120, "setupUs": 1, "authenticationUs": 80,
+            "allocationUs": 1, "mailboxWaitUs": 1, "mailboxHoldUs": 1,
+            "authenticated": true, "mailboxAccepted": true,
+            "frameActiveAtEntry": false, "frameActiveAtExit": false
+        ]
+        let owner: [String: Any] = [
+            "session": 3, "ordinal": 694, "channel": 2, "startedAtMs": 100,
+            "mailboxAgeUs": 10, "processingUs": 20
+        ]
+        var timing: [String: Any] = [
+            "schema": 1, "session": 3, "completed": 694,
+            "latest": callback, "slowestRoute": callback,
+            "slowestGps": callback, "latestOwner": owner, "slowestOwner": owner
+        ]
+        do {
+            let old = try JSONDecoder().decode(RendererDeliveryTimingEvidence.self,
+                from: JSONSerialization.data(withJSONObject: timing))
+            assert(old.latestStarted == nil && old.started == nil,
+                   "old timing evidence does not fabricate callback entry proof")
+            timing["started"] = 695
+            timing["latestStarted"] = [
+                "session": 3, "ordinal": 695, "channel": 2,
+                "startedAtMs": 200, "updatedAtMs": 201,
+                "phase": "waiting_for_mailbox"
+            ]
+            let updated = try JSONDecoder().decode(RendererDeliveryTimingEvidence.self,
+                from: JSONSerialization.data(withJSONObject: timing))
+            assertEqual(updated.latestStarted?.ordinal, 695,
+                        "incomplete callback remains distinct from latest completed callback")
+            assertEqual(updated.latestStarted?.phase, "waiting_for_mailbox",
+                        "callback progress is retained")
+            let exported = try JSONDecoder().decode(RendererDeliveryTimingEvidence.self,
+                from: JSONEncoder().encode(updated))
+            assertEqual(exported, updated, "entry evidence survives export round trip")
+        } catch {
+            assert(false, "delivery timing compatibility: \(error)")
+        }
         assertEqual(
             SecureRendererBenchmarkHTTPPolicy.connectionReuseHeaderName,
             "X-BikeComputer-Connection-Reuse",
@@ -15173,6 +15273,91 @@ struct NavigationProtocolTests {
             0,
             "secure benchmark retains the zero crypto-failure gate"
         )
+        guard var diagnosticMetricsObject = try? JSONSerialization.jsonObject(
+            with: metricsData
+        ) as? [String: Any] else {
+            assert(false, "secure benchmark creates diagnostic metrics fixture")
+            return
+        }
+        diagnosticMetricsObject["replayTransport"] = [
+            "gpsAuthenticationAccepted": 5,
+            "gpsAuthenticationRejected": 1,
+            "rbs1Detected": 4,
+            "rbs1Decoded": 3,
+            "rbs1Malformed": 1,
+            "rbs1Unnegotiated": 0,
+            "gpsMailboxAccepted": 3,
+            "gpsMailboxRejected": 0,
+            "markerAccepted": 2,
+            "markerRejectedInvalid": 0,
+            "markerRejectedNoActiveWindow": 1,
+            "markerRejectedActiveFixtureUnavailable": 0,
+            "markerRejectedFixtureMismatch": 0,
+            "lastTransportEventAtMs": 12_345,
+            "lastMarkerAtMs": 12_344,
+            "lastActiveWindowId": 41,
+            "lastSampleIndex": 12,
+            "lastSampleCount": 120,
+            "lastLoop": 2,
+            "lastCandidateFixtureTag": 0x0fec_6228,
+            "lastCandidateFixtureTagValid": true,
+            "lastExpectedFixtureTag": 0x0fec_6228,
+            "lastExpectedFixtureTagValid": true,
+            "lastMarkerResult": "accepted",
+        ] as [String: Any]
+        if var memory = diagnosticMetricsObject["memory"] as? [String: Any],
+           var dmaHeap = memory["dmaHeap"] as? [String: Any] {
+            dmaHeap["windowMinimumFreeAttribution"] = [
+                "phase": "render_complete",
+                "observedAtMs": 12_300,
+                "value": 20_000,
+                "frameTransferActive": true,
+            ] as [String: Any]
+            dmaHeap["windowMinimumLargestBlockAttribution"] = [
+                "phase": "metrics_snapshot",
+                "observedAtMs": 12_345,
+                "value": 10_000,
+                "frameTransferActive": false,
+            ] as [String: Any]
+            memory["dmaHeap"] = dmaHeap
+            diagnosticMetricsObject["memory"] = memory
+        }
+        guard let diagnosticMetricsData = try? JSONSerialization.data(
+            withJSONObject: diagnosticMetricsObject
+        ), let diagnosticMetrics = try? JSONDecoder().decode(
+            RendererBenchmarkMetricsSnapshot.self,
+            from: diagnosticMetricsData
+        ), let replayTransport = diagnosticMetrics.replayTransport,
+              let roundTripData = try? JSONEncoder().encode(diagnosticMetrics),
+              let roundTripObject = try? JSONSerialization.jsonObject(
+                with: roundTripData
+              ) as? [String: Any],
+              roundTripObject["replayTransport"] != nil else {
+            assert(false, "replay transport diagnostics survive evidence decoding and encoding")
+            return
+        }
+        assertEqual(
+            replayTransport.markerRejectedNoActiveWindow,
+            1,
+            "pre-window replay rejection remains available to exported evidence"
+        )
+        assertEqual(
+            replayTransport.lastMarkerResult,
+            "accepted",
+            "the last firmware admission result survives the evidence round trip"
+        )
+        assertEqual(
+            diagnosticMetrics.memory.dmaHeap
+                .windowMinimumFreeAttribution?.phase,
+            "render_complete",
+            "DMA low-water phase attribution survives evidence decoding"
+        )
+        assertEqual(
+            diagnosticMetrics.memory.dmaHeap
+                .windowMinimumFreeAttribution?.frameTransferActive,
+            true,
+            "DMA attribution retains only the non-secret frame-overlap bit"
+        )
         let baseline = RendererBenchmarkEvidenceIdentity(
             deviceId: metrics.identity.deviceId,
             firmwareCommit: metrics.identity.firmwareCommit,
@@ -15358,21 +15543,34 @@ struct NavigationProtocolTests {
                "older evidence does not invent a scheduler state")
         timing.schedulerActive = true
         var startupTrace = RendererBenchmarkStartupTrace()
+        startupTrace.recordNetworkTransport("hotspot")
+        assertEqual(startupTrace.networkTransport, "hotspot", "record network mode, not network identity")
+        startupTrace.recordNetworkTransport("private-network-name")
+        assert(startupTrace.networkTransport == nil, "unknown transport cannot export an SSID or URL")
+        startupTrace.recordNetworkTransport("lan")
         for index in 0..<(RendererBenchmarkStartupTrace.maximumSamples + 3) {
-            startupTrace.record(RendererBenchmarkStartupSample(
+            let startupSample = RendererBenchmarkStartupSample(
                 phase: "metrics_\(index)",
                 bleTransport: transportEvidence,
                 replayTiming: timing,
                 window: metrics.window,
                 routeReplay: metrics.routeReplay,
-                replayTransport: metrics.replayTransport
-            ))
+                replayTransport: metrics.replayTransport,
+                renderCount: metrics.render.jobs.completed,
+                psramFree: metrics.memory.psram.free,
+                psramLargest: metrics.memory.psram.largestBlock
+            )
+            startupTrace.record(startupSample)
+            startupTrace.recordWarmupBoundary(startupSample)
         }
         assert(startupTrace.samples.count == 128 && startupTrace.droppedSamples == 3,
                "startup trace remains bounded and counts discarded samples")
         assert(startupTrace.samples.first?.phase == "metrics_3" &&
                startupTrace.samples.last?.phase == "metrics_130",
                "startup trace retains the latest failure context")
+        assert(startupTrace.warmupBoundaries?.count == 32 &&
+               startupTrace.warmupBoundaries?.first?.phase == "metrics_0",
+               "bounded warm-up evidence survives failure-ring eviction")
         guard let traceData = try? JSONEncoder().encode(startupTrace),
               let decodedTrace = try? JSONDecoder().decode(
                 RendererBenchmarkStartupTrace.self, from: traceData
@@ -15383,6 +15581,14 @@ struct NavigationProtocolTests {
         assert(decodedTrace.samples == startupTrace.samples &&
                decodedTrace.droppedSamples == startupTrace.droppedSamples,
                "startup evidence preserves scheduler, queue, window and marker state")
+        assert(decodedTrace.warmupBoundaries == startupTrace.warmupBoundaries &&
+               decodedTrace.networkTransport == "lan",
+               "warm-up boundaries and sanitized network mode survive export")
+        let oldTrace = Data(#"{"samples":[],"droppedSamples":0}"#.utf8)
+        let decodedOldTrace = try? JSONDecoder().decode(RendererBenchmarkStartupTrace.self,
+                                                       from: oldTrace)
+        assert(decodedOldTrace != nil && decodedOldTrace?.warmupBoundaries == nil,
+               "older startup exports remain readable")
         assert(RendererBenchmarkEvidenceSecurityPolicy.isSecretFree(jsonData: traceData),
                "startup trace follows the same secret-free export policy")
         assert(

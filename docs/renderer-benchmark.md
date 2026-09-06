@@ -143,8 +143,27 @@ and device window/marker state when a metrics response is available. Failure
 and manual-stop observations are captured before cleanup clears replay state.
 These diagnostics distinguish app emission from BLE delivery without exporting
 session credentials; they do not substitute for a successful physical sweep.
+The trace also records only the advertised `lan`/`hotspot` network mode (never
+SSID, address or credentials), and retains the first 32 warm-up boundary
+observations separately from its rolling samples. Boundaries include render
+count and current PSRAM free/largest block, so a later failure cannot evict
+the first warm-up's readiness evidence. This does not lengthen warm-up or
+exclude early measurement samples from memory/performance gates.
 
 ### Completed results and delivery-stage timing
+
+Remote-debug metrics additionally retain `deliveryTiming.started` and
+`latestStarted` (session, ordinal, native channel, device start/update times,
+and phase). The record is published on native route/GPS callback entry before
+the MTU lookup, then at authentication and mailbox boundaries; `completed`
+marks callback exit. An unchanged completed record no longer hides a newer
+unfinished callback. Old schema-1 firmware omits these optional fields; absence
+is not proof that no callback entered. iOS preserves them in exported evidence.
+These fixed-size, payload-free records are debug-only and do not change the
+ATT watchdog, renderer quotas or acceptance gates. They are not radio traces:
+an entry not observed in a sampled response cannot rule out a later entry, and
+another BLE callback blocking the host can prevent the native callback entirely.
+Phases identify code regions, not the exact operation or root cause within them.
 
 The result model separates completed measurements, user/lifecycle cancellation,
 transport abort, Current-profile restoration, and evidence-export failure.

@@ -736,6 +736,14 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
 }
 
 nonisolated struct RendererDeliveryTimingEvidence: Codable, Equatable, Sendable {
+    nonisolated struct Progress: Codable, Equatable, Sendable {
+        let session: UInt32
+        let ordinal: UInt32
+        let channel: UInt8
+        let startedAtMs: UInt32
+        let updatedAtMs: UInt32
+        let phase: String
+    }
     nonisolated struct Callback: Codable, Equatable, Sendable {
         let session: UInt32
         let ordinal: UInt32
@@ -768,6 +776,9 @@ nonisolated struct RendererDeliveryTimingEvidence: Codable, Equatable, Sendable 
     let slowestGps: Callback
     let latestOwner: Owner
     let slowestOwner: Owner
+    // Additive schema-1 diagnostics; preserve older firmware evidence.
+    var started: UInt32? = nil
+    var latestStarted: Progress? = nil
 }
 
 nonisolated struct RendererBenchmarkReplayTimingEvidence: Codable,
@@ -790,12 +801,32 @@ nonisolated struct RendererBenchmarkStartupSample: Codable, Equatable, Sendable 
     let window: RendererBenchmarkMetricsSnapshot.Window?
     let routeReplay: RendererBenchmarkMetricsSnapshot.RouteReplay?
     let replayTransport: RendererBenchmarkMetricsSnapshot.ReplayTransport?
+    var renderCount: UInt32? = nil
+    var psramFree: UInt32? = nil
+    var psramLargest: UInt32? = nil
+    var deliveryTiming: RendererDeliveryTimingEvidence? = nil
 }
 
 nonisolated struct RendererBenchmarkStartupTrace: Codable, Sendable {
     static let maximumSamples = 128
     private(set) var samples: [RendererBenchmarkStartupSample] = []
     private(set) var droppedSamples: UInt64 = 0
+    // Keep early warm-up evidence independently of the rolling failure trace.
+    // Optional to decode older schema-1 exports without inventing observations.
+    private(set) var warmupBoundaries: [RendererBenchmarkStartupSample]? = nil
+    private(set) var networkTransport: String? = nil
+
+    mutating func recordNetworkTransport(_ value: String?) {
+        networkTransport = value.flatMap { ["lan", "hotspot"].contains($0) ? $0 : nil }
+    }
+
+    mutating func recordWarmupBoundary(_ sample: RendererBenchmarkStartupSample) {
+        if warmupBoundaries == nil { warmupBoundaries = [] }
+        // Thirteen planned runs require 26 boundaries. Keep the first 32 if
+        // an unexpected caller exceeds that bound; never evict first warm-up.
+        guard (warmupBoundaries?.count ?? 0) < 32 else { return }
+        warmupBoundaries?.append(sample)
+    }
 
     mutating func record(_ sample: RendererBenchmarkStartupSample) {
         if samples.count == Self.maximumSamples {
@@ -1484,34 +1515,72 @@ nonisolated enum RendererBenchmarkEvaluator {
         return Array(Set(failures)).sorted()
     }
 
+    static func progressiveCrossRunDecline(
+        _ values: [UInt32],
+        allowedDecline: UInt32
+    ) -> Bool {
+        guard values.count >= 3 else { return false }
+        let normalized = values.map(Int64.init)
+        let allowed = max(Int64(0), Int64(allowedDecline))
+        let continuationNoise = max(Int64(1), allowed / 4)
+        let totalDecline = normalized[0] - normalized[normalized.count - 1]
+        guard totalDecline > allowed else { return false }
+
+        var downwardSteps: [Int64] = []
+        downwardSteps.reserveCapacity(normalized.count - 1)
+        for (previous, current) in zip(
+            normalized,
+            normalized.dropFirst()
+        ) {
+            let delta = previous - current
+            // A rebound larger than the bounded noise allowance contradicts a
+            // progressive retained-state decline.
+            if delta < -continuationNoise { return false }
+            downwardSteps.append(max(Int64(0), delta))
+        }
+        guard let largestStep = downwardSteps.max() else { return false }
+        // Discount one one-time cache/session transition. A real progressive
+        // leak or fragmentation trend must continue beyond that single step.
+        let continuedDecline =
+            downwardSteps.reduce(Int64(0), +) - largestStep
+        return continuedDecline > continuationNoise
+    }
+
     static func applyCrossRunMemoryGates(
         runs: inout [RendererBenchmarkRunEvidence],
         gates: RendererBenchmarkGates
     ) {
         struct Check {
-            let value: (RendererBenchmarkRunSummary) -> UInt32
+            let value: (RendererBenchmarkRunEvidence) -> UInt32
             let allowed: UInt32
             let label: String
         }
+        // Per-window minima remain authoritative for the unchanged absolute
+        // safety floors. Cross-run retention instead compares the standardized
+        // current heap state in each terminal metrics snapshot: a minimum may
+        // be set by any transient render, checkpoint, TLS, or polling phase and
+        // is therefore not evidence that memory remained allocated.
         let checks = [
-            Check(value: { $0.minimumInternalFree },
+            Check(value: { $0.finalSnapshot.memory.internalHeap.free },
                   allowed: gates.trend.crossRunInternalAllowedDeclineBytes,
                   label: "cross_run_internal_decline"),
-            Check(value: { $0.minimumInternalLargest },
-                  allowed: gates.trend.crossRunInternalAllowedDeclineBytes,
-                  label: "cross_run_internal_largest_decline"),
-            Check(value: { $0.minimumPsramFree },
+            Check(value: {
+                $0.finalSnapshot.memory.internalHeap.largestBlock
+            }, allowed: gates.trend.crossRunInternalAllowedDeclineBytes,
+               label: "cross_run_internal_largest_decline"),
+            Check(value: { $0.finalSnapshot.memory.psram.free },
                   allowed: gates.trend.crossRunPsramAllowedDeclineBytes,
                   label: "cross_run_psram_decline"),
-            Check(value: { $0.minimumPsramLargest },
+            Check(value: { $0.finalSnapshot.memory.psram.largestBlock },
                   allowed: gates.trend.crossRunPsramAllowedDeclineBytes,
                   label: "cross_run_psram_largest_decline"),
-            Check(value: { $0.minimumDmaFree },
+            Check(value: { $0.finalSnapshot.memory.dmaHeap.free },
                   allowed: gates.trend.crossRunDmaAllowedDeclineBytes,
                   label: "cross_run_dma_decline"),
-            Check(value: { $0.minimumDmaLargest },
-                  allowed: gates.trend.crossRunDmaAllowedDeclineBytes,
-                  label: "cross_run_dma_largest_decline"),
+            Check(value: {
+                $0.finalSnapshot.memory.dmaHeap.largestBlock
+            }, allowed: gates.trend.crossRunDmaAllowedDeclineBytes,
+               label: "cross_run_dma_largest_decline"),
         ]
         for profile in RendererBenchmarkProfile.allCases {
             let indexes = runs.indices.filter {
@@ -1519,17 +1588,16 @@ nonisolated enum RendererBenchmarkEvaluator {
             }.sorted {
                 runs[$0].repeatNumber < runs[$1].repeatNumber
             }
-            guard indexes.count >= SecureRendererBenchmarkPlan.comparisonRepeats else {
+            guard indexes.count >=
+                    SecureRendererBenchmarkPlan.comparisonRepeats else {
                 continue
             }
             for check in checks {
-                let values = indexes.map { check.value(runs[$0].summary) }
-                let strictlyDeclining = zip(values, values.dropFirst())
-                    .allSatisfy { $0 > $1 }
-                guard strictlyDeclining,
-                      let first = values.first,
-                      let last = values.last,
-                      first - last > check.allowed else { continue }
+                let values = indexes.map { check.value(runs[$0]) }
+                guard progressiveCrossRunDecline(
+                    values,
+                    allowedDecline: check.allowed
+                ) else { continue }
                 for index in indexes {
                     runs[index].failures = Array(Set(
                         runs[index].failures + [check.label]
