@@ -1,10 +1,16 @@
 import subprocess
+import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from map_platform.automatic_promotion import JOB_TIMEOUT, PromotionQueue, run_promotion
+source = Path(os.environ.get("PROMOTION_SCHEDULER_SOURCE", Path(__file__).resolve().parents[1] / "map_platform" / "automatic_promotion.py"))
+spec = importlib.util.spec_from_file_location("automatic_promotion", source)
+promotion = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(promotion)
+JOB_TIMEOUT, PromotionQueue, run_promotion = promotion.JOB_TIMEOUT, promotion.PromotionQueue, promotion.run_promotion
 
 
 class AutomaticPromotionTests(unittest.TestCase):
@@ -23,7 +29,7 @@ class AutomaticPromotionTests(unittest.TestCase):
         self.queue.discover()
         self.assertTrue(self.queue.process_one(100))
         self.runner.assert_called_once_with(self.ids[0])
-        with patch("map_platform.automatic_promotion.subprocess.run") as run:
+        with patch.object(promotion.subprocess, "run") as run:
             run_promotion(self.ids[1])
         self.assertEqual(run.call_args.args[0], ["map-platform", "promote-catalog-map", self.ids[1]])
         self.assertEqual(run.call_args.kwargs["timeout"], JOB_TIMEOUT)
@@ -33,7 +39,7 @@ class AutomaticPromotionTests(unittest.TestCase):
     def test_failure_backoff_survives_discovery_restart_and_does_not_starve(self):
         self.queue.discover()
         self.runner.side_effect = RuntimeError("secret URL must not be logged")
-        with self.assertLogs("map_platform.automatic_promotion") as logs:
+        with self.assertLogs("automatic_promotion") as logs:
             self.queue.process_one(100)
         self.assertNotIn("secret URL", " ".join(logs.output))
         self.queue.close()
