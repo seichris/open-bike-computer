@@ -1,6 +1,6 @@
 #include "device_debug_frame_store.hpp"
 #if DEVICE_REMOTE_DEBUG
-#include "../gui/src/mainScr.hpp"
+#include "device_debug_camera.hpp"
 #endif
 
 #include <esp_heap_caps.h>
@@ -169,7 +169,7 @@ void FrameStore::offerPanelFrame(const uint16_t *pixels, uint16_t width,
   const uint32_t startedUs = micros();
   std::memcpy(buffer_, pixels, payloadBytes_);
 #if DEVICE_REMOTE_DEBUG
-  capturedCamera_ = mapView.captureCameraMetadata();
+  capturedCamera_ = captureMapCameraForPanelFrame();
 #endif
   const uint32_t durationUs = micros() - startedUs;
   capturedAtMs_ = capturedAtMs;

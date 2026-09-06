@@ -121,6 +121,14 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("map_camera::markerAngle(visibleProjection, rider", marker)
         self.assertIn("visibleProjection.projectWorld(rider)", marker)
 
+    def test_frame_capture_uses_narrow_gui_owner_interface(self):
+        capture = (ESP32_ROOT / "lib/device_debug/device_debug_frame_store.cpp").read_text()
+        self.assertNotIn("mainScr.hpp", capture)
+        self.assertIn("captureMapCameraForPanelFrame()", capture)
+        self.assertIn("device_debug::captureMapCameraForPanelFrame()", MAIN_SCREEN_SOURCE)
+        widgets = (ESP32_ROOT / "lib/gui/src/widgets.hpp").read_text()
+        self.assertIn('"../../utils/src/gpsMath.hpp"', widgets)
+
         raw_map = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
         raw_labels = function_body(MAP_RENDERER_SOURCE, "bool Maps::drawStreetLabels")
         for raw_path in (raw_map, raw_labels):

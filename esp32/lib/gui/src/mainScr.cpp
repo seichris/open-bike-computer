@@ -9,6 +9,7 @@
 #include "mainScr.hpp"
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
 #include "../../power_metrics/power_metrics.hpp"
+#include "../../device_debug/device_debug_camera.hpp"
 #include "../../route_overlay/route_overlay.hpp"
 #include "../../ride_automation/ride_automation_runtime.hpp"
 #include "destinationPickerLayout.hpp"
@@ -31,6 +32,12 @@
 // #include "../../compass/compass.hpp"
 
 bool isMainScreen = false; // Flag to indicate main screen is selected
+
+#if DEVICE_REMOTE_DEBUG
+renderer_diagnostics::CameraSample device_debug::captureMapCameraForPanelFrame() {
+  return mapView.captureCameraMetadata();
+}
+#endif
 bool isScrolled = true;    // Flag to indicate when tileview was scrolled
 bool isReady = false;      // Flag to indicate when tileview scroll was finished
 bool isScrollingMap = false;  // Flag to indicate if map is scrolling
