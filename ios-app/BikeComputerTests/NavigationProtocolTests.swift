@@ -3069,6 +3069,10 @@ struct NavigationProtocolTests {
             }
             assertEqual(request.value(forHTTPHeaderField: "X-Installation-Token"), old.clientInstallationToken,
                 "migration and refresh prove possession of the old token")
+            if OfflineMapTestURLProtocol.bodyData(from: request).isEmpty {
+                assertEqual(request.value(forHTTPHeaderField: "X-Bicino-App-Attest"), "required",
+                    "managed refresh explicitly selects the attested migration contract")
+            }
             assert(request.url!.query!.contains(old.clientInstallationId), "migration keeps the old identity")
             if !OfflineMapTestURLProtocol.bodyData(from: request).isEmpty {
                 enrollments += 1

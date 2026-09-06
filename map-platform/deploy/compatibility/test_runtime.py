@@ -35,15 +35,21 @@ class CompatibilityRuntimeTests(unittest.TestCase):
 
     def test_enrollment_health_refresh_and_owner_isolation(self):
         health = self.client.get("/healthz").json()
-        self.assertTrue(health["appAttest"]["requiredForInstallation"])
+        self.assertFalse(health["appAttest"]["requiredForInstallation"])
+        self.assertTrue(health["appAttest"]["legacyCompatibility"])
+        self.assertTrue(health["appAttest"]["requiredForAttestedInstallations"])
         self.assertNotIn("admissionPolicyVersion", health)
         self.assertNotIn("stravaIntegration", health)
-        self.assertEqual(self.client.post("/v1/installations").status_code, 401)
+        self.assertEqual(self.client.post("/v1/installations", headers={
+            "X-Bicino-App-Attest": "required",
+        }).status_code, 401)
         credential = self.attest.issue_installation(self.client)
         self.assertIsInstance(credential, dict)
         params = {"clientInstallationId": credential["clientInstallationId"]}
         headers = {"X-Installation-Token": credential["clientInstallationToken"]}
-        refresh = self.client.post("/v1/installations", params=params, headers=headers)
+        refresh = self.client.post("/v1/installations", params=params, headers={
+            **headers, "X-Bicino-App-Attest": "required",
+        })
         self.assertEqual(refresh.status_code, 200, refresh.text)
         self.assertEqual(refresh.json()["clientInstallationId"], credential["clientInstallationId"])
         self.assertEqual(self.client.get("/v1/map-jobs", params=params, headers=headers).status_code, 200)
@@ -82,7 +88,7 @@ class CompatibilityRuntimeTests(unittest.TestCase):
         self.assertEqual(migrated["clientInstallationToken"], old_token)
         refreshed = self.client.post("/v1/installations", params={
             "clientInstallationId": old_id,
-        }, headers={"X-Installation-Token": old_token})
+        }, headers={"X-Installation-Token": old_token, "X-Bicino-App-Attest": "required"})
         self.assertEqual(refreshed.json(), migrated)
         listing = self.client.get("/v1/map-jobs", params={"clientInstallationId": old_id},
                                   headers={"X-Installation-Token": old_token})
@@ -100,6 +106,39 @@ class CompatibilityRuntimeTests(unittest.TestCase):
         })
         self.assertEqual(rejected.status_code, 401, rejected.text)
         self.assertIsNone(self.app.state.app_attest_store.key_id_for_installation(old_id))
+
+    def test_legacy_app_contract_survives_until_authenticated_migration(self):
+        malformed = self.client.post("/v1/installations", json={"unexpected": True})
+        self.assertEqual(malformed.status_code, 401, malformed.text)
+        issued = self.client.post("/v1/installations")
+        self.assertEqual(issued.status_code, 200, issued.text)
+        legacy = issued.json()
+        params = {"clientInstallationId": legacy["clientInstallationId"]}
+        headers = {"X-Installation-Token": legacy["clientInstallationToken"]}
+        refreshed = self.client.post("/v1/installations", params=params, headers=headers)
+        self.assertEqual(refreshed.json(), legacy)
+        strict_refresh = self.client.post("/v1/installations", params=params, headers={
+            **headers, "X-Bicino-App-Attest": "required",
+        })
+        self.assertEqual(strict_refresh.status_code, 401, strict_refresh.text)
+        self.assertEqual(strict_refresh.json()["detail"]["code"], "installation_attestation_required")
+        payload = {
+            "mode": "custom_bbox", "bbox": [103.85, 1.29, 103.86, 1.30],
+            "clientInstallationId": legacy["clientInstallationId"],
+            "clientRequestId": "legacy-before-migration",
+        }
+        self.assertEqual(self.client.post("/v1/map-jobs", json=payload).status_code, 401)
+        created = self.client.post("/v1/map-jobs", json=payload, headers=headers)
+        self.assertEqual(created.status_code, 200, created.text)
+        migrated = self.attest.issue_installation(self.client, existing_credential=legacy)
+        self.assertIsInstance(migrated, dict)
+        self.assertEqual(migrated["clientInstallationId"], legacy["clientInstallationId"])
+        payload["clientRequestId"] = "legacy-after-migration"
+        rejected = self.client.post("/v1/map-jobs", json=payload, headers=headers)
+        self.assertEqual(rejected.status_code, 401, rejected.text)
+        self.assertEqual(rejected.json()["detail"]["code"], "app_attest_assertion_required")
+        signed = self.attest.post_map_job(self.client, credential=migrated, payload=payload)
+        self.assertEqual(signed.status_code, 200, signed.text)
 
     def test_missing_assertion_cannot_create_a_map(self):
         credential = self.attest.issue_installation(self.client)

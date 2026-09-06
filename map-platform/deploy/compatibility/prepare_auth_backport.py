@@ -56,7 +56,11 @@ def authenticated_create_handler(current, baseline):
     lock = next(n for n in ast.walk(handler) if isinstance(n, ast.With))
     insertion = next(i for i, n in enumerate(lock.body)
                      if isinstance(n, ast.If) and ast.unparse(n.test) == "existing is not None") + 1
-    lock.body[insertion:insertion] = copy.deepcopy(authentication)
+    # Existing, unbound clients keep the exact deployed token contract during
+    # the app rollout. Once an installation enrolls, it cannot opt out again.
+    gate = ast.parse("if app_attest_store.key_id_for_installation(registered_installation_id) is not None: pass").body[0]
+    gate.body = copy.deepcopy(authentication)
+    lock.body[insertion:insertion] = [gate]
 
     # Prove that deleting ONLY the authentication additions recovers the exact
     # base handler, including job persistence, idempotency and rate limiting.
@@ -64,11 +68,25 @@ def authenticated_create_handler(current, baseline):
     projection.args.args = projection.args.args[:-len(additions)]
     projection.args.defaults = projection.args.defaults[:-len(additions)]
     projected_lock = next(n for n in ast.walk(projection) if isinstance(n, ast.With))
-    del projected_lock.body[insertion:insertion + len(authentication)]
+    del projected_lock.body[insertion:insertion + 1]
     if dump(projection) != dump(baseline):
         difference = "\n".join(difflib.unified_diff(ast.unparse(baseline).splitlines(), ast.unparse(projection).splitlines()))
         raise ValueError("current map-create logic is not compatible with the base worker:\n" + difference)
     return handler
+
+
+def compatible_installation_handler(current, baseline):
+    legacy = copy.deepcopy(baseline)
+    legacy.name = "create_legacy_installation"
+    legacy.decorator_list = []
+    handler = copy.deepcopy(current)
+    handler.body[:0] = ast.parse('''
+if payload is None and request.headers.get("X-Bicino-App-Attest") != "required":
+    result = create_legacy_installation(request, clientInstallationId, x_installation_token)
+    response.headers["Cache-Control"] = "private, no-store"
+    return result
+''').body
+    return legacy, handler
 
 
 def backport_api(baseline_text: str, current_text: str) -> str:
@@ -80,8 +98,11 @@ def backport_api(baseline_text: str, current_text: str) -> str:
     old_factory.args = ast.parse(
         "def create_app(*, app_attest_verifier: AppAttestationVerifying | None = None): pass"
     ).body[0].args
+    legacy_installation, installation = compatible_installation_handler(
+        named(new_factory.body, "create_installation"), named(old_factory.body, "create_installation")
+    )
     replacements = {
-        "create_installation": copy.deepcopy(named(new_factory.body, "create_installation")),
+        "create_installation": installation,
         "create_map_job": authenticated_create_handler(
             named(new_factory.body, "create_map_job"), named(old_factory.body, "create_map_job")
         ),
@@ -89,6 +110,7 @@ def backport_api(baseline_text: str, current_text: str) -> str:
     for index, node in enumerate(old_factory.body):
         if getattr(node, "name", None) in replacements:
             old_factory.body[index] = replacements[node.name]
+    old_factory.body.insert(old_factory.body.index(installation), legacy_installation)
 
     imports = [n for n in current.body if isinstance(n, ast.ImportFrom) and n.module == "app_attest"]
     if len(imports) != 1:
@@ -126,6 +148,12 @@ app_attest_store = AppAttestStore(
     health = named(old_factory.body, "healthz").body[0].value
     new_health = named(new_factory.body, "healthz").body[0].value
     attest = next(value for key, value in zip(new_health.keys, new_health.values) if key.value == "appAttest")
+    attest = copy.deepcopy(attest)
+    for index, key in enumerate(attest.keys):
+        if key.value in {"requiredForInstallation", "requiredForMapCreate"}:
+            attest.values[index] = ast.Constant(False)
+    attest.keys.extend([ast.Constant("legacyCompatibility"), ast.Constant("requiredForAttestedInstallations")])
+    attest.values.extend([ast.Constant(True), ast.Constant(True)])
     health.keys.append(ast.Constant("appAttest"))
     health.values.append(copy.deepcopy(attest))
     ast.fix_missing_locations(baseline)
