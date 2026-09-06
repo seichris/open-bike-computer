@@ -7179,6 +7179,25 @@ struct NavigationProtocolTests {
             deliveryState: "development",
             artifact: artifact(id: "dev", tier: "development", requiredBuild: nil)
         )
+        assert(!SavedMapListScope.savedMaps.includes(developmentMap, channel: "production"),
+               "regular Saved Maps hides development-only library entries")
+        assert(SavedMapListScope.developerMaps.includes(developmentMap, channel: "production"),
+               "Developer Settings retains development-only library entries")
+        assert(SavedMapListScope.savedMaps.includes(developmentMap, channel: "development"),
+               "Bicino Dev keeps development maps in its normal saved list")
+        assert(!SavedMapListScope.developerMaps.includes(developmentMap, channel: "development"),
+               "Bicino Dev does not duplicate its saved maps in the production-only developer list")
+        assert(SavedMapListScope.savedMaps.includes(nil, channel: "production"),
+               "legacy phone and device maps without catalog metadata remain visible")
+        assert(!SavedMapListScope.developerMaps.includes(nil, channel: "production"),
+               "unknown legacy provenance is not classified as development")
+        for state in ["promotion_pending", "blocked", "tombstoned"] {
+            let unpublished = map(deliveryState: state, artifacts: developmentMap.artifacts)
+            assert(!SavedMapListScope.savedMaps.includes(unpublished, channel: "production"),
+                   "unpublished development maps stay out of the regular list")
+            assert(SavedMapListScope.developerMaps.includes(unpublished, channel: "production"),
+                   "unpublished development maps remain inspectable in Developer Settings")
+        }
         assertEqual(
             OfflineMapCatalogAvailabilityPolicy.availability(
                 for: developmentMap,
@@ -7202,6 +7221,10 @@ struct NavigationProtocolTests {
             deliveryState: "production",
             artifact: artifact(id: "prod", tier: "production", requiredBuild: identity.build)
         )
+        assert(SavedMapListScope.savedMaps.includes(productionMap, channel: "production"),
+               "promoted maps remain visible regardless of their development origin")
+        assert(!SavedMapListScope.developerMaps.includes(productionMap, channel: "production"),
+               "promotion moves a map out of the developer-only list")
         assertEqual(
             OfflineMapCatalogAvailabilityPolicy.availability(
                 for: productionMap,
@@ -11231,6 +11254,13 @@ struct NavigationProtocolTests {
                 source.contains("catalogAvailability?.canDownload != true") &&
                 source.contains("clock.badge.exclamationmark"),
             "catalog rows explain and disable downloads that are pending or incompatible"
+        )
+        assert(
+            source.contains("DevelopmentMapsSettingsView(manager: offlineMapManager)") &&
+                source.contains("scope: .developerMaps") &&
+                source.contains("scope: scope") &&
+                source.contains("if scope == .savedMaps"),
+            "Developer Settings owns development-only rows without a new-map action"
         )
         assert(
             source.contains(

@@ -1082,15 +1082,17 @@ private struct SavedMapsSettingsSection: View {
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var manager: OfflineMapManager
     @FocusState.Binding var focusedPackFilename: String?
+    var scope: SavedMapListScope = .savedMaps
     @State private var renameInteraction = SavedMapRenameInteraction()
 
     var body: some View {
         let savedMaps = manager.savedMapListItems(
-            activeDeviceMap: bleManager.activeDeviceMap
+            activeDeviceMap: bleManager.activeDeviceMap,
+            scope: scope
         )
-        Section(header: Text("Saved Maps")) {
+        Section(header: Text(scope == .developerMaps ? "Development Maps" : "Saved Maps")) {
             if savedMaps.isEmpty {
-                Text("No offline maps yet")
+                Text(scope == .developerMaps ? "No development-only maps" : "No offline maps yet")
                     .foregroundColor(.secondary)
             } else {
                 ForEach(savedMaps) { item in
@@ -1105,17 +1107,19 @@ private struct SavedMapsSettingsSection: View {
                 }
             }
 
-            Button {
-                if let commit = renameInteraction.finish() {
-                    commitRename(commit)
+            if scope == .savedMaps {
+                Button {
+                    if let commit = renameInteraction.finish() {
+                        commitRename(commit)
+                    }
+                    focusedPackFilename = nil
+                    manager.beginMapAreaSelection()
+                    if manager.isMapAreaSelectionActive {
+                        dismiss()
+                    }
+                } label: {
+                    Label("Download a new Map", systemImage: "rectangle.dashed")
                 }
-                focusedPackFilename = nil
-                manager.beginMapAreaSelection()
-                if manager.isMapAreaSelectionActive {
-                    dismiss()
-                }
-            } label: {
-                Label("Download a new Map", systemImage: "rectangle.dashed")
             }
         }
         .onChange(of: focusedPackFilename) { newValue in
@@ -1181,6 +1185,28 @@ private struct SavedMapsSettingsSection: View {
             return
         }
         manager.renameCachedPack(at: packURL, to: commit.proposedName)
+    }
+}
+
+private struct DevelopmentMapsSettingsView: View {
+    @ObservedObject var manager: OfflineMapManager
+    @FocusState private var focusedPackFilename: String?
+
+    var body: some View {
+        Form {
+            SavedMapsSettingsSection(
+                manager: manager,
+                focusedPackFilename: $focusedPackFilename,
+                scope: .developerMaps
+            )
+            Section {
+                Text("These maps are in your shared library but have not been published for production. Production downloads still require a compatible, production-signed artifact.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .navigationTitle("Development Maps")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -3418,6 +3444,11 @@ private struct DeveloperSettingsView: View {
                     MapLibrarySettingsView(manager: offlineMapManager)
                 } label: {
                     Label("Map Library", systemImage: "map.circle")
+                }
+                NavigationLink {
+                    DevelopmentMapsSettingsView(manager: offlineMapManager)
+                } label: {
+                    Label("Development Maps", systemImage: "hammer")
                 }
             } footer: {
                 Text(

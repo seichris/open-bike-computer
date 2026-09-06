@@ -149,6 +149,23 @@ nonisolated struct OfflineMapCatalogCredential: Codable, Equatable {
     let credential: String
 }
 
+nonisolated enum SavedMapListScope: Equatable, Sendable {
+    case savedMaps
+    case developerMaps
+
+    func includes(_ map: OfflineMapCatalogMap?, channel: String) -> Bool {
+        // Filter after local/catalog reconciliation so a map cannot reappear
+        // as a duplicate local row. Unknown legacy provenance stays visible.
+        let isDeveloperOnly = channel == "production" &&
+            map?.originChannel == "development" &&
+            map?.deliveryState != "production"
+        switch self {
+        case .savedMaps: return !isDeveloperOnly
+        case .developerMaps: return isDeveloperOnly
+        }
+    }
+}
+
 nonisolated enum OfflineMapCatalogAvailability: Equatable, Sendable {
     case available
     case awaitingProductionPromotion
@@ -162,7 +179,7 @@ nonisolated enum OfflineMapCatalogAvailability: Equatable, Sendable {
         case .available:
             return nil
         case .awaitingProductionPromotion:
-            return "Awaiting production promotion"
+            return "Development map — not published for production"
         case .incompatible:
             return "Not compatible with this app build"
         case .unavailable:
