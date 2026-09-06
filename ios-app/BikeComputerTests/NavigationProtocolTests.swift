@@ -11186,7 +11186,10 @@ struct NavigationProtocolTests {
             "tapping outside the saved-map name clears focus without covering form controls"
         )
         assert(
-            source.contains("manager.beginMapAreaSelection()\n                if manager.isMapAreaSelectionActive {\n                    dismiss()\n                }"),
+            source.split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .joined(separator: "\n")
+                .contains("manager.beginMapAreaSelection()\nif manager.isMapAreaSelectionActive {\ndismiss()\n}"),
             "Download a new Map starts selection and explicitly dismisses Settings"
         )
         assert(
