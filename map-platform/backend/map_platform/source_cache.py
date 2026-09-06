@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -16,6 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import SourceRegion, utc_now_iso
+from .osmfr_fallback import (
+    OSMFR_BASE, fallback_url, is_upstream_unavailable, validate_pbf_header,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class SourceCacheError(RuntimeError):
@@ -96,6 +102,9 @@ class SourceCache:
             else self.data_root / "source-cache.json"
         )
         self.lock_stale_seconds = lock_stale_seconds
+        self.osmfr_fallback_enabled = os.environ.get(
+            "MAP_PLATFORM_OSMFR_FALLBACK", "1"
+        ).lower() not in {"0", "false", "no", "off"}
         raw_revalidation_seconds = revalidate_after_seconds
         if raw_revalidation_seconds is None:
             raw_revalidation_seconds = os.environ.get(
@@ -116,6 +125,55 @@ class SourceCache:
         self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
 
     def ensure(
+        self,
+        region: SourceRegion,
+        *,
+        force: bool = False,
+        cancellation_check=None,
+        minimum_free_bytes: int | None = None,
+    ) -> CachedSource:
+        """Try the primary, then one known alternative on upstream failure.
+
+        Each attempt uses the same locking, reserve, hashing and atomic-replace
+        path. The failed attempt has closed its response and removed its .tmp
+        before failover; validators and partial bytes never cross providers.
+        """
+        options = {
+            "force": force,
+            "cancellation_check": cancellation_check,
+            "minimum_free_bytes": minimum_free_bytes,
+        }
+        try:
+            return self._ensure(region, **options)
+        except (SourceCacheCancelled, SourceCacheStorageError):
+            raise
+        except SourceCacheError as primary_error:
+            alternative_url = (
+                fallback_url(region) if self.osmfr_fallback_enabled else None
+            )
+            if (
+                alternative_url is None
+                or not is_upstream_unavailable(primary_error.__cause__)
+            ):
+                raise
+            _raise_if_cancelled(cancellation_check)
+            logger.warning(
+                "Source %s unavailable from Geofabrik; trying OpenStreetMap France: %s",
+                region.id,
+                alternative_url,
+            )
+            alternative = replace(region, url=alternative_url, published_at=None)
+            try:
+                return self._ensure(alternative, **options)
+            except (SourceCacheCancelled, SourceCacheStorageError):
+                raise
+            except SourceCacheError as fallback_error:
+                raise SourceCacheError(
+                    f"both source providers failed for {region.id}; "
+                    f"Geofabrik: {primary_error}; OpenStreetMap France: {fallback_error}"
+                ) from fallback_error
+
+    def _ensure(
         self,
         region: SourceRegion,
         *,
@@ -387,11 +445,13 @@ class SourceCache:
                                     else None
                                 ),
                             )
+                            exc.close()
                             self._record(
                                 validated,
                                 cancellation_check=cancellation_check,
                             )
                             return validated
+                        exc.close()
                         raise SourceCacheError(
                             f"failed to download source PBF for {region.id}: {exc}"
                         ) from exc
@@ -402,6 +462,13 @@ class SourceCache:
                             f"failed to download source PBF for {region.id}: {exc}"
                         ) from exc
 
+                    if region.url.startswith(OSMFR_BASE):
+                        if not resolved_url.startswith(OSMFR_BASE):
+                            raise SourceCacheError("fallback redirected outside the trusted HTTPS source")
+                        try:
+                            validate_pbf_header(tmp_path)
+                        except ValueError as exc:
+                            raise SourceCacheError(str(exc)) from exc
                     downloaded_at = utc_now_iso()
                     cached = self._cached_source(
                         region,
@@ -552,7 +619,10 @@ class SourceCache:
     ) -> bool:
         if region.checksum:
             return False
-        if cached.source_url is not None and cached.source_url != region.url:
+        accepted_urls = {region.url}
+        if self.osmfr_fallback_enabled and (alternative := fallback_url(region)):
+            accepted_urls.add(alternative)
+        if cached.source_url is not None and cached.source_url not in accepted_urls:
             return True
         if (
             region.published_at is not None
