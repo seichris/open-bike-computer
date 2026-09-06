@@ -1,87 +1,119 @@
-"""Explicit PBF alternatives, not a hostname-rewriting mirror.
+"""Per-request PBF alternatives, not a byte-identical mirror or catalogue.
 
-OpenStreetMap France uses different region names, boundaries and snapshots.
-Only unpinned latest extracts with a known corresponding region may fail over.
-See docs/osm-source-fallback.md before extending the mapping.
+Derive the same path by default; use exact aliases only for reviewed differences.
+The download validates availability and file framing, not geographic equivalence.
+See docs/osmfr-alias-research.md for evidence and coverage exceptions.
 """
 from __future__ import annotations
 
 import http.client
+import re
 import ssl
 import urllib.error
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .models import SourceRegion
+if TYPE_CHECKING:
+    from .models import SourceRegion
 
 GEOFABRIK_BASE = "https://download.geofabrik.de/"
 OSMFR_BASE = "https://download.openstreetmap.fr/extracts/"
 
-# These are explicit region names, not a rule for arbitrary Geofabrik paths.
-# Destination listings verified on 2026-09-06. In particular, never replace
-# malaysia-singapore-brunei with malaysia, or ireland-and-northern-ireland
-# with ireland: those would silently drop part of the requested source.
-_SAME_PATH_REGIONS = {
-    "asia/china",
-    "asia/japan",
-    "asia/india",
-    "asia/indonesia",
-    "asia/bhutan",
-    "asia/cambodia",
-    "asia/laos",
-    "asia/myanmar",
-    "asia/philippines",
-    "europe/andorra",
-    "europe/austria",
-    "europe/belgium",
-    "europe/denmark",
-    "europe/finland",
-    "europe/france",
-    "europe/germany",
-    "europe/italy",
-    "europe/luxembourg",
-    "europe/monaco",
-    "europe/netherlands",
-    "europe/norway",
-    "europe/poland",
-    "europe/portugal",
-    "europe/slovakia",
-    "europe/spain",
-    "europe/sweden",
-    "europe/switzerland",
-    "europe/ukraine",
-}
-_CHINA_REGIONS = {
-    "anhui", "beijing", "chongqing", "fujian", "gansu", "guangdong",
-    "guangxi", "guizhou", "hainan", "hebei", "heilongjiang", "henan",
-    "hubei", "hunan", "jiangsu", "jiangxi", "jilin", "liaoning", "ningxia",
-    "qinghai", "shaanxi", "shandong", "shanghai", "shanxi", "sichuan",
-    "tianjin", "xinjiang", "yunnan", "zhejiang",
-}
-_FALLBACK_URLS = {
-    f"{GEOFABRIK_BASE}{path}-latest.osm.pbf": f"{OSMFR_BASE}{path}-latest.osm.pbf"
-    for path in _SAME_PATH_REGIONS | {f"asia/china/{name}" for name in _CHINA_REGIONS}
+# Full source paths, without -latest.osm.pbf. No basename matching, fuzzy
+# translation, blanket punctuation replacement, or inheritance by descendants.
+# Reviewed 2026-09-06 against the provider catalogues/listings; see the research
+# document for evidence. These are naming correspondences, not polygon proofs.
+ALIASES = {
+    "africa/congo-brazzaville": "africa/congo_brazzaville",
+    "africa/congo-democratic-republic": "africa/congo_kinshasa",
+    "africa/equatorial-guinea": "africa/equatorial_guinea",
+    "africa/ivory-coast": "africa/ivory_coast",
+    "africa/south-africa": "africa/south_africa",
+    "africa/south-sudan": "africa/south_sudan",
+    "asia/china/hong-kong": "asia/china/hong_kong",
+    "asia/china/inner-mongolia": "asia/china/inner_mongolia",
+    "asia/east-timor": "asia/east_timor",
+    "asia/israel-and-palestine": "asia/israel_and_palestine",
+    "australia-oceania/australia": "oceania/australia",
+    "australia-oceania/fiji": "merge/fiji",
+    "australia-oceania/new-caledonia": "oceania/new_caledonia",
+    "australia-oceania/papua-new-guinea": "oceania/papua_new_guinea",
+    "australia-oceania/solomon-islands": "oceania/solomon_islands",
+    "central-america/costa-rica": "central-america/costa_rica",
+    "central-america/el-salvador": "central-america/el_salvador",
+    "europe/czech-republic": "europe/czech_republic",
+    "europe/georgia": "asia/georgia",
+    "europe/germany/nordrhein-westfalen": "europe/germany/nordrhein_westfalen",
+    "europe/united-kingdom": "europe/united_kingdom",
+    "europe/united-kingdom/england": "europe/united_kingdom/england",
+    "europe/united-kingdom/falklands": "south-america/falkland",
+    "north-america/canada/british-columbia": "north-america/canada/british_columbia",
+    "north-america/canada/new-brunswick": "north-america/canada/new_brunswick",
+    "north-america/canada/newfoundland-and-labrador": "north-america/canada/newfoundland_and_labrador",
+    "north-america/canada/northwest-territories": "north-america/canada/northwest_territories",
+    "north-america/canada/nova-scotia": "north-america/canada/nova_scotia",
+    "north-america/canada/prince-edward-island": "north-america/canada/prince_edward_island",
+    "north-america/us/california": "north-america/us-west/california",
+    "north-america/us/colorado": "north-america/us-west/colorado",
+    "north-america/us/florida": "north-america/us-south/florida",
+    "north-america/us/georgia": "north-america/us-south/georgia",
+    "north-america/us/illinois": "north-america/us-midwest/illinois",
+    "north-america/us/michigan": "north-america/us-midwest/michigan",
+    "north-america/us/new-york": "north-america/us-northeast/new-york",
+    "north-america/us/north-carolina": "north-america/us-south/north-carolina",
+    "north-america/us/texas": "north-america/us-south/texas",
+    "north-america/us/virginia": "north-america/us-south/virginia",
+    "russia/central-fed-district": "russia/central_federal_district",
+    "russia/far-eastern-fed-district": "russia/far_eastern_federal_district",
+    "russia/north-caucasus-fed-district": "russia/north_caucasian_federal_district",
+    "russia/northwestern-fed-district": "russia/northwestern_federal_district",
+    "russia/siberian-fed-district": "russia/siberian_federal_district",
+    "russia/south-fed-district": "russia/southern_federal_district",
+    "russia/ural-fed-district": "russia/ural_federal_district",
+    "russia/volga-fed-district": "russia/volga_federal_district",
 }
 
-# Explicit naming differences in the China subdivision catalog.
-_FALLBACK_URLS.update({
-    f"{GEOFABRIK_BASE}asia/china/{primary}-latest.osm.pbf":
-        f"{OSMFR_BASE}asia/china/{alternative}-latest.osm.pbf"
-    for primary, alternative in {
-        "xizang": "tibet",
-        "neimenggu": "inner_mongolia",
-        "hong-kong": "hong_kong",
-        "macau": "macau",
-    }.items()
-})
+# These particular source scopes must not be replaced by a smaller component
+# or an unreviewed larger union. Absence from a directory alone is NOT a reason
+# to block a same-path probe: unknown regions (including Taiwan) remain eligible.
+EXCEPTIONS = {
+    "africa/senegal-and-gambia": "Combined source; Senegal alone omits Gambia.",
+    "africa/south-africa-and-lesotho": "Combined source; South Africa alone may omit Lesotho.",
+    "asia/gcc-states": "Combined source; no single member is an equivalent extract.",
+    "asia/indonesia": "Geofabrik explicitly includes East Timor; OSM.fr publishes it separately.",
+    "asia/malaysia-singapore-brunei": "Combined source; Malaysia alone omits Singapore and Brunei.",
+    "australia-oceania/australia/new-south-wales": "Geofabrik explicitly includes ACT and JBT; a state-only alias is unverified.",
+    "central-america/haiti-and-domrep": "Combined source; Haiti or Dominican Republic alone is incomplete.",
+    "europe/britain-and-ireland": "Combined source; neither the UK nor Ireland alone suffices.",
+    "europe/great-britain": "Great Britain is not the same source scope as the United Kingdom.",
+    "europe/ireland-and-northern-ireland": "Combined source; Ireland alone omits Northern Ireland.",
+    "north-america/us": "OSM.fr publishes regional US quadrants; none alone covers the whole US.",
+}
+
+# Full matching deliberately rejects ports, credentials, queries, fragments,
+# encoded separators, dot segments, empty segments, backslashes and whitespace.
+# Do not normalize an untrusted URL before this check (urlsplit strips controls).
+_LATEST_URL = re.compile(
+    re.escape(GEOFABRIK_BASE)
+    + r"(?P<path>[a-z0-9][a-z0-9_-]*(?:/[a-z0-9][a-z0-9_-]*)*)-latest\.osm\.pbf"
+)
 
 
 def fallback_url(region: SourceRegion) -> str | None:
-    """Never translate pinned snapshots, custom hosts, or unknown regions."""
+    """Return one candidate for an unpinned canonical Geofabrik latest URL.
+
+    Candidate construction performs no I/O. SourceCache tries it only after an
+    eligible primary failure; a missing candidate fails normally, without a
+    catalogue crawl, additional guesses, or a larger parent-region download.
+    """
     if region.provider != "geofabrik" or region.checksum or region.published_at:
         return None
-    # Exact full-URL lookup also rejects credentials, queries, fragments,
-    # alternate ports, lookalike hosts, and path traversal.
-    return _FALLBACK_URLS.get(region.url)
+    if not isinstance(region.url, str) or (match := _LATEST_URL.fullmatch(region.url)) is None:
+        return None
+    path = match.group("path")
+    if path in EXCEPTIONS:
+        return None
+    return f"{OSMFR_BASE}{ALIASES.get(path, path)}-latest.osm.pbf"
 
 
 def is_upstream_unavailable(error: BaseException | None) -> bool:

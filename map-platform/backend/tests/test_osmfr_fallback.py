@@ -275,7 +275,7 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual(opener.call_count, 1)
         self.assertEqual(cached.source_url, PRIMARY)
 
-    def test_pinned_or_unmapped_sources_never_fail_over(self):
+    def test_pinned_or_excluded_sources_never_fail_over(self):
         variants = [
             replace(self.region, checksum="a" * 64),
             replace(self.region, published_at="2026-09-05T00:00:00Z"),
@@ -359,19 +359,55 @@ class FallbackTests(unittest.TestCase):
             self.assertFalse(self.target.exists())
             self.assert_clean()
 
-    def test_url_mapping_is_explicit_and_preserves_region(self):
+    def test_url_derivation_and_aliases_preserve_region(self):
         self.assertEqual(fallback_url(self.region), ALTERNATIVE)
         for source, destination in (("asia/china/jiangsu", "asia/china/jiangsu"),
                                     ("europe/germany", "europe/germany"),
-                                    ("asia/china/xizang", "asia/china/tibet")):
+                                    ("asia/china/inner-mongolia", "asia/china/inner_mongolia"),
+                                    ("asia/taiwan", "asia/taiwan")):
             region = replace(self.region, url=GEOFABRIK_BASE + source + "-latest.osm.pbf")
             self.assertEqual(fallback_url(region), OSMFR_BASE + destination + "-latest.osm.pbf")
         for url in (PRIMARY + "?x=1", PRIMARY + "#fragment", PRIMARY.replace("https:", "http:"),
                     PRIMARY.replace(".de/", ".de.evil/"), PRIMARY.replace(".de/", ".de:443/"),
                     PRIMARY.replace("https://", "https://user:pass@"),
-                    GEOFABRIK_BASE + "europe/ireland-and-northern-ireland-latest.osm.pbf",
-                    GEOFABRIK_BASE + "asia/taiwan-latest.osm.pbf"):
+                    GEOFABRIK_BASE + "europe/ireland-and-northern-ireland-latest.osm.pbf"):
             self.assertIsNone(fallback_url(replace(self.region, url=url)), url)
+
+    def test_previously_unlisted_path_downloads_one_same_path_candidate(self):
+        primary = GEOFABRIK_BASE + "asia/japan/kanto-latest.osm.pbf"
+        alternative = OSMFR_BASE + "asia/japan/kanto-latest.osm.pbf"
+        self.region = replace(self.region, url=primary)
+        cached, opener = self.download([TimeoutError(), Response(pbf_bytes(), alternative)])
+        self.assertEqual([request_url(c.args[0]) for c in opener.call_args_list], [primary, alternative])
+        self.assertEqual(cached.source_url, alternative)
+        self.assert_clean()
+
+    def test_researched_alias_download_preserves_source_identity(self):
+        primary = GEOFABRIK_BASE + "europe/georgia-latest.osm.pbf"
+        alternative = OSMFR_BASE + "asia/georgia-latest.osm.pbf"
+        self.region = replace(self.region, url=primary)
+        cached, opener = self.download([TimeoutError(), Response(pbf_bytes(), alternative)])
+        self.assertEqual([request_url(c.args[0]) for c in opener.call_args_list], [primary, alternative])
+        self.assertEqual(cached.source_url, alternative)
+        self.assertIn(self.region.id, self.cache.metadata()["sources"])
+        self.assertEqual(self.region.url, primary)
+        self.assert_clean()
+
+    def test_missing_candidate_does_not_guess_or_replace_stable_bytes(self):
+        self.seed()
+        old_bytes = self.target.read_bytes()
+        old_metadata = self.cache.metadata_path.read_bytes()
+        primary = GEOFABRIK_BASE + "asia/new-region-latest.osm.pbf"
+        alternative = OSMFR_BASE + "asia/new-region-latest.osm.pbf"
+        self.region = replace(self.region, url=primary)
+        missing = urllib.error.HTTPError(alternative, 404, "not published", {}, None)
+        with patch("map_platform.source_cache.urllib.request.urlopen", side_effect=[TimeoutError(), missing]) as opener:
+            with self.assertRaisesRegex(SourceCacheError, "both source providers failed"):
+                self.cache.ensure(self.region, force=True)
+        self.assertEqual([request_url(c.args[0]) for c in opener.call_args_list], [primary, alternative])
+        self.assertEqual(self.target.read_bytes(), old_bytes)
+        self.assertEqual(self.cache.metadata_path.read_bytes(), old_metadata)
+        self.assert_clean()
 
     def test_error_classifier_does_not_retry_unrelated_errors(self):
         for error in (None, RuntimeError("local"), OSError(errno.ENOSPC, "disk"), ssl.SSLError("TLS")):
