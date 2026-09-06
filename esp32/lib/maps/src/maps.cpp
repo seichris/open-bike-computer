@@ -4406,7 +4406,9 @@ bool Maps::prepareMapScene(const RenderRequest &request, RenderResult &result) {
         return a->offset.y != b->offset.y ? a->offset.y < b->offset.y
                                          : a->offset.x < b->offset.x;
       });
-  result.sceneGeneration = preparedScene.generation;
+  // Zero explicitly identifies an incomplete, non-reusable preparation rather
+  // than attributing these pixels to a previous complete scene's generation.
+  result.sceneGeneration = preparedScene.valid ? preparedScene.generation : 0;
   return true;
 }
 

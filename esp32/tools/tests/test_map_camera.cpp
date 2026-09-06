@@ -3,18 +3,22 @@
 #include "../../lib/ble_navigation/device_capabilities_protocol.hpp"
 #include <cassert>
 #include <cmath>
+#include <utility>
 
 int main() {
   using namespace map_camera;
   using map_projection::Mode;
   for (auto mode : {Mode::Flat, Mode::BirdsEye}) {
-    for (int height : {366, 466, 410}) {
+    for (auto dimensions : {std::pair<int, int>{466, 366}, {466, 466},
+                            {410, 402}, {410, 502}, {502, 410}}) {
+      const int width = dimensions.first;
+      const int height = dimensions.second;
       for (int tilt = 0; tilt <= 4; ++tilt) {
         for (double heading : {0.0, 90.0, 180.0, 270.0, 359.0, 1.0}) {
           map_projection::Config config;
-          config.viewportWidth = 658;
+          config.viewportWidth = width + 192;
           config.viewportHeight = height + 192;
-          config.anchorX = 329;
+          config.anchorX = 96 + width / 2.0;
           config.anchorY = 96 + (mode == Mode::BirdsEye
               ? map_projection::birdsEyeAnchorY(height) : height / 2.0);
           config.mode = mode;
@@ -33,14 +37,14 @@ int main() {
             assert(roof.x == base.x);
             assert(roof.y < base.y);
           }
-          const auto label = projectLabel(p, {99850, 20030}, {10150, 20070}, false);
-          const auto along = projectLabel(p, {99850, 20030}, {10150, 20070}, true);
+          const auto label = projectLabel(p, {9985, 20030}, {10150, 20070}, false);
+          const auto along = projectLabel(p, {9985, 20030}, {10150, 20070}, true);
           assert(label.valid == along.valid);
           if (label.valid) {
             assert(label.angle == 0);
             assert(std::fabs(along.angle) <= map_presentation::kPi / 2);
             assert(label.x == along.x && label.y == along.y);
-            const auto a = p.projectWorld({99850, 20030});
+            const auto a = p.projectWorld({9985, 20030});
             const auto b = p.projectWorld({10150, 20070});
             if (a.valid && b.valid) {
               assert(std::fabs(label.x - (a.x + b.x) / 2) < 1e-8);
@@ -78,7 +82,21 @@ int main() {
   assert(!cropCovered(594, 494, 466, 366, 64, 16, true));
   assert(cropCovered(598, 498, 466, 366, 66, 16, true));
   assert(cropCovered(694, 602, 502, 410, 96, 16, false));
+  assert(cropCovered(602, 694, 410, 502, 96, 16, false));
+  assert(cropCovered(602, 594, 410, 402, 96, 16, false));
   assert(!cropCovered(500, 410, 502, 410, 0, 16, false));
+
+  // A live eastbound marker on an accepted north-up camera points right,
+  // including while a newer course-up camera is delayed. It must not be
+  // forced upright against north-up roads.
+  map_projection::Config northConfig;
+  northConfig.worldOrigin = {10000, 20000};
+  for (auto mode : {Mode::Flat, Mode::BirdsEye}) {
+    northConfig.mode = mode;
+    map_projection::Projection north(northConfig);
+    assert(std::fabs(markerAngle(north, northConfig.worldOrigin, 90) - 90) < 1e-6);
+    assert(needsRefresh(north, northConfig.worldOrigin, -map_presentation::kPi / 2));
+  }
 
   PreparedScene scene;
   assert(!scene.covers(1, 0, 0, 10, 10));
