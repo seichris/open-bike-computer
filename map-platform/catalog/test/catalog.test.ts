@@ -16,6 +16,7 @@ import {
   finalizePublication,
   getLibraryMap,
   listLibraryMaps,
+  listPromotionCandidates,
   listShares,
   prepareRetentionAuthorizations,
   quarantinePublication,
@@ -2342,6 +2343,47 @@ describe("validation", () => {
 });
 
 describe("catalog lifecycle boundaries", () => {
+  it("discovers development maps with bounded keyset pagination and excludes blocked maps", async () => {
+    const maps = [
+      developmentPublication("auto-a"),
+      developmentPublication("auto-b"),
+      developmentPublication("auto-c"),
+    ];
+    for (const candidate of maps) {
+      await finalizePublication(
+        env,
+        candidate,
+        candidate.publicationId,
+        await sha256Hex(JSON.stringify(candidate)),
+        null,
+        verifyTestArtifact,
+      );
+    }
+    const ids = maps.map((map) => map.mapEntryId).sort();
+    const first = await listPromotionCandidates(env, null, 1);
+    expect(first).toEqual({ mapEntryIds: [ids[0]], nextCursor: ids[0] });
+    expect(await listPromotionCandidates(env, first.nextCursor, 100)).toEqual({
+      mapEntryIds: ids.slice(1),
+      nextCursor: null,
+    });
+    await env.DB.prepare(
+      "UPDATE map_entries SET delivery_state='blocked' WHERE id=?",
+    )
+      .bind(ids[0])
+      .run();
+    expect((await listPromotionCandidates(env, null, 100)).mapEntryIds).toEqual(
+      ids.slice(1),
+    );
+    await expect(createPromotionGrant(env, ids[0])).rejects.toMatchObject({
+      status: 409,
+    });
+    await expect(listPromotionCandidates(env, null, 101)).rejects.toMatchObject(
+      { status: 400 },
+    );
+    await expect(listPromotionCandidates(env, "bad", 50)).rejects.toMatchObject(
+      { status: 400 },
+    );
+  });
   it("leases promotion atomically, renews it, recovers stale work, and finalizes once", async () => {
     const development = developmentPublication("promotion-lease");
     await finalizePublication(

@@ -16,6 +16,32 @@ SPEC.loader.exec_module(update_image)
 
 
 class UpdateImageTests(unittest.TestCase):
+    def test_optional_promoter_requires_immutable_identity_and_fixed_role(self):
+        text = MODULE_PATH.with_name("compose.yaml").read_text()
+        source = "a" * 40
+        reference = update_image.IMAGE_REPOSITORY + "@sha256:" + "b" * 64
+        converter = update_image.IMAGE_REPOSITORY + "@sha256:142957ae0d5f08d366b657f9bacb0ce17d85bfac9c5d98c644bc1b02188a59c8"
+        service = f"""  map-platform-promotion:
+    image: {reference}
+    environment:
+      MAP_PLATFORM_WORKER_IMAGE_REFERENCE: {converter}
+      MAP_PLATFORM_AUTO_PROMOTION_ENABLED: '1'
+      MAP_PLATFORM_CATALOG_CHANNEL: production
+"""
+        candidate = f"# promotion-source-commit: {source}\n" + text.replace("services:\n", "services:\n" + service, 1)
+        result = update_image.validate_manifest_text(candidate)
+        self.assertEqual(result.promotion_reference, reference)
+        self.assertEqual(result.promotion_source_commit, source)
+        for invalid in (
+            candidate.replace(reference, "image:latest"),
+            candidate.replace("MAP_PLATFORM_CATALOG_CHANNEL: production", "MAP_PLATFORM_CATALOG_CHANNEL: development"),
+            candidate.replace("MAP_PLATFORM_AUTO_PROMOTION_ENABLED: '1'", "MAP_PLATFORM_AUTO_PROMOTION_ENABLED: '0'"),
+            candidate.replace(f"    image: {reference}", f"    image: {reference}\n    command: worker-loop"),
+            candidate.replace(converter, "*map-platform-worker-image"),
+        ):
+            with self.assertRaises(ValueError):
+                update_image.validate_manifest_text(invalid)
+
     def setUp(self) -> None:
         self.compose = MODULE_PATH.with_name("compose.yaml")
         self.development_compose = MODULE_PATH.with_name(

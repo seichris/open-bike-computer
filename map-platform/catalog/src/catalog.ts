@@ -31,6 +31,46 @@ const MAX_RETENTION_BATCH = 10;
 const RETENTION_AUTHORIZATION_MILLISECONDS = 15 * 60 * 1000;
 const PROMOTION_LEASE_MILLISECONDS = 60 * 60 * 1000;
 
+/** Production-only discovery; promotion grants still revalidate each artifact. */
+export async function listPromotionCandidates(
+  env: Env,
+  cursor: unknown,
+  limit: unknown,
+): Promise<{ mapEntryIds: string[]; nextCursor: string | null }> {
+  if (
+    cursor !== null &&
+    (typeof cursor !== "string" || !MAP_ENTRY_ID.test(cursor))
+  ) {
+    throw new HttpError(400, "invalid promotion cursor");
+  }
+  if (
+    typeof limit !== "number" ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 100
+  ) {
+    throw new HttpError(400, "invalid promotion limit");
+  }
+  const rows = await env.DB.prepare(
+    `SELECT m.id FROM map_entries m
+      WHERE m.id > ? AND m.origin_channel = 'development'
+        AND m.delivery_state IN ('development', 'promotion_pending')
+        AND EXISTS (SELECT 1 FROM artifacts a WHERE a.map_entry_id = m.id
+          AND a.bucket_slot = 'development' AND a.delivery_tier = 'development'
+          AND a.format = 'zip-stored-v1' AND a.generation_head = 1 AND a.state = 'live')
+        AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.map_entry_id = m.id
+          AND a.delivery_tier = 'production' AND a.generation_head = 1 AND a.state = 'live')
+      ORDER BY m.id LIMIT ?`,
+  )
+    .bind(cursor ?? "", limit + 1)
+    .all<{ id: string }>();
+  const ids = rows.results.slice(0, limit).map((row) => row.id);
+  return {
+    mapEntryIds: ids,
+    nextCursor: rows.results.length > limit ? ids[ids.length - 1] : null,
+  };
+}
+
 function retentionGraceMilliseconds(env: Env): number {
   const days = Number(env.RETENTION_GRACE_DAYS ?? "30");
   if (!Number.isSafeInteger(days) || days < 1 || days > 365) {
@@ -1807,6 +1847,12 @@ export async function createPromotionGrant(
   if (!map) throw new HttpError(404, "map not found");
   const production = await existingProductionPromotion(env, mapEntryID);
   if (production) return production;
+  if (
+    map.origin_channel !== "development" ||
+    !["development", "promotion_pending"].includes(map.delivery_state)
+  ) {
+    throw new HttpError(409, "map is not eligible for promotion");
+  }
   const artifact = await env.DB.prepare(
     `SELECT * FROM artifacts
       WHERE map_entry_id = ? AND bucket_slot = 'development'
@@ -1837,7 +1883,8 @@ export async function createPromotionGrant(
        ) SELECT me.id, ?, a.id, a.object_key, a.byte_count, a.sha256,
                 'active', ?, ?
            FROM map_entries me JOIN artifacts a ON a.map_entry_id = me.id
-          WHERE me.id = ? AND me.delivery_state <> 'production'
+          WHERE me.id = ? AND me.origin_channel = 'development'
+            AND me.delivery_state IN ('development', 'promotion_pending')
             AND a.id = ? AND a.bucket_slot = 'development'
             AND a.delivery_tier = 'development' AND a.format = 'zip-stored-v1'
             AND a.state = 'live' AND a.object_key = ?
