@@ -508,6 +508,54 @@ nonisolated enum RendererBenchmarkWindowWireContract {
     }
 }
 
+nonisolated struct RendererCameraEvidence: Codable, Equatable, Sendable {
+    let schema: Int
+    let enabled: Bool
+    let frameSequence: UInt32
+    let sceneGeneration: UInt32
+    let requestedAtMs: UInt32
+    let observedAtMs: UInt32
+    let lagMs: UInt32
+    let displayedBearingTenths: Int
+    let targetBearingTenths: Int
+    let markerAngleTenths: Int
+    let effectiveTopScalePermille: Int
+    let requestedMode: Int
+    let effectiveMode: Int
+    let labelDensity: Int
+    let labelOrientation: Int
+    let hidden: Bool
+    let updateRequired: Bool
+    let sceneReused: Bool
+    var maximumMarkerResidualTenths: Int? = nil
+    var lag: RendererBenchmarkMetricsSnapshot.Timing? = nil
+}
+
+extension RendererCameraEvidence {
+    nonisolated static func frameHeader(_ header: String) -> Self? {
+        guard header.utf8.count <= 255 else { return nil }
+        let parts = header.split(separator: ",", omittingEmptySubsequences: false)
+        guard parts.count == 18 else { return nil }
+        let values = parts.compactMap { Int64($0) }
+        guard values.count == 18, values[0] == 1,
+              [1, 15, 16, 17].allSatisfy({ (0...1).contains(values[$0]) }),
+              (2...6).allSatisfy({ (0...Int64(UInt32.max)).contains(values[$0]) }),
+              [7, 8].allSatisfy({ (-3600...3600).contains(values[$0]) }),
+              (0..<3600).contains(values[9]), (0...1000).contains(values[10]),
+              [11, 12, 14].allSatisfy({ (0...1).contains(values[$0]) }),
+              (0...3).contains(values[13]) else { return nil }
+        return Self(schema: 1, enabled: values[1] == 1,
+                    frameSequence: UInt32(values[2]), sceneGeneration: UInt32(values[3]),
+                    requestedAtMs: UInt32(values[4]), observedAtMs: UInt32(values[5]),
+                    lagMs: UInt32(values[6]), displayedBearingTenths: Int(values[7]),
+                    targetBearingTenths: Int(values[8]), markerAngleTenths: Int(values[9]),
+                    effectiveTopScalePermille: Int(values[10]), requestedMode: Int(values[11]),
+                    effectiveMode: Int(values[12]), labelDensity: Int(values[13]),
+                    labelOrientation: Int(values[14]), hidden: values[15] == 1,
+                    updateRequired: values[16] == 1, sceneReused: values[17] == 1)
+    }
+}
+
 nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
                                                             Equatable,
                                                             Sendable {
@@ -733,6 +781,7 @@ nonisolated struct RendererBenchmarkMetricsSnapshot: Codable,
     let replayTransport: ReplayTransport?
     let remoteDebug: RemoteDebug
     var deliveryTiming: RendererDeliveryTimingEvidence? = nil
+    var camera: RendererCameraEvidence? = nil
 }
 
 nonisolated struct RendererDeliveryTimingEvidence: Codable, Equatable, Sendable {
@@ -883,6 +932,7 @@ nonisolated struct RendererBenchmarkEvidenceSample: Codable,
     var replayTransport: RendererBenchmarkMetricsSnapshot.ReplayTransport? = nil
     var remoteDebug: RendererBenchmarkMetricsSnapshot.RemoteDebug? = nil
     var deliveryTiming: RendererDeliveryTimingEvidence? = nil
+    var camera: RendererCameraEvidence? = nil
 }
 
 nonisolated struct RendererBenchmarkRunSummary: Codable, Equatable, Sendable {
@@ -970,6 +1020,7 @@ nonisolated struct RendererBenchmarkScreenshotEvidence: Codable,
     let path: String
     let bytes: Int
     let sha256: String
+    var camera: RendererCameraEvidence? = nil
 }
 
 nonisolated enum RendererBenchmarkCheckpointFramePolicy {
@@ -1140,7 +1191,8 @@ nonisolated enum RendererBenchmarkEvaluator {
             gps: snapshot.gps,
             replayTransport: snapshot.replayTransport,
             remoteDebug: snapshot.remoteDebug,
-            deliveryTiming: snapshot.deliveryTiming
+            deliveryTiming: snapshot.deliveryTiming,
+            camera: snapshot.camera
         )
     }
 

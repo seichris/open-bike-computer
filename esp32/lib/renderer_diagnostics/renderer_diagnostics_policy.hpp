@@ -324,6 +324,27 @@ struct ReplayTransportDiagnostics {
   ReplayMarkerResult lastMarkerResult = ReplayMarkerResult::None;
 };
 
+struct CameraSample {
+  uint32_t frameSequence = 0;
+  uint32_t sceneGeneration = 0;
+  uint32_t requestedAtMs = 0;
+  uint32_t observedAtMs = 0;
+  uint32_t lagMs = 0;
+  int16_t displayedBearingTenths = 0;
+  int16_t targetBearingTenths = 0;
+  uint16_t markerAngleTenths = 0;
+  uint16_t effectiveTopScalePermille = 0;
+  uint8_t requestedMode = 0;
+  uint8_t effectiveMode = 0;
+  uint8_t labelDensity = 0;
+  uint8_t labelOrientation = 0;
+  bool enabled = false;
+  bool hidden = false;
+  bool updateRequired = false;
+  bool sceneReused = false;
+};
+static_assert(sizeof(CameraSample) <= 40, "bounded camera telemetry");
+
 struct Snapshot {
   uint8_t schema = kSchemaVersion;
   uint32_t sequence = 0;
@@ -350,6 +371,9 @@ struct Snapshot {
   TimingSummary buildingDraw{};
   TimingSummary buildingTotal{};
   TimingSummary displayFlush{};
+  CameraSample camera{};
+  TimingSummary cameraLag{};
+  uint16_t maximumMarkerResidualTenths = 0;
   BuildingPassSample buildings{};
   std::array<uint32_t, 6> limiterPasses{};
   JobCounters jobs{};
@@ -415,6 +439,21 @@ public:
   uint32_t measurementWindowId() const { return measurementWindowId_; }
 
   JobCounters currentJobs() const { return jobs_; }
+
+  bool noteCameraForWindow(uint32_t windowId, const CameraSample &sample) {
+    if (!sessionActive_ || windowId == 0 || windowId != measurementWindowId_)
+      return false;
+    camera_ = sample;
+    if (sample.updateRequired)
+      cameraLag_.note(sample.lagMs);
+    if (sample.effectiveMode == 1) {
+      maximumMarkerResidualTenths_ = std::max<uint16_t>(
+          maximumMarkerResidualTenths_,
+          std::min<uint16_t>(sample.markerAngleTenths,
+                             3600 - sample.markerAngleTenths));
+    }
+    return true;
+  }
 
   void noteMemory(
       const MemorySample &sample,
@@ -687,6 +726,9 @@ public:
     result.buildingDraw = buildingDraw_.summary();
     result.buildingTotal = buildingTotal_.summary();
     result.displayFlush = displayFlush_.summary();
+    result.camera = camera_;
+    result.cameraLag = cameraLag_.summary();
+    result.maximumMarkerResidualTenths = maximumMarkerResidualTenths_;
     result.buildings = buildings_;
     result.buildings.allocationFallback = allocationFallbackObserved_;
     result.limiterPasses = limiterPasses_;
@@ -808,6 +850,9 @@ private:
     buildingDraw_.reset();
     buildingTotal_.reset();
     displayFlush_.reset();
+    camera_ = {};
+    cameraLag_.reset();
+    maximumMarkerResidualTenths_ = 0;
     buildings_ = {};
     allocationFallbackObserved_ = false;
     limiterPasses_.fill(0);
@@ -852,6 +897,9 @@ private:
   TimingHistogram buildingDraw_{};
   TimingHistogram buildingTotal_{};
   TimingHistogram displayFlush_{};
+  CameraSample camera_{};
+  TimingHistogram cameraLag_{};
+  uint16_t maximumMarkerResidualTenths_ = 0;
   BuildingPassSample buildings_{};
   bool allocationFallbackObserved_ = false;
   std::array<uint32_t, 6> limiterPasses_{};
