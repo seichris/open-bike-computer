@@ -28,7 +28,7 @@ enum SavedRouteMapPreviewFactory {
     static func make(
         _ selection: SavedRouteMapSelection,
         now: () -> Date = Date.init,
-        convert: (CLLocationCoordinate2D) -> CLLocationCoordinate2D =
+        convert: @MainActor (CLLocationCoordinate2D) -> CLLocationCoordinate2D =
             displayCoordinate
     ) throws -> SavedRouteMapPreview {
         try checkExpiry(selection, now: now())
