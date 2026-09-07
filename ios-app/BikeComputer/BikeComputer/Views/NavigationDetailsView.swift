@@ -182,15 +182,12 @@ struct NavigationInstructionBanner: View {
 }
 
 struct RideMetricsPanel: View {
+    @ObservedObject var coordinator: BikeComputerCoordinator
     @ObservedObject var workoutStore: WorkoutMetricsStore
     @ObservedObject var watchAvailability: WorkoutWatchAvailabilityMonitor
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
-    let isNavigating: Bool
     let isCompactHeight: Bool
-    let arrivalDate: Date?
-    let remainingTime: TimeInterval?
-    let remainingDistance: CLLocationDistance?
     let onStopNavigation: () -> Void
     let onStartWorkout: () -> Void
     let onMarkSegment: () -> Void
@@ -203,6 +200,22 @@ struct RideMetricsPanel: View {
     let onOpenSensorSettings: () -> Void
     let onDismissSensorPrompt: () -> Void
     let isSheetExpanded: Bool?
+
+    private var isNavigating: Bool {
+        coordinator.isNavigating
+    }
+
+    private var arrivalDate: Date? {
+        coordinator.expectedArrivalDate
+    }
+
+    private var remainingTime: TimeInterval? {
+        coordinator.routeRemainingTime
+    }
+
+    private var remainingDistance: CLLocationDistance? {
+        coordinator.routeRemainingDistance
+    }
 
     var body: some View {
         if let isSheetExpanded {

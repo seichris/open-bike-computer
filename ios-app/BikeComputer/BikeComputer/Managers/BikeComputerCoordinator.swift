@@ -131,6 +131,7 @@ class BikeComputerCoordinator: ObservableObject {
     private var latestRerouteLocation: CLLocation?
     private var navigationDestination: MKMapItem?
     private var routeDeviationDetector = RouteDeviationDetector()
+    private var lastRerouteObservationAt: Date?
     private var lastRerouteRequestDate = Date.distantPast
     private let rerouteCooldown: TimeInterval = 15
     private var transportType: MKDirectionsTransportType = RouteTransportTypes.cycling
@@ -480,19 +481,37 @@ class BikeComputerCoordinator: ObservableObject {
     }
 
     private func processNavigationLocation(_ location: CLLocation) {
-        let acceptedForNavigation = navEngine.processExternalLocation(location)
-        if acceptedForNavigation {
-            if ongoingRerouteDirections != nil,
-               routeDeviationDetector.isEligible(
-                   horizontalAccuracy: location.horizontalAccuracy
-               ) {
-                let routeLocation = CoordinateConverter.mapKitRouteLocation(
-                    fromGPSLocation: location
-                )
-                latestRerouteLocation = routeLocation
-            }
-            evaluateRerouting(for: location)
+        _ = navEngine.processExternalLocation(location)
+        guard navEngine.isNavigating, !navEngine.isSimulationMode else {
+            return
         }
+
+        // Progress matching may reject a valid far-away fix. Rerouting uses
+        // its own observation gate, without counting cached/replayed fixes.
+        let age = now().timeIntervalSince(location.timestamp)
+        guard age.isFinite, (-1...10).contains(age),
+              CLLocationCoordinate2DIsValid(location.coordinate) else {
+            routeDeviationDetector.reset()
+            return
+        }
+        if let previous = lastRerouteObservationAt {
+            guard location.timestamp > previous else { return }
+            if location.timestamp.timeIntervalSince(previous) > 5 {
+                routeDeviationDetector.reset()
+            }
+        }
+        lastRerouteObservationAt = location.timestamp
+
+        if ongoingRerouteDirections != nil,
+           routeDeviationDetector.isEligible(
+               horizontalAccuracy: location.horizontalAccuracy
+           ) {
+            let routeLocation = CoordinateConverter.mapKitRouteLocation(
+                fromGPSLocation: location
+            )
+            latestRerouteLocation = routeLocation
+        }
+        evaluateRerouting(for: location)
     }
 
     private static func workoutFallbackLocation(
@@ -633,6 +652,7 @@ class BikeComputerCoordinator: ObservableObject {
         ongoingRerouteDirections = nil
         latestRerouteLocation = nil
         navigationDestination = nil
+        lastRerouteObservationAt = nil
         routeDeviationDetector.reset()
         lastRerouteRequestDate = .distantPast
         navEngine.stopNavigation()
@@ -1279,8 +1299,8 @@ extension BikeComputerCoordinator {
                 }
 
                 if presentsAlternatives {
-                    let alternatives = routes.compactMap { candidate ->
-                        NavigationRouteAlternativeV1? in
+                    let alternatives = routes.enumerated().compactMap {
+                        index, candidate -> (index: Int, candidate: MKRoute, name: String)? in
                         do {
                             let normalizedInitialLocation =
                                 MapKitRouteAdapter.normalizedLocation(
@@ -1300,15 +1320,34 @@ extension BikeComputerCoordinator {
                             print("Ignoring invalid route alternative: \(error)")
                             return nil
                         }
-                        return NavigationRouteAlternativeV1(
+                        return (
+                            index: index,
+                            candidate: candidate,
+                            name: candidate.name
+                        )
+                    }
+                    .sorted { lhs, rhs in
+                        if lhs.candidate.expectedTravelTime !=
+                            rhs.candidate.expectedTravelTime {
+                            return lhs.candidate.expectedTravelTime <
+                                rhs.candidate.expectedTravelTime
+                        }
+                        if lhs.candidate.distance != rhs.candidate.distance {
+                            return lhs.candidate.distance < rhs.candidate.distance
+                        }
+                        return lhs.index < rhs.index
+                    }
+                    .enumerated()
+                    .map { displayIndex, entry in
+                        NavigationRouteAlternativeV1(
                             id: UUID(),
-                            route: candidate,
-                            title: candidate.name.isEmpty
-                                ? "Route \(routes.firstIndex(where: { $0 === candidate }).map { $0 + 1 } ?? 1)"
-                                : candidate.name,
-                            distanceMeters: candidate.distance,
-                            expectedTravelTime: candidate.expectedTravelTime,
-                            advisoryNotices: candidate.advisoryNotices
+                            route: entry.candidate,
+                            title: entry.name.isEmpty
+                                ? "Route \(displayIndex + 1)"
+                                : entry.name,
+                            distanceMeters: entry.candidate.distance,
+                            expectedTravelTime: entry.candidate.expectedTravelTime,
+                            advisoryNotices: entry.candidate.advisoryNotices
                         )
                     }
                     guard let selected = alternatives.first else {
@@ -1318,6 +1357,30 @@ extension BikeComputerCoordinator {
                         self.alert.isShowing = true
                         return
                     }
+
+                    if alternatives.count == 1 {
+                        print("Route calculated successfully!")
+                        print("Distance: \(selected.distanceMeters)m, ETA: \(selected.expectedTravelTime)s")
+                        print("Steps: \(selected.route.steps.count)")
+
+                        self.routeCalculation.status = "Starting navigation..."
+                        self.beginNavigation(
+                            with: selected.route,
+                            destination: destinationItem,
+                            transportType: requestedTransportType,
+                            isTestMode: isTestMode,
+                            initialLocation: initialLocation
+                        )
+                        self.completeNavigationStart(.started, generation: generation)
+
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                            guard self.routeCalculationGeneration == generation else { return }
+                            self.routeCalculation.isCalculating = false
+                            self.routeCalculation.status = ""
+                        }
+                        return
+                    }
+
                     self.pendingRoutePlan = PendingRoutePlan(
                         alternatives: alternatives,
                         destination: destinationItem,
@@ -1367,6 +1430,7 @@ extension BikeComputerCoordinator {
     ) {
         currentRoute = route
         navigationDestination = destination
+        lastRerouteObservationAt = nil
         self.transportType = transportType
         routeDeviationDetector.reset()
         lastRerouteRequestDate = .distantPast

@@ -3172,6 +3172,7 @@ final class OfflineMapManager: ObservableObject {
         })
         return OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
             localArtifactSHA256s: localArtifactSHA256s,
+            localPrimaryArtifact: metadata?.primaryArtifact,
             map: map,
             channel: OfflineMapCatalogConfig.channel(
                 generationServerURLString: serverURLString

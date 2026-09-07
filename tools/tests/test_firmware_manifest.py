@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -23,6 +24,11 @@ SPEC.loader.exec_module(firmware_manifest)
 
 
 class FirmwareManifestTests(unittest.TestCase):
+    def test_new_signing_rejects_short_or_unverified_source_before_reading_image(self):
+        for sha in ("a" * 12, "unverified-main", "A" * 40, "a" * 41):
+            with self.subTest(sha=sha), self.assertRaisesRegex(ValueError, "full immutable Git SHA"):
+                firmware_manifest.write_manifest(argparse.Namespace(git_sha=sha))
+
     def test_canonical_payload_requires_and_orders_signed_fields(self) -> None:
         manifest = {
             "schemaVersion": 1,
@@ -81,7 +87,7 @@ class FirmwareManifestTests(unittest.TestCase):
                     "--tag",
                     "v2.3.4",
                     "--git-sha",
-                    "0123456789ab",
+                    "0123456789abcdef0123456789abcdef01234567",
                     "--private-key-base64",
                     private_key_base64,
                     "--output",
@@ -99,7 +105,7 @@ class FirmwareManifestTests(unittest.TestCase):
                     "target": "WAVESHARE_AMOLED_175",
                     "version": "2.3.4",
                     "build": 57,
-                    "gitSha": "0123456789ab",
+                    "gitSha": "0123456789abcdef0123456789abcdef01234567",
                     "size": len(firmware_bytes),
                     "sha256": hashlib.sha256(firmware_bytes).hexdigest(),
                     "url": (
@@ -115,7 +121,7 @@ class FirmwareManifestTests(unittest.TestCase):
                 "target=WAVESHARE_AMOLED_175\n"
                 "version=2.3.4\n"
                 "build=57\n"
-                "gitSha=0123456789ab\n"
+                "gitSha=0123456789abcdef0123456789abcdef01234567\n"
                 f"size={len(firmware_bytes)}\n"
                 f"sha256={hashlib.sha256(firmware_bytes).hexdigest()}\n"
                 "url=https://github.com/owner/repository/releases/download/"
