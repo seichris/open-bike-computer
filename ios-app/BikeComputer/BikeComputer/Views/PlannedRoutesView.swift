@@ -7,12 +7,12 @@ struct SavedRoutesSettingsSection: View {
     @Environment(\.savedRouteMapAction) private var mapAction
     @Environment(\.savedRouteNavigationAction) private var navigationAction
     let onImportFromStrava: () -> Void
+    let onPrepareOfflineSave: (PhoneOfflineRouteSaveSession) -> Void
+    let saveFeedback: String?
     @FocusState private var focusedRouteID: UUID?
     @State private var renameInteraction = SavedRouteRenameInteraction()
     @State private var errorMessage: String?
     @State private var isImportingGPX = false
-    @State private var offlineSaveSession: PhoneOfflineRouteSaveSession?
-    @State private var saveFeedback: String?
 
     var body: some View {
         Section {
@@ -83,14 +83,6 @@ struct SavedRoutesSettingsSection: View {
         } message: {
             Text(errorMessage ?? "Unknown error")
         }
-        .sheet(item: $offlineSaveSession) { session in
-            OfflineRouteSaveSheet(session: session, library: routeLibrary) { result in
-                let name = routeLibrary.displayName(for: result.summary)
-                saveFeedback = result.alreadySaved
-                    ? String(format: NSLocalizedString("“%@” is already saved on this iPhone.", comment: "Duplicate offline route"), name)
-                    : String(format: NSLocalizedString("“%@” is saved on this iPhone.", comment: "Offline route save success"), name)
-            }
-        }
         .onAppear { routeLibrary.reload() }
         .onChange(of: focusedRouteID) { newValue in
             scheduleRenameCommitIfNeeded(focusedRouteID: newValue)
@@ -119,10 +111,10 @@ struct SavedRoutesSettingsSection: View {
                   byteCount <= GPXRouteImporterV1.maximumInputBytes else {
                 throw GPXRouteImporterError.fileTooLarge
             }
-            offlineSaveSession = try routeLibrary.prepareGPX(
+            onPrepareOfflineSave(try routeLibrary.prepareGPX(
                 Data(contentsOf: url, options: .mappedIfSafe),
                 fileName: url.lastPathComponent
-            )
+            ))
         } catch {
             let cocoa = error as NSError
             guard !(cocoa.domain == NSCocoaErrorDomain && cocoa.code == NSUserCancelledError) else { return }
@@ -513,7 +505,7 @@ struct SavedRoutesSettingsSection: View {
 
 /// Confirmation owns only a memory draft. The library remains the sole durable
 /// owner; closing this sheet, the document picker or the app writes no draft.
-private struct OfflineRouteSaveSheet: View {
+struct OfflineRouteSaveSheet: View {
     @ObservedObject var session: PhoneOfflineRouteSaveSession
     let library: PhoneRouteLibrary
     let onSaved: (PhoneOfflineRouteSaveResult) -> Void

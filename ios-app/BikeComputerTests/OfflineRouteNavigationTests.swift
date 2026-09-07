@@ -21,6 +21,7 @@ extension NavigationProtocolTests {
     /// Runs against the actual coordinator and NavigationEngine. Only directions
     /// and external location samples are controlled; offline requests are counted.
     static func testOfflineSavedNavigation() {
+        testOfflineSavePresentationWiring()
         let suite = "OfflineNavigation.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -133,4 +134,27 @@ extension NavigationProtocolTests {
             assert(false, "offline navigation regression failed: \(error)")
         }
     }
+
+    private static func testOfflineSavePresentationWiring() {
+        do {
+            let settings = try String(contentsOfFile:
+                "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift", encoding: .utf8)
+            let routes = try String(contentsOfFile:
+                "ios-app/BikeComputer/BikeComputer/Views/PlannedRoutesView.swift", encoding: .utf8)
+            assert(settings.contains("case offlineRouteSave(UUID)") &&
+                settings.contains("presentedSheet = .offlineRouteSave(session.id)") &&
+                settings.contains("OfflineRouteSaveSheet(session: session, library: routeLibrary)"),
+                "offline confirmation is item-driven from the stable Settings root")
+            assert(settings.contains("offlineSaveSession?.cancel()") &&
+                settings.contains("offlineSaveSession = nil") &&
+                settings.contains("saveFeedback: offlineSaveFeedback"),
+                "Settings owns confirmation cancellation, draft release, and success feedback")
+            assert(routes.contains("onPrepareOfflineSave(try routeLibrary.prepareGPX(") &&
+                !routes.contains(".sheet("),
+                "Saved Routes requests offline confirmation without a transient section sheet")
+        } catch {
+            assert(false, "offline confirmation wiring sources unavailable: \(error)")
+        }
+    }
+
 }
