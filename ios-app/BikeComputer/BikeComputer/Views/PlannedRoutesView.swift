@@ -130,6 +130,11 @@ struct SavedRoutesSettingsSection: View {
                     .contentShape(Rectangle())
                     .onTapGesture { focusedRouteID = nil }
 
+                mapPreviewButton(
+                    route: route,
+                    displayName: displayName
+                )
+
                 watchStatusControl(
                     status,
                     route: route,
@@ -164,44 +169,12 @@ struct SavedRoutesSettingsSection: View {
                 .accessibilityLabel("Delete \(displayName)")
             }
 
-            Text("\(route.source.label) → \(route.destination.label)")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-
             if route.providerID == RouteProviderPolicyV1.strava.providerID {
                 stravaAttribution(
                     sourceReference: route.sourceReference,
                     deleteAfter: route.deleteAfter
                 )
             }
-
-            // This is a local read, independent of Watch transfer state. Keep
-            // it separate from the already crowded rename/Watch/delete row.
-            Button {
-                finishRenaming()
-                focusedRouteID = nil
-                guard let mapAction else { return }
-                do {
-                    try mapAction.perform {
-                        try routeLibrary.mapSelection(for: route)
-                    }
-                } catch {
-                    errorMessage = error.localizedDescription
-                }
-            } label: {
-                Label("Show on Map", systemImage: "map")
-                    .frame(minHeight: 44)
-            }
-            .buttonStyle(.borderless)
-            .disabled(mapAction == nil || mapAction?.isNavigationActive == true)
-            .accessibilityLabel("Show \(displayName) on map")
-            .accessibilityHint(
-                mapAction?.isNavigationActive == true
-                    ? "Available after navigation stops"
-                    : "Previews the saved route without starting navigation"
-            )
-            .accessibilityIdentifier("showSavedRouteOnMap-\(route.id.uuidString)")
 
             if let transientStatus = transientStatus(status) {
                 Label(transientStatus.label, systemImage: transientStatus.icon)
@@ -210,6 +183,38 @@ struct SavedRoutesSettingsSection: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private func mapPreviewButton(
+        route: PlannedRouteSummaryV1,
+        displayName: String
+    ) -> some View {
+        // This is a local read, independent of Watch transfer state. Keep it
+        // beside the Watch upload action so each route's controls stay together.
+        Button {
+            finishRenaming()
+            focusedRouteID = nil
+            guard let mapAction else { return }
+            do {
+                try mapAction.perform {
+                    try routeLibrary.mapSelection(for: route)
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        } label: {
+            Image(systemName: "map")
+                .frame(width: 32, height: 32)
+        }
+        .buttonStyle(.borderless)
+        .disabled(mapAction == nil || mapAction?.isNavigationActive == true)
+        .accessibilityLabel("Show \(displayName) on map")
+        .accessibilityHint(
+            mapAction?.isNavigationActive == true
+                ? "Available after navigation stops"
+                : "Previews the saved route without starting navigation"
+        )
+        .accessibilityIdentifier("showSavedRouteOnMap-\(route.id.uuidString)")
     }
 
     private func expiredStravaRow(
@@ -223,6 +228,11 @@ struct SavedRoutesSettingsSection: View {
                     .lineLimit(2)
 
                 Spacer()
+
+                Image(systemName: "clock.badge.exclamationmark")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 32, height: 32)
+                    .accessibilityLabel("Expired")
 
                 stravaReloadButton(
                     routeID: bookmark.routeID,
@@ -245,10 +255,6 @@ struct SavedRoutesSettingsSection: View {
                 .buttonStyle(.borderless)
                 .accessibilityLabel("Delete \(displayName)")
             }
-
-            Label("Expired", systemImage: "clock.badge.exclamationmark")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
 
             HStack(spacing: 10) {
                 if let url = URL(string: bookmark.canonicalURL) {

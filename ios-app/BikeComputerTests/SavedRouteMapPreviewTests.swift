@@ -313,6 +313,9 @@ struct SavedRouteMapPreviewTests {
                 let expected = SavedRouteMapPreviewFactory.displayCoordinate(CLLocationCoordinate2D(latitude: points[index].latitude, longitude: points[index].longitude))
                 check(abs(actual[index].latitude - expected.latitude) < 1e-7 && abs(actual[index].longitude - expected.longitude) < 1e-7, "Ordered coordinates convert exactly once at display boundary")
             }
+            let expectedFinish = actual[actual.count - 1]
+            let finish = preview.overlay.finishCoordinate
+            check(abs(finish.latitude - expectedFinish.latitude) < 1e-7 && abs(finish.longitude - expectedFinish.longitude) < 1e-7, "Finish marker uses the final converted route coordinate")
             check(saved.route.points == points, "Factory leaves WGS-84 archive points unchanged")
             check(preview.displayName == "Local alias" && preview.sourceLabel == "Start" && preview.attribution == saved.route.provider.attribution, "Factory preserves display metadata")
             failure {
@@ -383,6 +386,9 @@ struct SavedRouteMapPreviewTests {
         map.addOverlay(unrelated, level: .aboveLabels)
         update(coordinator, map: map, preview: preview.overlay, padding: nil)
         check(map.fits.isEmpty && map.userTrackingMode == .none, "Wait for measured layout without following location")
+        check(coordinator.displayedSavedRouteFinishAnnotation?.title == "Finish" && coordinator.displayedSavedRouteFinishAnnotation?.coordinate.latitude == preview.overlay.finishCoordinate.latitude && coordinator.displayedSavedRouteFinishAnnotation?.coordinate.longitude == preview.overlay.finishCoordinate.longitude, "Saved preview installs a finish annotation at the route endpoint")
+        let finishView = coordinator.mapView(map, viewFor: SavedRouteFinishAnnotation()) as? MKMarkerAnnotationView
+        check(finishView?.glyphImage != nil && finishView?.markerTintColor == .systemGreen, "Finish annotation uses a native flag marker")
         update(coordinator, map: map, preview: preview.overlay)
         check(map.fits.count == 1 && map.fits[0].1.bottom == 300, "Fit once using actual card padding")
         let owned = coordinator.displayedSavedRouteOverlay
@@ -406,7 +412,7 @@ struct SavedRouteMapPreviewTests {
         update(coordinator, map: map, preview: changedHash)
         check(map.fits.count == 3, "Same UUID and revision with changed hash is a new preview")
         update(coordinator, map: map)
-        check(map.overlays.count == 1 && map.overlays[0] === unrelated, "Hide removes only the saved overlay")
+        check(map.overlays.count == 1 && map.overlays[0] === unrelated && coordinator.displayedSavedRouteFinishAnnotation == nil, "Hide removes only the saved overlay and its finish marker")
         check(map.userTrackingMode == .follow && coordinator.displayedSavedRouteIdentity == nil, "Hide releases identity and restores permitted follow")
         update(coordinator, map: map, preview: preview.overlay)
         map.selectedAnnotations = [DestinationAnnotation()]

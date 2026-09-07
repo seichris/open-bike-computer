@@ -151,9 +151,11 @@ struct SavedRouteMapPreviewCard: View {
     var body: some View {
         ViewThatFits(in: .vertical) {
             contents
+                .fixedSize(horizontal: false, vertical: true)
             ScrollView { contents }
+                .frame(maxHeight: maximumHeight, alignment: .top)
         }
-        .frame(maxHeight: maximumHeight)
+        .fixedSize(horizontal: false, vertical: true)
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
@@ -165,9 +167,6 @@ struct SavedRouteMapPreviewCard: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Route preview")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                     Text(preview.displayName)
                         .font(.headline)
                         .fixedSize(horizontal: false, vertical: true)
@@ -183,15 +182,8 @@ struct SavedRouteMapPreviewCard: View {
                 .accessibilityHint("Closes the preview without deleting the saved route")
                 .accessibilityIdentifier("hideSavedRouteMapPreview")
             }
-            Text("\(preview.sourceLabel) → \(preview.destinationLabel)")
-                .font(.subheadline)
-                .fixedSize(horizontal: false, vertical: true)
             Text(distance)
                 .font(.subheadline)
-            Text(preview.attribution)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             if preview.providerID == RouteProviderPolicyV1.strava.providerID,
                let url = preview.sourceURL {
                 Link("View on Strava", destination: url)

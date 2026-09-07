@@ -43,6 +43,10 @@ enum DestinationCalloutLabel {
 
 class SimulatedPositionAnnotation: MKPointAnnotation {}
 
+// MARK: - Saved Route Finish Annotation
+
+final class SavedRouteFinishAnnotation: MKPointAnnotation {}
+
 // MARK: - Map View Container
 
 @MainActor
@@ -123,6 +127,17 @@ struct MapCompassControl: UIViewRepresentable {
 struct MapSavedRouteOverlay {
     let identity: AnyHashable
     let polyline: MKPolyline
+
+    var finishCoordinate: CLLocationCoordinate2D {
+        guard polyline.pointCount > 0 else { return polyline.coordinate }
+
+        var coordinate = CLLocationCoordinate2D()
+        polyline.getCoordinates(
+            &coordinate,
+            range: NSRange(location: polyline.pointCount - 1, length: 1)
+        )
+        return coordinate
+    }
 }
 
 struct MapRouteAlternative: Identifiable, Equatable {
@@ -461,6 +476,7 @@ struct MapViewContainer: UIViewRepresentable {
         private(set) var lastAppliedAppearance: IPhoneMapAppearance?
         private(set) var displayedSavedRouteIdentity: AnyHashable?
         private(set) var displayedSavedRouteOverlay: MKPolyline?
+        private(set) var displayedSavedRouteFinishAnnotation: SavedRouteFinishAnnotation?
         private var savedRouteCamera = SavedRouteMapCameraState<AnyHashable>()
         private var routeOverlays: [MKPolyline] = []
         private var trackingButton: MKUserTrackingButton?
@@ -787,10 +803,13 @@ struct MapViewContainer: UIViewRepresentable {
         func removeSavedRouteOverlay(from mapView: MKMapView) -> Bool {
             let overlay = displayedSavedRouteOverlay
             if let overlay { mapView.removeOverlay(overlay) }
+            let finishAnnotation = displayedSavedRouteFinishAnnotation
+            if let finishAnnotation { mapView.removeAnnotation(finishAnnotation) }
             displayedSavedRouteOverlay = nil
+            displayedSavedRouteFinishAnnotation = nil
             displayedSavedRouteIdentity = nil
             savedRouteCamera.select(nil)
-            return overlay != nil
+            return overlay != nil || finishAnnotation != nil
         }
 
         private func updateSavedRouteOverlay(
@@ -803,6 +822,12 @@ struct MapViewContainer: UIViewRepresentable {
                 displayedSavedRouteIdentity = preview.identity
                 displayedSavedRouteOverlay = preview.polyline
                 mapView.addOverlay(preview.polyline, level: .aboveRoads)
+
+                let finishAnnotation = SavedRouteFinishAnnotation()
+                finishAnnotation.coordinate = preview.finishCoordinate
+                finishAnnotation.title = "Finish"
+                displayedSavedRouteFinishAnnotation = finishAnnotation
+                mapView.addAnnotation(finishAnnotation)
             }
             if mapView.userTrackingMode != .none {
                 mapView.setUserTrackingMode(.none, animated: false)
@@ -1278,6 +1303,26 @@ struct MapViewContainer: UIViewRepresentable {
             // Use default view for user location
             if annotation is MKUserLocation {
                 return nil
+            }
+
+            // Mark the endpoint of a saved route with the native checkered-flag
+            // SF Symbol when available, falling back to the standard flag.
+            if let _ = annotation as? SavedRouteFinishAnnotation {
+                let identifier = "SavedRouteFinish"
+                var annotationView = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? MKMarkerAnnotationView
+
+                if annotationView == nil {
+                    annotationView = MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+                    annotationView?.canShowCallout = false
+                    annotationView?.markerTintColor = .systemGreen
+                    annotationView?.glyphImage = UIImage(systemName: "flag.checkered")
+                        ?? UIImage(systemName: "flag.fill")
+                    annotationView?.displayPriority = .required
+                    annotationView?.accessibilityLabel = "Route finish"
+                } else {
+                    annotationView?.annotation = annotation
+                }
+                return annotationView
             }
             
             // Handle simulated position annotation
