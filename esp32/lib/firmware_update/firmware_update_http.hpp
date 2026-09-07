@@ -60,6 +60,8 @@ private:
 
   bool handleRequest(const device_transfer::HttpRequest &request,
                      device_transfer::TransferClient &client) override;
+  void workerWillStop() override;
+  StaticSemaphore_t stateMutexStorage_{};
   void handleStatus(device_transfer::TransferClient &client);
   void handleBegin(const device_transfer::HttpRequest &request,
                    device_transfer::TransferClient &client);

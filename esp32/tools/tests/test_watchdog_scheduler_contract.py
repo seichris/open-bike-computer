@@ -48,7 +48,7 @@ class WatchdogSchedulerContractTests(unittest.TestCase):
 
     def test_diagnostics_writer_remains_off_watched_cpu(self):
         creation = re.search(
-            r'xTaskCreatePinnedToCore\(writerTask, "ride_diag_writer".*?;\n',
+            r'xTaskCreatePinnedToCore\(\s*writerTask, "ride_diag_writer".*?;\n',
             RIDE_SOURCE,
             re.DOTALL,
         )

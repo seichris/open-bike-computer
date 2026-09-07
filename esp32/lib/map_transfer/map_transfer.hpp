@@ -137,8 +137,8 @@ public:
                               uint8_t totalSteps = 5,
                               uint32_t minimumSequence = 0);
   void updateProgress(const ActivationProgress &progress);
-  void finish(const std::string &status, const std::string &mapId,
-              const std::string &errorCode, const std::string &errorMessage);
+  void finish(std::string status, std::string mapId,
+              std::string errorCode, std::string errorMessage);
   bool acceptsUploads() const;
   MapActivationSnapshot snapshot() const;
   std::string json(bool compact = false) const;
