@@ -1223,9 +1223,6 @@ struct ContentView: View {
                 routeAlternativePicker
                 selectedRouteAdvisory
 
-                Text("Tap a route on the map, or choose below. Your workout keeps running.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 20)
             .padding(.top, 24)
@@ -1320,10 +1317,6 @@ struct ContentView: View {
                 .font(.subheadline)
             }
 
-            Text("Tap a route on the map, or choose below.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-
             routeAlternativePicker
 
             HStack(spacing: 8) {
@@ -1375,7 +1368,7 @@ struct ContentView: View {
                                 .lineLimit(1)
                             Text(routeAlternativeDetails(alternative))
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.white)
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 9)

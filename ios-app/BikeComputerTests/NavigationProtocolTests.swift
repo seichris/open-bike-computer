@@ -594,21 +594,32 @@ final class TestRoute: MKRoute {
     private let storedSteps: [MKRoute.Step]
     private let storedPolyline: MKPolyline
     private let storedDistance: CLLocationDistance
+    private let storedExpectedTravelTime: TimeInterval
 
-    init(instructions: String, coordinates: [CLLocationCoordinate2D]) {
+    init(
+        instructions: String,
+        coordinates: [CLLocationCoordinate2D],
+        expectedTravelTime: TimeInterval = 0
+    ) {
         self.storedSteps = [TestRouteStep(instructions: instructions, coordinates: coordinates)]
         self.storedPolyline = MKPolyline(coordinates: coordinates, count: coordinates.count)
         self.storedDistance = zip(coordinates, coordinates.dropFirst()).reduce(0) { distance, pair in
             distance + CLLocation(latitude: pair.0.latitude, longitude: pair.0.longitude)
                 .distance(from: CLLocation(latitude: pair.1.latitude, longitude: pair.1.longitude))
         }
+        self.storedExpectedTravelTime = expectedTravelTime
         super.init()
     }
 
-    init(steps: [TestRouteStep], coordinates: [CLLocationCoordinate2D]) {
+    init(
+        steps: [TestRouteStep],
+        coordinates: [CLLocationCoordinate2D],
+        expectedTravelTime: TimeInterval = 0
+    ) {
         self.storedSteps = steps
         self.storedPolyline = MKPolyline(coordinates: coordinates, count: coordinates.count)
         self.storedDistance = steps.reduce(0) { $0 + $1.distance }
+        self.storedExpectedTravelTime = expectedTravelTime
         super.init()
     }
 
@@ -622,6 +633,10 @@ final class TestRoute: MKRoute {
 
     override var distance: CLLocationDistance {
         storedDistance
+    }
+
+    override var expectedTravelTime: TimeInterval {
+        storedExpectedTravelTime
     }
 }
 
@@ -683,6 +698,13 @@ final class TestLocationManagerClient: LocationManagerClient {
 @main
 @MainActor
 struct NavigationProtocolTests {
+    static func freshNavigationFix(_ location: CLLocation, at date: Date = Date()) -> CLLocation {
+        CLLocation(coordinate: location.coordinate, altitude: location.altitude,
+                   horizontalAccuracy: location.horizontalAccuracy,
+                   verticalAccuracy: location.verticalAccuracy, course: location.course,
+                   speed: location.speed, timestamp: date)
+    }
+
     static func main() async {
         testIconMapping()
         testRouteEndpointExtraction()
@@ -690,6 +712,7 @@ struct NavigationProtocolTests {
         testRouteDeviationDetection()
         testReplacementStepSelectionUsesUnambiguousGeometry()
         testCoordinatorPreviewsAndSelectsAlternateRoutes()
+        testCoordinatorStartsSingleRouteWithoutPicker()
         testCoordinatorReroutesAndAppliesLatestRoute()
         testCoordinatorReroutesWhenProgressRejectsFarLocation()
         testWorkoutAndNavigationLifecyclesStayIndependent()
@@ -738,8 +761,10 @@ struct NavigationProtocolTests {
         testWorkoutDeviceTelemetryMapping()
         testWorkoutDeviceRelayScheduling()
         testWorkoutDeviceRelayPublicationIntegration()
+        testWorkoutDeviceRelayMotionDeduplicationIntegration()
         testWorkoutDeviceRelayRegularRetryIntegration()
         testWorkoutTelemetryBLETransport()
+        testQueuedMotionUsesDispatchAge()
         testDevicePacketRouting()
         testDeviceTransferHandshakePolicy()
         testDeviceSoundProtocol()
@@ -911,6 +936,9 @@ struct NavigationProtocolTests {
         testFirmwareStorageMigrationFlow()
         testFirmwareUpdateAvailabilitySemantics()
         testFirmwareDeviceClientSendsSignedBeginRequest()
+        testFirmwareDownloadBounds()
+        testFirmwareSourceIdentityMigration()
+        await testFirmwarePendingIdentityReconciliation()
         await testOfflineMapRecoveryRoutes()
         print("NavigationProtocolTests passed")
     }
@@ -3704,7 +3732,8 @@ struct NavigationProtocolTests {
         destination.name = "Finish"
         let direct = TestRoute(
             instructions: "Continue",
-            coordinates: [sourceCoordinate, destinationCoordinate]
+            coordinates: [sourceCoordinate, destinationCoordinate],
+            expectedTravelTime: 300
         )
         let scenic = TestRoute(
             instructions: "Bear right",
@@ -3715,7 +3744,8 @@ struct NavigationProtocolTests {
                     longitude: -122.001
                 ),
                 destinationCoordinate
-            ]
+            ],
+            expectedTravelTime: 120
         )
 
         coordinator.planNavigation(
@@ -3736,13 +3766,17 @@ struct NavigationProtocolTests {
             "all valid alternatives are presented before navigation"
         )
         assert(!coordinator.isNavigating, "route preview does not start navigation")
-        assert(coordinator.routePreview === direct, "first alternative is previewed")
+        assert(
+            coordinator.routeAlternatives[0].route === scenic,
+            "fastest alternative is listed first"
+        )
+        assert(coordinator.routePreview === scenic, "fastest alternative is previewed")
         assert(
             coordinator.selectedRouteAlternativeID == nil,
             "the rider must explicitly select an alternative"
         )
 
-        let scenicID = coordinator.routeAlternatives[1].id
+        let scenicID = coordinator.routeAlternatives[0].id
         coordinator.selectRouteAlternative(scenicID)
         assert(coordinator.routePreview === scenic, "selection updates map preview")
         coordinator.startSelectedRoute()
@@ -3761,6 +3795,60 @@ struct NavigationProtocolTests {
         assert(
             !factory.tasks[1].request.requestsAlternateRoutes,
             "immediate/device starts retain a single-route request"
+        )
+    }
+
+    @MainActor
+    static func testCoordinatorStartsSingleRouteWithoutPicker() {
+        let suite = "CoordinatorSingleRoute.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let factory = TestNavigationDirectionsFactory()
+        let coordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: defaults),
+            directionsFactory: factory.makeTask,
+            startServices: false
+        )
+        let sourceCoordinate = CLLocationCoordinate2D(
+            latitude: 37.0,
+            longitude: -122.0
+        )
+        let destinationCoordinate = CLLocationCoordinate2D(
+            latitude: 37.004,
+            longitude: -122.0
+        )
+        let source = MKMapItem(
+            placemark: MKPlacemark(coordinate: sourceCoordinate)
+        )
+        source.name = "Start"
+        let destination = MKMapItem(
+            placemark: MKPlacemark(coordinate: destinationCoordinate)
+        )
+        destination.name = "Finish"
+        let route = TestRoute(
+            instructions: "Continue",
+            coordinates: [sourceCoordinate, destinationCoordinate]
+        )
+
+        coordinator.planNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling,
+            isTestMode: true
+        )
+        assertEqual(factory.tasks.count, 1, "single-route planning creates one request")
+        assert(
+            factory.tasks[0].request.requestsAlternateRoutes,
+            "single-route planning still asks MapKit for alternatives"
+        )
+        factory.tasks[0].succeed(with: [route])
+
+        assert(coordinator.isNavigating, "one returned route starts navigation immediately")
+        assert(coordinator.currentRoute === route, "the only route becomes the active route")
+        assert(coordinator.routeAlternatives.isEmpty, "single-route planning skips the picker")
+        assert(
+            coordinator.selectedRouteAlternativeID == nil,
+            "single-route planning does not require an explicit selection"
         )
     }
 
@@ -3801,7 +3889,7 @@ struct NavigationProtocolTests {
 
         let offRouteLocation = testLocation(latitude: 37.0003, longitude: -121.9995)
         for sampleIndex in 0..<3 {
-            coordinator.processNavigationLocationForTesting(offRouteLocation)
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation))
             if sampleIndex < 2 {
                 assertEqual(
                     factory.tasks.count,
@@ -3881,7 +3969,7 @@ struct NavigationProtocolTests {
 
         let cooldownDeviation = testLocation(latitude: 37.0003, longitude: -121.9989)
         for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(cooldownDeviation)
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(cooldownDeviation))
         }
         assertEqual(factory.tasks.count, 2, "cooldown suppresses an immediate repeated reroute")
     }
@@ -3948,6 +4036,16 @@ struct NavigationProtocolTests {
 
         for _ in 0..<3 {
             coordinator.processNavigationLocationForTesting(farOffRouteLocation)
+        }
+        assertEqual(factory.tasks.count, 1, "repeated cached fix is only one observation")
+        for age in [60.0, -60.0, 1.0] {
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(
+                farOffRouteLocation, at: farOffRouteLocation.timestamp.addingTimeInterval(-age)))
+        }
+        assertEqual(factory.tasks.count, 1, "stale, future and out-of-order fixes cannot trigger rerouting")
+
+        for _ in 0..<3 {
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(farOffRouteLocation))
         }
 
         assertEqual(
@@ -4412,8 +4510,8 @@ struct NavigationProtocolTests {
             waitForMainLoop(timeout: 2) { !staleCoordinator.routeCalculation.isCalculating },
             "stale-location test initial route calculation should finish"
         )
-        for _ in 0..<3 {
-            staleCoordinator.processNavigationLocationForTesting(rerouteTrigger)
+        for sampleIndex in 0..<3 {
+            staleCoordinator.processNavigationLocationForTesting(freshNavigationFix(rerouteTrigger, at: staleClock.now().addingTimeInterval(Double(sampleIndex) * 0.000001)))
         }
         assertEqual(staleFactory.tasks.count, 2, "stale-location test creates a reroute request")
 
@@ -4425,7 +4523,8 @@ struct NavigationProtocolTests {
             ]
         )
         let movedAway = testLocation(latitude: 37.0009, longitude: -121.9985)
-        staleCoordinator.processNavigationLocationForTesting(movedAway)
+        staleCoordinator.processNavigationLocationForTesting(freshNavigationFix(
+            movedAway, at: staleClock.now().addingTimeInterval(0.01)))
         staleCoordinator.processNavigationLocationForTesting(testLocation(
             latitude: 37.0009,
             longitude: -121.9995,
@@ -4437,8 +4536,8 @@ struct NavigationProtocolTests {
             staleCoordinator.currentRoute === initialRoute,
             "a response that misses the latest accurate fix is not applied"
         )
-        for _ in 0..<3 {
-            staleCoordinator.processNavigationLocationForTesting(movedAway)
+        for sampleIndex in 0..<3 {
+            staleCoordinator.processNavigationLocationForTesting(freshNavigationFix(movedAway, at: staleClock.now().addingTimeInterval(Double(sampleIndex) * 0.000001)))
         }
         assertEqual(
             staleFactory.tasks.count,
@@ -4446,8 +4545,8 @@ struct NavigationProtocolTests {
             "discarding a stale response still respects the reroute cooldown"
         )
         staleClock.advance(by: 15)
-        for _ in 0..<3 {
-            staleCoordinator.processNavigationLocationForTesting(movedAway)
+        for sampleIndex in 0..<3 {
+            staleCoordinator.processNavigationLocationForTesting(freshNavigationFix(movedAway, at: staleClock.now().addingTimeInterval(Double(sampleIndex) * 0.000001)))
         }
         assertEqual(staleFactory.tasks.count, 3, "stale rerouting resumes after 15 seconds")
         guard let retriedSource = staleFactory.tasks[2].request.source else {
@@ -4481,7 +4580,7 @@ struct NavigationProtocolTests {
             "poor-accuracy test initial route calculation should finish"
         )
         for _ in 0..<3 {
-            accuracyCoordinator.processNavigationLocationForTesting(rerouteTrigger)
+            accuracyCoordinator.processNavigationLocationForTesting(freshNavigationFix(rerouteTrigger))
         }
         assertEqual(accuracyFactory.tasks.count, 2, "poor-accuracy test creates a reroute request")
 
@@ -4570,7 +4669,7 @@ struct NavigationProtocolTests {
 
         let skippedAhead = testLocation(latitude: 37.0010, longitude: -121.9995)
         for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(skippedAhead)
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(skippedAhead))
         }
         assertEqual(
             factory.tasks.count,
@@ -4613,8 +4712,8 @@ struct NavigationProtocolTests {
         )
 
         let offRouteLocation = testLocation(latitude: 37.0003, longitude: -121.9995)
-        for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(offRouteLocation)
+        for sampleIndex in 0..<3 {
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation, at: clock.now().addingTimeInterval(Double(sampleIndex) * 0.000001)))
         }
         assertEqual(factory.tasks.count, 2, "cooldown test creates the first reroute")
         factory.tasks[1].fail(with: TestNavigationDirectionsError.unavailable)
@@ -4635,8 +4734,8 @@ struct NavigationProtocolTests {
             waitForMainLoop(timeout: 3) { !coordinator.routeCalculation.isCalculating },
             "failed replacement should finish before cooldown evaluation"
         )
-        for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(offRouteLocation)
+        for sampleIndex in 0..<3 {
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation, at: clock.now().addingTimeInterval(Double(sampleIndex) * 0.000001)))
         }
         assertEqual(
             factory.tasks.count,
@@ -4645,14 +4744,14 @@ struct NavigationProtocolTests {
         )
 
         clock.advance(by: 14.999)
-        for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(offRouteLocation)
+        for sampleIndex in 0..<3 {
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation, at: clock.now().addingTimeInterval(Double(sampleIndex) * 0.000001)))
         }
         assertEqual(factory.tasks.count, 3, "rerouting remains suppressed just before 15 seconds")
 
         clock.advance(by: 0.001)
-        for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(offRouteLocation)
+        for sampleIndex in 0..<3 {
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation, at: clock.now().addingTimeInterval(Double(sampleIndex) * 0.000001)))
         }
         assertEqual(factory.tasks.count, 4, "rerouting resumes at the 15-second boundary")
         assertEqual(
@@ -4699,7 +4798,7 @@ struct NavigationProtocolTests {
             "stop test initial route calculation should finish"
         )
         for _ in 0..<3 {
-            stopCoordinator.processNavigationLocationForTesting(offRouteLocation)
+            stopCoordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation))
         }
         assertEqual(stopFactory.tasks.count, 2, "stop test creates a reroute request")
         let stoppedReroute = stopFactory.tasks[1]
@@ -4730,7 +4829,7 @@ struct NavigationProtocolTests {
             "replacement test initial route calculation should finish"
         )
         for _ in 0..<3 {
-            replaceCoordinator.processNavigationLocationForTesting(offRouteLocation)
+            replaceCoordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation))
         }
         assertEqual(replaceFactory.tasks.count, 2, "replacement test creates a reroute request")
         let replacedReroute = replaceFactory.tasks[1]
@@ -4807,7 +4906,7 @@ struct NavigationProtocolTests {
 
         let offRouteLocation = testLocation(latitude: 37.0003, longitude: -121.9995)
         for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(offRouteLocation)
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation))
         }
         assertEqual(factory.tasks.count, 2, "rerouting pauses while a replacement route is calculating")
 
@@ -4817,7 +4916,7 @@ struct NavigationProtocolTests {
             "failed replacement route calculation should finish"
         )
         for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(offRouteLocation)
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation))
         }
         assertEqual(factory.tasks.count, 3, "rerouting resumes on the original route after replacement fails")
         guard factory.tasks.count == 3,
@@ -13635,14 +13734,14 @@ struct NavigationProtocolTests {
         bleManager.firmwareTarget = "WAVESHARE_AMOLED_206"
         bleManager.firmwareVersion = "0.2.4"
         bleManager.firmwareBuild = 88
-        bleManager.firmwareGitSha = "abcdef123456"
+        bleManager.firmwareGitSha = "abcdef123456abcdef123456abcdef123456abcd"
 
         let current = FirmwareReleaseManifest(
             schemaVersion: 1,
             target: "WAVESHARE_AMOLED_206",
             version: "0.2.4",
             build: 88,
-            gitSha: "abcdef123456",
+            gitSha: "abcdef123456abcdef123456abcdef123456abcd",
             size: 3,
             sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             url: URL(string: "https://github.com/seichris/open-bike-computer/releases/download/v0.2.4/WAVESHARE_AMOLED_206.bin")!,
@@ -13697,6 +13796,96 @@ struct NavigationProtocolTests {
         assertEqual(manager.availabilityMessage(for: older, bleManager: bleManager),
                     "developer firmware install available",
                     "developer downgrade is not labeled as a normal update")
+    }
+
+    static func testFirmwareSourceIdentityMigration() {
+        let full = String(repeating: "a", count: 40)
+        assertEqual(FirmwareSourceIdentity.fullSHA(full, target: "WAVESHARE_AMOLED_175", version: "0.3.4", build: 94), full,
+                    "full immutable identity is preserved")
+        for target in ["WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"] {
+            assertEqual(FirmwareSourceIdentity.fullSHA("02bce8150d2c", target: target, version: "0.3.3", build: 92),
+                        "02bce8150d2c0f88fa0481d9b6fcef76da8865ef", "previous immutable release migrates exactly")
+            assertEqual(FirmwareSourceIdentity.fullSHA("8a0c9df6db26", target: target, version: "0.3.4", build: 93),
+                        FirmwareSourceIdentity.legacySHA, "known immutable release migrates exactly")
+            assert(FirmwareSourceIdentity.fullSHA("8a0c9df6db26", target: target, version: "0.3.4", build: 94) == nil,
+                   "legacy prefix cannot identify a different build")
+        }
+        for sha in ["a", String(repeating: "a", count: 12), String(repeating: "A", count: 40), full + "a"] {
+            assert(FirmwareSourceIdentity.fullSHA(sha, target: "WAVESHARE_AMOLED_175", version: "0.3.4", build: 94) == nil,
+                   "arbitrary prefixes and malformed source identities fail closed")
+        }
+        assert(!FirmwareHTTPSRedirectPolicy.allows(URL(string: "http://example.test/image")!), "HTTPS downgrade rejected")
+        assert(!FirmwareHTTPSRedirectPolicy.allows(URL(string: "https://user:pass@example.test/image")!), "URL credentials rejected")
+        assert(FirmwareHTTPSRedirectPolicy.allows(URL(string: "https://release-assets.githubusercontent.com/image")!), "HTTPS CDN redirect allowed")
+    }
+
+    static func testFirmwareDownloadBounds() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); FirmwareRequestCaptureProtocol.handler = nil }
+        let url = URL(string: "https://example.test/firmware")!
+        // URLProtocol delivers decoded bytes, matching the application's
+        // boundary after HTTP decompression; Content-Length is never authority.
+        for (count, header, shouldPass) in [(2048, nil, true), (2049, nil, false),
+                                          (2049, "1", false), (1, "99999999", false)] as [(Int, String?, Bool)] {
+            FirmwareRequestCaptureProtocol.handler = { request, _ in
+                (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+                                 headerFields: header.map { ["Content-Length": $0] })!, Data(repeating: 65, count: count))
+            }
+            runAsyncTest {
+                do {
+                    let data = try await FirmwareDownload.read(url, session: session, maximumBytes: 2048)
+                    assert(shouldPass && data.count == count, "only exactly bounded responses pass")
+                } catch {
+                    assert(!shouldPass, "at-limit response must not fail: \(error)")
+                }
+            }
+        }
+        FirmwareRequestCaptureProtocol.handler = { request, _ in
+            (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data("abc".utf8))
+        }
+        runAsyncTest {
+            let hash = FirmwareUpdateManager.sha256Hex(Data("abc".utf8))
+            let image = try await FirmwareDownload.read(url, session: session, maximumBytes: 3, expectedSHA256: hash)
+            assertEqual(image, Data("abc".utf8), "streaming hash verifies exact image")
+            for (size, digest) in [(4, hash), (3, String(repeating: "0", count: 64))] {
+                do {
+                    _ = try await FirmwareDownload.read(url, session: session, maximumBytes: size, expectedSHA256: digest)
+                    assert(false, "truncated or corrupt image must fail")
+                } catch { }
+            }
+        }
+    }
+
+    @MainActor
+    static func testFirmwarePendingIdentityReconciliation() async {
+        let suiteName = "FirmwarePendingIdentity.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        for sha in [FirmwareSourceIdentity.legacySHA, "8a0c9df6db26"] {
+            let pending = PendingFirmwareUpdate(target: "WAVESHARE_AMOLED_175", version: "0.3.4", build: 93,
+                                                gitSha: sha, startedAt: Date(), status: "device rebooting")
+            defaults.set(try! JSONEncoder().encode(pending), forKey: "firmware.pendingUpdate")
+            let manager = FirmwareUpdateManager(defaults: defaults) // actual persisted relaunch path
+            let ble = BLEManager()
+            ble.firmwareTarget = pending.target
+            ble.firmwareVersion = pending.version
+            ble.firmwareBuild = pending.build
+            ble.firmwareGitSha = String(repeating: "0", count: 40) // rollback/different image
+            manager.refreshDeviceFirmwareStatus(bleManager: ble)
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            assert(defaults.data(forKey: "firmware.pendingUpdate") != nil, "different running image does not clear pending update")
+            ble.firmwareGitSha = FirmwareSourceIdentity.legacySHA
+            manager.refreshDeviceFirmwareStatus(bleManager: ble)
+            for _ in 0..<100 {
+                if defaults.data(forKey: "firmware.pendingUpdate") == nil { break }
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            assert(defaults.data(forKey: "firmware.pendingUpdate") == nil,
+                   "exact full running identity clears both new and legacy persisted updates")
+            assertEqual(manager.statusMessage, "firmware update installed", "relaunch reports verified identity completion")
+        }
     }
 
     static func testFirmwareDeviceClientSendsSignedBeginRequest() {
@@ -16011,9 +16200,10 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rideDiagnosticsCapabilityMask, 1 << 20, "CAP2 bit 20 advertises persistent ride diagnostics")
         assertEqual(DeviceBLEProtocol.detailedRideDiagnosticsCapabilityMask, 1 << 21, "CAP2 bit 21 advertises detailed ride diagnostics")
         assertEqual(DeviceBLEProtocol.rideDeliveryAcknowledgementCapabilityMask, 1 << 22, "CAP2 bit 22 advertises reliable ride delivery")
-        assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 22, "capability version negotiates independent navigation orientation")
+        assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
+        assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 23, "capability version negotiates independent navigation orientation and Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationRotationSettingID, 37, "navigation orientation has an independent setting")
         assertEqual(RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature, 1 << 24, "orientation capability has its own bit")
         assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
@@ -17029,6 +17219,132 @@ struct NavigationProtocolTests {
     }
 
     @MainActor
+    static func testWorkoutDeviceRelayMotionDeduplicationIntegration() {
+        let clock = TestClock(Date(timeIntervalSince1970: 25_000))
+        let sessionID = UUID(
+            uuidString: "ABABABAB-CDCD-EFEF-0101-232323232323"
+        )!
+        let store = WorkoutMetricsStore(now: clock.now)
+        store.attachMirroredSession(at: clock.now())
+        let firstLocationCapturedAt = clock.now()
+        func snapshot(
+            locationSequence: UInt32,
+            locationCapturedAt: Date
+        ) -> WorkoutSnapshotV1 {
+            WorkoutSnapshotV1(
+                state: .running,
+                startDate: Date(timeIntervalSince1970: 24_990),
+                location: WorkoutLocationV1(
+                    latitude: 31.2304,
+                    longitude: 121.4737,
+                    capturedAt: locationCapturedAt,
+                    horizontalAccuracy: 5,
+                    altitude: nil,
+                    verticalAccuracy: nil,
+                    course: nil,
+                    speed: 0.1,
+                    motionSampleEpoch: 7,
+                    motionSampleSequence: locationSequence
+                ),
+                availability: [.location]
+            )
+        }
+        _ = store.ingestBatch([
+            WorkoutEnvelopeV1(
+                kind: .snapshot,
+                sessionID: sessionID,
+                sessionToken: 93,
+                sequence: 1,
+                capturedAt: clock.now(),
+                snapshot: snapshot(
+                    locationSequence: 1,
+                    locationCapturedAt: firstLocationCapturedAt
+                )
+            ),
+        ], receivedAt: clock.now())
+
+        let manager = BLEManager()
+        var writes: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 32,
+            canSend: { true },
+            write: { writes.append($0) }
+        ))
+        func workoutKinds() -> [UInt8] {
+            writes.compactMap { write in
+                guard String(data: write.prefix(4), encoding: .utf8) ==
+                    DeviceBLEProtocol.workoutTelemetryFallbackPrefix,
+                    write.count > 4 else { return nil }
+                return write[4]
+            }
+        }
+        let relay = WorkoutDeviceRelay(
+            store: store,
+            bleManager: manager,
+            now: clock.now
+        )
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let flags = UInt32(
+            DeviceBLEProtocol.workoutTelemetryCapabilityMask
+        ) | DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask
+        let capability =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([
+                1,
+                UInt8(flags & 0xFF),
+                UInt8((flags >> 8) & 0xFF),
+                UInt8((flags >> 16) & 0xFF),
+                UInt8((flags >> 24) & 0xFF),
+            ])
+        assert(manager.handleDeviceCapabilitiesNotification(capability),
+               "Watch-motion capability is accepted")
+        assert(waitForMainLoop(timeout: 1) {
+            workoutKinds().filter { $0 == 4 }.count == 1
+        }, "the initial Watch motion sample is relayed")
+
+        writes.removeAll()
+        clock.advance(by: 0.25)
+        _ = store.ingestBatch([
+            WorkoutEnvelopeV1(
+                kind: .snapshot,
+                sessionID: sessionID,
+                sessionToken: 93,
+                sequence: 2,
+                capturedAt: clock.now(),
+                snapshot: snapshot(
+                    locationSequence: 1,
+                    locationCapturedAt: firstLocationCapturedAt
+                )
+            ),
+        ], receivedAt: clock.now())
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        assert(
+            !workoutKinds().contains(4),
+            "changing send age cannot resend one producer sample"
+        )
+
+        clock.advance(by: 0.25)
+        _ = store.ingestBatch([
+            WorkoutEnvelopeV1(
+                kind: .snapshot,
+                sessionID: sessionID,
+                sessionToken: 93,
+                sequence: 3,
+                capturedAt: clock.now(),
+                snapshot: snapshot(
+                    locationSequence: 2,
+                    locationCapturedAt: clock.now()
+                )
+            ),
+        ], receivedAt: clock.now())
+        assert(waitForMainLoop(timeout: 1) {
+            workoutKinds().filter { $0 == 4 }.count == 1
+        }, "a distinct Watch producer sample is relayed")
+        withExtendedLifetime(relay) {}
+    }
+
+    @MainActor
     static func testWorkoutDeviceRelayRegularRetryIntegration() {
         let clock = TestClock(Date(timeIntervalSince1970: 30_000))
         let sessionID = UUID(uuidString: "BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF")!
@@ -17148,6 +17464,48 @@ struct NavigationProtocolTests {
                     "regular-lane retry delivers one adjacent correlated bundle")
         manager.completeNavigationWriteForTesting(error: nil)
         withExtendedLifetime(relay) {}
+    }
+
+    static func testQueuedMotionUsesDispatchAge() {
+        for native in [false, true] {
+            let manager = BLEManager()
+            var uptime: TimeInterval = 10
+            manager.workoutMotionUptime = { uptime }
+            var ready = false
+            var writes: [Data] = []
+            let flags = UInt32(DeviceBLEProtocol.workoutTelemetryCapabilityMask)
+                | DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask
+            var capability = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8)
+            capability.append(1)
+            appendUInt32LE(flags, to: &capability)
+            assert(manager.handleDeviceCapabilitiesNotification(capability), "motion capability accepted")
+            manager.isConnected = true
+            manager.isNavigationReady = true
+            manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+                maximumWriteLength: 32, canSend: { ready }, write: { writes.append($0) }))
+            if native {
+                manager.installWorkoutTelemetryWriteEndpoint(WorkoutTelemetryWriteEndpoint(
+                    maximumWriteLength: 32, canSend: { ready }, write: { writes.append($0) }))
+            }
+            var frame = Data(repeating: 0, count: 16)
+            frame[0] = 4
+            frame[12] = 100
+            assert(manager.sendWorkoutTelemetryFrame(frame), "motion admitted behind backpressure")
+            assertEqual(writes.count, 0, "blocked writer submits nothing")
+            uptime = 12
+            ready = true
+            manager.flushPendingNavigationWritesForTesting()
+            assertEqual(writes.count, 1, "fresh delayed frame dispatches")
+            let offset = native ? 0 : 4
+            assertEqual(readUInt16LE(writes[0], offset: offset + 12), 2100,
+                        "native and fallback encode dispatch age, not enqueue age")
+            ready = false
+            assert(manager.sendWorkoutTelemetryFrame(frame), "next motion admitted")
+            uptime = 16
+            ready = true
+            manager.flushPendingNavigationWritesForTesting()
+            assertEqual(writes.count, 1, "expired motion never reaches the endpoint")
+        }
     }
 
     static func testWorkoutTelemetryBLETransport() {
