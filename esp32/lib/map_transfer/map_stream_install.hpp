@@ -92,6 +92,8 @@ public:
       const std::string &path,
       const std::function<bool(const MapStreamDirectoryEntry &)> &callback) = 0;
   virtual int openWrite(const std::string &path) = 0;
+  virtual int openRead(const std::string &path) = 0;
+  virtual bool read(int descriptor, uint8_t *data, size_t size) = 0;
   virtual bool write(int descriptor, const uint8_t *data, size_t size) = 0;
   virtual bool syncFile(int descriptor) = 0;
   virtual bool closeFile(int descriptor) = 0;

@@ -9,7 +9,9 @@
     "deploy:dry-run": "wrangler deploy --dry-run --env=\"\" --outdir dist/staging && wrangler deploy --dry-run --env production --outdir dist/production",
     "format:check": "prettier --check .",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "types:generate": "wrangler types --env-interface CatalogBindings --include-runtime=false --strict-vars=false src/worker-configuration.generated.d.ts",
+    "types:check": "wrangler types --env-interface CatalogBindings --include-runtime=false --strict-vars=false --check src/worker-configuration.generated.d.ts",
+    "typecheck": "pnpm run types:check && tsc --noEmit"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.879.0",

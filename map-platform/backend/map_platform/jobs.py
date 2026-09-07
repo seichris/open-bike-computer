@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -74,9 +75,18 @@ class UnsupportedRendererTargetError(ValueError):
         }
 
 
+def _serialized(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._queue_lock():
+            return method(self, *args, **kwargs)
+    return locked
+
+
 class JobStore:
     _local_queue_locks_guard = threading.Lock()
     _local_queue_locks: dict[str, threading.Lock] = {}
+    _held_queue_locks = threading.local()
     _local_client_request_locks_guard = threading.Lock()
     _local_client_request_locks: dict[str, threading.Lock] = {}
     _local_artifact_locks_guard = threading.Lock()
@@ -102,23 +112,65 @@ class JobStore:
         self.map_id_index_root.mkdir(exist_ok=True)
         self.active_index_root = self.root / ".active-jobs"
         self.active_index_root.mkdir(exist_ok=True)
+        self.pending_write_root = self.root / ".pending-writes"
+        self.pending_write_root.mkdir(exist_ok=True)
         self.artifact_gc_cursor_path = self.root / ".artifact-gc-cursor"
         self.lock_stale_seconds = lock_stale_seconds
         self.admission_policy = admission_policy
         self._rebuild_lookup_indexes()
 
+    @_serialized
     def save(self, job: MapJob) -> None:
+        # Persist intent before changing canonical data. Every process repairs
+        # incomplete publication before consulting any derived lookup index.
+        intent = self.pending_write_root / self._path(job.job_id).name
+        self._durable_write(intent, json.dumps(job.to_dict(include_internal=True)))
+        self._publish_job(job)
+        intent.unlink()
+        self._sync_directory(self.pending_write_root)
+
+    @staticmethod
+    def _sync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _durable_write(cls, path: Path, contents: str) -> None:
+        temporary = path.with_suffix(".tmp")
+        with temporary.open("w") as stream:
+            stream.write(contents + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+        cls._sync_directory(path.parent)
+
+    def _publish_job(self, job: MapJob) -> None:
         path = self._path(job.job_id)
-        tmp_path = path.with_suffix(".json.tmp")
-        tmp_path.write_text(
-            json.dumps(job.to_dict(include_internal=True), indent=2, sort_keys=True) + "\n"
-        )
-        tmp_path.replace(path)
+        self._durable_write(path, json.dumps(job.to_dict(include_internal=True), indent=2, sort_keys=True))
         self._index_job_ownership(job)
         self._index_map_id(job)
         self._index_client_request(job)
         self._index_active_status(job)
 
+    def _recover_pending_writes(self) -> None:
+        # Bounded by incomplete writes, never by the historical job count.
+        intents = []
+        for path in self.pending_write_root.glob("*.json"):
+            intents.append(path)
+            if len(intents) > 256:
+                raise RuntimeError("too many incomplete job writes; repair required")
+        for path in intents:
+            job = MapJob.from_dict(json.loads(path.read_text()))
+            if path.name != self._path(job.job_id).name:
+                raise ValueError("invalid pending job identity")
+            self._publish_job(job)
+            path.unlink()
+            self._sync_directory(self.pending_write_root)
+
+    @_serialized
     def get(self, job_id: str) -> MapJob:
         path = self._path(job_id)
         if not path.exists():
@@ -129,6 +181,7 @@ class JobStore:
         jobs, _ = self.list_with_failures()
         return jobs
 
+    @_serialized
     def list_with_failures(
         self,
     ) -> tuple[list[MapJob], list[tuple[Path, Exception]]]:
@@ -148,6 +201,7 @@ class JobStore:
             raise JobRecordEnumerationError(failures)
         return jobs
 
+    @_serialized
     def list_for_installation(self, client_installation_id: str) -> list[MapJob]:
         """Read only records named by the per-installation lookup index."""
         matches: list[MapJob] = []
@@ -164,6 +218,7 @@ class JobStore:
                 matches.append(job)
         return matches
 
+    @_serialized
     def list_for_map_id(self, map_id: str) -> list[MapJob]:
         matches: list[MapJob] = []
         index_root = self._map_id_index_path(map_id)
@@ -179,6 +234,7 @@ class JobStore:
                 matches.append(job)
         return matches
 
+    @_serialized
     def list_active(self) -> list[MapJob]:
         active: list[MapJob] = []
         for path in sorted(self.active_index_root.glob("*.idx")):
@@ -222,6 +278,7 @@ class JobStore:
             self.save(job)
             return job
 
+    @_serialized
     def get_by_client_request(
         self,
         client_installation_id: str,
@@ -290,9 +347,9 @@ class JobStore:
             return
         root = self._installation_index_path(job.client_installation_id)
         root.mkdir(exist_ok=True)
+        self._sync_directory(root.parent)
         path = root / f"{job.job_id}.idx"
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(
+        self._durable_write(path,
             json.dumps(
                 {
                     "clientInstallationId": job.client_installation_id,
@@ -302,32 +359,29 @@ class JobStore:
             )
             + "\n"
         )
-        tmp_path.replace(path)
 
     def _index_map_id(self, job: MapJob) -> None:
         if not job.map_id:
             return
         root = self._map_id_index_path(job.map_id)
         root.mkdir(exist_ok=True)
+        self._sync_directory(root.parent)
         path = root / f"{job.job_id}.idx"
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(
+        self._durable_write(path,
             json.dumps(
                 {"mapId": job.map_id, "jobId": job.job_id},
                 separators=(",", ":"),
             )
             + "\n"
         )
-        tmp_path.replace(path)
 
     def _index_active_status(self, job: MapJob) -> None:
         path = self.active_index_root / f"{job.job_id}.idx"
         if job.status not in ACTIVE_STATUSES:
             path.unlink(missing_ok=True)
+            self._sync_directory(path.parent)
             return
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(job.job_id + "\n")
-        tmp_path.replace(path)
+        self._durable_write(path, job.job_id)
 
     def _index_client_request(self, job: MapJob) -> None:
         if not job.client_installation_id or not job.client_request_id:
@@ -336,9 +390,7 @@ class JobStore:
             job.client_installation_id,
             job.client_request_id,
         )
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(job.job_id + "\n")
-        tmp_path.replace(path)
+        self._durable_write(path, job.job_id)
 
     def _client_request_index_path(
         self,
@@ -1612,6 +1664,12 @@ class JobStore:
     @contextmanager
     def _queue_lock(self):
         local_key = str(self.lock_path.resolve())
+        held = getattr(self._held_queue_locks, "paths", None)
+        if held is None:
+            held = self._held_queue_locks.paths = set()
+        if local_key in held:
+            yield
+            return
         with self._local_queue_locks_guard:
             local_lock = self._local_queue_locks.setdefault(
                 local_key,
@@ -1621,8 +1679,11 @@ class JobStore:
             descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
+                held.add(local_key)
+                self._recover_pending_writes()
                 yield
             finally:
+                held.discard(local_key)
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
 

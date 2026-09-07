@@ -866,6 +866,7 @@ struct NavigationProtocolTests {
         testOfflineMapJobRecoverySelection()
         testOfflineMapDownloadResponseValidation()
         await testOfflineMapPackDownloaderRejectsHTTPError()
+        await testDurableMapDownloads()
         testPendingOfflineMapJobBlocksEveryCreationIngress()
         await testOfflineMapJobCreatorReconcilesAmbiguousResponse()
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
@@ -877,6 +878,7 @@ struct NavigationProtocolTests {
         testOfflineMapInventoryMutationURLRequests()
         testOfflineMapManagerMigratesProductionConfig()
         testSavedMapDefaultNamePolicy()
+        testSavedMapReplacementCrashRecovery()
         testOfflineMapManagerRepairsGeneratedPackDefaults()
         testOfflineMapManagerRenamesCachedPack()
         testSavedMapRenameViewWiring()
@@ -9070,6 +9072,36 @@ struct NavigationProtocolTests {
         }
     }
 
+    @MainActor
+    static func testDurableMapDownloads() async {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root); OfflineMapTestURLProtocol.reset() }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let payload = Data("durable".utf8)
+        let constraints = OfflineMapDownloadConstraints(exactBytes: Int64(payload.count), maximumBytes: 1024,
+            allowedDownloadHosts: ["maps.example"], artifactSHA256: SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined())
+        OfflineMapTestURLProtocol.configure { _ in (200, payload) }
+        do {
+            let first = DurableMapDownloadCoordinator(configuration: configuration, directory: root)
+            let downloaded = try await first.download(from: URL(string: "https://maps.example/first-grant")!,
+                constraints: constraints, onProgress: { _ in }, onByteProgress: { _ in })
+            assertEqual(try Data(contentsOf: downloaded), payload, "durable download retains completed bytes")
+            let second = DurableMapDownloadCoordinator(configuration: configuration, directory: root)
+            OfflineMapTestURLProtocol.configure { _ in (403, Data()) }
+            let restored = try await second.download(from: URL(string: "https://maps.example/renewed-grant")!,
+                constraints: constraints, onProgress: { _ in }, onByteProgress: { _ in })
+            assertEqual(restored, downloaded, "fresh coordinator reuses immutable completion across grant URLs")
+            assertEqual(OfflineMapTestURLProtocol.requests().count, 0, "restored completion needs no second GET")
+            try FileManager.default.removeItem(at: downloaded)
+            do {
+                _ = try await second.download(from: URL(string: "https://maps.example/expired")!,
+                    constraints: constraints, onProgress: { _ in }, onByteProgress: { _ in })
+                assert(false, "HTTP rejection cannot publish a durable download")
+            } catch { /* Expected HTTP/size rejection. */ }
+        } catch { assert(false, "durable download test failed: \(error)") }
+    }
+
     static func testOfflineMapProgressPresentation() {
         let legacy = offlineMapJob(status: "converting_features")
         let progressPayload = Data(
@@ -11016,6 +11048,64 @@ struct NavigationProtocolTests {
             defaults.object(forKey: "offlineMap.apiToken") == nil,
             "app launch removes the legacy shared map API token"
         )
+    }
+
+    static func testSavedMapReplacementCrashRecovery() {
+        let migrationRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: migrationRoot) }
+        do {
+            let legacy = migrationRoot.appendingPathComponent("Caches")
+            let saved = migrationRoot.appendingPathComponent("Saved")
+            try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+            try Data("saved".utf8).write(to: legacy.appendingPathComponent("one.zip"))
+            _ = try SavedMapStorageDirectory.prepare(directory: saved, legacy: legacy)
+            assert(FileManager.default.fileExists(atPath: saved.appendingPathComponent("one.zip").path), "legacy artifact moves outside caches")
+            try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+            try Data("older".utf8).write(to: legacy.appendingPathComponent("one.zip"))
+            try Data("other".utf8).write(to: legacy.appendingPathComponent("two.zip"))
+            _ = try SavedMapStorageDirectory.prepare(directory: saved, legacy: legacy)
+            assertEqual(try Data(contentsOf: saved.appendingPathComponent("one.zip")), Data("saved".utf8), "downgrade migration preserves current map")
+            assert(FileManager.default.fileExists(atPath: saved.appendingPathComponent("two.zip").path), "downgrade migration merges missing map")
+            assert(FileManager.default.fileExists(atPath: migrationRoot.appendingPathComponent("OfflineMapLegacyRecovery").path), "conflicting legacy bytes retained outside caches")
+        } catch { assert(false, "saved map directory migration failed: \(error)") }
+        for boundary in 0...4 {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            do {
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                let artifact = root.appendingPathComponent("map.zip")
+                let metadata = SavedMapArtifactMetadataStore.metadataURL(for: artifact)
+                try Data("old".utf8).write(to: artifact)
+                try Data("old-meta".utf8).write(to: metadata)
+                var journal = try SavedMapReplacementJournal.begin(at: artifact)
+                let backup = journal.backup(in: root)
+                if boundary >= 1 { try FileManager.default.moveItem(at: artifact, to: backup) }
+                if boundary >= 2 {
+                    try FileManager.default.moveItem(at: metadata, to: SavedMapArtifactMetadataStore.metadataURL(for: backup))
+                    try Data("new".utf8).write(to: artifact)
+                }
+                if boundary >= 3 { try Data("new-meta".utf8).write(to: metadata) }
+                if boundary == 4 { journal.committed = true; try journal.save(in: root) }
+                // New process-equivalent state: no in-memory rollback flags.
+                try SavedMapReplacementJournal.recover(in: root)
+                try SavedMapReplacementJournal.recover(in: root)
+                let actual = try String(contentsOf: artifact, encoding: .utf8)
+                let actualMetadata = try String(contentsOf: metadata, encoding: .utf8)
+                assertEqual(actual, boundary == 4 ? "new" : "old", "crash artifact decision")
+                assertEqual(actualMetadata, boundary == 4 ? "new-meta" : "old-meta", "crash metadata decision")
+                assert(!FileManager.default.fileExists(atPath: journal.url(in: root).path), "completed recovery removes journal")
+            } catch {
+                assert(false, "replacement crash recovery failed: \(error)")
+            }
+        }
+        let constraints = OfflineMapDownloadConstraints(
+            exactBytes: 100, maximumBytes: 1024,
+            allowedDownloadHosts: ["download.example"], artifactSHA256: String(repeating: "a", count: 64)
+        )
+        let descriptor = DurableMapDownloadCoordinator.Descriptor(constraints: constraints)
+        assertEqual(descriptor.key, String(repeating: "a", count: 64) + "-100", "download identity pins digest and bytes")
+        assert(descriptor.allows(URL(string: "https://download.example/map")), "approved download host")
+        assert(!descriptor.allows(URL(string: "https://127.0.0.1/map")), "download redirects reject other origins")
     }
 
     static func testSavedMapDefaultNamePolicy() {

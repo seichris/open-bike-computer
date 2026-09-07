@@ -13,8 +13,10 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -26,15 +28,45 @@ MAP_ID = re.compile(r"map_v1_[A-Za-z0-9_-]{43}")
 PAGE_SIZE = 50
 JOB_TIMEOUT = 1800
 MAX_BACKOFF = 21600
+MINIMUM_FREE_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def recover_attempts(root: Path) -> None:
+    """Only reap scheduler-owned attempts whose inherited lease is released."""
+    if not root.exists():
+        return
+    for attempt in root.iterdir():
+        if (not re.fullmatch(r"attempt-[a-z0-9_]{8}", attempt.name)
+                or attempt.is_symlink() or not attempt.is_dir()):
+            continue
+        lease = attempt / "lease"
+        if not lease.is_file() or lease.is_symlink():
+            continue
+        with lease.open("r+") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue  # A child may still be running after its parent died.
+            shutil.rmtree(attempt)
 
 
 def run_promotion(map_id: str) -> None:
-    # Never log CLI output: failures may contain credential-bearing download URLs.
-    subprocess.run(
-        ["map-platform", "promote-catalog-map", map_id],
-        check=True, timeout=JOB_TIMEOUT,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    root = Path(os.environ.get("MAP_PLATFORM_DATA_ROOT", "/data")) / "automatic-promotion" / "attempts"
+    root.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(root).free < MINIMUM_FREE_BYTES:
+        raise RuntimeError("insufficient promotion scratch space")
+    # Parent cleanup survives child timeout. The inherited flock also prevents
+    # restart recovery from deleting a still-running orphan child's workspace.
+    with tempfile.TemporaryDirectory(prefix="attempt-", dir=root) as directory:
+        with (Path(directory) / "lease").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            environment = dict(os.environ, MAP_PLATFORM_DATA_ROOT=directory)
+            subprocess.run(
+                ["map-platform", "promote-catalog-map", map_id],
+                check=True, timeout=JOB_TIMEOUT, env=environment,
+                pass_fds=(lock.fileno(),),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
 
 
 class PromotionQueue:
@@ -123,6 +155,7 @@ def main() -> None:
     # Hold the descriptor throughout execution. Other hosts use catalog leases.
     with (root / "worker.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        recover_attempts(root / "attempts")
         queue = PromotionQueue(root / "queue.sqlite3", catalog)
         try:
             while not stopped.is_set():
