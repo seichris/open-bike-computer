@@ -100,7 +100,7 @@ class SourceAndJobTests(unittest.TestCase):
                     }
                 )
             )
-            provider = GeofabrikSourceProvider(catalog_path.as_uri(), cache_path=Path(tmp) / "cache.json")
+            provider = GeofabrikSourceProvider(cache_path=catalog_path)
             source_index_path = Path(__file__).resolve().parents[1] / "config" / "source-regions.json"
             index = SourceIndex.from_json(source_index_path, fallback_provider=provider)
 
@@ -142,7 +142,7 @@ class SourceAndJobTests(unittest.TestCase):
                     }
                 )
             )
-            provider = GeofabrikSourceProvider(catalog_path.as_uri(), cache_path=Path(tmp) / "cache.json")
+            provider = GeofabrikSourceProvider(cache_path=catalog_path)
             source_index_path = Path(__file__).resolve().parents[1] / "config" / "source-regions.json"
             index = SourceIndex.from_json(source_index_path, fallback_provider=provider)
 
@@ -185,7 +185,7 @@ class SourceAndJobTests(unittest.TestCase):
                     "properties": {
                         "id": "singapore",
                         "name": "Singapore",
-                        "urls": {"pbf": "https://example.invalid/singapore.osm.pbf"},
+                        "urls": {"pbf": "https://download.geofabrik.de/asia/singapore-latest.osm.pbf"},
                     },
                     "geometry": {
                         "type": "Polygon",

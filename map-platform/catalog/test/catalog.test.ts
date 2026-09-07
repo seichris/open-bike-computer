@@ -699,6 +699,43 @@ describe("catalog library", () => {
     expect(grant.downloadURL).not.toContain("map-artifacts");
   });
 
+  it("delivery stop rejects new grants and existing bearer resolution, failing closed when unset", async () => {
+    const library = await seededLibrary();
+    const grant = await createLibraryDownloadGrant(
+      env,
+      library.libraryId,
+      mapEntryID,
+      "production",
+      [{ keyId: "prod", keySha256: signerSha }],
+      appIdentity,
+      readerCapabilities,
+    );
+    const token = new URL(grant.downloadURL).pathname.split("/").at(-1)!;
+    for (const setting of ["0", "", "true"]) {
+      const disabled = { ...env, MAP_DELIVERY_ENABLED: setting };
+      await expect(
+        createLibraryDownloadGrant(
+          disabled,
+          library.libraryId,
+          mapEntryID,
+          "production",
+          [{ keyId: "prod", keySha256: signerSha }],
+          appIdentity,
+          readerCapabilities,
+        ),
+      ).rejects.toThrow("map delivery is temporarily disabled");
+      await expect(
+        resolveDownloadGrant(disabled, token, "library"),
+      ).rejects.toThrow("map delivery is temporarily disabled");
+      await expect(
+        resolveDownloadGrant(disabled, token, "promotion"),
+      ).rejects.toThrow("map delivery is temporarily disabled");
+    }
+    expect((await resolveDownloadGrant(env, token, "library")).id).toBe(
+      grant.artifact.artifactId,
+    );
+  });
+
   it("allows future app builds with the same exact reader capabilities", async () => {
     const library = await seededLibrary();
     await expect(

@@ -43,6 +43,10 @@ def url_of(request):
 
 class OsmfrPerSourceCacheTests(unittest.TestCase):
     def setUp(self):
+        transport = patch("map_platform.source_cache.open_geofabrik_url",
+                          side_effect=lambda request, timeout: urllib.request.urlopen(request, timeout=timeout))
+        transport.start()
+        self.addCleanup(transport.stop)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)

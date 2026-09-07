@@ -8,6 +8,7 @@
 import CoreLocation
 import Combine
 import Foundation
+import Darwin
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -1615,6 +1616,171 @@ typealias SavedMapArtifactMetadataSaveOperation = @MainActor (
     URL
 ) throws -> Void
 
+// A replacement is a two-file transaction. Catch-based rollback alone cannot
+// survive process termination between the artifact and metadata renames.
+nonisolated enum SavedMapStorageDirectory {
+    static func prepare(directory: URL, legacy: URL) throws -> URL {
+        let manager = FileManager.default
+        if manager.fileExists(atPath: legacy.path) {
+            try SavedMapReplacementJournal.recover(in: legacy)
+            if !manager.fileExists(atPath: directory.path) {
+                try manager.moveItem(at: legacy, to: directory)
+            } else {
+                // An older app may have populated Caches after a downgrade.
+                // Merge missing pairs; never overwrite a current saved artifact.
+                try mergeMissingPairs(from: legacy, to: directory)
+                let recovery = directory.deletingLastPathComponent()
+                    .appendingPathComponent("OfflineMapLegacyRecovery", isDirectory: true)
+                try manager.createDirectory(at: recovery, withIntermediateDirectories: true)
+                try manager.moveItem(at: legacy, to: recovery.appendingPathComponent(UUID().uuidString))
+                var recoveryURL = recovery
+                var excluded = URLResourceValues()
+                excluded.isExcludedFromBackup = true
+                try recoveryURL.setResourceValues(excluded)
+            }
+        }
+        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        var directory = directory
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try directory.setResourceValues(values)
+        try SavedMapReplacementJournal.recover(in: directory)
+        return directory
+    }
+
+    private static func mergeMissingPairs(from legacy: URL, to directory: URL) throws {
+        let manager = FileManager.default
+        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        for artifact in try manager.contentsOfDirectory(at: legacy, includingPropertiesForKeys: nil) {
+            let destination = directory.appendingPathComponent(artifact.lastPathComponent)
+            if artifact.lastPathComponent == "Compatibility" {
+                try mergeMissingPairs(from: artifact, to: destination)
+            } else if ["zip", "bmap"].contains(artifact.pathExtension),
+                      !manager.fileExists(atPath: destination.path) {
+                let metadata = SavedMapArtifactMetadataStore.metadataURL(for: artifact)
+                let newMetadata = SavedMapArtifactMetadataStore.metadataURL(for: destination)
+                if manager.fileExists(atPath: metadata.path) {
+                    if manager.fileExists(atPath: newMetadata.path) { try manager.removeItem(at: newMetadata) }
+                    try manager.moveItem(at: metadata, to: newMetadata)
+                    try SavedMapReplacementJournal.sync(directory)
+                }
+                try manager.moveItem(at: artifact, to: destination)
+                try SavedMapReplacementJournal.sync(directory)
+                try SavedMapReplacementJournal.sync(legacy)
+            }
+        }
+    }
+}
+
+nonisolated struct SavedMapReplacementJournal: Codable {
+    let filename: String
+    let id: UUID
+    let hadArtifact: Bool
+    let hadMetadata: Bool
+    var committed: Bool
+
+    func artifact(in directory: URL) -> URL { directory.appendingPathComponent(filename) }
+    func backup(in directory: URL) -> URL {
+        directory.appendingPathComponent(".\(filename).\(id.uuidString).backup")
+    }
+    func url(in directory: URL) -> URL {
+        directory.appendingPathComponent(".\(filename).replacement.json")
+    }
+
+    static func sync(_ url: URL) throws {
+        let descriptor = Darwin.open(url.path, O_RDONLY)
+        guard descriptor >= 0 else { throw POSIXError(.EIO) }
+        defer { Darwin.close(descriptor) }
+        guard Darwin.fsync(descriptor) == 0 else { throw POSIXError(.EIO) }
+    }
+
+    func save(in directory: URL) throws {
+        try JSONEncoder().encode(self).write(to: url(in: directory), options: .atomic)
+        try Self.sync(url(in: directory))
+        try Self.sync(directory)
+    }
+
+    static func begin(at destination: URL) throws -> Self {
+        let manager = FileManager.default
+        let value = Self(
+            filename: destination.lastPathComponent, id: UUID(),
+            hadArtifact: manager.fileExists(atPath: destination.path),
+            hadMetadata: manager.fileExists(atPath: SavedMapArtifactMetadataStore.metadataURL(for: destination).path),
+            committed: false
+        )
+        try value.save(in: destination.deletingLastPathComponent())
+        return value
+    }
+
+    func finish(in directory: URL) throws {
+        let manager = FileManager.default
+        let destination = artifact(in: directory)
+        let old = backup(in: directory)
+        let pairs = [
+            (destination, old, hadArtifact),
+            (SavedMapArtifactMetadataStore.metadataURL(for: destination),
+             SavedMapArtifactMetadataStore.metadataURL(for: old), hadMetadata)
+        ]
+        for (current, previous, existed) in pairs {
+            if manager.fileExists(atPath: previous.path) {
+                if committed {
+                    try manager.removeItem(at: previous)
+                } else {
+                    if manager.fileExists(atPath: current.path) { try manager.removeItem(at: current) }
+                    try manager.moveItem(at: previous, to: current)
+                }
+            } else if !committed && !existed && manager.fileExists(atPath: current.path) {
+                try manager.removeItem(at: current)
+            }
+        }
+        try Self.sync(directory)
+        try manager.removeItem(at: url(in: directory))
+        try Self.sync(directory)
+    }
+
+    static func recover(in directory: URL) throws {
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+        )
+        for file in files where file.lastPathComponent.hasSuffix(".replacement.json") {
+            let attributes = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            guard attributes.isRegularFile == true, attributes.isSymbolicLink != true,
+                  (attributes.fileSize ?? Int.max) <= 4096 else { throw POSIXError(.EINVAL) }
+            let value = try JSONDecoder().decode(Self.self, from: Data(contentsOf: file))
+            guard !value.filename.isEmpty, !value.filename.hasPrefix("."),
+                  !value.filename.contains("/"), !value.filename.contains("\\"),
+                  ["zip", "bmap"].contains(URL(fileURLWithPath: value.filename).pathExtension),
+                  value.url(in: directory).standardizedFileURL == file.standardizedFileURL else {
+                throw POSIXError(.EINVAL)
+            }
+            try value.finish(in: directory)
+        }
+        // Older releases left UUID backups without a journal. Recover only an
+        // unambiguous missing artifact; preserve conflicting copies for repair.
+        let backups = files.filter { $0.lastPathComponent.hasSuffix(".backup") }
+        for old in backups {
+            let name = old.lastPathComponent
+            guard name.hasPrefix("."), name.count > 45 else { continue }
+            let suffix = String(name.dropLast(7).suffix(36))
+            guard UUID(uuidString: suffix) != nil else { continue }
+            let filename = String(name.dropFirst().dropLast(44))
+            let destination = directory.appendingPathComponent(filename)
+            guard ["zip", "bmap"].contains(destination.pathExtension),
+                  !FileManager.default.fileExists(atPath: destination.path),
+                  backups.filter({ $0.lastPathComponent.hasPrefix(".\(filename).") }).count == 1 else { continue }
+            // Publish metadata first so a restart can safely repeat artifact recovery.
+            let oldMetadata = SavedMapArtifactMetadataStore.metadataURL(for: old)
+            let metadata = SavedMapArtifactMetadataStore.metadataURL(for: destination)
+            if FileManager.default.fileExists(atPath: oldMetadata.path) {
+                if FileManager.default.fileExists(atPath: metadata.path) { try FileManager.default.removeItem(at: metadata) }
+                try FileManager.default.moveItem(at: oldMetadata, to: metadata)
+            }
+            try FileManager.default.moveItem(at: old, to: destination)
+            try Self.sync(directory)
+        }
+    }
+}
+
 nonisolated enum SavedMapStreamMigrationFallback {
     static func shouldUseLegacyArtifact(
         for metadata: SavedMapArtifactMetadata
@@ -1943,7 +2109,7 @@ final class OfflineMapManager: ObservableObject {
         catalogHost: String? = OfflineMapCatalogConfig.catalogHost,
         catalogClient: OfflineMapCatalogClient? = nil,
         packDownload: @escaping PackDownloadOperation = { url, constraints, onProgress, onByteProgress in
-            try await OfflineMapPackDownloader.download(
+            try await DurableMapDownloadCoordinator.shared.download(
                 from: url,
                 constraints: constraints,
                 onProgress: onProgress,
@@ -4564,24 +4730,30 @@ final class OfflineMapManager: ObservableObject {
         obsoleteDestination: URL? = nil
     ) throws {
         defer { invalidateCachedPreview(for: destination) }
-        let backup = destination
-            .deletingLastPathComponent()
-            .appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString).backup")
+        let directory = destination.deletingLastPathComponent()
+        var journal = try SavedMapReplacementJournal.begin(at: destination)
+        let backup = journal.backup(in: directory)
         let metadataURL = SavedMapArtifactMetadataStore.metadataURL(for: destination)
         let metadataBackup = SavedMapArtifactMetadataStore.metadataURL(for: backup)
-        var backedUpArtifact = false
-        var backedUpMetadata = false
         do {
             if FileManager.default.fileExists(atPath: destination.path) {
                 try FileManager.default.moveItem(at: destination, to: backup)
-                backedUpArtifact = true
+                try SavedMapReplacementJournal.sync(directory)
             }
             if FileManager.default.fileExists(atPath: metadataURL.path) {
                 try FileManager.default.moveItem(at: metadataURL, to: metadataBackup)
-                backedUpMetadata = true
+                try SavedMapReplacementJournal.sync(directory)
             }
             try FileManager.default.moveItem(at: temporaryURL, to: destination)
             try metadataSave(metadata, destination)
+            try SavedMapReplacementJournal.sync(destination)
+            try SavedMapReplacementJournal.sync(metadataURL)
+            try SavedMapReplacementJournal.sync(directory)
+            journal.committed = true
+            try journal.save(in: directory)
+            // Once committed, recovery must keep the new coherent pair. Cleanup
+            // failure is retried at launch, never treated as installation failure.
+            try? journal.finish(in: directory)
             let obsoleteExtension = fileExtension == "bmap" ? "zip" : "bmap"
             let obsolete = try obsoleteDestination ?? cachedPackURL(
                 mapId: mapID,
@@ -4593,18 +4765,11 @@ final class OfflineMapManager: ObservableObject {
                 packDisplayNames.removeValue(forKey: obsolete.lastPathComponent)
                 invalidateCachedPreview(for: obsolete)
             }
-            if backedUpArtifact { try? FileManager.default.removeItem(at: backup) }
-            if backedUpMetadata { try? FileManager.default.removeItem(at: metadataBackup) }
         } catch {
             try? FileManager.default.removeItem(at: temporaryURL)
-            try? FileManager.default.removeItem(at: destination)
-            try? SavedMapArtifactMetadataStore.delete(for: destination)
-            if backedUpArtifact {
-                try? FileManager.default.moveItem(at: backup, to: destination)
-            }
-            if backedUpMetadata {
-                try? FileManager.default.moveItem(at: metadataBackup, to: metadataURL)
-            }
+            // Read the persisted commit decision, not an in-memory flag whose
+            // journal write may have failed. Preserve the journal on repair error.
+            try? SavedMapReplacementJournal.recover(in: directory)
             throw error
         }
     }
@@ -5849,16 +6014,19 @@ final class OfflineMapManager: ObservableObject {
                 at: cacheDirectoryOverride,
                 withIntermediateDirectories: true
             )
+            try SavedMapReplacementJournal.recover(in: cacheDirectoryOverride)
             return cacheDirectoryOverride
         }
         let directory = try FileManager.default.url(
-            for: .cachesDirectory,
+            for: .applicationSupportDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
             create: true
         ).appendingPathComponent("OfflineMapPacks", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory
+        let legacy = try FileManager.default.url(
+            for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: false
+        ).appendingPathComponent("OfflineMapPacks", isDirectory: true)
+        return try SavedMapStorageDirectory.prepare(directory: directory, legacy: legacy)
     }
 
     private func deleteCompatibilityArtifacts(mapID: String) throws {
@@ -6148,19 +6316,22 @@ struct OfflineMapByteProgress: Equatable {
     }
 }
 
-nonisolated struct OfflineMapDownloadConstraints: Equatable {
+nonisolated struct OfflineMapDownloadConstraints: Codable, Equatable {
     let exactBytes: Int64?
     let maximumBytes: Int64
     let allowedDownloadHosts: Set<String>?
+    let artifactSHA256: String?
 
     init(
         exactBytes: Int64?,
         maximumBytes: Int64,
-        allowedDownloadHosts: Set<String>? = nil
+        allowedDownloadHosts: Set<String>? = nil,
+        artifactSHA256: String? = nil
     ) {
         self.exactBytes = exactBytes
         self.maximumBytes = maximumBytes
         self.allowedDownloadHosts = allowedDownloadHosts
+        self.artifactSHA256 = artifactSHA256
     }
 
     static let defaultMap = Self(
@@ -6185,7 +6356,8 @@ nonisolated struct OfflineMapDownloadConstraints: Equatable {
         return Self(
             exactBytes: exactBytes,
             maximumBytes: maximumBytes,
-            allowedDownloadHosts: nil
+            allowedDownloadHosts: nil,
+            artifactSHA256: artifact?.sha256
         )
     }
 
@@ -6201,8 +6373,274 @@ nonisolated struct OfflineMapDownloadConstraints: Equatable {
         return Self(
             exactBytes: base.exactBytes,
             maximumBytes: base.maximumBytes,
-            allowedDownloadHosts: [catalogHost.lowercased(), r2DownloadHost.lowercased()]
+            allowedDownloadHosts: [catalogHost.lowercased(), r2DownloadHost.lowercased()],
+            artifactSHA256: base.artifactSHA256
         )
+    }
+}
+
+// One background session serves catalog and job downloads. Tasks are identified
+// by immutable digest/length, not a short-lived grant URL. Completed bytes and
+// opaque URLSession resume data remain private, excluded-from-backup app data.
+@MainActor
+final class DurableMapDownloadCoordinator: NSObject, URLSessionDownloadDelegate {
+    static let shared = DurableMapDownloadCoordinator()
+    nonisolated static let sessionIdentifier = "org.bicino.offline-map-downloads.v1"
+    private var completionHandler: (() -> Void)?
+    private let configurationOverride: URLSessionConfiguration?
+    nonisolated private let directoryOverride: URL?
+    init(configuration: URLSessionConfiguration? = nil, directory: URL? = nil) {
+        configurationOverride = configuration
+        directoryOverride = directory
+        super.init()
+    }
+    private struct Waiter {
+        let task: URLSessionDownloadTask
+        let continuation: CheckedContinuation<URL, Error>
+        let progress: @MainActor @Sendable (Double) -> Void
+        let bytes: @MainActor @Sendable (OfflineMapByteProgress) -> Void
+    }
+    private var waiters: [String: Waiter] = [:]
+    private lazy var session: URLSession = {
+        let configuration: URLSessionConfiguration
+        if let override = configurationOverride {
+            configuration = override
+        } else {
+#if os(iOS) && !HOST_TESTING
+        configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
+        configuration.sessionSendsLaunchEvents = true
+        configuration.isDiscretionary = false
+#else
+        configuration = URLSessionConfiguration.default
+#endif
+        }
+        configuration.waitsForConnectivity = true
+        configuration.httpShouldSetCookies = false
+        configuration.timeoutIntervalForResource = 24 * 60 * 60
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }()
+
+    nonisolated struct Descriptor: Codable {
+        let constraints: OfflineMapDownloadConstraints
+        var key: String? {
+            guard let sha = constraints.artifactSHA256, sha.count == 64,
+                  sha.allSatisfy({ "0123456789abcdef".contains($0) }),
+                  let count = constraints.exactBytes, count > 0,
+                  count <= constraints.maximumBytes,
+                  count <= BikeMapStreamFormat.maximumArtifactBytes else { return nil }
+            return "\(sha)-\(count)"
+        }
+        static func read(_ task: URLSessionTask) -> Self? {
+            guard let text = task.taskDescription, text.utf8.count <= 4096,
+                  let data = text.data(using: .utf8),
+                  let value = try? JSONDecoder().decode(Self.self, from: data),
+                  value.key != nil else { return nil }
+            return value
+        }
+        func file(_ suffix: String, directory: URL? = nil) throws -> URL {
+            guard let key else { throw OfflineMapCatalogError.invalidResponse }
+            var root = try directory ?? FileManager.default.url(
+                for: .applicationSupportDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: true
+            ).appendingPathComponent("OfflineMapDownloads", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try root.setResourceValues(values)
+            return root.appendingPathComponent(key).appendingPathExtension(suffix)
+        }
+        func allows(_ url: URL?) -> Bool {
+            guard let hosts = constraints.allowedDownloadHosts else { return true }
+            guard let url, url.scheme == "https", url.port == nil,
+                  url.user == nil, url.password == nil, let host = url.host else { return false }
+            return hosts.contains(host.lowercased())
+        }
+    }
+
+    func handleEvents(completionHandler: @escaping () -> Void) {
+        self.completionHandler = completionHandler
+        _ = session
+    }
+
+    func download(
+        from url: URL, constraints: OfflineMapDownloadConstraints,
+        onProgress: @escaping @MainActor @Sendable (Double) -> Void,
+        onByteProgress: @escaping @MainActor @Sendable (OfflineMapByteProgress) -> Void,
+        allowResume: Bool = true
+    ) async throws -> URL {
+        let descriptor = Descriptor(constraints: constraints)
+        guard let key = descriptor.key else {
+            // Legacy unsigned endpoints have no immutable identity to resume.
+            return try await OfflineMapPackDownloader.download(
+                from: url, constraints: constraints,
+                onProgress: onProgress, onByteProgress: onByteProgress
+            )
+        }
+        guard descriptor.allows(url) else { throw OfflineMapCatalogError.invalidResponse }
+        let tasks = await session.allTasks
+        try Task.checkCancellation()
+        guard waiters[key] == nil else {
+            throw OfflineMapPlatformError.invalidPack("this map is already downloading")
+        }
+        let complete = try descriptor.file("download", directory: directoryOverride)
+        // The caller still checks the full artifact digest/signature before
+        // publishing; a completed background task is not trusted installation.
+        if FileManager.default.fileExists(atPath: complete.path) { return complete }
+        try maintainStorage(descriptor: descriptor, tasks: tasks)
+        let resume = try descriptor.file("resume", directory: directoryOverride)
+        let matching = tasks.compactMap { $0 as? URLSessionDownloadTask }.first {
+            Descriptor.read($0)?.constraints == constraints && $0.state != .canceling && $0.state != .completed
+        }
+        let task: URLSessionDownloadTask
+        var resumed = false
+        if let matching {
+            task = matching
+        } else {
+            // A changed host policy must not reattach a task with looser rules.
+            for old in tasks where Descriptor.read(old)?.key == key { old.cancel() }
+            if allowResume, let size = try? resume.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+               size <= 1024 * 1024, let data = try? Data(contentsOf: resume) {
+                task = session.downloadTask(withResumeData: data)
+                resumed = true
+            } else {
+                task = session.downloadTask(with: url)
+            }
+            try? FileManager.default.removeItem(at: resume)
+            task.taskDescription = String(decoding: try JSONEncoder().encode(descriptor), as: UTF8.self)
+        }
+        do {
+          return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                waiters[key] = Waiter(task: task, continuation: continuation, progress: onProgress, bytes: onByteProgress)
+                task.resume()
+                if Task.isCancelled { cancel(key) }
+            }
+        } onCancel: {
+            Task { @MainActor in self.cancel(key) }
+        }
+        } catch {
+            // Opaque resume data can contain an expired signed URL. Retry once
+            // using the freshly authorized URL and the SAME immutable identity.
+            if resumed && !Task.isCancelled && !(error is CancellationError) {
+                try? FileManager.default.removeItem(at: resume)
+                return try await download(from: url, constraints: constraints,
+                    onProgress: onProgress, onByteProgress: onByteProgress, allowResume: false)
+            }
+            throw error
+        }
+    }
+
+    private func maintainStorage(descriptor: Descriptor, tasks: [URLSessionTask]) throws {
+        let root = try descriptor.file("download", directory: directoryOverride).deletingLastPathComponent()
+        let protectedKeys = Set(tasks.compactMap { Descriptor.read($0)?.key }).union([descriptor.key!])
+        let files = try FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey])
+        var retained: Int64 = 0
+        for file in files {
+            retained += Int64((try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        }
+        let budget = 2 * BikeMapStreamFormat.maximumArtifactBytes
+        for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            guard ["download", "resume"].contains(file.pathExtension),
+                  !protectedKeys.contains(file.deletingPathExtension().lastPathComponent) else { continue }
+            let values = try file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            if retained > budget || (values.contentModificationDate ?? .distantPast) < Date().addingTimeInterval(-7 * 86400) {
+                try FileManager.default.removeItem(at: file)
+                retained -= Int64(values.fileSize ?? 0)
+            }
+        }
+        let activeOthers = tasks.filter { $0.state != .completed && $0.state != .canceling && Descriptor.read($0)?.key != descriptor.key }
+        guard activeOthers.count < 2 else {
+            throw OfflineMapPlatformError.invalidPack("wait for the other map downloads to finish")
+        }
+        let attributes = try FileManager.default.attributesOfFileSystem(forPath: root.path)
+        let available = (attributes[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
+        guard available >= (descriptor.constraints.exactBytes ?? 0) + 32 * 1024 * 1024 else {
+            throw OfflineMapPlatformError.invalidPack("not enough free space to download this map")
+        }
+    }
+
+    private func cancel(_ key: String) {
+        guard let waiter = waiters.removeValue(forKey: key) else { return }
+        let directory = directoryOverride
+        waiter.task.cancel { data in
+            guard let data, data.count <= 1024 * 1024,
+                  let descriptor = Descriptor.read(waiter.task),
+                  let file = try? descriptor.file("resume", directory: directory) else { return }
+            try? data.write(to: file, options: .atomic)
+        }
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func finish(_ task: URLSessionTask, result: Result<URL, Error>) {
+        guard let key = Descriptor.read(task)?.key,
+              let waiter = waiters[key], waiter.task.taskIdentifier == task.taskIdentifier else { return }
+        waiters.removeValue(forKey: key)
+        waiter.continuation.resume(with: result)
+    }
+
+    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                               didFinishDownloadingTo location: URL) {
+        let result: Result<URL, Error> = Result {
+            guard let descriptor = Descriptor.read(downloadTask), descriptor.allows(downloadTask.response?.url),
+                  let response = downloadTask.response as? HTTPURLResponse,
+                  [200, 206].contains(response.statusCode),
+                  let count = try location.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                  Int64(count) == descriptor.constraints.exactBytes else {
+                throw OfflineMapCatalogError.invalidResponse
+            }
+            let destination = try descriptor.file("download", directory: directoryOverride)
+            // Download callbacks run off the main actor and must retain this
+            // temporary file before returning to URLSession.
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.moveItem(at: location, to: destination)
+            return destination
+        }
+        Task { @MainActor in self.finish(downloadTask, result: result) }
+    }
+
+    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask,
+                               didCompleteWithError error: Error?) {
+        guard let error else { return }
+        if let data = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data,
+           data.count <= 1024 * 1024, let descriptor = Descriptor.read(task),
+           let file = try? descriptor.file("resume", directory: directoryOverride) {
+            try? data.write(to: file, options: .atomic)
+        }
+        Task { @MainActor in self.finish(task, result: .failure(error)) }
+    }
+
+    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                               didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                               totalBytesExpectedToWrite: Int64) {
+        guard let descriptor = Descriptor.read(downloadTask), let key = descriptor.key,
+              let expected = descriptor.constraints.exactBytes else { downloadTask.cancel(); return }
+        guard totalBytesWritten <= expected,
+              totalBytesExpectedToWrite <= 0 || totalBytesExpectedToWrite == expected else {
+            downloadTask.cancel()
+            return
+        }
+        Task { @MainActor in
+            guard let waiter = self.waiters[key] else { return }
+            waiter.progress(Double(totalBytesWritten) / Double(expected))
+            waiter.bytes(OfflineMapByteProgress(completedBytes: totalBytesWritten, totalBytes: expected))
+        }
+    }
+
+    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask,
+                               willPerformHTTPRedirection response: HTTPURLResponse,
+                               newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(Descriptor.read(task)?.allows(request.url) == true ? request : nil)
+    }
+
+    nonisolated func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        Task { @MainActor in
+            let completion = self.completionHandler
+            self.completionHandler = nil
+            completion?()
+        }
     }
 }
 
