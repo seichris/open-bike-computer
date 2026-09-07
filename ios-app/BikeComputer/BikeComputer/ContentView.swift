@@ -673,6 +673,7 @@ struct ContentView: View {
                 "Times out in \(rideAutomationCoordinator.promptSecondsRemaining)s"
             )
             .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
             HStack {
                 Button("Not Now", role: .cancel) {
                     rideAutomationCoordinator.dismissStartPrompt()
