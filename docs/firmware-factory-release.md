@@ -42,21 +42,21 @@ is never checked out or executed by the publisher.
 
 Before merging and using this flow, repository administrators must:
 
-1. Configure `firmware-release` with the exact human reviewer named in
+1. Configure `firmware-release` with the exact reviewer named in
    `.github/firmware-release-authority.json`, restrict deployments to the exact
    protected default branch used by `workflow_run`, and limit release-tag bypass
-   to that named user. The maintainer selected `single-maintainer` review on
-   2026-09-07: `seichris` may approve their own run. This remains an explicit
-   approval gate, but is **not independent review**. Selecting `independent` in
-   the reviewed policy additionally requires GitHub's prevent-self-review rule.
+   to that named user. The maintainer explicitly selected single-maintainer
+   approval: `seichris` may approve their own run. This is not independent review.
+   Selecting `independent` in the reviewed policy also requires prevent-self-review.
 2. Make `FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY`,
    `FIRMWARE_RELEASE_PREFLIGHT_APP_ID`, and
    `FIRMWARE_RELEASE_PREFLIGHT_APP_PRIVATE_KEY` available to that environment
    with no broader scope than operationally required. Store both private keys
    as environment secrets and remove any repository-level copies after the
    environment migration is verified. If the local firmware key is lost but the
-   repository secret remains, use the controlled migration below; do not rotate
-   the firmware key or change device trust just to change secret scope.
+   repository secret remains, follow [the controlled encrypted migration](firmware-signing-key-migration.md).
+   Keep both repository copies until destination proof and approved cleanup; do
+   not rotate the firmware key or change device trust just to change secret scope.
 3. Add a `v*` tag ruleset that restricts tag creation, update, and deletion to
    release maintainers. Enable GitHub's full-SHA Actions policy after every
    workflow has landed with immutable action pins.
@@ -202,6 +202,13 @@ group; out-of-order queued publications must recheck history under that lock.
 Do not publish firmware outside this serialized workflow or delete build history.
 GitHub may replace an older pending run in a concurrency group; a dropped release
 needs a new candidate, not an assumption that every queued tag will publish.
+The publisher runs the read-only `firmware_release_controls.py` gate before
+exposing the firmware key to the signing command. It requires the checked-in
+reviewer policy, exact default-branch-only admission, environment-scoped private
+keys without repository/organization copies, strict admin-enforced CI Gate and
+the owner-only release-tag ruleset. Missing API access fails closed. See the
+[authority and migration runbook](firmware-signing-key-migration.md) for App
+permissions, verification and remaining live-operation boundaries.
 
 Compilation, host tests, and a merged pull request establish software readiness;
 they do not establish physical acceptance. Before calling an artifact

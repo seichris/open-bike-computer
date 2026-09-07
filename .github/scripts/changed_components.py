@@ -28,7 +28,10 @@ FULL_CI_PATHS = {
     ".github/workflows/ci.yml",
 }
 FIRMWARE_HOST_ONLY_PATH_PREFIXES = ("esp32/tools/tests/",)
-FIRMWARE_HOST_PATH_PREFIXES = (".github/actions/require-immutable-releases/",)
+FIRMWARE_HOST_PATH_PREFIXES = (
+    ".github/actions/require-immutable-releases/",
+    ".github/actions/require-firmware-release-controls/",
+)
 FIRMWARE_WORKFLOW_PATHS = {
     ".github/workflows/firmware-diagnostics.yml",
     ".github/workflows/firmware-release-candidate.yml",

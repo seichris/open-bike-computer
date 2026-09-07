@@ -231,7 +231,7 @@ jobs:
           test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "${GIT_SHA}"
           git merge-base --is-ancestor \
             "${GIT_SHA}" "refs/remotes/origin/${DEFAULT_BRANCH}"
-      - name: Require release signing authority
+      - name: Require firmware signing authority
         uses: ./.github/actions/require-firmware-release-controls
         with:
           app-id: ${{ vars.FIRMWARE_RELEASE_PREFLIGHT_APP_ID }}
