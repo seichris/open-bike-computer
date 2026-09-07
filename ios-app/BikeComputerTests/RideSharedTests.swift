@@ -102,6 +102,7 @@ enum RideSharedTests {
         ))
         expect(
             stopping.reduce(.stopRequested(generation: 1)) == .leftReady &&
+                stopping.reduce(.stopWritesDrained(generation: 1)) == .applied &&
                 stopping.reduce(.leaseReleased(generation: 1)) == .applied &&
                 stopping.leaseGeneration == nil,
             "a Watch stop cannot remain Ready while its lease is releasing"
