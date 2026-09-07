@@ -58,17 +58,18 @@ jobs:
           git apply --unidiff-zero --index "$RUNNER_TEMP/offline-route-feature.patch"
           test "$(git write-tree)" = 'f3f2a682ef43c99097f6c9adb9c1c9d0ce3d31a0'
           git diff --cached --check
-          git commit -m 'feat(ios): save approved GPX routes and navigate saved archives offline' -m 'Integrates the pinned PR #429 preview prerequisite. Preserves the MapKit durable-storage gate and Strava retention. Removes temporary source-transfer helpers. Tree verified against the isolated local implementation.'
+          # The connector removes these unchanged transport files in a follow-up
+          # commit. GITHUB_TOKEN never attempts to modify workflow definitions.
+          git restore --source=HEAD --staged --worktree .github/workflows/offline-route-source-export.yml .github/offline-route-feature.part1 .github/offline-route-feature.part2
+          git commit -m 'feat(ios): save approved GPX routes and navigate saved archives offline' -m 'Integrates the pinned PR #429 preview prerequisite. Preserves the MapKit durable-storage gate and Strava retention. Application tree verified against the isolated local implementation.'
           git push origin HEAD:refs/heads/feat/planned-routes-save-offline
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   native:
-    name: Requested iOS validation on exact feature tree
+    name: Requested iOS validation on transferred feature code
     needs: apply
     runs-on: macos-latest
     timeout-minutes: 60
-    env:
-      CI_DERIVED_DATA_PATH: ${{ runner.temp }}/offline-route-derived-data
     defaults:
       run:
         working-directory: ios-app
@@ -78,11 +79,14 @@ jobs:
         with:
           ref: ${{ needs.apply.outputs.sha }}
           persist-credentials: false
-      - name: Record exact source and toolchain
+      - name: Record source and toolchain; exclude all transfer files from validation
+        working-directory: .
         run: |
           git rev-parse HEAD
-          git rev-parse HEAD^{tree}
+          git rm .github/workflows/offline-route-source-export.yml .github/offline-route-feature.part1 .github/offline-route-feature.part2
+          test "$(git write-tree)" = 'f3f2a682ef43c99097f6c9adb9c1c9d0ce3d31a0'
           xcrun swiftc --version
+          echo "CI_DERIVED_DATA_PATH=$RUNNER_TEMP/offline-route-derived-data" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/offline-route-validation"
       - id: navigation
         name: Run requested navigation tests
