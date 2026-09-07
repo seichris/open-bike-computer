@@ -4,6 +4,10 @@ This administrative-only prerequisite preserves the existing firmware identity.
 It does not build, flash or publish firmware. Execution and secret cleanup require
 separate operator approval after this workflow lands on reviewed main.
 
+The controlled migration completed on 2026-09-07. The one-time workflow has since
+been retired through a reviewed change; the procedure below is retained as an
+audit record and is not an instruction to dispatch a removed workflow.
+
 The publisher now runs `firmware_release_controls.py` before exposing the
 firmware scalar to the signing command. Its read-only App token needs
 Administration, Actions, Contents, Environments and Secrets **read** permissions.
