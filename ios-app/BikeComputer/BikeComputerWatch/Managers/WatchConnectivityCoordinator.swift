@@ -26,6 +26,33 @@ final class WatchConnectivityCoordinator: NSObject {
     private let inFlightTransportDiagnosticsKey =
         "watchConnectivity.inFlightBLETransportDiagnostics.v1"
 
+    private lazy var cyclingSensorPublisher =
+        WatchCyclingSensorObservationPublisher(
+            isActivated: { [weak self] in
+                self?.session?.activationState == .activated
+            },
+            publish: { [weak self] observation in
+                guard let session = self?.session,
+                      session.activationState == .activated else {
+                    return false
+                }
+                do {
+                    try session.updateApplicationContext(
+                        observation.merging(into: session.applicationContext)
+                    )
+                    return true
+                } catch {
+                    return false
+                }
+            }
+        )
+
+    func publishCyclingSensorObservation(
+        _ observation: WatchCyclingSensorObservationV1
+    ) {
+        cyclingSensorPublisher.offer(observation)
+    }
+
     init(
         routeLibrary: WatchRouteLibrary,
         controllerCredentialStore: WatchControllerCredentialStore,
@@ -45,6 +72,7 @@ final class WatchConnectivityCoordinator: NSObject {
             if session.activationState == .activated {
                 flushPendingTransportDiagnostics(using: session)
                 publishDeviceMetadata(using: session)
+                cyclingSensorPublisher.flush()
             }
             return
         }
@@ -57,6 +85,7 @@ final class WatchConnectivityCoordinator: NSObject {
         guard let session,
               session.activationState == .activated else { return }
         publishDeviceMetadata(using: session)
+        cyclingSensorPublisher.flush()
     }
 
     func publishWorkoutHealthSetup(
@@ -142,11 +171,13 @@ final class WatchConnectivityCoordinator: NSObject {
         flushPendingDirectRideReleases(using: session)
         flushPendingTransportDiagnostics(using: session)
         publishDeviceMetadata(using: session)
+        cyclingSensorPublisher.flush()
         onApplicationContext?(session.receivedApplicationContext)
     }
 
     fileprivate func reachabilityDidChange() {
         onDirectRidePreparationAvailabilityChanged?()
+        cyclingSensorPublisher.flush()
         if let session {
             flushPendingTransportDiagnostics(using: session)
         }

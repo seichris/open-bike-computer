@@ -7,6 +7,8 @@
 #include <cstring>
 #include <cmath>
 #include <limits>
+#include <cstdlib>
+#include <fstream>
 
 namespace {
 
@@ -85,6 +87,9 @@ Decision runSeconds(RideAutomationPolicy &policy, uint32_t startMs,
 } // namespace
 
 int main() {
+  assert(!ride_automation_runtime::decisionTransportExpired(30'999, 1'000));
+  assert(ride_automation_runtime::decisionTransportExpired(31'000, 1'000));
+  assert(ride_automation_runtime::decisionTransportExpired(29'999, UINT32_MAX));
   using ride_automation_runtime::shouldEndDetailedCapture;
   assert(shouldEndDetailedCapture(ConfirmedLifecycle::Running,
                                   ConfirmedLifecycle::Finished));
@@ -121,53 +126,6 @@ int main() {
   Settings ask;
   ask.startMode = StartMode::Ask;
   ask.autoPauseEnabled = true;
-
-  // The real detector output must survive the decision wire contract.
-  for (bool resume : {false, true}) {
-    RideAutomationPolicy policy;
-    Decision emitted;
-    const uint32_t duration = resume ? 2'000 : 5'000;
-    for (uint32_t t = 0; t <= duration; t += 1'000)
-      emitted = policy.update(t, watchGps(resume ? 3.0F : 0.0F, t, t / 1'000 + 1),
-          resume ? ConfirmedLifecycle::AutomaticallyPaused : ConfirmedLifecycle::Running, ask);
-    assert(emitted);
-    ride_automation_protocol::Frame frame;
-    frame.transition = static_cast<ride_automation_protocol::Transition>(emitted.transition);
-    frame.origin = ride_automation_protocol::Origin::Automatic;
-    frame.rideGeneration = 1;
-    frame.decisionSequence = emitted.sequence;
-    frame.evidenceMask = emitted.evidenceMask;
-    frame.sourceHealthMask = emitted.sourceHealthMask;
-    frame.profileVersion = emitted.profileVersion;
-    uint8_t bytes[ride_automation_protocol::FRAME_SIZE]{};
-    assert(frame.sourceHealthMask == SourceHealthWatchGpsFresh);
-    assert(ride_automation_protocol::encode(frame, bytes, sizeof(bytes)));
-    ride_automation_protocol::Frame decoded;
-    assert(ride_automation_protocol::decode(bytes, sizeof(bytes), decoded));
-    assert(decoded.sourceHealthMask == frame.sourceHealthMask);
-  }
-  for (int veto = 0; veto != 4; ++veto) {
-    RideAutomationPolicy policy;
-    for (uint32_t t = 0; t <= 4'000; t += 1'000)
-      assert(!policy.update(t, watchGps(0, t, t / 1'000 + 1), ConfirmedLifecycle::Running, ask));
-    auto movement = watchGps(0, 5'000, 6);
-    if (veto == 0 || veto == 2)
-      movement.wheelSpeedMetersPerSecond = metric(3.0F, 5'000);
-    if (veto == 1 || veto == 2)
-      movement.cadenceRpm = metric(veto == 2 ? 0.0F : 80.0F, 5'000);
-    if (veto == 3) {
-      movement.gpsSpeedMetersPerSecond = metric(3.0F, 5'000);
-      movement.gpsFixValid = flag(true, 5'000);
-      movement.gpsHorizontalUncertaintyMeters = metric(5.0F, 5'000);
-      movement.imuMotionScore = metric(0.9F, 5'000);
-    }
-    assert(!policy.update(5'000, movement, ConfirmedLifecycle::Running, ask));
-    for (uint32_t t = 6'000; t < 11'000; t += 1'000)
-      assert(!policy.update(t, watchGps(0, t, t / 1'000 + 1), ConfirmedLifecycle::Running, ask));
-    const auto decision = policy.update(11'000, watchGps(0, 11'000, 12), ConfirmedLifecycle::Running, ask);
-    assert(decision.transition == Transition::Pause);
-    assert(decision.candidateBeganAtMs == 6'000);
-  }
 
   // Missing and stale measurements are not zero-valued stopped evidence.
   TimedMetric missing;
@@ -509,6 +467,69 @@ int main() {
   assert(decision.transition == Transition::Pause);
   assert((decision.evidenceMask & EvidenceWatchGpsStopped) != 0);
   assert((decision.sourceHealthMask & SourceHealthWatchGpsFresh) != 0);
+
+  // Exercise the actual policy output through the transport encoder. The
+  // Watch health bit must survive, not just the older four source bits.
+  ride_automation_protocol::Frame watchFrame;
+  watchFrame.kind = ride_automation_protocol::Kind::Decision;
+  watchFrame.transition = ride_automation_protocol::Transition::Pause;
+  watchFrame.origin = ride_automation_protocol::Origin::Automatic;
+  watchFrame.rideGeneration = 1;
+  watchFrame.decisionSequence = decision.sequence;
+  watchFrame.evidenceMask = decision.evidenceMask;
+  watchFrame.sourceHealthMask = decision.sourceHealthMask;
+  watchFrame.profileVersion = 1;
+  watchFrame.sessionID[0] = 1;
+  uint8_t wire[ride_automation_protocol::FRAME_SIZE]{};
+  assert(ride_automation_protocol::encode(watchFrame, wire, sizeof(wire)));
+  ride_automation_protocol::Frame decodedWatch;
+  assert(ride_automation_protocol::decode(wire, sizeof(wire), decodedWatch));
+  assert(decodedWatch.sourceHealthMask == SourceHealthWatchGpsFresh);
+  if (const char *fixturePath = std::getenv("RAUT_POLICY_FRAME_PATH")) {
+    std::ofstream fixture(fixturePath, std::ios::binary);
+    fixture.write(reinterpret_cast<const char *>(wire), sizeof(wire));
+    assert(fixture.good());
+  }
+
+  // A brief movement veto must discard the preceding Watch stopped span.
+  for (int source = 0; source < 3; ++source) {
+    RideAutomationPolicy veto;
+    for (uint32_t second = 0; second < 9; ++second) {
+      auto observation = watchGps(0.1F, second * 1'000, second + 1);
+      if (second == 4) {
+        if (source == 0)
+          observation.wheelSpeedMetersPerSecond = metric(5.0F, 4'000);
+        else if (source == 1)
+          observation.cadenceRpm = metric(70.0F, 4'000);
+        else {
+          observation.gpsSpeedMetersPerSecond = metric(5.0F, 4'000);
+          observation.gpsFixValid = flag(true, 4'000);
+          observation.gpsHorizontalUncertaintyMeters = metric(5.0F, 4'000);
+          observation.imuMotionScore = metric(1.0F, 4'000);
+        }
+      }
+      assert(!veto.update(second * 1'000, observation,
+                          ConfirmedLifecycle::Running, ask));
+    }
+  }
+
+  for (int source = 0; source < 2; ++source) {
+    RideAutomationPolicy mixedResume;
+    for (uint32_t second = 0; second <= 3; ++second) {
+      auto observation = watchGps(0.1F, second * 1'000, second + 1);
+      if (source == 0)
+        observation.wheelSpeedMetersPerSecond = metric(5.0F, second * 1'000);
+      else
+        observation.cadenceRpm = metric(70.0F, second * 1'000);
+      const auto result = mixedResume.update(second * 1'000, observation,
+                                             ConfirmedLifecycle::AutomaticallyPaused, ask);
+      if (second == 2) assert(result.transition == Transition::Resume);
+      assert(!mixedResume.takePendingCancellation());
+    }
+    assert(!mixedResume.update(4'000, watchGps(0.1F, 4'000, 5),
+                               ConfirmedLifecycle::AutomaticallyPaused, ask));
+    assert(mixedResume.takePendingCancellation());
+  }
 
   // Repeating a transport frame cannot advance the sample window.
   RideAutomationPolicy watchDuplicate;

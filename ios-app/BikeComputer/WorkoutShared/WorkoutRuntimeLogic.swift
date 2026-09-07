@@ -340,9 +340,34 @@ nonisolated enum WorkoutRouteSegmentFilter {
     }
 }
 
-/// Timer pauses are not route discontinuities. While paused, accept only
-/// points with strong movement evidence so genuine coasting remains connected
-/// without turning stationary GPS drift into route distance.
+/// Classify delayed points by HealthKit's transition timestamp, not callback
+/// state. Bound both retained history and distance interpolation through gaps.
+nonisolated struct WorkoutRouteCaptureLifecycle {
+    static let maximumLateness: TimeInterval = 30
+    static let maximumSegmentGap: TimeInterval = 10
+    private var transitions: [(at: Date, paused: Bool)]
+
+    init(startedAt: Date) {
+        transitions = [(startedAt, false)]
+    }
+
+    mutating func record(paused: Bool, at date: Date) {
+        guard date.timeIntervalSinceReferenceDate.isFinite,
+              let last = transitions.last, date >= last.at else { return }
+        if date == last.at { transitions.removeLast() }
+        transitions.append((date, paused))
+        // Points older than retained history fail closed.
+        if transitions.count > 128 { transitions.removeFirst() }
+    }
+
+    func paused(at date: Date) -> Bool? {
+        transitions.last(where: { $0.at <= date })?.paused
+    }
+}
+
+/// Timer pauses are not route discontinuities. Qualified movement can retain
+/// route geometry during either manual or automatic pauses; stationary drift
+/// cannot. HealthKit remains the owner of saved cycling distance and time.
 nonisolated enum WorkoutPausedRoutePointFilter {
     static let minimumMovingSpeedMetersPerSecond = 0.8
     static let maximumHorizontalAccuracyMeters = 25.0

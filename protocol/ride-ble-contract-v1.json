@@ -59,6 +59,13 @@
       "watch_gps_motion_evidence_v1": {"bit": 25, "minimum_client_version": 23}
     }
   },
+  "automation_source_health": {
+    "wheel_fresh": 0,
+    "cadence_fresh": 1,
+    "gps_fresh": 2,
+    "imu_fresh": 3,
+    "watch_gps_fresh": 4
+  },
   "device_requests": {
     "workout_start_magic": "WREQ",
     "destination_magic": "DREQ"

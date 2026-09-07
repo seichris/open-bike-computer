@@ -270,8 +270,10 @@ jobs:
       - name: Run Watch online navigation policy tests
         run: ./scripts/run-watch-online-navigation-tests.sh
         working-directory: ios-app
-      - name: Run workout contract tests
-        run: ./scripts/run-workout-contract-tests.sh
+      - name: Fetch immutable pre-388 workout decoder
+        run: git fetch --no-tags --depth=1 origin fe73e43431ed76c39159de7624c4cd9ede509434
+      - name: Run workout contracts and firmware-to-Swift legacy compatibility tests
+        run: python3 scripts/verify-legacy-workout-decoder.py
         working-directory: ios-app
 
   ios:

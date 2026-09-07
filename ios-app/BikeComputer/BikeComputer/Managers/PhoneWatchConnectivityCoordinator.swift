@@ -14,6 +14,9 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     @Published private(set) var workoutHealthSetupSnapshot:
         WorkoutHealthSetupSnapshotV1?
 
+    @Published private(set) var cyclingSensorObservation:
+        WatchCyclingSensorObservationV1?
+
     var onRouteAcknowledgement: ((WatchRouteSyncMessageV1) -> Void)?
     var onDirectRidePreparationRequest:
         ((WatchDirectRidePreparationRequestV1) ->
@@ -574,12 +577,24 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     fileprivate func refreshState(activationFailed: Bool? = nil) {
         guard let session else {
             workoutHealthSetupSnapshot = nil
+            cyclingSensorObservation = nil
             state = PhoneWatchConnectivityStateV1()
             return
         }
         let activated = session.activationState == .activated
         let paired = activated && session.isPaired
         let watchAppInstalled = paired && session.isWatchAppInstalled
+        // Read the latest context on activation as well as delivery. A phone
+        // launched after the sensor started must not wait for another packet.
+        if watchAppInstalled,
+           let data = session.receivedApplicationContext[
+               WatchCyclingSensorObservationV1.applicationContextKey
+           ] as? Data {
+            cyclingSensorObservation = try?
+                WatchCyclingSensorObservationV1.decode(data)
+        } else {
+            cyclingSensorObservation = nil
+        }
         let watchMetadata: WatchDeviceMetadataV1?
         if watchAppInstalled,
            let data = session.receivedApplicationContext[

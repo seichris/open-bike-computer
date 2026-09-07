@@ -126,8 +126,8 @@ nonisolated struct RendererBenchmarkBLETransportEvidence: Codable,
 #endif
 
 struct NavigationWrite {
-    private(set) var data: Data
-    let payloadProvider: (() -> Data?)?
+    let data: Data
+    let prepareData: (() -> Data?)?
     let label: String
     let transportWrite: ((Data) -> Void)?
     let onWrite: (() -> Void)?
@@ -149,7 +149,7 @@ struct NavigationWrite {
     init(
         data: Data,
         label: String,
-        payloadProvider: (() -> Data?)? = nil,
+        prepareData: (() -> Data?)? = nil,
         transportWrite: ((Data) -> Void)? = nil,
         onWrite: (() -> Void)? = nil,
         onDrop: (() -> Void)? = nil,
@@ -164,7 +164,7 @@ struct NavigationWrite {
         enqueuedAtUptime: TimeInterval? = nil
     ) {
         self.data = data
-        self.payloadProvider = payloadProvider
+        self.prepareData = prepareData
         self.label = label
         self.transportWrite = transportWrite
         self.onWrite = onWrite
@@ -181,20 +181,8 @@ struct NavigationWrite {
         self.enqueuedAtUptime = enqueuedAtUptime
     }
 
-    /// Called before allocating an ATT response slot. Providers may only
-    /// refresh same-size replaceable payloads, or expire them.
-    func preparedForSubmission() -> NavigationWrite? {
-        guard let payloadProvider else { return self }
-        guard let payload = payloadProvider(), payload.count == data.count else {
-            onDrop?()
-            return nil
-        }
-        var prepared = self
-        prepared.data = payload
-        return prepared
-    }
-
-    func perform(using fallbackWrite: (Data) -> Void) {
+    func perform(using fallbackWrite: (Data) -> Void, preparedData: Data? = nil) {
+        let data = preparedData ?? self.data
         if let transportWrite {
             transportWrite(data)
         } else {
@@ -207,7 +195,7 @@ struct NavigationWrite {
         NavigationWrite(
             data: data,
             label: label,
-            payloadProvider: payloadProvider,
+            prepareData: prepareData,
             transportWrite: transportWrite,
             onWrite: onWrite,
             onDrop: onDrop,
@@ -228,7 +216,7 @@ struct NavigationWrite {
         NavigationWrite(
             data: data,
             label: label,
-            payloadProvider: payloadProvider,
+            prepareData: prepareData,
             transportWrite: transportWrite,
             onWrite: onWrite,
             onDrop: onDrop,

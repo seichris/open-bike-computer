@@ -30,3 +30,6 @@ xcrun swiftc \
   BikeComputerTests/RideSharedTests.swift
 
 "${OUT}"
+
+# Exercise the actual Watch adapter with deterministic host boundary doubles.
+python3 "${IOS_DIR}/tests/watch-link-host/run.py"

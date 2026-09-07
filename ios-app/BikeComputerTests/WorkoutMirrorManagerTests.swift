@@ -405,6 +405,10 @@ final class RideAutomationCoordinatorProductionTests: XCTestCase {
         }
         XCTAssertNil(coordinator.startPrompt)
         XCTAssertFalse(pendingWasDurableAtAcknowledgement)
+        XCTAssertFalse(sentFrames.contains {
+            $0.kind == .acknowledgement && $0.acknowledgedKind == .decision
+                && $0.decisionSequence == decision.decisionSequence
+        })
         XCTAssertNil(settingsStore.loadDecisionWatermarks()["bicino-175:7"])
         XCTAssertNil(settingsStore.loadPendingDecision())
         persistence.failsSave = false

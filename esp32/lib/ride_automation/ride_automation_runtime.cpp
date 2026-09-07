@@ -891,12 +891,14 @@ void processFirmwareShadow(uint32_t nowMs) {
     frame.monotonicSeconds = nowMs / 1'000;
     frame.sourceHealthMask = decision.sourceHealthMask;
 #if defined(RIDE_AUTOMATION_INTERNAL_CONTROL)
-    // A frame which cannot be serialized has no transport retry state.
-    // Never install a logical outstanding decision in that case.
-    uint8_t validatedFrame[ride_automation_protocol::FRAME_SIZE]{};
-    if (!ride_automation_protocol::encode(
-            frame, validatedFrame, sizeof(validatedFrame))) {
+    // Encoding/admission failure must not create a decision with no retry
+    // frame. Notification failure after admission is handled by the retries.
+    uint8_t validatedFrame[ride_automation_protocol::FRAME_SIZE];
+    if (!ride_automation_protocol::encode(frame, validatedFrame, sizeof(validatedFrame))) {
       runtime.policy().rejectPending(nowMs);
+      hasOutstandingDecision = false;
+      decisionAcknowledged = false;
+      pendingFrameValid = false;
       showTransportError(ride_automation_protocol::Result::Rejected, nowMs);
       return;
     }
@@ -939,8 +941,8 @@ void processFirmwareShadow(uint32_t nowMs) {
     decisionAcknowledged = false;
   }
 
-  if (hasOutstandingDecision && decisionAcknowledged) {
-    if (nowMs - outstandingDecisionBeganAtMs >= 30'000) {
+  if (hasOutstandingDecision) {
+    if (decisionTransportExpired(nowMs, outstandingDecisionBeganAtMs)) {
       showTransportError(
           ride_automation_protocol::Result::WatchUnavailable, nowMs);
       if (outstandingDecision.transition ==
@@ -951,7 +953,8 @@ void processFirmwareShadow(uint32_t nowMs) {
       }
       hasOutstandingDecision = false;
       decisionAcknowledged = false;
-    } else if (nowMs - lastAcknowledgedDecisionRetryAtMs >= 5'000) {
+      pendingFrameValid = false;
+    } else if (decisionAcknowledged && nowMs - lastAcknowledgedDecisionRetryAtMs >= 5'000) {
       lastAcknowledgedDecisionRetryAtMs = nowMs;
       sendTransportFrame(outstandingDecision);
     }

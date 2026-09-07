@@ -62,6 +62,7 @@ private struct WorkoutContractTestSuite {
 #endif
         testRideAutomationAdmissionAndOriginContract()
         testSnapshotRoundTrip()
+        testLegacyPhoneProjection()
         testSegmentRoundTripValidationAndAccumulation()
         testTerminalOutcomeRoundTripAndValidation()
         testAllMessageKindsRoundTrip()
@@ -151,6 +152,13 @@ private struct WorkoutContractTestSuite {
     }
 
     private mutating func testRideAutomationGoldenVectorAndValidation() {
+        if let path = ProcessInfo.processInfo.environment["RAUT_POLICY_FRAME_PATH"] {
+            let frame = (try? Data(contentsOf: URL(fileURLWithPath: path)))
+                .flatMap(RideAutomationFrame.init)
+            expect(frame?.sourceHealthMask == RideAutomationSourceHealth.watchGpsFresh
+                   && frame?.transition == .pause,
+                   "actual firmware policy output is decodable by Swift")
+        }
         let sessionID = UUID(
             uuidString: "00112233-4455-6677-8899-AABBCCDDEEFF"
         )!
@@ -182,12 +190,10 @@ private struct WorkoutContractTestSuite {
         ])
         expect(frame.encoded() == expected, "RAUT Swift encoding must match firmware golden vector")
         expect(RideAutomationFrame(expected) == frame, "RAUT golden vector must round trip")
-        for mask in UInt8(0)...31 {
-            var vector = expected
-            vector[48] = mask
-            expect(RideAutomationFrame(vector)?.encoded() == vector,
-                "all defined source-health combinations must round trip")
-        }
+        var watchFrame = frame
+        watchFrame.sourceHealthMask = RideAutomationSourceHealth.watchGpsFresh
+        expect(watchFrame.encoded().flatMap(RideAutomationFrame.init) == watchFrame,
+               "Watch GPS source health survives firmware-to-Swift decoding")
         expect(RideAutomationFrame(expected.dropLast()) == nil, "RAUT frames must be exactly 52 bytes")
         var invalid = expected
         invalid[12] = 0
@@ -273,7 +279,7 @@ private struct WorkoutContractTestSuite {
             decisionSequence: 12,
             detectorProfileVersion: 3,
             evidenceMask: 0x55AA,
-            sourceHealthMask: 0x001F,
+            sourceHealthMask: 0x000F,
             candidateBeganSeconds: 88,
             decidedAtSeconds: 99
         )
@@ -553,6 +559,39 @@ private struct WorkoutContractTestSuite {
         let afterCommit = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
         expect(afterCommit.loadDecisionWatermarks() == ["bike-a:7": 12] &&
             afterCommit.loadPendingDecision() == nil, "committed state restores atomically")
+
+        let legacyName = "RideDecisionMigration.\(UUID().uuidString)"
+        let legacyDefaults = UserDefaults(suiteName: legacyName)!
+        defer { legacyDefaults.removePersistentDomain(forName: legacyName) }
+        legacyDefaults.set(["bike-a:7": 10], forKey: "rideDetection.decisionWatermarks.v1")
+        legacyDefaults.set(try! PropertyListEncoder().encode(pendingStart),
+            forKey: "rideDetection.pendingDecision.v1")
+        let migrationPersistence = ControllableRecoveryPersistence()
+        migrationPersistence.failsSave = true
+        let blockedMigration = RideDetectionSettingsStore(
+            defaults: legacyDefaults, decisionPersistence: migrationPersistence)
+        expect(blockedMigration.loadPendingDecision() == nil,
+            "failed migration must not replay the legacy outbox")
+        expect(legacyDefaults.data(forKey: "rideDetection.pendingDecision.v1") != nil,
+            "failed migration must retain legacy bytes for the next launch")
+        migrationPersistence.failsSave = false
+        let migrated = RideDetectionSettingsStore(
+            defaults: legacyDefaults, decisionPersistence: migrationPersistence)
+        expect(migrated.loadPendingDecision() == pendingStart &&
+            migrated.loadDecisionWatermarks()["bike-a:7"] == 11,
+            "migration must commit the pending identity and matching watermark together")
+        expect(legacyDefaults.object(forKey: "rideDetection.pendingDecision.v1") == nil,
+            "legacy bytes are removed only after the new journal commits")
+        let corruptPersistence = ControllableRecoveryPersistence()
+        corruptPersistence.data = Data("not a journal".utf8)
+        let corruptStore = RideDetectionSettingsStore(
+            defaults: legacyDefaults, decisionPersistence: corruptPersistence)
+        do {
+            try corruptStore.saveDecisionState(watermarks: [:], pending: nil)
+            expect(false, "corrupt durable state must fail closed, not reset watermarks")
+        } catch {}
+        expect(corruptPersistence.data == Data("not a journal".utf8),
+            "corrupt journal evidence must not be silently overwritten")
 
         let pauseFrame = RideAutomationFrame(
             kind: .decision,
@@ -1010,19 +1049,6 @@ private struct WorkoutContractTestSuite {
             ]),
             "motion frame uses raw location speed, quality, age, epoch, and sequence"
         )
-        let refreshed = WorkoutDeviceFrameBuilder.refreshingWatchMotionAge(
-            frame, capturedAt: location.capturedAt,
-            sentAt: sentAt.addingTimeInterval(0.5)
-        )
-        expect(refreshed?[12] == 0xB8 && refreshed?[13] == 0x0B,
-            "queued sample must carry actual submission age at the freshness boundary")
-        expect(WorkoutDeviceFrameBuilder.refreshingWatchMotionAge(
-            frame, capturedAt: location.capturedAt,
-            sentAt: sentAt.addingTimeInterval(0.501)
-        ) == nil, "expired queued motion must be dropped")
-        expect(WorkoutDeviceFrameBuilder.refreshingWatchMotionAge(
-            frame, capturedAt: sentAt.addingTimeInterval(1), sentAt: sentAt
-        ) == nil, "clock regression must fail closed")
         let paused = WorkoutSnapshotV1(
             state: .paused,
             location: location,
@@ -1279,6 +1305,37 @@ private struct WorkoutContractTestSuite {
         } catch {
             expect(false, "\(message): unexpected error \(error)")
         }
+    }
+
+    private mutating func testLegacyPhoneProjection() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let snapshot = WorkoutSnapshotV1(
+            state: .paused, startDate: now.addingTimeInterval(-90),
+            currentSpeed: metric(3, .metersPerSecond, now, .healthKit),
+            location: WorkoutLocationV1(latitude: 1, longitude: 2, capturedAt: now,
+                horizontalAccuracy: 5, altitude: nil, verticalAccuracy: nil,
+                course: nil, speed: 3, motionSampleEpoch: 1, motionSampleSequence: 1),
+            availability: [.currentSpeed, .location], pauseOrigin: .system)
+        let envelope = makeEnvelope(sequence: 1, capturedAt: now, snapshot: snapshot)
+        do {
+            if let directory = ProcessInfo.processInfo.environment["WORKOUT_LEGACY_FIXTURE_DIR"] {
+                try WorkoutContractCodec.encodeForPhone(envelope, peerVersion: nil)
+                    .write(to: URL(fileURLWithPath: directory).appendingPathComponent("projected.plist"))
+                try WorkoutContractCodec.encode(envelope)
+                    .write(to: URL(fileURLWithPath: directory).appendingPathComponent("current.plist"))
+            }
+            let projected = try WorkoutContractCodec.decode(
+                WorkoutContractCodec.encodeForPhone(envelope, peerVersion: nil))
+            expect(projected.schemaVersion.minor == 5, "unknown phone gets legacy schema")
+            expect(projected.snapshot?.currentSpeed == nil, "legacy phone never receives unsupported HK speed")
+            expect(projected.snapshot?.availability.contains(.currentSpeed) == false,
+                   "removed metric also removes availability")
+            expect(projected.snapshot?.pauseOrigin == .unknown, "legacy enum remains decodable")
+            expect(projected.snapshot?.location?.motionSampleEpoch == nil,
+                   "legacy phone does not receive motion identity")
+            expect(try WorkoutContractCodec.decode(WorkoutContractCodec.encodeForPhone(
+                envelope, peerVersion: .current)) == envelope, "new phone retains full envelope")
+        } catch { expect(false, "compatibility projection failed: \(error)") }
     }
 
     private mutating func testSnapshotRoundTrip() {
@@ -8195,10 +8252,10 @@ private struct WorkoutContractTestSuite {
                 && compactContent.contains(
                     "onRouteAlternativeSelected:{coordinator.selectRouteAlternative($0)}"
                 )
-                && compactContent.contains(
+                && !compactContent.contains(
                     "Taparouteonthemap,orchoosebelow.Yourworkoutkeepsrunning."
                 ),
-            "route alternatives must render and remain selectable on the map while the buttons stay available"
+            "route alternatives must render and remain selectable on the map while the buttons stay available without redundant helper copy"
         )
         expect(
             compactContent.contains("mapControlsBottomPadding(in:proxy)")

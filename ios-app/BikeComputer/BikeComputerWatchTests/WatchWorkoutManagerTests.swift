@@ -197,7 +197,8 @@ final class WatchWorkoutManagerTests: XCTestCase {
             rideGeneration: 7,
             decisionSequence: 11,
             profileVersion: 1,
-            sessionID: identity.sessionID
+            sessionID: identity.sessionID,
+            sourceHealthMask: RideAutomationSourceHealth.watchGpsFresh
         )
 
         XCTAssertEqual(
@@ -1656,7 +1657,9 @@ final class WatchWorkoutManagerTests: XCTestCase {
         try await waitUntil { probe.sentData.count == 2 }
         let newest = try WorkoutContractCodec.decode(probe.sentData[1])
         XCTAssertGreaterThan(newest.sequence, first.sequence)
-        XCTAssertEqual(newest, runtime.manager.latestEnvelope)
+        XCTAssertEqual(newest, try runtime.manager.latestEnvelope.map {
+            try WorkoutContractCodec.decode(WorkoutContractCodec.encodeForPhone($0, peerVersion: nil))
+        })
 
         runtime.manager.workoutSession(
             runtime.session,
@@ -2851,6 +2854,68 @@ final class WatchWorkoutManagerTests: XCTestCase {
             recorder.routeDistanceMeters,
             "stationary paused drift remains excluded from route distance"
         )
+        recorder.discardRoute()
+    }
+
+    func testDelayedLocationsUseCaptureLifecycleAndBoundContinuity() {
+        let recorder = WatchRouteRecorder()
+        let start = Date().addingTimeInterval(-28)
+        recorder.begin(routeBuilder: nil, startDate: start, motionSampleEpoch: 7) {}
+        recorder.setPaused(true, at: start.addingTimeInterval(2))
+        recorder.setPaused(false, at: start.addingTimeInterval(8))
+        func point(_ second: Double, _ longitude: Double, _ speed: Double) -> CLLocation {
+            CLLocation(coordinate: .init(latitude: 0, longitude: longitude),
+                altitude: 0, horizontalAccuracy: 5, verticalAccuracy: 5,
+                course: -1, speed: speed, timestamp: start.addingTimeInterval(second))
+        }
+        let running = point(1, 0, 3)
+        let pausedMovement = point(3, 0.00005, 3)
+        let pausedDrift = point(5, 0.0001, 0)
+        recorder.receiveLocationsForTesting([pausedMovement, running])
+        XCTAssertGreaterThan(recorder.routeDistanceMeters ?? 0, 5,
+                             "late coasting during pause is preserved")
+        let beforeDrift = recorder.routeDistanceMeters
+        recorder.receiveLocationsForTesting([pausedDrift])
+        XCTAssertEqual(recorder.routeDistanceMeters, beforeDrift,
+                       "late paused drift cannot become running distance")
+        recorder.receiveLocationsForTesting([point(9, 0.0002, 3)])
+        XCTAssertEqual(recorder.routeDistanceMeters, beforeDrift,
+                       "stationary gap is not bridged on resume")
+        recorder.receiveLocationsForTesting([point(10, 0.00025, 3)])
+        let beforeGap = recorder.routeDistanceMeters
+        recorder.receiveLocationsForTesting([point(25, 0.0005, 3)])
+        XCTAssertEqual(recorder.routeDistanceMeters, beforeGap,
+                       "long missing-GPS gap does not create distance")
+        let sequence = recorder.motionSampleSequence
+        recorder.receiveLocationsForTesting([pausedMovement, point(25, 0.0005, 3)])
+        XCTAssertEqual(recorder.motionSampleSequence, sequence,
+                       "replayed and out-of-order callbacks cannot mint identities")
+        recorder.setPaused(true, at: start.addingTimeInterval(25.1))
+        recorder.receiveLocationsForTesting([point(26, 0.0005, 0)])
+        recorder.receiveLocationsForTesting([point(27, 0.0007, -1)])
+        recorder.receiveLocationsForTesting([point(28, 0.0009, -1)])
+        XCTAssertGreaterThan(recorder.routeDistanceMeters ?? 0, (beforeGap ?? 0) + 20,
+                             "displacement requalifies movement without reported speed")
+        recorder.discardRoute()
+    }
+
+    func testUnavailableMotionEpochPreservesOrdinaryLocation() throws {
+        let persistence = ToggleRecoveryPersistence()
+        let store = WatchWorkoutRecoveryStore(persistence: persistence)
+        _ = try store.begin(startDate: Date().addingTimeInterval(-2))
+        persistence.failsSave = true
+        let epoch = try? store.beginMotionSampleProducer()
+        XCTAssertNil(epoch, "failed durable reservation must not mint epoch zero")
+        let recorder = WatchRouteRecorder()
+        let start = Date().addingTimeInterval(-2)
+        recorder.begin(routeBuilder: nil, startDate: start, motionSampleEpoch: epoch) {}
+        let location = CLLocation(coordinate: .init(latitude: 1, longitude: 2),
+            altitude: 0, horizontalAccuracy: 5, verticalAccuracy: 5,
+            course: -1, speed: 3, timestamp: start.addingTimeInterval(1))
+        recorder.receiveLocationsForTesting([location])
+        XCTAssertNil(recorder.motionSampleEpoch)
+        XCTAssertEqual(recorder.motionSampleSequence, 0)
+        XCTAssertEqual(recorder.latestLocation, location)
         recorder.discardRoute()
     }
 
@@ -6287,7 +6352,8 @@ final class WatchWorkoutManagerTests: XCTestCase {
                 try WorkoutContractCodec.decode(
                     recoverySnapshotProbe.sentData[0]
                 ),
-                recoverySnapshot
+                try WorkoutContractCodec.decode(WorkoutContractCodec.encodeForPhone(
+                    recoverySnapshot, peerVersion: nil))
             )
 
             persistence.failsSave = true

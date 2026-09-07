@@ -62,3 +62,34 @@ Terminal state: needs-user-input (WRK-001); this is not a clean review result.
 Publication is a draft repair batch, not a claim that all lifecycle issues are
 resolved. The final clean published-head verification and GitHub check state
 are reported in the PR and handoff; draft CI skips heavy build jobs.
+
+
+## Reconciliation with current main — 2026-09-08
+
+The original stack and validation above are historical. #388 is merged, and
+its later implementation supersedes WRK-003 through WRK-005 here. This update
+retains main's generated source-health contract, encoder failure cleanup,
+continuous-stop reset and monotonic-uptime motion preparation. It also retains
+#423's Watch shutdown/demand coordination byte-for-byte. None of the older
+wall-clock motion helpers or alternative Watch queue implementation is replayed.
+
+The remaining implementation delta is WRK-002 only: atomically persist the phone
+decision watermark and pending/resolved operation before acknowledgement or
+Watch control. Existing crash/relaunch and write-failure regressions are retained;
+new checks cover legacy migration failure/retry, corrupt-journal fail-closed
+behavior and absence of any decision acknowledgement after failed admission.
+The current-main integration is deliberately limited to the two phone managers,
+their two existing test files, and this ledger.
+
+WRK-001 remains a separate, pre-existing unresolved HealthKit commit-unknown
+recovery issue. This change does not retry uncertain HealthKit saves, mark them
+saved/discarded without proof, add a stop-recovery action or enable production
+automatic start. Merging this journal repair must not be described as resolving
+all workout lifecycle findings.
+
+Validation: generated-contract and whitespace checks passed during local
+reconciliation. New and retained Apple-platform tests require the exact updated
+head's macOS CI; they were not executed on the Linux editing host. Historical
+native/host results above are not substituted for this integration's CI. No
+physical devices, HealthKit writes, firmware builds, deployments or releases
+were used by this reconciliation.

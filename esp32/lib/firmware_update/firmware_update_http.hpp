@@ -37,7 +37,9 @@ public:
   void process();
   FirmwareUpdateStatus status() const;
   std::string statusJson() const;
-  void markRunningAppValid();
+  bool markRunningAppValid();
+  void rejectRunningApp();
+  std::string bootAcceptanceJson(bool ready) const;
 
 private:
   device_transfer::HttpTransferServer ownedTransferServer_;

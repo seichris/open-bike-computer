@@ -1140,7 +1140,7 @@ class BLEManager: NSObject, ObservableObject {
     private var workoutTelemetryCharacteristic: CBCharacteristic?
     private var rideAutomationCharacteristic: CBCharacteristic?
     private var workoutTelemetryWriteEndpointForTesting: WorkoutTelemetryWriteEndpoint?
-    var workoutMotionSubmissionDate: () -> Date = Date.init
+    var workoutMotionUptime = { ProcessInfo.processInfo.systemUptime }
     private var deviceInformation: [CBUUID: String] = [:]
     private var navigationWriteEndpoint: NavigationWriteEndpoint?
     private var navigationWriteQueue = NavigationWriteQueue(
@@ -4047,7 +4047,6 @@ class BLEManager: NSObject, ObservableObject {
     func sendWorkoutTelemetryFrame(
         _ frame: Data,
         prioritized: Bool = false,
-        motionCapturedAt: Date? = nil,
         onWrite: (() -> Void)? = nil,
         onDrop: (() -> Void)? = nil,
         onWriteFailure: (() -> Void)? = nil
@@ -4077,7 +4076,6 @@ class BLEManager: NSObject, ObservableObject {
         if frame.first == 4, !supportsWatchGPSMotionEvidenceV1 {
             return false
         }
-        if frame.first == 4, motionCapturedAt == nil { return false }
 
         let isCore = frame.first == 1
         if prioritized, isCore,
@@ -4109,7 +4107,6 @@ class BLEManager: NSObject, ObservableObject {
             frame,
             navigationEndpoint: navigationEndpoint,
             coalescingKey: coalescingKey,
-            motionCapturedAt: motionCapturedAt,
             onWrite: onWrite,
             onDrop: onDrop,
             onWriteFailure: onWriteFailure
@@ -4594,12 +4591,10 @@ class BLEManager: NSObject, ObservableObject {
         _ frame: Data,
         navigationEndpoint: NavigationWriteEndpoint,
         coalescingKey: String,
-        motionCapturedAt: Date? = nil,
         onWrite: (() -> Void)?,
         onDrop: (() -> Void)?,
         onWriteFailure: (() -> Void)?
     ) -> NavigationWrite? {
-        let motionNow = workoutMotionSubmissionDate
         let payload: Data
         let label: String
         let transportWrite: ((Data) -> Void)?
@@ -4699,19 +4694,19 @@ class BLEManager: NSObject, ObservableObject {
             }
         }
 
+        let motionClock = workoutMotionUptime
+        let motion = frame.first == 4
+            ? RideBLEMotionDispatch(frame: frame, enqueuedUptime: motionClock()) : nil
+        let isFallback = route == .navigationFallback
         return NavigationWrite(
             data: payload,
             label: label,
-            payloadProvider: motionCapturedAt.map { capturedAt in
+            prepareData: motion.map { motion in
                 {
-                    guard let refreshed = WorkoutDeviceFrameBuilder.refreshingWatchMotionAge(
-                        frame, capturedAt: capturedAt, sentAt: motionNow()
-                    ) else { return nil }
-                    if route == .navigationFallback {
-                        return Data(DeviceBLEProtocol.workoutTelemetryFallbackPrefix.utf8)
-                            + refreshed
-                    }
-                    return refreshed
+                    guard let frame = motion.payload(at: motionClock()) else { return nil }
+                    return isFallback
+                        ? Data(DeviceBLEProtocol.workoutTelemetryFallbackPrefix.utf8) + frame
+                        : frame
                 }
             },
             transportWrite: transportWrite,
@@ -7854,13 +7849,22 @@ class BLEManager: NSObject, ObservableObject {
             return write.transportCanSend?() ?? endpoint.canSend()
         }, maxWrites: 1) { write in
             madeProgress = true
-            guard let write = write.preparedForSubmission() else { return }
+            let payload: Data
+            if let prepare = write.prepareData {
+                guard let prepared = prepare() else {
+                    write.onDrop?()
+                    return
+                }
+                payload = prepared
+            } else {
+                payload = write.data
+            }
             let expectsWriteResponse = write.transportExpectsWriteResponse
                 ?? endpoint.expectsWriteResponse
             if expectsWriteResponse {
                 beginNavigationWriteResponseWait(for: write)
             }
-            write.perform(using: endpoint.write)
+            write.perform(using: endpoint.write, preparedData: payload)
             log("Sent \(write.label): \(write.data.count) bytes")
         }
         updateNavigationBackpressureWatchdog(
