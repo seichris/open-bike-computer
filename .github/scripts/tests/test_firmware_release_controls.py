@@ -69,6 +69,8 @@ class ReleaseControlsTests(unittest.TestCase):
         workflow = (Path(__file__).resolve().parents[2] / "workflows/firmware-release.yml").read_text()
         self.assertLess(workflow.index("uses: ./.github/actions/require-firmware-release-controls"),
                         workflow.index("- name: Generate signed manifests"))
+        self.assertNotIn("git_sha_short", workflow)
+        self.assertIn("group: firmware-release-channel", workflow)
         self.assertLess(workflow.index("uses: ./.github/actions/require-firmware-release-controls"),
                         workflow.index("FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY: ${{ secrets."))
 

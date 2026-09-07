@@ -53,10 +53,10 @@ Before merging and using this flow, repository administrators must:
    `FIRMWARE_RELEASE_PREFLIGHT_APP_PRIVATE_KEY` available to that environment
    with no broader scope than operationally required. Store both private keys
    as environment secrets and remove any repository-level copies after the
-   environment migration is verified.
-   If the local firmware key is lost but the repository secret remains, follow
-   [the controlled encrypted migration](firmware-signing-key-migration.md).
-   Keep both repository copies until destination proof and approved cleanup.
+   environment migration is verified. If the local firmware key is lost but the
+   repository secret remains, follow [the controlled encrypted migration](firmware-signing-key-migration.md).
+   Keep both repository copies until destination proof and approved cleanup; do
+   not rotate the firmware key or change device trust just to change secret scope.
 3. Add a `v*` tag ruleset that restricts tag creation, update, and deletion to
    release maintainers. Enable GitHub's full-SHA Actions policy after every
    workflow has landed with immutable action pins.
@@ -67,6 +67,141 @@ Before merging and using this flow, repository administrators must:
 Source changes alone do not prove those live controls are configured. Do not
 push the first release tag until their read-back has been reviewed.
 
+The publisher now runs `firmware_release_controls.py` before exposing the
+firmware scalar to the signing command. Its read-only App token needs
+Administration, Actions, Contents, Environments and Secrets **read** permissions.
+It reads secret names only, requires both private keys in `firmware-release`,
+rejects repository/organization copies, requires the checked-in environment-review policy,
+an exact default-branch-only deployment policy, strict admin-enforced `CI Gate`,
+and an active `v*` creation/update/deletion ruleset. Missing API access fails
+closed. See GitHub's [environment API](https://docs.github.com/en/rest/deployments/environments)
+and [secret metadata API](https://docs.github.com/en/rest/actions/secrets).
+
+This gate is not a substitute for secret migration: another branch workflow can
+bypass source checks while a repository-scoped key still exists. An administrator
+must provision the existing key from secure custody or the controlled encrypted
+migration (GitHub's API cannot return its value), verify environment scope, then
+remove the broad copy. Do not
+print or pass the real scalar in a rehearsal. Coordinate the preflight App key
+with `firmware-runtime-publication`: provision an environment-scoped copy there
+before removing its repository copy, retain that publisher's required permissions,
+and review its environment/ref policy. Preparing the workflow does not migrate
+live keys, authenticate new App keys, or satisfy any physical firmware gate.
+
+### Controlled migration when the local firmware key is lost
+
+The manually dispatched `firmware-key-migration.yml` preserves the existing
+P-256 identity. It has no delete operation, no arbitrary recipient input, no
+secret-write token on a runner, and does not publish firmware or a release. Its
+scripts and policy must first land through a reviewed PR on `main`. Do not run
+an equivalent key-handling workflow from a feature branch. If this PR still has
+unaccepted hardware gates, it must not be merged merely to enable the migration;
+use a separately reviewed administrative-only prerequisite change or complete
+the hardware gates first.
+
+Prerequisites:
+
+- Keep both repository-level private keys until verification completes.
+- Add the existing/new preflight App private key to `firmware-release` and
+  `firmware-runtime-publication`. It must be for App ID 4579522, with repository
+  Administration, Environments, Secrets, Contents and Actions read access. No
+  secret-write permission or replacement App is needed.
+- Both environments require the named maintainer reviewer. Only `main` may
+  deploy to `firmware-release`; the workflow also rejects non-main dispatches,
+  a moved default-branch head, other actors, forks and reruns.
+- There must be no firmware-scalar secret in `firmware-runtime-publication`
+  shadowing the repository source, and no destination scalar yet. The same-name
+  App secret in each environment must predate dispatch to prove the environment
+  copy was used. Disable debug logging and keep concurrent secret writers stopped.
+
+1. Dispatch and approve the exact reviewed main commit:
+
+   ```sh
+   gh workflow run firmware-key-migration.yml --ref main -f operation=prepare
+   ```
+
+   Record the exact successful run ID and SHA; never select a merely "latest"
+   artifact. The source job uses `firmware-runtime-publication` for approval and
+   the environment-scoped read-only App key. It validates that the repository
+   scalar derives the public key embedded in firmware. `gh secret set --no-store`
+   then encrypts the scalar for the fixed destination environment using stdin,
+   not an argument. The destination public-key identity is read before and after.
+   Only a one-day artifact containing ciphertext and a domain-separated signed
+   receipt is uploaded. No plaintext key is logged, written to a file or sent to
+   an operator. The trusted runner/OS, pinned actions and dependencies, GitHub CLI
+   and GitHub control plane remain execution trust boundaries.
+
+2. Download that run's `firmware-key-migration-RUN_ID-prepare` artifact. In a clean
+   reviewed checkout with the pinned signing dependencies, run:
+
+   ```sh
+   python3 .github/scripts/firmware_key_migration.py install \
+     --receipt /absolute/path/to/receipt.json \
+     --expected-run RUN_ID --expected-sha FULL_REVIEWED_SHA
+   ```
+
+   This local step needs the existing operator's environment-write authority.
+   It checks the receipt signature, selected run/SHA, successful owner/main run,
+   main ancestry, unchanged destination encryption key and absent destination
+   before uploading **ciphertext only**. It does not need the firmware private
+   key. An existing destination fails rather than being intentionally replaced.
+   GitHub's PUT API has no conditional-create primitive: exclude concurrent
+   writers during the check/upload interval. Metadata read-back is not yet
+   cryptographic proof of the stored key; do not delete the source now.
+
+3. After installation, dispatch a new verification run:
+
+   ```sh
+   gh workflow run firmware-key-migration.yml --ref main -f operation=verify
+   ```
+
+   Approve `firmware-release`. The job requires its scalar's metadata timestamp
+   to predate dispatch, rejects metadata changes during verification, and uses
+   the destination environment's same-name secret. A missing/late-created
+   destination cannot pass using repository fallback. The loaded scalar must
+   derive the unchanged firmware public key and sign a non-release receipt.
+   A successful run also authenticates that environment's App key. Review both
+   exact-run receipts and App access before any cleanup.
+
+4. Only after both successful runs and review, remove the two exact
+   repository-level secret copies. The environment copies remain. Re-run
+   `firmware_release_controls.py` and record its `single-maintainer` result;
+   never label it independent approval. The migration tool intentionally does
+   not automate deletion. Remove/disable the one-time migration workflow after
+   completion through a reviewed change. Moving the firmware key does not
+   rotate it, revoke old signatures or prove absence of prior exposure.
+
+## Release identity and build allocation
+
+New OTA manifests carry the **full 40-character Git SHA**, matching embedded
+firmware and authenticated BLE identity. Signatures remain over the original
+schema-1 fields; do not rewrite a signed manifest to expand its SHA. The app
+has exact mappings for the two immutable historical releases, backed by their
+verified signed factory manifests:
+
+| Release | Build | Full identity |
+| --- | --- | --- |
+| `v0.3.3-release.3` | 92 | `02bce8150d2c0f88fa0481d9b6fcef76da8865ef` |
+| `v0.3.4-release.1` | 93 | `8a0c9df6db26120bc988651d6a43a99ac04ef778` |
+
+These mappings apply only to the exact version/build/short-SHA tuple and the
+two Waveshare targets. Arbitrary prefix matching is forbidden. Older mutable
+short-SHA releases are not accepted as immutable source identities by the new
+app; recover their implementation with a newly qualified full-SHA, increasing
+build release, or use the separately authorized USB recovery workflow.
+
+`common.revision` allocates one increasing uint32 build across both targets,
+independently of semantic version. `firmware_release_history.py` reads all pages
+of published releases, verifies each manifest against GitHub's asset digest,
+requires paired target builds, and rejects a candidate at or below the maximum
+before signing. This includes prereleases and historical mutable releases as
+consumed build allocations. Network errors, missing manifests, or missing asset
+digests fail closed. Reverting implementation still requires a **new higher build**.
+All firmware signing, Pages deployment and Pages recovery share one concurrency
+group; out-of-order queued publications must recheck history under that lock.
+Do not publish firmware outside this serialized workflow or delete build history.
+GitHub may replace an older pending run in a concurrency group; a dropped release
+needs a new candidate, not an assumption that every queued tag will publish.
 The publisher runs the read-only `firmware_release_controls.py` gate before
 exposing the firmware key to the signing command. It requires the checked-in
 reviewer policy, exact default-branch-only admission, environment-scoped private
@@ -78,7 +213,7 @@ permissions, verification and remaining live-operation boundaries.
 Compilation, host tests, and a merged pull request establish software readiness;
 they do not establish physical acceptance. Before calling an artifact
 factory/golden firmware, record the target-specific device identity, attested
-upload, matching `BOOT_META` target/profile/Git identity, ready checkpoint, and
+upload, matching production boot-acceptance target/profile/Git identity, ready checkpoint, and
 the hardware observations required by the changed production paths. The
 1.75-inch and 2.06-inch boards qualify independently.
 
@@ -184,9 +319,52 @@ headers by using `keep` for flash mode, frequency, and size.
 
 Immediately before the write, obtain explicit confirmation of the physical
 target, production profile, stable serial/device identity, exact Git SHA, and
-factory release manifest. Afterward, require matching `BOOT_META` plus the ready
-checkpoint. Use flash readback or a runtime image digest when byte-for-byte
-on-device equality is required.
+factory release manifest. Afterward, use the production acceptance path below.
+Use flash readback or a runtime image digest when byte-for-byte on-device equality
+is required.
+
+### Production boot acceptance (no USB logging required)
+
+Production deliberately disables USB CDC and continuous diagnostic serial output.
+Do not require `BOOT_META` from those images or substitute a diagnostic image.
+After successful initialization and durable OTA confirmation, the production
+image emits one `boot/acceptance` event through the existing persistent ride
+diagnostics recorder. The event contains schema, exact target, production profile,
+version/build, full Git SHA, readiness and OTA state. Its envelope adds the
+persistent boot sequence and firmware fingerprint. No credentials or transfer
+tokens are recorded. The app and host diagnostics allowlists preserve these fields.
+
+1. Provision the exact production artifact and record the stable physical device
+   identity plus the intentional boot event. Keep a working SD card available for
+   this **log-based acceptance** (OTA itself still supports no SD card).
+2. Pair/authenticate the owner app. Use **Settings → Diagnostics → Download Device
+   Logs → Export Support Bundle**, keeping the BLE owner session connected during
+   the certificate-pinned, token-authenticated transfer.
+3. Select that new boot's firmware JSONL stream and boot sequence from the captured
+   envelope, independently correlating it with the device/provisioning record.
+   Do not select an old retained boot merely because its source matches.
+4. Validate the actual production checkpoint, for example:
+
+   ```sh
+   python3 tools/verify_firmware_boot_acceptance.py captured-firmware.jsonl \
+     --target WAVESHARE_AMOLED_175 --git-sha FULL_REVIEWED_SHA \
+     --version RELEASE_VERSION --build RELEASE_BUILD \
+     --boot-sequence CAPTURED_NEW_BOOT_SEQUENCE --ota
+   ```
+
+   Select `WAVESHARE_AMOLED_206` independently. `--ota` requires `otaState=valid`;
+   omit it only for a separately recorded USB/factory first boot, which can have
+   an `untracked`/`undefined` OTA state. Wrong profile/SHA/build/boot, unsupported
+   schema, false readiness, pending/failed OTA state and ambiguous checkpoints fail.
+5. Preserve the authenticated capture and physical observations. A dropped record,
+   failed export, missing SD card, or uncorrelated old stream is **no acceptance**;
+   repeat the intentional boot/capture after correcting the condition. Log parsing
+   alone does not authenticate a local file's origin or prove flash-byte equality.
+
+`capture_boot.py` and `BOOT_META`/ready remain the serial acceptance path for
+profiles that actually enable those markers. Their cold-power/PMIC checks qualify
+those diagnostic bytes, not a replacement production image. Production hardware
+observations and flash readback remain separate per-target gates.
 
 Tagged GitHub publication is create-only. The workflow creates a draft release,
 uploads without replacement flags, verifies GitHub's reported size and SHA-256
@@ -199,7 +377,10 @@ a new tag rather than `--clobber`.
 
 If publication succeeds but the same job stops before GitHub Pages deployment,
 run **Firmware Release** manually from the default branch with the immutable
-release tag in `release_tag`. This recovery path never signs, rebuilds,
+release tag in `release_tag`. An older-than-history channel also requires explicitly
+setting `allow_older_channel=true`; the run records this choice in its summary.
+Normal recovery of the highest published build needs no downgrade override.
+This recovery path never signs, rebuilds,
 uploads, edits, or replaces release assets. It downloads the complete
 published inventory,
 requires the repository verifier and GitHub release attestation to accept the
