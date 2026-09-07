@@ -131,6 +131,7 @@ class BikeComputerCoordinator: ObservableObject {
     private var latestRerouteLocation: CLLocation?
     private var navigationDestination: MKMapItem?
     private var routeDeviationDetector = RouteDeviationDetector()
+    private var lastRerouteObservationAt: Date?
     private var lastRerouteRequestDate = Date.distantPast
     private let rerouteCooldown: TimeInterval = 15
     private var transportType: MKDirectionsTransportType = RouteTransportTypes.cycling
@@ -485,6 +486,22 @@ class BikeComputerCoordinator: ObservableObject {
             return
         }
 
+        // Progress matching may reject a valid far-away fix. Rerouting uses
+        // its own observation gate, without counting cached/replayed fixes.
+        let age = now().timeIntervalSince(location.timestamp)
+        guard age.isFinite, (-1...10).contains(age),
+              CLLocationCoordinate2DIsValid(location.coordinate) else {
+            routeDeviationDetector.reset()
+            return
+        }
+        if let previous = lastRerouteObservationAt {
+            guard location.timestamp > previous else { return }
+            if location.timestamp.timeIntervalSince(previous) > 5 {
+                routeDeviationDetector.reset()
+            }
+        }
+        lastRerouteObservationAt = location.timestamp
+
         if ongoingRerouteDirections != nil,
            routeDeviationDetector.isEligible(
                horizontalAccuracy: location.horizontalAccuracy
@@ -635,6 +652,7 @@ class BikeComputerCoordinator: ObservableObject {
         ongoingRerouteDirections = nil
         latestRerouteLocation = nil
         navigationDestination = nil
+        lastRerouteObservationAt = nil
         routeDeviationDetector.reset()
         lastRerouteRequestDate = .distantPast
         navEngine.stopNavigation()
@@ -1369,6 +1387,7 @@ extension BikeComputerCoordinator {
     ) {
         currentRoute = route
         navigationDestination = destination
+        lastRerouteObservationAt = nil
         self.transportType = transportType
         routeDeviationDetector.reset()
         lastRerouteRequestDate = .distantPast
