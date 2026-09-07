@@ -683,6 +683,13 @@ final class TestLocationManagerClient: LocationManagerClient {
 @main
 @MainActor
 struct NavigationProtocolTests {
+    static func freshNavigationFix(_ location: CLLocation, at date: Date = Date()) -> CLLocation {
+        CLLocation(coordinate: location.coordinate, altitude: location.altitude,
+                   horizontalAccuracy: location.horizontalAccuracy,
+                   verticalAccuracy: location.verticalAccuracy, course: location.course,
+                   speed: location.speed, timestamp: date)
+    }
+
     static func main() async {
         testIconMapping()
         testRouteEndpointExtraction()
@@ -3801,7 +3808,7 @@ struct NavigationProtocolTests {
 
         let offRouteLocation = testLocation(latitude: 37.0003, longitude: -121.9995)
         for sampleIndex in 0..<3 {
-            coordinator.processNavigationLocationForTesting(offRouteLocation)
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation))
             if sampleIndex < 2 {
                 assertEqual(
                     factory.tasks.count,
@@ -3881,7 +3888,7 @@ struct NavigationProtocolTests {
 
         let cooldownDeviation = testLocation(latitude: 37.0003, longitude: -121.9989)
         for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(cooldownDeviation)
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(cooldownDeviation))
         }
         assertEqual(factory.tasks.count, 2, "cooldown suppresses an immediate repeated reroute")
     }
@@ -3948,6 +3955,16 @@ struct NavigationProtocolTests {
 
         for _ in 0..<3 {
             coordinator.processNavigationLocationForTesting(farOffRouteLocation)
+        }
+        assertEqual(factory.tasks.count, 1, "repeated cached fix is only one observation")
+        for age in [60.0, -60.0, 1.0] {
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(
+                farOffRouteLocation, at: farOffRouteLocation.timestamp.addingTimeInterval(-age)))
+        }
+        assertEqual(factory.tasks.count, 1, "stale, future and out-of-order fixes cannot trigger rerouting")
+
+        for _ in 0..<3 {
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(farOffRouteLocation))
         }
 
         assertEqual(
@@ -4412,8 +4429,8 @@ struct NavigationProtocolTests {
             waitForMainLoop(timeout: 2) { !staleCoordinator.routeCalculation.isCalculating },
             "stale-location test initial route calculation should finish"
         )
-        for _ in 0..<3 {
-            staleCoordinator.processNavigationLocationForTesting(rerouteTrigger)
+        for sampleIndex in 0..<3 {
+            staleCoordinator.processNavigationLocationForTesting(freshNavigationFix(rerouteTrigger, at: staleClock.now().addingTimeInterval(Double(sampleIndex) * 0.000001)))
         }
         assertEqual(staleFactory.tasks.count, 2, "stale-location test creates a reroute request")
 
@@ -4425,7 +4442,8 @@ struct NavigationProtocolTests {
             ]
         )
         let movedAway = testLocation(latitude: 37.0009, longitude: -121.9985)
-        staleCoordinator.processNavigationLocationForTesting(movedAway)
+        staleCoordinator.processNavigationLocationForTesting(freshNavigationFix(
+            movedAway, at: staleClock.now().addingTimeInterval(0.01)))
         staleCoordinator.processNavigationLocationForTesting(testLocation(
             latitude: 37.0009,
             longitude: -121.9995,
@@ -4437,8 +4455,8 @@ struct NavigationProtocolTests {
             staleCoordinator.currentRoute === initialRoute,
             "a response that misses the latest accurate fix is not applied"
         )
-        for _ in 0..<3 {
-            staleCoordinator.processNavigationLocationForTesting(movedAway)
+        for sampleIndex in 0..<3 {
+            staleCoordinator.processNavigationLocationForTesting(freshNavigationFix(movedAway, at: staleClock.now().addingTimeInterval(Double(sampleIndex) * 0.000001)))
         }
         assertEqual(
             staleFactory.tasks.count,
@@ -4446,8 +4464,8 @@ struct NavigationProtocolTests {
             "discarding a stale response still respects the reroute cooldown"
         )
         staleClock.advance(by: 15)
-        for _ in 0..<3 {
-            staleCoordinator.processNavigationLocationForTesting(movedAway)
+        for sampleIndex in 0..<3 {
+            staleCoordinator.processNavigationLocationForTesting(freshNavigationFix(movedAway, at: staleClock.now().addingTimeInterval(Double(sampleIndex) * 0.000001)))
         }
         assertEqual(staleFactory.tasks.count, 3, "stale rerouting resumes after 15 seconds")
         guard let retriedSource = staleFactory.tasks[2].request.source else {
@@ -4481,7 +4499,7 @@ struct NavigationProtocolTests {
             "poor-accuracy test initial route calculation should finish"
         )
         for _ in 0..<3 {
-            accuracyCoordinator.processNavigationLocationForTesting(rerouteTrigger)
+            accuracyCoordinator.processNavigationLocationForTesting(freshNavigationFix(rerouteTrigger))
         }
         assertEqual(accuracyFactory.tasks.count, 2, "poor-accuracy test creates a reroute request")
 
@@ -4570,7 +4588,7 @@ struct NavigationProtocolTests {
 
         let skippedAhead = testLocation(latitude: 37.0010, longitude: -121.9995)
         for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(skippedAhead)
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(skippedAhead))
         }
         assertEqual(
             factory.tasks.count,
@@ -4613,8 +4631,8 @@ struct NavigationProtocolTests {
         )
 
         let offRouteLocation = testLocation(latitude: 37.0003, longitude: -121.9995)
-        for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(offRouteLocation)
+        for sampleIndex in 0..<3 {
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation, at: clock.now().addingTimeInterval(Double(sampleIndex) * 0.000001)))
         }
         assertEqual(factory.tasks.count, 2, "cooldown test creates the first reroute")
         factory.tasks[1].fail(with: TestNavigationDirectionsError.unavailable)
@@ -4635,8 +4653,8 @@ struct NavigationProtocolTests {
             waitForMainLoop(timeout: 3) { !coordinator.routeCalculation.isCalculating },
             "failed replacement should finish before cooldown evaluation"
         )
-        for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(offRouteLocation)
+        for sampleIndex in 0..<3 {
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation, at: clock.now().addingTimeInterval(Double(sampleIndex) * 0.000001)))
         }
         assertEqual(
             factory.tasks.count,
@@ -4645,14 +4663,14 @@ struct NavigationProtocolTests {
         )
 
         clock.advance(by: 14.999)
-        for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(offRouteLocation)
+        for sampleIndex in 0..<3 {
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation, at: clock.now().addingTimeInterval(Double(sampleIndex) * 0.000001)))
         }
         assertEqual(factory.tasks.count, 3, "rerouting remains suppressed just before 15 seconds")
 
         clock.advance(by: 0.001)
-        for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(offRouteLocation)
+        for sampleIndex in 0..<3 {
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation, at: clock.now().addingTimeInterval(Double(sampleIndex) * 0.000001)))
         }
         assertEqual(factory.tasks.count, 4, "rerouting resumes at the 15-second boundary")
         assertEqual(
@@ -4699,7 +4717,7 @@ struct NavigationProtocolTests {
             "stop test initial route calculation should finish"
         )
         for _ in 0..<3 {
-            stopCoordinator.processNavigationLocationForTesting(offRouteLocation)
+            stopCoordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation))
         }
         assertEqual(stopFactory.tasks.count, 2, "stop test creates a reroute request")
         let stoppedReroute = stopFactory.tasks[1]
@@ -4730,7 +4748,7 @@ struct NavigationProtocolTests {
             "replacement test initial route calculation should finish"
         )
         for _ in 0..<3 {
-            replaceCoordinator.processNavigationLocationForTesting(offRouteLocation)
+            replaceCoordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation))
         }
         assertEqual(replaceFactory.tasks.count, 2, "replacement test creates a reroute request")
         let replacedReroute = replaceFactory.tasks[1]
@@ -4807,7 +4825,7 @@ struct NavigationProtocolTests {
 
         let offRouteLocation = testLocation(latitude: 37.0003, longitude: -121.9995)
         for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(offRouteLocation)
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation))
         }
         assertEqual(factory.tasks.count, 2, "rerouting pauses while a replacement route is calculating")
 
@@ -4817,7 +4835,7 @@ struct NavigationProtocolTests {
             "failed replacement route calculation should finish"
         )
         for _ in 0..<3 {
-            coordinator.processNavigationLocationForTesting(offRouteLocation)
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation))
         }
         assertEqual(factory.tasks.count, 3, "rerouting resumes on the original route after replacement fails")
         guard factory.tasks.count == 3,
