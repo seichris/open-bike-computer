@@ -11,6 +11,7 @@ enum class DetectionHealthState : uint8_t {
   MotionUnavailable,
   HealthyGpsAndMotion,
   HealthyDirectSensor,
+  HealthyWatchGps,
 };
 
 struct DetectionHealthInput {
@@ -19,6 +20,7 @@ struct DetectionHealthInput {
   bool externalPositionFresh = false;
   bool externalPositionQualityValid = false;
   bool imuFresh = false;
+  bool watchGpsQualified = false;
 };
 
 struct DetectionHealth {
@@ -27,12 +29,17 @@ struct DetectionHealth {
 
   bool healthy() const {
     return state == DetectionHealthState::HealthyGpsAndMotion ||
-           state == DetectionHealthState::HealthyDirectSensor;
+           state == DetectionHealthState::HealthyDirectSensor ||
+           state == DetectionHealthState::HealthyWatchGps;
   }
 };
 
 inline DetectionHealth
 resolveDetectionHealth(const DetectionHealthInput &input) {
+  if (input.watchGpsQualified) {
+    return {DetectionHealthState::HealthyWatchGps,
+            input.directSensorFresh};
+  }
   if (input.directSensorFresh) {
     return {DetectionHealthState::HealthyDirectSensor, true};
   }

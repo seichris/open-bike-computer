@@ -71,6 +71,11 @@ final class WatchLocationService: NSObject, ObservableObject {
 
     private func reconcileUpdates() {
         let hasDemand = !handlers.isEmpty
+        // Ride automation needs stationary samples too; a distance-based
+        // filter can otherwise suppress the entire auto-pause evidence span.
+        manager.distanceFilter = handlers[.workout] == nil
+            ? 2
+            : kCLDistanceFilterNone
         if handlers[.navigation] != nil {
             if #available(watchOS 10.0, *),
                backgroundActivitySession == nil,
