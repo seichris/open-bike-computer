@@ -13,12 +13,15 @@ import WebKit
 
 private enum SettingsSheetDestination: Identifiable, Equatable {
     case stravaRouteImport
+    case offlineRouteSave(UUID)
     case savedMapShare(URL)
 
     var id: String {
         switch self {
         case .stravaRouteImport:
             return "strava-route-import"
+        case .offlineRouteSave(let id):
+            return "offline-route-save:\(id.uuidString)"
         case .savedMapShare(let url):
             return "saved-map-share:\(url.absoluteString)"
         }
@@ -46,6 +49,8 @@ struct SettingsView: View {
         RideDiagnosticsRecorder
     @FocusState private var focusedSavedMapFilename: String?
     @State private var presentedSheet: SettingsSheetDestination?
+    @State private var offlineSaveSession: PhoneOfflineRouteSaveSession?
+    @State private var offlineSaveFeedback: String?
     let locationAuthorizationStatus: CLAuthorizationStatus
     let locationAccuracyAuthorization: CLAccuracyAuthorization
     let currentLocation: CLLocation?
@@ -165,7 +170,16 @@ struct SettingsView: View {
                     stravaCoordinator: stravaIntegrationCoordinator,
                     onImportFromStrava: {
                         presentedSheet = .stravaRouteImport
-                    }
+                    },
+                    onPrepareOfflineSave: { session in
+                        guard presentedSheet == nil else {
+                            session.cancel()
+                            return
+                        }
+                        offlineSaveSession = session
+                        presentedSheet = .offlineRouteSave(session.id)
+                    },
+                    saveFeedback: offlineSaveFeedback
                 )
 
                 Section {
@@ -282,6 +296,11 @@ struct SettingsView: View {
                    case .some(.savedMapShare) = previousDestination {
                     offlineMapManager.clearCreatedShareURL()
                 }
+                if nextDestination == nil,
+                   case .some(.offlineRouteSave) = previousDestination {
+                    offlineSaveSession?.cancel()
+                    offlineSaveSession = nil
+                }
             }
         )
     }
@@ -295,6 +314,15 @@ struct SettingsView: View {
             StravaRouteImportView(
                 coordinator: stravaIntegrationCoordinator
             )
+        case .offlineRouteSave(let id):
+            if let session = offlineSaveSession, session.id == id {
+                OfflineRouteSaveSheet(session: session, library: routeLibrary) { result in
+                    let name = routeLibrary.displayName(for: result.summary)
+                    offlineSaveFeedback = result.alreadySaved
+                        ? String(format: NSLocalizedString("“%@” is already saved on this iPhone.", comment: "Duplicate offline route"), name)
+                        : String(format: NSLocalizedString("“%@” is saved on this iPhone.", comment: "Offline route save success"), name)
+                }
+            }
         case .savedMapShare(let url):
             SavedMapShareSheet(url: url)
                 .presentationDetents([.medium])

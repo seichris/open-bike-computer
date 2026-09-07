@@ -53,7 +53,8 @@ final class PhoneRouteLibrary: ObservableObject {
         let base = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first ?? FileManager.default.temporaryDirectory
+        ).first ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
         let routeStore = NavigationRouteFileStoreV1(
             rootDirectory: base.appendingPathComponent(
                 "PlannedRoutes",
@@ -132,15 +133,88 @@ final class PhoneRouteLibrary: ObservableObject {
         _ data: Data,
         fileName: String
     ) throws -> PlannedRouteSummaryV1 {
+        let session = try prepareGPX(data, fileName: fileName)
+        return try saveOffline(session.archive, name: session.name).summary
+    }
+
+    /// Parsing and naming are a memory-only draft. Cancel never reaches the store.
+    func prepareGPX(_ data: Data, fileName: String) throws -> PhoneOfflineRouteSaveSession {
         let archive = try GPXRouteImporterV1.archive(
-            data: data,
-            fallbackName: fileName,
-            createdAt: now()
+            data: data, fallbackName: fileName, createdAt: now()
         )
-        return try importArchive(archive.encoded(
-            purpose: .offlineNavigation,
-            now: now()
-        ))
+        return PhoneOfflineRouteSaveSession(archive: archive, now: now)
+    }
+
+    /// The sole Save Offline commit boundary. Never accepts MKRoute, invents
+    /// provider attribution, resets an expiry, or overwrites a conflicting ID.
+    func saveOffline(
+        _ archive: NavigationRouteArchiveV1,
+        name: String
+    ) throws -> PhoneOfflineRouteSaveResult {
+        try archive.validate(purpose: .offlineNavigation, now: now())
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedName.isEmpty, normalizedName.count <= 120 else {
+            throw OfflineRouteSaveError.invalidName
+        }
+        let identity = WatchRouteIdentityV1(archive: archive)
+        let records = store.records(now: now())
+        if let exact = records.first(where: {
+            WatchRouteIdentityV1(archive: $0.archive) == identity
+        }) {
+            // A library-backed save is idempotent, including Strava's original
+            // deadline. A different typed name must not rewrite its identity.
+            let verified = try offlineNavigationArchive(for: exact.summary)
+            return PhoneOfflineRouteSaveResult(
+                summary: PlannedRouteSummaryV1(archive: verified), alreadySaved: true
+            )
+        }
+        // Do not hide stale revisions or same-revision conflicts behind a
+        // geometry match. Cross-UUID deduplication is for local GPX only; Strava
+        // imports/reloads keep their existing receipt + bookmark transaction.
+        if !records.contains(where: { $0.archive.routeID == archive.routeID }),
+           archive.route.provider == RouteProviderPolicyV1.importedGPX,
+           let duplicate = records.first(where: {
+               $0.archive.route.hasSameOfflineContent(as: archive.route)
+           }) {
+            let verified = try offlineNavigationArchive(for: duplicate.summary)
+            return PhoneOfflineRouteSaveResult(
+                summary: PlannedRouteSummaryV1(archive: verified), alreadySaved: true
+            )
+        }
+        // New Strava data must enter through importStravaGPX and its receipt,
+        // retention and bookmark transaction, never through a generic draft.
+        guard archive.route.provider == RouteProviderPolicyV1.importedGPX else {
+            throw PhoneRouteLibraryError.stravaReceiptMismatch
+        }
+        let named = try NavigationRouteArchiveV1.create(
+            route: archive.route.namedForOfflineStorage(normalizedName),
+            createdAt: archive.createdAt, deleteAfter: archive.deleteAfter,
+            purpose: .durableStorage
+        )
+        let summary = try importArchive(named.encoded(purpose: .durableStorage, now: now()))
+        // Report success only after the exact committed identity can be read.
+        _ = try offlineNavigationArchive(for: summary)
+        return PhoneOfflineRouteSaveResult(summary: summary, alreadySaved: false)
+    }
+
+    /// Always read the full identity again at start, not geometry retained by a
+    /// preview. Missing, deleted, expired, corrupt or replaced routes fail closed.
+    func offlineNavigationArchive(
+        for summary: PlannedRouteSummaryV1
+    ) throws -> NavigationRouteArchiveV1 {
+        do {
+            let selectedIdentity = identity(for: summary)
+            guard !pendingDeletionKeys.contains(Self.receiptKey(selectedIdentity)),
+                  !providerDeletionTombstones.contains(selectedIdentity) else {
+                throw NavigationRouteFileStoreError.notFound
+            }
+            let archive = try store.record(matching: selectedIdentity, now: now()).archive
+            try archive.validate(purpose: .offlineNavigation, now: now())
+            return archive
+        } catch {
+            reload()
+            throw error
+        }
     }
 
     var expiredStravaBookmarks: [StravaRouteReloadBookmarkV1] {
@@ -317,6 +391,41 @@ final class PhoneRouteLibrary: ObservableObject {
         )
     }
 
+    /// Resolve only the selected immutable identity through normal archive
+    /// validation and retention. A successful preview read has no write or
+    /// Watch-transfer side effects and never falls back to another revision.
+    func mapSelection(
+        for summary: PlannedRouteSummaryV1
+    ) throws -> SavedRouteMapSelection {
+        let name = displayName(for: summary)
+        do {
+            guard !providerDeletionTombstones.contains(identity(for: summary)) else {
+                throw NavigationRouteFileStoreError.notFound
+            }
+            let record = try store.record(
+                matching: identity(for: summary),
+                now: now()
+            )
+            // The clock may have crossed the retention deadline while reading.
+            try record.archive.validate(purpose: .offlineNavigation, now: now())
+            return SavedRouteMapSelection(
+                identity: WatchRouteIdentityV1(archive: record.archive),
+                displayName: displayName(for: record.summary),
+                route: record.archive.route,
+                createdAt: record.archive.createdAt,
+                deleteAfter: record.archive.deleteAfter
+            )
+        } catch {
+            // Publish deletion, corruption, or replacement to any open preview
+            // using the same cleanup and Watch-retention path as the library.
+            reload()
+            if let deadline = summary.deleteAfter, now() >= deadline {
+                throw SavedRouteMapError.expired(name)
+            }
+            throw SavedRouteMapError.unavailable(name)
+        }
+    }
+
     @discardableResult
     func rename(
         _ summary: PlannedRouteSummaryV1,
@@ -351,14 +460,16 @@ final class PhoneRouteLibrary: ObservableObject {
         let key = Self.receiptKey(identity)
         if summary.providerID == RouteProviderPolicyV1.strava.providerID {
             _ = try stravaBookmarkStore.delete(routeID: summary.id)
+            var removedLocally = true
             for record in store.recordsIncludingExpired().filter({
                 $0.archive.routeID == summary.id
             }) {
-                removeArchiveAndQueueWatchDeletion(record)
+                if !removeArchiveAndQueueWatchDeletion(record) { removedLocally = false }
             }
             removeDisplayName(routeID: summary.id)
             watchSyncState.removeValue(forKey: identity)
             reload()
+            guard removedLocally else { throw NavigationRouteFileStoreError.ioFailure }
             return
         }
         guard !pendingInstallKeys.contains(key) else {
@@ -382,11 +493,18 @@ final class PhoneRouteLibrary: ObservableObject {
 
     func reload() {
         let timestamp = now()
+        // Retry local cleanup from persisted tombstones after a transient disk
+        // failure/restart. Such routes stay unavailable even before cleanup wins.
+        for identity in providerDeletionTombstones {
+            try? store.deleteDeferred(matching: identity)
+        }
         for record in store.expiredRecords(now: timestamp) {
             removeArchiveAndQueueWatchDeletion(record)
         }
         _ = store.pruneInvalidAndExpired(now: timestamp)
-        routes = store.records(now: timestamp).map(\.summary)
+        routes = store.records(now: timestamp).filter {
+            !providerDeletionTombstones.contains(WatchRouteIdentityV1(archive: $0.archive))
+        }.map(\.summary)
         loadStravaBookmarks()
         let installedIdentities = Set(routes.map { identity(for: $0) })
         let installedKeys = Set(installedIdentities.map(Self.receiptKey))
@@ -570,9 +688,10 @@ final class PhoneRouteLibrary: ObservableObject {
         }
     }
 
+    @discardableResult
     private func removeArchiveAndQueueWatchDeletion(
         _ record: InstalledNavigationRouteV1
-    ) {
+    ) -> Bool {
         let identity = WatchRouteIdentityV1(archive: record.archive)
         providerDeletionTombstones.insert(identity)
         queuedProviderDeletions.remove(identity)
@@ -583,8 +702,17 @@ final class PhoneRouteLibrary: ObservableObject {
         persistPendingDeletions()
         persistPendingInstalls()
         persistProviderDeletionTombstones()
-        try? store.deleteDeferred(matching: identity)
+        let removed: Bool
+        do {
+            try store.deleteDeferred(matching: identity)
+            removed = true
+        } catch NavigationRouteFileStoreError.notFound {
+            removed = true
+        } catch {
+            removed = false
+        }
         retryProviderDeletions()
+        return removed
     }
 
     private func retryProviderDeletions() {
@@ -717,5 +845,77 @@ final class PhoneRouteLibrary: ObservableObject {
 
     private static func receiptKey(_ identity: WatchRouteIdentityV1) -> String {
         "\(identity.routeID.uuidString.lowercased())|\(identity.revision)|\(identity.contentHash)"
+    }
+}
+struct PhoneOfflineRouteSaveResult: Equatable {
+    let summary: PlannedRouteSummaryV1
+    let alreadySaved: Bool
+}
+
+/// Shared by the confirmation UI and integration tests. The operation has one
+/// synchronous atomic commit point on the library's actor: cancellation before
+/// Save writes nothing; cancellation after success does not undo a committed save.
+@MainActor
+final class PhoneOfflineRouteSaveSession: ObservableObject, Identifiable {
+    enum State: Equatable {
+        case ready
+        case saving
+        case saved(PhoneOfflineRouteSaveResult)
+        case failed(String)
+        case cancelled
+    }
+    let archive: NavigationRouteArchiveV1
+    nonisolated let id: UUID
+    @Published var name: String
+    @Published private(set) var state: State = .ready
+    private let now: () -> Date
+    private let validationFailure: String?
+
+    init(archive: NavigationRouteArchiveV1, now: @escaping () -> Date = Date.init) {
+        self.archive = archive
+        self.id = archive.routeID
+        self.now = now
+        name = archive.route.name ?? "\(archive.route.source.label) → \(archive.route.destination.label)"
+        do {
+            try archive.validate(purpose: .offlineNavigation, now: now())
+            validationFailure = nil
+        } catch {
+            validationFailure = error.localizedDescription
+            state = .failed(error.localizedDescription)
+        }
+    }
+
+    var canSave: Bool {
+        switch state {
+        case .saving, .saved, .cancelled: return false
+        case .ready, .failed: break
+        }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return validationFailure == nil && !trimmed.isEmpty && trimmed.count <= 120 &&
+            OfflineRouteSourceEligibilityV1.allowsSave(
+                provider: archive.route.provider, deleteAfter: archive.deleteAfter, now: now()
+            )
+    }
+
+    @discardableResult
+    func save(to library: PhoneRouteLibrary) -> PhoneOfflineRouteSaveResult? {
+        guard canSave else { return nil }
+        state = .saving
+        do {
+            let result = try library.saveOffline(archive, name: name)
+            state = .saved(result)
+            return result
+        } catch {
+            state = .failed((error as? LocalizedError)?.errorDescription ??
+                NSLocalizedString("The route could not be saved. Check available iPhone storage and try again.", comment: "Offline route storage failure"))
+            return nil
+        }
+    }
+
+    func cancel() {
+        switch state {
+        case .ready, .failed: state = .cancelled
+        case .saving, .saved, .cancelled: break
+        }
     }
 }

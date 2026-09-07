@@ -696,6 +696,7 @@ struct NavigationProtocolTests {
         testRouteRemainingDistance()
         testRouteDeviationDetection()
         testReplacementStepSelectionUsesUnambiguousGeometry()
+        testOfflineSavedNavigation()
         testCoordinatorPreviewsAndSelectsAlternateRoutes()
         testCoordinatorReroutesAndAppliesLatestRoute()
         testCoordinatorReroutesWhenProgressRejectsFarLocation()
@@ -3756,6 +3757,7 @@ struct NavigationProtocolTests {
 
         let scenicID = coordinator.routeAlternatives[1].id
         coordinator.selectRouteAlternative(scenicID)
+        assert(!coordinator.selectedRouteCanSaveOffline, "a selected MapKit alternative cannot save offline")
         assert(coordinator.routePreview === scenic, "selection updates map preview")
         coordinator.startSelectedRoute()
         assert(coordinator.currentRoute === scenic, "explicit start uses selected route")

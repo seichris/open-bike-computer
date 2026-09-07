@@ -98,3 +98,21 @@ nonisolated enum RouteProviderPolicyV1 {
         return String(parsed) == value
     }
 }
+
+/// Presentation admission only. Storage and navigation MUST also validate the
+/// complete archive at the time of use; this never authorizes an export.
+nonisolated enum OfflineRouteSourceEligibilityV1 {
+    static func allowsSave(
+        provider: RouteProviderMetadataV1?,
+        deleteAfter: Date? = nil,
+        now: Date = Date()
+    ) -> Bool {
+        guard let provider, now.timeIntervalSince1970.isFinite,
+              RouteProviderPolicyV1.allowsDurableStorage(provider) else { return false }
+        if RouteProviderPolicyV1.requiresExpiry(provider), deleteAfter == nil { return false }
+        if let deleteAfter {
+            guard deleteAfter.timeIntervalSince1970.isFinite, now < deleteAfter else { return false }
+        }
+        return true
+    }
+}

@@ -75,7 +75,7 @@ class BikeComputerCoordinator: ObservableObject {
     let destinationStore: SavedDestinationStore
     let workoutMetricsStore: WorkoutMetricsStore
     private let rideDetectionSettingsStore: RideDetectionSettingsStore?
-    private let navEngine = NavigationEngine()
+    private let navEngine: NavigationEngine
     private let locationManager: CurrentLocationManager
     private let directionsFactory: NavigationDirectionsFactory
     private let startServices: Bool
@@ -98,6 +98,14 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var distanceToManeuver: Int = 0
     @Published var currentIconID: Int = NavigationIconID.straight
     @Published var currentRoute: MKRoute?
+    @Published private(set) var offlineNavigationIdentity: WatchRouteIdentityV1?
+
+    var selectedRouteCanSaveOffline: Bool {
+        guard selectedRouteAlternativeID != nil else { return false }
+        // NavigationRouteAlternativeV1 currently wraps MKRoute exclusively.
+        // Never infer durable provenance from its title or converted geometry.
+        return OfflineRouteSourceEligibilityV1.allowsSave(provider: RouteProviderPolicyV1.mapKit)
+    }
     @Published private(set) var routePreview: MKRoute?
     @Published private(set) var routeAlternatives:
         [NavigationRouteAlternativeV1] = []
@@ -188,6 +196,7 @@ class BikeComputerCoordinator: ObservableObject {
         self.directionsFactory = directionsFactory
         self.startServices = startServices
         self.now = now
+        self.navEngine = NavigationEngine(now: now)
         self.workoutDeviceRelay = WorkoutDeviceRelay(
             store: self.workoutMetricsStore,
             bleManager: bleManager,
@@ -234,6 +243,7 @@ class BikeComputerCoordinator: ObservableObject {
                 }
                 let didStopNavigation = self.wasNavigating && !navigating
                 self.wasNavigating = navigating
+                if !navigating { self.offlineNavigationIdentity = nil }
                 if didStopNavigation {
                     self.synchronizeDestinationCatalog(force: true)
                 }
@@ -613,6 +623,39 @@ class BikeComputerCoordinator: ObservableObject {
         }
         selectedRouteAlternativeID = id
         routePreview = alternative.route
+    }
+
+    /// Starts only verified, licensed canonical geometry. No search, directions,
+    /// network reachability or Watch connection is involved. Offline rerouting
+    /// is deliberately unavailable because currentRoute/destination stay nil.
+    func startOfflineNavigation(with archive: NavigationRouteArchiveV1) throws {
+        guard !navEngine.isNavigating else { throw OfflineRouteSaveError.navigationActive }
+        guard !routeCalculation.isCalculating, pendingRoutePlan == nil,
+              routeAlternatives.isEmpty, currentRoute == nil else {
+            throw OfflineRouteSaveError.planningActive
+        }
+        try archive.validate(purpose: .offlineNavigation, now: now())
+        let identity = WatchRouteIdentityV1(archive: archive)
+        do {
+            offlineNavigationIdentity = identity
+            try navEngine.startOfflineNavigation(with: archive, initialLocation: currentLocation)
+            guard navEngine.isNavigating else { throw OfflineRouteSaveError.startFailed }
+        } catch {
+            offlineNavigationIdentity = nil
+            throw error
+        }
+    }
+
+    func reconcileOfflineNavigation(with routes: [PlannedRouteSummaryV1]) {
+        guard let identity = offlineNavigationIdentity else { return }
+        guard routes.contains(where: {
+            $0.id == identity.routeID && $0.revision == identity.revision &&
+                $0.contentHash == identity.contentHash &&
+                ($0.deleteAfter.map { now() < $0 } ?? true)
+        }) else {
+            stopNavigation()
+            return
+        }
     }
 
     func startSelectedRoute() {
@@ -1330,12 +1373,28 @@ extension BikeComputerCoordinator {
                             expectedTravelTime: candidate.expectedTravelTime,
                             advisoryNotices: candidate.advisoryNotices
                         )
-                    }
+                    }.enumerated().sorted { lhs, rhs in
+                        let left = lhs.element.expectedTravelTime
+                        let right = rhs.element.expectedTravelTime
+                        let leftTime = left.isFinite && left > 0 ? left : .infinity
+                        let rightTime = right.isFinite && right > 0 ? right : .infinity
+                        return leftTime == rightTime ? lhs.offset < rhs.offset : leftTime < rightTime
+                    }.map(\.element)
                     guard let selected = alternatives.first else {
                         self.routeCalculation.status = "No usable route available"
                         self.routeCalculation.isCalculating = false
                         self.alert.message = "The returned routes could not be prepared safely."
                         self.alert.isShowing = true
+                        return
+                    }
+                    if alternatives.count == 1 {
+                        self.routeCalculation.isCalculating = false
+                        self.routeCalculation.status = ""
+                        self.beginNavigation(
+                            with: selected.route, destination: destinationItem,
+                            transportType: requestedTransportType,
+                            isTestMode: isTestMode, initialLocation: initialLocation
+                        )
                         return
                     }
                     self.pendingRoutePlan = PendingRoutePlan(
