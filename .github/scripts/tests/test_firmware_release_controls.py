@@ -58,18 +58,12 @@ class ReleaseControlsTests(unittest.TestCase):
         fixture["environment"]["protection_rules"][0]["prevent_self_review"] = True
         controls.validate(**fixture, policy=independent)
 
-    def test_migration_workflow_has_no_write_token_or_secret_deletion(self):
-        source = (Path(__file__).resolve().parents[2] / "workflows/firmware-key-migration.yml").read_text()
-        self.assertIn("github.ref == 'refs/heads/main'", source)
-        self.assertIn("github.actor_id == '25006584'", source)
-        self.assertIn("github.run_attempt == '1'", source)
-        self.assertIn("persist-credentials: false", source)
-        self.assertIn("--require-hashes --only-binary=:all: --no-deps", source)
-        self.assertNotIn(": write", source)
-        self.assertNotIn("secret delete", source)
-        self.assertNotIn("pull_request", source)
-        self.assertEqual(source.count("secrets.FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY"), 1)
-        self.assertIn("retention-days: 1", source)
+    def test_one_time_migration_workflow_is_retired_after_cleanup(self):
+        workflow = Path(__file__).resolve().parents[2] / "workflows/firmware-key-migration.yml"
+        self.assertFalse(workflow.exists())
+        # Keep the implementation and runbook available as audit history.
+        self.assertTrue((workflow.parents[1] / "scripts/firmware_key_migration.py").is_file())
+        self.assertTrue((workflow.parents[2] / "docs/firmware-signing-key-migration.md").is_file())
 
     def test_control_check_precedes_secret_use(self):
         workflow = (Path(__file__).resolve().parents[2] / "workflows/firmware-release.yml").read_text()
