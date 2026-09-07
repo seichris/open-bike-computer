@@ -132,6 +132,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private var leaseReleaseAckTask: Task<Void, Never>?
     private var latestWorkoutFrames: WorkoutDeviceFrames?
     private var latestWorkoutGPS: WorkoutDeviceGPSUpdate?
+    private var latestWorkoutMotion: WorkoutDeviceMotionUpdate?
     private var workoutPairGeneration: UInt8 = 0
     private var latestLocation: NavigationLocationSampleV1?
     private var latestNavigationSnapshot: NavigationSnapshotV1?
@@ -470,12 +471,15 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     func updateWorkout(
         _ frames: WorkoutDeviceFrames,
-        gps: WorkoutDeviceGPSUpdate?
+        gps: WorkoutDeviceGPSUpdate?,
+        motion: WorkoutDeviceMotionUpdate?
     ) {
         latestWorkoutFrames = frames
         latestWorkoutGPS = gps
+        latestWorkoutMotion = motion
         guard transportStateMachine.isReady else { return }
         enqueueWorkoutFrames(frames)
+        enqueueWorkoutMotionIfNeeded()
         enqueueWorkoutGPSIfNeeded()
         drainQueue()
     }
@@ -483,6 +487,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     func clearWorkout(_ frames: WorkoutDeviceFrames) {
         latestWorkoutFrames = frames
         latestWorkoutGPS = nil
+        latestWorkoutMotion = nil
         guard transportStateMachine.isReady else { return }
         enqueueWorkoutFrames(frames)
         drainQueue()
@@ -1189,6 +1194,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         if let latestWorkoutFrames {
             enqueueWorkoutFrames(latestWorkoutFrames)
         }
+        enqueueWorkoutMotionIfNeeded()
         if let latestLocation {
             _ = enqueueGroup(
                 priority: .livePosition,
@@ -1366,6 +1372,26 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         )
     }
 
+    private func enqueueWorkoutMotionIfNeeded() {
+        guard demand.workoutActive,
+              capabilities?.supportsWatchGPSMotionEvidenceV1 == true,
+              let latestWorkoutMotion,
+              let frame = WorkoutDeviceFrameBuilder.watchMotionFrame(
+                for: latestWorkoutMotion,
+                sentAt: Date()
+              ) else { return }
+        _ = enqueueGroup(
+            priority: .liveWorkout,
+            disposition: .replaceable,
+            coalescingKey: "workout-motion",
+            writes: [.init(
+                target: .workout,
+                payload: frame,
+                motionDispatch: RideBLEMotionDispatch(frame: frame)
+            )]
+        )
+    }
+
     @discardableResult
     private func enqueueGroup(
         priority: RideBLECommandPriorityV1,
@@ -1450,6 +1476,13 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                     sampleTimestamp: $0
                 )
             } ?? write.payload
+            if let motion = write.motionDispatch {
+                guard let freshPayload = motion.payload() else {
+                    activeWriteIndex += 1
+                    continue
+                }
+                payload = freshPayload
+            }
             if shouldUseApplicationAcknowledgement(for: group) {
                 guard let commandType = group.applicationCommandType,
                       let wrapped = RideBLEApplicationCommandEnvelopeV1(

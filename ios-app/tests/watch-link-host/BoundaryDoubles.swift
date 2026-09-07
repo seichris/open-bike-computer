@@ -63,9 +63,21 @@ struct WorkoutDeviceGPSUpdate {
     let courseDegrees: Double?; let speedMetersPerSecond: Double?; let altitudeMeters: Double?
     let capturedAt: Date; let distanceTraveledMeters: Double?; let elapsedSeconds: TimeInterval?
 }
+struct WorkoutDeviceMotionUpdate {
+    let sessionToken: UInt16
+    let capturedAt: Date
+    let speedMetersPerSecond: Double
+    let horizontalAccuracyMeters: Double
+    let sampleEpoch: UInt16
+    let sampleSequence: UInt32
+    let automaticallyPaused: Bool
+}
 enum WorkoutDeviceFrameBuilder {
     static func transportFrames(for frames: WorkoutDeviceFrames, generation: UInt8, includeOrigin: Bool) -> [Data] {
         [Data("workout-\(frames.identity.state)-identity".utf8), Data("workout-\(frames.identity.state)-metrics".utf8)]
+    }
+    static func watchMotionFrame(for update: WorkoutDeviceMotionUpdate, sentAt: Date) -> Data? {
+        Data(repeating: 0, count: 16)
     }
 }
 enum WatchRidePacketEncoderV1 {

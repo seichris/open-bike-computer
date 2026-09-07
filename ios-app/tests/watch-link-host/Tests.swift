@@ -87,7 +87,7 @@ enum Tests {
                     let nav = kind != "workout", workout = kind != "navigation"
                     f.link.setDemand(navigation: nav, workout: workout)
                     if nav { f.link.updateNavigation(location: location, snapshot: snapshot(77)) }
-                    if workout { f.link.updateWorkout(.init(identity: .init(state: .running)), gps: nil) }
+                    if workout { f.link.updateWorkout(.init(identity: .init(state: .running)), gps: nil, motion: nil) }
                     expect(!f.link.state.isReady, "published readiness follows stopping phase")
                     expect(f.link.testQueued == 0, "successor snapshots cannot enter retiring queue")
                     expect(f.prepares.isEmpty, "no successor prepare before old session finishes")
@@ -221,7 +221,7 @@ enum Tests {
                 f.stop(); f.link.testDrainATT(on: f.peer)
                 f.link.setDemand(navigation: kind != "workout", workout: kind != "navigation")
                 if kind != "workout" { f.link.updateNavigation(location: location, snapshot: snapshot(88)) }
-                if kind != "navigation" { f.link.updateWorkout(.init(identity: .init(state: .running)), gps: nil) }
+                if kind != "navigation" { f.link.updateWorkout(.init(identity: .init(state: .running)), gps: nil, motion: nil) }
                 await settle(); f.clock.advance(by: .seconds(5)); await settle()
                 expect(f.releases == [f.id] && f.link.testCentral.connections.isEmpty,
                        "deadline releases preparation but respects old connection cancellation")
@@ -254,7 +254,7 @@ enum Tests {
         }
         await run("stop drains admitted application groups before release") {
             let f = Fixture(); defer { f.close() }
-            f.link.updateWorkout(.init(identity: .init(state: .ended)), gps: nil)
+            f.link.updateWorkout(.init(identity: .init(state: .ended)), gps: nil, motion: nil)
             let group = f.link.testActiveGroup!
             f.stop()
             f.link.testAuth("LEASE_RELEASED", on: f.peer)

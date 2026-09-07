@@ -186,13 +186,18 @@ gates pass.
 - A ride that was manually paused may only be manually resumed.
 - A manual resume receives a 15-second grace period before another automatic
   pause can be requested. Positive motion may resume immediately.
-- Conflicting fresh signals suppress an automatic pause. A fresh positive wheel
-  or cadence signal wins over GPS/IMU “stopped” evidence.
+- Conflicting fresh signals suppress an automatic pause. Fresh positive wheel,
+  cadence, or qualified GPS-plus-IMU movement wins over stopped evidence.
+- The five-second short pause path requires a fresh, definitively stopped wheel
+  speed. Zero cadence is not stopped evidence: riders coast, and cadence can
+  remain zero while the bicycle is moving.
 - The detector never automatically ends or discards a ride.
 
 ### Manual precedence
 
-Every control surface must tag a lifecycle request as `manual` or `automatic`.
+Every explicit rider control surface tags its lifecycle request as `manual`,
+and detector requests are `automatic`. Uncorroborated session callbacks remain
+`unknown`; callbacks with explicit system attribution remain `system`.
 The following rules are normative:
 
 | Rider action | Automation consequence |
@@ -263,14 +268,16 @@ Avoid one enum containing every combination. Use three orthogonal values:
 
 ```text
 RideLifecycle = idle | starting | running | paused | ending | ended | failed
-PauseOrigin   = none | automatic | manual
+PauseOrigin   = none | automatic | manual | system | unknown
 DetectorPhase = quiet | startCandidate | awaitingConfirmation |
                 pauseCandidate | resumeCandidate | restartCooldown
 ```
 
 `PauseOrigin` is meaningful only while paused. A confirmed manual control updates
-the lifecycle first, then resets the detector phase. The detector may request a
-transition but never mutates a Watch session optimistically.
+the lifecycle first, then resets the detector phase. Only `automatic` is
+eligible for automatic resume. `none`, `system`, and `unknown` fail closed until
+durable evidence resolves them. The detector may request a transition but never
+mutates a Watch session optimistically.
 
 ### Core transitions
 
@@ -311,8 +318,10 @@ quality, and optional value. Missing or stale is never converted to zero.
 | Source | Fresh for | Positive moving evidence | Stopped evidence | Authority |
 | --- | ---: | --- | --- | --- |
 | Direct wheel speed | 3 s | `>= 1.5 m/s` | `< 0.5 m/s` with fresh revolutions | Highest |
-| Direct cadence | 3 s | `>= 20 rpm` | `< 5 rpm` | Highest |
-| Watch paired speed/cadence | 3 s | Same thresholds while workout exists | Same thresholds | High, active ride only |
+| Direct cadence | 3 s | `>= 20 rpm` | Not authoritative; zero can mean coasting | Moving veto/start/resume only |
+| Confirmed Watch paired speed | 3 s | Same wheel threshold while workout exists | Same wheel threshold | High, active ride only |
+| Generic HealthKit cycling speed | 5 s | Display only | Display only | Never sets paired-sensor detector provenance |
+| Raw Watch workout GPS | 3 s | `>= 2.0 m/s` during an active workout | `< 0.8 m/s`, accuracy `<= 12.5 m` | Primary active-workout pause/resume source in profile 4 |
 | LC76G GPS | 3 s | valid 2D/3D fix, HDOP `<= 2.5`, speed `>= 2.8 m/s` | speed `< 0.8 m/s` and stationary radius | Medium |
 | QMI8658 | 1 s | calibrated windowed vibration/motion score | low score over full window | Corroboration only |
 
@@ -340,20 +349,24 @@ cycling.
 
 ### Pause gate
 
-When at least one wheel/cadence source is fresh:
+With qualified raw Watch workout GPS, profile 4 uses distinct producer samples
+spanning five seconds below `0.8 m/s`; BLE retries do not advance the span and
+no source-sample gap may exceed three seconds. Fresh wheel/cadence or qualified
+device GPS-plus-IMU movement vetoes the pause.
 
-- require every fresh wheel/cadence source to be below its stopped threshold
-  for 5 continuous seconds;
-- any positive fresh wheel/cadence sample cancels the pause candidate; and
-- use GPS/IMU only to extend confidence, never to override a positive sensor.
+When Watch GPS is unavailable, a fresh, definitively stopped wheel-speed source requires
+that stopped wheel evidence for five continuous seconds. Any positive fresh
+wheel/cadence sample or qualified GPS-plus-IMU movement cancels the candidate.
+Cadence-only evidence, cadence zero, missing cycling sensors, and wheel dropout
+do not qualify for the short path.
 
-Without a fresh wheel/cadence source:
+Without fresh definitive stopped wheel evidence:
 
 - require good GPS below `0.8 m/s`;
 - require all accepted positions to remain inside `max(8 m, 2 x estimated
   horizontal uncertainty)`;
 - require low IMU motion for 10 continuous seconds; and
-- freeze the candidate rather than pause when GPS quality disappears before the
+- reset the candidate rather than pause when GPS quality disappears before the
   stationary window completes.
 
 After an already-confirmed stop, GPS drift outside its uncertainty envelope does
@@ -361,6 +374,8 @@ not resume the ride unless the speed and IMU gates also pass.
 
 ### Resume gate
 
+- Qualified Watch GPS `>= 2.0 m/s` across distinct samples spanning 2 seconds
+  is the primary automatic-resume path.
 - Wheel speed `>= 1.5 m/s` or cadence `>= 20 rpm` for 2 continuous seconds may
   resume an automatically paused ride.
 - GPS `>= 2.0 m/s` plus positive IMU motion for 4 continuous seconds is the
@@ -734,7 +749,7 @@ Add focused tests for:
 - capability and old-client compatibility;
 - wall-elapsed/moving-time mapping across mixed manual and automatic
   transitions; and
-- reducer parsing for the third workout telemetry frame.
+- reducer parsing for origin and Watch-motion workout telemetry frames.
 
 Suggested files:
 
