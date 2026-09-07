@@ -1,0 +1,37 @@
+name: Refresh pinned integration source
+on:
+  push:
+    branches: [review/pr-integration-snapshot-2026-09-08]
+    paths: [.github/workflows/review-refresh-source.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: 25b6352e69c39af66369743b57dd6f76c92c5e91
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Package the newly reviewed main delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 25b6352e69c39af66369743b57dd6f76c92c5e91
+          git update-ref refs/review/current HEAD
+          mkdir -p "$RUNNER_TEMP/source-delta"
+          git bundle create "$RUNNER_TEMP/source-delta/current.bundle" \
+            refs/review/current ^89d3c98f3a5d4e7fdfd37bc996113ccf0c61f7bd
+          git bundle verify "$RUNNER_TEMP/source-delta/current.bundle"
+          (cd "$RUNNER_TEMP/source-delta" && sha256sum current.bundle > SHA256SUMS)
+          git log --oneline 89d3c98f..HEAD
+          git ls-remote origin refs/heads/main refs/heads/fix/firmware-runtime-ownership \
+            refs/heads/fix/workout-lifecycle-recovery refs/heads/fix/offline-map-lifecycle-durability
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pinned-main-incremental-source
+          path: ${{ runner.temp }}/source-delta/
+          retention-days: 3
+          if-no-files-found: error
