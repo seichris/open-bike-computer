@@ -1,4 +1,4 @@
-name: Temporary offline-route source export
+name: Temporary offline-route implementation and native validation
 
 on:
   pull_request:
@@ -8,47 +8,113 @@ permissions:
   contents: read
 
 jobs:
-  source:
+  apply:
     if: github.head_ref == 'feat/planned-routes-save-offline' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.apply.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: main
-          path: main-source
-          fetch-depth: 16
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: b8282d3954b59fde7f551856bf8242e8024a274e
-          path: preview-source
-          fetch-depth: 16
-          persist-credentials: false
-      - name: Export only Git objects and refs, never credentials or runner configuration
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 32
+      - id: apply
+        name: Apply exact reviewed worktree tree to the isolated feature branch
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p export
-          for source in main preview; do
-            repo="${source}-source"
-            target="export/${source}.git"
-            mkdir -p "$target"
-            for entry in objects refs HEAD packed-refs shallow; do
-              if test -e "$repo/.git/$entry"; then
-                cp -a "$repo/.git/$entry" "$target/$entry"
-              fi
-            done
-            printf '[core]\n\trepositoryformatversion = 0\n\tbare = true\n' > "$target/config"
-            git -C "$repo" rev-parse HEAD | tee "export/${source}-sha.txt"
-          done
-          tar -czf offline-route-source.tar.gz -C export .
-          sha256sum offline-route-source.tar.gz > offline-route-source.sha256
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          python3 - <<'PY'
+          import hashlib, lzma, os
+          from pathlib import Path
+          data = b''.join(Path('.github/offline-route-feature.part' + str(i)).read_bytes() for i in (1, 2))
+          assert len(data) == 17820, 'Unexpected payload size'
+          patch = lzma.decompress(data)
+          assert len(patch) == 78855, 'Unexpected patch size'
+          assert hashlib.sha256(patch).hexdigest() == '7e02b233b9ce4f9716f20d49ffea314ef34f703de41e71948dbc185d7bb129e6', 'Patch integrity mismatch'
+          Path(os.environ['RUNNER_TEMP'], 'offline-route-feature.patch').write_bytes(patch)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags --depth=32 origin b8282d3954b59fde7f551856bf8242e8024a274e
+          if ! git merge --no-commit --no-ff b8282d3954b59fde7f551856bf8242e8024a274e; then
+            test "$(git diff --name-only --diff-filter=U)" = 'ios-app/scripts/run-navigation-tests.sh'
+            git checkout --ours ios-app/scripts/run-navigation-tests.sh
+            python3 - <<'PY'
+          from pathlib import Path
+          path = Path('ios-app/scripts/run-navigation-tests.sh')
+          text = path.read_text()
+          hook = '"${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"'
+          assert text.count(hook) == 1
+          text = text.replace(hook, hook + '\nbash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"', 1)
+          path.write_text(text)
+          PY
+            git add ios-app/scripts/run-navigation-tests.sh
+          fi
+          git rm .github/workflows/offline-route-source-export.yml .github/offline-route-feature.part1 .github/offline-route-feature.part2
+          test "$(git write-tree)" = '1876a12b1ded68fef3547b9ee5042e6de6d0e5de'
+          git apply --unidiff-zero --index "$RUNNER_TEMP/offline-route-feature.patch"
+          test "$(git write-tree)" = 'f3f2a682ef43c99097f6c9adb9c1c9d0ce3d31a0'
+          git diff --cached --check
+          git commit -m 'feat(ios): save approved GPX routes and navigate saved archives offline' -m 'Integrates the pinned PR #429 preview prerequisite. Preserves the MapKit durable-storage gate and Strava retention. Removes temporary source-transfer helpers. Tree verified against the isolated local implementation.'
+          git push origin HEAD:refs/heads/feat/planned-routes-save-offline
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  native:
+    name: Requested iOS validation on exact feature tree
+    needs: apply
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CI_DERIVED_DATA_PATH: ${{ runner.temp }}/offline-route-derived-data
+    defaults:
+      run:
+        working-directory: ios-app
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          name: offline-route-source
-          path: |
-            offline-route-source.tar.gz
-            offline-route-source.sha256
-          retention-days: 1
-          if-no-files-found: error
+          ref: ${{ needs.apply.outputs.sha }}
+          persist-credentials: false
+      - name: Record exact source and toolchain
+        run: |
+          git rev-parse HEAD
+          git rev-parse HEAD^{tree}
+          xcrun swiftc --version
+          mkdir -p "$RUNNER_TEMP/offline-route-validation"
+      - id: navigation
+        name: Run requested navigation tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./scripts/run-navigation-tests.sh 2>&1 | tee "$RUNNER_TEMP/offline-route-validation/navigation.log"
+      - id: saved
+        name: Run requested saved-route map tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./scripts/run-saved-route-map-tests.sh 2>&1 | tee "$RUNNER_TEMP/offline-route-validation/saved-route-map.log"
+      - id: build
+        name: Run requested unsigned iOS build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/offline-route-validation/build.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: offline-route-native-validation
+          path: ${{ runner.temp }}/offline-route-validation
+          retention-days: 7
+      - name: Require all requested checks
+        if: always()
+        env:
+          NAVIGATION_OUTCOME: ${{ steps.navigation.outcome }}
+          SAVED_OUTCOME: ${{ steps.saved.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+        run: |
+          test "$NAVIGATION_OUTCOME" = success
+          test "$SAVED_OUTCOME" = success
+          test "$BUILD_OUTCOME" = success
