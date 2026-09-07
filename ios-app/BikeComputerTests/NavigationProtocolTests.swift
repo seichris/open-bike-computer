@@ -594,21 +594,32 @@ final class TestRoute: MKRoute {
     private let storedSteps: [MKRoute.Step]
     private let storedPolyline: MKPolyline
     private let storedDistance: CLLocationDistance
+    private let storedExpectedTravelTime: TimeInterval
 
-    init(instructions: String, coordinates: [CLLocationCoordinate2D]) {
+    init(
+        instructions: String,
+        coordinates: [CLLocationCoordinate2D],
+        expectedTravelTime: TimeInterval = 0
+    ) {
         self.storedSteps = [TestRouteStep(instructions: instructions, coordinates: coordinates)]
         self.storedPolyline = MKPolyline(coordinates: coordinates, count: coordinates.count)
         self.storedDistance = zip(coordinates, coordinates.dropFirst()).reduce(0) { distance, pair in
             distance + CLLocation(latitude: pair.0.latitude, longitude: pair.0.longitude)
                 .distance(from: CLLocation(latitude: pair.1.latitude, longitude: pair.1.longitude))
         }
+        self.storedExpectedTravelTime = expectedTravelTime
         super.init()
     }
 
-    init(steps: [TestRouteStep], coordinates: [CLLocationCoordinate2D]) {
+    init(
+        steps: [TestRouteStep],
+        coordinates: [CLLocationCoordinate2D],
+        expectedTravelTime: TimeInterval = 0
+    ) {
         self.storedSteps = steps
         self.storedPolyline = MKPolyline(coordinates: coordinates, count: coordinates.count)
         self.storedDistance = steps.reduce(0) { $0 + $1.distance }
+        self.storedExpectedTravelTime = expectedTravelTime
         super.init()
     }
 
@@ -622,6 +633,10 @@ final class TestRoute: MKRoute {
 
     override var distance: CLLocationDistance {
         storedDistance
+    }
+
+    override var expectedTravelTime: TimeInterval {
+        storedExpectedTravelTime
     }
 }
 
@@ -697,6 +712,7 @@ struct NavigationProtocolTests {
         testRouteDeviationDetection()
         testReplacementStepSelectionUsesUnambiguousGeometry()
         testCoordinatorPreviewsAndSelectsAlternateRoutes()
+        testCoordinatorStartsSingleRouteWithoutPicker()
         testCoordinatorReroutesAndAppliesLatestRoute()
         testCoordinatorReroutesWhenProgressRejectsFarLocation()
         testWorkoutAndNavigationLifecyclesStayIndependent()
@@ -3716,7 +3732,8 @@ struct NavigationProtocolTests {
         destination.name = "Finish"
         let direct = TestRoute(
             instructions: "Continue",
-            coordinates: [sourceCoordinate, destinationCoordinate]
+            coordinates: [sourceCoordinate, destinationCoordinate],
+            expectedTravelTime: 300
         )
         let scenic = TestRoute(
             instructions: "Bear right",
@@ -3727,7 +3744,8 @@ struct NavigationProtocolTests {
                     longitude: -122.001
                 ),
                 destinationCoordinate
-            ]
+            ],
+            expectedTravelTime: 120
         )
 
         coordinator.planNavigation(
@@ -3748,13 +3766,17 @@ struct NavigationProtocolTests {
             "all valid alternatives are presented before navigation"
         )
         assert(!coordinator.isNavigating, "route preview does not start navigation")
-        assert(coordinator.routePreview === direct, "first alternative is previewed")
+        assert(
+            coordinator.routeAlternatives[0].route === scenic,
+            "fastest alternative is listed first"
+        )
+        assert(coordinator.routePreview === scenic, "fastest alternative is previewed")
         assert(
             coordinator.selectedRouteAlternativeID == nil,
             "the rider must explicitly select an alternative"
         )
 
-        let scenicID = coordinator.routeAlternatives[1].id
+        let scenicID = coordinator.routeAlternatives[0].id
         coordinator.selectRouteAlternative(scenicID)
         assert(coordinator.routePreview === scenic, "selection updates map preview")
         coordinator.startSelectedRoute()
@@ -3773,6 +3795,60 @@ struct NavigationProtocolTests {
         assert(
             !factory.tasks[1].request.requestsAlternateRoutes,
             "immediate/device starts retain a single-route request"
+        )
+    }
+
+    @MainActor
+    static func testCoordinatorStartsSingleRouteWithoutPicker() {
+        let suite = "CoordinatorSingleRoute.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let factory = TestNavigationDirectionsFactory()
+        let coordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: defaults),
+            directionsFactory: factory.makeTask,
+            startServices: false
+        )
+        let sourceCoordinate = CLLocationCoordinate2D(
+            latitude: 37.0,
+            longitude: -122.0
+        )
+        let destinationCoordinate = CLLocationCoordinate2D(
+            latitude: 37.004,
+            longitude: -122.0
+        )
+        let source = MKMapItem(
+            placemark: MKPlacemark(coordinate: sourceCoordinate)
+        )
+        source.name = "Start"
+        let destination = MKMapItem(
+            placemark: MKPlacemark(coordinate: destinationCoordinate)
+        )
+        destination.name = "Finish"
+        let route = TestRoute(
+            instructions: "Continue",
+            coordinates: [sourceCoordinate, destinationCoordinate]
+        )
+
+        coordinator.planNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: RouteTransportTypes.cycling,
+            isTestMode: true
+        )
+        assertEqual(factory.tasks.count, 1, "single-route planning creates one request")
+        assert(
+            factory.tasks[0].request.requestsAlternateRoutes,
+            "single-route planning still asks MapKit for alternatives"
+        )
+        factory.tasks[0].succeed(with: [route])
+
+        assert(coordinator.isNavigating, "one returned route starts navigation immediately")
+        assert(coordinator.currentRoute === route, "the only route becomes the active route")
+        assert(coordinator.routeAlternatives.isEmpty, "single-route planning skips the picker")
+        assert(
+            coordinator.selectedRouteAlternativeID == nil,
+            "single-route planning does not require an explicit selection"
         )
     }
 

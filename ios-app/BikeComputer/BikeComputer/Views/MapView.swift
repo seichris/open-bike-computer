@@ -1133,9 +1133,9 @@ struct MapViewContainer: UIViewRepresentable {
             }
 
             let isSelected = alternativeID == selectedRouteAlternativeID
-            renderer.strokeColor = isSelected ? .systemBlue : .systemGray
+            renderer.strokeColor = .systemBlue
             renderer.lineWidth = isSelected ? 8 : 5
-            renderer.alpha = isSelected ? 1 : 0.72
+            renderer.alpha = 1
         }
         
 
