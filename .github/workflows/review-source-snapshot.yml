@@ -1,0 +1,52 @@
+name: PR integration source snapshot
+
+on:
+  push:
+    branches:
+      - review/pr-integration-snapshot-2026-09-08
+    paths:
+      - .github/workflows/review-source-snapshot.yml
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: 89d3c98f3a5d4e7fdfd37bc996113ccf0c61f7bd
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Package pinned tracked Git objects only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 89d3c98f3a5d4e7fdfd37bc996113ccf0c61f7bd
+          git update-ref refs/review/main HEAD
+          for entry in \
+            '420:7615e418eb535789eb9103fa106650641421cc5f' \
+            '424:e41ee05dcc96dff2d07a1846021d07f44740af30' \
+            '425:8dcbc540b518a6d63e171160dea906bf8096c2e6'; do
+            number="${entry%%:*}"
+            sha="${entry#*:}"
+            git fetch --no-tags origin "$sha"
+            test "$(git rev-parse FETCH_HEAD)" = "$sha"
+            git update-ref "refs/review/$number" "$sha"
+          done
+          mkdir -p "$RUNNER_TEMP/review-source"
+          git bundle create "$RUNNER_TEMP/review-source/review.bundle" \
+            refs/review/main refs/review/420 refs/review/424 refs/review/425
+          git bundle verify "$RUNNER_TEMP/review-source/review.bundle"
+          git for-each-ref --format='%(objectname) %(refname)' refs/review/ \
+            > "$RUNNER_TEMP/review-source/refs.txt"
+          (cd "$RUNNER_TEMP/review-source" && sha256sum review.bundle > SHA256SUMS)
+          cat "$RUNNER_TEMP/review-source/refs.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pinned-pr-integration-source
+          path: ${{ runner.temp }}/review-source/
+          if-no-files-found: error
+          retention-days: 3
