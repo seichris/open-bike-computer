@@ -170,12 +170,12 @@ def prepare(value):
     if secret_metadata() is None:
         raise MigrationError("repository signing key is missing")
     key = signing_key(value)
-    recipient = api(environment_path("public-key"))
+    recipient = api(environment_path("secrets/public-key"))
     ciphertext = run_gh(["secret", "set", SECRET, "--repo", f"github.com/{REPOSITORY}",
                          "--env", ENVIRONMENT, "--no-store"], value).strip()
     if len(base64.b64decode(ciphertext, validate=True)) != len(value) + 48:
         raise MigrationError("invalid sealed-secret output")
-    if api(environment_path("public-key")) != recipient:
+    if api(environment_path("secrets/public-key")) != recipient:
         raise MigrationError("environment encryption key changed; prepare again")
     receipt.update(operation="prepare", keyId=recipient["key_id"],
                    recipientKeySha256=hashlib.sha256(base64.b64decode(recipient["key"], validate=True)).hexdigest(),
@@ -223,7 +223,7 @@ def install(document, expected_run, expected_sha):
     if comparison.get("status") not in ("ahead", "identical"):
         raise MigrationError("migration workflow commit is not on current main")
     validate_destination()
-    recipient = api(environment_path("public-key"))
+    recipient = api(environment_path("secrets/public-key"))
     if (recipient["key_id"] != receipt["keyId"] or
         hashlib.sha256(base64.b64decode(recipient["key"], validate=True)).hexdigest() != receipt["recipientKeySha256"] or
         len(base64.b64decode(receipt["encryptedValue"], validate=True)) != 92):

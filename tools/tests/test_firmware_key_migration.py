@@ -95,6 +95,11 @@ class KeyMigrationTests(unittest.TestCase):
             command = gh.call_args.args[0]
             self.assertIn("--no-store", command)
             self.assertEqual(command[command.index("--env") + 1], migration.ENVIRONMENT)
+            self.assertEqual(
+                [call.args[0] for call in api.call_args_list
+                 if call.args[0].endswith("public-key")],
+                [migration.environment_path("secrets/public-key")] * 2,
+            )
             self.assertTrue(all(len(call.args) == 1 for call in api.call_args_list))
 
     def test_prepare_rejects_existing_or_shadowed_key_before_encryption(self):
@@ -144,7 +149,7 @@ class KeyMigrationTests(unittest.TestCase):
                 return None
             if "actions/runs" in path: return self.run
             if "compare/" in path: return {"status": "ahead"}
-            if path.endswith("public-key"): return self.recipient
+            if path.endswith("/secrets/public-key"): return self.recipient
             raise AssertionError(path)
         with patch.object(migration, "api", side_effect=api), \
              patch.object(migration, "validate_destination"), \
