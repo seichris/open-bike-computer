@@ -5976,7 +5976,7 @@ void BLENavigationServer::init(const char *deviceName) {
   pAdvertising->start();
 
   initialized = true;
-  bleDebugStats.updateWith([](BLEDebugStats &stats) {
+  bleDebugStats.update([this](BLEDebugStats &stats) {
     stats.initialized = true;
     stats.connected = connected;
     stats.authenticated = bleSessionAuthenticated;
@@ -6092,7 +6092,7 @@ void BLENavigationServer::process() {
 #if FIRMWARE_DIAGNOSTICS
   if (millis() - lastLog > 5000) {
     lastLog = millis();
-    bleDebugStats.updateWith([](BLEDebugStats &stats) {
+    bleDebugStats.update([this](BLEDebugStats &stats) {
       stats.initialized = initialized;
       stats.connected = connected;
       stats.authenticated = bleSessionAuthenticated;

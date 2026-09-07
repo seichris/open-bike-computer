@@ -36,6 +36,32 @@ int main() {
   snapshot.publish({}); // Disconnect/reset uses the same boundary.
   assert(snapshot.read().icon == 0);
 
+  // Exercise both mutation paths used by BLE: shared captureless updates
+  // and member-dependent updates. Concurrent read-modify-write must not
+  // lose increments or expose a partially changed record.
+  std::thread sharedWriter([&] {
+    for (unsigned i = 0; i < 10000; ++i) {
+      snapshot.updateWith([](Maneuver &value) {
+        ++value.icon;
+        value.distance = value.icon * 10;
+      });
+    }
+  });
+  unsigned increment = 2;
+  std::thread capturedWriter([&] {
+    for (unsigned i = 0; i < 10000; ++i) {
+      snapshot.update([increment](Maneuver &value) {
+        value.icon += increment;
+        value.distance = value.icon * 10;
+      });
+      const auto value = snapshot.read();
+      assert(value.distance == value.icon * 10);
+    }
+  });
+  sharedWriter.join();
+  capturedWriter.join();
+  assert(snapshot.read().icon == 30000);
+
   runtime_ownership::SocketInterruptLease<std::mutex> lease;
   lease.publish(42);
   std::mutex barrier;
