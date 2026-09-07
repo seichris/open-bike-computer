@@ -325,8 +325,11 @@ Treat the 1.75-inch and 2.06-inch boards as separate qualification targets.
 
 Tagged releases package the production images using the attested flash plan;
 see `docs/firmware-factory-release.md`. The factory archive does not waive the
-normal device-identity, confirmation, post-flash `BOOT_META`, ready-state, or
-readback requirements.
+normal device-identity, confirmation, ready-state, or readback requirements.
+Production disables serial `BOOT_META`; use its owner-authenticated
+`boot/acceptance` checkpoint and `tools/verify_firmware_boot_acceptance.py` as
+documented in `docs/firmware-factory-release.md`. Diagnostic serial captures
+qualify only their own diagnostic-profile bytes, not production substitutes.
 
 ### iOS app
 

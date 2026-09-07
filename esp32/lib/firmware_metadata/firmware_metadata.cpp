@@ -81,4 +81,13 @@ std::string json() {
          std::to_string(kUpdaterProtocolVersion) + "}";
 }
 
+std::string bootAcceptanceJson(bool ready, const char *otaState) {
+  return std::string("{\"schemaVersion\":1,\"firmwareTarget\":\"") + jsonEscape(target()) +
+         "\",\"firmwareProfile\":\"" + jsonEscape(buildProfile()) +
+         "\",\"firmwareVersion\":\"" + jsonEscape(version()) + "\",\"firmwareBuild\":" +
+         std::to_string(build()) + ",\"firmwareGitSha\":\"" + jsonEscape(gitSha()) +
+         "\",\"ready\":" + (ready ? "true" : "false") +
+         ",\"otaState\":\"" + jsonEscape(otaState == nullptr ? "unknown" : otaState) + "\"}";
+}
+
 } // namespace firmware_metadata

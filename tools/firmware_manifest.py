@@ -9,6 +9,7 @@ import configparser
 import hashlib
 import json
 import pathlib
+import re
 import sys
 from dataclasses import dataclass
 
@@ -97,6 +98,8 @@ def sign_manifest(manifest: dict[str, object], private_key_base64: str) -> str:
 
 
 def write_manifest(args: argparse.Namespace) -> None:
+    if re.fullmatch(r"[0-9a-f]{40}", args.git_sha) is None:
+        raise ValueError("new OTA manifests require the full immutable Git SHA")
     firmware = args.firmware.resolve()
     if not firmware.is_file():
         raise SystemExit(f"firmware image not found: {firmware}")

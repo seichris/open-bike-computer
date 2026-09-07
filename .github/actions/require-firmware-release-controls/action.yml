@@ -1,0 +1,28 @@
+name: Require firmware release authority
+description: Fail before signing unless environment, key scopes, branch and tag controls match policy
+inputs:
+  app-id:
+    required: true
+    description: Repository-scoped read-only preflight App ID
+  private-key:
+    required: true
+    description: Environment-scoped preflight App private key
+runs:
+  using: composite
+  steps:
+    - id: preflight-token
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: ${{ github.repository_owner }}
+        repositories: ${{ github.event.repository.name }}
+        permission-administration: read
+        permission-environments: read
+        permission-secrets: read
+        permission-contents: read
+        permission-actions: read
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ steps.preflight-token.outputs.token }}
+      run: python3 .github/scripts/firmware_release_controls.py --repository "${GITHUB_REPOSITORY}"
