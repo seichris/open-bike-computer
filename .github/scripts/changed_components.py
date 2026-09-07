@@ -62,6 +62,10 @@ SHARED_RIDE_BLE_CONTRACT_PATHS = {
     "tools/generate_ride_ble_contract.py",
 }
 FIRMWARE_RELEASE_TOOL_PATHS = {
+    ".github/firmware-release-authority.json",
+    ".github/scripts/firmware_key_migration.py",
+    ".github/scripts/firmware_release_controls.py",
+    ".github/workflows/firmware-key-migration.yml",
     ".github/scripts/firmware_release_gate.py",
     "tools/factory_release_manifest.py",
     "tools/firmware_release_candidate.py",

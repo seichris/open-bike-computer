@@ -1,5 +1,5 @@
 name: Require firmware release authority
-description: Fail before signing unless environment, key scopes, branch and tag controls match policy
+description: Fail before signing unless the explicit review policy, environment key scopes, branch and tag controls match
 inputs:
   app-id:
     required: true
