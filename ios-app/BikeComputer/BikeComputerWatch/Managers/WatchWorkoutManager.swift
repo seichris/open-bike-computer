@@ -1891,7 +1891,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 ) as? HKWorkoutRouteBuilder
                 : nil
             let motionSampleEpoch = (try? recoveryStore
-                .beginMotionSampleProducer()) ?? 0
+                .beginMotionSampleProducer())
             identity = recoveryStore.recoveredIdentity ?? identity
             routeRecorder.begin(
                 routeBuilder: routeBuilder,
@@ -2373,7 +2373,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             startDate: startDate
         )
         if lifecycle.state == .paused {
-            routeRecorder.setPaused(true, at: Date())
+            // History before reattachment is unknown. Do not treat delayed
+            // pre-recovery points as confirmed running samples.
+            routeRecorder.setPaused(true, at: startDate)
         }
         if lifecycle.state == .ending {
             routeRecorder.stopLocationUpdates()
@@ -2838,7 +2840,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             for: HKSeriesType.workoutRoute()
         ) as? HKWorkoutRouteBuilder
         let motionSampleEpoch = (try? recoveryStore
-            .beginMotionSampleProducer()) ?? 0
+            .beginMotionSampleProducer())
         identity = recoveryStore.recoveredIdentity ?? identity
         routeRecorder.begin(
             routeBuilder: routeBuilder,
@@ -4833,6 +4835,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         drainMirrorEnvelopeBuffer()
     }
 
+    private var phoneSchemaVersion: WorkoutSchemaVersion?
+
     private func drainMirrorEnvelopeBuffer(forceAttempt: Bool = false) {
         guard isMirroring || forceAttempt,
               let workoutSession = session,
@@ -4841,7 +4845,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
         let data: Data
         do {
-            data = try WorkoutContractCodec.encode(envelope)
+            data = try WorkoutContractCodec.encodeForPhone(envelope, peerVersion: phoneSchemaVersion)
         } catch {
             mirrorEnvelopeBuffer.complete(succeeded: true)
             if mirrorEnvelopeBuffer.pending != nil {
@@ -5168,6 +5172,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     }
 
     private func resetMirrorTransport() {
+        phoneSchemaVersion = nil
         mirrorRetryTask?.cancel()
         mirrorRetryTask = nil
         mirrorShutdownWatchdogTask?.cancel()
@@ -5204,6 +5209,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                   let control = envelope.control else {
                 continue
             }
+            phoneSchemaVersion = envelope.schemaVersion
             let requestedTerminalDisposition: WorkoutFinishDisposition?
             if [.starting, .running, .paused].contains(lifecycle.state) {
                 switch control {
@@ -6731,7 +6737,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             course: course,
             speed: speed,
             motionSampleEpoch: routeRecorder.motionSampleEpoch,
-            motionSampleSequence: routeRecorder.motionSampleSequence
+            motionSampleSequence: routeRecorder.motionSampleEpoch == nil
+                ? nil : routeRecorder.motionSampleSequence
         )
     }
 

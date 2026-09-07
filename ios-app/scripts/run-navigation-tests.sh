@@ -78,6 +78,7 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
+  ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
@@ -93,9 +94,11 @@ xcrun swiftc \
   -parse-as-library \
   -default-isolation MainActor \
   -o "${CYCLING_SENSOR_OUT}" \
+  ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
+  ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
@@ -187,6 +190,7 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/RideAutomationRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
+  ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \

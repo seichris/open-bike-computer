@@ -1279,7 +1279,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             coalescingKey: "workout-motion",
             writes: [.init(
                 target: .workout,
-                payload: frame
+                payload: frame,
+                motionDispatch: RideBLEMotionDispatch(frame: frame)
             )]
         )
     }
@@ -1355,6 +1356,13 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                     sampleTimestamp: $0
                 )
             } ?? write.payload
+            if let motion = write.motionDispatch {
+                guard let freshPayload = motion.payload() else {
+                    activeWriteIndex += 1
+                    continue
+                }
+                payload = freshPayload
+            }
             if shouldUseApplicationAcknowledgement(for: group) {
                 guard let commandType = group.applicationCommandType,
                       let wrapped = RideBLEApplicationCommandEnvelopeV1(

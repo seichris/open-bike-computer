@@ -11,11 +11,28 @@ enum RideSharedTests {
         try testRideBLETransportStateMachine()
         try testRideBLEATTWatchdogPolicy()
         try testWatchDirectBLEContract()
+        testMotionDispatchAge()
         try testFavoriteSyncPolicyAndCoordinateNormalization()
         try testGPXImport()
         try testStravaAthleteRoutePages()
         try testStravaRouteContractAndReloadBookmarks()
         print("RideSharedTests passed")
+    }
+
+    private static func testMotionDispatchAge() {
+        var frame = Data(repeating: 0, count: 16)
+        frame[0] = 4
+        frame[12] = 100
+        let dispatch = RideBLEMotionDispatch(frame: frame, enqueuedUptime: 10)
+        let delayed = dispatch.payload(at: 12)!
+        expect(Int(delayed[12]) + (Int(delayed[13]) << 8) == 2100,
+               "queued age includes monotonic writer delay")
+        expect(dispatch.payload(at: 13) == nil, "expired motion is dropped before ATT")
+        expect(dispatch.payload(at: 9) == nil, "invalid monotonic clock fails closed")
+        let write = WatchBLEOutboundWriteV1(target: .workout,
+                                           payload: frame, motionDispatch: dispatch)
+        expect(write.motionDispatch?.payload(at: 13) == nil,
+               "Watch queue retains original admission time through backpressure")
     }
 
     private static func testRideBLETransportStateMachine() throws {

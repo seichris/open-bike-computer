@@ -66,9 +66,23 @@ reports paused, a point is accepted only when either:
 - displacement is at least both 10 metres and the combined uncertainty of the
   previous and current points, and computed speed is at least `0.8 m/s`.
 
-Accepted points preserve HealthKit route geometry and cycling distance through
-a false pause. Stationary drift, duplicate/regressing time, poor quality, and
-delayed batches remain rejected.
+Accepted points preserve route geometry and the route-distance fallback through
+short false pauses. This does **not** prove recovery of HealthKit's selected or
+saved cycling-distance total: HealthKit remains authoritative when that metric
+exists. We do not sum or take the maximum of independent cumulative totals.
+Physical Watch/HealthKit qualification is still required for saved distance.
+
+The filter applies to manual and automatic pauses alike; it does not resume the
+timer. Capture-time lifecycle classifies delayed batches (up to 30 seconds late),
+including batches received after resume. Duplicate/regressing points are ignored.
+Stationary rejected points and gaps longer than 10 seconds break distance
+interpolation. Recovery treats unknown pre-attachment paused history conservatively.
+
+Watch motion ages include monotonic queue residence at both BLE writers; frames
+older than 3 seconds are dropped before submission. Producer epoch reservation
+failure disables motion evidence only, not ordinary workout/location snapshots.
+Unknown/older phones receive schema-1.5-compatible snapshots until their current
+control envelope proves schema-1.6 support.
 
 Transition origin has four durable values: `manual`, `automatic`, `system`, and
 `unknown`. Only explicit rider control is manual. An automatic marker stores a

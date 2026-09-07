@@ -61,6 +61,7 @@ private struct WorkoutContractTestSuite {
 #endif
         testRideAutomationAdmissionAndOriginContract()
         testSnapshotRoundTrip()
+        testLegacyPhoneProjection()
         testSegmentRoundTripValidationAndAccumulation()
         testTerminalOutcomeRoundTripAndValidation()
         testAllMessageKindsRoundTrip()
@@ -150,6 +151,13 @@ private struct WorkoutContractTestSuite {
     }
 
     private mutating func testRideAutomationGoldenVectorAndValidation() {
+        if let path = ProcessInfo.processInfo.environment["RAUT_POLICY_FRAME_PATH"] {
+            let frame = (try? Data(contentsOf: URL(fileURLWithPath: path)))
+                .flatMap(RideAutomationFrame.init)
+            expect(frame?.sourceHealthMask == RideAutomationSourceHealth.watchGpsFresh
+                   && frame?.transition == .pause,
+                   "actual firmware policy output is decodable by Swift")
+        }
         let sessionID = UUID(
             uuidString: "00112233-4455-6677-8899-AABBCCDDEEFF"
         )!
@@ -181,6 +189,10 @@ private struct WorkoutContractTestSuite {
         ])
         expect(frame.encoded() == expected, "RAUT Swift encoding must match firmware golden vector")
         expect(RideAutomationFrame(expected) == frame, "RAUT golden vector must round trip")
+        var watchFrame = frame
+        watchFrame.sourceHealthMask = RideAutomationSourceHealth.watchGpsFresh
+        expect(watchFrame.encoded().flatMap(RideAutomationFrame.init) == watchFrame,
+               "Watch GPS source health survives firmware-to-Swift decoding")
         expect(RideAutomationFrame(expected.dropLast()) == nil, "RAUT frames must be exactly 52 bytes")
         var invalid = expected
         invalid[12] = 0
@@ -189,7 +201,7 @@ private struct WorkoutContractTestSuite {
         invalid[15] = 0
         expect(RideAutomationFrame(invalid) == nil, "RAUT decisions require a nonzero sequence")
         invalid = expected
-        invalid[48] = 0x10
+        invalid[48] = 0x20
         expect(
             RideAutomationFrame(invalid) == nil,
             "RAUT source health must reject undefined bits"
@@ -1241,6 +1253,37 @@ private struct WorkoutContractTestSuite {
         } catch {
             expect(false, "\(message): unexpected error \(error)")
         }
+    }
+
+    private mutating func testLegacyPhoneProjection() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let snapshot = WorkoutSnapshotV1(
+            state: .paused, startDate: now.addingTimeInterval(-90),
+            currentSpeed: metric(3, .metersPerSecond, now, .healthKit),
+            location: WorkoutLocationV1(latitude: 1, longitude: 2, capturedAt: now,
+                horizontalAccuracy: 5, altitude: nil, verticalAccuracy: nil,
+                course: nil, speed: 3, motionSampleEpoch: 1, motionSampleSequence: 1),
+            availability: [.currentSpeed, .location], pauseOrigin: .system)
+        let envelope = makeEnvelope(sequence: 1, capturedAt: now, snapshot: snapshot)
+        do {
+            if let directory = ProcessInfo.processInfo.environment["WORKOUT_LEGACY_FIXTURE_DIR"] {
+                try WorkoutContractCodec.encodeForPhone(envelope, peerVersion: nil)
+                    .write(to: URL(fileURLWithPath: directory).appendingPathComponent("projected.plist"))
+                try WorkoutContractCodec.encode(envelope)
+                    .write(to: URL(fileURLWithPath: directory).appendingPathComponent("current.plist"))
+            }
+            let projected = try WorkoutContractCodec.decode(
+                WorkoutContractCodec.encodeForPhone(envelope, peerVersion: nil))
+            expect(projected.schemaVersion.minor == 5, "unknown phone gets legacy schema")
+            expect(projected.snapshot?.currentSpeed == nil, "legacy phone never receives unsupported HK speed")
+            expect(projected.snapshot?.availability.contains(.currentSpeed) == false,
+                   "removed metric also removes availability")
+            expect(projected.snapshot?.pauseOrigin == .unknown, "legacy enum remains decodable")
+            expect(projected.snapshot?.location?.motionSampleEpoch == nil,
+                   "legacy phone does not receive motion identity")
+            expect(try WorkoutContractCodec.decode(WorkoutContractCodec.encodeForPhone(
+                envelope, peerVersion: .current)) == envelope, "new phone retains full envelope")
+        } catch { expect(false, "compatibility projection failed: \(error)") }
     }
 
     private mutating func testSnapshotRoundTrip() {

@@ -2,6 +2,7 @@
 
 #include "ride_detection_profile.hpp"
 #include "ride_evidence_window.hpp"
+#include "../ble_navigation/ride_ble_protocol.generated.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -71,11 +72,11 @@ enum EvidenceMask : uint16_t {
 
 enum SourceHealthMask : uint16_t {
   SourceHealthNone = 0,
-  SourceHealthWheelFresh = 1U << 0,
-  SourceHealthCadenceFresh = 1U << 1,
-  SourceHealthGpsFresh = 1U << 2,
-  SourceHealthImuFresh = 1U << 3,
-  SourceHealthWatchGpsFresh = 1U << 4,
+  SourceHealthWheelFresh = ride_ble_protocol_generated::SOURCE_HEALTH_WHEEL_FRESH,
+  SourceHealthCadenceFresh = ride_ble_protocol_generated::SOURCE_HEALTH_CADENCE_FRESH,
+  SourceHealthGpsFresh = ride_ble_protocol_generated::SOURCE_HEALTH_GPS_FRESH,
+  SourceHealthImuFresh = ride_ble_protocol_generated::SOURCE_HEALTH_IMU_FRESH,
+  SourceHealthWatchGpsFresh = ride_ble_protocol_generated::SOURCE_HEALTH_WATCH_GPS_FRESH,
 };
 
 struct TimedMetric {
@@ -321,6 +322,9 @@ private:
   }
 
   static bool hasConfirmedStoppedEvidence(const Normalized &evidence) {
+    // Continuing movement cannot contradict a resume admitted by that source.
+    if (hasConfirmedMovingEvidence(evidence))
+      return false;
     if (evidence.watchGpsKnown)
       return evidence.watchGpsStopped;
     if (evidence.wheelKnown) {
@@ -653,22 +657,26 @@ private:
 
     if (evidence.directConflict) {
       pauseLatch_.reset();
+      watchPauseLatch_.reset();
       pausePath_ = PausePath::None;
       return {};
     }
     if (evidence.wheelMoving) {
       pauseLatch_.reset();
+      watchPauseLatch_.reset();
       pausePath_ = PausePath::None;
       return {};
     }
     if (evidence.cadenceMoving) {
       pauseLatch_.reset();
+      watchPauseLatch_.reset();
       pausePath_ = PausePath::None;
       return {};
     }
     if (evidence.gpsKnown && evidence.imuKnown &&
         evidence.gpsResumeMoving && evidence.imuMoving) {
       pauseLatch_.reset();
+      watchPauseLatch_.reset();
       pausePath_ = PausePath::None;
       return {};
     }

@@ -458,6 +458,47 @@ nonisolated enum WorkoutContractError: Error, Equatable, CustomStringConvertible
 }
 
 nonisolated enum WorkoutContractCodec {
+    /// Unknown peers receive the last compatible vocabulary. Optional new
+    /// fields alone do not protect older decoders from new enum/source values.
+    static func encodeForPhone(
+        _ envelope: WorkoutEnvelopeV1,
+        peerVersion: WorkoutSchemaVersion?
+    ) throws -> Data {
+        let data = try encode(envelope)
+        guard peerVersion?.supportsWatchGPSMotionEvidence != true else { return data }
+        guard var plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+            throw WorkoutContractError.invalidEnvelopePayload
+        }
+        plist["schemaVersion"] = ["major": 1, "minor": 5]
+        if var snapshot = plist["snapshot"] as? [String: Any] {
+            if envelope.snapshot?.currentSpeed?.source == .healthKit {
+                snapshot.removeValue(forKey: "currentSpeed")
+                // Availability describes the projected metric, not its source.
+                if let availability = envelope.snapshot?.availability {
+                    snapshot["availability"] = availability.subtracting(.currentSpeed).rawValue
+                }
+            }
+            for key in ["pauseOrigin", "lastTransitionOrigin"] {
+                if (snapshot[key] as? NSNumber)?.uint8Value == WorkoutTransitionOrigin.system.rawValue {
+                    snapshot[key] = WorkoutTransitionOrigin.unknown.rawValue
+                }
+            }
+            if var location = snapshot["location"] as? [String: Any] {
+                location.removeValue(forKey: "motionSampleEpoch")
+                location.removeValue(forKey: "motionSampleSequence")
+                snapshot["location"] = location
+            }
+            plist["snapshot"] = snapshot
+        }
+        if var context = plist["controlContext"] as? [String: Any] {
+            if let mask = context["sourceHealthMask"] as? NSNumber {
+                context["sourceHealthMask"] = mask.uint16Value & 0x000F
+            }
+            plist["controlContext"] = context
+        }
+        return try PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0)
+    }
+
     static func encode(_ envelope: WorkoutEnvelopeV1) throws -> Data {
         try validate(envelope)
         let encoder = PropertyListEncoder()
@@ -773,7 +814,7 @@ nonisolated enum WorkoutContractCodec {
                   context.decisionSequence.map({ $0 > 0 }) == true,
                   context.detectorProfileVersion.map({ $0 > 0 }) == true,
                   context.sourceHealthMask.map({
-                    $0 & ~UInt16(0x000F) == 0
+                    $0 & ~RideAutomationSourceHealth.mask == 0
                   }) ?? true,
                   [
                     context.evidenceMask != nil,

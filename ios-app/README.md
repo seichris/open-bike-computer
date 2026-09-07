@@ -231,8 +231,10 @@ also retain the detector profile, evidence/source-health masks, candidate time,
 and decision time so recovery cannot relabel the transition.
 
 Location recording remains active during a reported pause. Quality points that
-prove physical movement preserve the HealthKit route and cycling distance
-through a false pause; stationary drift, delayed points, and regressing points
+prove physical movement preserve route geometry and route-distance fallback
+through short false pauses; HealthKit remains authoritative for its own live and
+saved cycling-distance totals, which require physical validation. Stationary
+drift, overly delayed points, and regressing points
 are rejected. Pause/resume itself does not break the route segment.
 
 **Elapsed** is wall time since confirmed start, including pauses. **Moving** is

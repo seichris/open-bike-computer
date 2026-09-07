@@ -741,6 +741,7 @@ struct NavigationProtocolTests {
         testWorkoutDeviceRelayMotionDeduplicationIntegration()
         testWorkoutDeviceRelayRegularRetryIntegration()
         testWorkoutTelemetryBLETransport()
+        testQueuedMotionUsesDispatchAge()
         testDevicePacketRouting()
         testDeviceTransferHandshakePolicy()
         testDeviceSoundProtocol()
@@ -17276,6 +17277,48 @@ struct NavigationProtocolTests {
                     "regular-lane retry delivers one adjacent correlated bundle")
         manager.completeNavigationWriteForTesting(error: nil)
         withExtendedLifetime(relay) {}
+    }
+
+    static func testQueuedMotionUsesDispatchAge() {
+        for native in [false, true] {
+            let manager = BLEManager()
+            var uptime: TimeInterval = 10
+            manager.workoutMotionUptime = { uptime }
+            var ready = false
+            var writes: [Data] = []
+            let flags = UInt32(DeviceBLEProtocol.workoutTelemetryCapabilityMask)
+                | DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask
+            var capability = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8)
+            capability.append(1)
+            appendUInt32LE(flags, to: &capability)
+            assert(manager.handleDeviceCapabilitiesNotification(capability), "motion capability accepted")
+            manager.isConnected = true
+            manager.isNavigationReady = true
+            manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+                maximumWriteLength: 32, canSend: { ready }, write: { writes.append($0) }))
+            if native {
+                manager.installWorkoutTelemetryWriteEndpoint(WorkoutTelemetryWriteEndpoint(
+                    maximumWriteLength: 32, canSend: { ready }, write: { writes.append($0) }))
+            }
+            var frame = Data(repeating: 0, count: 16)
+            frame[0] = 4
+            frame[12] = 100
+            assert(manager.sendWorkoutTelemetryFrame(frame), "motion admitted behind backpressure")
+            assertEqual(writes.count, 0, "blocked writer submits nothing")
+            uptime = 12
+            ready = true
+            manager.flushPendingNavigationWritesForTesting()
+            assertEqual(writes.count, 1, "fresh delayed frame dispatches")
+            let offset = native ? 0 : 4
+            assertEqual(readUInt16LE(writes[0], offset: offset + 12), 2100,
+                        "native and fallback encode dispatch age, not enqueue age")
+            ready = false
+            assert(manager.sendWorkoutTelemetryFrame(frame), "next motion admitted")
+            uptime = 16
+            ready = true
+            manager.flushPendingNavigationWritesForTesting()
+            assertEqual(writes.count, 1, "expired motion never reaches the endpoint")
+        }
     }
 
     static func testWorkoutTelemetryBLETransport() {
