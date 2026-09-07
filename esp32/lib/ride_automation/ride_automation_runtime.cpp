@@ -370,19 +370,22 @@ bool workoutContradictsOutstandingDecision(
       workout.state.sessionID != outstandingDecision.sessionID) {
     return true;
   }
+  const auto isConfirmedNonAutomatic = [](PauseOrigin origin) {
+    return origin != PauseOrigin::None && origin != PauseOrigin::Automatic;
+  };
   switch (outstandingDecision.transition) {
   case Transition::Start:
-    return workout.state.lastTransitionOrigin == PauseOrigin::Manual;
+    return isConfirmedNonAutomatic(workout.state.lastTransitionOrigin);
   case Transition::Pause:
     return (state == SessionState::Paused &&
-            workout.state.pauseOrigin == PauseOrigin::Manual) ||
+            isConfirmedNonAutomatic(workout.state.pauseOrigin)) ||
            (state == SessionState::Running &&
-            workout.state.lastTransitionOrigin == PauseOrigin::Manual);
+            isConfirmedNonAutomatic(workout.state.lastTransitionOrigin));
   case Transition::Resume:
     return (state == SessionState::Paused &&
-            workout.state.pauseOrigin == PauseOrigin::Manual) ||
+            isConfirmedNonAutomatic(workout.state.pauseOrigin)) ||
            (state == SessionState::Running &&
-            workout.state.lastTransitionOrigin == PauseOrigin::Manual);
+            isConfirmedNonAutomatic(workout.state.lastTransitionOrigin));
   case Transition::None:
     return false;
   }
@@ -413,6 +416,25 @@ void appendWorkoutSensorEvidence(uint32_t nowMs,
             10.0F,
         workout.state.lastExtendedReceivedAtMs,
         ride_automation::kRideDetectionProfile.cadenceFreshnessMs};
+  }
+  if (workout.state.watchMotion.available) {
+    const auto &motion = workout.state.watchMotion;
+    out.watchGpsSpeedMetersPerSecond = {
+        true,
+        static_cast<float>(motion.speedCentimetersPerSecond) / 100.0F,
+        motion.capturedAtMs,
+        ride_automation::kRideDetectionProfile.watchGpsFreshnessMs};
+    out.watchGpsHorizontalUncertaintyMeters = {
+        true,
+        static_cast<float>(motion.horizontalAccuracyDecimeters) / 10.0F,
+        motion.capturedAtMs,
+        ride_automation::kRideDetectionProfile.watchGpsFreshnessMs};
+    out.watchGpsFixValid = {
+        true, true, motion.capturedAtMs,
+        ride_automation::kRideDetectionProfile.watchGpsFreshnessMs};
+    out.watchGpsSampleIdentityAvailable = true;
+    out.watchGpsSampleEpoch = motion.sampleEpoch;
+    out.watchGpsSampleSequence = motion.sampleSequence;
   }
 }
 
@@ -760,6 +782,27 @@ void processFirmwareShadow(uint32_t nowMs) {
       observation.gpsHorizontalUncertaintyMeters.value <=
           ride_automation::kRideDetectionProfile
               .maximumGpsHorizontalUncertaintyMeters;
+  const bool watchGpsEvidenceAvailable =
+      observation.watchGpsSampleIdentityAvailable &&
+      observation.watchGpsSampleEpoch != 0 &&
+      observation.watchGpsSampleSequence != 0 &&
+      ride_automation::flagFresh(
+          observation.watchGpsFixValid, nowMs,
+          ride_automation::kRideDetectionProfile.watchGpsFreshnessMs) &&
+      observation.watchGpsFixValid.value &&
+      ride_automation::metricFresh(
+          observation.watchGpsSpeedMetersPerSecond, nowMs,
+          ride_automation::kRideDetectionProfile.watchGpsFreshnessMs) &&
+      ride_automation::nonnegativeFinite(
+          observation.watchGpsSpeedMetersPerSecond.value) &&
+      ride_automation::metricFresh(
+          observation.watchGpsHorizontalUncertaintyMeters, nowMs,
+          ride_automation::kRideDetectionProfile.watchGpsFreshnessMs) &&
+      ride_automation::nonnegativeFinite(
+          observation.watchGpsHorizontalUncertaintyMeters.value) &&
+      observation.watchGpsHorizontalUncertaintyMeters.value <=
+          ride_automation::kRideDetectionProfile
+              .maximumWatchGpsHorizontalUncertaintyMeters;
   detectionHealth = ride_automation::resolveDetectionHealth({
       directEvidenceAvailable,
       gpsObservation.source != RidePositionSource::None &&
@@ -769,6 +812,7 @@ void processFirmwareShadow(uint32_t nowMs) {
               ride_automation::kRideDetectionProfile.gpsFreshnessMs,
       gpsEvidenceAvailable,
       imuEvidenceAvailable,
+      watchGpsEvidenceAvailable,
   });
 
   const ride_automation::Settings settings = configuredSettings;
@@ -847,6 +891,17 @@ void processFirmwareShadow(uint32_t nowMs) {
     frame.monotonicSeconds = nowMs / 1'000;
     frame.sourceHealthMask = decision.sourceHealthMask;
 #if defined(RIDE_AUTOMATION_INTERNAL_CONTROL)
+    // Encoding/admission failure must not create a decision with no retry
+    // frame. Notification failure after admission is handled by the retries.
+    uint8_t validatedFrame[ride_automation_protocol::FRAME_SIZE];
+    if (!ride_automation_protocol::encode(frame, validatedFrame, sizeof(validatedFrame))) {
+      runtime.policy().rejectPending(nowMs);
+      hasOutstandingDecision = false;
+      decisionAcknowledged = false;
+      pendingFrameValid = false;
+      showTransportError(ride_automation_protocol::Result::Rejected, nowMs);
+      return;
+    }
     queueTransportFrame(frame, nowMs);
     outstandingDecision = frame;
     hasOutstandingDecision = true;
@@ -886,8 +941,8 @@ void processFirmwareShadow(uint32_t nowMs) {
     decisionAcknowledged = false;
   }
 
-  if (hasOutstandingDecision && decisionAcknowledged) {
-    if (nowMs - outstandingDecisionBeganAtMs >= 30'000) {
+  if (hasOutstandingDecision) {
+    if (decisionTransportExpired(nowMs, outstandingDecisionBeganAtMs)) {
       showTransportError(
           ride_automation_protocol::Result::WatchUnavailable, nowMs);
       if (outstandingDecision.transition ==
@@ -898,7 +953,8 @@ void processFirmwareShadow(uint32_t nowMs) {
       }
       hasOutstandingDecision = false;
       decisionAcknowledged = false;
-    } else if (nowMs - lastAcknowledgedDecisionRetryAtMs >= 5'000) {
+      pendingFrameValid = false;
+    } else if (decisionAcknowledged && nowMs - lastAcknowledgedDecisionRetryAtMs >= 5'000) {
       lastAcknowledgedDecisionRetryAtMs = nowMs;
       sendTransportFrame(outstandingDecision);
     }

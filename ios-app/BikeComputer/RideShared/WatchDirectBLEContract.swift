@@ -22,6 +22,8 @@ enum WatchDirectBLEProtocolV1 {
         .gpsPositionQualityV1Feature
     static let rideDeliveryAcknowledgementFeature =
         RideBLEGeneratedProtocolV1.rideDeliveryAckFeature
+    static let watchGPSMotionEvidenceV1Feature =
+        RideBLEGeneratedProtocolV1.watchGpsMotionEvidenceV1Feature
     static let protectedFrameOverhead = RideBLEGeneratedProtocolV1
         .protectedFrameOverhead
 }
@@ -312,6 +314,11 @@ struct WatchDeviceCapabilitiesV1: Equatable {
     var supportsRideDeliveryAcknowledgement: Bool {
         featureFlags &
             WatchDirectBLEProtocolV1.rideDeliveryAcknowledgementFeature != 0
+    }
+
+    var supportsWatchGPSMotionEvidenceV1: Bool {
+        featureFlags &
+            WatchDirectBLEProtocolV1.watchGPSMotionEvidenceV1Feature != 0
     }
 
     static func decode(_ data: Data) -> Self? {
@@ -652,22 +659,50 @@ struct WatchRideDemandStateV1: Equatable, Sendable {
     }
 }
 
+/// Preserve source age across queue residence using the sender's monotonic
+/// clock. Neither retries nor wall-clock corrections may rejuvenate a sample.
+struct RideBLEMotionDispatch: Equatable, Sendable {
+    let frame: Data
+    let enqueuedUptime: TimeInterval
+
+    init(frame: Data, enqueuedUptime: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        self.frame = frame
+        self.enqueuedUptime = enqueuedUptime
+    }
+
+    func payload(at uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Data? {
+        guard frame.count == 16, frame.first == 4,
+              uptime.isFinite, enqueuedUptime.isFinite, uptime >= enqueuedUptime else { return nil }
+        let bytes = [UInt8](frame)
+        let age = Double(UInt16(bytes[12]) | UInt16(bytes[13]) << 8)
+            + ((uptime - enqueuedUptime) * 1_000).rounded(.up)
+        guard age <= 3_000 else { return nil }
+        var result = frame
+        result[12] = UInt8(UInt16(age) & 0xFF)
+        result[13] = UInt8(UInt16(age) >> 8)
+        return result
+    }
+}
+
 struct WatchBLEOutboundWriteV1: Equatable, Sendable {
     let target: WatchBLEOutboundTargetV1
     let payload: Data
     let gpsSampleTimestamp: Date?
     let protection: WatchBLEOutboundProtectionV1
+    let motionDispatch: RideBLEMotionDispatch?
 
     init(
         target: WatchBLEOutboundTargetV1,
         payload: Data,
         gpsSampleTimestamp: Date? = nil,
-        protection: WatchBLEOutboundProtectionV1 = .protected
+        protection: WatchBLEOutboundProtectionV1 = .protected,
+        motionDispatch: RideBLEMotionDispatch? = nil
     ) {
         self.target = target
         self.payload = payload
         self.gpsSampleTimestamp = gpsSampleTimestamp
         self.protection = protection
+        self.motionDispatch = motionDispatch
     }
 }
 
