@@ -9,7 +9,7 @@ namespace runtime_ownership {
 // and bounded; formatting and IO belong outside the protected snapshot.
 template <typename T, typename Mutex> class Snapshot {
 public:
-  T read() const {
+  __attribute__((noinline)) T read() const {
     std::lock_guard<Mutex> lock(mutex_);
     return value_;
   }
@@ -17,8 +17,16 @@ public:
     std::lock_guard<Mutex> lock(mutex_);
     update(value_);
   }
+  // The production firmware has a number of small statistics mutations;
+  // accepting a plain function pointer gives those call sites one shared
+  // mutation path without changing the general Snapshot utility above.
+  __attribute__((noinline)) void updateWith(void (*update)(T &)) {
+    std::lock_guard<Mutex> lock(mutex_);
+    update(value_);
+  }
   void publish(const T &value) {
-    update([&](T &current) { current = value; });
+    std::lock_guard<Mutex> lock(mutex_);
+    value_ = value;
   }
 private:
   mutable Mutex mutex_;
