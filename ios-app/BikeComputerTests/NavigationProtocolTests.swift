@@ -911,6 +911,9 @@ struct NavigationProtocolTests {
         testFirmwareStorageMigrationFlow()
         testFirmwareUpdateAvailabilitySemantics()
         testFirmwareDeviceClientSendsSignedBeginRequest()
+        testFirmwareDownloadBounds()
+        testFirmwareSourceIdentityMigration()
+        await testFirmwarePendingIdentityReconciliation()
         await testOfflineMapRecoveryRoutes()
         print("NavigationProtocolTests passed")
     }
@@ -13635,14 +13638,14 @@ struct NavigationProtocolTests {
         bleManager.firmwareTarget = "WAVESHARE_AMOLED_206"
         bleManager.firmwareVersion = "0.2.4"
         bleManager.firmwareBuild = 88
-        bleManager.firmwareGitSha = "abcdef123456"
+        bleManager.firmwareGitSha = "abcdef123456abcdef123456abcdef123456abcd"
 
         let current = FirmwareReleaseManifest(
             schemaVersion: 1,
             target: "WAVESHARE_AMOLED_206",
             version: "0.2.4",
             build: 88,
-            gitSha: "abcdef123456",
+            gitSha: "abcdef123456abcdef123456abcdef123456abcd",
             size: 3,
             sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             url: URL(string: "https://github.com/seichris/open-bike-computer/releases/download/v0.2.4/WAVESHARE_AMOLED_206.bin")!,
@@ -13697,6 +13700,96 @@ struct NavigationProtocolTests {
         assertEqual(manager.availabilityMessage(for: older, bleManager: bleManager),
                     "developer firmware install available",
                     "developer downgrade is not labeled as a normal update")
+    }
+
+    static func testFirmwareSourceIdentityMigration() {
+        let full = String(repeating: "a", count: 40)
+        assertEqual(FirmwareSourceIdentity.fullSHA(full, target: "WAVESHARE_AMOLED_175", version: "0.3.4", build: 94), full,
+                    "full immutable identity is preserved")
+        for target in ["WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"] {
+            assertEqual(FirmwareSourceIdentity.fullSHA("02bce8150d2c", target: target, version: "0.3.3", build: 92),
+                        "02bce8150d2c0f88fa0481d9b6fcef76da8865ef", "previous immutable release migrates exactly")
+            assertEqual(FirmwareSourceIdentity.fullSHA("8a0c9df6db26", target: target, version: "0.3.4", build: 93),
+                        FirmwareSourceIdentity.legacySHA, "known immutable release migrates exactly")
+            assert(FirmwareSourceIdentity.fullSHA("8a0c9df6db26", target: target, version: "0.3.4", build: 94) == nil,
+                   "legacy prefix cannot identify a different build")
+        }
+        for sha in ["a", String(repeating: "a", count: 12), String(repeating: "A", count: 40), full + "a"] {
+            assert(FirmwareSourceIdentity.fullSHA(sha, target: "WAVESHARE_AMOLED_175", version: "0.3.4", build: 94) == nil,
+                   "arbitrary prefixes and malformed source identities fail closed")
+        }
+        assert(!FirmwareHTTPSRedirectPolicy.allows(URL(string: "http://example.test/image")!), "HTTPS downgrade rejected")
+        assert(!FirmwareHTTPSRedirectPolicy.allows(URL(string: "https://user:pass@example.test/image")!), "URL credentials rejected")
+        assert(FirmwareHTTPSRedirectPolicy.allows(URL(string: "https://release-assets.githubusercontent.com/image")!), "HTTPS CDN redirect allowed")
+    }
+
+    static func testFirmwareDownloadBounds() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); FirmwareRequestCaptureProtocol.handler = nil }
+        let url = URL(string: "https://example.test/firmware")!
+        // URLProtocol delivers decoded bytes, matching the application's
+        // boundary after HTTP decompression; Content-Length is never authority.
+        for (count, header, shouldPass) in [(2048, nil, true), (2049, nil, false),
+                                          (2049, "1", false), (1, "99999999", false)] as [(Int, String?, Bool)] {
+            FirmwareRequestCaptureProtocol.handler = { request, _ in
+                (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+                                 headerFields: header.map { ["Content-Length": $0] })!, Data(repeating: 65, count: count))
+            }
+            runAsyncTest {
+                do {
+                    let data = try await FirmwareDownload.read(url, session: session, maximumBytes: 2048)
+                    assert(shouldPass && data.count == count, "only exactly bounded responses pass")
+                } catch {
+                    assert(!shouldPass, "at-limit response must not fail: \(error)")
+                }
+            }
+        }
+        FirmwareRequestCaptureProtocol.handler = { request, _ in
+            (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data("abc".utf8))
+        }
+        runAsyncTest {
+            let hash = FirmwareUpdateManager.sha256Hex(Data("abc".utf8))
+            let image = try await FirmwareDownload.read(url, session: session, maximumBytes: 3, expectedSHA256: hash)
+            assertEqual(image, Data("abc".utf8), "streaming hash verifies exact image")
+            for (size, digest) in [(4, hash), (3, String(repeating: "0", count: 64))] {
+                do {
+                    _ = try await FirmwareDownload.read(url, session: session, maximumBytes: size, expectedSHA256: digest)
+                    assert(false, "truncated or corrupt image must fail")
+                } catch { }
+            }
+        }
+    }
+
+    @MainActor
+    static func testFirmwarePendingIdentityReconciliation() async {
+        let suiteName = "FirmwarePendingIdentity.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        for sha in [FirmwareSourceIdentity.legacySHA, "8a0c9df6db26"] {
+            let pending = PendingFirmwareUpdate(target: "WAVESHARE_AMOLED_175", version: "0.3.4", build: 93,
+                                                gitSha: sha, startedAt: Date(), status: "device rebooting")
+            defaults.set(try! JSONEncoder().encode(pending), forKey: "firmware.pendingUpdate")
+            let manager = FirmwareUpdateManager(defaults: defaults) // actual persisted relaunch path
+            let ble = BLEManager()
+            ble.firmwareTarget = pending.target
+            ble.firmwareVersion = pending.version
+            ble.firmwareBuild = pending.build
+            ble.firmwareGitSha = String(repeating: "0", count: 40) // rollback/different image
+            manager.refreshDeviceFirmwareStatus(bleManager: ble)
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            assert(defaults.data(forKey: "firmware.pendingUpdate") != nil, "different running image does not clear pending update")
+            ble.firmwareGitSha = FirmwareSourceIdentity.legacySHA
+            manager.refreshDeviceFirmwareStatus(bleManager: ble)
+            for _ in 0..<100 {
+                if defaults.data(forKey: "firmware.pendingUpdate") == nil { break }
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            assert(defaults.data(forKey: "firmware.pendingUpdate") == nil,
+                   "exact full running identity clears both new and legacy persisted updates")
+            assertEqual(manager.statusMessage, "firmware update installed", "relaunch reports verified identity completion")
+        }
     }
 
     static func testFirmwareDeviceClientSendsSignedBeginRequest() {

@@ -12,13 +12,19 @@ on:
         description: Immutable firmware release tag whose OTA manifests should be redeployed
         required: true
         type: string
+      allow_older_channel:
+        description: Explicitly acknowledge recovery of an older release channel (does not enable device downgrade)
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   actions: read
   contents: read
 
 concurrency:
-  group: firmware-release-${{ github.event.workflow_run.id || inputs.release_tag }}
+  # Serialize signing AND Pages promotion/recovery across all release tags.
+  group: firmware-release-channel
   cancel-in-progress: false
 
 jobs:
@@ -225,6 +231,16 @@ jobs:
           test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "${GIT_SHA}"
           git merge-base --is-ancestor \
             "${GIT_SHA}" "refs/remotes/origin/${DEFAULT_BRANCH}"
+      - name: Require release signing authority
+        uses: ./.github/actions/require-firmware-release-controls
+        with:
+          app-id: ${{ vars.FIRMWARE_RELEASE_PREFLIGHT_APP_ID }}
+          private-key: ${{ secrets.FIRMWARE_RELEASE_PREFLIGHT_APP_PRIVATE_KEY }}
+      - name: Require an increasing release build
+        run: >-
+          python3 tools/firmware_release_history.py
+          --repository "${GITHUB_REPOSITORY}"
+          --candidate "${RUNNER_TEMP}/candidate-verification.json"
       - name: Generate signed manifests
         env:
           FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY: ${{ secrets.FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY }}
@@ -240,7 +256,6 @@ jobs:
           candidate_receipt="${RUNNER_TEMP}/candidate-verification.json"
           firmware_version="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["firmwareVersion"]["version"])' "${candidate_receipt}")"
           firmware_build="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["firmwareVersion"]["build"])' "${candidate_receipt}")"
-          git_sha_short="${GIT_SHA:0:12}"
           mkdir -p public/firmware
           for target in WAVESHARE_AMOLED_175 WAVESHARE_AMOLED_206; do
             python tools/firmware_manifest.py \
@@ -248,7 +263,7 @@ jobs:
               --target "${target}" \
               --repository "${GITHUB_REPOSITORY}" \
               --tag "${RELEASE_TAG}" \
-              --git-sha "${git_sha_short}" \
+              --git-sha "${GIT_SHA}" \
               --version "${firmware_version}" \
               --build "${firmware_build}" \
               --private-key-base64 "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" \
@@ -407,6 +422,17 @@ jobs:
             echo "Recovery payload must contain exactly two OTA manifests" >&2
             exit 1
           fi
+      - name: Require explicit older-channel recovery
+        env:
+          ALLOW_OLDER: ${{ inputs.allow_older_channel }}
+        run: |
+          set -euo pipefail
+          options=()
+          if [ "${ALLOW_OLDER}" = true ]; then options+=(--allow-older); fi
+          python3 tools/firmware_release_history.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --recovery-assets release-assets "${options[@]}"
+          echo "Older channel explicitly authorized: ${ALLOW_OLDER}" >> "${GITHUB_STEP_SUMMARY}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: firmware-release-recovery-receipt-${{ inputs.release_tag }}

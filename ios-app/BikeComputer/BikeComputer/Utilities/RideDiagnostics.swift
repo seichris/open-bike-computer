@@ -66,6 +66,7 @@ nonisolated enum RideDiagnosticsFieldPolicy {
         "durationMs", "enqueuedCount", "errorCode", "errorDomain",
         "eventCount", "expectedState", "fallback", "featureFlags",
         "firmwareBuild", "firmwareFingerprint", "firmwareTarget", "firstMissingUptimeMs",
+        "firmwareProfile", "firmwareVersion", "firmwareGitSha", "otaState",
         "fixValid", "formatVersion", "generation", "highWater",
         "highWaterBytes", "httpStatus", "importedCount", "kind",
         "lastCriticalCategory", "lastCriticalEvent", "lastFailureCompletedStage", "lastFailureResetReason",
