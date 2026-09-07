@@ -12082,7 +12082,7 @@ struct NavigationProtocolTests {
         assert(
             source.contains("Text(\"Saved Routes\")") &&
                 source.contains(
-                    "Save GPX route files to your Apple watch for offline navigation"
+                    "Preview saved routes on the map, or send them to Apple Watch for offline navigation."
                 ),
             "Saved Routes uses the requested title and explanatory copy"
         )
