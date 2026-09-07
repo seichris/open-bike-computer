@@ -150,7 +150,9 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             }
             .store(in: &cancellables)
         cyclingSensorDetectionCoordinator.bind(
-            to: workoutMirrorManager.store
+            to: workoutMirrorManager.store,
+            watchObservations: watchConnectivityCoordinator
+                .$cyclingSensorObservation.eraseToAnyPublisher()
         )
         locationManager.bindWorkoutMetricsStore(
             workoutMirrorManager.store

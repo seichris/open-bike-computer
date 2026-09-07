@@ -839,7 +839,11 @@ final class RideAutomationCoordinator: ObservableObject {
             automaticReason: .rideDetection,
             rideGeneration: frame.rideGeneration,
             decisionSequence: frame.decisionSequence,
-            detectorProfileVersion: frame.profileVersion
+            detectorProfileVersion: frame.profileVersion,
+            evidenceMask: frame.evidenceMask,
+            sourceHealthMask: frame.sourceHealthMask,
+            candidateBeganSeconds: frame.candidateBeganSeconds,
+            decidedAtSeconds: frame.monotonicSeconds
         )
     }
 

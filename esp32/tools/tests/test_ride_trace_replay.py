@@ -48,6 +48,73 @@ class RideTraceReplayTests(unittest.TestCase):
         self.assertEqual(summary["pause_latency_ms_total"], 5_000)
         self.assertEqual(summary["resume_latency_ms_total"], 2_000)
 
+    def test_aug_29_coasting_regression_and_true_stop_control(self):
+        # This synthetic scenario models the reported failure class; it is not
+        # a retained trace from the historical ride. Under profile 2, the
+        # cadence-zero rows enter the five-second direct stop path while
+        # GPS+IMU show movement. Profile 3 keeps every coasting/dropout row
+        # running, then proves the independent sustained GPS+IMU true-stop
+        # control still pauses.
+        trace = (
+            Path(__file__).parent
+            / "fixtures"
+            / "ride_automation"
+            / "aug-29-coasting-regression.jsonl"
+        )
+        records = replay_module.load_trace(trace)
+        outputs = replay_module.replay(records, self.binary)
+        summary = replay_module.validate_expectations(trace, records, outputs)
+        legacy_candidate_began = None
+        legacy_false_pause_at = None
+        for record in records:
+            evidence = record.get("evidence", {})
+            cadence = evidence.get("cadence_rpm")
+            wheel = evidence.get("wheel_mps")
+            has_direct = cadence is not None or wheel is not None
+            direct_moving = (cadence is not None and cadence >= 20.0) or (
+                wheel is not None and wheel >= 1.5
+            )
+            all_direct_stopped = has_direct and (
+                wheel is None or wheel < 0.5
+            ) and (cadence is None or cadence < 5.0)
+            if all_direct_stopped and not direct_moving:
+                if legacy_candidate_began is None:
+                    legacy_candidate_began = record["t_ms"]
+                if record["t_ms"] - legacy_candidate_began >= 5_000:
+                    legacy_false_pause_at = record["t_ms"]
+                    break
+            else:
+                legacy_candidate_began = None
+        self.assertEqual(legacy_false_pause_at, 5_000)
+        self.assertEqual(records[5]["expected"], "none")
+        self.assertEqual(summary["mismatches"], 0)
+        self.assertEqual(summary["decisions"], 1)
+        self.assertEqual(summary["false_pauses"], 0)
+        self.assertEqual(summary["missed_transitions"], 0)
+        self.assertEqual(summary["pause_latency_ms_total"], 10_000)
+        self.assertFalse(
+            replay_module.FORBIDDEN_KEYS.intersection(
+                key
+                for record in records
+                for key in replay_module._walk_keys(record)
+            )
+        )
+
+    def test_watch_gps_sensorless_pause_and_resume(self):
+        trace = (
+            Path(__file__).parent
+            / "fixtures"
+            / "ride_automation"
+            / "watch-gps-sensorless-regression.jsonl"
+        )
+        records = replay_module.load_trace(trace)
+        outputs = replay_module.replay(records, self.binary)
+        summary = replay_module.validate_expectations(trace, records, outputs)
+        self.assertEqual(summary["mismatches"], 0)
+        self.assertEqual(summary["decisions"], 2)
+        self.assertEqual(summary["pause_latency_ms_total"], 5_000)
+        self.assertEqual(summary["resume_latency_ms_total"], 2_000)
+
     def test_rejects_private_and_raw_sensor_fields(self):
         for forbidden in sorted(replay_module.FORBIDDEN_KEYS):
             with self.subTest(forbidden=forbidden), tempfile.TemporaryDirectory() as directory:

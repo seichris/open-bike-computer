@@ -14,7 +14,7 @@ enum RideBLEGeneratedProtocolV1 {
     static let capabilityRequestMagic = "CAPS"
     static let capabilityResponseMagic = "CAP2"
     static let capabilitySchemaVersion: UInt8 = 1
-    static let currentClientVersion: UInt8 = 22
+    static let currentClientVersion: UInt8 = 23
     static let deviceSoundsFeature: UInt32 = 1 << 0
     static let deviceSoundsMinimumClientVersion: UInt8 = 1
     static let powerButtonHonkFeature: UInt32 = 1 << 1
@@ -65,6 +65,8 @@ enum RideBLEGeneratedProtocolV1 {
     static let rendererBenchmarkSampleMinimumClientVersion: UInt8 = 21
     static let mapNavigationOrientationFeature: UInt32 = 1 << 24
     static let mapNavigationOrientationMinimumClientVersion: UInt8 = 22
+    static let watchGpsMotionEvidenceV1Feature: UInt32 = 1 << 25
+    static let watchGpsMotionEvidenceV1MinimumClientVersion: UInt8 = 23
     static let workoutStartRequestMagic = "WREQ"
     static let destinationRequestMagic = "DREQ"
     static let applicationCommandMagic = "RCM1"

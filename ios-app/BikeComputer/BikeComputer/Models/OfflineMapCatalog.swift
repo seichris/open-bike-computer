@@ -242,6 +242,7 @@ nonisolated enum OfflineMapCatalogAvailabilityPolicy {
 
     static func localArtifactNeedsRefresh(
         localArtifactSHA256s: Set<String>,
+        localPrimaryArtifact: OfflineMapArtifact? = nil,
         map: OfflineMapCatalogMap,
         channel: String,
         trustStore: BikeMapStreamTrustStore,
@@ -258,6 +259,21 @@ nonisolated enum OfflineMapCatalogAvailabilityPolicy {
             readerCapabilities: readerCapabilities
         )
         guard !preferredArtifacts.isEmpty else { return false }
+        // ZIP and BMAP are different containers, not different map content.
+        // Only accept the actual local primary ZIP when the catalog still lists
+        // its exact hash as a live head in the preferred delivery tier. A legacy
+        // fallback must not mask a stale/untrusted primary BMAP. This freshness
+        // check does not change download eligibility or device validation.
+        if let primary = localPrimaryArtifact, primary.isStoredZip, !primary.sha256.isEmpty,
+           map.artifacts.contains(where: { artifact in
+               artifact.platformArtifact.isStoredZip &&
+                   artifact.sha256.lowercased() == primary.sha256.lowercased() &&
+                   preferredArtifacts.contains {
+                       $0.deliveryTier.lowercased() == artifact.deliveryTier.lowercased()
+                   }
+           }) {
+            return false
+        }
         let localSHA256s = Set(localArtifactSHA256s.map { $0.lowercased() })
         return preferredArtifacts.allSatisfy {
             !localSHA256s.contains($0.sha256.lowercased())
