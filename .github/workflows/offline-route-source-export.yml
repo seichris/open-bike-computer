@@ -1,0 +1,54 @@
+name: Temporary offline-route source export
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    if: github.head_ref == 'feat/planned-routes-save-offline' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          path: main-source
+          fetch-depth: 16
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: b8282d3954b59fde7f551856bf8242e8024a274e
+          path: preview-source
+          fetch-depth: 16
+          persist-credentials: false
+      - name: Export only Git objects and refs, never credentials or runner configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p export
+          for source in main preview; do
+            repo="${source}-source"
+            target="export/${source}.git"
+            mkdir -p "$target"
+            for entry in objects refs HEAD packed-refs shallow; do
+              if test -e "$repo/.git/$entry"; then
+                cp -a "$repo/.git/$entry" "$target/$entry"
+              fi
+            done
+            printf '[core]\n\trepositoryformatversion = 0\n\tbare = true\n' > "$target/config"
+            git -C "$repo" rev-parse HEAD | tee "export/${source}-sha.txt"
+          done
+          tar -czf offline-route-source.tar.gz -C export .
+          sha256sum offline-route-source.tar.gz > offline-route-source.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: offline-route-source
+          path: |
+            offline-route-source.tar.gz
+            offline-route-source.sha256
+          retention-days: 1
+          if-no-files-found: error
