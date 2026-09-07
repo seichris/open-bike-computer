@@ -1,0 +1,171 @@
+diff --git a/ios-app/BikeComputer/BikeComputer/Views/PlannedRoutesView.swift b/ios-app/BikeComputer/BikeComputer/Views/PlannedRoutesView.swift
+index fcb40ca..8fc3e51 100644
+--- a/ios-app/BikeComputer/BikeComputer/Views/PlannedRoutesView.swift
++++ b/ios-app/BikeComputer/BikeComputer/Views/PlannedRoutesView.swift
+@@ -7,12 +7,12 @@ struct SavedRoutesSettingsSection: View {
+     @Environment(\.savedRouteMapAction) private var mapAction
+     @Environment(\.savedRouteNavigationAction) private var navigationAction
+     let onImportFromStrava: () -> Void
++    let onPrepareOfflineSave: (PhoneOfflineRouteSaveSession) -> Void
++    let saveFeedback: String?
+     @FocusState private var focusedRouteID: UUID?
+     @State private var renameInteraction = SavedRouteRenameInteraction()
+     @State private var errorMessage: String?
+     @State private var isImportingGPX = false
+-    @State private var offlineSaveSession: PhoneOfflineRouteSaveSession?
+-    @State private var saveFeedback: String?
+ 
+     var body: some View {
+         Section {
+@@ -83,14 +83,6 @@ struct SavedRoutesSettingsSection: View {
+         } message: {
+             Text(errorMessage ?? "Unknown error")
+         }
+-        .sheet(item: $offlineSaveSession) { session in
+-            OfflineRouteSaveSheet(session: session, library: routeLibrary) { result in
+-                let name = routeLibrary.displayName(for: result.summary)
+-                saveFeedback = result.alreadySaved
+-                    ? String(format: NSLocalizedString("“%@” is already saved on this iPhone.", comment: "Duplicate offline route"), name)
+-                    : String(format: NSLocalizedString("“%@” is saved on this iPhone.", comment: "Offline route save success"), name)
+-            }
+-        }
+         .onAppear { routeLibrary.reload() }
+         .onChange(of: focusedRouteID) { newValue in
+             scheduleRenameCommitIfNeeded(focusedRouteID: newValue)
+@@ -119,10 +111,10 @@ struct SavedRoutesSettingsSection: View {
+                   byteCount <= GPXRouteImporterV1.maximumInputBytes else {
+                 throw GPXRouteImporterError.fileTooLarge
+             }
+-            offlineSaveSession = try routeLibrary.prepareGPX(
++            onPrepareOfflineSave(try routeLibrary.prepareGPX(
+                 Data(contentsOf: url, options: .mappedIfSafe),
+                 fileName: url.lastPathComponent
+-            )
++            ))
+         } catch {
+             let cocoa = error as NSError
+             guard !(cocoa.domain == NSCocoaErrorDomain && cocoa.code == NSUserCancelledError) else { return }
+@@ -513,7 +505,7 @@ struct SavedRoutesSettingsSection: View {
+ 
+ /// Confirmation owns only a memory draft. The library remains the sole durable
+ /// owner; closing this sheet, the document picker or the app writes no draft.
+-private struct OfflineRouteSaveSheet: View {
++struct OfflineRouteSaveSheet: View {
+     @ObservedObject var session: PhoneOfflineRouteSaveSession
+     let library: PhoneRouteLibrary
+     let onSaved: (PhoneOfflineRouteSaveResult) -> Void
+diff --git a/ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift b/ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift
+index 9a4f37b..5af478f 100644
+--- a/ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift
++++ b/ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift
+@@ -13,12 +13,15 @@ import WebKit
+ 
+ private enum SettingsSheetDestination: Identifiable, Equatable {
+     case stravaRouteImport
++    case offlineRouteSave(UUID)
+     case savedMapShare(URL)
+ 
+     var id: String {
+         switch self {
+         case .stravaRouteImport:
+             return "strava-route-import"
++        case .offlineRouteSave(let id):
++            return "offline-route-save:\(id.uuidString)"
+         case .savedMapShare(let url):
+             return "saved-map-share:\(url.absoluteString)"
+         }
+@@ -46,6 +49,8 @@ struct SettingsView: View {
+         RideDiagnosticsRecorder
+     @FocusState private var focusedSavedMapFilename: String?
+     @State private var presentedSheet: SettingsSheetDestination?
++    @State private var offlineSaveSession: PhoneOfflineRouteSaveSession?
++    @State private var offlineSaveFeedback: String?
+     let locationAuthorizationStatus: CLAuthorizationStatus
+     let locationAccuracyAuthorization: CLAccuracyAuthorization
+     let currentLocation: CLLocation?
+@@ -165,7 +170,16 @@ struct SettingsView: View {
+                     stravaCoordinator: stravaIntegrationCoordinator,
+                     onImportFromStrava: {
+                         presentedSheet = .stravaRouteImport
+-                    }
++                    },
++                    onPrepareOfflineSave: { session in
++                        guard presentedSheet == nil else {
++                            session.cancel()
++                            return
++                        }
++                        offlineSaveSession = session
++                        presentedSheet = .offlineRouteSave(session.id)
++                    },
++                    saveFeedback: offlineSaveFeedback
+                 )
+ 
+                 Section {
+@@ -282,6 +296,11 @@ struct SettingsView: View {
+                    case .some(.savedMapShare) = previousDestination {
+                     offlineMapManager.clearCreatedShareURL()
+                 }
++                if nextDestination == nil,
++                   case .some(.offlineRouteSave) = previousDestination {
++                    offlineSaveSession?.cancel()
++                    offlineSaveSession = nil
++                }
+             }
+         )
+     }
+@@ -295,6 +314,15 @@ struct SettingsView: View {
+             StravaRouteImportView(
+                 coordinator: stravaIntegrationCoordinator
+             )
++        case .offlineRouteSave(let id):
++            if let session = offlineSaveSession, session.id == id {
++                OfflineRouteSaveSheet(session: session, library: routeLibrary) { result in
++                    let name = routeLibrary.displayName(for: result.summary)
++                    offlineSaveFeedback = result.alreadySaved
++                        ? String(format: NSLocalizedString("“%@” is already saved on this iPhone.", comment: "Duplicate offline route"), name)
++                        : String(format: NSLocalizedString("“%@” is saved on this iPhone.", comment: "Offline route save success"), name)
++                }
++            }
+         case .savedMapShare(let url):
+             SavedMapShareSheet(url: url)
+                 .presentationDetents([.medium])
+diff --git a/ios-app/BikeComputerTests/OfflineRouteNavigationTests.swift b/ios-app/BikeComputerTests/OfflineRouteNavigationTests.swift
+index 858c194..364198c 100644
+--- a/ios-app/BikeComputerTests/OfflineRouteNavigationTests.swift
++++ b/ios-app/BikeComputerTests/OfflineRouteNavigationTests.swift
+@@ -21,6 +21,7 @@ extension NavigationProtocolTests {
+     /// Runs against the actual coordinator and NavigationEngine. Only directions
+     /// and external location samples are controlled; offline requests are counted.
+     static func testOfflineSavedNavigation() {
++        testOfflineSavePresentationWiring()
+         let suite = "OfflineNavigation.\(UUID().uuidString)"
+         let defaults = UserDefaults(suiteName: suite)!
+         defer { defaults.removePersistentDomain(forName: suite) }
+@@ -133,4 +134,27 @@ extension NavigationProtocolTests {
+             assert(false, "offline navigation regression failed: \(error)")
+         }
+     }
++
++    private static func testOfflineSavePresentationWiring() {
++        do {
++            let settings = try String(contentsOfFile:
++                "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift", encoding: .utf8)
++            let routes = try String(contentsOfFile:
++                "ios-app/BikeComputer/BikeComputer/Views/PlannedRoutesView.swift", encoding: .utf8)
++            assert(settings.contains("case offlineRouteSave(UUID)") &&
++                settings.contains("presentedSheet = .offlineRouteSave(session.id)") &&
++                settings.contains("OfflineRouteSaveSheet(session: session, library: routeLibrary)"),
++                "offline confirmation is item-driven from the stable Settings root")
++            assert(settings.contains("offlineSaveSession?.cancel()") &&
++                settings.contains("offlineSaveSession = nil") &&
++                settings.contains("saveFeedback: offlineSaveFeedback"),
++                "Settings owns confirmation cancellation, draft release, and success feedback")
++            assert(routes.contains("onPrepareOfflineSave(try routeLibrary.prepareGPX(") &&
++                !routes.contains(".sheet("),
++                "Saved Routes requests offline confirmation without a transient section sheet")
++        } catch {
++            assert(false, "offline confirmation wiring sources unavailable: \(error)")
++        }
++    }
++
+ }
