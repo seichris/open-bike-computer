@@ -244,10 +244,10 @@ struct DestinationCalloutLayoutTests {
             "the selected route should be prominent and blue"
         )
         precondition(
-            unselectedRenderer.strokeColor == .systemGray &&
+            unselectedRenderer.strokeColor == .systemBlue &&
                 unselectedRenderer.lineWidth == 5 &&
-                unselectedRenderer.alpha == 0.72,
-            "unselected routes should remain visible but visually secondary"
+                unselectedRenderer.alpha == 1,
+            "unselected routes should remain blue and use a narrower line"
         )
 
         selectedRouteID = nil
