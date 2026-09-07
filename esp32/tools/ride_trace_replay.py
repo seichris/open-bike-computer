@@ -14,8 +14,8 @@ import tempfile
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 2
-SUPPORTED_SCHEMA_VERSIONS = {1, 2}
+SCHEMA_VERSION = 4
+SUPPORTED_SCHEMA_VERSIONS = {1, 2, 3, 4}
 FORBIDDEN_KEYS = {
     "latitude",
     "longitude",
@@ -33,6 +33,9 @@ EVIDENCE_KEYS = {
     "wheel_mps", "cadence_rpm", "gps_mps", "gps_fix_valid", "gps_hdop",
     "gps_source", "gps_horizontal_uncertainty_m", "gps_stationary",
     "gps_displacement_m", "imu_motion_score",
+    "watch_gps_mps", "watch_gps_fix_valid",
+    "watch_gps_horizontal_uncertainty_m", "watch_gps_epoch",
+    "watch_gps_sequence",
 }
 METRIC_KEYS = {"value", "age_ms"}
 OUTPUT_KEYS = {
@@ -102,9 +105,9 @@ def load_trace(path: Path) -> list[dict[str, Any]]:
         schema = record.get("schema")
         if not _is_uint(schema, 0xFF) or schema not in SUPPORTED_SCHEMA_VERSIONS:
             raise TraceError(
-                f"{path}:{line_number}: expected schema 1 or {SCHEMA_VERSION}"
+                f"{path}:{line_number}: expected schema 1 through {SCHEMA_VERSION}"
             )
-        expected_profile = 1 if schema == 1 else 2
+        expected_profile = schema
         if (not _is_uint(record.get("profile"), 0xFFFF)
                 or record["profile"] != expected_profile):
             raise TraceError(f"{path}:{line_number}: unsupported or missing profile")
@@ -120,6 +123,15 @@ def load_trace(path: Path) -> list[dict[str, Any]]:
             raise TraceError(f"{path}:{line_number}: schema 1 contains schema 2 GPS quality")
         if schema == 2 and "gps_hdop" in evidence:
             raise TraceError(f"{path}:{line_number}: schema 2 must use horizontal uncertainty")
+        watch_fields = {
+            "watch_gps_mps", "watch_gps_fix_valid",
+            "watch_gps_horizontal_uncertainty_m", "watch_gps_epoch",
+            "watch_gps_sequence",
+        }
+        if schema < 4 and watch_fields.intersection(evidence):
+            raise TraceError(
+                f"{path}:{line_number}: legacy schema contains Watch GPS evidence"
+            )
         if "gps_source" in evidence and not _is_uint(evidence["gps_source"], 2):
             raise TraceError(f"{path}:{line_number}: gps_source must be 0, 1, or 2")
         for metric_name, metric in evidence.items():
@@ -155,10 +167,25 @@ def load_trace(path: Path) -> list[dict[str, Any]]:
             "gps_hdop" if schema == 1 else "gps_horizontal_uncertainty_m",
             "gps_displacement_m",
             "imu_motion_score",
+            "watch_gps_mps",
+            "watch_gps_horizontal_uncertainty_m",
         ):
             _metric(evidence, field)
-        for field in ("gps_fix_valid", "gps_stationary"):
+        for field in ("gps_fix_valid", "gps_stationary", "watch_gps_fix_valid"):
             _flag(evidence, field)
+        epoch = evidence.get("watch_gps_epoch")
+        sequence = evidence.get("watch_gps_sequence")
+        if (epoch is None) != (sequence is None):
+            raise TraceError(
+                f"{path}:{line_number}: Watch sample epoch and sequence must be paired"
+            )
+        if epoch is not None and (
+            not _is_uint(epoch, 0xFFFF) or epoch == 0
+            or not _is_uint(sequence) or sequence == 0
+        ):
+            raise TraceError(
+                f"{path}:{line_number}: invalid Watch sample identity"
+            )
         output = record.get("output")
         if output is not None:
             if not isinstance(output, dict):
@@ -262,6 +289,11 @@ def encode_record(record: dict[str, Any]) -> str:
     stationary, stationary_age = _flag(evidence, "gps_stationary")
     displacement, displacement_age = _metric(evidence, "gps_displacement_m")
     imu, imu_age = _metric(evidence, "imu_motion_score")
+    watch_speed, watch_speed_age = _metric(evidence, "watch_gps_mps")
+    watch_fix, watch_fix_age = _flag(evidence, "watch_gps_fix_valid")
+    watch_accuracy, watch_accuracy_age = _metric(
+        evidence, "watch_gps_horizontal_uncertainty_m"
+    )
     fields = (
         record["t_ms"],
         record["lifecycle"],
@@ -283,6 +315,16 @@ def encode_record(record: dict[str, Any]) -> str:
         displacement_age,
         imu,
         imu_age,
+        watch_speed,
+        watch_speed_age,
+        watch_fix,
+        watch_fix_age,
+        watch_accuracy,
+        watch_accuracy_age,
+        evidence.get("watch_gps_epoch")
+        if evidence.get("watch_gps_epoch") is not None else "-",
+        evidence.get("watch_gps_sequence")
+        if evidence.get("watch_gps_sequence") is not None else "-",
     )
     return "\t".join(str(field) for field in fields)
 

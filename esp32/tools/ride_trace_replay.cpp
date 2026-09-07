@@ -69,6 +69,19 @@ bool parseUInt32(const std::string &value, uint32_t &result) {
   }
 }
 
+bool parseOptionalUInt32(const std::string &value, uint32_t maximum,
+                         bool &available, uint32_t &result) {
+  if (value == "-") {
+    available = false;
+    result = 0;
+    return true;
+  }
+  if (!parseUInt32(value, result) || result > maximum)
+    return false;
+  available = true;
+  return true;
+}
+
 bool parseMetric(const std::string &value, const std::string &ageValue,
                  uint32_t nowMs, TimedMetric &result) {
   if (value == "-") {
@@ -151,12 +164,16 @@ int main() {
     std::string wheel, wheelAge, cadence, cadenceAge, gps, gpsAge;
     std::string gpsFix, gpsFixAge, uncertainty, uncertaintyAge, stationary;
     std::string stationaryAge, displacement, displacementAge, imu, imuAge;
+    std::string watchSpeed, watchSpeedAge, watchFix, watchFixAge;
+    std::string watchAccuracy, watchAccuracyAge, watchEpoch, watchSequence;
     if (!(input >> timestampValue >> lifecycleValue >> startModeValue >>
           autoPauseValue >> wheel >> wheelAge >> cadence >> cadenceAge >>
           gps >> gpsAge >> gpsFix >> gpsFixAge >> uncertainty >>
           uncertaintyAge >>
           stationary >> stationaryAge >> displacement >> displacementAge >>
-          imu >> imuAge)) {
+          imu >> imuAge >> watchSpeed >> watchSpeedAge >> watchFix >>
+          watchFixAge >> watchAccuracy >> watchAccuracyAge >> watchEpoch >>
+          watchSequence)) {
       std::cerr << "invalid replay row " << lineNumber << '\n';
       return 2;
     }
@@ -197,10 +214,29 @@ int main() {
                    observation.gpsStationaryWindowValid) ||
         !parseMetric(displacement, displacementAge, nowMs,
                      observation.gpsNetDisplacementMeters) ||
-        !parseMetric(imu, imuAge, nowMs, observation.imuMotionScore)) {
+        !parseMetric(imu, imuAge, nowMs, observation.imuMotionScore) ||
+        !parseMetric(watchSpeed, watchSpeedAge, nowMs,
+                     observation.watchGpsSpeedMetersPerSecond) ||
+        !parseFlag(watchFix, watchFixAge, nowMs,
+                   observation.watchGpsFixValid) ||
+        !parseMetric(watchAccuracy, watchAccuracyAge, nowMs,
+                     observation.watchGpsHorizontalUncertaintyMeters)) {
       std::cerr << "invalid replay metric on row " << lineNumber << '\n';
       return 2;
     }
+    bool epochAvailable = false;
+    bool sequenceAvailable = false;
+    uint32_t epoch = 0;
+    if (!parseOptionalUInt32(watchEpoch, UINT16_MAX, epochAvailable, epoch) ||
+        !parseOptionalUInt32(watchSequence, UINT32_MAX, sequenceAvailable,
+                             observation.watchGpsSampleSequence) ||
+        epochAvailable != sequenceAvailable) {
+      std::cerr << "invalid Watch sample identity on row " << lineNumber
+                << '\n';
+      return 2;
+    }
+    observation.watchGpsSampleIdentityAvailable = epochAvailable;
+    observation.watchGpsSampleEpoch = static_cast<uint16_t>(epoch);
     const auto decision = policy.update(nowMs, observation, lifecycle, settings);
     std::cout << nowMs << '\t' << name(decision.transition) << '\t'
               << decision.evidenceMask << '\t' << decision.sequence << '\t'

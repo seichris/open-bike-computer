@@ -164,6 +164,7 @@ nonisolated enum WorkoutLiveActivityStateMapper {
         case .unknown: return .unknown
         case .manual: return .manual
         case .automatic: return .automatic
+        case .system: return .system
         case nil: return nil
         }
     }

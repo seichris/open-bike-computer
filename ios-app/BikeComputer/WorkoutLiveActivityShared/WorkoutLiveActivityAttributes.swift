@@ -46,6 +46,7 @@ nonisolated enum WorkoutLiveActivityPauseOrigin:
     case unknown
     case manual
     case automatic
+    case system
 }
 
 @available(iOS 17.0, *)

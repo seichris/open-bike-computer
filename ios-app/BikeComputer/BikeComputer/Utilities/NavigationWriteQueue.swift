@@ -127,6 +127,7 @@ nonisolated struct RendererBenchmarkBLETransportEvidence: Codable,
 
 struct NavigationWrite {
     let data: Data
+    let prepareData: (() -> Data?)?
     let label: String
     let transportWrite: ((Data) -> Void)?
     let onWrite: (() -> Void)?
@@ -148,6 +149,7 @@ struct NavigationWrite {
     init(
         data: Data,
         label: String,
+        prepareData: (() -> Data?)? = nil,
         transportWrite: ((Data) -> Void)? = nil,
         onWrite: (() -> Void)? = nil,
         onDrop: (() -> Void)? = nil,
@@ -162,6 +164,7 @@ struct NavigationWrite {
         enqueuedAtUptime: TimeInterval? = nil
     ) {
         self.data = data
+        self.prepareData = prepareData
         self.label = label
         self.transportWrite = transportWrite
         self.onWrite = onWrite
@@ -178,7 +181,8 @@ struct NavigationWrite {
         self.enqueuedAtUptime = enqueuedAtUptime
     }
 
-    func perform(using fallbackWrite: (Data) -> Void) {
+    func perform(using fallbackWrite: (Data) -> Void, preparedData: Data? = nil) {
+        let data = preparedData ?? self.data
         if let transportWrite {
             transportWrite(data)
         } else {
@@ -191,6 +195,7 @@ struct NavigationWrite {
         NavigationWrite(
             data: data,
             label: label,
+            prepareData: prepareData,
             transportWrite: transportWrite,
             onWrite: onWrite,
             onDrop: onDrop,
@@ -211,6 +216,7 @@ struct NavigationWrite {
         NavigationWrite(
             data: data,
             label: label,
+            prepareData: prepareData,
             transportWrite: transportWrite,
             onWrite: onWrite,
             onDrop: onDrop,

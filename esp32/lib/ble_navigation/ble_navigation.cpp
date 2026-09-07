@@ -3464,6 +3464,11 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::RIDE_AUTOMATION_V2_FEATURE;
     }
+    if (clientVersion >= device_capabilities_protocol::
+                             WATCH_GPS_MOTION_EVIDENCE_V1_CLIENT_VERSION) {
+      featureFlags |= device_capabilities_protocol::
+          WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE;
+    }
 #endif
 #if DEVICE_REMOTE_DEBUG
     if (deviceDebugHttp.initialized() &&
@@ -5531,6 +5536,9 @@ public:
           case ApplyResult::IgnoredToken:
           case ApplyResult::IgnoredPair:
           case ApplyResult::IgnoredStateRegression:
+          case ApplyResult::IgnoredMotionEpoch:
+          case ApplyResult::IgnoredMotionSequence:
+          case ApplyResult::IgnoredLifecyclePhase:
             deliveryResult = ride_delivery_protocol::Result::Stale;
             break;
           case ApplyResult::RejectedUnauthenticated:
