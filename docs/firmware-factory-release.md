@@ -42,16 +42,21 @@ is never checked out or executed by the publisher.
 
 Before merging and using this flow, repository administrators must:
 
-1. Create the `firmware-release` environment, require at least one named human
-   reviewer, prevent self-review, restrict deployments to the protected
-   default branch used by `workflow_run`, and limit bypass actors to the
-   reviewed break-glass owner.
+1. Configure `firmware-release` with the exact reviewer named in
+   `.github/firmware-release-authority.json`, restrict deployments to the exact
+   protected default branch used by `workflow_run`, and limit release-tag bypass
+   to that named user. The maintainer explicitly selected single-maintainer
+   approval: `seichris` may approve their own run. This is not independent review.
+   Selecting `independent` in the reviewed policy also requires prevent-self-review.
 2. Make `FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY`,
    `FIRMWARE_RELEASE_PREFLIGHT_APP_ID`, and
    `FIRMWARE_RELEASE_PREFLIGHT_APP_PRIVATE_KEY` available to that environment
    with no broader scope than operationally required. Store both private keys
    as environment secrets and remove any repository-level copies after the
    environment migration is verified.
+   If the local firmware key is lost but the repository secret remains, follow
+   [the controlled encrypted migration](firmware-signing-key-migration.md).
+   Keep both repository copies until destination proof and approved cleanup.
 3. Add a `v*` tag ruleset that restricts tag creation, update, and deletion to
    release maintainers. Enable GitHub's full-SHA Actions policy after every
    workflow has landed with immutable action pins.
@@ -61,6 +66,14 @@ Before merging and using this flow, repository administrators must:
 
 Source changes alone do not prove those live controls are configured. Do not
 push the first release tag until their read-back has been reviewed.
+
+The publisher runs the read-only `firmware_release_controls.py` gate before
+exposing the firmware key to the signing command. It requires the checked-in
+reviewer policy, exact default-branch-only admission, environment-scoped private
+keys without repository/organization copies, strict admin-enforced CI Gate and
+the owner-only release-tag ruleset. Missing API access fails closed. See the
+[authority and migration runbook](firmware-signing-key-migration.md) for App
+permissions, verification and remaining live-operation boundaries.
 
 Compilation, host tests, and a merged pull request establish software readiness;
 they do not establish physical acceptance. Before calling an artifact
