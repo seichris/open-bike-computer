@@ -8,6 +8,8 @@ OUT="${TMPDIR:-/tmp}/open-bike-navigation-tests"
 
 cd "${REPO_DIR}"
 
+"${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"
+
 RENDERER_SCHEDULER_OUT="${TMPDIR:-/tmp}/open-bike-renderer-scheduler-tests"
 xcrun swiftc -D HOST_TESTING -parse-as-library \
   -o "${RENDERER_SCHEDULER_OUT}" \
@@ -90,6 +92,7 @@ xcrun swiftc \
 
 CYCLING_SENSOR_OUT="${TMPDIR:-/tmp}/open-bike-cycling-sensor-tests"
 
+for CYCLING_SENSOR_TEST in CyclingSensorTests CyclingSensorObservationIntegrationTests; do
 xcrun swiftc \
   -parse-as-library \
   -default-isolation MainActor \
@@ -102,14 +105,17 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
+  ios-app/BikeComputer/WorkoutShared/WatchCyclingSensorObservation.swift \
+  ios-app/BikeComputer/WorkoutShared/WatchCyclingSensorObservation+Workout.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
   ios-app/BikeComputer/BikeComputer/Models/CyclingSensorProfile.swift \
   ios-app/BikeComputer/BikeComputer/Managers/CyclingSensorStore.swift \
   ios-app/BikeComputer/BikeComputer/Managers/CyclingSensorDetectionCoordinator.swift \
-  ios-app/BikeComputerTests/CyclingSensorTests.swift
+  "ios-app/BikeComputerTests/${CYCLING_SENSOR_TEST}.swift"
 
 "${CYCLING_SENSOR_OUT}"
+done
 
 CATALYST_OUT="${TMPDIR:-/tmp}/open-bike-destination-callout-tests"
 MACOS_SDK="$(xcrun --sdk macosx --show-sdk-path)"

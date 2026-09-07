@@ -76,6 +76,91 @@ struct FirmwareReleaseManifest: Codable, Equatable {
     }
 }
 
+// New releases use full source identity. The two immutable short-SHA releases
+// have exact signed factory mappings; arbitrary prefixes never establish identity.
+nonisolated enum FirmwareSourceIdentity {
+    static let legacySHA = "8a0c9df6db26120bc988651d6a43a99ac04ef778"
+
+    static func fullSHA(_ sha: String, target: String, version: String, build: Int) -> String? {
+        if sha.count == 40 && sha.allSatisfy({ "0123456789abcdef".contains($0) }) {
+            return sha
+        }
+        if ["WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"].contains(target) {
+            if sha == "8a0c9df6db26", version == "0.3.4", build == 93 {
+                return legacySHA
+            }
+            if sha == "02bce8150d2c", version == "0.3.3", build == 92 {
+                return "02bce8150d2c0f88fa0481d9b6fcef76da8865ef"
+            }
+        }
+        return nil
+    }
+}
+
+nonisolated final class FirmwareHTTPSRedirectPolicy: NSObject, URLSessionTaskDelegate {
+    static func allows(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "https" && url.host?.isEmpty == false &&
+        url.user == nil && url.password == nil
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        // GitHub release assets redirect to its HTTPS asset CDN. Never permit
+        // a downgrade to plaintext or a credential-bearing URL.
+        completionHandler(request.url.map(Self.allows) == true ? request : nil)
+    }
+}
+
+nonisolated enum FirmwareDownload {
+    static let maximumManifestBytes = 2048 // device begin-body contract
+    static let maximumImageBytes = 3 * 1024 * 1024 // both production OTA slots
+
+    static func read(_ url: URL, session: URLSession, maximumBytes: Int,
+                     expectedSHA256: String? = nil) async throws -> Data {
+        guard FirmwareHTTPSRedirectPolicy.allows(url), maximumBytes > 0,
+              maximumBytes <= maximumImageBytes else {
+            throw FirmwareUpdateError.invalidManifest
+        }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData,
+                                 timeoutInterval: 60)
+        request.httpShouldHandleCookies = false
+        let (bytes, response) = try await session.bytes(for: request, delegate: FirmwareHTTPSRedirectPolicy())
+        defer { bytes.task.cancel() } // including headers, decode, oversize and cancellation errors
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let finalURL = http.url, FirmwareHTTPSRedirectPolicy.allows(finalURL) else {
+            throw FirmwareUpdateError.serverError("Firmware server request failed")
+        }
+        guard response.expectedContentLength <= Int64(maximumBytes) else {
+            throw FirmwareUpdateError.downloadSizeMismatch
+        }
+        var data = Data()
+        var chunk = Data()
+        var hash = SHA256()
+        for try await byte in bytes {
+            try Task.checkCancellation()
+            guard data.count + chunk.count < maximumBytes else {
+                throw FirmwareUpdateError.downloadSizeMismatch
+            }
+            chunk.append(byte)
+            if chunk.count == 16 * 1024 {
+                hash.update(data: chunk)
+                data.append(chunk)
+                chunk.removeAll(keepingCapacity: true)
+            }
+        }
+        hash.update(data: chunk)
+        data.append(chunk)
+        if let expectedSHA256 {
+            guard data.count == maximumBytes else { throw FirmwareUpdateError.downloadSizeMismatch }
+            let digest = hash.finalize().map { String(format: "%02x", $0) }.joined()
+            guard digest == expectedSHA256.lowercased() else { throw FirmwareUpdateError.downloadHashMismatch }
+        }
+        return data
+    }
+}
+
 struct FirmwareDeviceStatus: Decodable, Equatable {
     let status: String
     let target: String
@@ -418,8 +503,8 @@ final class FirmwareUpdateManager: ObservableObject {
             .appendingPathComponent(bleManager.firmwareTarget)
             .appendingPathComponent("manifest.json")
         lastManifestURLString = manifestURL.absoluteString
-        let (data, response) = try await session.data(from: manifestURL)
-        try Self.validateHTTP(response)
+        let data = try await FirmwareDownload.read(manifestURL, session: session,
+                                                  maximumBytes: FirmwareDownload.maximumManifestBytes)
         let manifest = try JSONDecoder().decode(FirmwareReleaseManifest.self, from: data)
         guard manifest.isSupportedByApp else {
             throw FirmwareUpdateError.unsupportedUpdaterProtocol
@@ -428,8 +513,10 @@ final class FirmwareUpdateManager: ObservableObject {
             throw FirmwareUpdateError.targetMismatch
         }
         guard !manifest.version.isEmpty,
-              !manifest.gitSha.isEmpty,
+              FirmwareSourceIdentity.fullSHA(manifest.gitSha, target: manifest.target,
+                                              version: manifest.version, build: manifest.build) != nil,
               manifest.size > 0,
+              manifest.size <= FirmwareDownload.maximumImageBytes,
               !manifest.sha256.isEmpty,
               manifest.signature?.isEmpty == false else {
             throw FirmwareUpdateError.invalidManifest
@@ -485,7 +572,8 @@ final class FirmwareUpdateManager: ObservableObject {
         manifest.target == bleManager.firmwareTarget &&
         manifest.version == bleManager.firmwareVersion &&
         manifest.build == bleManager.firmwareBuild &&
-        manifest.gitSha == bleManager.firmwareGitSha
+        FirmwareSourceIdentity.fullSHA(manifest.gitSha, target: manifest.target,
+                                       version: manifest.version, build: manifest.build) == bleManager.firmwareGitSha
     }
 
     private func automaticCheckDeviceKey(bleManager: BLEManager) -> String {
@@ -504,9 +592,9 @@ final class FirmwareUpdateManager: ObservableObject {
     }
 
     private func downloadFirmware(manifest: FirmwareReleaseManifest) async throws -> Data {
-        let (data, response) = try await session.data(from: manifest.url)
-        try Self.validateHTTP(response)
-        return data
+        try await FirmwareDownload.read(manifest.url, session: session,
+                                        maximumBytes: manifest.size,
+                                        expectedSHA256: manifest.sha256)
     }
 
     private func verify(image: Data, manifest: FirmwareReleaseManifest) throws {
@@ -545,7 +633,8 @@ final class FirmwareUpdateManager: ObservableObject {
         if bleManager.firmwareTarget == pending.target &&
             bleManager.firmwareVersion == pending.version &&
             bleManager.firmwareBuild == pending.build &&
-            bleManager.firmwareGitSha == pending.gitSha {
+            bleManager.firmwareGitSha == FirmwareSourceIdentity.fullSHA(
+                pending.gitSha, target: pending.target, version: pending.version, build: pending.build) {
             statusMessage = storageMigrationNotice == nil
                 ? "firmware update installed"
                 : FirmwareStorageMigrationNotice.statusMessage
@@ -563,14 +652,17 @@ final class FirmwareUpdateManager: ObservableObject {
         bleManager.firmwareTarget == manifest.target &&
         bleManager.firmwareVersion == manifest.version &&
         bleManager.firmwareBuild == manifest.build &&
-        bleManager.firmwareGitSha == manifest.gitSha
+        bleManager.firmwareGitSha == FirmwareSourceIdentity.fullSHA(
+            manifest.gitSha, target: manifest.target, version: manifest.version, build: manifest.build)
     }
 
     private func persistPendingUpdate(manifest: FirmwareReleaseManifest, status: String) {
         let pending = PendingFirmwareUpdate(target: manifest.target,
                                             version: manifest.version,
                                             build: manifest.build,
-                                            gitSha: manifest.gitSha,
+                                            gitSha: FirmwareSourceIdentity.fullSHA(
+                                                manifest.gitSha, target: manifest.target,
+                                                version: manifest.version, build: manifest.build) ?? manifest.gitSha,
                                             startedAt: Date(),
                                             status: status)
         savePendingUpdate(pending)

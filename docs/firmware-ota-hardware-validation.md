@@ -124,6 +124,38 @@ Pass criteria:
 
 ## Completion
 
+### Open gate: application-owned boot confirmation
+
+The firmware trust-chain fix defers Arduino's pre-`setup()` confirmation and
+confirms only after finalization, pending map activation recovery and startup
+power handoff. Confirmation failure must never publish a ready checkpoint;
+pending-image rejection/reboot leaves rollback selection with ESP-IDF. Missing
+SD media remains an allowed degraded mode, not a boot-failure criterion.
+
+**Both 1.75 and 2.06 physical gates are OPEN.** Host stubs and compile checks do
+not establish bootloader or flash behavior. Before release (or merge under an
+explicit maintainer risk acceptance), record separately for each exact production
+artifact:
+
+- Effective SDK rollback flags and the linked strong `verifyRollbackLater`
+  symbol; no pre-setup VALID transition.
+- Inject crashes/hangs before Arduino init, during critical setup phases,
+  during pending-map activation recovery, and just before confirmation.
+  Reboot must select the previous usable partition, not inert safe mode.
+- Inject confirmation-write failure and loss of power during OTA metadata
+  changes; no false ready/acceptance record and a recoverable next boot.
+- Prove successful confirmation, then a normal later reboot/crash does not
+  roll back the already confirmed image. Verify first USB boot and USB rescue.
+- Capture exact production `boot/acceptance` evidence with
+  `tools/verify_firmware_boot_acceptance.py --ota` via authenticated device-log
+  export. Test no-SD operation separately; the persistent log acceptance path
+  itself needs working SD storage.
+- Verify full-SHA iOS reconnect/relaunch completion and the exact immutable
+  build-92/build-93 migration tuples, plus rejection of unrelated prefixes.
+
+Do not tag, distribute, or call either target factory/golden before its gate
+passes. A PR is source delivery, not hardware qualification.
+
 Firmware OTA hardware validation is complete when:
 
 - Foreground update succeeds on each supported target.
