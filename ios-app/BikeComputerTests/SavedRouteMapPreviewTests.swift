@@ -627,10 +627,18 @@ struct SavedRouteMapPreviewTests {
         update(coordinator, map: map, preview: preview.overlay, padding: 330)
         check(map.additions == beforeAdds && map.removals == beforeRemoves && map.fits.count == 1, "Ordinary layout update does not rebuild or refit")
         check(coordinator.displayedSavedRouteOverlay === owned, "Unchanged immutable identity reuses polyline")
+        // MKMapView may call overridden camera APIs during initialization on
+        // newer SDKs. Assert this location update causes no additional movement,
+        // rather than assuming UIKit made zero calls before this operation.
+        let beforeLocationRegionUpdates = map.regionUpdates
+        let beforeLocationCameraUpdates = map.cameraUpdates
+        print("Preview camera baseline: regions=\(beforeLocationRegionUpdates), cameras=\(beforeLocationCameraUpdates)")
         coordinator.updateUserTrackingMode(mapView: map, isNavigating: false, isOfflineMapSelectionActive: false)
         coordinator.updateInitialRegionIfNeeded(mapView: map, location: CLLocation(latitude: 40, longitude: 0), simulatedPosition: nil, isSimulationMode: false,
             isFreePanActive: coordinator.isFreePanActive(mapView: map, isOfflineMapSelectionActive: false))
-        check(map.userTrackingMode == .none && map.regionUpdates == 0, "Location changes cannot steal preview camera")
+        check(map.userTrackingMode == .none && map.regionUpdates == beforeLocationRegionUpdates &&
+            map.cameraUpdates == beforeLocationCameraUpdates,
+            "Location changes cannot steal preview camera: regions \(beforeLocationRegionUpdates) → \(map.regionUpdates), cameras \(beforeLocationCameraUpdates) → \(map.cameraUpdates), tracking \(map.userTrackingMode.rawValue)")
         let renderer = coordinator.mapView(map, rendererFor: preview.overlay.polyline) as! MKPolylineRenderer
         check(renderer.lineWidth == 4 && abs(renderer.alpha - 0.65) < 0.001 && renderer.lineCap == .round && renderer.lineJoin == .round, "Saved route has distinct rounded thinner styling")
         check(map.levels.last == .aboveRoads, "Saved route is above roads")

@@ -171,7 +171,7 @@ struct SavedRoutesSettingsSection: View {
                         try routeLibrary.delete(route)
                     } catch {
                         errorMessage =
-                            "The route was kept because deletion could not be completed safely."
+                            "Route deletion could not be completed. Please try again."
                     }
                 } label: {
                     Image(systemName: "trash")

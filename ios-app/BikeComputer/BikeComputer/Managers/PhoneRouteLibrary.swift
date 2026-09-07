@@ -865,7 +865,7 @@ final class PhoneOfflineRouteSaveSession: ObservableObject, Identifiable {
         case cancelled
     }
     let archive: NavigationRouteArchiveV1
-    var id: UUID { archive.routeID }
+    nonisolated let id: UUID
     @Published var name: String
     @Published private(set) var state: State = .ready
     private let now: () -> Date
@@ -873,6 +873,7 @@ final class PhoneOfflineRouteSaveSession: ObservableObject, Identifiable {
 
     init(archive: NavigationRouteArchiveV1, now: @escaping () -> Date = Date.init) {
         self.archive = archive
+        self.id = archive.routeID
         self.now = now
         name = archive.route.name ?? "\(archive.route.source.label) → \(archive.route.destination.label)"
         do {
