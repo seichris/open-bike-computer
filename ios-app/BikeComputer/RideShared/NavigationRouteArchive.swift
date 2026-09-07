@@ -285,3 +285,55 @@ struct PlannedRouteSummaryV1: Codable, Equatable, Identifiable {
         deleteAfter = archive.deleteAfter
     }
 }
+
+/// A duplicate comparison is intentionally separate from archive identity.
+/// UUID/revision/hash (including creation time and name) remain immutable after
+/// installation. Reimporting the same GPX under another filename reuses that
+/// identity rather than manufacturing a new archive or extending retention.
+nonisolated extension NavigationRouteV1 {
+    func hasSameOfflineContent(as other: NavigationRouteV1) -> Bool {
+        provider == other.provider && sourceReference == other.sourceReference &&
+            localeIdentifier == other.localeIdentifier &&
+            transportType == other.transportType && source == other.source &&
+            destination == other.destination && bounds == other.bounds &&
+            distanceMeters == other.distanceMeters &&
+            expectedTravelTimeSeconds == other.expectedTravelTimeSeconds &&
+            points == other.points && steps == other.steps &&
+            normalizationVersion == other.normalizationVersion
+    }
+
+    func namedForOfflineStorage(_ name: String) -> NavigationRouteV1 {
+        NavigationRouteV1(
+            id: id, revision: revision, provider: provider,
+            sourceReference: sourceReference, localeIdentifier: localeIdentifier,
+            transportType: transportType, source: source, destination: destination,
+            bounds: bounds, distanceMeters: distanceMeters,
+            expectedTravelTimeSeconds: expectedTravelTimeSeconds,
+            name: name, points: points, steps: steps,
+            normalizationVersion: normalizationVersion
+        )
+    }
+}
+
+nonisolated enum OfflineRouteSaveError: LocalizedError {
+    case invalidName
+    case cancelled
+    case navigationActive
+    case planningActive
+    case startFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidName:
+            NSLocalizedString("Enter a route name of 1–120 characters.", comment: "Offline save name validation")
+        case .cancelled:
+            NSLocalizedString("The route save was cancelled.", comment: "Offline save cancelled")
+        case .navigationActive:
+            NSLocalizedString("Stop navigation before starting another route.", comment: "Offline navigation already active")
+        case .planningActive:
+            NSLocalizedString("Finish or cancel route planning before starting a saved route.", comment: "Offline navigation must preserve route planning")
+        case .startFailed:
+            NSLocalizedString("The saved route could not start navigation.", comment: "Offline navigation start failed")
+        }
+    }
+}

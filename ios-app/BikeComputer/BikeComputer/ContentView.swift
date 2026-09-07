@@ -78,6 +78,9 @@ struct ContentView: View {
     
     @State private var sourceAddress = ""
     @State private var destinationAddress = ""
+    @State private var savedRouteMapPreview: SavedRouteMapPreview?
+    @State private var offlineNavigationOverlay: MapSavedRouteOverlay?
+    @State private var savedRoutePreviewBottomHeight: CGFloat?
     @State private var presentedSheet: ContentSheetDestination?
     @State private var queuedSheetAfterDismiss:
         ContentSheetDestination?
@@ -232,7 +235,11 @@ struct ContentView: View {
                         ? selectionFrame
                         : nil,
                     routePlanningBottomPadding:
-                        mapRoutePlanningBottomPadding(in: proxy)
+                        mapRoutePlanningBottomPadding(in: proxy),
+                    savedRoutePreviewBottomPadding:
+                        savedRoutePreviewBottomHeight.map {
+                            $0 + proxy.safeAreaInsets.bottom + 12
+                        }
                 )
                     .ignoresSafeArea()
 
@@ -313,6 +320,19 @@ struct ContentView: View {
                         maxHeight: proxy.size.height * 0.68,
                         isCompactHeight: isCompactHeight
                     )
+                    .background {
+                        GeometryReader { layout in
+                            Color.clear.preference(
+                                key: SavedRoutePreviewLayoutKey.self,
+                                value: visibleSavedRouteMapPreview.map {
+                                    SavedRoutePreviewLayout(
+                                        identity: $0.layoutIdentity,
+                                        height: layout.size.height
+                                    )
+                                }
+                            )
+                        }
+                    }
                 }
                 .ignoresSafeArea(.container, edges: .bottom)
 
@@ -371,6 +391,25 @@ struct ContentView: View {
                 presentedSheetContent(for: destination)
             }
         }
+        .onPreferenceChange(SavedRoutePreviewLayoutKey.self) { layout in
+            Task { @MainActor in updateSavedRoutePreviewLayout(layout) }
+        }
+        .onReceive(routeLibrary.$routes) { routes in
+            coordinator.reconcileOfflineNavigation(with: routes)
+            reconcileSavedRoutePreview(with: routes)
+        }
+        .onChange(of: coordinator.offlineNavigationIdentity) { identity in
+            if identity == nil { offlineNavigationOverlay = nil }
+        }
+        .onChange(of: savedRoutePreviewIsBlocked) { isBlocked in
+            if isBlocked { clearSavedRoutePreview() }
+        }
+        .onChange(of: isSearchPanelExpanded) { isExpanded in
+            if isExpanded { clearSavedRoutePreview() }
+        }
+        .onChange(of: savedRouteMapPreview?.identity) { identity in
+            if identity == nil { synchronizeRideMetricsSheet() }
+        }
         .onAppear {
             onApplicationActiveChange(scenePhase == .active)
             migrateExistingInstallOnboardingIfNeeded()
@@ -382,6 +421,7 @@ struct ContentView: View {
             workoutMirrorManager.refreshFreshness()
             observedWorkoutSegmentIndex = currentWorkoutSegment?.index
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
+            routeLibrary.reload()
             stravaIntegrationCoordinator.activate()
             synchronizeRideMetricsSheet()
             presentNearbyBicinoIfEligible()
@@ -440,6 +480,7 @@ struct ContentView: View {
             coordinator.applicationDidBecomeActive()
             workoutMirrorManager.refreshFreshness()
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
+            routeLibrary.reload()
             stravaIntegrationCoordinator.activate()
             presentNearbyBicinoIfEligible()
         }
@@ -544,6 +585,84 @@ struct ContentView: View {
             withAnimation {
                 workoutSegmentToast = nil
             }
+        }
+    }
+
+    private var savedRoutePreviewIsBlocked: Bool {
+        SavedRouteMapPolicy.content(
+            isNavigating: coordinator.isNavigating,
+            hasCalculatedRoute: coordinator.currentRoute != nil,
+            hasRouteAlternatives: !coordinator.routeAlternatives.isEmpty,
+            isCalculating: coordinator.routeCalculation.isCalculating,
+            hasSavedRoute: true,
+            isOfflineMapSelectionActive: offlineMapManager.isMapAreaSelectionActive
+        ) != .savedRoute
+    }
+
+    private var visibleSavedRouteMapPreview: SavedRouteMapPreview? {
+        guard !savedRoutePreviewIsBlocked,
+              let preview = savedRouteMapPreview,
+              preview.deleteAfter.map({ Date() < $0 }) ?? true else { return nil }
+        return preview
+    }
+
+    private func showSavedRouteMapPreview(_ selection: SavedRouteMapSelection) throws {
+        guard !coordinator.isNavigating else { throw SavedRouteMapError.navigationActive }
+        guard !savedRoutePreviewIsBlocked else { throw SavedRouteMapError.planningActive }
+        let preview = try SavedRouteMapPreviewFactory.make(selection)
+        if savedRouteMapPreview?.identity != preview.identity {
+            savedRoutePreviewBottomHeight = nil
+        }
+        savedRouteMapPreview = preview
+        isSearchPanelExpanded = false
+        // This is deliberately after both the validated read and factory. A
+        // failure is shown by the Settings row, without dismissing its sheet.
+        presentedSheet = nil
+    }
+
+    private func startSavedRouteOffline(
+        _ archive: NavigationRouteArchiveV1, name: String
+    ) throws {
+        guard !savedRoutePreviewIsBlocked else { throw OfflineRouteSaveError.planningActive }
+        let preview = try SavedRouteMapPreviewFactory.make(SavedRouteMapSelection(
+            identity: WatchRouteIdentityV1(archive: archive), displayName: name,
+            route: archive.route, createdAt: archive.createdAt, deleteAfter: archive.deleteAfter
+        ))
+        // Build the display-only polyline before starting. Construction failure
+        // leaves Settings and the navigation lifecycle untouched.
+        try coordinator.startOfflineNavigation(with: archive)
+        offlineNavigationOverlay = preview.overlay
+        clearSavedRoutePreview()
+        isSearchPanelExpanded = false
+        presentedSheet = nil
+    }
+
+    private func clearSavedRoutePreview() {
+        savedRouteMapPreview = nil
+        savedRoutePreviewBottomHeight = nil
+    }
+
+    private func updateSavedRoutePreviewLayout(_ layout: SavedRoutePreviewLayout?) {
+        guard let layout,
+              layout.identity == visibleSavedRouteMapPreview?.layoutIdentity,
+              layout.height > 0,
+              savedRoutePreviewBottomHeight != layout.height else { return }
+        savedRoutePreviewBottomHeight = layout.height
+    }
+
+    private func reconcileSavedRoutePreview(with routes: [PlannedRouteSummaryV1]) {
+        guard let preview = savedRouteMapPreview else { return }
+        let identities = routes.map {
+            WatchRouteIdentityV1(routeID: $0.id, revision: $0.revision, contentHash: $0.contentHash)
+        }
+        guard SavedRouteMapPolicy.shouldRetain(
+            preview.identity,
+            installedIdentities: identities,
+            deleteAfter: preview.deleteAfter,
+            now: Date()
+        ) else {
+            clearSavedRoutePreview()
+            return
         }
     }
 
@@ -658,6 +777,7 @@ struct ContentView: View {
                     coordinator.requestLocationAuthorization()
                 },
                 onStartTestNavigation: { destination in
+                    clearSavedRoutePreview()
                     coordinator.startNavigation(
                         from: .currentLocation,
                         to: .query(destination),
@@ -666,6 +786,14 @@ struct ContentView: View {
                     )
                 }
             )
+            .environment(\.savedRouteMapAction, SavedRouteMapAction(
+                isNavigationActive: coordinator.isNavigating,
+                show: { selection in try showSavedRouteMapPreview(selection) }
+            ))
+            .environment(\.savedRouteNavigationAction, SavedRouteNavigationAction(
+                isEnabled: !savedRoutePreviewIsBlocked,
+                start: { archive, name in try startSavedRouteOffline(archive, name: name) }
+            ))
             .environmentObject(coordinator.bleManager)
             .presentationDetents([.large])
             .presentationBackgroundInteraction(.disabled)
@@ -768,7 +896,8 @@ struct ContentView: View {
 
     private func synchronizeRideMetricsSheet() {
         if workoutStore.presentation.isWorkoutActive {
-            guard presentedSheet == nil else { return }
+            guard presentedSheet == nil,
+                  savedRouteMapPreview == nil else { return }
             rideMetricsDetent = .rideMetricsCompact
             presentedSheet = .rideMetrics
         } else if presentedSheet == .rideMetrics {
@@ -777,7 +906,8 @@ struct ContentView: View {
     }
 
     private func restoreRideMetricsSheetIfNeeded() {
-        guard workoutStore.presentation.isWorkoutActive else {
+        guard workoutStore.presentation.isWorkoutActive,
+              savedRouteMapPreview == nil else {
             isSheetDismissalInFlight = false
             presentNearbyBicinoIfEligible()
             return
@@ -785,6 +915,7 @@ struct ContentView: View {
         Task { @MainActor in
             await Task.yield()
             guard presentedSheet == nil,
+                  savedRouteMapPreview == nil,
                   workoutStore.presentation.isWorkoutActive else {
                 isSheetDismissalInFlight = false
                 presentNearbyBicinoIfEligible()
@@ -848,6 +979,7 @@ struct ContentView: View {
                     activeSheetDestination != nil ||
                     isSheetDismissalInFlight ||
                     queuedSheetAfterDismiss != nil ||
+                    savedRouteMapPreview != nil ||
                     visibleOfflineMapOnboardingStep != nil,
                 isMapAreaSelectionActive:
                     offlineMapManager.isMapAreaSelectionActive,
@@ -1145,6 +1277,15 @@ struct ContentView: View {
         isCompactHeight: Bool
     ) -> some View {
         VStack(spacing: 12) {
+            if let preview = visibleSavedRouteMapPreview {
+                SavedRouteMapPreviewCard(
+                    preview: preview,
+                    maximumHeight: min(220, maxHeight * 0.45),
+                    onHide: clearSavedRoutePreview
+                )
+                .padding(.horizontal, 12)
+            }
+
             if coordinator.routeCalculation.isCalculating {
                 CalculationStatusView(status: coordinator.routeCalculation.status)
                     .padding(.horizontal, 18)
@@ -1266,6 +1407,7 @@ struct ContentView: View {
                 currentLocation: coordinator.currentLocation,
                 maxExpandedHeight: maxHeight,
                 onStartNavigation: { source, destination, transport in
+                    clearSavedRoutePreview()
                     isSearchPanelExpanded = false
                     coordinator.planNavigation(
                         from: source,
@@ -1337,18 +1479,22 @@ struct ContentView: View {
                 .disabled(coordinator.selectedRouteAlternativeID == nil)
 
                 Button { } label: {
-                    Label("Save Offline", systemImage: "applewatch")
+                    Label("Save Offline", systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(.bordered)
-                .disabled(true)
+                .disabled(!coordinator.selectedRouteCanSaveOffline)
+                .accessibilityIdentifier("saveSelectedRouteOffline")
                 .accessibilityHint(
-                    "MapKit routes cannot be stored offline until an approved route provider is configured."
+                    "Apple Maps routes are online-only. Import GPX or Strava in Saved Routes to save approved geometry."
                 )
             }
 
             selectedRouteAdvisory
 
-            Text("Offline saving needs an approved route source.")
+            Button("Open Saved Routes in Settings") { presentedSheet = .settings }
+                .font(.caption)
+
+            Text("Apple Maps routes are online-only. Import GPX or Strava in Settings → Saved Routes for offline navigation.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -1499,7 +1645,8 @@ struct ContentView: View {
     
     private func mapView(
         selectionFrame: CGRect?,
-        routePlanningBottomPadding: CGFloat
+        routePlanningBottomPadding: CGFloat,
+        savedRoutePreviewBottomPadding: CGFloat?
     ) -> some View {
         let canSelectDestination = !coordinator.isNavigating && !offlineMapManager.isMapAreaSelectionActive
 
@@ -1533,9 +1680,15 @@ struct ContentView: View {
             onDestinationSelected: canSelectDestination ? MapDestinationSelection.handler(
                 store: coordinator.destinationStore,
                 navigate: { destination, mapLocation in
+                    clearSavedRoutePreview()
                     coordinator.handleDestinationSelection(destination: destination, mapLocation: mapLocation)
                 }
-            ) : nil
+            ) : nil,
+            savedRoutePreview: visibleSavedRouteMapPreview?.overlay,
+            savedRoutePreviewBottomPadding: savedRoutePreviewBottomPadding,
+            isRouteCalculationActive: coordinator.routeCalculation.isCalculating,
+            offlineNavigationRoute: coordinator.offlineNavigationIdentity.map(AnyHashable.init) ==
+                offlineNavigationOverlay?.identity ? offlineNavigationOverlay : nil
         )
     }
 

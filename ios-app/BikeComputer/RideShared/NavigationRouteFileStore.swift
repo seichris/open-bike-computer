@@ -216,12 +216,13 @@ final class NavigationRouteFileStoreV1 {
         let decoded: [InstalledNavigationRouteV1] = urls.compactMap {
             url -> InstalledNavigationRouteV1? in
             guard url.pathExtension == "routev1",
-                  let data = try? Data(contentsOf: url),
+                  let data = try? readArchiveData(at: url),
                   let archive = try? NavigationRouteArchiveV1
                     .decodeForRetentionInspection(
                     data,
                     purpose: .offlineNavigation
-                  ) else {
+                  ),
+                  url.standardizedFileURL == fileURL(for: WatchRouteIdentityV1(archive: archive)) else {
                 return nil
             }
             return InstalledNavigationRouteV1(
@@ -279,6 +280,7 @@ final class NavigationRouteFileStoreV1 {
         let record = try record(matching: identity, now: now)
         do {
             try fileManager.removeItem(at: record.fileURL)
+            try synchronizeRootDirectory()
         } catch {
             throw NavigationRouteFileStoreError.ioFailure
         }
@@ -312,7 +314,7 @@ final class NavigationRouteFileStoreV1 {
         ) else { return 0 }
         var removed = 0
         for url in urls where url.pathExtension == "routev1" {
-            guard let data = try? Data(contentsOf: url) else {
+            guard let data = try? readArchiveData(at: url) else {
                 if quarantineOrRemove(url) { removed += 1 }
                 continue
             }
@@ -322,6 +324,9 @@ final class NavigationRouteFileStoreV1 {
                     data,
                     purpose: .offlineNavigation
                 )
+                guard url.standardizedFileURL == fileURL(for: WatchRouteIdentityV1(archive: archive)) else {
+                    throw NavigationRouteArchiveError.invalidEncoding
+                }
                 if let deleteAfter = archive.deleteAfter,
                    now >= deleteAfter {
                     let identity = WatchRouteIdentityV1(archive: archive)
@@ -340,6 +345,25 @@ final class NavigationRouteFileStoreV1 {
             }
         }
         return removed
+    }
+
+    /// Bound corrupt-archive reads before allocating or decoding. Do not follow
+    /// links outside the owned store, and cap the read even if a file grows after
+    /// its size was inspected. The decoder still verifies schema, policy and hash.
+    private func readArchiveData(at url: URL) throws -> Data {
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        let maximum = NavigationRouteLimitsV1.production.maximumEncodedBytes
+        guard values.isRegularFile == true, values.isSymbolicLink != true,
+              let size = values.fileSize, size > 0, size <= maximum else {
+            throw NavigationRouteArchiveError.encodedSizeExceeded
+        }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: maximum + 1) ?? Data()
+        guard !data.isEmpty, data.count <= maximum else {
+            throw NavigationRouteArchiveError.encodedSizeExceeded
+        }
+        return data
     }
 
     private func prepareDirectory() throws {

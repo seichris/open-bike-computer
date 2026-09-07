@@ -4,14 +4,23 @@ import UniformTypeIdentifiers
 struct SavedRoutesSettingsSection: View {
     @ObservedObject var routeLibrary: PhoneRouteLibrary
     @ObservedObject var stravaCoordinator: StravaIntegrationCoordinator
+    @Environment(\.savedRouteMapAction) private var mapAction
+    @Environment(\.savedRouteNavigationAction) private var navigationAction
     let onImportFromStrava: () -> Void
     @FocusState private var focusedRouteID: UUID?
     @State private var renameInteraction = SavedRouteRenameInteraction()
     @State private var errorMessage: String?
     @State private var isImportingGPX = false
+    @State private var offlineSaveSession: PhoneOfflineRouteSaveSession?
+    @State private var saveFeedback: String?
 
     var body: some View {
         Section {
+            if let saveFeedback {
+                Label(saveFeedback, systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("offlineRouteSaveFeedback")
+            }
             if routeLibrary.routes.isEmpty &&
                 routeLibrary.expiredStravaBookmarks.isEmpty {
                 Label(
@@ -60,11 +69,11 @@ struct SavedRoutesSettingsSection: View {
             Text("Saved Routes")
         } footer: {
             Text(
-                "Save GPX route files to your Apple watch for offline navigation"
+                "Save approved GPX routes on this iPhone, preview them on the map, or start offline navigation here or on Apple Watch. Strava routes are available only until their stated expiry. Saving a route does not download basemap tiles or enable offline rerouting."
             )
         }
         .alert(
-            "Route Sync Error",
+            "Saved Route Error",
             isPresented: Binding(
                 get: { errorMessage != nil },
                 set: { if !$0 { errorMessage = nil } }
@@ -73,6 +82,14 @@ struct SavedRoutesSettingsSection: View {
             Button("OK", role: .cancel) { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "Unknown error")
+        }
+        .sheet(item: $offlineSaveSession) { session in
+            OfflineRouteSaveSheet(session: session, library: routeLibrary) { result in
+                let name = routeLibrary.displayName(for: result.summary)
+                saveFeedback = result.alreadySaved
+                    ? String(format: NSLocalizedString("“%@” is already saved on this iPhone.", comment: "Duplicate offline route"), name)
+                    : String(format: NSLocalizedString("“%@” is saved on this iPhone.", comment: "Offline route save success"), name)
+            }
         }
         .onAppear { routeLibrary.reload() }
         .onChange(of: focusedRouteID) { newValue in
@@ -102,11 +119,13 @@ struct SavedRoutesSettingsSection: View {
                   byteCount <= GPXRouteImporterV1.maximumInputBytes else {
                 throw GPXRouteImporterError.fileTooLarge
             }
-            _ = try routeLibrary.importGPX(
+            offlineSaveSession = try routeLibrary.prepareGPX(
                 Data(contentsOf: url, options: .mappedIfSafe),
                 fileName: url.lastPathComponent
             )
         } catch {
+            let cocoa = error as NSError
+            guard !(cocoa.domain == NSCocoaErrorDomain && cocoa.code == NSUserCancelledError) else { return }
             errorMessage = (error as? LocalizedError)?.errorDescription ??
                 "The GPX route could not be imported."
         }
@@ -174,6 +193,54 @@ struct SavedRoutesSettingsSection: View {
                     deleteAfter: route.deleteAfter
                 )
             }
+
+            // This is a local read, independent of Watch transfer state. Keep
+            // it separate from the already crowded rename/Watch/delete row.
+            Button {
+                finishRenaming()
+                focusedRouteID = nil
+                guard let mapAction else { return }
+                do {
+                    try mapAction.perform {
+                        try routeLibrary.mapSelection(for: route)
+                    }
+                } catch {
+                    errorMessage = error.localizedDescription
+                }
+            } label: {
+                Label("Show on Map", systemImage: "map")
+                    .frame(minHeight: 44)
+            }
+            .buttonStyle(.borderless)
+            .disabled(mapAction == nil || mapAction?.isNavigationActive == true)
+            .accessibilityLabel("Show \(displayName) on map")
+            .accessibilityHint(
+                mapAction?.isNavigationActive == true
+                    ? "Available after navigation stops"
+                    : "Previews the saved route without starting navigation"
+            )
+            .accessibilityIdentifier("showSavedRouteOnMap-\(route.id.uuidString)")
+
+            Button {
+                finishRenaming()
+                focusedRouteID = nil
+                guard let navigationAction else { return }
+                do {
+                    try navigationAction.perform(name: routeLibrary.displayName(for: route)) {
+                        try routeLibrary.offlineNavigationArchive(for: route)
+                    }
+                } catch {
+                    errorMessage = (error as? LocalizedError)?.errorDescription ??
+                        "The saved route could not be opened. Import it again or reload it from Strava."
+                }
+            } label: {
+                Label("Navigate Offline on iPhone", systemImage: "location.fill")
+                    .frame(minHeight: 44)
+            }
+            .buttonStyle(.borderless)
+            .disabled(navigationAction?.isEnabled != true || status == .deleting)
+            .accessibilityHint("Follows the saved route without calculating directions or downloading maps")
+            .accessibilityIdentifier("navigateSavedRouteOffline-\(route.id.uuidString)")
 
             if let transientStatus = transientStatus(status) {
                 Label(transientStatus.label, systemImage: transientStatus.icon)
@@ -441,5 +508,65 @@ struct SavedRoutesSettingsSection: View {
             $0.id == commit.routeID
         }) else { return }
         routeLibrary.rename(route, to: commit.proposedName)
+    }
+}
+
+/// Confirmation owns only a memory draft. The library remains the sole durable
+/// owner; closing this sheet, the document picker or the app writes no draft.
+private struct OfflineRouteSaveSheet: View {
+    @ObservedObject var session: PhoneOfflineRouteSaveSession
+    let library: PhoneRouteLibrary
+    let onSaved: (PhoneOfflineRouteSaveResult) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Route") {
+                    TextField("Route name", text: $session.name)
+                        .accessibilityIdentifier("offlineRouteName")
+                    Text("\(session.archive.route.source.label) → \(session.archive.route.destination.label)")
+                    Text(Measurement(value: session.archive.route.distanceMeters, unit: UnitLength.meters), format: .measurement(width: .abbreviated))
+                    Text(session.archive.route.provider.attribution)
+                        .font(.caption)
+                    if let deadline = session.archive.deleteAfter {
+                        Text("Expires \(deadline.formatted(date: .abbreviated, time: .shortened))")
+                    }
+                }
+                Section {
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        Button {
+                            if let result = session.save(to: library) {
+                                onSaved(result)
+                                dismiss()
+                            }
+                        } label: {
+                            Label("Save Offline", systemImage: "square.and.arrow.down")
+                        }
+                        .disabled(!session.canSave)
+                        .accessibilityIdentifier("confirmSaveOffline")
+                    }
+                } footer: {
+                    Text("Saved on this iPhone. Route geometry is available without a network connection; basemap tiles and new directions are not included. Duplicate GPX routes reuse the existing saved route and name.")
+                }
+                if case .failed(let message) = session.state {
+                    Section {
+                        Label(message, systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("offlineRouteSaveError")
+                    }
+                }
+            }
+            .navigationTitle("Save Offline")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", role: .cancel) {
+                        session.cancel()
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .onDisappear { session.cancel() }
     }
 }
