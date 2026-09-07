@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include "../utils/src/runtime_ownership.hpp"
+#include "../utils/src/runtime_mutex.hpp"
 
 struct esp_tls;
 
@@ -165,6 +167,8 @@ private:
   WiFiClient socketOwner_;
   esp_tls *tls_ = nullptr;
   int socket_ = -1;
+  runtime_ownership::SocketInterruptLease<runtime_ownership::StaticMutex>
+      interruptLease_;
   bool connected_ = false;
   bool responsePersistenceAllowed_ = false;
   bool responseKeepAlive_ = false;

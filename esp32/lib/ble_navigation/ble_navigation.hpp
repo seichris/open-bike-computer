@@ -14,6 +14,7 @@
  */
 
 #include <Arduino.h>
+#include <atomic>
 #include "ble_radio_policy.hpp"
 #include "destination_picker_protocol.hpp"
 #include "map_profile_protocol.hpp"
@@ -289,8 +290,8 @@ public:
       renderer_diagnostics_ble_protocol::WindowRequest &request);
 
 private:
-  bool initialized = false;
-  bool connected = false;
+  std::atomic<bool> initialized{false};
+  std::atomic<bool> connected{false};
 
   // BLE UUIDs (matching iOS app)
   static constexpr const char *SERVICE_UUID =

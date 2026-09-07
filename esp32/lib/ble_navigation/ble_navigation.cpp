@@ -6,6 +6,8 @@
  */
 
 #include "ble_navigation.hpp"
+#include "../utils/src/runtime_ownership.hpp"
+#include "../utils/src/runtime_mutex.hpp"
 
 #ifndef FIRMWARE_DIAGNOSTICS
 #define FIRMWARE_DIAGNOSTICS 1
@@ -112,11 +114,11 @@ MapRenderSettings mapRenderSettings;
 static Preferences settingsPrefs;
 
 // Global navigation data
-static NavigationData currentNavData = {0, 0, ""};
-static volatile bool navDataUpdated = false;
-static volatile int16_t phoneBatteryLevelPercent = -1;
-static volatile bool phoneBatteryCharging = false;
-static bool bleSessionAuthenticated = false;
+static runtime_ownership::Snapshot<NavigationData,
+                                   runtime_ownership::CriticalSection> currentNavData;
+static std::atomic<int16_t> phoneBatteryLevelPercent{-1};
+static std::atomic<bool> phoneBatteryCharging{false};
+static std::atomic<bool> bleSessionAuthenticated{false};
 static bool bleSessionUsesIndependentMapProfiles = false;
 static bool bleSessionSupportsStreetLabels = false;
 static bool bleSessionSupports3DBuildings = false;
@@ -158,7 +160,8 @@ static std::atomic<bool> pendingDeviceTransferStatusContinuation{false};
 static map_transfer_status_protocol::ChunkTransmission
     pendingRendererDiagnosticsChunks;
 static std::atomic<bool> pendingRendererDiagnosticsContinuation{false};
-static BLEDebugStats bleDebugStats;
+static runtime_ownership::Snapshot<BLEDebugStats,
+                                   runtime_ownership::CriticalSection> bleDebugStats;
 static gps_input_freshness::State gpsFreshnessState;
 static_assert(BLE_HS_CONN_HANDLE_NONE == ble_connection_policy::noConnection,
               "single-connection policy must match NimBLE's empty handle");
@@ -523,10 +526,11 @@ static void applyOwnershipAdvertisingData() {
   ownershipAdvertisingDirty = false;
 }
 
-NavigationData getCurrentNavigationData() { return currentNavData; }
+NavigationData getCurrentNavigationData() { return currentNavData.read(); }
 
 bool hasCurrentNavigationData() {
-  return currentNavData.distance > 0 || currentNavData.instruction[0] != '\0';
+  const auto data = currentNavData.read();
+  return data.distance > 0 || data.instruction[0] != '\0';
 }
 
 int16_t getPhoneBatteryLevelPercent() { return phoneBatteryLevelPercent; }
@@ -713,7 +717,7 @@ BLENavigationServer::workoutStartRequestPresentation() const {
   using PolicyPresentation =
       scoped_watch_payload_policy::OwnerOnlyRequestPresentation;
   switch (scoped_watch_payload_policy::ownerOnlyRequestPresentation(
-      connected, bleSessionAuthenticated,
+      connected.load(), bleSessionAuthenticated.load(),
       mapTransferStatusCharacteristic != nullptr,
       currentRequestSessionRole())) {
   case PolicyPresentation::OwnerAction:
@@ -786,8 +790,7 @@ static uint32_t normalizedDisconnectedSleepTimeoutSeconds(int64_t rawSeconds) {
 }
 
 static void clearCurrentNavigationData() {
-  currentNavData = {0, 0, ""};
-  navDataUpdated = true;
+  currentNavData.publish({0, 0, ""});
   ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
 }
 
@@ -1218,16 +1221,17 @@ static void parseNavigationData(const std::string &data) {
     return;
   }
 
-  currentNavData.iconID = atoi(data.substr(0, firstPipe).c_str());
-  currentNavData.distance =
+  NavigationData next{};
+  next.iconID = atoi(data.substr(0, firstPipe).c_str());
+  next.distance =
       atoi(data.substr(firstPipe + 1, secondPipe - firstPipe - 1).c_str());
 
   std::string instruction = data.substr(secondPipe + 1);
-  strncpy(currentNavData.instruction, instruction.c_str(),
-          sizeof(currentNavData.instruction) - 1);
-  currentNavData.instruction[sizeof(currentNavData.instruction) - 1] = '\0';
+  strncpy(next.instruction, instruction.c_str(),
+          sizeof(next.instruction) - 1);
+  next.instruction[sizeof(next.instruction) - 1] = '\0';
+  currentNavData.publish(next);
 
-  navDataUpdated = true;
   static std::string lastDiagnosticInstruction;
   static uint32_t lastDiagnosticNavigationRecordMs = 0;
   const uint32_t nowMs = millis();
@@ -1246,8 +1250,8 @@ static void parseNavigationData(const std::string &data) {
   }
 
 #if FIRMWARE_DIAGNOSTICS
-  Serial.printf("BLE Nav: Icon=%d, Dist=%dm, Instr=%s\n", currentNavData.iconID,
-                currentNavData.distance, currentNavData.instruction);
+  Serial.printf("BLE Nav: Icon=%d, Dist=%dm, Instr=%s\n", next.iconID,
+                next.distance, next.instruction);
 #endif
   ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
 }
@@ -1257,8 +1261,10 @@ static bool requireAuthenticated(const char *payloadName) {
     return true;
   }
 
-  bleDebugStats.rejectedUnauthenticatedCount++;
-  bleDebugStats.lastRejectedUnauthenticatedMs = millis();
+  bleDebugStats.update([&](BLEDebugStats &stats) {
+    ++stats.rejectedUnauthenticatedCount;
+    stats.lastRejectedUnauthenticatedMs = millis();
+  });
   Serial.printf("BLE: Rejected %s: session is not authenticated\n",
                 payloadName == nullptr ? "payload" : payloadName);
   return false;
@@ -1325,13 +1331,17 @@ static bool unwrapOwnerAuthenticatedPayload(
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
     clearRendererWindowRequest();
-    bleDebugStats.authenticated = false;
+    bleDebugStats.update([&](BLEDebugStats &stats) {
+      stats.authenticated = false;
+    });
     ownershipDisconnectPending = true;
     Serial.println("BLE: Ownership session was lost; disconnect requested");
   }
   if (!accepted) {
-    bleDebugStats.rejectedUnauthenticatedCount++;
-    bleDebugStats.lastRejectedUnauthenticatedMs = millis();
+    bleDebugStats.update([&](BLEDebugStats &stats) {
+      ++stats.rejectedUnauthenticatedCount;
+      stats.lastRejectedUnauthenticatedMs = millis();
+    });
     Serial.printf("BLE: Rejected %s: invalid frame, role, or controller lease\n",
                   payloadName == nullptr ? "payload" : payloadName);
   }
@@ -1620,9 +1630,11 @@ static void completeBleSessionAuthentication() {
   // snapshot even when the 16-bit session token collides.
   workout_telemetry_runtime::beginAuthenticatedResynchronization();
   bleSessionAuthenticated = true;
-  bleDebugStats.authenticated = true;
-  bleDebugStats.authSuccessCount++;
-  bleDebugStats.lastAuthSuccessMs = millis();
+  bleDebugStats.update([&](BLEDebugStats &stats) {
+    stats.authenticated = true;
+    ++stats.authSuccessCount;
+    stats.lastAuthSuccessMs = millis();
+  });
   ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
                            "authenticated", "{}");
   queueOwnershipUiUpdate();
@@ -1895,7 +1907,9 @@ static void handleAuthPayload(const std::string &frame) {
       bleSessionSupportsRideDiagnostics.store(false,
                                               std::memory_order_release);
       clearRendererWindowRequest();
-      bleDebugStats.authenticated = false;
+      bleDebugStats.update([&](BLEDebugStats &stats) {
+        stats.authenticated = false;
+      });
       ownershipDisconnectPending = true;
       Serial.println("BLE: Ownership command invalidated session; disconnect requested");
     }
@@ -1947,7 +1961,9 @@ static void handleAuthPayload(const std::string &frame) {
                 bleSessionSupportsRendererBenchmarkSample.store(
                     false, std::memory_order_release);
                 clearRendererWindowRequest();
-                bleDebugStats.authenticated = false;
+                bleDebugStats.update([&](BLEDebugStats &stats) {
+                  stats.authenticated = false;
+                });
                 ownershipAdvertisingDirty = true;
                 ownershipRestartRequested = true;
                 ownershipRestartRequestedMs = millis();
@@ -2046,8 +2062,10 @@ static void handleAuthPayload(const std::string &frame) {
     pendingAuthNonce[sizeof(pendingAuthNonce) - 1] = '\0';
     snprintf(response, sizeof(response), "SERVER|%s|%s", nonce, mac);
     notifyAuthResponse(response);
-    bleDebugStats.authChallengeCount++;
-    bleDebugStats.lastAuthChallengeMs = millis();
+    bleDebugStats.update([&](BLEDebugStats &stats) {
+      ++stats.authChallengeCount;
+      stats.lastAuthChallengeMs = millis();
+    });
     Serial.println("BLE: Auth challenge answered");
     return;
   }
@@ -2129,7 +2147,7 @@ static bool handleSoundPlayCommand(const std::string &value,
   waveshare_board::speaker::PlaybackRequest request{};
   const auto result = waveshare_board::speaker::classifyPlayCommand(
       reinterpret_cast<const uint8_t *>(value.data()), value.length(),
-      bleSessionAuthenticated, request);
+      bleSessionAuthenticated.load(), request);
   if (result == waveshare_board::speaker::PlayCommandResult::NotMatched) {
     return false;
   }
@@ -2159,7 +2177,7 @@ static bool handlePowerButtonHonkCommand(const std::string &value,
   const auto result =
       waveshare_board::speaker::classifyPowerButtonHonkCommand(
           reinterpret_cast<const uint8_t *>(value.data()), value.length(),
-          bleSessionAuthenticated, command);
+          bleSessionAuthenticated.load(), command);
   if (result == waveshare_board::speaker::PlayCommandResult::NotMatched) {
     return false;
   }
@@ -4119,8 +4137,10 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     lastRouteLen = 0;
     Serial.printf("BLE: %s route geometry cleared\n",
                   source == nullptr ? "unknown" : source);
-    bleDebugStats.routePacketCount++;
-    bleDebugStats.lastRoutePacketMs = millis();
+    bleDebugStats.update([&](BLEDebugStats &stats) {
+      ++stats.routePacketCount;
+      stats.lastRoutePacketMs = millis();
+    });
     routeOverlay.clear();
     clearCurrentNavigationData();
     requestMapRender(map_render_policy::Reason::Route);
@@ -4162,16 +4182,19 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     return;
   }
 
-  lastRouteHash = hash;
-  lastRouteLen = len;
 
   Serial.printf("BLE: %s route geometry received: %u bytes\n",
                 source == nullptr ? "unknown" : source, (unsigned)len);
-  bleDebugStats.routePacketCount++;
-  bleDebugStats.lastRoutePacketMs = millis();
+  bleDebugStats.update([&](BLEDebugStats &stats) {
+    ++stats.routePacketCount;
+    stats.lastRoutePacketMs = millis();
+  });
 
   const bool hadRoute = routeOverlay.hasRoute();
-  routeOverlay.parseRouteData(data, len);
+  if (!routeOverlay.parseRouteData(data, len))
+    return; // Preserve retry admission and the previous route on resource rejection.
+  lastRouteHash = hash;
+  lastRouteLen = len;
   // Route geometry is a live foreground input, not part of the expensive base
   // frame. Only a transition into or out of usable route geometry forces a
   // base request; ordinary sliding-window replacement is picked up on the next
@@ -4213,10 +4236,12 @@ static void handleGpsPayload(
 #endif
 
   gpsFreshnessState.accept(arrivals);
-  bleDebugStats.gpsPacketCount = gpsFreshnessState.packetCount;
-  bleDebugStats.lastGpsPacketMs = gpsFreshnessState.lastPacketMs;
-  bleDebugStats.lastGpsPacketGapMs = gpsFreshnessState.lastGapMs;
-  bleDebugStats.maximumGpsPacketGapMs = gpsFreshnessState.maximumGapMs;
+  bleDebugStats.update([&](BLEDebugStats &stats) {
+    stats.gpsPacketCount = gpsFreshnessState.packetCount;
+    stats.lastGpsPacketMs = gpsFreshnessState.lastPacketMs;
+    stats.lastGpsPacketGapMs = gpsFreshnessState.lastGapMs;
+    stats.maximumGpsPacketGapMs = gpsFreshnessState.maximumGapMs;
+  });
 
   const uint32_t nowMs = millis();
   const uint32_t previousDiagnosticGpsLogMs =
@@ -4232,8 +4257,8 @@ static void handleGpsPayload(
              packet.fixValid ? "true" : "false",
              packet.hasSpeed ? "true" : "false",
              packet.hasHorizontalAccuracy ? "true" : "false",
-             static_cast<unsigned long>(bleDebugStats.lastGpsPacketGapMs),
-             static_cast<unsigned long>(bleDebugStats.maximumGpsPacketGapMs));
+             static_cast<unsigned long>(bleDebugStats.read().lastGpsPacketGapMs),
+             static_cast<unsigned long>(bleDebugStats.read().maximumGpsPacketGapMs));
     ride_diagnostics::record(ride_diagnostics::Level::Info, "gps",
                              "quality_checkpoint", fields);
   }
@@ -4271,8 +4296,8 @@ static void handleGpsPayload(
 #else
                 0,
 #endif
-                (unsigned long)bleDebugStats.lastGpsPacketGapMs,
-                (unsigned long)bleDebugStats.maximumGpsPacketGapMs
+                (unsigned long)bleDebugStats.read().lastGpsPacketGapMs,
+                (unsigned long)bleDebugStats.read().maximumGpsPacketGapMs
   );
 #endif
 
@@ -4330,8 +4355,10 @@ handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
 
 static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                              const char *source) {
-  bleDebugStats.settingsPacketCount++;
-  bleDebugStats.lastSettingsPacketMs = millis();
+  bleDebugStats.update([&](BLEDebugStats &stats) {
+    ++stats.settingsPacketCount;
+    stats.lastSettingsPacketMs = millis();
+  });
   if (settingId == map_profile_protocol::MAP_NAVIGATION_ROTATION_SETTING_ID &&
       (!map_profile_protocol::STABLE_CAMERA_ENABLED ||
        !bleSessionSupportsMapNavigationOrientation))
@@ -4603,7 +4630,7 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     }
     phoneBatteryLevelPercent = static_cast<int16_t>(settingValue);
     Serial.printf("BLE Settings: phoneBatteryLevel = %d%%\n",
-                  phoneBatteryLevelPercent);
+                  phoneBatteryLevelPercent.load());
     return;
   case 24:
     if (settingValue < 0 || settingValue > 1) {
@@ -4997,10 +5024,12 @@ public:
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
     ownershipDisconnectPending = false;
-    bleDebugStats.connected = true;
-    bleDebugStats.authenticated = false;
-    bleDebugStats.connectCount++;
-    bleDebugStats.lastConnectMs = millis();
+    bleDebugStats.update([&](BLEDebugStats &stats) {
+      stats.connected = true;
+      stats.authenticated = false;
+      ++stats.connectCount;
+      stats.lastConnectMs = millis();
+    });
     pendingAuthNonce[0] = '\0';
     if (deviceOwnershipReady) {
       queueOwnershipUiUpdate();
@@ -5083,13 +5112,17 @@ public:
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
     ownershipDisconnectPending = false;
-    bleDebugStats.connected = false;
-    bleDebugStats.authenticated = false;
+    bleDebugStats.update([&](BLEDebugStats &stats) {
+      stats.connected = false;
+      stats.authenticated = false;
+    });
     ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
                              "disconnected", "{}");
     ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
-    bleDebugStats.disconnectCount++;
-    bleDebugStats.lastDisconnectMs = millis();
+    bleDebugStats.update([&](BLEDebugStats &stats) {
+      ++stats.disconnectCount;
+      stats.lastDisconnectMs = millis();
+    });
     pendingAuthNonce[0] = '\0';
     if (deviceOwnershipReady) {
       if (ownershipAdvertisingDirty) {
@@ -5171,8 +5204,10 @@ public:
     if (scopedWatchSession &&
         !scoped_watch_payload_policy::allowsNavigationPayload(
             reinterpret_cast<const uint8_t *>(value.data()), value.size())) {
-      bleDebugStats.rejectedUnauthenticatedCount++;
-      bleDebugStats.lastRejectedUnauthenticatedMs = millis();
+      bleDebugStats.update([&](BLEDebugStats &stats) {
+        ++stats.rejectedUnauthenticatedCount;
+        stats.lastRejectedUnauthenticatedMs = millis();
+      });
       Serial.println(
           "BLE: Rejected privileged multiplexed command from scoped Watch");
       if (hasDeliveryMember) {
@@ -5312,8 +5347,10 @@ public:
 #if FIRMWARE_DIAGNOSTICS
     Serial.printf("BLE Nav received: %u bytes\n", (unsigned)value.length());
 #endif
-    bleDebugStats.navPacketCount++;
-    bleDebugStats.lastNavPacketMs = millis();
+    bleDebugStats.update([&](BLEDebugStats &stats) {
+      ++stats.navPacketCount;
+      stats.lastNavPacketMs = millis();
+    });
     parseNavigationData(value);
     if (hasDeliveryMember) {
       noteRideDeliveryMember(deliveryMember,
@@ -5939,9 +5976,11 @@ void BLENavigationServer::init(const char *deviceName) {
   pAdvertising->start();
 
   initialized = true;
-  bleDebugStats.initialized = true;
-  bleDebugStats.connected = connected;
-  bleDebugStats.authenticated = bleSessionAuthenticated;
+  bleDebugStats.update([&](BLEDebugStats &stats) {
+    stats.initialized = true;
+    stats.connected = connected;
+    stats.authenticated = bleSessionAuthenticated;
+  });
   Serial.printf("BLE: Server started, advertising as '%s'\n",
                 effectiveDeviceName.c_str());
 }
@@ -6042,7 +6081,7 @@ void BLENavigationServer::process() {
   }
   if (connected && !bleSessionAuthenticated &&
       !unauthTimeoutDisconnectRequested &&
-      millis() - bleDebugStats.lastConnectMs > unauthenticatedLimitMs) {
+      millis() - bleDebugStats.read().lastConnectMs > unauthenticatedLimitMs) {
     Serial.println("BLE: Disconnecting unauthenticated client after timeout");
     unauthTimeoutDisconnectRequested = true;
     if (pServer != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
@@ -6053,9 +6092,11 @@ void BLENavigationServer::process() {
 #if FIRMWARE_DIAGNOSTICS
   if (millis() - lastLog > 5000) {
     lastLog = millis();
-    bleDebugStats.initialized = initialized;
-    bleDebugStats.connected = connected;
-    bleDebugStats.authenticated = bleSessionAuthenticated;
+    bleDebugStats.update([&](BLEDebugStats &stats) {
+      stats.initialized = initialized;
+      stats.connected = connected;
+      stats.authenticated = bleSessionAuthenticated;
+    });
 
     if (connected) {
       Serial.println("BLE Status: CONNECTED");
@@ -6068,27 +6109,28 @@ void BLENavigationServer::process() {
 
     const device_ownership::CryptoResourceDiagnostics cryptoResources =
         device_ownership::cryptoResourceDiagnostics();
+    const BLEDebugStats logStats = bleDebugStats.read();
     Serial.printf("BLE Debug: up=%lus init=%d conn=%d auth=%d connects=%lu "
                   "disconnects=%lu authOK=%lu nav=%lu route=%lu gps=%lu "
                   "settings=%lu rejectAuth=%lu lastMs[c=%lu a=%lu n=%lu r=%lu "
                   "g=%lu s=%lu rej=%lu] gpsGapMs[last=%lu max=%lu] "
                   "cryptoDma[free=%lu largest=%lu minFree=%lu minLargest=%lu "
                   "rejected=%lu failed=%lu]\n",
-                  millis() / 1000, initialized, connected,
-                  bleSessionAuthenticated, bleDebugStats.connectCount,
-                  bleDebugStats.disconnectCount, bleDebugStats.authSuccessCount,
-                  bleDebugStats.navPacketCount, bleDebugStats.routePacketCount,
-                  bleDebugStats.gpsPacketCount,
-                  bleDebugStats.settingsPacketCount,
-                  bleDebugStats.rejectedUnauthenticatedCount,
-                  bleDebugStats.lastConnectMs, bleDebugStats.lastAuthSuccessMs,
-                  bleDebugStats.lastNavPacketMs,
-                  bleDebugStats.lastRoutePacketMs,
-                  bleDebugStats.lastGpsPacketMs,
-                  bleDebugStats.lastSettingsPacketMs,
-                  bleDebugStats.lastRejectedUnauthenticatedMs,
-                  bleDebugStats.lastGpsPacketGapMs,
-                  bleDebugStats.maximumGpsPacketGapMs,
+                  millis() / 1000, initialized.load(), connected.load(),
+                  bleSessionAuthenticated.load(), logStats.connectCount,
+                  logStats.disconnectCount, logStats.authSuccessCount,
+                  logStats.navPacketCount, logStats.routePacketCount,
+                  logStats.gpsPacketCount,
+                  logStats.settingsPacketCount,
+                  logStats.rejectedUnauthenticatedCount,
+                  logStats.lastConnectMs, logStats.lastAuthSuccessMs,
+                  logStats.lastNavPacketMs,
+                  logStats.lastRoutePacketMs,
+                  logStats.lastGpsPacketMs,
+                  logStats.lastSettingsPacketMs,
+                  logStats.lastRejectedUnauthenticatedMs,
+                  logStats.lastGpsPacketGapMs,
+                  logStats.maximumGpsPacketGapMs,
                   static_cast<unsigned long>(cryptoResources.current.dmaFree),
                   static_cast<unsigned long>(
                       cryptoResources.current.dmaLargest),
@@ -6120,7 +6162,7 @@ void BLENavigationServer::setNavigationActivity(bool active) {
 }
 
 BLEDebugStats BLENavigationServer::getDebugStats() const {
-  BLEDebugStats stats = bleDebugStats;
+  BLEDebugStats stats = bleDebugStats.read();
   stats.initialized = initialized;
   stats.connected = connected;
   stats.authenticated = bleSessionAuthenticated;
@@ -6188,7 +6230,9 @@ bool BLENavigationServer::forgetOwner() {
       std::memory_order_release);
   clearRendererWindowRequest();
   clearAuthenticatedBleGpsRideObservation();
-  bleDebugStats.authenticated = false;
+  bleDebugStats.update([&](BLEDebugStats &stats) {
+    stats.authenticated = false;
+  });
   // Physical owner recovery is an immediate authorization boundary. Revoke
   // the token before the scheduled restart rather than relying on that later
   // restart to eventually tear the session down.

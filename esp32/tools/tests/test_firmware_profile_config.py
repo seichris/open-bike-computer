@@ -250,6 +250,14 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y" in sdkconfig
     assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n" not in sdkconfig
     assert "CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y" in sdkconfig
+    for watchdog_setting in (
+        "CONFIG_ESP_TASK_WDT_INIT=y",
+        "CONFIG_ESP_TASK_WDT_PANIC=y",
+        "CONFIG_ESP_TASK_WDT_TIMEOUT_S=5",
+        "CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y",
+        "CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n",
+    ):
+        assert watchdog_setting in inherited_option(environment, "custom_sdkconfig")
     assert "CONFIG_ARDUINO_LOOP_STACK_SIZE=16384" in sdkconfig
     assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in sdkconfig
     assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536" in sdkconfig

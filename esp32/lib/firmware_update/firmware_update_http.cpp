@@ -259,7 +259,8 @@ static bool verifyManifestSignature(const std::string &payload,
 void FirmwareUpdateHttpServer::configure(
     device_transfer::HttpTransferServer *sharedServer, uint16_t port) {
   if (stateMutex_ == nullptr)
-    stateMutex_ = xSemaphoreCreateMutex();
+    stateMutex_ = xSemaphoreCreateMutexStatic(&stateMutexStorage_);
+  configASSERT(stateMutex_ != nullptr);
   transferServer_ = sharedServer == nullptr ? &ownedTransferServer_ : sharedServer;
   if (sharedServer == nullptr)
     transferServer_->configure(port, "BikeComputer-Transfer");
@@ -267,10 +268,12 @@ void FirmwareUpdateHttpServer::configure(
 }
 
 bool FirmwareUpdateHttpServer::setEnabled(bool enabled) {
-  if (!enabled)
-    resetUploadState();
+  // UI/callback callers revoke admission only. The HTTP owner aborts after
+  // the last begin/write/end call has unwound, including idle uploads.
   return transferServer_->setEnabled(enabled, enabled ? "firmware" : "");
 }
+
+void FirmwareUpdateHttpServer::workerWillStop() { resetUploadState(); }
 
 void FirmwareUpdateHttpServer::setLastError(const std::string &code,
                                             const std::string &message) {

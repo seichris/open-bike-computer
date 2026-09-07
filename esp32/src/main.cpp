@@ -1868,6 +1868,9 @@ void setup() {
       [] { return storage.getSdLoaded(); });
   mapTransferHttp.setStreamStorageAvailable(sdResult == ESP_OK &&
                                             storage.getSdLoaded());
+  mapTransferHttp.setStorageControlSubmit([](void (*work)(void *), void *context) {
+    return mapView.requestStorageControl(work, context);
+  });
   firmwareUpdateHttp.configure(&deviceTransferHttp);
   deviceDebugHttp.configure(&deviceTransferHttp);
   rideDiagnosticsHttp.configure(&deviceTransferHttp);
@@ -1968,6 +1971,8 @@ void setup() {
 #endif
 
   log_i("Setup Complete");
+  Serial.printf("RIDE_DIAGNOSTICS: recorder_ready=%u ui_ready=1\n",
+                ride_diagnostics::recorderReady() ? 1U : 0U);
   ride_diagnostics::record(ride_diagnostics::Level::Info, "lifecycle",
                            "ready", "{}");
   (void)ride_diagnostics::recordHealth("ready");
@@ -2142,44 +2147,33 @@ void loop() {
       }
     }
 
-    std::string labelRuntimeFailure;
+    static std::string labelRuntimeFailure;
+    static bool labelRollbackQueued = false;
     if (pendingMapRendererActivation.source ==
             PendingMapRendererActivationSource::None &&
-        mapView.takeStreetLabelRuntimeFailure(labelRuntimeFailure)) {
-      map_transfer::MapTransferInstaller mapInstaller("/sdcard");
-      map_transfer::ActiveMapSelection failedSelection;
-      const map_transfer::InstallStatus activeStatus =
-          mapInstaller.readActiveMap(failedSelection);
-      map_transfer::InstallStatus rollbackStatus{
-          false, "active_rollback_unavailable", "active map is unavailable"};
-      bool restorationAvailable = false;
-      std::string restoredRoot;
-      if (activeStatus.ok && !failedSelection.sessionId.empty()) {
-        rollbackStatus =
-            mapInstaller.rollbackActiveMap(failedSelection.sessionId);
-        map_transfer::ActiveMapSelection restored;
-        if (rollbackStatus.ok && mapInstaller.readActiveMap(restored).ok) {
-          restoredRoot = std::string("/sdcard") + restored.root;
-          restorationAvailable = true;
-          pendingMapRendererActivation = {
-              PendingMapRendererActivationSource::LabelRollback,
-              restoredRoot, {}, labelRuntimeFailure, rollbackStatus.code,
-              mapDiagnosticIdentity(restored), false, now};
-        }
-      }
-      if (!restorationAvailable) {
+        !labelRollbackQueued) {
+      if (labelRuntimeFailure.empty())
+        mapView.takeStreetLabelRuntimeFailure(labelRuntimeFailure);
+      if (!labelRuntimeFailure.empty())
+        labelRollbackQueued = mapTransferHttp.requestRuntimeRollback();
+    }
+    map_transfer::ActiveMapSelection restored;
+    bool rollbackSucceeded = false;
+    if (labelRollbackQueued &&
+        mapTransferHttp.takeRuntimeRollback(restored, rollbackSucceeded)) {
+      if (rollbackSucceeded) {
+        pendingMapRendererActivation = {
+            PendingMapRendererActivationSource::LabelRollback,
+            std::string("/sdcard") + restored.root, {}, labelRuntimeFailure,
+            "rollback", mapDiagnosticIdentity(restored), false, now};
+      } else {
         rendererMapDiagnosticIdentity = {};
-        const RendererMapDiagnosticIdentity failedIdentity =
-            activeStatus.ok ? mapDiagnosticIdentity(failedSelection)
-                            : RendererMapDiagnosticIdentity{};
         recordMapDiagnostic(ride_diagnostics::Level::Warning,
                             "runtime_rollback_completed", "runtime_rollback",
-                            "failed", rollbackStatus.code.c_str(),
-                            &failedIdentity, true);
-        Serial.printf("MAP_TRANSFER: runtime label failure=%s rollback=%s "
-                      "restored=0\n",
-                      labelRuntimeFailure.c_str(), rollbackStatus.code.c_str());
+                            "failed", "rollback_failed", nullptr, true);
       }
+      labelRuntimeFailure.clear();
+      labelRollbackQueued = false;
     }
 
     // A worker restart handoff or a briefly-held render mutex can make the
@@ -2258,6 +2252,7 @@ void loop() {
 #endif
     updateMapActivationProgressOverlay();
     deviceTransferHttp.process();
+    mapTransferHttp.submitPendingRollback();
   }
 
   const BLEDebugStats bleStatsBeforeWork = bleNavServer.getDebugStats();

@@ -357,6 +357,12 @@ jobs:
       - name: Firmware manifest tests
         run: python3 -m unittest discover -s tools/tests
         working-directory: ${{ github.workspace }}
+      - name: Runtime ownership and allocation recovery tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -pthread \
+            tools/tests/test_runtime_ownership.cpp -o /tmp/test_runtime_ownership
+          /tmp/test_runtime_ownership
+          python3 tools/tests/test_runtime_ownership_contract.py
       - name: Ride diagnostics and watchdog host tests
         run: |
           for test in \
