@@ -97,3 +97,42 @@ exercise both boards with concurrent BLE, maps, SD recovery, HTTP/OTA and audio;
 inject allocation failures; cancel at begin/write/end; and capture watchdog,
 heap/stack, display and power evidence. Full-screen buffering/FULL refresh remains
 a requirement, not a performance shortcut removed by this change.
+
+
+## Current-main integration review — 2026-09-08
+
+Integrated main `25b6352e69c39af66369743b57dd6f76c92c5e91` into the
+existing implementation, retaining the newer #422 fail-closed boot-confirmation
+sequence. The only merge conflict is `esp32/src/main.cpp`: recorder readiness
+must be reported after startup completion, running-image confirmation and boot
+readiness, never by restoring the older early confirmation block. A regression
+in `test_runtime_ownership_contract.py` checks this ordering and rejects duplicate
+confirmation/ready calls.
+
+The earlier PR comment attributing CI failure to `test_vector_runtime.cpp` and
+13 `CHECK` macro errors is withdrawn: that file is absent from this pinned
+repository tree. It is not a verified defect in this PR. Integration decisions
+use the checksum-verified Git bundle and actual source/tests instead.
+
+Local integration evidence (Linux host, not an ESP32 or Apple build):
+
+- The real threaded ownership/allocation C++ executable passed with
+  `-std=c++17 -Wall -Wextra -Werror -pthread`.
+- All 8 runtime ownership source-contract tests passed, including the new
+  startup/confirmation regression.
+- Root tooling: 97 tests passed. Workflow tooling: 78 tests passed.
+- Full firmware Python discovery ran 455 tests but is **not green** locally:
+  the pre-connection asset module cannot import the unavailable `zxingcpp`
+  dependency. No assertion failures were reported. CI must install the pinned
+  asset requirements and execute the complete suite.
+- Generated BLE contract verification and whitespace checks passed.
+
+Exact published-head CI must be recorded separately after the branch update.
+No native iOS/Watch builds, firmware compilation, device access, flashing, OTA,
+release, deployment or physical qualification occurred in this integration.
+The original implementation's historical results above are not fresh evidence.
+
+**Merge qualification remains open:** these changes affect production-enabled
+hardware paths. Per AGENTS.md, merge requires separate 1.75-inch and 2.06-inch
+qualification or explicit, recorded maintainer acceptance of the residual risk.
+No such hardware-risk exception is inferred from a general request to merge.

@@ -8195,10 +8195,10 @@ private struct WorkoutContractTestSuite {
                 && compactContent.contains(
                     "onRouteAlternativeSelected:{coordinator.selectRouteAlternative($0)}"
                 )
-                && compactContent.contains(
+                && !compactContent.contains(
                     "Taparouteonthemap,orchoosebelow.Yourworkoutkeepsrunning."
                 ),
-            "route alternatives must render and remain selectable on the map while the buttons stay available"
+            "route alternatives must render and remain selectable on the map while the buttons stay available without redundant helper copy"
         )
         expect(
             compactContent.contains("mapControlsBottomPadding(in:proxy)")

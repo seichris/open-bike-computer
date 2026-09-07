@@ -83,6 +83,21 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         self.assertIn("std::unique_ptr<MapBlock> blockOwner", maps)
         self.assertIn("result.folder = std::move(completedVectorMapActivation.folder)", maps)
 
+    def test_ready_reporting_follows_boot_confirmation(self):
+        main = source("src/main.cpp")
+        setup = main[main.index("void setup()") : main.index("void loop()")]
+        # Keep current-main's fail-closed confirmation: no early acceptance
+        # or duplicate ready records while integrating recorder observability.
+        confirmation = setup.index("!firmwareUpdateHttp.markRunningAppValid()")
+        ready = setup.index("boot_diagnostics::markReady()")
+        recorder = setup.index("recorder_ready=%u ui_ready=1")
+        self.assertEqual(setup.count("markRunningAppValid()"), 1)
+        self.assertEqual(setup.count('log_i("Setup Complete")'), 1)
+        self.assertLess(setup.index("power_management::completeStartup()"), confirmation)
+        self.assertLess(confirmation, ready)
+        self.assertLess(ready, recorder)
+        self.assertLess(setup.index("firmwareUpdateHttp.rejectRunningApp()"), ready)
+
     def test_recorder_reports_degraded_startup(self):
         recorder = source("lib/ride_diagnostics/ride_diagnostics.cpp")
         self.assertIn("recorderResourcesReady.store(resourcesReady", recorder)

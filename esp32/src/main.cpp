@@ -1467,6 +1467,7 @@ void setup() {
       runtime_watchdog_diagnostics::Role::Ui,
       runtime_watchdog_diagnostics::Phase::Setup);
   if (boot_diagnostics::safeModeActive()) {
+    firmwareUpdateHttp.rejectRunningApp();
     // setup() returns into a deliberately inert loop. No I2C, PMIC, display,
     // storage, speaker, radio, or charging-control initialization is attempted.
     return;
@@ -1970,19 +1971,32 @@ void setup() {
   displayInactivityPolicy.begin(millis());
 #endif
 
+  mapTransferHttp.resumePendingActivations();
+  power_management::completeStartup();
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::Finalization);
+  const auto completedBoot = boot_diagnostics::snapshot();
+  if (completedBoot.safeMode || completedBoot.diagnosticHold ||
+      completedBoot.completedStage != boot_diagnostics::Stage::Finalization ||
+      !firmwareUpdateHttp.markRunningAppValid()) {
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Error, "boot",
+                                   "confirmation_failed", "{}");
+    firmwareUpdateHttp.rejectRunningApp();
+    ESP.restart();
+    return;
+  }
+  boot_diagnostics::markReady();
+  const std::string acceptance = firmwareUpdateHttp.bootAcceptanceJson(
+      boot_diagnostics::snapshot().ready);
+  (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "boot",
+                                "acceptance", acceptance.c_str());
+#endif
   log_i("Setup Complete");
   Serial.printf("RIDE_DIAGNOSTICS: recorder_ready=%u ui_ready=1\n",
                 ride_diagnostics::recorderReady() ? 1U : 0U);
   ride_diagnostics::record(ride_diagnostics::Level::Info, "lifecycle",
                            "ready", "{}");
   (void)ride_diagnostics::recordHealth("ready");
-  firmwareUpdateHttp.markRunningAppValid();
-  mapTransferHttp.resumePendingActivations();
-  power_management::completeStartup();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  boot_diagnostics::completeStage(boot_diagnostics::Stage::Finalization);
-  boot_diagnostics::markReady();
-#endif
 }
 
 /**
