@@ -1299,8 +1299,8 @@ extension BikeComputerCoordinator {
                 }
 
                 if presentsAlternatives {
-                    let alternatives = routes.compactMap { candidate ->
-                        NavigationRouteAlternativeV1? in
+                    let alternatives = routes.enumerated().compactMap {
+                        index, candidate -> (index: Int, candidate: MKRoute, name: String)? in
                         do {
                             let normalizedInitialLocation =
                                 MapKitRouteAdapter.normalizedLocation(
@@ -1320,15 +1320,34 @@ extension BikeComputerCoordinator {
                             print("Ignoring invalid route alternative: \(error)")
                             return nil
                         }
-                        return NavigationRouteAlternativeV1(
+                        return (
+                            index: index,
+                            candidate: candidate,
+                            name: candidate.name
+                        )
+                    }
+                    .sorted { lhs, rhs in
+                        if lhs.candidate.expectedTravelTime !=
+                            rhs.candidate.expectedTravelTime {
+                            return lhs.candidate.expectedTravelTime <
+                                rhs.candidate.expectedTravelTime
+                        }
+                        if lhs.candidate.distance != rhs.candidate.distance {
+                            return lhs.candidate.distance < rhs.candidate.distance
+                        }
+                        return lhs.index < rhs.index
+                    }
+                    .enumerated()
+                    .map { displayIndex, entry in
+                        NavigationRouteAlternativeV1(
                             id: UUID(),
-                            route: candidate,
-                            title: candidate.name.isEmpty
-                                ? "Route \(routes.firstIndex(where: { $0 === candidate }).map { $0 + 1 } ?? 1)"
-                                : candidate.name,
-                            distanceMeters: candidate.distance,
-                            expectedTravelTime: candidate.expectedTravelTime,
-                            advisoryNotices: candidate.advisoryNotices
+                            route: entry.candidate,
+                            title: entry.name.isEmpty
+                                ? "Route \(displayIndex + 1)"
+                                : entry.name,
+                            distanceMeters: entry.candidate.distance,
+                            expectedTravelTime: entry.candidate.expectedTravelTime,
+                            advisoryNotices: entry.candidate.advisoryNotices
                         )
                     }
                     guard let selected = alternatives.first else {
@@ -1338,6 +1357,30 @@ extension BikeComputerCoordinator {
                         self.alert.isShowing = true
                         return
                     }
+
+                    if alternatives.count == 1 {
+                        print("Route calculated successfully!")
+                        print("Distance: \(selected.distanceMeters)m, ETA: \(selected.expectedTravelTime)s")
+                        print("Steps: \(selected.route.steps.count)")
+
+                        self.routeCalculation.status = "Starting navigation..."
+                        self.beginNavigation(
+                            with: selected.route,
+                            destination: destinationItem,
+                            transportType: requestedTransportType,
+                            isTestMode: isTestMode,
+                            initialLocation: initialLocation
+                        )
+                        self.completeNavigationStart(.started, generation: generation)
+
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                            guard self.routeCalculationGeneration == generation else { return }
+                            self.routeCalculation.isCalculating = false
+                            self.routeCalculation.status = ""
+                        }
+                        return
+                    }
+
                     self.pendingRoutePlan = PendingRoutePlan(
                         alternatives: alternatives,
                         destination: destinationItem,
