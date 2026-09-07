@@ -1,0 +1,60 @@
+name: Validate and publish reconciled PR420
+on:
+  push:
+    branches: [review/pr-integration-snapshot-2026-09-08]
+    paths: [.github/workflows/review-publish-420.yml]
+permissions:
+  contents: write
+jobs:
+  reconcile:
+    if: github.ref == 'refs/heads/review/pr-integration-snapshot-2026-09-08'
+    runs-on: macos-latest
+    timeout-minutes: 35
+    env:
+      EXPECTED_HEAD: 7615e418eb535789eb9103fa106650641421cc5f
+      REVIEWED_MAIN: 25b6352e69c39af66369743b57dd6f76c92c5e91
+      EXPECTED_TREE: 8a4a4aa675d82f8197feac4b9ae2b1ac58cf30fd
+      PR_BRANCH: fix/workout-lifecycle-recovery
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: bb2852ca4a0122a9bcb80442abaa5b0f65ee3177
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Construct the reviewed journal-only integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .github/review-integration/reconcile-420.py "$RUNNER_TEMP/reconcile-420.py"
+          git ls-remote origin "refs/heads/$PR_BRANCH" refs/heads/main
+          test "$(git ls-remote origin "refs/heads/$PR_BRANCH" | cut -f1)" = "$EXPECTED_HEAD"
+          git fetch --no-tags origin "$EXPECTED_HEAD" "$REVIEWED_MAIN"
+          git switch --detach "$REVIEWED_MAIN"
+          python3 "$RUNNER_TEMP/reconcile-420.py"
+          git add -A
+          git diff --cached --check
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+          python3 tools/generate_ride_ble_contract.py --check
+          git diff --cached --exit-code "$REVIEWED_MAIN" -- esp32 ios-app/BikeComputer/BikeComputerWatch ios-app/BikeComputer/RideShared ios-app/BikeComputer/WorkoutShared
+      - name: Run production journal and crash-relaunch host regressions
+        run: ./scripts/run-workout-contract-tests.sh
+        working-directory: ios-app
+      - name: Run iOS workout and real coordinator regression tests
+        run: ./scripts/run-workout-platform-tests.sh ios
+        working-directory: ios-app
+      - name: Publish only the reviewed PR branch
+        shell: bash
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+          test "$(git ls-remote origin "refs/heads/$PR_BRANCH" | cut -f1)" = "$EXPECTED_HEAD"
+          git config user.name 'Chris'
+          git config user.email '25006584+seichris@users.noreply.github.com'
+          commit=$(git commit-tree "$EXPECTED_TREE" -p "$EXPECTED_HEAD" -p "$REVIEWED_MAIN" -m 'Reconcile PR420 with current main and retain only the atomic decision journal')
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 | tr -d '\n')" \
+            push origin "$commit:refs/heads/$PR_BRANCH"
+          git show -s --format='Published %H tree=%T' "$commit"
