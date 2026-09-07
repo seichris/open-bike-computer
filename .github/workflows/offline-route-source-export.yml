@@ -38,14 +38,14 @@ jobs:
           git fetch --no-tags --depth=32 origin b8282d3954b59fde7f551856bf8242e8024a274e
           if ! git merge --no-commit --no-ff b8282d3954b59fde7f551856bf8242e8024a274e; then
             test "$(git diff --name-only --diff-filter=U)" = 'ios-app/scripts/run-navigation-tests.sh'
-            git checkout --theirs ios-app/scripts/run-navigation-tests.sh
             python3 - <<'PY'
           from pathlib import Path
           path = Path('ios-app/scripts/run-navigation-tests.sh')
           text = path.read_text()
-          hook = 'bash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"'
-          assert text.count(hook) == 1
-          text = text.replace(hook, '"${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"\n' + hook, 1)
+          assert text.count('<<<<<<< ') == 1
+          # Preserve both hooks AND all nonconflicting changes from both parents.
+          # The following whole-tree hash guard verifies the exact resolution.
+          text = ''.join(line for line in text.splitlines(True) if not line.startswith(('<<<<<<< ', '=======', '>>>>>>> ')))
           path.write_text(text)
           PY
             git add ios-app/scripts/run-navigation-tests.sh
