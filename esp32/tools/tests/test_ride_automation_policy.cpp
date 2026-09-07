@@ -1,5 +1,6 @@
 #include "../../lib/ride_automation/ride_automation_runtime.hpp"
 #include "../../lib/ride_automation/ride_automation_trace.hpp"
+#include "../../lib/ride_automation/ride_automation_protocol.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -120,6 +121,53 @@ int main() {
   Settings ask;
   ask.startMode = StartMode::Ask;
   ask.autoPauseEnabled = true;
+
+  // The real detector output must survive the decision wire contract.
+  for (bool resume : {false, true}) {
+    RideAutomationPolicy policy;
+    Decision emitted;
+    const uint32_t duration = resume ? 2'000 : 5'000;
+    for (uint32_t t = 0; t <= duration; t += 1'000)
+      emitted = policy.update(t, watchGps(resume ? 3.0F : 0.0F, t, t / 1'000 + 1),
+          resume ? ConfirmedLifecycle::AutomaticallyPaused : ConfirmedLifecycle::Running, ask);
+    assert(emitted);
+    ride_automation_protocol::Frame frame;
+    frame.transition = static_cast<ride_automation_protocol::Transition>(emitted.transition);
+    frame.origin = ride_automation_protocol::Origin::Automatic;
+    frame.rideGeneration = 1;
+    frame.decisionSequence = emitted.sequence;
+    frame.evidenceMask = emitted.evidenceMask;
+    frame.sourceHealthMask = emitted.sourceHealthMask;
+    frame.profileVersion = emitted.profileVersion;
+    uint8_t bytes[ride_automation_protocol::FRAME_SIZE]{};
+    assert(frame.sourceHealthMask == SourceHealthWatchGpsFresh);
+    assert(ride_automation_protocol::encode(frame, bytes, sizeof(bytes)));
+    ride_automation_protocol::Frame decoded;
+    assert(ride_automation_protocol::decode(bytes, sizeof(bytes), decoded));
+    assert(decoded.sourceHealthMask == frame.sourceHealthMask);
+  }
+  for (int veto = 0; veto != 4; ++veto) {
+    RideAutomationPolicy policy;
+    for (uint32_t t = 0; t <= 4'000; t += 1'000)
+      assert(!policy.update(t, watchGps(0, t, t / 1'000 + 1), ConfirmedLifecycle::Running, ask));
+    auto movement = watchGps(0, 5'000, 6);
+    if (veto == 0 || veto == 2)
+      movement.wheelSpeedMetersPerSecond = metric(3.0F, 5'000);
+    if (veto == 1 || veto == 2)
+      movement.cadenceRpm = metric(veto == 2 ? 0.0F : 80.0F, 5'000);
+    if (veto == 3) {
+      movement.gpsSpeedMetersPerSecond = metric(3.0F, 5'000);
+      movement.gpsFixValid = flag(true, 5'000);
+      movement.gpsHorizontalUncertaintyMeters = metric(5.0F, 5'000);
+      movement.imuMotionScore = metric(0.9F, 5'000);
+    }
+    assert(!policy.update(5'000, movement, ConfirmedLifecycle::Running, ask));
+    for (uint32_t t = 6'000; t < 11'000; t += 1'000)
+      assert(!policy.update(t, watchGps(0, t, t / 1'000 + 1), ConfirmedLifecycle::Running, ask));
+    const auto decision = policy.update(11'000, watchGps(0, 11'000, 12), ConfirmedLifecycle::Running, ask);
+    assert(decision.transition == Transition::Pause);
+    assert(decision.candidateBeganAtMs == 6'000);
+  }
 
   // Missing and stale measurements are not zero-valued stopped evidence.
   TimedMetric missing;

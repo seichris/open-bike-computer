@@ -3,6 +3,17 @@ import HealthKit
 import WatchConnectivity
 import XCTest
 
+private nonisolated final class FakeRideDecisionPersistence: RideDecisionPersistence {
+    enum Failure: Error { case write }
+    var data: Data?
+    var failsSave = false
+    func load() throws -> Data? { data }
+    func save(_ data: Data) throws {
+        if failsSave { throw Failure.write }
+        self.data = data
+    }
+}
+
 private final class FakeWorkoutWatchConnectivitySession:
     WorkoutWatchConnectivitySession
 {
@@ -337,7 +348,8 @@ final class RideAutomationCoordinatorProductionTests: XCTestCase {
     func testPromptOutboxIsDurableBeforePublicationAndCancellationClearsIt()
         async throws
     {
-        let (defaults, settingsStore) = try makeSettingsStore()
+        let persistence = FakeRideDecisionPersistence()
+        let (defaults, settingsStore) = try makeSettingsStore(persistence: persistence)
         defer {
             defaults.removePersistentDomain(forName: defaultsSuiteName(defaults))
         }
@@ -386,6 +398,16 @@ final class RideAutomationCoordinatorProductionTests: XCTestCase {
             sequence: 11,
             monotonicSeconds: 100
         )
+        persistence.failsSave = true
+        bleManager.receive(decision)
+        try await waitUntil("failed journal admission") {
+            coordinator.lastError == .watchUnavailable
+        }
+        XCTAssertNil(coordinator.startPrompt)
+        XCTAssertFalse(pendingWasDurableAtAcknowledgement)
+        XCTAssertNil(settingsStore.loadDecisionWatermarks()["bicino-175:7"])
+        XCTAssertNil(settingsStore.loadPendingDecision())
+        persistence.failsSave = false
         bleManager.receive(decision)
         try await waitUntil("first start prompt") {
             coordinator.startPrompt?.frame == decision
@@ -618,13 +640,17 @@ final class RideAutomationCoordinatorProductionTests: XCTestCase {
         }
     }
 
-    private func makeSettingsStore() throws
+    private func makeSettingsStore(
+        persistence: FakeRideDecisionPersistence = FakeRideDecisionPersistence()
+    ) throws
         -> (UserDefaults, RideDetectionSettingsStore)
     {
         let suiteName = "RideAutomationCoordinatorTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.set(suiteName, forKey: "testSuiteName")
-        return (defaults, RideDetectionSettingsStore(defaults: defaults))
+        return (defaults, RideDetectionSettingsStore(
+            defaults: defaults, decisionPersistence: persistence
+        ))
     }
 
     private func defaultsSuiteName(_ defaults: UserDefaults) -> String {

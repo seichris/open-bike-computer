@@ -663,17 +663,20 @@ struct WatchBLEOutboundWriteV1: Equatable, Sendable {
     let target: WatchBLEOutboundTargetV1
     let payload: Data
     let gpsSampleTimestamp: Date?
+    let workoutMotionCapturedAt: Date?
     let protection: WatchBLEOutboundProtectionV1
 
     init(
         target: WatchBLEOutboundTargetV1,
         payload: Data,
         gpsSampleTimestamp: Date? = nil,
+        workoutMotionCapturedAt: Date? = nil,
         protection: WatchBLEOutboundProtectionV1 = .protected
     ) {
         self.target = target
         self.payload = payload
         self.gpsSampleTimestamp = gpsSampleTimestamp
+        self.workoutMotionCapturedAt = workoutMotionCapturedAt
         self.protection = protection
     }
 }

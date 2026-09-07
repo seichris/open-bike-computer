@@ -1279,7 +1279,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             coalescingKey: "workout-motion",
             writes: [.init(
                 target: .workout,
-                payload: frame
+                payload: frame,
+                workoutMotionCapturedAt: latestWorkoutMotion.capturedAt
             )]
         )
     }
@@ -1355,6 +1356,17 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                     sampleTimestamp: $0
                 )
             } ?? write.payload
+            if let capturedAt = write.workoutMotionCapturedAt {
+                guard let refreshed = WorkoutDeviceFrameBuilder.refreshingWatchMotionAge(
+                    payload, capturedAt: capturedAt, sentAt: Date()
+                ) else {
+                    // This replaceable sample expired while another write
+                    // occupied the ATT slot; do not acquire a slot for it.
+                    activeWriteIndex += 1
+                    continue
+                }
+                payload = refreshed
+            }
             if shouldUseApplicationAcknowledgement(for: group) {
                 guard let commandType = group.applicationCommandType,
                       let wrapped = RideBLEApplicationCommandEnvelopeV1(

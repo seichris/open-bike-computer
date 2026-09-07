@@ -54,7 +54,7 @@ nonisolated struct RideAutomationFrame: Codable, Equatable, Sendable {
     // Evidence bits are intentionally forward compatible across detector
     // profiles. Consumers interpret known bits and preserve the full field.
     static let validEvidenceMask: UInt16 = .max
-    static let validSourceHealthMask: UInt16 = 0x000F
+static let validSourceHealthMask: UInt16 = 0x001F
 
     var kind: RideAutomationKind
     var transition: RideAutomationTransition = .none

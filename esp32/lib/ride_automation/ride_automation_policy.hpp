@@ -653,22 +653,26 @@ private:
 
     if (evidence.directConflict) {
       pauseLatch_.reset();
+      watchPauseLatch_.reset();
       pausePath_ = PausePath::None;
       return {};
     }
     if (evidence.wheelMoving) {
       pauseLatch_.reset();
+      watchPauseLatch_.reset();
       pausePath_ = PausePath::None;
       return {};
     }
     if (evidence.cadenceMoving) {
       pauseLatch_.reset();
+      watchPauseLatch_.reset();
       pausePath_ = PausePath::None;
       return {};
     }
     if (evidence.gpsKnown && evidence.imuKnown &&
         evidence.gpsResumeMoving && evidence.imuMoving) {
       pauseLatch_.reset();
+      watchPauseLatch_.reset();
       pausePath_ = PausePath::None;
       return {};
     }

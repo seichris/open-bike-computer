@@ -891,6 +891,15 @@ void processFirmwareShadow(uint32_t nowMs) {
     frame.monotonicSeconds = nowMs / 1'000;
     frame.sourceHealthMask = decision.sourceHealthMask;
 #if defined(RIDE_AUTOMATION_INTERNAL_CONTROL)
+    // A frame which cannot be serialized has no transport retry state.
+    // Never install a logical outstanding decision in that case.
+    uint8_t validatedFrame[ride_automation_protocol::FRAME_SIZE]{};
+    if (!ride_automation_protocol::encode(
+            frame, validatedFrame, sizeof(validatedFrame))) {
+      runtime.policy().rejectPending(nowMs);
+      showTransportError(ride_automation_protocol::Result::Rejected, nowMs);
+      return;
+    }
     queueTransportFrame(frame, nowMs);
     outstandingDecision = frame;
     hasOutstandingDecision = true;

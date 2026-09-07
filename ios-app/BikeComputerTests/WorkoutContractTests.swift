@@ -1,6 +1,7 @@
 import Foundation
 #if WORKOUT_CONTRACT_HOST
 import Darwin
+extension ControllableRecoveryPersistence: RideDecisionPersistence {}
 #endif
 #if WORKOUT_CONTRACT_XCTEST
 import XCTest
@@ -181,6 +182,12 @@ private struct WorkoutContractTestSuite {
         ])
         expect(frame.encoded() == expected, "RAUT Swift encoding must match firmware golden vector")
         expect(RideAutomationFrame(expected) == frame, "RAUT golden vector must round trip")
+        for mask in UInt8(0)...31 {
+            var vector = expected
+            vector[48] = mask
+            expect(RideAutomationFrame(vector)?.encoded() == vector,
+                "all defined source-health combinations must round trip")
+        }
         expect(RideAutomationFrame(expected.dropLast()) == nil, "RAUT frames must be exactly 52 bytes")
         var invalid = expected
         invalid[12] = 0
@@ -189,7 +196,7 @@ private struct WorkoutContractTestSuite {
         invalid[15] = 0
         expect(RideAutomationFrame(invalid) == nil, "RAUT decisions require a nonzero sequence")
         invalid = expected
-        invalid[48] = 0x10
+        invalid[48] = 0x20
         expect(
             RideAutomationFrame(invalid) == nil,
             "RAUT source health must reject undefined bits"
@@ -266,7 +273,7 @@ private struct WorkoutContractTestSuite {
             decisionSequence: 12,
             detectorProfileVersion: 3,
             evidenceMask: 0x55AA,
-            sourceHealthMask: 0x000F,
+            sourceHealthMask: 0x001F,
             candidateBeganSeconds: 88,
             decidedAtSeconds: 99
         )
@@ -388,7 +395,8 @@ private struct WorkoutContractTestSuite {
         }
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let store = RideDetectionSettingsStore(defaults: defaults)
+        let decisionPersistence = ControllableRecoveryPersistence()
+        let store = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
         expect(store.generation == 1, "ride settings begin at generation one")
 
         store.adoptDeviceSettings(
@@ -440,7 +448,7 @@ private struct WorkoutContractTestSuite {
         )
 #endif
 
-        let restored = RideDetectionSettingsStore(defaults: defaults)
+        let restored = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
         expect(
             restored.generation == store.generation
                 && restored.settings == store.settings,
@@ -449,7 +457,7 @@ private struct WorkoutContractTestSuite {
 
         defaults.set(-1, forKey: "rideDetection.settingsGeneration.v1")
         let corruptGenerationReload = RideDetectionSettingsStore(
-            defaults: defaults
+            defaults: defaults, decisionPersistence: decisionPersistence
         )
         expect(
             corruptGenerationReload.generation == 1,
@@ -504,7 +512,7 @@ private struct WorkoutContractTestSuite {
                 ),
             "pending automation may recover only after exact device boot and sequence proof"
         )
-        store.savePendingDecision(pendingStart)
+        try! store.saveDecisionState(watermarks: ["bike-a:7": 11], pending: pendingStart)
         expect(
             store.loadPendingDecision() == pendingStart,
             "a valid unresolved prompt must survive relaunch"
@@ -523,11 +531,28 @@ private struct WorkoutContractTestSuite {
             !mismatchedIdentity.isValidForPersistence,
             "a recovery cache cannot relabel a detector decision identity"
         )
-        store.savePendingDecision(mismatchedIdentity)
+        do {
+            try store.saveDecisionState(watermarks: ["bike-a:7": 12], pending: mismatchedIdentity)
+            expect(false, "invalid pending identity must reject the transaction")
+        } catch {}
         expect(
-            store.loadPendingDecision() == nil,
-            "invalid pending automation must be removed rather than replayed"
+            store.loadPendingDecision() == pendingStart,
+            "invalid transaction must retain the earlier durable operation"
         )
+        decisionPersistence.failsSave = true
+        do {
+            try store.saveDecisionState(watermarks: ["bike-a:7": 12], pending: nil)
+            expect(false, "failed save must not report success")
+        } catch {}
+        let afterFailure = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
+        expect(afterFailure.loadDecisionWatermarks() == ["bike-a:7": 11] &&
+            afterFailure.loadPendingDecision() == pendingStart,
+            "relaunch after failed commit must retain watermark and outbox together")
+        decisionPersistence.failsSave = false
+        try! store.saveDecisionState(watermarks: ["bike-a:7": 12], pending: nil)
+        let afterCommit = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
+        expect(afterCommit.loadDecisionWatermarks() == ["bike-a:7": 12] &&
+            afterCommit.loadPendingDecision() == nil, "committed state restores atomically")
 
         let pauseFrame = RideAutomationFrame(
             kind: .decision,
@@ -985,6 +1010,19 @@ private struct WorkoutContractTestSuite {
             ]),
             "motion frame uses raw location speed, quality, age, epoch, and sequence"
         )
+        let refreshed = WorkoutDeviceFrameBuilder.refreshingWatchMotionAge(
+            frame, capturedAt: location.capturedAt,
+            sentAt: sentAt.addingTimeInterval(0.5)
+        )
+        expect(refreshed?[12] == 0xB8 && refreshed?[13] == 0x0B,
+            "queued sample must carry actual submission age at the freshness boundary")
+        expect(WorkoutDeviceFrameBuilder.refreshingWatchMotionAge(
+            frame, capturedAt: location.capturedAt,
+            sentAt: sentAt.addingTimeInterval(0.501)
+        ) == nil, "expired queued motion must be dropped")
+        expect(WorkoutDeviceFrameBuilder.refreshingWatchMotionAge(
+            frame, capturedAt: sentAt.addingTimeInterval(1), sentAt: sentAt
+        ) == nil, "clock regression must fail closed")
         let paused = WorkoutSnapshotV1(
             state: .paused,
             location: location,
@@ -5248,6 +5286,11 @@ private struct WorkoutContractTestSuite {
         }
 
         do {
+            let journalWrite = try runChild(mode: "decision-write-and-crash")
+            expect(journalWrite.0 == 0, "decision journal writer must commit before abrupt exit")
+            let journalRead = try runChild(mode: "decision-read-after-crash")
+            expect(journalRead.0 == 0 && journalRead.1 == "11|11",
+                "a separate process must recover watermark and pending operation together")
             let writeResult = try runChild(mode: "write-and-crash")
             expect(
                 writeResult.0 == 0,
@@ -8603,6 +8646,35 @@ private enum WorkoutContractTestRunner {
                 fileURL: URL(fileURLWithPath: path)
             )
             switch mode {
+            case "decision-write-and-crash", "decision-read-after-crash":
+                let name = "DecisionJournalChild.\(UUID().uuidString)"
+                let defaults = UserDefaults(suiteName: name)!
+                let store = RideDetectionSettingsStore(
+                    defaults: defaults,
+                    decisionPersistence: RideDecisionFilePersistence(
+                        url: URL(fileURLWithPath: path).appendingPathExtension("decisions")
+                    )
+                )
+                if mode == "decision-write-and-crash" {
+                    let frame = RideAutomationFrame(
+                        kind: .decision, transition: .start, origin: .automatic,
+                        rideGeneration: 7, decisionSequence: 11, startMode: .ask
+                    )
+                    let pending = RideAutomationPendingDecision(
+                        identity: RideAutomationDecisionIdentity(
+                            deviceID: "bike-a", rideGeneration: 7, decisionSequence: 11
+                        ),
+                        frame: frame, expectedState: nil
+                    )
+                    do {
+                        try store.saveDecisionState(watermarks: ["bike-a:7": 11], pending: pending)
+                        defaults.removePersistentDomain(forName: name)
+                        Darwin._exit(0)
+                    } catch { Darwin._exit(5) }
+                }
+                print("\(store.loadDecisionWatermarks()["bike-a:7"] ?? 0)|\(store.loadPendingDecision()?.identity.decisionSequence ?? 0)")
+                defaults.removePersistentDomain(forName: name)
+                return
             case "write-and-crash":
                 let store = WatchWorkoutRecoveryStore(persistence: persistence)
                 guard (try? store.begin(

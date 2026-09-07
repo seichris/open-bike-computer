@@ -9,7 +9,7 @@ namespace ride_automation_protocol {
 constexpr uint8_t PROTOCOL_VERSION = 2;
 constexpr std::size_t FRAME_SIZE = 52;
 constexpr std::size_t SESSION_ID_SIZE = 16;
-constexpr uint16_t SOURCE_HEALTH_MASK = 0x000F;
+constexpr uint16_t SOURCE_HEALTH_MASK = 0x001F;
 constexpr char FALLBACK_PREFIX[] = "RAUT";
 constexpr std::size_t FALLBACK_PREFIX_SIZE = 4;
 

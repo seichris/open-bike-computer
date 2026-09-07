@@ -485,6 +485,23 @@ nonisolated enum WorkoutDeviceFrameBuilder {
 
     /// Dedicated raw Watch-location evidence for device ride automation.
     /// This intentionally does not use the source-selected workout speed.
+    /// Rebuild age at actual submission, not at queue admission. A stalled
+    /// writer must not relabel an old producer sample as current evidence.
+    static func refreshingWatchMotionAge(
+        _ frame: Data,
+        capturedAt: Date,
+        sentAt: Date
+    ) -> Data? {
+        let age = sentAt.timeIntervalSince(capturedAt) * 1_000
+        guard frame.count == 16, frame.first == 4,
+              age.isFinite, age >= 0, age <= 3_000 else { return nil }
+        let milliseconds = UInt16(age.rounded(.up))
+        var refreshed = frame
+        refreshed[12] = UInt8(truncatingIfNeeded: milliseconds)
+        refreshed[13] = UInt8(truncatingIfNeeded: milliseconds >> 8)
+        return refreshed
+    }
+
     static func watchMotionFrame(
         for snapshot: WorkoutSnapshotV1,
         sessionToken: UInt16,
@@ -538,7 +555,7 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         let sampleAgeMilliseconds = (sampleAge * 1_000).rounded()
         guard sampleAgeMilliseconds.isFinite,
               sampleAgeMilliseconds >= 0,
-              sampleAgeMilliseconds <= Double(unavailableUInt16 - 1) else {
+              sampleAgeMilliseconds <= 3_000 else {
             return nil
         }
         var flags = watchMotionFixValid

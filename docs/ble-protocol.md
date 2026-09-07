@@ -792,7 +792,7 @@ strict parser. Frames use little-endian numeric fields:
 | `36` | 4 | decision watermark or configuration generation, by kind |
 | `40` | 4 | boot-local seconds when the transition candidate began |
 | `44` | 4 | sender boot-local seconds when the frame was emitted |
-| `48` | 2 | source-health mask: bit 0 wheel, bit 1 cadence, bit 2 GPS, bit 3 IMU |
+| `48` | 2 | source-health mask: bit 0 wheel, bit 1 cadence, bit 2 GPS, bit 3 IMU, bit 4 qualified Watch GPS; all other bits zero |
 | `50` | 1 | acknowledged kind for kind `2`; otherwise zero |
 | `51` | 1 | reserved, exactly zero |
 
@@ -808,6 +808,19 @@ mismatch`. Unknown enums, invalid booleans, zero generations/profile versions,
 non-zero reserved bytes, or a wrong frame length reject the whole frame.
 
 ### Decision and confirmation lifecycle
+
+Source-health mask `0x001F` is accepted by the firmware and Swift RAUT and
+workout-context validators. Bit 4 requires the Watch motion capability
+(client 23); it is not inferred from generic HealthKit cycling speed.
+Motion age is rebuilt at actual BLE submission in both direct Watch and
+phone-relay queues. Samples older than three seconds are dropped before an
+ATT slot is allocated; retransmission/coalescing does not refresh capture time.
+
+The phone persists the decision watermark and pending/resolved operation in
+one versioned atomic file before publishing an ACK or requesting a Watch
+transition. A persistence failure leaves the prior operation intact and
+withholds the new side effect. Legacy defaults are removed only after a
+successful journal commit. Corrupt/unreadable journals fail closed.
 
 The ESP32 is the evidence authority but never treats a notification as proof
 that HealthKit changed state:

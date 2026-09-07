@@ -13832,6 +13832,37 @@ struct NavigationProtocolTests {
     }
 
     static func testNavigationWriteQueue() {
+        var clock = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let capturedAt = clock
+        let motion = Data([4, 15, 1, 0, 1, 0, 0, 0, 0, 0, 50, 0, 0, 0, 1, 0])
+        var dropped = 0
+        var refreshedWrites: [Data] = []
+        var motionQueue = NavigationWriteQueue(maxCount: 2)
+        func pendingMotion() -> NavigationWrite {
+            NavigationWrite(
+                data: motion, label: "motion",
+                payloadProvider: {
+                    WorkoutDeviceFrameBuilder.refreshingWatchMotionAge(
+                        motion, capturedAt: capturedAt, sentAt: clock
+                    )
+                },
+                onDrop: { dropped += 1 }, coalescingKey: "motion"
+            )
+        }
+        _ = motionQueue.enqueueCoalescing(pendingMotion(), prioritized: false)
+        clock = capturedAt.addingTimeInterval(2)
+        motionQueue.flush(canSend: { true }) { write in
+            write.preparedForSubmission()?.perform { refreshedWrites.append($0) }
+        }
+        assertEqual(refreshedWrites.first?[12], 0xD0, "queued provider survives admission and refreshes age")
+        assertEqual(refreshedWrites.first?[13], 0x07, "two-second age is encoded")
+        _ = motionQueue.enqueueCoalescing(pendingMotion(), prioritized: false)
+        clock = capturedAt.addingTimeInterval(4)
+        motionQueue.flush(canSend: { true }) { write in
+            write.preparedForSubmission()?.perform { refreshedWrites.append($0) }
+        }
+        assertEqual(refreshedWrites.count, 1, "expired motion cannot be written")
+        assertEqual(dropped, 1, "expired motion reports a drop rather than a write")
         var queue = NavigationWriteQueue(maxCount: 2)
         queue.enqueue(NavigationWrite(data: Data([1]), label: "first"))
         queue.enqueue(NavigationWrite(data: Data([2]), label: "second"))
@@ -17076,10 +17107,12 @@ struct NavigationProtocolTests {
         ], receivedAt: clock.now())
 
         let manager = BLEManager()
+        manager.workoutMotionSubmissionDate = clock.now
+        var canSendMotion = true
         var writes: [Data] = []
         manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 32,
-            canSend: { true },
+            canSend: { canSendMotion },
             write: { writes.append($0) }
         ))
         func workoutKinds() -> [UInt8] {
@@ -17153,6 +17186,22 @@ struct NavigationProtocolTests {
         assert(waitForMainLoop(timeout: 1) {
             workoutKinds().filter { $0 == 4 }.count == 1
         }, "a distinct Watch producer sample is relayed")
+        writes.removeAll()
+        canSendMotion = false
+        _ = store.ingestBatch([
+            WorkoutEnvelopeV1(
+                kind: .snapshot, sessionID: sessionID, sessionToken: 93,
+                sequence: 4, capturedAt: clock.now(),
+                snapshot: snapshot(locationSequence: 3, locationCapturedAt: clock.now())
+            ),
+        ], receivedAt: clock.now())
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        clock.advance(by: 4)
+        canSendMotion = true
+        manager.flushPendingNavigationWritesForTesting()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        assert(!workoutKinds().contains(4),
+            "relay must drop a queued four-second-old producer sample")
         withExtendedLifetime(relay) {}
     }
 

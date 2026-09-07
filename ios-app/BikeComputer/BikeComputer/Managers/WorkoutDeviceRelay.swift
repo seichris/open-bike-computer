@@ -675,6 +675,7 @@ final class WorkoutDeviceRelay {
                 let accepted = bleManager.sendWorkoutTelemetryFrame(
                     motion,
                     prioritized: false,
+                    motionCapturedAt: snapshot.location?.capturedAt,
                     onWrite: { [weak self] in
                         self?.completeMotionWrite(motionIdentity)
                     },
