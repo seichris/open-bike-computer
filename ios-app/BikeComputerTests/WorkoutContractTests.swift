@@ -8129,7 +8129,7 @@ private struct WorkoutContractTestSuite {
                     ".onChange(of:workoutStore.presentation.isWorkoutActive){_insynchronizeRideMetricsSheet()}"
                 )
                 && compactContent.contains(
-                    "ifworkoutStore.presentation.isWorkoutActive{guardpresentedSheet==nilelse{return}rideMetricsDetent=.rideMetricsCompactpresentedSheet=.rideMetrics}"
+                "ifworkoutStore.presentation.isWorkoutActive{guardpresentedSheet==nil,savedRouteMapPreview==nilelse{return}rideMetricsDetent=.rideMetricsCompactpresentedSheet=.rideMetrics}"
                 )
                 && compactContent.contains(
                     ".sheet(item:$presentedSheet,onDismiss:handleSheetDismissal){destinationinpresentedSheetContent(for:destination)}"
