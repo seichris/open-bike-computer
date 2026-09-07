@@ -581,11 +581,11 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('gh release verify "${RELEASE_TAG}"', recovery)
         self.assertIn('gh release verify-asset "${RELEASE_TAG}"', recovery)
         self.assertIn(
-            "actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3",
+            "actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0",
             recovery,
         )
         self.assertIn(
-            "actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4",
+            "actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1",
             recovery,
         )
         self.assertNotIn("FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY", recovery)
