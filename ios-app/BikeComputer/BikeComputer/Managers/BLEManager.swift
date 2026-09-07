@@ -417,6 +417,8 @@ enum DeviceBLEProtocol {
         RideBLEGeneratedProtocolV1.rideDeliveryAckFeature
     static let rendererBenchmarkSampleCapabilityMask =
         RideBLEGeneratedProtocolV1.rendererBenchmarkSampleFeature
+    static let watchGPSMotionEvidenceV1CapabilityMask =
+        RideBLEGeneratedProtocolV1.watchGpsMotionEvidenceV1Feature
     static let deviceCapabilitiesVersion =
         RideBLEGeneratedProtocolV1.currentClientVersion
     static let workoutTelemetryFrameLength = 16
@@ -426,6 +428,8 @@ enum DeviceBLEProtocol {
         "workout-telemetry-extended"
     static let workoutTelemetryOriginCoalescingKey =
         "workout-telemetry-origin"
+    static let workoutTelemetryMotionCoalescingKey =
+        "workout-telemetry-motion"
     static let navigationSnapshotCoalescingKey = "navigation-snapshot"
     static let gpsPositionCoalescingKey = "gps-position"
     static let automaticDisplayOffSettingCoalescingKey =
@@ -932,6 +936,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsRideDiagnostics: Bool = false
     @Published private(set) var supportsDetailedRideDiagnostics: Bool = false
     @Published private(set) var supportsRideDeliveryAcknowledgement: Bool = false
+    @Published private(set) var supportsWatchGPSMotionEvidenceV1: Bool = false
     @Published private(set) var rideTransportPhase:
         RideBLETransportPhaseV1 = .idle
     @Published private(set) var rideTransportFailureReason:
@@ -1135,6 +1140,7 @@ class BLEManager: NSObject, ObservableObject {
     private var workoutTelemetryCharacteristic: CBCharacteristic?
     private var rideAutomationCharacteristic: CBCharacteristic?
     private var workoutTelemetryWriteEndpointForTesting: WorkoutTelemetryWriteEndpoint?
+    var workoutMotionSubmissionDate: () -> Date = Date.init
     private var deviceInformation: [CBUUID: String] = [:]
     private var navigationWriteEndpoint: NavigationWriteEndpoint?
     private var navigationWriteQueue = NavigationWriteQueue(
@@ -4041,13 +4047,14 @@ class BLEManager: NSObject, ObservableObject {
     func sendWorkoutTelemetryFrame(
         _ frame: Data,
         prioritized: Bool = false,
+        motionCapturedAt: Date? = nil,
         onWrite: (() -> Void)? = nil,
         onDrop: (() -> Void)? = nil,
         onWriteFailure: (() -> Void)? = nil
     ) -> Bool {
         let hasValidLength: Bool
         switch frame.first {
-        case 1, 2:
+        case 1, 2, 4:
             hasValidLength = frame.count ==
                 DeviceBLEProtocol.workoutTelemetryFrameLength
         case 3:
@@ -4067,6 +4074,10 @@ class BLEManager: NSObject, ObservableObject {
               let navigationEndpoint = navigationWriteEndpoint else {
             return false
         }
+        if frame.first == 4, !supportsWatchGPSMotionEvidenceV1 {
+            return false
+        }
+        if frame.first == 4, motionCapturedAt == nil { return false }
 
         let isCore = frame.first == 1
         if prioritized, isCore,
@@ -4087,6 +4098,9 @@ class BLEManager: NSObject, ObservableObject {
         case 2:
             coalescingKey =
                 DeviceBLEProtocol.workoutTelemetryExtendedCoalescingKey
+        case 4:
+            coalescingKey =
+                DeviceBLEProtocol.workoutTelemetryMotionCoalescingKey
         default:
             coalescingKey =
                 DeviceBLEProtocol.workoutTelemetryOriginCoalescingKey
@@ -4095,6 +4109,7 @@ class BLEManager: NSObject, ObservableObject {
             frame,
             navigationEndpoint: navigationEndpoint,
             coalescingKey: coalescingKey,
+            motionCapturedAt: motionCapturedAt,
             onWrite: onWrite,
             onDrop: onDrop,
             onWriteFailure: onWriteFailure
@@ -4579,10 +4594,12 @@ class BLEManager: NSObject, ObservableObject {
         _ frame: Data,
         navigationEndpoint: NavigationWriteEndpoint,
         coalescingKey: String,
+        motionCapturedAt: Date? = nil,
         onWrite: (() -> Void)?,
         onDrop: (() -> Void)?,
         onWriteFailure: (() -> Void)?
     ) -> NavigationWrite? {
+        let motionNow = workoutMotionSubmissionDate
         let payload: Data
         let label: String
         let transportWrite: ((Data) -> Void)?
@@ -4685,6 +4702,18 @@ class BLEManager: NSObject, ObservableObject {
         return NavigationWrite(
             data: payload,
             label: label,
+            payloadProvider: motionCapturedAt.map { capturedAt in
+                {
+                    guard let refreshed = WorkoutDeviceFrameBuilder.refreshingWatchMotionAge(
+                        frame, capturedAt: capturedAt, sentAt: motionNow()
+                    ) else { return nil }
+                    if route == .navigationFallback {
+                        return Data(DeviceBLEProtocol.workoutTelemetryFallbackPrefix.utf8)
+                            + refreshed
+                    }
+                    return refreshed
+                }
+            },
             transportWrite: transportWrite,
             onWrite: onWrite,
             onDrop: onDrop,
@@ -5047,6 +5076,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWatchGPSMotionEvidenceV1 = false
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -6222,6 +6252,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWatchGPSMotionEvidenceV1 = false
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -7823,6 +7854,7 @@ class BLEManager: NSObject, ObservableObject {
             return write.transportCanSend?() ?? endpoint.canSend()
         }, maxWrites: 1) { write in
             madeProgress = true
+            guard let write = write.preparedForSubmission() else { return }
             let expectsWriteResponse = write.transportExpectsWriteResponse
                 ?? endpoint.expectsWriteResponse
             if expectsWriteResponse {
@@ -9401,6 +9433,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWatchGPSMotionEvidenceV1 = false
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -9542,6 +9575,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let hasRideDeliveryAcknowledgement =
             flags & DeviceBLEProtocol
                 .rideDeliveryAcknowledgementCapabilityMask != 0
+        let hasWatchGPSMotionEvidenceV1 =
+            flags & DeviceBLEProtocol
+                .watchGPSMotionEvidenceV1CapabilityMask != 0
         if has3DBuildings && shouldApply3DBuildingVisibilityDefault {
             shouldApply3DBuildingVisibilityDefault = false
             UserDefaults.standard.set(
@@ -9644,6 +9680,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             cancelPendingRideApplicationDeliveries(notifyFailure: true)
         }
         supportsRideDeliveryAcknowledgement = hasRideDeliveryAcknowledgement
+        supportsWatchGPSMotionEvidenceV1 = hasWatchGPSMotionEvidenceV1
         if hasRideDiagnostics {
             sendDiagnosticsCaptureBindingIfNeeded()
         }

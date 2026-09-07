@@ -130,11 +130,11 @@ final class RideAutomationCoordinator: ObservableObject {
         guard bleManager.connectedDeviceID == prompt.identity.deviceID else {
             return
         }
-        beginPendingDecision(
+        guard beginPendingDecision(
             identity: prompt.identity,
             frame: prompt.frame,
             expectedState: .running
-        )
+        ) else { return }
         guard sendPromptResponse(
             to: prompt.frame,
             result: .accepted
@@ -237,15 +237,6 @@ final class RideAutomationCoordinator: ObservableObject {
             expectedSessionID: presentation.sessionID,
             highestDecisionSequence: highest
         )
-        if admission != .duplicate {
-            highestSequenceByGeneration[generationKey] =
-                frame.decisionSequence
-            trimWatermarks(keeping: generationKey)
-            settingsStore.saveDecisionWatermarks(
-                highestSequenceByGeneration
-            )
-        }
-
         switch admission {
         case .duplicate:
             if pendingDecision?.identity == identity {
@@ -261,6 +252,9 @@ final class RideAutomationCoordinator: ObservableObject {
                 result: acknowledgementByDecision[identity] ?? .stale
             )
         case .reject(let result):
+            highestSequenceByGeneration[generationKey] = frame.decisionSequence
+            trimWatermarks(keeping: generationKey)
+            guard persistDecisionState(pending: pendingDecision) else { return }
             if result == .sessionMismatch || result == .watchUnavailable {
                 lastError = result
             }
@@ -268,36 +262,36 @@ final class RideAutomationCoordinator: ObservableObject {
             sendResponse(to: frame, kind: .acknowledgement, result: result)
         case .prompt:
             supersedePendingDecision(ifDifferentFrom: identity)
-            presentStartPrompt(identity: identity, frame: frame)
-            acknowledgementByDecision[identity] = .accepted
-            beginPendingDecision(
+            guard beginPendingDecision(
                 identity: identity,
                 frame: frame,
                 expectedState: nil
-            )
+            ) else { return }
+            presentStartPrompt(identity: identity, frame: frame)
+            acknowledgementByDecision[identity] = .accepted
             sendResponse(to: frame, kind: .acknowledgement, result: .accepted)
         case .start:
             guard presentation.canStartNewWorkout else {
                 sendResponse(to: frame, kind: .acknowledgement, result: .stale)
                 return
             }
-            acknowledgementByDecision[identity] = .accepted
             supersedePendingDecision(ifDifferentFrom: identity)
-            beginPendingDecision(
+            guard beginPendingDecision(
                 identity: identity,
                 frame: frame,
                 expectedState: .running
-            )
+            ) else { return }
+            acknowledgementByDecision[identity] = .accepted
             sendResponse(to: frame, kind: .acknowledgement, result: .accepted)
             launchPendingAutomaticStart()
         case .pause, .resume:
             let context = automaticControlContext(for: frame)
             supersedePendingDecision(ifDifferentFrom: identity)
-            beginPendingDecision(
+            guard beginPendingDecision(
                 identity: identity,
                 frame: frame,
                 expectedState: admission == .pause ? .paused : .running
-            )
+            ) else { return }
             guard workoutManager.requestAutomaticTransition(
                 frame.transition,
                 context: context
@@ -337,11 +331,11 @@ final class RideAutomationCoordinator: ObservableObject {
         switch frame.result {
         case .accepted:
             if pending.expectedState != .running {
-                beginPendingDecision(
+                guard beginPendingDecision(
                     identity: pending.identity,
                     frame: pending.frame,
                     expectedState: .running
-                )
+                ) else { return }
             }
             guard sendResponse(
                 to: frame,
@@ -637,9 +631,15 @@ final class RideAutomationCoordinator: ObservableObject {
     }
 
     private func trimWatermarks(keeping currentGenerationKey: String) {
+        let pendingKey = pendingDecision.map {
+            generationKey(
+                deviceID: $0.identity.deviceID,
+                generation: $0.identity.rideGeneration
+            )
+        }
         while highestSequenceByGeneration.count > 16 {
             guard let key = highestSequenceByGeneration.keys.first(where: {
-                $0 != currentGenerationKey
+                $0 != currentGenerationKey && $0 != pendingKey
             }) else { break }
             highestSequenceByGeneration[key] = nil
         }
@@ -661,7 +661,7 @@ final class RideAutomationCoordinator: ObservableObject {
         identity: RideAutomationDecisionIdentity,
         frame: RideAutomationFrame,
         expectedState: WorkoutSessionStateV1?
-    ) {
+    ) -> Bool {
         if pendingDecision?.identity != identity {
             startAnnotationRequestedFor = nil
         }
@@ -670,9 +670,26 @@ final class RideAutomationCoordinator: ObservableObject {
             frame: frame,
             expectedState: expectedState
         )
+        let key = generationKey(deviceID: identity.deviceID, generation: identity.rideGeneration)
+        highestSequenceByGeneration[key] = identity.decisionSequence
+        trimWatermarks(keeping: key)
+        guard persistDecisionState(pending: pending) else { return false }
         pendingDecision = pending
-        settingsStore.savePendingDecision(pending)
         schedulePendingTimeout(for: pending)
+        return true
+    }
+
+    private func persistDecisionState(pending: RideAutomationPendingDecision?) -> Bool {
+        do {
+            try settingsStore.saveDecisionState(
+                watermarks: highestSequenceByGeneration, pending: pending
+            )
+            return true
+        } catch {
+            highestSequenceByGeneration = settingsStore.loadDecisionWatermarks()
+            lastError = .watchUnavailable
+            return false
+        }
     }
 
     private func restorePendingDecision(
@@ -798,8 +815,8 @@ final class RideAutomationCoordinator: ObservableObject {
             resolvedResult: result,
             resolvedSessionID: sessionID
         )
+        guard persistDecisionState(pending: resolved) else { return nil }
         pendingDecision = resolved
-        settingsStore.savePendingDecision(resolved)
         if resolved.frame.transition == .start {
             _ = watchAvailability?.setPendingAutomaticStartContext(nil)
         }
@@ -819,6 +836,7 @@ final class RideAutomationCoordinator: ObservableObject {
     }
 
     private func clearPendingDecision() {
+        guard persistDecisionState(pending: nil) else { return }
         pendingTimeoutTask?.cancel()
         pendingTimeoutTask = nil
         if pendingDecision?.frame.transition == .start {
@@ -828,7 +846,6 @@ final class RideAutomationCoordinator: ObservableObject {
         startPrompt = nil
         startAnnotationRequestedFor = nil
         cancelPromptCountdown()
-        settingsStore.savePendingDecision(nil)
     }
 
     private func automaticControlContext(
@@ -839,7 +856,11 @@ final class RideAutomationCoordinator: ObservableObject {
             automaticReason: .rideDetection,
             rideGeneration: frame.rideGeneration,
             decisionSequence: frame.decisionSequence,
-            detectorProfileVersion: frame.profileVersion
+            detectorProfileVersion: frame.profileVersion,
+            evidenceMask: frame.evidenceMask,
+            sourceHealthMask: frame.sourceHealthMask,
+            candidateBeganSeconds: frame.candidateBeganSeconds,
+            decidedAtSeconds: frame.monotonicSeconds
         )
     }
 
@@ -1162,11 +1183,11 @@ final class RideAutomationCoordinator: ObservableObject {
             highestSequenceByGeneration[key] = frame.decisionSequence
         }
         trimWatermarks(keeping: key)
-        settingsStore.saveDecisionWatermarks(highestSequenceByGeneration)
         guard let pending = pendingDecision,
               pending.identity.deviceID == deviceID,
               pending.identity.rideGeneration == frame.rideGeneration,
               pending.identity.decisionSequence == frame.decisionSequence else {
+            _ = persistDecisionState(pending: pendingDecision)
             return
         }
         clearPendingDecision()

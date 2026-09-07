@@ -2816,6 +2816,44 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertEqual(WatchRouteRecorder.mapAuthorization(.authorizedWhenInUse), .authorized)
     }
 
+    func testPausedRecorderPublishesStationaryMotionSamples() {
+        let recorder = WatchRouteRecorder()
+        let start = Date().addingTimeInterval(-2)
+        var publicationCount = 0
+        recorder.begin(
+            routeBuilder: nil,
+            startDate: start,
+            motionSampleEpoch: 7
+        ) {
+            publicationCount += 1
+        }
+        recorder.setPaused(true, at: start.addingTimeInterval(0.5))
+        let stationary = CLLocation(
+            coordinate: CLLocationCoordinate2D(
+                latitude: 31.2304,
+                longitude: 121.4737
+            ),
+            altitude: 5,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 5,
+            course: -1,
+            speed: 0.1,
+            timestamp: start.addingTimeInterval(1)
+        )
+
+        recorder.receiveLocationsForTesting([stationary])
+
+        XCTAssertEqual(recorder.motionSampleEpoch, 7)
+        XCTAssertEqual(recorder.motionSampleSequence, 1)
+        XCTAssertEqual(recorder.latestLocation, stationary)
+        XCTAssertEqual(publicationCount, 1)
+        XCTAssertNil(
+            recorder.routeDistanceMeters,
+            "stationary paused drift remains excluded from route distance"
+        )
+        recorder.discardRoute()
+    }
+
     func testWorkoutIdentityMetadataUsesStableHealthKitIdentifiers() {
         let sessionID = UUID(uuidString: "769C5984-D589-4CB9-88A5-A97559D5A5DB")!
         let metadata = WatchWorkoutManager.workoutIdentityMetadata(

@@ -888,19 +888,22 @@ enum RideSharedTests {
         var cap2 = Data("CAP2".utf8)
         cap2.append(1)
         expect(
-            WatchDirectBLEProtocolV1.capabilityClientVersion == 22 &&
+            WatchDirectBLEProtocolV1.capabilityClientVersion == 23 &&
                 WatchDirectBLEProtocolV1.scopedControllerFeature == 1 << 14 &&
                 WatchDirectBLEProtocolV1.rideAutomationFeature == 1 << 15 &&
                 WatchDirectBLEProtocolV1.gpsPositionQualityV1Feature == 1 << 17 &&
                 WatchDirectBLEProtocolV1.rideDeliveryAcknowledgementFeature ==
-                    1 << 22,
-            "Watch requests reliable ride delivery at the current protocol version without moving existing capabilities"
+                    1 << 22 &&
+                WatchDirectBLEProtocolV1.watchGPSMotionEvidenceV1Feature ==
+                    1 << 25,
+            "Watch requests reliable ride delivery and Watch GPS motion evidence without moving existing capabilities"
         )
         let flags = WatchDirectBLEProtocolV1.scopedControllerFeature |
             WatchDirectBLEProtocolV1.workoutTelemetryFeature |
             WatchDirectBLEProtocolV1.rideAutomationFeature |
             WatchDirectBLEProtocolV1.gpsPositionQualityV1Feature |
-            WatchDirectBLEProtocolV1.rideDeliveryAcknowledgementFeature
+            WatchDirectBLEProtocolV1.rideDeliveryAcknowledgementFeature |
+            WatchDirectBLEProtocolV1.watchGPSMotionEvidenceV1Feature
         cap2.append(UInt8(flags & 0xFF))
         cap2.append(UInt8((flags >> 8) & 0xFF))
         cap2.append(UInt8((flags >> 16) & 0xFF))
@@ -911,8 +914,9 @@ enum RideSharedTests {
                 capabilities?.supportsWorkoutTelemetry == true &&
                 capabilities?.supportsRideAutomation == true &&
                 capabilities?.supportsGPSPositionQualityV1 == true &&
-                capabilities?.supportsRideDeliveryAcknowledgement == true,
-            "Watch recognizes direct-controller, workout, ride-automation, GPS-quality, and delivery-ack capabilities"
+                capabilities?.supportsRideDeliveryAcknowledgement == true &&
+                capabilities?.supportsWatchGPSMotionEvidenceV1 == true,
+            "Watch recognizes direct-controller, workout, ride-automation, GPS-quality, delivery-ack, and Watch-motion capabilities"
         )
         let deliveryCommandID = UUID(
             uuidString: "00112233-4455-6677-8899-aabbccddeeff"

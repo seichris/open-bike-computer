@@ -738,6 +738,7 @@ struct NavigationProtocolTests {
         testWorkoutDeviceTelemetryMapping()
         testWorkoutDeviceRelayScheduling()
         testWorkoutDeviceRelayPublicationIntegration()
+        testWorkoutDeviceRelayMotionDeduplicationIntegration()
         testWorkoutDeviceRelayRegularRetryIntegration()
         testWorkoutTelemetryBLETransport()
         testDevicePacketRouting()
@@ -13831,6 +13832,37 @@ struct NavigationProtocolTests {
     }
 
     static func testNavigationWriteQueue() {
+        var clock = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let capturedAt = clock
+        let motion = Data([4, 15, 1, 0, 1, 0, 0, 0, 0, 0, 50, 0, 0, 0, 1, 0])
+        var dropped = 0
+        var refreshedWrites: [Data] = []
+        var motionQueue = NavigationWriteQueue(maxCount: 2)
+        func pendingMotion() -> NavigationWrite {
+            NavigationWrite(
+                data: motion, label: "motion",
+                payloadProvider: {
+                    WorkoutDeviceFrameBuilder.refreshingWatchMotionAge(
+                        motion, capturedAt: capturedAt, sentAt: clock
+                    )
+                },
+                onDrop: { dropped += 1 }, coalescingKey: "motion"
+            )
+        }
+        _ = motionQueue.enqueueCoalescing(pendingMotion(), prioritized: false)
+        clock = capturedAt.addingTimeInterval(2)
+        motionQueue.flush(canSend: { true }) { write in
+            write.preparedForSubmission()?.perform { refreshedWrites.append($0) }
+        }
+        assertEqual(refreshedWrites.first?[12], 0xD0, "queued provider survives admission and refreshes age")
+        assertEqual(refreshedWrites.first?[13], 0x07, "two-second age is encoded")
+        _ = motionQueue.enqueueCoalescing(pendingMotion(), prioritized: false)
+        clock = capturedAt.addingTimeInterval(4)
+        motionQueue.flush(canSend: { true }) { write in
+            write.preparedForSubmission()?.perform { refreshedWrites.append($0) }
+        }
+        assertEqual(refreshedWrites.count, 1, "expired motion cannot be written")
+        assertEqual(dropped, 1, "expired motion reports a drop rather than a write")
         var queue = NavigationWriteQueue(maxCount: 2)
         queue.enqueue(NavigationWrite(data: Data([1]), label: "first"))
         queue.enqueue(NavigationWrite(data: Data([2]), label: "second"))
@@ -16011,9 +16043,10 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rideDiagnosticsCapabilityMask, 1 << 20, "CAP2 bit 20 advertises persistent ride diagnostics")
         assertEqual(DeviceBLEProtocol.detailedRideDiagnosticsCapabilityMask, 1 << 21, "CAP2 bit 21 advertises detailed ride diagnostics")
         assertEqual(DeviceBLEProtocol.rideDeliveryAcknowledgementCapabilityMask, 1 << 22, "CAP2 bit 22 advertises reliable ride delivery")
-        assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 22, "capability version negotiates independent navigation orientation")
+        assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
+        assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 23, "capability version negotiates independent navigation orientation and Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationRotationSettingID, 37, "navigation orientation has an independent setting")
         assertEqual(RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature, 1 << 24, "orientation capability has its own bit")
         assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
@@ -17025,6 +17058,150 @@ struct NavigationProtocolTests {
                "legacy reenable resynchronizes only supported latest frames")
         assertEqual(workoutWrites()[0][5] & 0x3F, WorkoutDeviceSessionState.paused.rawValue,
                     "reconnect resynchronization uses the latest committed state")
+        withExtendedLifetime(relay) {}
+    }
+
+    @MainActor
+    static func testWorkoutDeviceRelayMotionDeduplicationIntegration() {
+        let clock = TestClock(Date(timeIntervalSince1970: 25_000))
+        let sessionID = UUID(
+            uuidString: "ABABABAB-CDCD-EFEF-0101-232323232323"
+        )!
+        let store = WorkoutMetricsStore(now: clock.now)
+        store.attachMirroredSession(at: clock.now())
+        let firstLocationCapturedAt = clock.now()
+        func snapshot(
+            locationSequence: UInt32,
+            locationCapturedAt: Date
+        ) -> WorkoutSnapshotV1 {
+            WorkoutSnapshotV1(
+                state: .running,
+                startDate: Date(timeIntervalSince1970: 24_990),
+                location: WorkoutLocationV1(
+                    latitude: 31.2304,
+                    longitude: 121.4737,
+                    capturedAt: locationCapturedAt,
+                    horizontalAccuracy: 5,
+                    altitude: nil,
+                    verticalAccuracy: nil,
+                    course: nil,
+                    speed: 0.1,
+                    motionSampleEpoch: 7,
+                    motionSampleSequence: locationSequence
+                ),
+                availability: [.location]
+            )
+        }
+        _ = store.ingestBatch([
+            WorkoutEnvelopeV1(
+                kind: .snapshot,
+                sessionID: sessionID,
+                sessionToken: 93,
+                sequence: 1,
+                capturedAt: clock.now(),
+                snapshot: snapshot(
+                    locationSequence: 1,
+                    locationCapturedAt: firstLocationCapturedAt
+                )
+            ),
+        ], receivedAt: clock.now())
+
+        let manager = BLEManager()
+        manager.workoutMotionSubmissionDate = clock.now
+        var canSendMotion = true
+        var writes: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 32,
+            canSend: { canSendMotion },
+            write: { writes.append($0) }
+        ))
+        func workoutKinds() -> [UInt8] {
+            writes.compactMap { write in
+                guard String(data: write.prefix(4), encoding: .utf8) ==
+                    DeviceBLEProtocol.workoutTelemetryFallbackPrefix,
+                    write.count > 4 else { return nil }
+                return write[4]
+            }
+        }
+        let relay = WorkoutDeviceRelay(
+            store: store,
+            bleManager: manager,
+            now: clock.now
+        )
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let flags = UInt32(
+            DeviceBLEProtocol.workoutTelemetryCapabilityMask
+        ) | DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask
+        let capability =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([
+                1,
+                UInt8(flags & 0xFF),
+                UInt8((flags >> 8) & 0xFF),
+                UInt8((flags >> 16) & 0xFF),
+                UInt8((flags >> 24) & 0xFF),
+            ])
+        assert(manager.handleDeviceCapabilitiesNotification(capability),
+               "Watch-motion capability is accepted")
+        assert(waitForMainLoop(timeout: 1) {
+            workoutKinds().filter { $0 == 4 }.count == 1
+        }, "the initial Watch motion sample is relayed")
+
+        writes.removeAll()
+        clock.advance(by: 0.25)
+        _ = store.ingestBatch([
+            WorkoutEnvelopeV1(
+                kind: .snapshot,
+                sessionID: sessionID,
+                sessionToken: 93,
+                sequence: 2,
+                capturedAt: clock.now(),
+                snapshot: snapshot(
+                    locationSequence: 1,
+                    locationCapturedAt: firstLocationCapturedAt
+                )
+            ),
+        ], receivedAt: clock.now())
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        assert(
+            !workoutKinds().contains(4),
+            "changing send age cannot resend one producer sample"
+        )
+
+        clock.advance(by: 0.25)
+        _ = store.ingestBatch([
+            WorkoutEnvelopeV1(
+                kind: .snapshot,
+                sessionID: sessionID,
+                sessionToken: 93,
+                sequence: 3,
+                capturedAt: clock.now(),
+                snapshot: snapshot(
+                    locationSequence: 2,
+                    locationCapturedAt: clock.now()
+                )
+            ),
+        ], receivedAt: clock.now())
+        assert(waitForMainLoop(timeout: 1) {
+            workoutKinds().filter { $0 == 4 }.count == 1
+        }, "a distinct Watch producer sample is relayed")
+        writes.removeAll()
+        canSendMotion = false
+        _ = store.ingestBatch([
+            WorkoutEnvelopeV1(
+                kind: .snapshot, sessionID: sessionID, sessionToken: 93,
+                sequence: 4, capturedAt: clock.now(),
+                snapshot: snapshot(locationSequence: 3, locationCapturedAt: clock.now())
+            ),
+        ], receivedAt: clock.now())
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        clock.advance(by: 4)
+        canSendMotion = true
+        manager.flushPendingNavigationWritesForTesting()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        assert(!workoutKinds().contains(4),
+            "relay must drop a queued four-second-old producer sample")
         withExtendedLifetime(relay) {}
     }
 

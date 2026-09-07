@@ -1,8 +1,9 @@
 import Foundation
 
 nonisolated struct WorkoutSchemaVersion: Codable, Equatable, Sendable {
-    static let current = Self(major: 1, minor: 5)
+    static let current = Self(major: 1, minor: 6)
     static let rideAutomationControlContextMinor: UInt16 = 5
+    static let watchGPSMotionEvidenceMinor: UInt16 = 6
 
     let major: UInt16
     let minor: UInt16
@@ -11,12 +12,18 @@ nonisolated struct WorkoutSchemaVersion: Codable, Equatable, Sendable {
         major == Self.current.major
             && minor >= Self.rideAutomationControlContextMinor
     }
+
+    var supportsWatchGPSMotionEvidence: Bool {
+        major == Self.current.major
+            && minor >= Self.watchGPSMotionEvidenceMinor
+    }
 }
 
 nonisolated enum WorkoutTransitionOrigin: UInt8, Codable, Sendable {
     case unknown = 0
     case manual
     case automatic
+    case system
 }
 
 nonisolated enum WorkoutAutomaticReasonV1: String, Codable, Sendable {
@@ -29,19 +36,31 @@ nonisolated struct WorkoutControlContextV1: Codable, Equatable, Sendable {
     let rideGeneration: UInt32?
     let decisionSequence: UInt32?
     let detectorProfileVersion: UInt16?
+    let evidenceMask: UInt16?
+    let sourceHealthMask: UInt16?
+    let candidateBeganSeconds: UInt32?
+    let decidedAtSeconds: UInt32?
 
     init(
         origin: WorkoutTransitionOrigin,
         automaticReason: WorkoutAutomaticReasonV1? = nil,
         rideGeneration: UInt32? = nil,
         decisionSequence: UInt32? = nil,
-        detectorProfileVersion: UInt16? = nil
+        detectorProfileVersion: UInt16? = nil,
+        evidenceMask: UInt16? = nil,
+        sourceHealthMask: UInt16? = nil,
+        candidateBeganSeconds: UInt32? = nil,
+        decidedAtSeconds: UInt32? = nil
     ) {
         self.origin = origin
         self.automaticReason = automaticReason
         self.rideGeneration = rideGeneration
         self.decisionSequence = decisionSequence
         self.detectorProfileVersion = detectorProfileVersion
+        self.evidenceMask = evidenceMask
+        self.sourceHealthMask = sourceHealthMask
+        self.candidateBeganSeconds = candidateBeganSeconds
+        self.decidedAtSeconds = decidedAtSeconds
     }
 }
 
@@ -148,6 +167,35 @@ nonisolated struct WorkoutLocationV1: Codable, Equatable, Sendable {
     let verticalAccuracy: Double?
     let course: Double?
     let speed: Double?
+    /// Per-location producer identity used by device ride automation. The
+    /// epoch changes whenever Watch location production is restarted; the
+    /// sequence changes only for a newly accepted Core Location sample.
+    let motionSampleEpoch: UInt16?
+    let motionSampleSequence: UInt32?
+
+    init(
+        latitude: Double,
+        longitude: Double,
+        capturedAt: Date,
+        horizontalAccuracy: Double,
+        altitude: Double?,
+        verticalAccuracy: Double?,
+        course: Double?,
+        speed: Double?,
+        motionSampleEpoch: UInt16? = nil,
+        motionSampleSequence: UInt32? = nil
+    ) {
+        self.latitude = latitude
+        self.longitude = longitude
+        self.capturedAt = capturedAt
+        self.horizontalAccuracy = horizontalAccuracy
+        self.altitude = altitude
+        self.verticalAccuracy = verticalAccuracy
+        self.course = course
+        self.speed = speed
+        self.motionSampleEpoch = motionSampleEpoch
+        self.motionSampleSequence = motionSampleSequence
+    }
 }
 
 nonisolated enum WorkoutSafeErrorCodeV1: String, Codable, Sendable {
@@ -463,6 +511,10 @@ nonisolated enum WorkoutContractCodec {
                   envelope.error == nil else {
                 throw WorkoutContractError.invalidEnvelopePayload
             }
+            if snapshot.location?.motionSampleEpoch != nil,
+               !envelope.schemaVersion.supportsWatchGPSMotionEvidence {
+                throw WorkoutContractError.invalidEnvelopePayload
+            }
             try validate(snapshot, envelopeCapturedAt: envelope.capturedAt)
         case .control:
             guard envelope.snapshot == nil,
@@ -593,7 +645,12 @@ nonisolated enum WorkoutContractCodec {
             expectedUnit: .metersPerSecond,
             earliestCapturedAt: earliestComponentDate,
             latestCapturedAt: envelopeCapturedAt,
-            allowedSources: [.pairedCyclingSensor, .watchLocation, .iPhoneLocation]
+            allowedSources: [
+                .healthKit,
+                .pairedCyclingSensor,
+                .watchLocation,
+                .iPhoneLocation,
+            ]
         )
         try validate(
             snapshot.cyclingPower,
@@ -663,6 +720,12 @@ nonisolated enum WorkoutContractCodec {
             if (location.altitude == nil) != (location.verticalAccuracy == nil) {
                 throw WorkoutContractError.invalidLocation
             }
+            if (location.motionSampleEpoch == nil) !=
+                (location.motionSampleSequence == nil) ||
+                location.motionSampleEpoch == 0 ||
+                location.motionSampleSequence == 0 {
+                throw WorkoutContractError.invalidLocation
+            }
         }
         if let segment = snapshot.lastCompletedSegment {
             guard segment.index > 0,
@@ -697,7 +760,7 @@ nonisolated enum WorkoutContractCodec {
         guard let context else { return }
         guard control == .pause || control == .resume
                 || control == .requestCurrentSnapshot,
-              context.origin != .unknown else {
+              context.origin == .manual || context.origin == .automatic else {
             throw WorkoutContractError.invalidEnvelopePayload
         }
         if control == .requestCurrentSnapshot,
@@ -708,13 +771,32 @@ nonisolated enum WorkoutContractCodec {
             guard context.automaticReason == .rideDetection,
                   context.rideGeneration.map({ $0 > 0 }) == true,
                   context.decisionSequence.map({ $0 > 0 }) == true,
-                  context.detectorProfileVersion.map({ $0 > 0 }) == true else {
+                  context.detectorProfileVersion.map({ $0 > 0 }) == true,
+                  context.sourceHealthMask.map({
+$0 & ~UInt16(0x001F) == 0
+                  }) ?? true,
+                  [
+                    context.evidenceMask != nil,
+                    context.sourceHealthMask != nil,
+                    context.candidateBeganSeconds != nil,
+                    context.decidedAtSeconds != nil,
+                  ].allSatisfy({ $0 })
+                    || [
+                        context.evidenceMask == nil,
+                        context.sourceHealthMask == nil,
+                        context.candidateBeganSeconds == nil,
+                        context.decidedAtSeconds == nil,
+                    ].allSatisfy({ $0 }) else {
                 throw WorkoutContractError.invalidEnvelopePayload
             }
         } else if context.automaticReason != nil
                     || context.rideGeneration != nil
                     || context.decisionSequence != nil
-                    || context.detectorProfileVersion != nil {
+                    || context.detectorProfileVersion != nil
+                    || context.evidenceMask != nil
+                    || context.sourceHealthMask != nil
+                    || context.candidateBeganSeconds != nil
+                    || context.decidedAtSeconds != nil {
             throw WorkoutContractError.invalidEnvelopePayload
         }
     }

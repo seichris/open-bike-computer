@@ -266,6 +266,16 @@ nonisolated struct WorkoutDeviceGPSUpdate: Equatable, Sendable {
     let elapsedSeconds: TimeInterval?
 }
 
+nonisolated struct WorkoutDeviceMotionUpdate: Equatable, Sendable {
+    let sessionToken: UInt16
+    let capturedAt: Date
+    let speedMetersPerSecond: Double
+    let horizontalAccuracyMeters: Double
+    let sampleEpoch: UInt16
+    let sampleSequence: UInt32
+    let automaticallyPaused: Bool
+}
+
 nonisolated struct WorkoutDeviceFrames: Equatable, Sendable {
     struct Identity: Equatable, Sendable {
         let state: WorkoutDeviceSessionState
@@ -327,6 +337,11 @@ nonisolated enum WorkoutDeviceFrameBuilder {
     static let unavailableUInt16 = UInt16.max
     static let unavailableUInt32 = UInt32.max
     static let unavailableAltitude = Int16.min
+    private static let watchMotionFixValid: UInt8 = 1 << 0
+    private static let watchMotionSpeedAvailable: UInt8 = 1 << 1
+    private static let watchMotionAccuracyAvailable: UInt8 = 1 << 2
+    private static let watchMotionCurrentSample: UInt8 = 1 << 3
+    private static let watchMotionAutomaticallyPaused: UInt8 = 1 << 4
     private static let metricSourceFlagsMask: UInt8 = 0x1F
 
     static func frames(
@@ -468,6 +483,106 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         )
     }
 
+    /// Dedicated raw Watch-location evidence for device ride automation.
+    /// This intentionally does not use the source-selected workout speed.
+    /// Rebuild age at actual submission, not at queue admission. A stalled
+    /// writer must not relabel an old producer sample as current evidence.
+    static func refreshingWatchMotionAge(
+        _ frame: Data,
+        capturedAt: Date,
+        sentAt: Date
+    ) -> Data? {
+        let age = sentAt.timeIntervalSince(capturedAt) * 1_000
+        guard frame.count == 16, frame.first == 4,
+              age.isFinite, age >= 0, age <= 3_000 else { return nil }
+        let milliseconds = UInt16(age.rounded(.up))
+        var refreshed = frame
+        refreshed[12] = UInt8(truncatingIfNeeded: milliseconds)
+        refreshed[13] = UInt8(truncatingIfNeeded: milliseconds >> 8)
+        return refreshed
+    }
+
+    static func watchMotionFrame(
+        for snapshot: WorkoutSnapshotV1,
+        sessionToken: UInt16,
+        sentAt: Date
+    ) -> Data? {
+        guard let update = watchMotionUpdate(
+            for: snapshot,
+            sessionToken: sessionToken
+        ) else {
+            return nil
+        }
+        return watchMotionFrame(for: update, sentAt: sentAt)
+    }
+
+    static func watchMotionUpdate(
+        for snapshot: WorkoutSnapshotV1,
+        sessionToken: UInt16
+    ) -> WorkoutDeviceMotionUpdate? {
+        guard sessionToken != 0,
+              snapshot.state == .running || snapshot.state == .paused,
+              let location = snapshot.location,
+              let epoch = location.motionSampleEpoch,
+              epoch != 0,
+              let sequence = location.motionSampleSequence,
+              sequence != 0,
+              let speed = finiteValue(
+                location.speed,
+                acceptedBy: { $0 >= 0 }
+              ),
+              location.horizontalAccuracy.isFinite,
+              location.horizontalAccuracy >= 0 else {
+            return nil
+        }
+        return WorkoutDeviceMotionUpdate(
+            sessionToken: sessionToken,
+            capturedAt: location.capturedAt,
+            speedMetersPerSecond: speed,
+            horizontalAccuracyMeters: location.horizontalAccuracy,
+            sampleEpoch: epoch,
+            sampleSequence: sequence,
+            automaticallyPaused: snapshot.state == .paused &&
+                snapshot.pauseOrigin == .automatic
+        )
+    }
+
+    static func watchMotionFrame(
+        for update: WorkoutDeviceMotionUpdate,
+        sentAt: Date
+    ) -> Data? {
+        let sampleAge = sentAt.timeIntervalSince(update.capturedAt)
+        let sampleAgeMilliseconds = (sampleAge * 1_000).rounded()
+        guard sampleAgeMilliseconds.isFinite,
+              sampleAgeMilliseconds >= 0,
+              sampleAgeMilliseconds <= 3_000 else {
+            return nil
+        }
+        var flags = watchMotionFixValid
+            | watchMotionSpeedAvailable
+            | watchMotionAccuracyAvailable
+            | watchMotionCurrentSample
+        if update.automaticallyPaused {
+            flags |= watchMotionAutomaticallyPaused
+        }
+        var frame = Data(capacity: frameLength)
+        frame.append(4)
+        frame.append(flags)
+        frame.appendUInt16LE(update.sessionToken)
+        frame.appendUInt32LE(update.sampleSequence)
+        frame.appendUInt16LE(encodeUInt16(
+            update.speedMetersPerSecond,
+            scale: 100
+        ))
+        frame.appendUInt16LE(encodeUInt16(
+            update.horizontalAccuracyMeters,
+            scale: 10
+        ))
+        frame.appendUInt16LE(UInt16(sampleAgeMilliseconds))
+        frame.appendUInt16LE(update.sampleEpoch)
+        return frame.count == frameLength ? frame : nil
+    }
+
     static func stampedPair(
         core: Data,
         extended: Data,
@@ -518,14 +633,13 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         }
         let pauseOrigin: UInt8
         if sample.state == .paused {
-            pauseOrigin = sample.pauseOrigin?.rawValue ?? 0
+            pauseOrigin = encodedOrigin(sample.pauseOrigin)
         } else {
             pauseOrigin = 0
         }
         let profileVersion = sample.detectorProfileVersion ?? 0
-        let lastOrigin = sample.lastTransitionOrigin?.rawValue ?? 0
-        if (pauseOrigin == WorkoutTransitionOrigin.automatic.rawValue
-                || lastOrigin == WorkoutTransitionOrigin.automatic.rawValue),
+        let lastOrigin = encodedOrigin(sample.lastTransitionOrigin)
+        if (pauseOrigin == 2 || lastOrigin == 2),
            profileVersion == 0 {
             return nil
         }
@@ -541,6 +655,20 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         origin.append(0)
         guard origin.count == originFrameLength else { return nil }
         return origin
+    }
+
+    /// Wire zero means absent/pending, so the canonical `.unknown` case needs
+    /// its own value instead of being collapsed with nil.
+    private static func encodedOrigin(
+        _ origin: WorkoutTransitionOrigin?
+    ) -> UInt8 {
+        switch origin {
+        case nil: 0
+        case .manual: 1
+        case .automatic: 2
+        case .system: 3
+        case .unknown: 4
+        }
     }
 
     private static func encodeUInt16(

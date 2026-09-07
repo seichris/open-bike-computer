@@ -24,13 +24,15 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     @Published private(set) var routeDistanceMeters: Double?
     @Published private(set) var routeDistanceCapturedAt: Date?
     @Published private(set) var routeSavingFailed = false
+    private(set) var motionSampleEpoch: UInt16 = 0
+    private(set) var motionSampleSequence: UInt32 = 0
 
     private let locationService: WatchLocationService
     private var cancellables = Set<AnyCancellable>()
     private var routeBuilder: (any WatchWorkoutRouteBuilding)?
     private var workoutStart: Date?
     private var isWorkoutActive = false
-    private var isPaused = false
+    private var pausedContinuity = WorkoutPausedRouteContinuity()
     private var mayContainExistingRouteData = false
     private var timestampGate: WorkoutRouteTimestampGate?
     private var distanceAccumulator: WorkoutRouteDistanceAccumulator?
@@ -63,6 +65,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     func begin(
         routeBuilder: (any WatchWorkoutRouteBuilding)?,
         startDate: Date,
+        motionSampleEpoch: UInt16 = 0,
         mayContainExistingRouteData: Bool = false,
         onLocationUpdate: @escaping () -> Void
     ) {
@@ -72,7 +75,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         self.workoutStart = startDate
         self.onLocationUpdate = onLocationUpdate
         isWorkoutActive = true
-        isPaused = false
+        pausedContinuity.reset()
         self.mayContainExistingRouteData = mayContainExistingRouteData
         distanceAccumulator = WorkoutRouteDistanceAccumulator(
             mayContainExistingRouteData: mayContainExistingRouteData
@@ -84,22 +87,23 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         latestLocation = nil
         lastDistanceLocation = nil
         routeSavingFailed = false
+        self.motionSampleEpoch = motionSampleEpoch
+        motionSampleSequence = 0
 
         requestAuthorizationIfNeeded()
         startLocationUpdatesWhenAuthorized()
     }
 
-    func setPaused(_ paused: Bool, at date: Date) {
-        isPaused = paused
-        lastDistanceLocation = nil
-        distanceAccumulator?.breakSegment()
-        if !paused {
-            timestampGate?.resume(at: date)
+    func setPaused(_ paused: Bool, at _: Date) {
+        if pausedContinuity.setPaused(paused) {
+            lastDistanceLocation = nil
+            distanceAccumulator?.breakSegment()
         }
     }
 
     func stopLocationUpdates() {
         isWorkoutActive = false
+        pausedContinuity.reset()
         locationService.setConsumer(.workout, active: false)
         lastDistanceLocation = nil
         distanceAccumulator?.breakSegment()
@@ -170,7 +174,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     }
 
     private func receive(_ locations: [CLLocation]) {
-        guard isWorkoutActive, !isPaused, let workoutStart else { return }
+        guard isWorkoutActive, let workoutStart else { return }
         let now = Date()
         let accepted = locations.filter { [timestampGate] location in
             guard timestampGate?.accepts(location.timestamp) == true else {
@@ -190,9 +194,18 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         }
         guard !accepted.isEmpty else { return }
 
+        for _ in accepted {
+            motionSampleSequence &+= 1
+            if motionSampleSequence == 0 {
+                motionSampleSequence = 1
+            }
+        }
+        latestLocation = accepted.last
+
         var routeAccepted: [CLLocation] = []
         for location in accepted {
             var segmentDistanceFromPrevious: Double?
+            var intervalFromPrevious: TimeInterval?
             if let previous = lastDistanceLocation {
                 let segmentDistance = location.distance(from: previous)
                 let interval = location.timestamp.timeIntervalSince(previous.timestamp)
@@ -203,16 +216,31 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
                     continue
                 }
                 segmentDistanceFromPrevious = segmentDistance
+                intervalFromPrevious = interval
+            }
+            if pausedContinuity.isPaused,
+               !WorkoutPausedRoutePointFilter.accepts(
+                 reportedSpeedMetersPerSecond: location.speed,
+                 horizontalAccuracyMeters: location.horizontalAccuracy,
+                 previousHorizontalAccuracyMeters:
+                    lastDistanceLocation?.horizontalAccuracy,
+                 segmentDistanceMeters: segmentDistanceFromPrevious,
+                 interval: intervalFromPrevious
+               ) {
+                continue
             }
             lastDistanceLocation = location
             distanceAccumulator?.appendPoint(
                 segmentDistanceFromPrevious: segmentDistanceFromPrevious
             )
+            pausedContinuity.noteAcceptedPoint()
             routeDistanceMeters = distanceAccumulator?.totalMeters
             routeAccepted.append(location)
         }
-        guard !routeAccepted.isEmpty else { return }
-        latestLocation = routeAccepted.last
+        guard !routeAccepted.isEmpty else {
+            onLocationUpdate?()
+            return
+        }
         routeDistanceCapturedAt = routeDistanceMeters == nil
             ? nil
             : routeAccepted.last?.timestamp
@@ -220,6 +248,12 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
 
         enqueueRouteLocations(routeAccepted)
     }
+
+#if WORKOUT_CONTRACT_XCTEST
+    func receiveLocationsForTesting(_ locations: [CLLocation]) {
+        receive(locations)
+    }
+#endif
 
     /// The production queue/insert boundary is internal so the Watch test
     /// target can inject a route-builder failure without Core Location or
@@ -291,10 +325,12 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         timestampGate = nil
         distanceAccumulator = nil
         isWorkoutActive = false
-        isPaused = false
+        pausedContinuity.reset()
         mayContainExistingRouteData = false
         routeQueue.reset()
         latestLocation = nil
+        motionSampleEpoch = 0
+        motionSampleSequence = 0
         lastDistanceLocation = nil
         routeDistanceMeters = nil
         routeDistanceCapturedAt = nil

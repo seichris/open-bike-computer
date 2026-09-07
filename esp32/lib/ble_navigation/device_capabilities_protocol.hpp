@@ -36,6 +36,9 @@ constexpr uint8_t RIDE_DELIVERY_ACK_CLIENT_VERSION =
 constexpr uint8_t RENDERER_BENCHMARK_SAMPLE_CLIENT_VERSION =
     ride_ble_protocol_generated::
         RENDERER_BENCHMARK_SAMPLE_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t WATCH_GPS_MOTION_EVIDENCE_V1_CLIENT_VERSION =
+    ride_ble_protocol_generated::
+        WATCH_GPS_MOTION_EVIDENCE_V1_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t CAP2_SCHEMA_VERSION =
     ride_ble_protocol_generated::CAPABILITY_SCHEMA_VERSION;
 constexpr uint32_t STREET_LABELS_FEATURE =
@@ -74,6 +77,8 @@ constexpr uint32_t RIDE_DELIVERY_ACK_FEATURE =
     ride_ble_protocol_generated::RIDE_DELIVERY_ACK_FEATURE;
 constexpr uint32_t RENDERER_BENCHMARK_SAMPLE_FEATURE =
     ride_ble_protocol_generated::RENDERER_BENCHMARK_SAMPLE_FEATURE;
+constexpr uint32_t WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE =
+    ride_ble_protocol_generated::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE;
 constexpr uint32_t MAP_NAVIGATION_ORIENTATION_FEATURE =
     ride_ble_protocol_generated::MAP_NAVIGATION_ORIENTATION_FEATURE;
 constexpr uint8_t MAP_NAVIGATION_ORIENTATION_CLIENT_VERSION =
