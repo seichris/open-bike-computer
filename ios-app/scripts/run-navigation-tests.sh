@@ -8,6 +8,8 @@ OUT="${TMPDIR:-/tmp}/open-bike-navigation-tests"
 
 cd "${REPO_DIR}"
 
+bash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"
+
 RENDERER_SCHEDULER_OUT="${TMPDIR:-/tmp}/open-bike-renderer-scheduler-tests"
 xcrun swiftc -D HOST_TESTING -parse-as-library \
   -o "${RENDERER_SCHEDULER_OUT}" \
@@ -78,7 +80,6 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
-  ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
@@ -128,6 +129,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Views/MapView.swift \
   ios-app/BikeComputerTests/DestinationCalloutLayoutTests.swift
 
@@ -148,6 +150,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Views/MapView.swift \
   ios-app/BikeComputerTests/MapAppearanceTests.swift
 

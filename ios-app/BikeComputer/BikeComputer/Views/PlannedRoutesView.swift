@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct SavedRoutesSettingsSection: View {
     @ObservedObject var routeLibrary: PhoneRouteLibrary
     @ObservedObject var stravaCoordinator: StravaIntegrationCoordinator
+    @Environment(\.savedRouteMapAction) private var mapAction
     let onImportFromStrava: () -> Void
     @FocusState private var focusedRouteID: UUID?
     @State private var renameInteraction = SavedRouteRenameInteraction()
@@ -60,11 +61,11 @@ struct SavedRoutesSettingsSection: View {
             Text("Saved Routes")
         } footer: {
             Text(
-                "Save GPX route files to your Apple watch for offline navigation"
+                "Preview saved routes on the map, or send them to Apple Watch for offline navigation."
             )
         }
         .alert(
-            "Route Sync Error",
+            "Saved Route Error",
             isPresented: Binding(
                 get: { errorMessage != nil },
                 set: { if !$0 { errorMessage = nil } }
@@ -174,6 +175,33 @@ struct SavedRoutesSettingsSection: View {
                     deleteAfter: route.deleteAfter
                 )
             }
+
+            // This is a local read, independent of Watch transfer state. Keep
+            // it separate from the already crowded rename/Watch/delete row.
+            Button {
+                finishRenaming()
+                focusedRouteID = nil
+                guard let mapAction else { return }
+                do {
+                    try mapAction.perform {
+                        try routeLibrary.mapSelection(for: route)
+                    }
+                } catch {
+                    errorMessage = error.localizedDescription
+                }
+            } label: {
+                Label("Show on Map", systemImage: "map")
+                    .frame(minHeight: 44)
+            }
+            .buttonStyle(.borderless)
+            .disabled(mapAction == nil || mapAction?.isNavigationActive == true)
+            .accessibilityLabel("Show \(displayName) on map")
+            .accessibilityHint(
+                mapAction?.isNavigationActive == true
+                    ? "Available after navigation stops"
+                    : "Previews the saved route without starting navigation"
+            )
+            .accessibilityIdentifier("showSavedRouteOnMap-\(route.id.uuidString)")
 
             if let transientStatus = transientStatus(status) {
                 Label(transientStatus.label, systemImage: transientStatus.icon)
