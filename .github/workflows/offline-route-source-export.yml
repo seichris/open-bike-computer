@@ -1,12 +1,9 @@
 name: Temporary offline-route implementation and native validation
-
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-
 permissions:
   contents: read
-
 jobs:
   apply:
     if: github.head_ref == 'feat/planned-routes-save-offline' && github.event.pull_request.head.repo.full_name == github.repository
@@ -30,10 +27,10 @@ jobs:
           import hashlib, lzma, os
           from pathlib import Path
           data = b''.join(Path('.github/offline-route-feature.part' + str(i)).read_bytes() for i in (1, 2))
-          assert len(data) == 17820, 'Unexpected payload size'
+          assert len(data) == 17820
           patch = lzma.decompress(data)
-          assert len(patch) == 78855, 'Unexpected patch size'
-          assert hashlib.sha256(patch).hexdigest() == '7e02b233b9ce4f9716f20d49ffea314ef34f703de41e71948dbc185d7bb129e6', 'Patch integrity mismatch'
+          assert len(patch) == 78855
+          assert hashlib.sha256(patch).hexdigest() == '7e02b233b9ce4f9716f20d49ffea314ef34f703de41e71948dbc185d7bb129e6'
           Path(os.environ['RUNNER_TEMP'], 'offline-route-feature.patch').write_bytes(patch)
           PY
           git config user.name 'github-actions[bot]'
@@ -41,30 +38,30 @@ jobs:
           git fetch --no-tags --depth=32 origin b8282d3954b59fde7f551856bf8242e8024a274e
           if ! git merge --no-commit --no-ff b8282d3954b59fde7f551856bf8242e8024a274e; then
             test "$(git diff --name-only --diff-filter=U)" = 'ios-app/scripts/run-navigation-tests.sh'
-            git checkout --ours ios-app/scripts/run-navigation-tests.sh
+            git checkout --theirs ios-app/scripts/run-navigation-tests.sh
             python3 - <<'PY'
           from pathlib import Path
           path = Path('ios-app/scripts/run-navigation-tests.sh')
           text = path.read_text()
-          hook = '"${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"'
+          hook = 'bash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"'
           assert text.count(hook) == 1
-          text = text.replace(hook, hook + '\nbash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"', 1)
+          text = text.replace(hook, '"${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"\n' + hook, 1)
           path.write_text(text)
           PY
             git add ios-app/scripts/run-navigation-tests.sh
           fi
           git rm .github/workflows/offline-route-source-export.yml .github/offline-route-feature.part1 .github/offline-route-feature.part2
+          git write-tree
           test "$(git write-tree)" = '1876a12b1ded68fef3547b9ee5042e6de6d0e5de'
           git apply --unidiff-zero --index "$RUNNER_TEMP/offline-route-feature.patch"
           test "$(git write-tree)" = 'f3f2a682ef43c99097f6c9adb9c1c9d0ce3d31a0'
           git diff --cached --check
-          # The connector removes these unchanged transport files in a follow-up
-          # commit. GITHUB_TOKEN never attempts to modify workflow definitions.
+          # The connector removes these unchanged transport files afterwards.
+          # GITHUB_TOKEN never attempts to modify workflow definitions.
           git restore --source=HEAD --staged --worktree .github/workflows/offline-route-source-export.yml .github/offline-route-feature.part1 .github/offline-route-feature.part2
-          git commit -m 'feat(ios): save approved GPX routes and navigate saved archives offline' -m 'Integrates the pinned PR #429 preview prerequisite. Preserves the MapKit durable-storage gate and Strava retention. Application tree verified against the isolated local implementation.'
+          git commit -m 'feat(ios): save approved GPX routes and navigate saved archives offline' -m 'Integrates pinned PR #429. Preserves MapKit storage policy and Strava retention. Application tree verified against isolated local worktree.'
           git push origin HEAD:refs/heads/feat/planned-routes-save-offline
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
   native:
     name: Requested iOS validation on transferred feature code
     needs: apply
@@ -79,7 +76,7 @@ jobs:
         with:
           ref: ${{ needs.apply.outputs.sha }}
           persist-credentials: false
-      - name: Record source and toolchain; exclude all transfer files from validation
+      - name: Record source and toolchain; exclude transfer files from validation
         working-directory: .
         run: |
           git rev-parse HEAD
