@@ -357,7 +357,8 @@ bool RideDiagnosticsHttp::handleRequest(
   if (route.kind == http_policy::RouteKind::Status) {
     const Stats snapshot = stats();
     const std::string body =
-        "{\"schema\":1,\"ready\":true,\"bootSequence\":" +
+        std::string("{\"schema\":1,\"ready\":") +
+        (snapshot.recorderReady ? "true" : "false") + ",\"bootSequence\":" +
         std::to_string(currentBootSequence()) +
         ",\"activeChunk\":" + std::to_string(currentActiveChunk()) +
         ",\"storageAvailable\":" +

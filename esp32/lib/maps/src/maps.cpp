@@ -186,7 +186,9 @@ bool findMapBlock(const std::string &directory, std::string &basePath,
                   size_t &visited, size_t depth) {
   if (depth > 6 || visited >= 65536)
     return false;
-  DIR *handle = ::opendir(directory.c_str());
+  std::unique_ptr<DIR, decltype(&::closedir)> directoryOwner(
+      ::opendir(directory.c_str()), &::closedir);
+  DIR *handle = directoryOwner.get();
   if (handle == nullptr)
     return false;
   bool found = false;
@@ -218,7 +220,6 @@ bool findMapBlock(const std::string &directory, std::string &basePath,
       basePath = path.substr(0, path.size() - 4);
     }
   }
-  ::closedir(handle);
   return found || (depth == 0 && !basePath.empty());
 }
 
@@ -2010,7 +2011,8 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
       }
     }
 
-    MapBlock *newBlock = Maps::readMapBlock(fileName);
+    std::unique_ptr<MapBlock> blockOwner(Maps::readMapBlock(fileName));
+    MapBlock *newBlock = blockOwner.get();
     if (Maps::isMapFound.load(std::memory_order_acquire)) {
       newBlock->inView = true;
       newBlock->offset = req;
@@ -2018,14 +2020,13 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
           Maps::mercatorY2lat(static_cast<double>(req.y) +
                               (1 << (MAPBLOCK_SIZE_BITS - 1))));
       memCache.blocks.push_back(newBlock);
+      blockOwner.release();
       cachedBlockCount.store(memCache.blocks.size(),
                              std::memory_order_release);
       loadedBlocks++;
 
       ESP_LOGI(TAG, "Block loaded: %p, offset(%d, %d)", newBlock, req.x, req.y);
       ESP_LOGI(TAG, "FreeHeap: %d", (int)esp_get_free_heap_size());
-    } else {
-      delete newBlock;
     }
 
     if (shouldCancelMapRenderWork()) {
@@ -4204,7 +4205,7 @@ bool Maps::takeWorkerRequest(RenderRequest &request) {
   if (xSemaphoreTake(renderStateMutex, portMAX_DELAY) != pdTRUE)
     return false;
   bool available =
-      !pendingVectorMapActivationValid &&
+      pendingStorageControl_ == nullptr && !pendingVectorMapActivationValid &&
       !completedVectorMapActivationValid && latestRenderRequestValid &&
       latestRenderRequest.version.sequence > lastTakenRenderSequence &&
       renderJobs.beginLatest();
@@ -4423,7 +4424,7 @@ void Maps::renderWorkerLoop() {
     if (renderWorkerShutdown.load(std::memory_order_acquire))
       break;
 
-    if (processPendingVectorMapActivation())
+    if (processPendingStorageControl() || processPendingVectorMapActivation())
       continue;
 
     RenderRequest request;
@@ -4474,7 +4475,7 @@ void Maps::renderWorkerLoop() {
           static_cast<int32_t>(std::ceil(worldBounds.max.y)));
 
       bool completed = false;
-      {
+      try {
         power_management::ScopedLock powerLock(
             power_management::LockDomain::Map);
         runtime_watchdog_diagnostics::notePhase(
@@ -4517,6 +4518,11 @@ void Maps::renderWorkerLoop() {
                      (unsigned)requiredBytes, (unsigned)bufMapTempSize);
           }
         }
+      }
+      catch (const std::bad_alloc &) {
+        preparedScene.invalidate();
+        completed = false; // Existing failed-job path retains the visible front.
+        ESP_LOGE(TAG, "MAP_RESOURCE_REJECTED: preserving prior frame");
       }
       result.durationMs = millis() - startMs;
       result.psramFree = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
@@ -4628,7 +4634,7 @@ void Maps::renderWorkerLoop() {
           runtime_watchdog_diagnostics::Phase::Waiting,
           request.version.sequence);
       taskYIELD();
-      if (processPendingVectorMapActivation())
+      if (processPendingStorageControl() || processPendingVectorMapActivation())
         break;
     }
   }
@@ -5707,7 +5713,8 @@ Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
 
   const bool previousMapFound = isMapFound.load();
   isMapFound = false;
-  MapBlock *block = readMapBlock(String(blockBase.c_str()));
+  std::unique_ptr<MapBlock> blockOwner(readMapBlock(String(blockBase.c_str())));
+  MapBlock *block = blockOwner.get();
   loaded = block != nullptr && isMapFound.load();
   if (!loaded)
     result.code = map_probe_diagnostics::Code::BlockInvalid;
@@ -5735,7 +5742,6 @@ Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
   } else if (loaded) {
     result.formatVersion = block->formatVersion;
   }
-  delete block;
   isMapFound = previousMapFound;
   if (loaded)
     result.code = map_probe_diagnostics::Code::Ok;
@@ -5746,7 +5752,60 @@ Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
   return result;
 }
 
-bool Maps::requestVectorMapFolderActivation(const std::string &folder) {
+bool Maps::requestStorageControl(void (*work)(void *), void *context) {
+  if (work == nullptr || renderWorkerShutdown.load(std::memory_order_acquire))
+    return false;
+  if (renderWorkerTaskHandle == nullptr && !startRenderWorker())
+    return false;
+  if (xSemaphoreTake(renderStateMutex, 0) != pdTRUE)
+    return false;
+  if (pendingStorageControl_ != nullptr) {
+    xSemaphoreGive(renderStateMutex);
+    return false;
+  }
+  pendingStorageControl_ = work;
+  pendingStorageControlContext_ = context;
+  gMapRenderCancellationGeneration.fetch_add(1, std::memory_order_acq_rel);
+  renderJobs.requestCancellation();
+  latestRenderRequestValid = false;
+  if (renderJobs.state() == map_render_job::State::Ready) {
+#if FIRMWARE_DIAGNOSTICS
+    renderer_diagnostics::noteJobForWindow(
+        renderJobs.ready().diagnosticsWindowId,
+        renderer_diagnostics::JobEvent::Stale);
+#endif
+    renderJobs.rejectReadyAsStale();
+  }
+  readyRenderResultValid = false;
+  const TaskHandle_t worker = renderWorkerTaskHandle;
+  xSemaphoreGive(renderStateMutex);
+  xTaskNotifyGive(worker);
+  return true;
+}
+
+bool Maps::processPendingStorageControl() {
+  if (xSemaphoreTake(renderStateMutex, portMAX_DELAY) != pdTRUE)
+    return false;
+  auto work = pendingStorageControl_;
+  void *context = pendingStorageControlContext_;
+  pendingStorageControl_ = nullptr;
+  pendingStorageControlContext_ = nullptr;
+  xSemaphoreGive(renderStateMutex);
+  if (work == nullptr)
+    return false;
+  power_management::ScopedLock powerLock(power_management::LockDomain::Storage);
+  runtime_watchdog_diagnostics::notePhase(
+      runtime_watchdog_diagnostics::Role::MapRender,
+      runtime_watchdog_diagnostics::Phase::MapActivation, 0);
+  work(context); // Command owns its completion mailbox and failure handling.
+  runtime_watchdog_diagnostics::notePhase(
+      runtime_watchdog_diagnostics::Role::MapRender,
+      runtime_watchdog_diagnostics::Phase::Waiting, 0);
+  return true;
+}
+
+bool Maps::requestVectorMapFolderActivation(const std::string &folder) try {
+  std::string ownedFolder = folder; // Allocate before taking the render mutex.
   if (folder.empty())
     return false;
   if (renderWorkerRestartAfterExit.load(std::memory_order_acquire) &&
@@ -5765,7 +5824,7 @@ bool Maps::requestVectorMapFolderActivation(const std::string &folder) {
   }
 
   pendingVectorMapActivation.sequence = ++vectorMapActivationSequence;
-  pendingVectorMapActivation.folder = folder;
+  pendingVectorMapActivation.folder.swap(ownedFolder);
   pendingVectorMapActivationValid = true;
   gMapRenderCancellationGeneration.fetch_add(1, std::memory_order_acq_rel);
   renderJobs.requestCancellation();
@@ -5785,6 +5844,8 @@ bool Maps::requestVectorMapFolderActivation(const std::string &folder) {
   return true;
 }
 
+catch (const std::bad_alloc &) { return false; }
+
 bool Maps::takeVectorMapActivationRequest(
     VectorMapActivationRequest &request) {
   if (renderStateMutex == nullptr ||
@@ -5793,7 +5854,7 @@ bool Maps::takeVectorMapActivationRequest(
   const bool available = pendingVectorMapActivationValid &&
                          !completedVectorMapActivationValid;
   if (available) {
-    request = pendingVectorMapActivation;
+    request = std::move(pendingVectorMapActivation);
     pendingVectorMapActivation = {};
     pendingVectorMapActivationValid = false;
   }
@@ -5819,12 +5880,19 @@ bool Maps::processPendingVectorMapActivation() {
         runtime_watchdog_diagnostics::Phase::MapActivation,
         request.sequence);
   }
-  map_probe_diagnostics::Result probe =
-      probeVectorMapFolderOnStorageOwner(request.folder);
-  bool loaded = probe.loaded();
-  if (loaded && !switchVectorMapFolderOnStorageOwner(request.folder)) {
+  map_probe_diagnostics::Result probe;
+  bool loaded = false;
+  try {
+    probe = probeVectorMapFolderOnStorageOwner(request.folder);
+    loaded = probe.loaded();
+    if (loaded && !switchVectorMapFolderOnStorageOwner(request.folder)) {
+      loaded = false;
+      probe.code = map_probe_diagnostics::Code::RootSwitchFailed;
+    }
+  } catch (const std::bad_alloc &) {
     loaded = false;
     probe.code = map_probe_diagnostics::Code::RootSwitchFailed;
+    ESP_LOGE(TAG, "MAP_RESOURCE_REJECTED: activation");
   }
   gMapRenderControlOperation.store(false, std::memory_order_release);
   if (onMapRenderWorkerTask()) {
@@ -5834,17 +5902,18 @@ bool Maps::processPendingVectorMapActivation() {
         request.sequence);
   }
 
+  MAPIO_LOG("MAPIO: activation-ready sequence=%lu loaded=%u root=%s\n",
+            (unsigned long)request.sequence, loaded ? 1U : 0U,
+            request.folder.c_str());
+
   if (renderStateMutex != nullptr &&
       xSemaphoreTake(renderStateMutex, portMAX_DELAY) == pdTRUE) {
     completedVectorMapActivation =
-        {request.sequence, request.folder, loaded, probe};
+        {request.sequence, std::move(request.folder), loaded, probe};
     completedVectorMapActivationValid = true;
     latestRenderRequestValid = false;
     xSemaphoreGive(renderStateMutex);
   }
-  MAPIO_LOG("MAPIO: activation-ready sequence=%lu loaded=%u root=%s\n",
-            (unsigned long)request.sequence, loaded ? 1U : 0U,
-            request.folder.c_str());
   ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
   return true;
 }
@@ -5858,7 +5927,7 @@ bool Maps::takeVectorMapFolderActivationResult(
     xSemaphoreGive(renderStateMutex);
     return false;
   }
-  result.folder = completedVectorMapActivation.folder;
+  result.folder = std::move(completedVectorMapActivation.folder);
   result.loaded = completedVectorMapActivation.loaded;
   result.probe = completedVectorMapActivation.probe;
   completedVectorMapActivation = {};

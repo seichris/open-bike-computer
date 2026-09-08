@@ -25,6 +25,7 @@ struct Stats {
   uint16_t queueDepth;
   uint16_t maxQueueDepth;
   bool storageAvailable;
+  bool recorderReady = false;
 };
 
 constexpr std::size_t kCaptureIdBytes = 48;
@@ -119,6 +120,8 @@ void begin(Storage &storage, uint32_t bootSequence, uint32_t firmwareFingerprint
 // Start persistent SD writes after boot-time map recovery has released storage.
 // Events recorded between begin() and this handoff remain queued.
 void startWriter();
+// Distinct from mount availability and UI boot readiness.
+bool recorderReady();
 void process(uint32_t nowMs);
 using StorageRecoveryAllowedProbe = bool (*)();
 void setStorageRecoveryAllowedProbe(StorageRecoveryAllowedProbe probe);

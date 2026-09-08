@@ -66,6 +66,9 @@ public:
   virtual void responseDidComplete(const HttpRequest &request,
                                    bool peerClosedCleanly) {}
   virtual void responseDidAbort(const HttpRequest &request) {}
+  // Called only by the HTTP worker after all requests have unwound, before
+  // its handle is cleared. Resource owners finish cancellation here.
+  virtual void workerWillStop() {}
 };
 
 class HttpTransferServer {
