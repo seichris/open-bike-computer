@@ -184,7 +184,7 @@ struct OfflineRouteSaveTests {
         let xml = points.map { "<trkpt lat=\"\($0.0)\" lon=\"\($0.1)\"/>" }.joined()
         return Data("<gpx version=\"1.1\"><trk><name>Canal ride</name><trkseg>\(xml)</trkseg></trk></gpx>".utf8)
     }
-    static func draft(_ f: Fixture, reversed: Bool = false, offset: Double = 0) throws -> OfflineRouteSaveDraft {
+    private static func draft(_ f: Fixture, reversed: Bool = false, offset: Double = 0) throws -> OfflineRouteSaveDraft {
         try .gpx(data: gpx(reversed: reversed, offset: offset), fileName: "Canal.gpx", now: f.now)
     }
     static func changedProvider(_ route: NavigationRouteV1, _ provider: RouteProviderMetadataV1) -> NavigationRouteV1 {
@@ -197,7 +197,7 @@ struct OfflineRouteSaveTests {
             distanceMeters: route.distanceMeters, expectedTravelTimeSeconds: route.expectedTravelTimeSeconds,
             name: route.name, points: route.points, steps: route.steps, normalizationVersion: route.normalizationVersion)
     }
-    static func fix(_ f: Fixture, latitude: Double = 51.5, longitude: Double = -0.1) -> CLLocation {
+    private static func fix(_ f: Fixture, latitude: Double = 51.5, longitude: Double = -0.1) -> CLLocation {
         CLLocation(coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
             altitude: 0, horizontalAccuracy: 5, verticalAccuracy: 5, course: 0, speed: 4, timestamp: f.now)
     }
@@ -268,11 +268,17 @@ struct OfflineRouteSaveTests {
         let f = Fixture(); defer { f.cleanup() }
         var interaction = OfflineRouteSaveInteraction()
         check(!interaction.canSave(now: f.now), "Save disabled before selection")
+        interaction.save(now: f.now) { _, _ in preconditionFailure("No selection must not commit") }
+        check(interaction.errorMessage == OfflineRouteSaveError.noSelection.localizedDescription,
+            "Missing selection explains why saving is unavailable")
         let d = try draft(f)
         interaction.select(d)
         check(interaction.canSave(now: f.now), "Save enabled for approved valid GPX")
         interaction.proposedName = " "
         check(!interaction.canSave(now: f.now), "Save disabled for an empty name")
+        interaction.save(now: f.now) { _, _ in preconditionFailure("Invalid name must not commit") }
+        check(interaction.errorMessage == OfflineRouteSaveError.invalidName.localizedDescription,
+            "Invalid name is distinct from a blocked provider")
         interaction.cancel()
         check(!interaction.canSave(now: f.now) && f.library.routes.isEmpty, "Cancel discards the draft without writes")
         interaction.select(d)
@@ -395,6 +401,11 @@ struct OfflineRouteSaveTests {
         try engine.startOfflineNavigation(archive: archive, initialLocation: fix(f))
         check(engine.offlineSnapshotForTesting?.mode == .offline && engine.offlineSnapshotForTesting?.contentHash == archive.contentHash,
             "Actual engine/runtime use offline mode and original content hash")
+        let firstGeneration = engine.offlineSnapshotForTesting!.navigationGeneration
+        engine.stopNavigation()
+        try engine.startOfflineNavigation(archive: archive, initialLocation: fix(f))
+        check(engine.offlineSnapshotForTesting!.navigationGeneration > firstGeneration,
+            "Offline restarts preserve the monotonic runtime generation")
         engine.stopNavigation()
         let expiring = try NavigationRouteArchiveV1.create(route: changedProvider(archive.route, RouteProviderPolicyV1.strava),
             createdAt: f.now, deleteAfter: f.now.addingTimeInterval(1), purpose: .offlineNavigation)

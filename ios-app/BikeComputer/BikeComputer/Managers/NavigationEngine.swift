@@ -223,7 +223,9 @@ class NavigationEngine: NSObject, ObservableObject {
             }
             return CLLocation(latitude: first.latitude, longitude: first.longitude)
         }()
-        var runtime = NavigationRuntimeV1()
+        // Preflight on a copy so failure cannot replace active state, while
+        // preserving the monotonic runtime generation across navigation starts.
+        var runtime = navigationRuntime
         _ = try runtime.start(
                 route: sharedRoute,
                 contentHash: contentHash,

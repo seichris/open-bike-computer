@@ -120,8 +120,17 @@ struct OfflineRouteSaveInteraction {
         now: Date,
         commit: (OfflineRouteSaveDraft, String) throws -> OfflineRouteSaveResult
     ) {
-        guard canSave(now: now), let draft else {
+        guard result == nil else { return }
+        guard let draft else {
+            errorMessage = OfflineRouteSaveError.noSelection.localizedDescription
+            return
+        }
+        guard draft.isEligible(now: now) else {
             errorMessage = OfflineRouteSaveError.sourceNotApproved.localizedDescription
+            return
+        }
+        guard canSave(now: now) else {
+            errorMessage = OfflineRouteSaveError.invalidName.localizedDescription
             return
         }
         do {
