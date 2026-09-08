@@ -388,6 +388,9 @@ private:
   };
   bool takeVectorMapActivationRequest(VectorMapActivationRequest &request);
   bool processPendingVectorMapActivation();
+  bool processPendingStorageControl();
+  void (*pendingStorageControl_)(void *) = nullptr;
+  void *pendingStorageControlContext_ = nullptr;
   map_probe_diagnostics::Result
   probeVectorMapFolderOnStorageOwner(const std::string &folder);
   bool switchVectorMapFolderOnStorageOwner(const std::string &folder);
@@ -635,6 +638,9 @@ public:
   map_probe_diagnostics::Result
   probeVectorMapFolderDetailed(const std::string &folder);
   bool requestVectorMapFolderActivation(const std::string &folder);
+  // Bounded command admission; callback/context must live through completion.
+  // Runs between jobs on the sole map storage owner, never on the UI task.
+  bool requestStorageControl(void (*work)(void *), void *context);
   bool takeVectorMapFolderActivationResult(VectorMapActivationResult &result);
   void deleteMapScrSprites();
   void createMapScrSprites();
