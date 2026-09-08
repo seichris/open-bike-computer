@@ -335,7 +335,8 @@ struct ContentView: View {
                 }
                 .ignoresSafeArea(.container, edges: .bottom)
 
-                if coordinator.bleManager.supportsDeviceSounds &&
+                if coordinator.bleManager.deviceSoundsEnabled &&
+                    coordinator.bleManager.supportsDeviceSounds &&
                     !offlineMapManager.isMapAreaSelectionActive &&
                     visibleOfflineMapOnboardingStep == nil {
                     DeviceSoundMapButton(bleManager: coordinator.bleManager)
