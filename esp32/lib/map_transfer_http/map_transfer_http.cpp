@@ -781,6 +781,7 @@ void MapTransferHttpServer::executeRollback() {
     if (rollbackKind_ == RollbackKind::Runtime)
       succeeded = succeeded && installer_.readActiveMap(restored).ok;
   } catch (const std::bad_alloc &) {
+    succeeded = false;
     Serial.println("MAP_RESOURCE_REJECTED: rollback");
   }
   lockState();
