@@ -6387,6 +6387,18 @@ final class DurableMapDownloadCoordinator: NSObject, URLSessionDownloadDelegate 
     static let shared = DurableMapDownloadCoordinator()
     nonisolated static let sessionIdentifier = "org.bicino.offline-map-downloads.v1"
     private var completionHandler: (() -> Void)?
+    private var backgroundEventsFinished = false
+    private var pendingCancellationCallbacks = 0
+    private var blockedAttempts: Set<UUID> = []
+
+    // This record survives process death. A late callback cannot adopt an
+    // artifact merely because its newer caller no longer has a waiter.
+    nonisolated private struct Ownership: Codable {
+        enum Phase: String, Codable { case active, cancelled, finished, failed }
+        let attemptID: UUID
+        let constraints: OfflineMapDownloadConstraints
+        let phase: Phase
+    }
     private let configurationOverride: URLSessionConfiguration?
     nonisolated private let directoryOverride: URL?
     init(configuration: URLSessionConfiguration? = nil, directory: URL? = nil) {
@@ -6395,6 +6407,8 @@ final class DurableMapDownloadCoordinator: NSObject, URLSessionDownloadDelegate 
         super.init()
     }
     private struct Waiter {
+        let invocationID: UUID
+        let attemptID: UUID
         let task: URLSessionDownloadTask
         let continuation: CheckedContinuation<URL, Error>
         let progress: @MainActor @Sendable (Double) -> Void
@@ -6414,14 +6428,25 @@ final class DurableMapDownloadCoordinator: NSObject, URLSessionDownloadDelegate 
         configuration = URLSessionConfiguration.default
 #endif
         }
+#if !os(Linux)
         configuration.waitsForConnectivity = true
+#endif
         configuration.httpShouldSetCookies = false
         configuration.timeoutIntervalForResource = 24 * 60 * 60
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        // All delegate work, ownership checks, file publication and waiter
+        // transitions share the main actor. File moves complete before the
+        // callback returns; no URLSession temporary file escapes its lifetime.
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
     }()
 
     nonisolated struct Descriptor: Codable {
         let constraints: OfflineMapDownloadConstraints
+        let attemptID: UUID?
+
+        init(constraints: OfflineMapDownloadConstraints, attemptID: UUID? = nil) {
+            self.constraints = constraints
+            self.attemptID = attemptID
+        }
         var key: String? {
             guard let sha = constraints.artifactSHA256, sha.count == 64,
                   sha.allSatisfy({ "0123456789abcdef".contains($0) }),
@@ -6460,6 +6485,7 @@ final class DurableMapDownloadCoordinator: NSObject, URLSessionDownloadDelegate 
     func handleEvents(completionHandler: @escaping () -> Void) {
         self.completionHandler = completionHandler
         _ = session
+        completeBackgroundEventsIfReady()
     }
 
     func download(
@@ -6468,7 +6494,7 @@ final class DurableMapDownloadCoordinator: NSObject, URLSessionDownloadDelegate 
         onByteProgress: @escaping @MainActor @Sendable (OfflineMapByteProgress) -> Void,
         allowResume: Bool = true
     ) async throws -> URL {
-        let descriptor = Descriptor(constraints: constraints)
+        var descriptor = Descriptor(constraints: constraints)
         guard let key = descriptor.key else {
             // Legacy unsigned endpoints have no immutable identity to resume.
             return try await OfflineMapPackDownloader.download(
@@ -6489,40 +6515,44 @@ final class DurableMapDownloadCoordinator: NSObject, URLSessionDownloadDelegate 
         try maintainStorage(descriptor: descriptor, tasks: tasks)
         let resume = try descriptor.file("resume", directory: directoryOverride)
         let matching = tasks.compactMap { $0 as? URLSessionDownloadTask }.first {
-            Descriptor.read($0)?.constraints == constraints && $0.state != .canceling && $0.state != .completed
+            guard let saved = Descriptor.read($0) else { return false }
+            return saved.constraints == constraints && owns(saved, phases: [.active])
+                && $0.state != .canceling && $0.state != .completed
         }
         let task: URLSessionDownloadTask
         var resumed = false
         if let matching {
             task = matching
+            descriptor = Descriptor.read(matching)!
         } else {
-            // A changed host policy must not reattach a task with looser rules.
-            for old in tasks where Descriptor.read(old)?.key == key { old.cancel() }
-            if allowResume, let size = try? resume.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-               size <= 1024 * 1024, let data = try? Data(contentsOf: resume) {
+            descriptor = Descriptor(constraints: constraints, attemptID: UUID())
+            if allowResume, let data = resumeData(for: descriptor) {
                 task = session.downloadTask(withResumeData: data)
                 resumed = true
             } else {
                 task = session.downloadTask(with: url)
             }
+            do {
+                let encoded = try JSONEncoder().encode(descriptor)
+                guard encoded.count <= 4096 else { throw OfflineMapCatalogError.invalidResponse }
+                task.taskDescription = String(decoding: encoded, as: UTF8.self)
+                try persistOwnership(descriptor, phase: .active)
+            } catch {
+                task.cancel()
+                throw error
+            }
+            // Supersede ownership BEFORE cancelling old tasks. Legacy tasks
+            // without an attempt record restart using this authorized URL.
+            for old in tasks where Descriptor.read(old)?.key == key { old.cancel() }
             try? FileManager.default.removeItem(at: resume)
-            task.taskDescription = String(decoding: try JSONEncoder().encode(descriptor), as: UTF8.self)
         }
         do {
-          return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                waiters[key] = Waiter(task: task, continuation: continuation, progress: onProgress, bytes: onByteProgress)
-                task.resume()
-                if Task.isCancelled { cancel(key) }
-            }
-        } onCancel: {
-            Task { @MainActor in self.cancel(key) }
-        }
+            return try await wait(for: task, descriptor: descriptor,
+                onProgress: onProgress, onByteProgress: onByteProgress)
         } catch {
             // Opaque resume data can contain an expired signed URL. Retry once
             // using the freshly authorized URL and the SAME immutable identity.
             if resumed && !Task.isCancelled && !(error is CancellationError) {
-                try? FileManager.default.removeItem(at: resume)
                 return try await download(from: url, constraints: constraints,
                     onProgress: onProgress, onByteProgress: onByteProgress, allowResume: false)
             }
@@ -6530,9 +6560,82 @@ final class DurableMapDownloadCoordinator: NSObject, URLSessionDownloadDelegate 
         }
     }
 
+    private func wait(
+        for task: URLSessionDownloadTask, descriptor: Descriptor,
+        onProgress: @escaping @MainActor @Sendable (Double) -> Void,
+        onByteProgress: @escaping @MainActor @Sendable (OfflineMapByteProgress) -> Void
+    ) async throws -> URL {
+        guard let key = descriptor.key, let attemptID = descriptor.attemptID else {
+            throw OfflineMapCatalogError.invalidResponse
+        }
+        let invocationID = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                waiters[key] = Waiter(invocationID: invocationID, attemptID: attemptID,
+                    task: task, continuation: continuation, progress: onProgress, bytes: onByteProgress)
+                task.resume()
+                if Task.isCancelled { cancel(key, invocationID: invocationID) }
+            }
+        } onCancel: {
+            Task { @MainActor in self.cancel(key, invocationID: invocationID) }
+        }
+    }
+
+    private func ownership(_ descriptor: Descriptor) throws -> Ownership? {
+        let file = try descriptor.file("owner", directory: directoryOverride)
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        guard let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size <= 4096 else { throw OfflineMapCatalogError.invalidResponse }
+        return try JSONDecoder().decode(Ownership.self, from: Data(contentsOf: file))
+    }
+
+    private func owns(_ descriptor: Descriptor, phases: [Ownership.Phase]) -> Bool {
+        guard let attemptID = descriptor.attemptID, !blockedAttempts.contains(attemptID),
+              let current = try? ownership(descriptor), current.attemptID == attemptID,
+              current.constraints == descriptor.constraints else { return false }
+        return phases.contains(current.phase)
+    }
+
+    private func persistOwnership(_ descriptor: Descriptor, phase: Ownership.Phase) throws {
+        guard let attemptID = descriptor.attemptID else { throw OfflineMapCatalogError.invalidResponse }
+        let file = try descriptor.file("owner", directory: directoryOverride)
+        let encoded = try JSONEncoder().encode(Ownership(attemptID: attemptID,
+            constraints: descriptor.constraints, phase: phase))
+        guard encoded.count <= 4096 else { throw OfflineMapCatalogError.invalidResponse }
+        try encoded.write(to: file, options: .atomic)
+    }
+
+    private func retire(_ descriptor: Descriptor, phase: Ownership.Phase) {
+        guard let attemptID = descriptor.attemptID else { return }
+        // Persisted terminal records fence later process-restoration callbacks.
+        // Only failed writes need an additional in-memory fail-closed fence.
+        do { try persistOwnership(descriptor, phase: phase) }
+        catch { blockedAttempts.insert(attemptID) }
+    }
+
+    private func resumeData(for descriptor: Descriptor) -> Data? {
+        // Opaque URLSession resume data contains its original URL. A new host
+        // policy must not reuse a request admitted under older, looser rules.
+        guard let current = try? ownership(descriptor),
+              current.constraints == descriptor.constraints,
+              [.cancelled, .failed].contains(current.phase),
+              let file = try? descriptor.file("resume", directory: directoryOverride),
+              let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size <= 1024 * 1024,
+              let data = try? Data(contentsOf: file), data.count <= 1024 * 1024 else { return nil }
+        return data
+    }
+
+    private func saveResumeData(_ data: Data?, descriptor: Descriptor) {
+        guard owns(descriptor, phases: [.active, .cancelled]),
+              let data, data.count <= 1024 * 1024,
+              let file = try? descriptor.file("resume", directory: directoryOverride) else { return }
+        try? data.write(to: file, options: .atomic)
+    }
+
     private func maintainStorage(descriptor: Descriptor, tasks: [URLSessionTask]) throws {
         let root = try descriptor.file("download", directory: directoryOverride).deletingLastPathComponent()
-        let protectedKeys = Set(tasks.compactMap { Descriptor.read($0)?.key }).union([descriptor.key!])
+        let protectedKeys = Set(tasks.compactMap { Descriptor.read($0)?.key }).union(waiters.keys).union([descriptor.key!])
         let files = try FileManager.default.contentsOfDirectory(
             at: root, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey])
         var retained: Int64 = 0
@@ -6541,7 +6644,7 @@ final class DurableMapDownloadCoordinator: NSObject, URLSessionDownloadDelegate 
         }
         let budget = 2 * BikeMapStreamFormat.maximumArtifactBytes
         for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-            guard ["download", "resume"].contains(file.pathExtension),
+            guard ["download", "resume", "owner"].contains(file.pathExtension),
                   !protectedKeys.contains(file.deletingPathExtension().lastPathComponent) else { continue }
             let values = try file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
             if retained > budget || (values.contentModificationDate ?? .distantPast) < Date().addingTimeInterval(-7 * 86400) {
@@ -6560,70 +6663,98 @@ final class DurableMapDownloadCoordinator: NSObject, URLSessionDownloadDelegate 
         }
     }
 
-    private func cancel(_ key: String) {
-        guard let waiter = waiters.removeValue(forKey: key) else { return }
-        let directory = directoryOverride
+    private func cancel(_ key: String, invocationID: UUID) {
+        guard let waiter = waiters[key], waiter.invocationID == invocationID else { return }
+        waiters.removeValue(forKey: key)
+        let descriptor = Descriptor.read(waiter.task)
+        if let descriptor, owns(descriptor, phases: [.active]) {
+            do { try persistOwnership(descriptor, phase: .cancelled) }
+            catch { blockedAttempts.insert(waiter.attemptID) }
+        }
+        pendingCancellationCallbacks += 1
         waiter.task.cancel { data in
-            guard let data, data.count <= 1024 * 1024,
-                  let descriptor = Descriptor.read(waiter.task),
-                  let file = try? descriptor.file("resume", directory: directory) else { return }
-            try? data.write(to: file, options: .atomic)
+            Task { @MainActor in
+                defer {
+                    self.pendingCancellationCallbacks -= 1
+                    self.completeBackgroundEventsIfReady()
+                }
+                guard let descriptor, self.owns(descriptor, phases: [.cancelled]) else { return }
+                self.saveResumeData(data, descriptor: descriptor)
+                self.retire(descriptor, phase: .failed)
+            }
         }
         waiter.continuation.resume(throwing: CancellationError())
     }
 
     private func finish(_ task: URLSessionTask, result: Result<URL, Error>) {
-        guard let key = Descriptor.read(task)?.key,
-              let waiter = waiters[key], waiter.task.taskIdentifier == task.taskIdentifier else { return }
+        guard let descriptor = Descriptor.read(task), let key = descriptor.key,
+              let waiter = waiters[key], waiter.attemptID == descriptor.attemptID,
+              waiter.task.taskIdentifier == task.taskIdentifier else { return }
         waiters.removeValue(forKey: key)
         waiter.continuation.resume(with: result)
     }
 
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                                didFinishDownloadingTo location: URL) {
-        let result: Result<URL, Error> = Result {
-            guard let descriptor = Descriptor.read(downloadTask), descriptor.allows(downloadTask.response?.url),
-                  let response = downloadTask.response as? HTTPURLResponse,
-                  [200, 206].contains(response.statusCode),
-                  let count = try location.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                  Int64(count) == descriptor.constraints.exactBytes else {
-                throw OfflineMapCatalogError.invalidResponse
+        MainActor.assumeIsolated {
+            guard let descriptor = Descriptor.read(downloadTask), owns(descriptor, phases: [.active]) else {
+                finish(downloadTask, result: .failure(OfflineMapCatalogError.invalidResponse))
+                return
             }
-            let destination = try descriptor.file("download", directory: directoryOverride)
-            // Download callbacks run off the main actor and must retain this
-            // temporary file before returning to URLSession.
-            if FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.removeItem(at: destination)
+            let result: Result<URL, Error> = Result {
+                guard descriptor.allows(downloadTask.response?.url),
+                      let response = downloadTask.response as? HTTPURLResponse,
+                      [200, 206].contains(response.statusCode),
+                      let count = try location.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                      Int64(count) == descriptor.constraints.exactBytes else {
+                    throw OfflineMapCatalogError.invalidResponse
+                }
+                let destination = try descriptor.file("download", directory: directoryOverride)
+                // No suspension or actor hop between ownership and promotion.
+                // The installer still validates the complete digest/signature.
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    try FileManager.default.removeItem(at: destination)
+                }
+                try FileManager.default.moveItem(at: location, to: destination)
+                return destination
             }
-            try FileManager.default.moveItem(at: location, to: destination)
-            return destination
+            switch result {
+            case .success: retire(descriptor, phase: .finished)
+            case .failure: retire(descriptor, phase: .failed)
+            }
+            finish(downloadTask, result: result)
         }
-        Task { @MainActor in self.finish(downloadTask, result: result) }
     }
 
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask,
                                didCompleteWithError error: Error?) {
         guard let error else { return }
-        if let data = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data,
-           data.count <= 1024 * 1024, let descriptor = Descriptor.read(task),
-           let file = try? descriptor.file("resume", directory: directoryOverride) {
-            try? data.write(to: file, options: .atomic)
+        MainActor.assumeIsolated {
+            if let descriptor = Descriptor.read(task), owns(descriptor, phases: [.active, .cancelled]) {
+                saveResumeData((error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data,
+                    descriptor: descriptor)
+                // Cancellation's resume-data completion may arrive after this
+                // delegate callback, so it owns retirement of cancelled tasks.
+                if owns(descriptor, phases: [.active]) { retire(descriptor, phase: .failed) }
+            }
+            finish(task, result: .failure(error))
         }
-        Task { @MainActor in self.finish(task, result: .failure(error)) }
     }
 
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                                didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
                                totalBytesExpectedToWrite: Int64) {
-        guard let descriptor = Descriptor.read(downloadTask), let key = descriptor.key,
-              let expected = descriptor.constraints.exactBytes else { downloadTask.cancel(); return }
-        guard totalBytesWritten <= expected,
-              totalBytesExpectedToWrite <= 0 || totalBytesExpectedToWrite == expected else {
-            downloadTask.cancel()
-            return
-        }
-        Task { @MainActor in
-            guard let waiter = self.waiters[key] else { return }
+        MainActor.assumeIsolated {
+            guard let descriptor = Descriptor.read(downloadTask), let key = descriptor.key,
+                  let expected = descriptor.constraints.exactBytes,
+                  owns(descriptor, phases: [.active]) else { return }
+            guard totalBytesWritten >= 0, totalBytesWritten <= expected,
+                  totalBytesExpectedToWrite <= 0 || totalBytesExpectedToWrite == expected else {
+                downloadTask.cancel()
+                return
+            }
+            guard let waiter = waiters[key], waiter.attemptID == descriptor.attemptID,
+                  waiter.task.taskIdentifier == downloadTask.taskIdentifier else { return }
             waiter.progress(Double(totalBytesWritten) / Double(expected))
             waiter.bytes(OfflineMapByteProgress(completedBytes: totalBytesWritten, totalBytes: expected))
         }
@@ -6636,11 +6767,18 @@ final class DurableMapDownloadCoordinator: NSObject, URLSessionDownloadDelegate 
     }
 
     nonisolated func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
-        Task { @MainActor in
-            let completion = self.completionHandler
-            self.completionHandler = nil
-            completion?()
+        MainActor.assumeIsolated {
+            backgroundEventsFinished = true
+            completeBackgroundEventsIfReady()
         }
+    }
+
+    private func completeBackgroundEventsIfReady() {
+        guard backgroundEventsFinished, pendingCancellationCallbacks == 0,
+              let completion = completionHandler else { return }
+        completionHandler = nil
+        backgroundEventsFinished = false
+        completion()
     }
 }
 
