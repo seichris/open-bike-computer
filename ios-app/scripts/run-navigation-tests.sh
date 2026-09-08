@@ -10,6 +10,7 @@ cd "${REPO_DIR}"
 
 "${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"
 bash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"
+bash "${SCRIPT_DIR}/run-offline-route-tests.sh"
 
 RENDERER_SCHEDULER_OUT="${TMPDIR:-/tmp}/open-bike-renderer-scheduler-tests"
 xcrun swiftc -D HOST_TESTING -parse-as-library \

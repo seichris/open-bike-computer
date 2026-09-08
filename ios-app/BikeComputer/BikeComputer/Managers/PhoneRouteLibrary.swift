@@ -53,7 +53,10 @@ final class PhoneRouteLibrary: ObservableObject {
         let base = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first ?? FileManager.default.temporaryDirectory
+        ).first ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        // Never fall back to a purgeable temporary directory for a successful
+        // Save Offline operation. A write failure must be reported instead.
         let routeStore = NavigationRouteFileStoreV1(
             rootDirectory: base.appendingPathComponent(
                 "PlannedRoutes",
@@ -132,15 +135,50 @@ final class PhoneRouteLibrary: ObservableObject {
         _ data: Data,
         fileName: String
     ) throws -> PlannedRouteSummaryV1 {
-        let archive = try GPXRouteImporterV1.archive(
-            data: data,
-            fallbackName: fileName,
-            createdAt: now()
-        )
-        return try importArchive(archive.encoded(
-            purpose: .offlineNavigation,
-            now: now()
-        ))
+        let draft = try OfflineRouteSaveDraft.gpx(data: data, fileName: fileName, now: now())
+        return try saveOffline(draft, name: draft.archive.route.name ?? fileName).summary
+    }
+
+    /// The only Save Offline commit path. Library-backed selections are reads,
+    /// never clones: in particular a Strava lease cannot be extended by saving.
+    func saveOffline(_ draft: OfflineRouteSaveDraft, name: String) throws -> OfflineRouteSaveResult {
+        try draft.archive.validate(purpose: .offlineNavigation, now: now())
+        if draft.requiresExistingArchive {
+            let archive = try offlineArchive(for: PlannedRouteSummaryV1(archive: draft.archive))
+            return OfflineRouteSaveResult(summary: PlannedRouteSummaryV1(archive: archive), alreadySaved: true)
+        }
+        let archive = try draft.namedArchive(name)
+        if let duplicate = store.records(now: now()).first(where: {
+            OfflineRouteSaveDraft.sameGPXContent($0.archive.route, archive.route)
+        }) {
+            // Re-read the exact identity, also covering expiry/corruption races.
+            let verified = try offlineArchive(for: duplicate.summary)
+            reload()
+            return OfflineRouteSaveResult(summary: PlannedRouteSummaryV1(archive: verified), alreadySaved: true)
+        }
+        let summary = try importArchive(archive.encoded(purpose: .offlineNavigation, now: now()))
+        _ = try offlineArchive(for: summary)
+        return OfflineRouteSaveResult(summary: summary, alreadySaved: false)
+    }
+
+    func offlineDraft(for summary: PlannedRouteSummaryV1) throws -> OfflineRouteSaveDraft {
+        try .installed(offlineArchive(for: summary), now: now())
+    }
+
+    /// Navigation must re-read the exact durable identity, not use a preview's
+    /// cached geometry or silently substitute a newer revision.
+    func offlineArchive(for summary: PlannedRouteSummaryV1) throws -> NavigationRouteArchiveV1 {
+        do {
+            let record = try store.record(matching: identity(for: summary), now: now())
+            try record.archive.validate(purpose: .offlineNavigation, now: now())
+            return record.archive
+        } catch {
+            reload()
+            if let deadline = summary.deleteAfter, now() >= deadline {
+                throw SavedRouteMapError.expired(displayName(for: summary))
+            }
+            throw SavedRouteMapError.unavailable(displayName(for: summary))
+        }
     }
 
     var expiredStravaBookmarks: [StravaRouteReloadBookmarkV1] {
