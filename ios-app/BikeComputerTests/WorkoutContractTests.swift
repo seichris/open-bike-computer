@@ -1,6 +1,7 @@
 import Foundation
 #if WORKOUT_CONTRACT_HOST
 import Darwin
+extension ControllableRecoveryPersistence: RideDecisionPersistence {}
 #endif
 #if WORKOUT_CONTRACT_XCTEST
 import XCTest
@@ -400,7 +401,8 @@ private struct WorkoutContractTestSuite {
         }
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let store = RideDetectionSettingsStore(defaults: defaults)
+        let decisionPersistence = ControllableRecoveryPersistence()
+        let store = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
         expect(store.generation == 1, "ride settings begin at generation one")
 
         store.adoptDeviceSettings(
@@ -452,7 +454,7 @@ private struct WorkoutContractTestSuite {
         )
 #endif
 
-        let restored = RideDetectionSettingsStore(defaults: defaults)
+        let restored = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
         expect(
             restored.generation == store.generation
                 && restored.settings == store.settings,
@@ -461,7 +463,7 @@ private struct WorkoutContractTestSuite {
 
         defaults.set(-1, forKey: "rideDetection.settingsGeneration.v1")
         let corruptGenerationReload = RideDetectionSettingsStore(
-            defaults: defaults
+            defaults: defaults, decisionPersistence: decisionPersistence
         )
         expect(
             corruptGenerationReload.generation == 1,
@@ -516,7 +518,7 @@ private struct WorkoutContractTestSuite {
                 ),
             "pending automation may recover only after exact device boot and sequence proof"
         )
-        store.savePendingDecision(pendingStart)
+        try! store.saveDecisionState(watermarks: ["bike-a:7": 11], pending: pendingStart)
         expect(
             store.loadPendingDecision() == pendingStart,
             "a valid unresolved prompt must survive relaunch"
@@ -535,11 +537,61 @@ private struct WorkoutContractTestSuite {
             !mismatchedIdentity.isValidForPersistence,
             "a recovery cache cannot relabel a detector decision identity"
         )
-        store.savePendingDecision(mismatchedIdentity)
+        do {
+            try store.saveDecisionState(watermarks: ["bike-a:7": 12], pending: mismatchedIdentity)
+            expect(false, "invalid pending identity must reject the transaction")
+        } catch {}
         expect(
-            store.loadPendingDecision() == nil,
-            "invalid pending automation must be removed rather than replayed"
+            store.loadPendingDecision() == pendingStart,
+            "invalid transaction must retain the earlier durable operation"
         )
+        decisionPersistence.failsSave = true
+        do {
+            try store.saveDecisionState(watermarks: ["bike-a:7": 12], pending: nil)
+            expect(false, "failed save must not report success")
+        } catch {}
+        let afterFailure = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
+        expect(afterFailure.loadDecisionWatermarks() == ["bike-a:7": 11] &&
+            afterFailure.loadPendingDecision() == pendingStart,
+            "relaunch after failed commit must retain watermark and outbox together")
+        decisionPersistence.failsSave = false
+        try! store.saveDecisionState(watermarks: ["bike-a:7": 12], pending: nil)
+        let afterCommit = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
+        expect(afterCommit.loadDecisionWatermarks() == ["bike-a:7": 12] &&
+            afterCommit.loadPendingDecision() == nil, "committed state restores atomically")
+
+        let legacyName = "RideDecisionMigration.\(UUID().uuidString)"
+        let legacyDefaults = UserDefaults(suiteName: legacyName)!
+        defer { legacyDefaults.removePersistentDomain(forName: legacyName) }
+        legacyDefaults.set(["bike-a:7": 10], forKey: "rideDetection.decisionWatermarks.v1")
+        legacyDefaults.set(try! PropertyListEncoder().encode(pendingStart),
+            forKey: "rideDetection.pendingDecision.v1")
+        let migrationPersistence = ControllableRecoveryPersistence()
+        migrationPersistence.failsSave = true
+        let blockedMigration = RideDetectionSettingsStore(
+            defaults: legacyDefaults, decisionPersistence: migrationPersistence)
+        expect(blockedMigration.loadPendingDecision() == nil,
+            "failed migration must not replay the legacy outbox")
+        expect(legacyDefaults.data(forKey: "rideDetection.pendingDecision.v1") != nil,
+            "failed migration must retain legacy bytes for the next launch")
+        migrationPersistence.failsSave = false
+        let migrated = RideDetectionSettingsStore(
+            defaults: legacyDefaults, decisionPersistence: migrationPersistence)
+        expect(migrated.loadPendingDecision() == pendingStart &&
+            migrated.loadDecisionWatermarks()["bike-a:7"] == 11,
+            "migration must commit the pending identity and matching watermark together")
+        expect(legacyDefaults.object(forKey: "rideDetection.pendingDecision.v1") == nil,
+            "legacy bytes are removed only after the new journal commits")
+        let corruptPersistence = ControllableRecoveryPersistence()
+        corruptPersistence.data = Data("not a journal".utf8)
+        let corruptStore = RideDetectionSettingsStore(
+            defaults: legacyDefaults, decisionPersistence: corruptPersistence)
+        do {
+            try corruptStore.saveDecisionState(watermarks: [:], pending: nil)
+            expect(false, "corrupt durable state must fail closed, not reset watermarks")
+        } catch {}
+        expect(corruptPersistence.data == Data("not a journal".utf8),
+            "corrupt journal evidence must not be silently overwritten")
 
         let pauseFrame = RideAutomationFrame(
             kind: .decision,
@@ -5291,6 +5343,11 @@ private struct WorkoutContractTestSuite {
         }
 
         do {
+            let journalWrite = try runChild(mode: "decision-write-and-crash")
+            expect(journalWrite.0 == 0, "decision journal writer must commit before abrupt exit")
+            let journalRead = try runChild(mode: "decision-read-after-crash")
+            expect(journalRead.0 == 0 && journalRead.1 == "11|11",
+                "a separate process must recover watermark and pending operation together")
             let writeResult = try runChild(mode: "write-and-crash")
             expect(
                 writeResult.0 == 0,
@@ -8646,6 +8703,35 @@ private enum WorkoutContractTestRunner {
                 fileURL: URL(fileURLWithPath: path)
             )
             switch mode {
+            case "decision-write-and-crash", "decision-read-after-crash":
+                let name = "DecisionJournalChild.\(UUID().uuidString)"
+                let defaults = UserDefaults(suiteName: name)!
+                let store = RideDetectionSettingsStore(
+                    defaults: defaults,
+                    decisionPersistence: RideDecisionFilePersistence(
+                        url: URL(fileURLWithPath: path).appendingPathExtension("decisions")
+                    )
+                )
+                if mode == "decision-write-and-crash" {
+                    let frame = RideAutomationFrame(
+                        kind: .decision, transition: .start, origin: .automatic,
+                        rideGeneration: 7, decisionSequence: 11, startMode: .ask
+                    )
+                    let pending = RideAutomationPendingDecision(
+                        identity: RideAutomationDecisionIdentity(
+                            deviceID: "bike-a", rideGeneration: 7, decisionSequence: 11
+                        ),
+                        frame: frame, expectedState: nil
+                    )
+                    do {
+                        try store.saveDecisionState(watermarks: ["bike-a:7": 11], pending: pending)
+                        defaults.removePersistentDomain(forName: name)
+                        Darwin._exit(0)
+                    } catch { Darwin._exit(5) }
+                }
+                print("\(store.loadDecisionWatermarks()["bike-a:7"] ?? 0)|\(store.loadPendingDecision()?.identity.decisionSequence ?? 0)")
+                defaults.removePersistentDomain(forName: name)
+                return
             case "write-and-crash":
                 let store = WatchWorkoutRecoveryStore(persistence: persistence)
                 guard (try? store.begin(
