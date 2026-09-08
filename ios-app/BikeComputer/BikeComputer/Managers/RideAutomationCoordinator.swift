@@ -296,7 +296,10 @@ final class RideAutomationCoordinator: ObservableObject {
                 frame.transition,
                 context: context
             ) else {
-                clearPendingDecision()
+                // A terminal rejection must not escape while disk still
+                // contains a replayable operation. Retain it for retry when
+                // durable retirement fails, just as failed admission does.
+                guard clearPendingDecision() else { return }
                 acknowledgementByDecision[identity] = .rejected
                 sendResponse(to: frame, kind: .acknowledgement, result: .rejected)
                 return
@@ -835,8 +838,9 @@ final class RideAutomationCoordinator: ObservableObject {
         schedulePendingTimeout(for: resolved)
     }
 
-    private func clearPendingDecision() {
-        guard persistDecisionState(pending: nil) else { return }
+    @discardableResult
+    private func clearPendingDecision() -> Bool {
+        guard persistDecisionState(pending: nil) else { return false }
         pendingTimeoutTask?.cancel()
         pendingTimeoutTask = nil
         if pendingDecision?.frame.transition == .start {
@@ -846,6 +850,7 @@ final class RideAutomationCoordinator: ObservableObject {
         startPrompt = nil
         startAnnotationRequestedFor = nil
         cancelPromptCountdown()
+        return true
     }
 
     private func automaticControlContext(

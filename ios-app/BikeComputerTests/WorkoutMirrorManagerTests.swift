@@ -327,10 +327,12 @@ private final class FakeRideAutomationWorkoutController:
 
     func startOutdoorCyclingOnWatch() -> Bool { false }
 
+    var onAutomaticTransition: (() -> Bool)?
+
     func requestAutomaticTransition(
         _ transition: RideAutomationTransition,
         context: WorkoutControlContextV1
-    ) -> Bool { false }
+    ) -> Bool { onAutomaticTransition?() ?? false }
 
     func requestAutomaticTransitionConfirmation(
         _ transition: RideAutomationTransition,
@@ -473,6 +475,44 @@ final class RideAutomationCoordinatorProductionTests: XCTestCase {
             coordinator.startPrompt == nil
                 && settingsStore.loadPendingDecision() == nil
         }
+    }
+
+    func testRejectedControlDoesNotAcknowledgeWhenJournalRetirementFails() async throws {
+        let persistence = FakeRideDecisionPersistence()
+        let (defaults, settingsStore) = try makeSettingsStore(persistence: persistence)
+        defer { defaults.removePersistentDomain(forName: defaultsSuiteName(defaults)) }
+        settingsStore.setAutoPauseEnabled(true)
+        let ble = FakeRideAutomationBLETransport()
+        let workout = FakeRideAutomationWorkoutController()
+        let sessionID = UUID()
+        workout.rideAutomationPresentation = WorkoutMirrorPresentationV1(
+            connectionState: .connected, snapshot: WorkoutSnapshotV1(state: .running),
+            sessionID: sessionID, capturedAt: nil, receivedAt: nil,
+            confirmedSessionState: .running, errorCode: nil, pendingControl: nil,
+            finalSnapshot: nil, navigation: .empty)
+        var sent: [RideAutomationFrame] = []
+        let coordinator = RideAutomationCoordinator(bleManager: ble,
+            workoutManager: workout, settingsStore: settingsStore)
+        ble.connect(deviceID: "bicino-175") { sent.append($0); return true }
+        try await waitUntil { sent.contains { $0.kind == .resynchronize } }
+        acknowledgeConfiguration(on: ble, settingsStore: settingsStore,
+            rideGeneration: 7, monotonicSeconds: 100)
+        try await waitUntil { coordinator.confirmedDeviceSettings == settingsStore.settings }
+        workout.onAutomaticTransition = {
+            persistence.failsSave = true
+            return false
+        }
+        var decision = startDecision(settingsStore: settingsStore,
+            rideGeneration: 7, sequence: 11, monotonicSeconds: 100)
+        decision.transition = .pause
+        decision.sessionID = sessionID
+        ble.receive(decision)
+        try await waitUntil { coordinator.lastError == .watchUnavailable }
+        XCTAssertNotNil(settingsStore.loadPendingDecision())
+        XCTAssertFalse(sent.contains {
+            $0.kind == .acknowledgement && $0.acknowledgedKind == .decision
+                && $0.decisionSequence == 11
+        }, "no terminal ACK may escape while the journal still contains a replayable control")
     }
 
     func testReconnectDeduplicationAndFirmwareBootClockReset() async throws {

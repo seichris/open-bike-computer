@@ -34,3 +34,21 @@ It must not be described as resolving all workout lifecycle findings.
 
 No physical devices, real HealthKit writes, firmware uploads, releases, or
 production deployments were used in this reconciliation.
+
+## Fresh current-main validation and retirement failure fix
+
+Integrated main `b082746e` in an isolated worktree. Firmware, Watch coordination,
+BLEManager and shared contracts remain byte-identical to that main. The only
+additional runtime fix gates the rejection ACK on successful journal retirement:
+a rejected Watch pause/resume request followed by a failed journal clear must
+not acknowledge a terminal result while leaving a replayable operation on disk.
+The new production coordinator regression failed before the guard and passed
+with it in the full iOS workout platform suite.
+
+Passed locally: workout contracts, full iOS workout platform tests, unsigned
+Debug iOS container build (including Watch sources), and whitespace checks.
+The main Watch host matrix passed 35 cases / 192 assertions. #418's historical
+report now explicitly identifies #423 as the R1–R3 implementation without
+rewriting its baseline evidence. WRK-001 remains the separate preexisting
+reconciliation-only HealthKit issue described above; no save retry or loss-risk
+escape hatch was added. Physical qualification remains unperformed.
