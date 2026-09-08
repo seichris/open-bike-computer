@@ -219,7 +219,12 @@ protected:
 private:
   std::string storageRoot_;
 
-  InstallStatus fail(const std::string &code, const std::string &message) const;
+  // Share error-result construction across the many validation exits. Owning
+  // parameters move into the result rather than allocating a second copy.
+  __attribute__((noinline)) InstallStatus fail(const char *code,
+                                              std::string message) const;
+  __attribute__((noinline)) InstallStatus fail(const char *code,
+                                              const char *message) const;
   bool safeId(const std::string &value) const;
   bool safeMapId(const std::string &value) const;
   bool safeActiveRoot(const std::string &value) const;

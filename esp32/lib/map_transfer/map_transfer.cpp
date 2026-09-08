@@ -2839,8 +2839,13 @@ MapTransferInstaller::stagedArchivePath(const std::string &sessionId) const {
   return joinPath(stagingRoot(sessionId), "pack.zip");
 }
 
-InstallStatus MapTransferInstaller::fail(const std::string &code,
-                                         const std::string &message) const {
+InstallStatus MapTransferInstaller::fail(const char *code,
+                                         std::string message) const {
+  return {false, code, std::move(message)};
+}
+
+InstallStatus MapTransferInstaller::fail(const char *code,
+                                         const char *message) const {
   return {false, code, message};
 }
 
