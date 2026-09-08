@@ -1068,6 +1068,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var deviceBrightnessPercent: Double = 100
     @Published var automaticDisplayOffEnabled: Bool = true
     @Published var disconnectedSleepTimeout: DisconnectedSleepTimeout = .twoMinutes
+    @Published var deviceSoundsEnabled: Bool = false
     @Published var selectedDeviceSound: DeviceSound = .defaultSelection
     @Published var deviceSoundVolumePercent: Double = DeviceSound.defaultVolumePercent
     @Published var isPowerButtonHonkEnabled: Bool = false
@@ -1404,6 +1405,7 @@ class BLEManager: NSObject, ObservableObject {
         static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
         static let automaticDisplayOffEnabled = "deviceSettings.automaticDisplayOffEnabled"
         static let disconnectedSleepTimeoutSeconds = "deviceSettings.disconnectedSleepTimeoutSeconds"
+        static let deviceSoundsEnabled = "deviceSettings.deviceSoundsEnabled"
         static let watchControllerIDsByDevice =
             "deviceSettings.watchControllerIDsByDevice.v1"
         static let selectedDeviceSound = "deviceSettings.selectedSound"
@@ -1639,6 +1641,9 @@ class BLEManager: NSObject, ObservableObject {
         disconnectedSleepTimeout = DisconnectedSleepTimeout.normalized(
             rawValue: defaults.object(forKey: SettingsKeys.disconnectedSleepTimeoutSeconds) as? Int ?? DisconnectedSleepTimeout.twoMinutes.rawValue
         )
+        deviceSoundsEnabled = defaults.object(
+            forKey: SettingsKeys.deviceSoundsEnabled
+        ) as? Bool ?? false
         let storedSoundID = defaults.object(forKey: SettingsKeys.selectedDeviceSound) as? Int
             ?? Int(DeviceSound.defaultSelection.rawValue)
         selectedDeviceSound = UInt8(exactly: storedSoundID)
@@ -1925,6 +1930,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(deviceBrightnessPercent, forKey: SettingsKeys.deviceBrightnessPercent)
         defaults.set(automaticDisplayOffEnabled, forKey: SettingsKeys.automaticDisplayOffEnabled)
         defaults.set(disconnectedSleepTimeout.rawValue, forKey: SettingsKeys.disconnectedSleepTimeoutSeconds)
+        defaults.set(deviceSoundsEnabled, forKey: SettingsKeys.deviceSoundsEnabled)
         defaults.set(Int(selectedDeviceSound.rawValue), forKey: SettingsKeys.selectedDeviceSound)
         deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(deviceSoundVolumePercent)
         defaults.set(deviceSoundVolumePercent, forKey: SettingsKeys.deviceSoundVolumePercent)

@@ -107,6 +107,9 @@ extension DurableMapDownloadCoordinator {
         let bResult = try await callB.value
         expect(bResult == canonical && ob.completions == 1, "B finishes exactly once")
         expect(try c.ownership(db)?.phase == .finished, "completion ownership is persisted")
+        expect(!FileManager.default.fileExists(atPath:
+            try db.file("\(db.attemptID!.uuidString).staging", directory: root).path),
+            "successful promotion leaves no attempt staging file")
         c.urlSession(session, downloadTask: b, didFinishDownloadingTo: try temporary("XXXX"))
         c.urlSession(session, task: b, didCompleteWithError: error("late-B"))
         expect(try! Data(contentsOf: canonical) == Data("BBBB".utf8), "duplicate terminal callback cannot replace bytes")
@@ -158,6 +161,23 @@ extension DurableMapDownloadCoordinator {
             "changed host policy must not reuse an opaque request for an older host")
         c.urlSession(session, task: early, didCompleteWithError: error("duplicate-cancel"))
         expect(try! Data(contentsOf: resume) == Data("cancel-resume".utf8), "retired cancellation cannot rewrite resume data")
+
+        // Failure before promotion preserves the existing complete artifact.
+        let failedPromotion = ControlledDownloadTask(6)
+        let df = try prepare(failedPromotion, on: c, constraints: constraints)
+        let blockedStage = try df.file("\(df.attemptID!.uuidString).staging", directory: root)
+        try FileManager.default.createDirectory(at: blockedStage, withIntermediateDirectories: false)
+        let failedCall = Task { @MainActor in
+            try await c.wait(for: failedPromotion, descriptor: df,
+                onProgress: { _ in }, onByteProgress: { _ in })
+        }
+        await settle { c.waiters[key]?.task.taskIdentifier == 6 }
+        c.urlSession(session, downloadTask: failedPromotion, didFinishDownloadingTo: try temporary("XXXX"))
+        do { _ = try await failedCall.value; preconditionFailure("blocked staging succeeded") }
+        catch {}
+        expect(try! Data(contentsOf: canonical) == Data("BBBB".utf8),
+            "staging failure preserves previously completed bytes")
+        expect(c.waiters[key] == nil, "promotion failure completes its waiter")
 
         // Missing/corrupt durable authority must fail the matching caller, not
         // publish bytes, hang its continuation, or silently reset ownership.

@@ -51,3 +51,20 @@ results. Real iPhone OS relaunch/background scheduling, storage exhaustion,
 network transitions and device map installation remain physical qualification.
 No hardware access, flashing, OTA, release or production deployment is authorized
 or performed by this reconciliation.
+
+## macOS validation and atomic staging
+
+Integrated main `b082746e` in an isolated worktree. Completion now stages under
+its attempt UUID on the destination filesystem and atomically renames only
+while persisted ownership still matches. Failed staging retains the existing
+completed artifact; successful promotion leaves no staging file. The storage
+sweep also accounts for abandoned attempt staging files.
+
+Passed locally: all 33 deterministic attempt assertions; full navigation suite
+(including real delegates, saved-map replacement/migration and Catalyst preview);
+unsigned Release iOS app/Watch container; backend 742 tests (2 existing skips);
+catalog check with 66 tests, generated bindings/type/format checks and deployment
+dry-runs; native stream format/install regressions using Mbed TLS 2.28.10.
+The opt-in live MapKit smoke test was skipped. Debug app build and exact-head CI
+are recorded separately. No OS-daemon, device or physical SD qualification is
+claimed. Both-board hardware risk remains subject to the repository merge gate.

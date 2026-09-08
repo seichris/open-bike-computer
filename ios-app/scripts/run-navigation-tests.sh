@@ -11,6 +11,7 @@ cd "${REPO_DIR}"
 python3 "${SCRIPT_DIR}/run-durable-map-attempt-tests.py"
 
 "${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"
+bash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"
 
 RENDERER_SCHEDULER_OUT="${TMPDIR:-/tmp}/open-bike-renderer-scheduler-tests"
 xcrun swiftc -D HOST_TESTING -parse-as-library \
@@ -136,6 +137,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Views/MapView.swift \
   ios-app/BikeComputerTests/DestinationCalloutLayoutTests.swift
 
@@ -156,6 +158,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Views/MapView.swift \
   ios-app/BikeComputerTests/MapAppearanceTests.swift
 

@@ -6644,8 +6644,11 @@ final class DurableMapDownloadCoordinator: NSObject, URLSessionDownloadDelegate 
         }
         let budget = 2 * BikeMapStreamFormat.maximumArtifactBytes
         for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-            guard ["download", "resume", "owner"].contains(file.pathExtension),
-                  !protectedKeys.contains(file.deletingPathExtension().lastPathComponent) else { continue }
+            let artifactKey = file.pathExtension == "staging"
+                ? file.deletingPathExtension().deletingPathExtension().lastPathComponent
+                : file.deletingPathExtension().lastPathComponent
+            guard ["download", "resume", "owner", "staging"].contains(file.pathExtension),
+                  !protectedKeys.contains(artifactKey) else { continue }
             let values = try file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
             if retained > budget || (values.contentModificationDate ?? .distantPast) < Date().addingTimeInterval(-7 * 86400) {
                 try FileManager.default.removeItem(at: file)
@@ -6710,12 +6713,19 @@ final class DurableMapDownloadCoordinator: NSObject, URLSessionDownloadDelegate 
                     throw OfflineMapCatalogError.invalidResponse
                 }
                 let destination = try descriptor.file("download", directory: directoryOverride)
-                // No suspension or actor hop between ownership and promotion.
-                // The installer still validates the complete digest/signature.
-                if FileManager.default.fileExists(atPath: destination.path) {
-                    try FileManager.default.removeItem(at: destination)
+                let staged = try descriptor.file(
+                    "\(descriptor.attemptID!.uuidString).staging", directory: directoryOverride)
+                defer { try? FileManager.default.removeItem(at: staged) }
+                try FileManager.default.moveItem(at: location, to: staged)
+                // Stage on the destination filesystem, then atomically replace
+                // only while this attempt still owns publication. A failed
+                // promotion must retain the previous completed artifact.
+                guard owns(descriptor, phases: [.active]) else {
+                    throw OfflineMapCatalogError.invalidResponse
                 }
-                try FileManager.default.moveItem(at: location, to: destination)
+                guard rename(staged.path, destination.path) == 0 else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
                 return destination
             }
             switch result {

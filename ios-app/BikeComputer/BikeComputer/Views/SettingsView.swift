@@ -665,39 +665,52 @@ private struct DeviceSoundsSettingsSection: View {
     }
 
     var body: some View {
-        Section(header: Text("Device Sounds")) {
-            Picker("Sound", selection: soundSelection) {
-                ForEach(DeviceSound.allCases) { sound in
-                    Label(sound.title, systemImage: sound.systemImage)
-                        .tag(sound)
+        Section(
+            header: Text("Device Sounds"),
+            footer: Text("Enable this when a speaker is connected to show the sound controls and honk button.")
+        ) {
+            Toggle("Enable Device Sounds", isOn: $bleManager.deviceSoundsEnabled)
+                .onChange(of: bleManager.deviceSoundsEnabled) { _ in
+                    bleManager.saveSettings()
                 }
-            }
-            .pickerStyle(.inline)
 
-            VStack(alignment: .leading) {
-                HStack {
-                    Text("Volume")
-                    Spacer()
-                    Text("\(Int(bleManager.deviceSoundVolumePercent))%")
-                        .foregroundColor(.secondary)
-                }
-                Slider(
-                    value: volumeSelection,
-                    in: 0...100,
-                    step: 5,
-                    onEditingChanged: { isEditing in
-                        bleManager.deviceSoundVolumeEditingChanged(isEditing)
+            if bleManager.deviceSoundsEnabled {
+                Group {
+                    Picker("Sound", selection: soundSelection) {
+                        ForEach(DeviceSound.allCases) { sound in
+                            Label(sound.title, systemImage: sound.systemImage)
+                                .tag(sound)
+                        }
                     }
-                )
-            }
+                    .pickerStyle(.inline)
 
-            Toggle("Use PWR Button as Honk", isOn: powerButtonHonkSelection)
-                .disabled(!bleManager.supportsPowerButtonHonk)
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text("Volume")
+                            Spacer()
+                            Text("\(Int(bleManager.deviceSoundVolumePercent))%")
+                                .foregroundColor(.secondary)
+                        }
+                        Slider(
+                            value: volumeSelection,
+                            in: 0...100,
+                            step: 5,
+                            onEditingChanged: { isEditing in
+                                bleManager.deviceSoundVolumeEditingChanged(isEditing)
+                            }
+                        )
+                    }
 
-            if let error = bleManager.powerButtonHonkConfigurationError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundColor(.red)
+                    Toggle("Use PWR Button as Honk", isOn: powerButtonHonkSelection)
+                        .disabled(!bleManager.supportsPowerButtonHonk)
+
+                    if let error = bleManager.powerButtonHonkConfigurationError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                }
+                .disabled(!bleManager.supportsDeviceSounds)
             }
         }
     }
@@ -2500,9 +2513,6 @@ private struct HardwareCustomizationSettingsView: View {
             }
             .disabled(!bleManager.supportsDeviceSettings)
 
-            DeviceSoundsSettingsSection()
-                .disabled(!bleManager.supportsDeviceSounds)
-
             Section(header: Text("Power")) {
                 Picker("Disconnected Sleep After", selection: $bleManager.disconnectedSleepTimeout) {
                     ForEach(DisconnectedSleepTimeout.allCases) { timeout in
@@ -2525,6 +2535,8 @@ private struct HardwareCustomizationSettingsView: View {
                     }
             }
             .disabled(!bleManager.supportsDeviceSettings)
+
+            DeviceSoundsSettingsSection()
         }
         .navigationTitle("Hardware Customization")
         .navigationBarTitleDisplayMode(.inline)

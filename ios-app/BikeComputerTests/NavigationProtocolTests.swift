@@ -12172,7 +12172,7 @@ struct NavigationProtocolTests {
         assert(
             source.contains("Text(\"Saved Routes\")") &&
                 source.contains(
-                    "Save GPX route files to your Apple watch for offline navigation"
+                    "Preview saved routes on the map, or send them to Apple Watch for offline navigation."
                 ),
             "Saved Routes uses the requested title and explanatory copy"
         )
@@ -23254,24 +23254,29 @@ struct NavigationProtocolTests {
 
     static func testBLEManagerPersistsDeviceSoundSettings() {
         let defaults = UserDefaults.standard
+        let deviceSoundsEnabledKey = "deviceSettings.deviceSoundsEnabled"
         let soundKey = "deviceSettings.selectedSound"
         let volumeKey = "deviceSettings.soundVolumePercent"
         let powerButtonHonkKey = "deviceSettings.powerButtonHonkEnabled"
+        defaults.removeObject(forKey: deviceSoundsEnabledKey)
         defaults.removeObject(forKey: soundKey)
         defaults.removeObject(forKey: volumeKey)
         defaults.removeObject(forKey: powerButtonHonkKey)
 
         let freshManager = BLEManager()
+        assert(!freshManager.deviceSoundsEnabled, "fresh installs leave device sounds disabled")
         assertEqual(freshManager.selectedDeviceSound, .plasticBicycleHorn, "fresh installs use the bicycle horn")
         assertEqual(freshManager.deviceSoundVolumePercent, 70, "fresh installs use 70 percent sound volume")
         assert(!freshManager.isPowerButtonHonkEnabled, "fresh installs leave PWR honk disabled")
 
+        freshManager.deviceSoundsEnabled = true
         freshManager.selectedDeviceSound = .rotatingBicycleBell
         freshManager.deviceSoundVolumePercent = 65
         freshManager.isPowerButtonHonkEnabled = true
         freshManager.saveSettings()
 
         let reloaded = BLEManager()
+        assert(reloaded.deviceSoundsEnabled, "device sounds enabled state persists")
         assertEqual(reloaded.selectedDeviceSound, .rotatingBicycleBell, "selected sound persists")
         assertEqual(reloaded.deviceSoundVolumePercent, 65, "sound volume persists")
         assert(reloaded.isPowerButtonHonkEnabled, "PWR honk enabled state persists")
@@ -23282,6 +23287,7 @@ struct NavigationProtocolTests {
         assertEqual(invalidValues.selectedDeviceSound, .plasticBicycleHorn, "unknown sound IDs fall back safely")
         assertEqual(invalidValues.deviceSoundVolumePercent, 70, "non-finite persisted volume falls back safely")
 
+        defaults.removeObject(forKey: deviceSoundsEnabledKey)
         defaults.removeObject(forKey: soundKey)
         defaults.removeObject(forKey: volumeKey)
         defaults.removeObject(forKey: powerButtonHonkKey)
