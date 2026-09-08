@@ -2,6 +2,13 @@
 
 ## Decision and scope
 
+Historical evidence: this report describes baseline `fe73e43431ed76c39159de7624c4cd9ede509434`.
+[PR #423](https://github.com/seichris/open-bike-computer/pull/423), merged as
+`c3e2bbc641834a159b850abe04f85b4da36ac21a`, implements R1–R3 with the
+production Watch adapter host harness. The baseline findings below are retained
+as review evidence, not outstanding current-main runtime findings. Physical
+iPhone/Watch/Bicino qualification remains separate and unperformed here.
+
 Keep the architecture delivered by PR #366. Fix the remaining shutdown and
 readiness transitions before undertaking a larger transport refactor. The
 highest-impact remaining issues are in Watch-direct lifecycle coordination,
