@@ -9,8 +9,11 @@ been retired through a reviewed change; the procedure below is retained as an
 audit record and is not an instruction to dispatch a removed workflow.
 
 The publisher now runs `firmware_release_controls.py` before exposing the
-firmware scalar to the signing command. Its read-only App token needs
-Administration, Actions, Contents, Environments and Secrets **read** permissions.
+firmware scalar to the signing command. Its repository-scoped preflight App
+needs Administration **write** plus Actions, Contents, Environments and Secrets
+**read** permissions: GitHub only returns a ruleset's `bypass_actors` to a caller
+with write access. The preflight script only reads metadata and has no GitHub
+settings mutation path.
 It reads secret names only, requires both private keys in `firmware-release`,
 rejects repository/organization copies, requires the checked-in environment-review policy,
 an exact default-branch-only deployment policy, strict admin-enforced `CI Gate`,
@@ -45,7 +48,8 @@ Prerequisites:
 - Keep both repository-level private keys until verification completes.
 - Add the existing/new preflight App private key to `firmware-release` and
   `firmware-runtime-publication`. It must be for App ID 4579522, with repository
-  Administration, Environments, Secrets, Contents and Actions read access. No
+  Administration write access (needed only to read ruleset bypass actors), and
+  Environments, Secrets, Contents and Actions read access. No
   secret-write permission or replacement App is needed.
 - Both environments require the named maintainer reviewer. Only `main` may
   deploy to `firmware-release`; the workflow also rejects non-main dispatches,
