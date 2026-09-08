@@ -81,10 +81,33 @@ Strava expiry, offline startup without directions, off-route behavior, late
 online completion, button/feedback wiring, and one/multiple-result regressions.
 PR #429's native suite adds offline active-overlay ownership/reuse transitions.
 
-Local Linux verification: portable cycling observation and saved-map policy
-(178 checks) pass. Swift parser checks and `git diff --check` pass. Apple native
-suites/build cannot run locally because `xcrun`/Apple SDKs are absent. Native CI
-results must be recorded separately; authored tests are not passing-test evidence.
+Native verification passed on code commit
+`302df26bf3ae5fa61f19e70d8cacdfc12753bd5b`, using Xcode 26.6 on a macOS
+GitHub Actions runner. Run: [34174921680](https://github.com/seichris/open-bike-computer/actions/runs/34174921680).
+Commands run from `ios-app`:
+
+```sh
+./scripts/run-offline-route-tests.sh
+./scripts/run-navigation-tests.sh
+./scripts/run-saved-route-map-tests.sh
+./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
+```
+
+All four commands exited successfully. The focused suite passed 86 checks;
+the saved-map suite passed 178 policy checks and 86 native integration checks.
+The full navigation suite, including its existing renderer, protocol, runtime,
+layout and preview regressions, passed. The unsigned iOS build succeeded.
+No physical-device or UI-automation run is implied by these results. The UI
+coverage consists of interaction-state/coordinator tests, source-wiring checks,
+native MapKit integration tests and the real SwiftUI application build.
+
+Local Linux attempts ran the portable cycling observation and 178 saved-map
+policy checks successfully; native tests/build were blocked by missing `xcrun`.
+Swift parser checks and `git diff --check` passed locally. The first native
+focused/navigation attempt found two test-helper access-control compile errors;
+those were corrected before the fully passing run above. The first native
+saved-map suite and iOS build also passed. Subsequent changes to this document
+only record these results; they do not change the tested application or tests.
 
 Not performed: installation or flashing; airplane-mode iPhone/Watch/Bicino ride;
 GPS/background/lock-screen retention behavior; map alignment or screenshots;
