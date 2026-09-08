@@ -1644,6 +1644,7 @@ export async function createLibraryDownloadGrant(
   expiresAt: string;
   artifact: PublicArtifact;
 }> {
+  requireMapDeliveryEnabled(env);
   await libraryMapRow(env, libraryID, mapEntryID);
   if (
     !Array.isArray(acceptedSignersValue) ||
@@ -1751,11 +1752,18 @@ export async function createLibraryDownloadGrant(
   };
 }
 
+function requireMapDeliveryEnabled(env: Env): void {
+  if (env.MAP_DELIVERY_ENABLED !== "1") {
+    throw new HttpError(503, "map delivery is temporarily disabled");
+  }
+}
+
 export async function resolveDownloadGrant(
   env: Env,
   token: string,
   purpose: "library" | "promotion",
 ): Promise<ArtifactRow> {
+  requireMapDeliveryEnabled(env);
   const now = new Date().toISOString();
   const row = await env.DB.prepare(
     `SELECT a.*

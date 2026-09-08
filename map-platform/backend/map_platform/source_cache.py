@@ -11,6 +11,7 @@ import shutil
 import time
 import urllib.error
 import urllib.request
+from .source_http import open_geofabrik_url
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -295,7 +296,8 @@ class SourceCache:
                                 if request_headers
                                 else download_url
                             )
-                            with urllib.request.urlopen(
+                            opener = open_geofabrik_url if region.provider == "geofabrik" else urllib.request.urlopen
+                            with opener(
                                 request, timeout=60
                             ) as response:
                                 headers = getattr(response, "headers", None)

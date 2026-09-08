@@ -54,6 +54,12 @@ def request_headers(request):
 
 class FallbackTests(unittest.TestCase):
     def setUp(self):
+        # Keep these fallback fixtures transport-only; provider/redirect policy
+        # is exercised independently in test_source_http.py.
+        transport = patch("map_platform.source_cache.open_geofabrik_url",
+                          side_effect=lambda request, timeout: urllib.request.urlopen(request, timeout=timeout))
+        transport.start()
+        self.addCleanup(transport.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)

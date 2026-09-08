@@ -8,6 +8,8 @@ OUT="${TMPDIR:-/tmp}/open-bike-navigation-tests"
 
 cd "${REPO_DIR}"
 
+python3 "${SCRIPT_DIR}/run-durable-map-attempt-tests.py"
+
 "${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"
 bash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"
 
