@@ -279,6 +279,7 @@ final class NavigationRouteFileStoreV1 {
         let record = try record(matching: identity, now: now)
         do {
             try fileManager.removeItem(at: record.fileURL)
+            try synchronizeRootDirectory()
         } catch {
             throw NavigationRouteFileStoreError.ioFailure
         }

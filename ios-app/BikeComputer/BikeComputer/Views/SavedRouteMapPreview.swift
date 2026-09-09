@@ -147,6 +147,7 @@ struct SavedRouteMapPreviewCard: View {
     let preview: SavedRouteMapPreview
     let maximumHeight: CGFloat
     let onHide: () -> Void
+    var onStart: (() -> Void)? = nil
 
     var body: some View {
         ViewThatFits(in: .vertical) {
@@ -184,6 +185,18 @@ struct SavedRouteMapPreviewCard: View {
             }
             Text(distance)
                 .font(.subheadline)
+            Text(preview.attribution)
+                .font(.caption).foregroundStyle(.secondary)
+            if let onStart {
+                Button(action: onStart) {
+                    Label("Start Offline Navigation", systemImage: "location.fill")
+                        .frame(minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("startSavedRoutePreviewOffline")
+                Text("Follows the saved route; no online rerouting or offline map tiles are downloaded.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             if preview.providerID == RouteProviderPolicyV1.strava.providerID,
                let url = preview.sourceURL {
                 Link("View on Strava", destination: url)

@@ -11,6 +11,7 @@ import UIKit
 
 private enum ContentSheetDestination: Identifiable, Equatable {
     case settings
+    case offlineRoutes
     case bikeComputerSetup
     case sensorSettings
     case workoutDashboard
@@ -20,6 +21,7 @@ private enum ContentSheetDestination: Identifiable, Equatable {
     var id: String {
         switch self {
         case .settings: return "settings"
+        case .offlineRoutes: return "offline-routes"
         case .bikeComputerSetup: return "bike-computer-setup"
         case .sensorSettings: return "sensor-settings"
         case .workoutDashboard: return "workout-dashboard"
@@ -396,6 +398,7 @@ struct ContentView: View {
         }
         .onReceive(routeLibrary.$routes) { routes in
             reconcileSavedRoutePreview(with: routes)
+            coordinator.reconcileOfflineNavigation(with: routes)
         }
         .onChange(of: savedRoutePreviewIsBlocked) { isBlocked in
             if isBlocked { clearSavedRoutePreview() }
@@ -616,6 +619,40 @@ struct ContentView: View {
         presentedSheet = nil
     }
 
+    private func showOfflineRouteFromLibrary(_ summary: PlannedRouteSummaryV1) throws {
+        guard !coordinator.isNavigating else { throw SavedRouteMapError.navigationActive }
+        guard !offlineMapManager.isMapAreaSelectionActive else { throw SavedRouteMapError.planningActive }
+        let selection = try routeLibrary.mapSelection(for: summary)
+        let preview = try SavedRouteMapPreviewFactory.make(selection)
+        // User explicitly selected an offline route. Do not cancel their online
+        // plan until the exact archive and its display geometry were verified.
+        coordinator.cancelRoutePlan()
+        savedRoutePreviewBottomHeight = nil
+        savedRouteMapPreview = preview
+        isSearchPanelExpanded = false
+    }
+
+    private func startOfflineRouteFromLibrary(_ summary: PlannedRouteSummaryV1) throws {
+        guard !offlineMapManager.isMapAreaSelectionActive else { throw SavedRouteMapError.planningActive }
+        let archive = try routeLibrary.offlineArchive(for: summary)
+        try coordinator.startOfflineNavigation(archive)
+        clearSavedRoutePreview()
+        isSearchPanelExpanded = false
+    }
+
+    private func startPreviewedOfflineRoute(_ preview: SavedRouteMapPreview) {
+        do {
+            guard let summary = routeLibrary.routes.first(where: {
+                $0.id == preview.identity.routeID && $0.revision == preview.identity.revision &&
+                    $0.contentHash == preview.identity.contentHash
+            }) else { throw SavedRouteMapError.unavailable(preview.displayName) }
+            try startOfflineRouteFromLibrary(summary)
+        } catch {
+            coordinator.alert.message = error.localizedDescription
+            coordinator.alert.isShowing = true
+        }
+    }
+
     private func clearSavedRoutePreview() {
         savedRouteMapPreview = nil
         savedRoutePreviewBottomHeight = nil
@@ -732,6 +769,12 @@ struct ContentView: View {
         for destination: ContentSheetDestination
     ) -> some View {
         switch destination {
+        case .offlineRoutes:
+            OfflineRoutesView(library: routeLibrary,
+                onShow: showOfflineRouteFromLibrary,
+                onStart: startOfflineRouteFromLibrary)
+                .presentationDetents([.large])
+                .presentationBackgroundInteraction(.disabled)
         case .settings:
             SettingsView(
                 locationAuthorizationStatus:
@@ -970,6 +1013,16 @@ struct ContentView: View {
         )
         activeSheetDestination = destination
         presentedSheet = destination
+    }
+
+    private func openOfflineRoutes() {
+        guard presentedSheet != .offlineRoutes else { return }
+        if presentedSheet != nil || isSheetDismissalInFlight {
+            queuedSheetAfterDismiss = .offlineRoutes
+            presentedSheet = nil
+        } else {
+            presentedSheet = .offlineRoutes
+        }
     }
 
     private func openSensorSettings() {
@@ -1256,7 +1309,8 @@ struct ContentView: View {
                 SavedRouteMapPreviewCard(
                     preview: preview,
                     maximumHeight: min(220, maxHeight * 0.45),
-                    onHide: clearSavedRoutePreview
+                    onHide: clearSavedRoutePreview,
+                    onStart: { startPreviewedOfflineRoute(preview) }
                 )
                 .padding(.horizontal, 12)
             }
@@ -1447,10 +1501,11 @@ struct ContentView: View {
                 .disabled(coordinator.selectedRouteAlternativeID == nil)
 
                 Button { } label: {
-                    Label("Save Offline", systemImage: "applewatch")
+                    Label("Save Offline", systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(.bordered)
-                .disabled(true)
+                .disabled(!coordinator.selectedRouteCanSaveOffline)
+                .accessibilityIdentifier("saveMapKitRouteOffline")
                 .accessibilityHint(
                     "MapKit routes cannot be stored offline until an approved route provider is configured."
                 )
@@ -1458,7 +1513,13 @@ struct ContentView: View {
 
             selectedRouteAdvisory
 
-            Text("Offline saving needs an approved route source.")
+            Button("Import GPX or choose a saved route") {
+                openOfflineRoutes()
+            }
+            .font(.caption)
+            .accessibilityIdentifier("chooseApprovedOfflineRoute")
+
+            Text("Apple Maps routes are online-only. GPX imports and valid saved routes can be used offline.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -1650,7 +1711,8 @@ struct ContentView: View {
             ) : nil,
             savedRoutePreview: visibleSavedRouteMapPreview?.overlay,
             savedRoutePreviewBottomPadding: savedRoutePreviewBottomPadding,
-            isRouteCalculationActive: coordinator.routeCalculation.isCalculating
+            isRouteCalculationActive: coordinator.routeCalculation.isCalculating,
+            offlineNavigationPolyline: coordinator.offlineRoutePolyline
         )
     }
 

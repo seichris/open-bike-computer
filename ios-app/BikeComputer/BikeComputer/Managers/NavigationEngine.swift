@@ -28,6 +28,11 @@ class NavigationEngine: NSObject, ObservableObject {
     // MARK: - Private Properties
     private var currentRoute: NavigationRouteV1?
     private var navigationRuntime = NavigationRuntimeV1()
+    private var offlineDeleteAfter: Date?
+
+    #if HOST_TESTING
+    var offlineSnapshotForTesting: NavigationSnapshotV1? { navigationRuntime.snapshot }
+    #endif
     private var currentStepIndex: Int = 0
     private var currentSnapshot: NavigationManeuverSnapshot?
     private var lastManeuverStepIndex: Int?
@@ -136,6 +141,7 @@ class NavigationEngine: NSObject, ObservableObject {
     @discardableResult
     func processExternalLocation(_ location: CLLocation) -> Bool {
         latestExternalGpsLocation = location
+        expireOfflineNavigationIfNeeded()
         guard !isSimulationMode else { return false }
         let acceptedRouteLocation: CLLocation?
         if shouldAcceptLiveLocation(location) {
@@ -175,9 +181,73 @@ class NavigationEngine: NSObject, ObservableObject {
             print("Navigation route conversion failed: \(error)")
             return
         }
+        do {
+            try beginNavigation(
+                route: sharedRoute, mode: .online, contentHash: nil,
+                deleteAfter: nil, isTestMode: isTestMode,
+                normalizedInitialLocation: normalizedInitialLocation
+            )
+        } catch {
+            print("Navigation runtime failed to start: \(error)")
+        }
+    }
+
+    /// Consume a verified canonical archive directly. No MKDirections, GPX
+    /// reparse, provider fetch or MapKit-to-WGS84 conversion occurs here.
+    func startOfflineNavigation(
+        archive: NavigationRouteArchiveV1,
+        initialLocation: CLLocation? = nil
+    ) throws {
+        try archive.validate(purpose: .offlineNavigation, now: now())
+        try beginNavigation(
+            route: archive.route, mode: .offline, contentHash: archive.contentHash,
+            deleteAfter: archive.deleteAfter, isTestMode: false,
+            normalizedInitialLocation: initialLocation
+        )
+    }
+
+    private func beginNavigation(
+        route sharedRoute: NavigationRouteV1,
+        mode: NavigationModeV1,
+        contentHash: String?,
+        deleteAfter: Date?,
+        isTestMode: Bool,
+        normalizedInitialLocation: CLLocation?
+    ) throws {
+        let runtimeInitialLocation: CLLocation? = {
+            if let normalizedInitialLocation {
+                return normalizedInitialLocation
+            }
+            guard isTestMode, let first = sharedRoute.points.first else {
+                return nil
+            }
+            return CLLocation(latitude: first.latitude, longitude: first.longitude)
+        }()
+        // Preflight on a copy so failure cannot replace active state, while
+        // preserving the monotonic runtime generation across navigation starts.
+        var runtime = navigationRuntime
+        _ = try runtime.start(
+                route: sharedRoute,
+                contentHash: contentHash,
+                mode: mode,
+                initialStepStrategy: mode == .offline ? .nearestUnambiguous : .first,
+                initialLocation: runtimeInitialLocation.map(
+                    NavigationLocationSampleV1.init(location:)
+                )
+            )
+        if let deadline = deleteAfter, now() >= deadline {
+            throw NavigationRouteArchiveError.expired
+        }
+        stopSimulation()
+        stopRideTelemetryTimer()
+        navigationRuntime = runtime
+        offlineDeleteAfter = deleteAfter
         currentRoute = sharedRoute
         cacheRouteCoordinates(from: sharedRoute)
         currentStepIndex = 0
+        currentInstruction = sharedRoute.steps[0].instruction
+        currentIconID = sharedRoute.steps[0].maneuver.deviceIconID
+        distanceToManeuver = Int(min(sharedRoute.steps[0].distanceMeters.rounded(), Double(Int32.max)))
         isSimulationMode = isTestMode
         isNavigating = true
         navigationEpoch &+= 1
@@ -192,29 +262,6 @@ class NavigationEngine: NSObject, ObservableObject {
         lastSentGeometrySegmentIndex = nil
         lastGeometrySendTime = .distantPast
         resetRideTelemetry(startingAt: normalizedInitialLocation)
-        let runtimeInitialLocation: CLLocation? = {
-            if let normalizedInitialLocation {
-                return normalizedInitialLocation
-            }
-            guard isTestMode, let first = sharedRoute.points.first else {
-                return nil
-            }
-            return CLLocation(latitude: first.latitude, longitude: first.longitude)
-        }()
-        do {
-            _ = try navigationRuntime.start(
-                route: sharedRoute,
-                mode: .online,
-                initialStepStrategy: .first,
-                initialLocation: runtimeInitialLocation.map(
-                    NavigationLocationSampleV1.init(location:)
-                )
-            )
-        } catch {
-            print("Navigation runtime failed to start: \(error)")
-            stopNavigation()
-            return
-        }
         updateNavigationSummary(
             route: sharedRoute,
             remainingDistance: sharedRoute.distanceMeters
@@ -340,6 +387,7 @@ class NavigationEngine: NSObject, ObservableObject {
         bleManager?.clearRouteGeometry()
         isNavigating = false
         navigationRuntime.stop()
+        offlineDeleteAfter = nil
         navigationEpoch &+= 1
         courseResolver.reset(epoch: navigationEpoch)
         currentRoute = nil
@@ -548,8 +596,15 @@ class NavigationEngine: NSObject, ObservableObject {
         route: NavigationRouteV1,
         currentLocation: CLLocation
     ) {
+        let isNearOfflineFinish = runtimeSnapshot.mode != .offline ||
+            NavigationGeometryV1.distance(
+                from: RouteCoordinateV1(latitude: currentLocation.coordinate.latitude,
+                                        longitude: currentLocation.coordinate.longitude),
+                to: route.destination.coordinate
+            ) < 35
         if runtimeSnapshot.maneuver == .arrive,
-           runtimeSnapshot.distanceToManeuverMeters < 20 {
+           runtimeSnapshot.distanceToManeuverMeters < 20,
+           isNearOfflineFinish {
             print("Navigation complete!")
             stopNavigation()
             return
@@ -558,7 +613,9 @@ class NavigationEngine: NSObject, ObservableObject {
             currentStepIndex = runtimeSnapshot.currentStepIndex
             print("Advanced to step \(currentStepIndex)")
         }
-        let instruction = displayInstruction(runtimeSnapshot.instruction)
+        let instruction = runtimeSnapshot.mode == .offline && runtimeSnapshot.offRouteDistanceMeters != nil
+            ? "Off route — return to saved route"
+            : displayInstruction(runtimeSnapshot.instruction)
         let maneuverSnapshot = NavigationManeuverSnapshot(
             iconID: runtimeSnapshot.maneuver.deviceIconID,
             distance: Int(runtimeSnapshot.distanceToManeuverMeters),
@@ -666,7 +723,14 @@ class NavigationEngine: NSObject, ObservableObject {
         rideTelemetryTimer = nil
     }
 
+    private func expireOfflineNavigationIfNeeded() {
+        if let deadline = offlineDeleteAfter, now() >= deadline {
+            stopNavigation()
+        }
+    }
+
     private func refreshRideTelemetry() {
+        expireOfflineNavigationIfNeeded()
         guard isNavigating,
               !isSimulationMode,
               let lastDeviceGpsLocation else { return }
