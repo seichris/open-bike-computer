@@ -714,6 +714,10 @@ jobs:
           /tmp/test_map_label_selection
       - name: Map transfer host tests
         run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -Wframe-larger-than=4096 \
+            tools/tests/test_map_file_io.cpp \
+            -o /tmp/test_map_file_io
+          /tmp/test_map_file_io
           g++ -std=c++17 \
             lib/map_transfer/map_transfer.cpp \
             lib/maps/src/mapBlockFormat.cpp \

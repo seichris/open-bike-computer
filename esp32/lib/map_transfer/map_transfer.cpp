@@ -1,4 +1,5 @@
 #include "map_transfer.hpp"
+#include "map_file_io.hpp"
 #include "../maps/src/mapRendererFileValidator.hpp"
 #include "../maps/src/mapFontAsset.hpp"
 #include "../maps/src/mapBuildingBlock.hpp"
@@ -15,7 +16,6 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
-#include <fstream>
 #include <limits>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -1162,7 +1162,7 @@ InstallStatus MapTransferInstaller::validateStagedMap(
       // uploads are hashed while streaming and only reach activation with a
       // verification receipt, so the normal activation path performs no
       // full-file reads.
-      std::ifstream input(stagedPath, std::ios::binary);
+      MapReadFile input(stagedPath);
       if (!input)
         return fail("file_sha256", "could not read staged map file: " +
                                        file.path);
@@ -1171,7 +1171,7 @@ InstallStatus MapTransferInstaller::validateStagedMap(
       std::array<uint8_t, 4096> buffer = {};
       while (input) {
         input.read(reinterpret_cast<char *>(buffer.data()), buffer.size());
-        const std::streamsize count = input.gcount();
+        const size_t count = input.gcount();
         if (count <= 0)
           break;
         hasher.update(buffer.data(), static_cast<size_t>(count));
@@ -1226,7 +1226,7 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
   uint64_t archiveBytes = 0;
   if (!fileSize(archivePath, archiveBytes))
     return fail("archive_missing", "staged archive is missing");
-  std::ifstream input(archivePath, std::ios::binary);
+  MapReadFile input(archivePath);
   if (!input)
     return fail("archive_open", "could not open staged archive");
 
@@ -1251,10 +1251,10 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
   reportScanProgress(0, true);
   while (offset + 4 <= archiveBytes) {
     uint8_t signatureBytes[4] = {};
-    input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    input.seek(static_cast<off_t>(offset));
     input.read(reinterpret_cast<char *>(signatureBytes),
                sizeof(signatureBytes));
-    if (input.gcount() != static_cast<std::streamsize>(sizeof(signatureBytes)))
+    if (input.gcount() != static_cast<size_t>(sizeof(signatureBytes)))
       break;
     const uint32_t signature = readLe32(signatureBytes);
     if (signature == kZipCentralHeaderSignature ||
@@ -1270,7 +1270,7 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
 
     uint8_t header[26] = {};
     input.read(reinterpret_cast<char *>(header), sizeof(header));
-    if (input.gcount() != static_cast<std::streamsize>(sizeof(header))) {
+    if (input.gcount() != static_cast<size_t>(sizeof(header))) {
       return fail("archive_truncated", "stored archive header is truncated");
     }
     const uint16_t flags = readLe16(header + 2);
@@ -1287,8 +1287,8 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
     }
 
     std::string path(nameLength, '\0');
-    input.read(path.data(), static_cast<std::streamsize>(nameLength));
-    if (input.gcount() != static_cast<std::streamsize>(nameLength) ||
+    input.read(path.data(), static_cast<size_t>(nameLength));
+    if (input.gcount() != static_cast<size_t>(nameLength) ||
         path.find('\0') != std::string::npos) {
       return fail("archive_path", "map archive contains an invalid path");
     }
@@ -1329,26 +1329,25 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
 
   const std::string manifestPath = joinPath(root, "manifest.json");
   const std::string manifestTemp = manifestPath + ".part";
-  std::ofstream manifestOutput(manifestTemp,
-                               std::ios::binary | std::ios::trunc);
+  MapWriteFile manifestOutput(manifestTemp);
   if (!manifestOutput)
     return fail("archive_write", "could not create extracted manifest");
   input.clear();
-  input.seekg(static_cast<std::streamoff>(manifestOffset), std::ios::beg);
+  input.seek(static_cast<off_t>(manifestOffset));
   std::array<uint8_t, 4096> buffer = {};
   uint64_t remaining = manifestBytes;
   while (remaining > 0) {
     const size_t count =
         static_cast<size_t>(std::min<uint64_t>(remaining, buffer.size()));
     input.read(reinterpret_cast<char *>(buffer.data()),
-               static_cast<std::streamsize>(count));
-    if (input.gcount() != static_cast<std::streamsize>(count)) {
+               static_cast<size_t>(count));
+    if (input.gcount() != static_cast<size_t>(count)) {
       manifestOutput.close();
       removeTree(manifestTemp);
       return fail("archive_truncated", "map archive data is truncated");
     }
     manifestOutput.write(reinterpret_cast<const char *>(buffer.data()),
-                         static_cast<std::streamsize>(count));
+                         static_cast<size_t>(count));
     if (!manifestOutput) {
       manifestOutput.close();
       removeTree(manifestTemp);
@@ -1393,10 +1392,10 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
   sawCentralDirectory = false;
   while (offset + 4 <= archiveBytes) {
     uint8_t signatureBytes[4] = {};
-    input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    input.seek(static_cast<off_t>(offset));
     input.read(reinterpret_cast<char *>(signatureBytes),
                sizeof(signatureBytes));
-    if (input.gcount() != static_cast<std::streamsize>(sizeof(signatureBytes)))
+    if (input.gcount() != static_cast<size_t>(sizeof(signatureBytes)))
       break;
     const uint32_t signature = readLe32(signatureBytes);
     if (signature == kZipCentralHeaderSignature ||
@@ -1410,14 +1409,14 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
 
     uint8_t header[26] = {};
     input.read(reinterpret_cast<char *>(header), sizeof(header));
-    if (input.gcount() != static_cast<std::streamsize>(sizeof(header)))
+    if (input.gcount() != static_cast<size_t>(sizeof(header)))
       return fail("archive_truncated", "stored archive header is truncated");
     const uint64_t compressedSize = readLe32(header + 14);
     const uint16_t nameLength = readLe16(header + 22);
     const uint16_t extraLength = readLe16(header + 24);
     std::string path(nameLength, '\0');
-    input.read(path.data(), static_cast<std::streamsize>(nameLength));
-    if (input.gcount() != static_cast<std::streamsize>(nameLength))
+    input.read(path.data(), static_cast<size_t>(nameLength));
+    if (input.gcount() != static_cast<size_t>(nameLength))
       return fail("archive_path", "map archive contains an invalid path");
     const uint64_t dataOffset = offset + 30 + nameLength + extraLength;
     const bool isMapFile = startsWith(path, kVectMapPrefix) &&
@@ -1447,10 +1446,10 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
       if (!mkdirs(dirnameOf(destination)))
         return fail("archive_mkdir",
                     "could not create extracted map directory");
-      std::ofstream output(tempDestination, std::ios::binary | std::ios::trunc);
+      MapWriteFile output(tempDestination);
       if (!output)
         return fail("archive_write", "could not create extracted map file");
-      input.seekg(static_cast<std::streamoff>(dataOffset), std::ios::beg);
+      input.seek(static_cast<off_t>(dataOffset));
       Sha256Hasher hasher;
       map_renderer_format::StreamValidator rendererValidator(path);
       remaining = compressedSize;
@@ -1458,8 +1457,8 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
         const size_t count =
             static_cast<size_t>(std::min<uint64_t>(remaining, buffer.size()));
         input.read(reinterpret_cast<char *>(buffer.data()),
-                   static_cast<std::streamsize>(count));
-        if (input.gcount() != static_cast<std::streamsize>(count)) {
+                   static_cast<size_t>(count));
+        if (input.gcount() != static_cast<size_t>(count)) {
           output.close();
           removeTree(tempDestination);
           return fail("archive_truncated", "map archive data is truncated");
@@ -1473,7 +1472,7 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
                           path);
         }
         output.write(reinterpret_cast<const char *>(buffer.data()),
-                     static_cast<std::streamsize>(count));
+                     static_cast<size_t>(count));
         if (!output) {
           output.close();
           removeTree(tempDestination);
@@ -3010,16 +3009,16 @@ bool MapTransferInstaller::mkdirs(const std::string &path) const {
 
 bool MapTransferInstaller::copyFile(const std::string &from,
                                     const std::string &to) const {
-  std::ifstream input(from, std::ios::binary);
+  MapReadFile input(from);
   if (!input)
     return false;
-  std::ofstream output(to, std::ios::binary | std::ios::trunc);
+  MapWriteFile output(to);
   if (!output)
     return false;
   std::array<char, 4096> buffer = {};
   while (input.good()) {
     input.read(buffer.data(), buffer.size());
-    const std::streamsize count = input.gcount();
+    const size_t count = input.gcount();
     if (count > 0)
       output.write(buffer.data(), count);
     if (!output.good())
@@ -3226,16 +3225,16 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
     const std::string path = resolvedPath(file);
     if (path.empty())
       return fail("label_block_path", "label-aware block path is invalid");
-    std::ifstream input(path, std::ios::binary | std::ios::ate);
-    if (!input || input.tellg() <= 0 ||
-        static_cast<uint64_t>(input.tellg()) >
+    MapReadFile input(path, true);
+    if (!input || input.tell() <= 0 ||
+        static_cast<uint64_t>(input.tell()) >
             map_block_format::kMaximumBlockBytes)
       return fail("label_block_open", "could not read label-aware FMB block");
-    const size_t size = static_cast<size_t>(input.tellg());
-    input.seekg(0, std::ios::beg);
+    const size_t size = static_cast<size_t>(input.tell());
+    input.seek(0);
     std::vector<uint8_t> bytes(size);
     input.read(reinterpret_cast<char *>(bytes.data()),
-               static_cast<std::streamsize>(bytes.size()));
+               static_cast<size_t>(bytes.size()));
     const uint8_t expectedBlockVersion =
         static_cast<uint8_t>(manifest.formatVersion + 1U);
     if (!input || bytes.size() < 4 || bytes[3] != expectedBlockVersion)
@@ -3460,14 +3459,14 @@ bool MapTransferInstaller::fileSize(const std::string &path,
 
 bool MapTransferInstaller::fileSha256Hex(const std::string &path,
                                          std::string &hex) const {
-  std::ifstream input(path, std::ios::binary);
+  MapReadFile input(path);
   if (!input)
     return false;
   Sha256Hasher sha;
   std::array<uint8_t, 1024> buffer = {};
   while (input.good()) {
     input.read(reinterpret_cast<char *>(buffer.data()), buffer.size());
-    std::streamsize n = input.gcount();
+    size_t n = input.gcount();
     if (n > 0)
       sha.update(buffer.data(), static_cast<size_t>(n));
   }
@@ -3481,10 +3480,10 @@ bool MapTransferInstaller::writeTextFile(const std::string &path,
                                          const std::string &text) const {
   if (!mkdirs(dirnameOf(path)))
     return false;
-  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  MapWriteFile output(path);
   if (!output)
     return false;
-  output << text;
+  output.write(text.data(), text.size());
   output.flush();
   if (!output.good())
     return false;
@@ -3530,12 +3529,10 @@ bool MapTransferInstaller::readTextFile(const std::string &path,
   uint64_t size = 0;
   if (!fileSize(path, size) || size > maxBytes)
     return false;
-  std::ifstream input(path, std::ios::binary);
+  MapReadFile input(path);
   if (!input)
     return false;
-  text.assign((std::istreambuf_iterator<char>(input)),
-              std::istreambuf_iterator<char>());
-  return true;
+  return input.readAll(text, maxBytes);
 }
 
 } // namespace map_transfer
