@@ -76,6 +76,12 @@ public:
       paths_[descriptor] = path;
     return descriptor;
   }
+  int openRead(const std::string &path) override {
+    return delegate_->openRead(path);
+  }
+  bool read(int descriptor, uint8_t *data, size_t size) override {
+    return delegate_->read(descriptor, data, size);
+  }
   bool write(int descriptor, const uint8_t *data, size_t size) override {
     if (fail(FaultOperation::Write, pathFor(descriptor)))
       return false;
@@ -366,11 +372,11 @@ void testDirectWriteCheckpointAndReady() {
   MapStreamInstallSession duplicate(root, "session-1", {1, 10000});
   assert(duplicate.onManifest(manifest, kManifest));
   consumeFile(duplicate, manifest, 0, kPayload0,
-              MapStreamFileAction::ConsumeCheckpointed);
+              MapStreamFileAction::VerifyAndConsume);
   consumeFile(duplicate, manifest, 1, kPayload1,
-              MapStreamFileAction::ConsumeCheckpointed);
+              MapStreamFileAction::VerifyAndConsume);
   consumeFile(duplicate, manifest, 2, kPayload2,
-              MapStreamFileAction::ConsumeCheckpointed);
+              MapStreamFileAction::VerifyAndConsume);
   assert(duplicate.onComplete(manifest));
   assert(duplicate.snapshot().bytesWritten == 0);
   assert(duplicate.snapshot().bytesSkipped == kPayloadBytes);
@@ -412,7 +418,7 @@ void testResumeSkipsDurablePrefixWithoutRewriting() {
   assert(retry.onManifest(manifest, kManifest));
   assert(retry.snapshot().durableFilePrefix == 1);
   consumeFile(retry, manifest, 0, kPayload0,
-              MapStreamFileAction::ConsumeCheckpointed);
+              MapStreamFileAction::VerifyAndConsume);
   struct stat after;
   assert(::stat(firstPath.c_str(), &after) == 0);
   assert(before.st_ino == after.st_ino);
@@ -424,6 +430,28 @@ void testResumeSkipsDurablePrefixWithoutRewriting() {
   assert(retry.snapshot().bytesSkipped == kPayload0.size());
   assert(retry.snapshot().bytesWritten == kPayloadBytes - kPayload0.size());
   assert(retry.snapshot().completedPayloadBytes == kPayloadBytes);
+}
+
+void testResumeRejectsSameLengthCheckpointCorruption() {
+  const std::string root = tempRoot();
+  const auto manifest = verified();
+  {
+    MapStreamInstallSession first(root, "corrupt", {1, 10000});
+    assert(first.onManifest(manifest, kManifest));
+    consumeFile(first, manifest, 0, kPayload0, MapStreamFileAction::VerifyAndConsume);
+    first.onAbort(map_transfer::MapStreamParserError::Truncated);
+  }
+  auto damaged = kPayload0;
+  damaged[0] ^= 1;
+  writeFile(root + "/VECTMAP/.maps/corrupt/+0000+0000/0.fmb", damaged);
+  MapStreamInstallSession retry(root, "corrupt", {1, 10000});
+  assert(retry.onManifest(manifest, kManifest));
+  const auto file = fileView(manifest, 0);
+  assert(retry.onFileBegin(file, 0) == MapStreamFileAction::VerifyAndConsume);
+  assert(!retry.onFileData(file, reinterpret_cast<const uint8_t *>(kPayload0.data()), kPayload0.size()));
+  assert(retry.snapshot().state == MapStreamInstallState::Failed);
+  assert(retry.snapshot().errorCode == "stream_checkpoint_corrupt");
+  assert(!exists(retry.inactiveRoot() + "/.ready"));
 }
 
 void testIncompleteStreamCanBeDiscardedForProtocolArbitration() {
@@ -1047,6 +1075,7 @@ void testStartingNewStreamPrunesAbandonedPausedSessions() {
 } // namespace
 
 int main() {
+  testResumeRejectsSameLengthCheckpointCorruption();
   testDirectWriteCheckpointAndReady();
   testResumeSkipsDurablePrefixWithoutRewriting();
   testIncompleteStreamCanBeDiscardedForProtocolArbitration();

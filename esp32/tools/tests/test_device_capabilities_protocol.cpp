@@ -66,9 +66,29 @@ int main() {
   static_assert(device_capabilities_protocol::RIDE_DELIVERY_ACK_FEATURE ==
                 (1UL << 22));
   static_assert(
-      device_capabilities_protocol::SCREEN_CONFIGURATION_CLIENT_VERSION == 21);
+      device_capabilities_protocol::SCREEN_CONFIGURATION_CLIENT_VERSION == 24);
   static_assert(device_capabilities_protocol::SCREEN_CONFIGURATION_FEATURE ==
-                (1UL << 23));
+                (1UL << 26));
+  static_assert(device_capabilities_protocol::
+                    RENDERER_BENCHMARK_SAMPLE_CLIENT_VERSION == 21);
+  static_assert(
+      device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE ==
+      (1UL << 23));
+  static_assert(
+      device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_CLIENT_VERSION ==
+      23);
+  static_assert(
+      device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE ==
+      (1UL << 25));
+  static_assert(device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE ==
+                (1UL << 24));
+  static_assert(device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_CLIENT_VERSION == 22);
+  static_assert((device_capabilities_protocol::SCREEN_CONFIGURATION_FEATURE &
+                 (device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE |
+                  device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE |
+                  device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE)) == 0);
+  static_assert((device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE &
+                 device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE) == 0);
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
@@ -168,10 +188,28 @@ int main() {
       false, output, sizeof(output), screenTLV, sizeof(screenTLV));
   assert(screenSize == device_capabilities_protocol::CAP2_BASE_BYTES +
                            sizeof(screenTLV));
-  assert(output[7] == 0x80);
+  assert(output[7] == 0x00 && output[8] == 0x04);
   for (size_t index = 0; index < sizeof(screenTLV); ++index)
     assert(output[device_capabilities_protocol::CAP2_BASE_BYTES + index] ==
            screenTLV[index]);
+  const size_t rendererBenchmarkSampleSize =
+      device_capabilities_protocol::encodeCap2(
+          device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE,
+          nullptr, false, output, sizeof(output));
+  const uint8_t expectedRendererBenchmarkSample[] = {
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x80, 0x00};
+  assert(rendererBenchmarkSampleSize ==
+         sizeof(expectedRendererBenchmarkSample));
+  for (size_t index = 0; index < rendererBenchmarkSampleSize; ++index)
+    assert(output[index] == expectedRendererBenchmarkSample[index]);
+  const size_t watchMotionSize = device_capabilities_protocol::encodeCap2(
+      device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE,
+      nullptr, false, output, sizeof(output));
+  const uint8_t expectedWatchMotion[] = {
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x00, 0x02};
+  assert(watchMotionSize == sizeof(expectedWatchMotion));
+  for (size_t index = 0; index < watchMotionSize; ++index)
+    assert(output[index] == expectedWatchMotion[index]);
   std::cout << "device capabilities protocol tests passed\n";
   return 0;
 }

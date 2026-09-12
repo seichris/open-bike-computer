@@ -9,6 +9,167 @@ import CryptoKit
 import Foundation
 import Security
 
+nonisolated enum DeviceTransferTLSChallengeOutcome: String, Equatable, Sendable {
+    case defaultHandling = "default_handling"
+    case hostMismatch = "host_mismatch"
+    case invalidExpectedFingerprint = "invalid_expected_fingerprint"
+    case missingServerTrust = "missing_server_trust"
+    case certificateMismatch = "certificate_mismatch"
+    case accepted
+}
+
+nonisolated struct DeviceTransferTLSChallengeEvaluation {
+    let disposition: URLSession.AuthChallengeDisposition
+    let credential: URLCredential?
+    let outcome: DeviceTransferTLSChallengeOutcome
+}
+
+nonisolated struct DeviceTransferPinnedSessionSnapshot: Equatable, Sendable {
+    var tlsChallengeOutcome: DeviceTransferTLSChallengeOutcome? = nil
+    var waitedForConnectivity = false
+    var connectStarted = false
+    var connectCompleted = false
+    var tlsStarted = false
+    var tlsCompleted = false
+    var connectDurationMilliseconds: Int? = nil
+    var tlsDurationMilliseconds: Int? = nil
+    var remoteEndpointMatched: Bool? = nil
+    var localAddressInAccessorySubnet: Bool? = nil
+    var networkProtocolName: String? = nil
+    var reusedConnection = false
+    var proxyConnection = false
+    var underlyingErrorDomain: String? = nil
+    var underlyingErrorCode: Int? = nil
+
+    var diagnosticFields: [String: String] {
+        var fields = [
+            "tlsChallenge": tlsChallengeOutcome?.rawValue ?? "not_seen",
+            "waitedForConnectivity": String(waitedForConnectivity),
+            "connectStarted": String(connectStarted),
+            "connectCompleted": String(connectCompleted),
+            "tlsStarted": String(tlsStarted),
+            "tlsCompleted": String(tlsCompleted),
+            "connectionReused": String(reusedConnection),
+            "proxyConnection": String(proxyConnection),
+        ]
+        if let connectDurationMilliseconds {
+            fields["connectDurationMs"] = String(connectDurationMilliseconds)
+        }
+        if let tlsDurationMilliseconds {
+            fields["tlsDurationMs"] = String(tlsDurationMilliseconds)
+        }
+        if let remoteEndpointMatched {
+            fields["remoteEndpointMatched"] = String(remoteEndpointMatched)
+        }
+        if let localAddressInAccessorySubnet {
+            fields["localAccessorySubnet"] =
+                String(localAddressInAccessorySubnet)
+        }
+        if let networkProtocolName, !networkProtocolName.isEmpty {
+            fields["networkProtocol"] = networkProtocolName
+        }
+        if let underlyingErrorDomain, !underlyingErrorDomain.isEmpty {
+            fields["underlyingErrorDomain"] = underlyingErrorDomain
+        }
+        if let underlyingErrorCode {
+            fields["underlyingErrorCode"] = String(underlyingErrorCode)
+        }
+        return fields
+    }
+}
+
+nonisolated final class DeviceTransferPinnedSessionDiagnostics:
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var current = DeviceTransferPinnedSessionSnapshot()
+
+    func reset() {
+        lock.lock()
+        current = DeviceTransferPinnedSessionSnapshot()
+        lock.unlock()
+    }
+
+    func snapshot() -> DeviceTransferPinnedSessionSnapshot {
+        lock.lock()
+        let result = current
+        lock.unlock()
+        return result
+    }
+
+    func record(challenge outcome: DeviceTransferTLSChallengeOutcome) {
+        lock.lock()
+        current.tlsChallengeOutcome = outcome
+        lock.unlock()
+    }
+
+    func recordWaitingForConnectivity() {
+        lock.lock()
+        current.waitedForConnectivity = true
+        lock.unlock()
+    }
+
+    func record(error: NSError) {
+        let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError
+        lock.lock()
+        current.underlyingErrorDomain = underlying?.domain
+        current.underlyingErrorCode = underlying?.code
+        lock.unlock()
+    }
+
+    func record(
+        metrics: URLSessionTaskMetrics,
+        expectedHost: String,
+        expectedPort: Int
+    ) {
+        guard let transaction = metrics.transactionMetrics.last else { return }
+        let remoteEndpointMatched: Bool?
+        if let remoteAddress = transaction.remoteAddress,
+           let remotePort = transaction.remotePort {
+            remoteEndpointMatched =
+                remoteAddress.caseInsensitiveCompare(expectedHost) == .orderedSame &&
+                remotePort == expectedPort
+        } else {
+            remoteEndpointMatched = nil
+        }
+        let localAddressInAccessorySubnet: Bool?
+        if expectedHost == "192.168.4.1",
+           let localAddress = transaction.localAddress {
+            localAddressInAccessorySubnet = localAddress.hasPrefix("192.168.4.")
+        } else {
+            localAddressInAccessorySubnet = nil
+        }
+
+        lock.lock()
+        current.connectStarted = transaction.connectStartDate != nil
+        current.connectCompleted = transaction.connectEndDate != nil
+        current.tlsStarted = transaction.secureConnectionStartDate != nil
+        current.tlsCompleted = transaction.secureConnectionEndDate != nil
+        current.connectDurationMilliseconds = Self.durationMilliseconds(
+            from: transaction.connectStartDate,
+            to: transaction.connectEndDate
+        )
+        current.tlsDurationMilliseconds = Self.durationMilliseconds(
+            from: transaction.secureConnectionStartDate,
+            to: transaction.secureConnectionEndDate
+        )
+        current.remoteEndpointMatched = remoteEndpointMatched
+        current.localAddressInAccessorySubnet = localAddressInAccessorySubnet
+        current.networkProtocolName = transaction.networkProtocolName
+        current.reusedConnection = transaction.isReusedConnection
+        current.proxyConnection = transaction.isProxyConnection
+        lock.unlock()
+    }
+
+    private static func durationMilliseconds(
+        from start: Date?,
+        to end: Date?
+    ) -> Int? {
+        guard let start, let end else { return nil }
+        return max(0, Int((end.timeIntervalSince(start) * 1_000).rounded()))
+    }
+}
+
 nonisolated enum DeviceTransferSecurityPolicy {
     static func normalizedTransferToken(_ value: String) -> String? {
         guard value.utf8.count == 32,
@@ -60,29 +221,70 @@ nonisolated enum DeviceTransferSecurityPolicy {
         expectedHost: String,
         certificateSHA256: String
     ) -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+        let evaluation = evaluateWithOutcome(
+            challenge: challenge,
+            expectedHost: expectedHost,
+            certificateSHA256: certificateSHA256
+        )
+        return (evaluation.disposition, evaluation.credential)
+    }
+
+    static func evaluateWithOutcome(
+        challenge: URLAuthenticationChallenge,
+        expectedHost: String,
+        certificateSHA256: String
+    ) -> DeviceTransferTLSChallengeEvaluation {
         guard challenge.protectionSpace.authenticationMethod ==
                 NSURLAuthenticationMethodServerTrust else {
-            return (.performDefaultHandling, nil)
+            return DeviceTransferTLSChallengeEvaluation(
+                disposition: .performDefaultHandling,
+                credential: nil,
+                outcome: .defaultHandling
+            )
         }
         guard challenge.protectionSpace.host.caseInsensitiveCompare(
                 expectedHost
-              ) == .orderedSame,
-              let expected = normalizedCertificateSHA256(
+              ) == .orderedSame else {
+            return DeviceTransferTLSChallengeEvaluation(
+                disposition: .cancelAuthenticationChallenge,
+                credential: nil,
+                outcome: .hostMismatch
+            )
+        }
+        guard let expected = normalizedCertificateSHA256(
                 certificateSHA256
-              ),
-              let trust = challenge.protectionSpace.serverTrust,
+              ) else {
+            return DeviceTransferTLSChallengeEvaluation(
+                disposition: .cancelAuthenticationChallenge,
+                credential: nil,
+                outcome: .invalidExpectedFingerprint
+            )
+        }
+        guard let trust = challenge.protectionSpace.serverTrust,
               let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
               let leaf = chain.first else {
-            return (.cancelAuthenticationChallenge, nil)
+            return DeviceTransferTLSChallengeEvaluation(
+                disposition: .cancelAuthenticationChallenge,
+                credential: nil,
+                outcome: .missingServerTrust
+            )
         }
         let certificate = SecCertificateCopyData(leaf) as Data
         let actual = SHA256.hash(data: certificate)
             .map { String(format: "%02x", $0) }
             .joined()
         guard constantTimeEqual(actual, expected) else {
-            return (.cancelAuthenticationChallenge, nil)
+            return DeviceTransferTLSChallengeEvaluation(
+                disposition: .cancelAuthenticationChallenge,
+                credential: nil,
+                outcome: .certificateMismatch
+            )
         }
-        return (.useCredential, URLCredential(trust: trust))
+        return DeviceTransferTLSChallengeEvaluation(
+            disposition: .useCredential,
+            credential: URLCredential(trust: trust),
+            outcome: .accepted
+        )
     }
 
     private static func constantTimeEqual(_ left: String, _ right: String) -> Bool {
@@ -103,9 +305,15 @@ final class DeviceTransferPinnedSessionDelegate: NSObject,
                                                  URLSessionTaskDelegate,
                                                  @unchecked Sendable {
     private let expectedHost: String
+    private let expectedPort: Int
     private let certificateSHA256: String
+    private let diagnostics: DeviceTransferPinnedSessionDiagnostics?
 
-    init?(baseURL: URL, certificateSHA256: String) {
+    init?(
+        baseURL: URL,
+        certificateSHA256: String,
+        diagnostics: DeviceTransferPinnedSessionDiagnostics? = nil
+    ) {
         guard DeviceTransferSecurityPolicy.isSecureBaseURL(baseURL),
               let expectedHost = baseURL.host,
               let certificateSHA256 = DeviceTransferSecurityPolicy
@@ -113,7 +321,9 @@ final class DeviceTransferPinnedSessionDelegate: NSObject,
             return nil
         }
         self.expectedHost = expectedHost
+        self.expectedPort = baseURL.port ?? 443
         self.certificateSHA256 = certificateSHA256
+        self.diagnostics = diagnostics
     }
 
     func urlSession(
@@ -146,12 +356,46 @@ final class DeviceTransferPinnedSessionDelegate: NSObject,
             URLCredential?
         ) -> Void
     ) {
-        let result = DeviceTransferSecurityPolicy.evaluate(
+        let result = DeviceTransferSecurityPolicy.evaluateWithOutcome(
             challenge: challenge,
             expectedHost: expectedHost,
             certificateSHA256: certificateSHA256
         )
-        completionHandler(result.0, result.1)
+        // This deliberately records only the classification. Certificate
+        // fingerprints, transfer tokens, hotspot credentials, and trust
+        // objects never enter the log.
+        diagnostics?.record(challenge: result.outcome)
+        print("Device transfer TLS challenge: \(result.outcome.rawValue)")
+        completionHandler(result.disposition, result.credential)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        taskIsWaitingForConnectivity task: URLSessionTask
+    ) {
+        diagnostics?.recordWaitingForConnectivity()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didFinishCollecting metrics: URLSessionTaskMetrics
+    ) {
+        diagnostics?.record(
+            metrics: metrics,
+            expectedHost: expectedHost,
+            expectedPort: expectedPort
+        )
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        if let error {
+            diagnostics?.record(error: error as NSError)
+        }
     }
 
     func urlSession(
@@ -169,11 +413,13 @@ nonisolated enum DeviceTransferPinnedSessionFactory {
     static func make(
         configuration: URLSessionConfiguration,
         baseURL: URL,
-        certificateSHA256: String
+        certificateSHA256: String,
+        diagnostics: DeviceTransferPinnedSessionDiagnostics? = nil
     ) -> URLSession? {
         guard let delegate = DeviceTransferPinnedSessionDelegate(
             baseURL: baseURL,
-            certificateSHA256: certificateSHA256
+            certificateSHA256: certificateSHA256,
+            diagnostics: diagnostics
         ) else {
             return nil
         }

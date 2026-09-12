@@ -156,7 +156,7 @@ constexpr std::size_t INSTANCE_HEADER_BYTES = 9;
 constexpr std::size_t DOCUMENT_CRC_BYTES = 4;
 constexpr std::size_t EMPTY_PAYLOAD_BYTES = 1;
 constexpr std::size_t MAP_PAYLOAD_BYTES = 16;
-constexpr std::size_t MAP_NAVIGATION_PAYLOAD_BYTES = 18;
+constexpr std::size_t MAP_NAVIGATION_PAYLOAD_BYTES = 19;
 constexpr std::size_t RIDE_STATS_PAYLOAD_BYTES = 3 + RIDE_STATS_SLOT_COUNT;
 constexpr std::size_t REQUEST_BYTES = 8;
 constexpr std::size_t CHUNK_HEADER_BYTES = 14;
@@ -268,7 +268,7 @@ inline bool isValidMapProfile(const MapProfile &profile, ScreenType type) {
   if (type == ScreenType::Map)
     return profile.rotationMode <= 1;
   if (type == ScreenType::MapNavigation)
-    return profile.birdsEyePerspective <= 4;
+    return profile.birdsEyePerspective <= 4 && profile.rotationMode <= 1;
   return false;
 }
 
@@ -320,6 +320,7 @@ inline ValidationError validate(const Document &document) {
 inline MapProfile defaultMapProfile(ScreenType type) {
   MapProfile profile{};
   if (type == ScreenType::MapNavigation) {
+    profile.rotationMode = 1;
     profile.detailLevel =
         map_profile_protocol::MAP_NAVIGATION_DEFAULT_DETAIL_LEVEL;
     profile.routeLineWidth =
@@ -452,7 +453,8 @@ inline bool encodeMapProfile(Writer &writer, const MapProfile &profile,
     return writer.byte(profile.rotationMode);
   return writer.byte(profile.birdsEyeEnabled ? 1 : 0) &&
          writer.byte(profile.birdsEyePerspective) &&
-         writer.byte(profile.buildings3DEnabled ? 1 : 0);
+         writer.byte(profile.buildings3DEnabled ? 1 : 0) &&
+         writer.byte(profile.rotationMode);
 }
 
 inline bool encodePayload(Writer &writer, const ScreenInstance &instance) {
@@ -509,7 +511,9 @@ inline std::size_t encodeDocument(const Document &document, uint8_t *output,
 
 inline bool decodeMapProfile(Reader &reader, std::size_t payloadLength,
                              ScreenType type, MapProfile &profile) {
-  if (payloadLength != payloadSize(type))
+  const bool legacyNavigation =
+      type == ScreenType::MapNavigation && payloadLength == 18;
+  if (payloadLength != payloadSize(type) && !legacyNavigation)
     return false;
   uint8_t version = 0;
   uint8_t birdsEye = 0;
@@ -529,11 +533,13 @@ inline bool decodeMapProfile(Reader &reader, std::size_t payloadLength,
     return false;
   if (type == ScreenType::Map)
     return reader.byte(profile.rotationMode);
+  profile.rotationMode = 1;
   return reader.byte(birdsEye) && birdsEye <= 1 &&
          reader.byte(profile.birdsEyePerspective) &&
          reader.byte(buildings3D) && buildings3D <= 1 &&
          ((profile.birdsEyeEnabled = birdsEye == 1), true) &&
-         ((profile.buildings3DEnabled = buildings3D == 1), true);
+         ((profile.buildings3DEnabled = buildings3D == 1), true) &&
+         (legacyNavigation || reader.byte(profile.rotationMode));
 }
 
 inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,

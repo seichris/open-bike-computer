@@ -90,6 +90,47 @@ func testDeviceScreenConfigurationCodecAndValidation() {
         return
     }
     assertEqual(decoded, document, "screen configuration binary round trip")
+    var navigation = DeviceScreenInstance.defaults(
+        id: 1, type: .mapPlusNavigation, name: "Nav"
+    )
+    assertEqual(navigation.mapProfile?.rotationMode, 1, "navigation defaults to course up")
+    navigation.mapProfile?.rotationMode = 0
+    let northUp = DeviceScreenConfigurationDocument(
+        defaultInstanceID: 1, instances: [navigation]
+    )
+    guard var northUpBytes = try? DeviceScreenConfigurationCodec.encode(northUp) else {
+        assert(false, "north-up navigation must encode")
+        return
+    }
+    assertEqual(try? DeviceScreenConfigurationCodec.decode(northUpBytes), northUp,
+                "navigation orientation survives the wire round trip")
+    // Strip the appended orientation byte and repair length/CRC to represent
+    // a pre-integration 18-byte navigation payload.
+    northUpBytes.remove(at: northUpBytes.count - 5)
+    northUpBytes[17] = 18
+    northUpBytes.removeLast(4)
+    let legacyCRC = zipCRC32(northUpBytes)
+    northUpBytes.append(contentsOf: (0..<4).map {
+        UInt8(truncatingIfNeeded: legacyCRC >> ($0 * 8))
+    })
+    assertEqual(
+        (try? DeviceScreenConfigurationCodec.decode(northUpBytes))?
+            .instances.first?.mapProfile?.rotationMode,
+        1, "legacy navigation payloads retain course up"
+    )
+    var secondNavigation = navigation
+    secondNavigation.id = 2
+    secondNavigation.mapProfile?.rotationMode = 1
+    let independent = DeviceScreenConfigurationDocument(
+        defaultInstanceID: 1, instances: [navigation, secondNavigation]
+    )
+    assertEqual(
+        try? DeviceScreenConfigurationCodec.decode(DeviceScreenConfigurationCodec.encode(independent)),
+        independent, "duplicate navigation screens retain independent orientations"
+    )
+    navigation.mapProfile?.rotationMode = 2
+    assert(navigation.mapProfile?.isValid(for: .mapPlusNavigation) == false,
+           "navigation rejects unsupported orientation values")
     assertEqual(
         DeviceScreenConfigurationCodec.documentCRC(encoded),
         zipCRC32(Data(encoded.dropLast(4))),

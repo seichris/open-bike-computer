@@ -148,10 +148,12 @@ nonisolated enum WorkoutMetricPrecedence {
 
     static func currentSpeed(
         pairedSensor: WorkoutMetricCandidate?,
+        healthKit: WorkoutMetricCandidate? = nil,
         watchLocation: WorkoutMetricCandidate?
     ) -> WorkoutMetricCandidate? {
         firstUsable([
             pairedSensor.flatMap { $0.source == .pairedCyclingSensor ? $0 : nil },
+            healthKit.flatMap { $0.source == .healthKit ? $0 : nil },
             watchLocation.flatMap { $0.source == .watchLocation ? $0 : nil },
         ])
     }
@@ -168,6 +170,7 @@ nonisolated enum WorkoutMetricPrecedence {
 /// them with newer totals.
 nonisolated enum WorkoutMetricFreshness {
     static let pairedCyclingSensorMaximumAge: TimeInterval = 5
+    static let healthKitSpeedMaximumAge: TimeInterval = 5
     static let watchLocationMaximumAge: TimeInterval = 10
     static let heartRateMaximumAge: TimeInterval = 30
 
@@ -243,6 +246,51 @@ nonisolated enum WorkoutElapsedTimePolicy {
     }
 }
 
+nonisolated enum WorkoutTransitionOriginPolicy {
+    /// HealthKit's state callback does not itself identify who requested a
+    /// pause or resume. Preserve uncertainty until an explicit rider event,
+    /// detector context, or confirmed system path supplies that provenance.
+    static func resolve(
+        hasAutomaticContext: Bool,
+        hasExplicitManualRequest: Bool,
+        hasConfirmedSystemRequest: Bool = false
+    ) -> WorkoutTransitionOrigin {
+        if hasAutomaticContext { return .automatic }
+        if hasExplicitManualRequest { return .manual }
+        if hasConfirmedSystemRequest { return .system }
+        return .unknown
+    }
+}
+
+nonisolated struct WorkoutSystemTransitionEvent: Equatable, Sendable {
+    let paused: Bool
+    let capturedAt: Date
+}
+
+nonisolated enum WorkoutSystemTransitionEventPolicy {
+    static let correlationWindow: TimeInterval = 2
+
+    static func matches(
+        _ event: WorkoutSystemTransitionEvent,
+        paused: Bool,
+        transitionAt: Date,
+        lastManualRequestAt: Date,
+        currentOrigin: WorkoutTransitionOrigin?
+    ) -> Bool {
+        guard event.paused == paused,
+              event.capturedAt.timeIntervalSinceReferenceDate.isFinite,
+              transitionAt.timeIntervalSinceReferenceDate.isFinite,
+              lastManualRequestAt.timeIntervalSinceReferenceDate.isFinite,
+              abs(event.capturedAt.timeIntervalSince(transitionAt))
+                <= correlationWindow,
+              event.capturedAt.timeIntervalSince(lastManualRequestAt)
+                > correlationWindow else {
+            return false
+        }
+        return currentOrigin != .manual && currentOrigin != .automatic
+    }
+}
+
 nonisolated struct WorkoutRoutePointCandidate: Equatable, Sendable {
     let latitude: Double
     let longitude: Double
@@ -289,6 +337,107 @@ nonisolated enum WorkoutRouteSegmentFilter {
             && maximumSpeed.isFinite
             && maximumSpeed > 0
             && distanceMeters / interval <= maximumSpeed
+    }
+}
+
+/// Classify delayed points by HealthKit's transition timestamp, not callback
+/// state. Bound both retained history and distance interpolation through gaps.
+nonisolated struct WorkoutRouteCaptureLifecycle {
+    static let maximumLateness: TimeInterval = 30
+    static let maximumSegmentGap: TimeInterval = 10
+    private var transitions: [(at: Date, paused: Bool)]
+
+    init(startedAt: Date) {
+        transitions = [(startedAt, false)]
+    }
+
+    mutating func record(paused: Bool, at date: Date) {
+        guard date.timeIntervalSinceReferenceDate.isFinite,
+              let last = transitions.last, date >= last.at else { return }
+        if date == last.at { transitions.removeLast() }
+        transitions.append((date, paused))
+        // Points older than retained history fail closed.
+        if transitions.count > 128 { transitions.removeFirst() }
+    }
+
+    func paused(at date: Date) -> Bool? {
+        transitions.last(where: { $0.at <= date })?.paused
+    }
+}
+
+/// Timer pauses are not route discontinuities. Qualified movement can retain
+/// route geometry during either manual or automatic pauses; stationary drift
+/// cannot. HealthKit remains the owner of saved cycling distance and time.
+nonisolated enum WorkoutPausedRoutePointFilter {
+    static let minimumMovingSpeedMetersPerSecond = 0.8
+    static let maximumHorizontalAccuracyMeters = 25.0
+    static let minimumDisplacementMeters = 10.0
+
+    static func accepts(
+        reportedSpeedMetersPerSecond: Double,
+        horizontalAccuracyMeters: Double,
+        previousHorizontalAccuracyMeters: Double?,
+        segmentDistanceMeters: Double?,
+        interval: TimeInterval?
+    ) -> Bool {
+        guard reportedSpeedMetersPerSecond.isFinite,
+              horizontalAccuracyMeters.isFinite,
+              horizontalAccuracyMeters >= 0,
+              horizontalAccuracyMeters <= maximumHorizontalAccuracyMeters else {
+            return false
+        }
+        if reportedSpeedMetersPerSecond >= minimumMovingSpeedMetersPerSecond {
+            return true
+        }
+        guard let previousHorizontalAccuracyMeters,
+              previousHorizontalAccuracyMeters.isFinite,
+              previousHorizontalAccuracyMeters >= 0,
+              let segmentDistanceMeters,
+              let interval,
+              interval.isFinite,
+              interval > 0 else {
+            return false
+        }
+        let uncertaintyBound = max(
+            minimumDisplacementMeters,
+            horizontalAccuracyMeters + previousHorizontalAccuracyMeters
+        )
+        return segmentDistanceMeters >= uncertaintyBound
+            && segmentDistanceMeters / interval
+                >= minimumMovingSpeedMetersPerSecond
+    }
+}
+
+/// Preserves a false-pause movement segment, but breaks the distance anchor
+/// when a pause contains no accepted movement. That prevents the first fix
+/// after a genuine stationary pause from adding accumulated GPS drift.
+nonisolated struct WorkoutPausedRouteContinuity: Equatable, Sendable {
+    private(set) var isPaused = false
+    private(set) var acceptedMovementWhilePaused = false
+
+    /// Returns true when the caller must break its current distance segment.
+    mutating func setPaused(_ paused: Bool) -> Bool {
+        if paused {
+            if !isPaused {
+                acceptedMovementWhilePaused = false
+            }
+            isPaused = true
+            return false
+        }
+        let shouldBreakSegment = isPaused && !acceptedMovementWhilePaused
+        isPaused = false
+        acceptedMovementWhilePaused = false
+        return shouldBreakSegment
+    }
+
+    mutating func noteAcceptedPoint() {
+        if isPaused {
+            acceptedMovementWhilePaused = true
+        }
+    }
+
+    mutating func reset() {
+        self = Self()
     }
 }
 

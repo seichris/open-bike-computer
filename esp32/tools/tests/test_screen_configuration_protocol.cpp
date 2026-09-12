@@ -31,6 +31,26 @@ static Document makeDocument() {
 }
 
 int main() {
+  // Both new orientations round-trip; old pre-integration payloads retain
+  // their historical Course Up navigation behavior.
+  for (uint8_t rotation = 0; rotation <= 1; ++rotation) {
+    auto profile = defaultMapProfile(ScreenType::MapNavigation);
+    assert(profile.rotationMode == 1);
+    profile.rotationMode = rotation;
+    uint8_t payload[MAP_NAVIGATION_PAYLOAD_BYTES]{};
+    Writer writer(payload, sizeof(payload));
+    assert(encodeMapProfile(writer, profile, ScreenType::MapNavigation));
+    assert(writer.size() == 19 && payload[18] == rotation);
+    MapProfile decodedProfile{};
+    Reader reader(payload, sizeof(payload));
+    assert(decodeMapProfile(reader, sizeof(payload), ScreenType::MapNavigation,
+                            decodedProfile));
+    assert(reader.remaining() == 0 && decodedProfile.rotationMode == rotation);
+    Reader legacyReader(payload, 18);
+    assert(decodeMapProfile(legacyReader, 18, ScreenType::MapNavigation,
+                            decodedProfile));
+    assert(legacyReader.remaining() == 0 && decodedProfile.rotationMode == 1);
+  }
   Document minimal{};
   minimal.defaultInstanceID = 0x01020304;
   minimal.instanceCount = 1;
@@ -74,6 +94,9 @@ int main() {
          DecodeResult::Malformed);
 
   Document invalid = document;
+  invalid.instances[0].mapProfile.rotationMode = 2;
+  assert(validate(invalid) == ValidationError::InvalidPayload);
+  invalid = document;
   invalid.instances[1].id = invalid.instances[0].id;
   assert(validate(invalid) == ValidationError::DuplicateID);
   invalid = document;

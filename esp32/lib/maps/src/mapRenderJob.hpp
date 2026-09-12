@@ -17,13 +17,15 @@ struct Version {
   uint32_t styleEpoch = 0;
   uint32_t mapEpoch = 0;
   uint32_t projectionEpoch = 0;
+  uint32_t diagnosticsWindowId = 0;
 
   bool operator==(const Version &other) const {
     return sequence == other.sequence &&
            routeRevision == other.routeRevision &&
            navigationEpoch == other.navigationEpoch &&
            styleEpoch == other.styleEpoch && mapEpoch == other.mapEpoch &&
-           projectionEpoch == other.projectionEpoch;
+           projectionEpoch == other.projectionEpoch &&
+           diagnosticsWindowId == other.diagnosticsWindowId;
   }
 
   bool operator!=(const Version &other) const { return !(*this == other); }
@@ -37,7 +39,8 @@ struct Version {
     return left.navigationEpoch == right.navigationEpoch &&
            left.styleEpoch == right.styleEpoch &&
            left.mapEpoch == right.mapEpoch &&
-           left.projectionEpoch == right.projectionEpoch;
+           left.projectionEpoch == right.projectionEpoch &&
+           left.diagnosticsWindowId == right.diagnosticsWindowId;
   }
 };
 

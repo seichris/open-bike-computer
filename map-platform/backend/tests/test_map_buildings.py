@@ -1167,7 +1167,7 @@ class MapBuildingContractTests(unittest.TestCase):
                 "building_artifact_validation_failed",
             )
 
-    def test_multi_block_guard_failure_becomes_split_signal(self):
+    def test_multi_block_guard_or_geometry_failure_becomes_split_signal(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             job = self._service(JobStore(root / "jobs")).create_job(
@@ -1186,19 +1186,25 @@ class MapBuildingContractTests(unittest.TestCase):
                     root / "packs",
                 )
             )
-            with self.assertRaises(BuildingChunkSplitRequired) as raised:
-                pipeline._raise_chunk_split_if_needed(
-                    BuildingScopeError(
-                        "building_object_limit_exceeded", "too many objects"
-                    ),
-                    task_id="task-1",
-                    scope_plan=scope_plan,
-                )
-            self.assertEqual(raised.exception.task_id, "task-1")
-            self.assertEqual(
-                raised.exception.blocks,
-                tuple((block.x, block.y) for block in scope_plan.output_blocks),
-            )
+            for failure_code in (
+                "building_object_limit_exceeded",
+                "generic_geometry_invalid",
+            ):
+                with self.subTest(failure_code=failure_code):
+                    with self.assertRaises(BuildingChunkSplitRequired) as raised:
+                        pipeline._raise_chunk_split_if_needed(
+                            BuildingScopeError(failure_code, "deterministic failure"),
+                            task_id="task-1",
+                            scope_plan=scope_plan,
+                        )
+                    self.assertEqual(raised.exception.task_id, "task-1")
+                    self.assertEqual(
+                        raised.exception.blocks,
+                        tuple(
+                            (block.x, block.y)
+                            for block in scope_plan.output_blocks
+                        ),
+                    )
 
     def test_building_block_cache_identity_is_scope_independent_and_hash_bound(self):
         with tempfile.TemporaryDirectory() as tmp:

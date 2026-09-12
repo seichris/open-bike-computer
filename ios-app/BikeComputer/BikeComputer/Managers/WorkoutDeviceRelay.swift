@@ -457,6 +457,14 @@ final class WorkoutDeviceRelay {
     private var cancellables = Set<AnyCancellable>()
     private var timer: Timer?
     private var evaluationScheduled = false
+    private struct MotionTransmissionIdentity: Equatable {
+        let sessionToken: UInt16
+        let epoch: UInt16
+        let sequence: UInt32
+        let automaticallyPaused: Bool
+    }
+    private var lastMotionIdentity: MotionTransmissionIdentity?
+    private var pendingMotionIdentity: MotionTransmissionIdentity?
 
     init(
         store: WorkoutMetricsStore,
@@ -491,6 +499,8 @@ final class WorkoutDeviceRelay {
             // a reconnect and resend both frames.
             if !isConnected || !isNavigationReady || !supportsWorkoutTelemetry {
                 self.scheduler.transportDidBecomeUnavailable()
+                self.lastMotionIdentity = nil
+                self.pendingMotionIdentity = nil
             }
             self.requestEvaluation()
         }
@@ -499,6 +509,17 @@ final class WorkoutDeviceRelay {
         bleManager.$supportsRideAutomation
             .removeDuplicates()
             .sink { [weak self] _ in
+                self?.requestEvaluation()
+            }
+            .store(in: &cancellables)
+
+        bleManager.$supportsWatchGPSMotionEvidenceV1
+            .removeDuplicates()
+            .sink { [weak self] supported in
+                if !supported {
+                    self?.lastMotionIdentity = nil
+                    self?.pendingMotionIdentity = nil
+                }
                 self?.requestEvaluation()
             }
             .store(in: &cancellables)
@@ -629,6 +650,50 @@ final class WorkoutDeviceRelay {
             }
         }
 
+        if ready,
+           bleManager.supportsWatchGPSMotionEvidenceV1,
+           let envelope = store.currentEnvelope,
+           envelope.kind == .snapshot,
+           let snapshot = envelope.snapshot,
+           let epoch = snapshot.location?.motionSampleEpoch,
+           let sequence = snapshot.location?.motionSampleSequence {
+            let motionIdentity = MotionTransmissionIdentity(
+                sessionToken: envelope.sessionToken,
+                epoch: epoch,
+                sequence: sequence,
+                automaticallyPaused: snapshot.state == .paused &&
+                    snapshot.pauseOrigin == .automatic
+            )
+            if motionIdentity != lastMotionIdentity,
+               motionIdentity != pendingMotionIdentity,
+               let motion = WorkoutDeviceFrameBuilder.watchMotionFrame(
+                    for: snapshot,
+                    sessionToken: envelope.sessionToken,
+                    sentAt: date
+                  ) {
+                pendingMotionIdentity = motionIdentity
+                let accepted = bleManager.sendWorkoutTelemetryFrame(
+                    motion,
+                    prioritized: false,
+                    onWrite: { [weak self] in
+                        self?.completeMotionWrite(motionIdentity)
+                    },
+                    onDrop: { [weak self] in
+                        self?.dropMotionWrite(motionIdentity)
+                    },
+                    onWriteFailure: { [weak self] in
+                        self?.dropMotionWrite(motionIdentity)
+                    }
+                )
+                if !accepted {
+                    if pendingMotionIdentity == motionIdentity {
+                        pendingMotionIdentity = nil
+                    }
+                    needsRetry = true
+                }
+            }
+        }
+
         if needsRetry {
             schedule = WorkoutDeviceRelaySchedule(
                 transmissions: [],
@@ -636,6 +701,25 @@ final class WorkoutDeviceRelay {
             )
         }
         scheduleEvaluation(at: schedule.nextEvaluationAt)
+    }
+
+    private func completeMotionWrite(
+        _ identity: MotionTransmissionIdentity
+    ) {
+        if pendingMotionIdentity == identity {
+            pendingMotionIdentity = nil
+        }
+        lastMotionIdentity = identity
+        requestEvaluation()
+    }
+
+    private func dropMotionWrite(
+        _ identity: MotionTransmissionIdentity
+    ) {
+        if pendingMotionIdentity == identity {
+            pendingMotionIdentity = nil
+        }
+        requestEvaluation()
     }
 
     private func completeWrite(_ transmission: WorkoutDeviceTransmission) {

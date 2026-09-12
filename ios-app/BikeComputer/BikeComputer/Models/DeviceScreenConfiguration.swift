@@ -163,6 +163,7 @@ struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
         profile.routeLineWidth = 15
         profile.visibilityMask = 0x0339
         profile.labelDensity = 0
+        profile.rotationMode = 1
         return profile
     }
 
@@ -180,7 +181,7 @@ struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
               labelOrientation <= 1 else { return false }
         switch type {
         case .map: return rotationMode <= 1
-        case .mapPlusNavigation: return birdsEyePerspective <= 4
+        case .mapPlusNavigation: return birdsEyePerspective <= 4 && rotationMode <= 1
         default: return false
         }
     }
@@ -542,6 +543,7 @@ enum DeviceScreenConfigurationCodec {
                 payload.append(profile.birdsEyeEnabled ? 1 : 0)
                 payload.append(profile.birdsEyePerspective)
                 payload.append(profile.buildings3DEnabled ? 1 : 0)
+                payload.append(profile.rotationMode)
             }
         case .rideStats:
             guard let layout = instance.rideStatsLayout else {
@@ -571,8 +573,9 @@ enum DeviceScreenConfigurationCodec {
         var rideStatsLayout: RideStatsLayout?
         switch type {
         case .map, .mapPlusNavigation:
-            let expectedCount = type == .map ? 16 : 18
-            guard payload.count == expectedCount else {
+            let expectedCount = type == .map ? 16 : 19
+            let legacyNavigation = type == .mapPlusNavigation && payload.count == 18
+            guard payload.count == expectedCount || legacyNavigation else {
                 throw DeviceScreenConfigurationValidationError.invalidPayload
             }
             var profile = type == .map
@@ -600,6 +603,9 @@ enum DeviceScreenConfigurationCodec {
                 }
                 profile.birdsEyeEnabled = birdsEye == 1
                 profile.buildings3DEnabled = buildings == 1
+                if !legacyNavigation {
+                    profile.rotationMode = try reader.byte()
+                }
             }
             mapProfile = profile
         case .rideStats:

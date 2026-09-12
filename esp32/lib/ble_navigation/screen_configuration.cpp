@@ -78,6 +78,7 @@ MapProfile captureProfile(const ScreenMapRenderSettings &source,
   if (type == ScreenType::Map) {
     profile.rotationMode = legacy.mapRotationMode;
   } else {
+    profile.rotationMode = legacy.mapNavigationRotationMode;
     profile.birdsEyeEnabled = legacy.mapNavigationBirdsEyeEnabled;
     profile.birdsEyePerspective = legacy.mapNavigationBirdsEyePerspective;
     profile.buildings3DEnabled = legacy.mapNavigation3DBuildingsEnabled;
@@ -150,6 +151,7 @@ uint32_t legacyDigest(const MapRenderSettings &settings) {
   append(settings.mapNavigationBirdsEyePerspective);
   append(settings.mapNavigation3DBuildingsEnabled ? 1 : 0);
   append(settings.mapRotationMode);
+  append(settings.mapNavigationRotationMode);
   append(settings.enabledScreensMask);
   append(settings.defaultScreen);
   screen_configuration_protocol::writeUInt32LE(
@@ -166,6 +168,7 @@ void projectDocument(const Document &document, MapRenderSettings &settings) {
   if (const ScreenInstance *navigation =
           primaryInstance(document, ScreenType::MapNavigation)) {
     applyProfile(navigation->mapProfile, settings.mapNavigationStyle);
+    settings.mapNavigationRotationMode = navigation->mapProfile.rotationMode;
     settings.mapNavigationBirdsEyeEnabled =
         navigation->mapProfile.birdsEyeEnabled;
     settings.mapNavigationBirdsEyePerspective =
@@ -212,6 +215,7 @@ bool writeLegacyProjection(const Document &document,
   map_profile_persistence::persist3DBuildingsEnabled(
       legacy, settings.mapNavigation3DBuildingsEnabled);
   wrote = legacy.putUChar("mapRotMode", settings.mapRotationMode) == 1 && wrote;
+  wrote = legacy.putUChar("navRotMode", settings.mapNavigationRotationMode) == 1 && wrote;
   wrote = legacy.putUChar("screenMask", settings.enabledScreensMask) == 1 &&
           wrote;
   wrote = legacy.putUChar("defaultScreen", settings.defaultScreen) == 1 &&
@@ -237,6 +241,8 @@ bool verifyLegacyProjection(const Document &document,
   verified.mapNavigation3DBuildingsEnabled =
       map_profile_persistence::load3DBuildingsEnabled(legacy);
   verified.mapRotationMode = legacy.getUChar("mapRotMode", 0);
+  verified.mapNavigationRotationMode =
+      map_profile_persistence::loadNavigationRotation(legacy);
   verified.enabledScreensMask = legacy.getUChar("screenMask", 0);
   verified.defaultScreen = legacy.getUChar("defaultScreen", 0);
   verified.navigationOverlayVisibilityMask =

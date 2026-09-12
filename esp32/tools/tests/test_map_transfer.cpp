@@ -5,12 +5,31 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <new>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
+
+// One-shot failure, armed only at the label-validation boundary below.
+static size_t rejectAllocationSize = 0;
+static unsigned rejectedAllocations = 0;
+void *operator new(size_t size) {
+  if (rejectAllocationSize != 0 && size == rejectAllocationSize) {
+    rejectAllocationSize = 0;
+    ++rejectedAllocations;
+    throw std::bad_alloc();
+  }
+  if (void *memory = std::malloc(size == 0 ? 1 : size))
+    return memory;
+  throw std::bad_alloc();
+}
+void operator delete(void *memory) noexcept { std::free(memory); }
+#if defined(__cpp_sized_deallocation)
+void operator delete(void *memory, size_t) noexcept { std::free(memory); }
+#endif
 
 using map_transfer::ActivationBeginResult;
 using map_transfer::ActiveMapSelection;
@@ -255,6 +274,17 @@ static void testTargetTwoLabelContractValidation() {
   assert(parsed.formatVersion == 2);
   assert(parsed.labelProfileVersion == 1);
   assert(parsed.labelLanguages == std::vector<std::string>{"en"});
+  const auto exhausted = installer.validateStagedMap(
+      session, parsed, [&](const map_transfer::ActivationProgress &progress) {
+        if (progress.completed == progress.total && progress.total != 0)
+          rejectAllocationSize = block.size();
+      });
+  assert(rejectedAllocations == 1);
+  assert(rejectAllocationSize == 0);
+  assert(!exhausted.ok && exhausted.code == "out_of_memory");
+  assert(!exists(root + "/VECTMAP/active-map.json"));
+  // Same transfer remains retryable after memory becomes available.
+  assert(installer.validateStagedMap(session, parsed).ok);
   assert(installer.activateStagedMap(session, parsed).ok);
   ActiveMapSelection activeSelection;
   assert(installer.readActiveMap(activeSelection).ok);

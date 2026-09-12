@@ -14,6 +14,7 @@
  */
 
 #include <Arduino.h>
+#include <atomic>
 #include "ble_radio_policy.hpp"
 #include "destination_picker_protocol.hpp"
 #include "map_profile_protocol.hpp"
@@ -138,6 +139,7 @@ struct MapRenderSettings {
       map_profile_protocol::MAP_NAVIGATION_DEFAULT_BIRDS_EYE_PERSPECTIVE;
   bool mapNavigation3DBuildingsEnabled = true;
   uint8_t mapRotationMode = 0; // 0=North Up, 1=Course Up
+  uint8_t mapNavigationRotationMode = 1;
   uint8_t tapToSwitchScreens = 0; // 0=off, 1=short tap cycles main screens
   uint8_t enabledScreensMask =
       DEVICE_SCREEN_SUPPORTED_MASK; // Bits follow DeviceScreenSetting
@@ -288,8 +290,8 @@ public:
       renderer_diagnostics_ble_protocol::WindowRequest &request);
 
 private:
-  bool initialized = false;
-  bool connected = false;
+  std::atomic<bool> initialized{false};
+  std::atomic<bool> connected{false};
 
   // BLE UUIDs (matching iOS app)
   static constexpr const char *SERVICE_UUID =

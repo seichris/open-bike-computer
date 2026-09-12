@@ -16,6 +16,9 @@ from map_platform.jobs import JobStore, MapJobService
 from map_platform.building_scope import BuildingScopeError, plan_building_scope
 from map_platform.models import Bounds, SourceRegion
 from map_platform.pipeline import (
+    BUILDING_CALIBRATION_COMMAND_POLICY,
+    BUILDING_PREPROCESSING_COMMAND_POLICY,
+    SOURCE_INDEX_COMMAND_POLICY,
     BuildingChunkSplitRequired,
     CommandExecutionPolicy,
     CommandExecutionTimeout,
@@ -116,6 +119,22 @@ class BuildingPhaseStreamingRunner:
 
 
 class PipelineProgressTests(unittest.TestCase):
+    def test_source_wide_calibration_and_scoped_preprocessing_have_distinct_deadlines(
+        self,
+    ):
+        self.assertEqual(
+            BUILDING_CALIBRATION_COMMAND_POLICY.wall_timeout_seconds,
+            6 * 60 * 60,
+        )
+        self.assertEqual(
+            BUILDING_PREPROCESSING_COMMAND_POLICY.wall_timeout_seconds,
+            30 * 60,
+        )
+        self.assertGreater(
+            BUILDING_CALIBRATION_COMMAND_POLICY.wall_timeout_seconds,
+            BUILDING_PREPROCESSING_COMMAND_POLICY.wall_timeout_seconds,
+        )
+
     def assert_process_exits(self, process_id: int, *, timeout_seconds: float = 2) -> None:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
@@ -911,6 +930,7 @@ class PipelineProgressTests(unittest.TestCase):
                         source_sha256,
                     ],
                     cwd=repo_root / "tools" / "OSM_Extract" / "scripts",
+                    policy=SOURCE_INDEX_COMMAND_POLICY,
                     on_phase_progress=None,
                     default_unit="source_index",
                     total_blocks=1,
@@ -943,6 +963,7 @@ class PipelineProgressTests(unittest.TestCase):
             pipeline._run_preprocessing_command(
                 ["preprocess"],
                 cwd=root,
+                policy=BUILDING_CALIBRATION_COMMAND_POLICY,
                 on_phase_progress=progress.append,
                 default_unit="calibration_cells",
                 total_blocks=12,
@@ -1076,6 +1097,11 @@ class PipelineProgressTests(unittest.TestCase):
                     pipeline._run_preprocessing_command(
                         ["preprocess"],
                         cwd=root,
+                        policy=(
+                            SOURCE_INDEX_COMMAND_POLICY
+                            if unit == "source_index"
+                            else BUILDING_PREPROCESSING_COMMAND_POLICY
+                        ),
                         on_phase_progress=lambda _progress: None,
                         default_unit=unit,
                         total_blocks=12,

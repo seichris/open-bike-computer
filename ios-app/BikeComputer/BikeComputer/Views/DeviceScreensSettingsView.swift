@@ -195,6 +195,7 @@ struct ConfigurableDeviceScreensSettingsSection: View {
 
 private struct DeviceScreenInstanceEditorView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var controller: DeviceScreenConfigurationController
     @State private var instance: DeviceScreenInstance
 
@@ -228,7 +229,8 @@ private struct DeviceScreenInstanceEditorView: View {
                instance.mapProfile != nil {
                 DeviceScreenMapProfileEditor(
                     profile: mapProfileBinding,
-                    type: instance.type
+                    type: instance.type,
+                    supportsNavigationOrientation: bleManager.supportsMapNavigationOrientation
                 )
             }
 
@@ -305,6 +307,7 @@ private struct DeviceScreenInstanceEditorView: View {
 private struct DeviceScreenMapProfileEditor: View {
     @Binding var profile: DeviceScreenMapProfile
     let type: ConfiguredDeviceScreenType
+    let supportsNavigationOrientation: Bool
 
     private let visibilityOptions: [(String, UInt32)] = [
         ("Buildings", 1 << 0), ("Green Space", 1 << 1),
@@ -355,14 +358,15 @@ private struct DeviceScreenMapProfileEditor: View {
             }
         }
 
-        if type == .map {
+        if type == .map || supportsNavigationOrientation {
             Section("Orientation") {
                 Picker("Rotation", selection: $profile.rotationMode) {
                     Text("North Up").tag(UInt8(0))
                     Text("Course Up").tag(UInt8(1))
                 }
             }
-        } else {
+        }
+        if type == .mapPlusNavigation {
             Section("Navigation View") {
                 Toggle("Bird’s-Eye View", isOn: $profile.birdsEyeEnabled)
                 Picker("Perspective", selection: $profile.birdsEyePerspective) {

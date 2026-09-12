@@ -67,6 +67,13 @@ int main() {
   assert(mapProfileSignature(document.instances[3]) != firstSignature);
   document.instances[3].mapProfile = document.instances[0].mapProfile;
   assert(mapProfileSignature(document.instances[3]) == firstSignature);
+  auto navigation = document.instances[0];
+  navigation.type = ScreenType::MapNavigation;
+  navigation.mapProfile =
+      screen_configuration_protocol::defaultMapProfile(ScreenType::MapNavigation);
+  const uint32_t courseUpSignature = mapProfileSignature(navigation);
+  navigation.mapProfile.rotationMode = 0;
+  assert(mapProfileSignature(navigation) != courseUpSignature);
 
   const uint32_t mapPayload = screenPayloadSignature(document.instances[0]);
   document.instances[0].mapProfile.zoomLevel += 1;

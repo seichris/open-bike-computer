@@ -4,21 +4,128 @@
 
 #include "../ble_navigation/device_ownership_crypto_resource.hpp"
 
+#include <Arduino.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <charconv>
 #include <cstdio>
 #include <new>
-#include <sstream>
+#include <string_view>
+#include <type_traits>
 
 namespace renderer_diagnostics {
 namespace {
 
 portMUX_TYPE diagnosticsMux = portMUX_INITIALIZER_UNLOCKED;
-State diagnosticsState;
+// This state contains only exported benchmark counters and public build/run
+// identity. Keep it out of scarce internal DRAM so pinned TLS retains its
+// security-sensitive buffers there; transfer credentials never enter it.
+State *diagnosticsState = nullptr;
 uint32_t lastPeriodicMemorySampleMs = 0;
+std::atomic<bool> frameTransferActive{false};
+#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+DeliveryTimingState deliveryTiming;
+#endif
+
+State *allocateDiagnosticsState() {
+  void *storage = heap_caps_calloc(
+      1, sizeof(State), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return storage == nullptr ? nullptr : new (storage) State();
+}
+
+// Renderer snapshots are a little over 3 KiB. Reserving above Arduino's
+// ALWAYSINTERNAL threshold gives the returned std::string one stable PSRAM
+// allocation instead of several small internal stream-buffer allocations and
+// a final copy.
+class JsonBuilder {
+public:
+  JsonBuilder() { body_.reserve(4096); }
+
+  JsonBuilder &operator<<(const char *value) {
+    if (value != nullptr)
+      body_.append(value);
+    return *this;
+  }
+
+  JsonBuilder &operator<<(const std::string &value) {
+    body_.append(value);
+    return *this;
+  }
+
+  JsonBuilder &operator<<(std::string_view value) {
+    body_.append(value.data(), value.size());
+    return *this;
+  }
+
+  JsonBuilder &operator<<(char value) {
+    body_.push_back(value);
+    return *this;
+  }
+
+  struct EscapedText {
+    const char *value = nullptr;
+  };
+
+  JsonBuilder &operator<<(EscapedText escaped) {
+    if (escaped.value == nullptr)
+      return *this;
+    for (const unsigned char character : std::string_view(escaped.value)) {
+      switch (character) {
+      case '"':
+        body_.append("\\\"");
+        break;
+      case '\\':
+        body_.append("\\\\");
+        break;
+      case '\b':
+        body_.append("\\b");
+        break;
+      case '\f':
+        body_.append("\\f");
+        break;
+      case '\n':
+        body_.append("\\n");
+        break;
+      case '\r':
+        body_.append("\\r");
+        break;
+      case '\t':
+        body_.append("\\t");
+        break;
+      default:
+        if (character < 0x20) {
+          char encoded[7] = {};
+          std::snprintf(encoded, sizeof(encoded), "\\u%04x", character);
+          body_.append(encoded);
+        } else {
+          body_.push_back(static_cast<char>(character));
+        }
+        break;
+      }
+    }
+    return *this;
+  }
+
+  template <typename Integer,
+            typename = std::enable_if_t<std::is_integral_v<Integer> &&
+                                        !std::is_same_v<Integer, bool>>>
+  JsonBuilder &operator<<(Integer value) {
+    char digits[32] = {};
+    const auto converted = std::to_chars(digits, digits + sizeof(digits), value);
+    if (converted.ec == std::errc())
+      body_.append(digits, converted.ptr);
+    return *this;
+  }
+
+  std::string take() { return std::move(body_); }
+
+private:
+  std::string body_;
+};
 
 MemorySample memorySample() {
   constexpr uint32_t kInternalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
@@ -41,58 +148,33 @@ MemorySample memorySample() {
   };
 }
 
-void noteCurrentMemory() {
+void noteCurrentMemory(MemoryObservationPhase phase, uint32_t nowMs) {
   const MemorySample sample = memorySample();
+  const bool frameActive =
+      frameTransferActive.load(std::memory_order_acquire);
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteMemory(sample);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteMemory(sample, phase, nowMs, frameActive);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
-std::string jsonEscape(const char *value) {
-  std::string result;
-  if (value == nullptr)
-    return result;
-  for (const unsigned char character : std::string(value)) {
-    switch (character) {
-    case '"':
-      result += "\\\"";
-      break;
-    case '\\':
-      result += "\\\\";
-      break;
-    case '\b':
-      result += "\\b";
-      break;
-    case '\f':
-      result += "\\f";
-      break;
-    case '\n':
-      result += "\\n";
-      break;
-    case '\r':
-      result += "\\r";
-      break;
-    case '\t':
-      result += "\\t";
-      break;
-    default:
-      if (character < 0x20) {
-        char escaped[7] = {};
-        std::snprintf(escaped, sizeof(escaped), "\\u%04x", character);
-        result += escaped;
-      } else {
-        result.push_back(static_cast<char>(character));
-      }
-      break;
-    }
-  }
-  return result;
+JsonBuilder::EscapedText jsonEscape(const char *value) {
+  return {value};
 }
 
-void appendTiming(std::ostringstream &body, const TimingSummary &value) {
+void appendTiming(JsonBuilder &body, const TimingSummary &value) {
   body << "{\"count\":" << value.count << ",\"lastMs\":" << value.lastMs
        << ",\"p50Ms\":" << value.p50Ms << ",\"p95Ms\":" << value.p95Ms
        << ",\"maximumMs\":" << value.maximumMs << "}";
+}
+
+void appendMemoryMinimumAttribution(
+    JsonBuilder &body, const MemoryMinimumAttribution &value) {
+  body << "{\"phase\":\"" << memoryObservationPhaseName(value.phase)
+       << "\",\"observedAtMs\":" << value.observedAtMs
+       << ",\"value\":" << value.value
+       << ",\"frameTransferActive\":"
+       << (value.frameTransferActive ? "true" : "false") << "}";
 }
 
 std::string routeMarkerHash(const RouteMarker &marker) {
@@ -112,6 +194,10 @@ std::string routeMarkerHash(const RouteMarker &marker) {
 void configureBuildIdentity(const char *deviceId, const char *firmwareCommit,
                             const char *board, const char *buildProfile,
                             uint32_t bootId, uint32_t resetReason) {
+  if (diagnosticsState == nullptr)
+    diagnosticsState = allocateDiagnosticsState();
+  if (diagnosticsState == nullptr)
+    return;
   BuildIdentity identity;
   if (!identity.deviceId.assign(deviceId) ||
       !identity.firmwareCommit.assign(firmwareCommit) ||
@@ -122,65 +208,76 @@ void configureBuildIdentity(const char *deviceId, const char *firmwareCommit,
   identity.bootId = bootId;
   identity.resetReason = resetReason;
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.configureBuild(identity);
+  diagnosticsState->configureBuild(identity);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
 void beginSession(bool remoteDebugActive, uint32_t nowMs) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.beginSession(remoteDebugActive);
+#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+  deliveryTiming.reset();
+#endif
+  if (diagnosticsState != nullptr)
+    diagnosticsState->beginSession(remoteDebugActive);
   lastPeriodicMemorySampleMs = nowMs;
   portEXIT_CRITICAL(&diagnosticsMux);
-  noteCurrentMemory();
+  noteCurrentMemory(MemoryObservationPhase::SessionStart, nowMs);
 }
 
 void endSession(uint32_t nowMs) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.endSession();
+  if (diagnosticsState != nullptr)
+    diagnosticsState->endSession();
   lastPeriodicMemorySampleMs = nowMs;
   portEXIT_CRITICAL(&diagnosticsMux);
-  noteCurrentMemory();
+  noteCurrentMemory(MemoryObservationPhase::SessionEnd, nowMs);
 }
 
 bool sessionActive() {
   portENTER_CRITICAL(&diagnosticsMux);
-  const bool active = diagnosticsState.sessionActive();
+  const bool active = diagnosticsState != nullptr &&
+                      diagnosticsState->sessionActive();
   portEXIT_CRITICAL(&diagnosticsMux);
   return active;
 }
 
 bool beginWindow(uint32_t windowId, const RunIdentity &identity,
                  renderer_tuning::Profile profile, uint32_t nowMs,
-                 const JobCounters &currentJobs,
                  uint32_t currentGpsPacketSequence) {
   portENTER_CRITICAL(&diagnosticsMux);
-  const bool accepted = diagnosticsState.beginWindow(
-      windowId, identity, profile, nowMs, currentJobs,
-      currentGpsPacketSequence);
+  const bool accepted = diagnosticsState != nullptr &&
+                        diagnosticsState->beginWindow(
+                            windowId, identity, profile, nowMs,
+                            currentGpsPacketSequence);
   if (accepted)
     lastPeriodicMemorySampleMs = nowMs;
   portEXIT_CRITICAL(&diagnosticsMux);
   if (accepted)
-    noteCurrentMemory();
+    noteCurrentMemory(MemoryObservationPhase::WindowStart, nowMs);
   return accepted;
 }
 
 void setProfile(renderer_tuning::Profile profile) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.setProfile(profile);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->setProfile(profile);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
 renderer_tuning::Profile currentProfile() {
   portENTER_CRITICAL(&diagnosticsMux);
-  const renderer_tuning::Profile profile = diagnosticsState.profile();
+  const renderer_tuning::Profile profile =
+      diagnosticsState == nullptr ? renderer_tuning::Profile::Current
+                                  : diagnosticsState->profile();
   portEXIT_CRITICAL(&diagnosticsMux);
   return profile;
 }
 
 uint32_t currentWindowId() {
   portENTER_CRITICAL(&diagnosticsMux);
-  const uint32_t windowId = diagnosticsState.measurementWindowId();
+  const uint32_t windowId = diagnosticsState == nullptr
+                                ? 0
+                                : diagnosticsState->measurementWindowId();
   portEXIT_CRITICAL(&diagnosticsMux);
   return windowId;
 }
@@ -188,7 +285,8 @@ uint32_t currentWindowId() {
 void noteLoop(uint32_t nowMs, uint32_t gapMs) {
   bool sampleMemory = false;
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteUiLoopGap(gapMs);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteUiLoopGap(gapMs);
   if (lastPeriodicMemorySampleMs == 0 ||
       static_cast<uint32_t>(nowMs - lastPeriodicMemorySampleMs) >= 1000U) {
     lastPeriodicMemorySampleMs = nowMs;
@@ -196,12 +294,13 @@ void noteLoop(uint32_t nowMs, uint32_t gapMs) {
   }
   portEXIT_CRITICAL(&diagnosticsMux);
   if (sampleMemory)
-    noteCurrentMemory();
+    noteCurrentMemory(MemoryObservationPhase::Periodic, nowMs);
 }
 
 void noteDisplayFlushUs(uint32_t microseconds) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteDisplayFlushUs(microseconds);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteDisplayFlushUs(microseconds);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
@@ -209,42 +308,95 @@ bool noteRenderForWindow(uint32_t windowId,
                          renderer_tuning::Profile profile,
                          const RenderSample &sample) {
   const MemorySample memory = memorySample();
+  const uint32_t observedAtMs = millis();
+  const bool frameActive =
+      frameTransferActive.load(std::memory_order_acquire);
   portENTER_CRITICAL(&diagnosticsMux);
-  const bool accepted =
-      diagnosticsState.noteRenderForWindow(windowId, profile, sample);
+  const bool accepted = diagnosticsState != nullptr &&
+                        diagnosticsState->noteRenderForWindow(
+                            windowId, profile, sample);
   if (accepted)
-    diagnosticsState.noteMemory(memory);
+    diagnosticsState->noteMemory(memory, MemoryObservationPhase::RenderComplete,
+                                 observedAtMs, frameActive);
   portEXIT_CRITICAL(&diagnosticsMux);
   return accepted;
 }
 
-void noteJobs(const JobCounters &jobs) {
+void noteCameraForWindow(uint32_t windowId, const CameraSample &sample) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteJobs(jobs);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteCameraForWindow(windowId, sample);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
-void noteInterrupted() {
+bool noteJobForWindow(uint32_t windowId, JobEvent event) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteInterrupted();
+  const bool accepted = diagnosticsState != nullptr &&
+                        diagnosticsState->noteJobForWindow(windowId, event);
+  portEXIT_CRITICAL(&diagnosticsMux);
+  return accepted;
+}
+
+void noteInterruptedForWindow(uint32_t windowId) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteInterruptedForWindow(windowId);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
-void noteCoverageRejected() {
+void noteCoverageRejectedForWindow(uint32_t windowId) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteCoverageRejected();
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteCoverageRejectedForWindow(windowId);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
 void noteGpsPacket(uint32_t packetSequence, uint32_t packetGapMs) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteGpsPacket(packetSequence, packetGapMs);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteGpsPacket(packetSequence, packetGapMs);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
 void notePrediction(bool graceActive, bool exhausted) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.notePrediction(graceActive, exhausted);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->notePrediction(graceActive, exhausted);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+void noteGpsAuthentication(bool accepted, uint32_t nowMs) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteGpsAuthentication(accepted, nowMs);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+void noteReplaySampleDetected(uint32_t nowMs) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteReplaySampleDetected(nowMs);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+void noteReplaySampleDecoded(bool accepted, uint32_t nowMs) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteReplaySampleDecoded(accepted, nowMs);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+void noteReplaySampleUnnegotiated(uint32_t nowMs) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteReplaySampleUnnegotiated(nowMs);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+void noteReplayGpsMailbox(bool accepted, uint32_t nowMs) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteReplayGpsMailbox(accepted, nowMs);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
@@ -252,31 +404,107 @@ bool noteRouteMarker(const uint8_t *fixtureSha256, size_t hashBytes,
                      uint16_t sampleIndex, uint16_t sampleCount, uint32_t loop,
                      uint32_t nowMs) {
   portENTER_CRITICAL(&diagnosticsMux);
-  const bool accepted = diagnosticsState.noteRouteMarker(
-      fixtureSha256, hashBytes, sampleIndex, sampleCount, loop, nowMs);
+  const bool accepted = diagnosticsState != nullptr &&
+                        diagnosticsState->noteRouteMarker(
+                            fixtureSha256, hashBytes, sampleIndex, sampleCount,
+                            loop, nowMs);
   portEXIT_CRITICAL(&diagnosticsMux);
   return accepted;
 }
 
 void noteRemoteDebug(const RemoteDebugOverhead &overhead) {
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteRemoteDebug(overhead);
+  if (diagnosticsState != nullptr)
+    diagnosticsState->noteRemoteDebug(overhead);
   portEXIT_CRITICAL(&diagnosticsMux);
 }
 
-Snapshot snapshot(uint32_t nowMs) {
+void setFrameTransferActive(bool active) {
+  frameTransferActive.store(active, std::memory_order_release);
+}
+
+Snapshot snapshot() {
   const MemorySample memory = memorySample();
+  const bool frameActive =
+      frameTransferActive.load(std::memory_order_acquire);
   portENTER_CRITICAL(&diagnosticsMux);
-  diagnosticsState.noteMemory(memory);
-  Snapshot value = diagnosticsState.snapshot(nowMs);
+  Snapshot value;
+  if (diagnosticsState != nullptr) {
+    // Capture the envelope timestamp under the same lock that protects the
+    // copied route marker. A BLE callback can no longer publish a marker with
+    // a receivedAtMs newer than its enclosing snapshot.
+    const uint32_t nowMs = millis();
+    diagnosticsState->noteMemory(
+        memory, MemoryObservationPhase::MetricsSnapshot, nowMs, frameActive);
+    value = diagnosticsState->snapshot(nowMs);
+#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+    value.deliveryTiming = deliveryTiming.snapshot();
+#endif
+  }
   portEXIT_CRITICAL(&diagnosticsMux);
   return value;
 }
 
+#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+DeliveryCallbackTiming beginDeliveryCallback(uint8_t channel, uint32_t nowMs) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  DeliveryCallbackTiming value{};
+  if (diagnosticsState != nullptr && diagnosticsState->sessionActive())
+    value = deliveryTiming.begin(channel, nowMs, frameTransferActive.load());
+  portEXIT_CRITICAL(&diagnosticsMux);
+  return value;
+}
+
+void noteDeliveryCallbackProgress(const DeliveryCallbackTiming &value,
+                                 DeliveryCallbackPhase phase, uint32_t nowMs) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr && diagnosticsState->sessionActive())
+    deliveryTiming.progress(value, phase, nowMs);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+void completeDeliveryCallback(DeliveryCallbackTiming value) {
+  value.frameActiveAtExit = frameTransferActive.load();
+  const uint32_t nowMs = millis();
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr && diagnosticsState->sessionActive()) {
+    deliveryTiming.complete(value, nowMs);
+  }
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+void noteDeliveryOwner(const DeliveryOwnerTiming &value) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if (diagnosticsState != nullptr && diagnosticsState->sessionActive())
+    deliveryTiming.consumed(value);
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+
+static void appendOwnerTiming(JsonBuilder &body, const DeliveryOwnerTiming &v) {
+  body << "{\"session\":" << v.session << ",\"ordinal\":" << v.ordinal
+       << ",\"channel\":" << static_cast<unsigned>(v.channel)
+       << ",\"startedAtMs\":" << v.startedAtMs << ",\"mailboxAgeUs\":" << v.mailboxAgeUs
+       << ",\"processingUs\":" << v.processingUs << "}";
+}
+
+static void appendDeliveryTiming(JsonBuilder &body, const DeliveryCallbackTiming &v) {
+  body << "{\"session\":" << v.session << ",\"ordinal\":" << v.ordinal
+       << ",\"channel\":" << static_cast<unsigned>(v.channel)
+       << ",\"startedAtMs\":" << v.startedAtMs << ",\"callbackUs\":" << v.callbackUs
+       << ",\"setupUs\":" << v.setupUs << ",\"authenticationUs\":" << v.authenticationUs
+       << ",\"allocationUs\":" << v.allocationUs << ",\"mailboxWaitUs\":" << v.mailboxWaitUs
+       << ",\"mailboxHoldUs\":" << v.mailboxHoldUs
+       << ",\"authenticated\":" << (v.authenticated ? "true" : "false")
+       << ",\"mailboxAccepted\":" << (v.mailboxAccepted ? "true" : "false")
+       << ",\"frameActiveAtEntry\":" << (v.frameActiveAtEntry ? "true" : "false")
+       << ",\"frameActiveAtExit\":" << (v.frameActiveAtExit ? "true" : "false") << "}";
+}
+#endif
+
 std::string toJson(const Snapshot &value) {
   try {
     const renderer_tuning::BuildingQuotas &quotas = value.tuning.buildings;
-    std::ostringstream body;
+    JsonBuilder body;
     body << "{\"ok\":true,\"schema\":" << static_cast<unsigned>(value.schema)
        << ",\"sequence\":" << value.sequence
        << ",\"timestampMs\":" << value.timestampMs
@@ -333,12 +561,39 @@ std::string toJson(const Snapshot &value) {
        << ",\"windowMinimumFree\":" << value.windowMinimumDmaFree
        << ",\"windowMinimumLargestBlock\":"
        << value.windowMinimumDmaLargest
-       << ",\"cryptoCountersScope\":\"window\""
+       << ",\"windowMinimumFreeAttribution\":";
+    appendMemoryMinimumAttribution(
+        body, value.windowMinimumDmaFreeAttribution);
+    body << ",\"windowMinimumLargestBlockAttribution\":";
+    appendMemoryMinimumAttribution(
+        body, value.windowMinimumDmaLargestAttribution);
+    body << ",\"cryptoCountersScope\":\"window\""
        << ",\"cryptoHeadroomRejections\":"
        << value.memory.cryptoHeadroomRejections
        << ",\"cryptoOperationFailures\":"
-       << value.memory.cryptoOperationFailures << "}}"
-       << ",\"render\":{\"timings\":{\"total\":";
+       << value.memory.cryptoOperationFailures << "}}";
+    const auto &camera = value.camera;
+    body << ",\"camera\":{\"schema\":1,\"enabled\":" << (camera.enabled ? "true" : "false")
+       << ",\"frameSequence\":" << camera.frameSequence
+       << ",\"sceneGeneration\":" << camera.sceneGeneration
+       << ",\"requestedAtMs\":" << camera.requestedAtMs
+       << ",\"observedAtMs\":" << camera.observedAtMs
+       << ",\"lagMs\":" << camera.lagMs
+       << ",\"displayedBearingTenths\":" << camera.displayedBearingTenths
+       << ",\"targetBearingTenths\":" << camera.targetBearingTenths
+       << ",\"markerAngleTenths\":" << camera.markerAngleTenths
+       << ",\"maximumMarkerResidualTenths\":" << value.maximumMarkerResidualTenths
+       << ",\"effectiveTopScalePermille\":" << camera.effectiveTopScalePermille
+       << ",\"requestedMode\":" << camera.requestedMode
+       << ",\"effectiveMode\":" << camera.effectiveMode
+       << ",\"labelDensity\":" << camera.labelDensity
+       << ",\"labelOrientation\":" << camera.labelOrientation
+       << ",\"hidden\":" << (camera.hidden ? "true" : "false")
+       << ",\"updateRequired\":" << (camera.updateRequired ? "true" : "false")
+       << ",\"sceneReused\":" << (camera.sceneReused ? "true" : "false")
+       << ",\"lag\":";
+    appendTiming(body, value.cameraLag);
+    body << "},\"render\":{\"timings\":{\"total\":";
     appendTiming(body, value.totalRender);
     body << ",\"blockLoad\":";
     appendTiming(body, value.blockLoad);
@@ -401,6 +656,55 @@ std::string toJson(const Snapshot &value) {
        << ",\"receivedAtMs\":" << value.routeMarker.receivedAtMs
        << ",\"accepted\":" << value.routeMarker.accepted
        << ",\"rejected\":" << value.routeMarker.rejected << "}"
+       << ",\"replayTransport\":{\"gpsAuthenticationAccepted\":"
+       << value.replayTransport.gpsAuthenticationAccepted
+       << ",\"gpsAuthenticationRejected\":"
+       << value.replayTransport.gpsAuthenticationRejected
+       << ",\"rbs1Detected\":" << value.replayTransport.rbs1Detected
+       << ",\"rbs1Decoded\":" << value.replayTransport.rbs1Decoded
+       << ",\"rbs1Malformed\":" << value.replayTransport.rbs1Malformed
+       << ",\"rbs1Unnegotiated\":"
+       << value.replayTransport.rbs1Unnegotiated
+       << ",\"gpsMailboxAccepted\":"
+       << value.replayTransport.gpsMailboxAccepted
+       << ",\"gpsMailboxRejected\":"
+       << value.replayTransport.gpsMailboxRejected
+       << ",\"markerAccepted\":"
+       << value.replayTransport.markerAccepted
+       << ",\"markerRejectedInvalid\":"
+       << value.replayTransport.markerRejectedInvalid
+       << ",\"markerRejectedNoActiveWindow\":"
+       << value.replayTransport.markerRejectedNoActiveWindow
+       << ",\"markerRejectedActiveFixtureUnavailable\":"
+       << value.replayTransport.markerRejectedActiveFixtureUnavailable
+       << ",\"markerRejectedFixtureMismatch\":"
+       << value.replayTransport.markerRejectedFixtureMismatch
+       << ",\"lastTransportEventAtMs\":"
+       << value.replayTransport.lastTransportEventAtMs
+       << ",\"lastMarkerAtMs\":"
+       << value.replayTransport.lastMarkerAtMs
+       << ",\"lastActiveWindowId\":"
+       << value.replayTransport.lastActiveWindowId
+       << ",\"lastSampleIndex\":"
+       << value.replayTransport.lastSampleIndex
+       << ",\"lastSampleCount\":"
+       << value.replayTransport.lastSampleCount
+       << ",\"lastLoop\":" << value.replayTransport.lastLoop
+       << ",\"lastCandidateFixtureTag\":"
+       << value.replayTransport.lastCandidateFixtureTag
+       << ",\"lastCandidateFixtureTagValid\":"
+       << (value.replayTransport.lastCandidateFixtureTagValid
+               ? "true"
+               : "false")
+       << ",\"lastExpectedFixtureTag\":"
+       << value.replayTransport.lastExpectedFixtureTag
+       << ",\"lastExpectedFixtureTagValid\":"
+       << (value.replayTransport.lastExpectedFixtureTagValid
+               ? "true"
+               : "false")
+       << ",\"lastMarkerResult\":\""
+       << replayMarkerResultName(value.replayTransport.lastMarkerResult)
+       << "\"}"
        << ",\"remoteDebug\":{\"active\":"
        << (value.remoteDebug.active ? "true" : "false")
        << ",\"snapshotBytes\":" << value.remoteDebug.snapshotBytes
@@ -414,13 +718,58 @@ std::string toJson(const Snapshot &value) {
        << value.remoteDebug.lastHttpResponseMs
        << ",\"maximumHttpResponseMs\":"
        << value.remoteDebug.maximumHttpResponseMs
+       << ",\"lastFrameSnapshotWaitUs\":"
+       << value.remoteDebug.lastFrameSnapshotWaitUs
+       << ",\"maximumFrameSnapshotWaitUs\":"
+       << value.remoteDebug.maximumFrameSnapshotWaitUs
+       << ",\"lastFrameCrcUs\":" << value.remoteDebug.lastFrameCrcUs
+       << ",\"maximumFrameCrcUs\":"
+       << value.remoteDebug.maximumFrameCrcUs
+       << ",\"lastHttpExpectedBytes\":"
+       << value.remoteDebug.lastHttpExpectedBytes
+       << ",\"lastHttpActualBytes\":"
+       << value.remoteDebug.lastHttpActualBytes
+       << ",\"lastHttpWriteCalls\":"
+       << value.remoteDebug.lastHttpWriteCalls
+       << ",\"lastHttpZeroWriteCalls\":"
+       << value.remoteDebug.lastHttpZeroWriteCalls
+       << ",\"lastHttpShortWriteCalls\":"
+       << value.remoteDebug.lastHttpShortWriteCalls
+       << ",\"lastHttpActiveTlsWriteUs\":"
+       << value.remoteDebug.lastHttpActiveTlsWriteUs
+       << ",\"lastHttpNoProgressWaitMs\":"
+       << value.remoteDebug.lastHttpNoProgressWaitMs
+       << ",\"lastHttpIntentionalDelayMs\":"
+       << value.remoteDebug.lastHttpIntentionalDelayMs
        << ",\"freeBefore\":" << value.remoteDebug.freeBefore
        << ",\"largestBefore\":" << value.remoteDebug.largestBefore
        << ",\"freeAfterAllocate\":"
        << value.remoteDebug.freeAfterAllocate
        << ",\"largestAfterAllocate\":"
-       << value.remoteDebug.largestAfterAllocate << "}}";
-    return body.str();
+       << value.remoteDebug.largestAfterAllocate << "}";
+#if defined(DEVICE_REMOTE_DEBUG) && DEVICE_REMOTE_DEBUG
+    body << ",\"deliveryTiming\":{\"schema\":1,\"session\":" << value.deliveryTiming.session
+         << ",\"started\":" << value.deliveryTiming.started
+         << ",\"latestStarted\":{\"session\":" << value.deliveryTiming.latestStarted.session
+         << ",\"ordinal\":" << value.deliveryTiming.latestStarted.ordinal
+         << ",\"channel\":" << static_cast<unsigned>(value.deliveryTiming.latestStarted.channel)
+         << ",\"startedAtMs\":" << value.deliveryTiming.latestStarted.startedAtMs
+         << ",\"updatedAtMs\":" << value.deliveryTiming.latestStarted.updatedAtMs
+         << ",\"phase\":\"" << deliveryCallbackPhaseName(value.deliveryTiming.latestStarted.phase)
+         << "\"},\"completed\":" << value.deliveryTiming.completed << ",\"latest\":";
+    appendDeliveryTiming(body, value.deliveryTiming.latest);
+    body << ",\"slowestRoute\":";
+    appendDeliveryTiming(body, value.deliveryTiming.slowestRoute);
+    body << ",\"slowestGps\":";
+    appendDeliveryTiming(body, value.deliveryTiming.slowestGps);
+    body << ",\"latestOwner\":";
+    appendOwnerTiming(body, value.deliveryTiming.latestOwner);
+    body << ",\"slowestOwner\":";
+    appendOwnerTiming(body, value.deliveryTiming.slowestOwner);
+    body << "}";
+#endif
+    body << "}";
+    return body.take();
   } catch (const std::bad_alloc &) {
     return {};
   }

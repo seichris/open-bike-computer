@@ -37,7 +37,7 @@ class RideDiagnosticsStorageContractTests(unittest.TestCase):
 
     def test_writer_isolated_from_cpu0_watchdog_and_uses_native_first_migration(self):
         self.assertIn(
-            'xTaskCreatePinnedToCore(writerTask, "ride_diag_writer", 6144, nullptr, 0,',
+            'writerTask, "ride_diag_writer", 6144, nullptr, 0,',
             RECORDER,
         )
         self.assertIn("&writerTaskHandle, 1);", RECORDER)

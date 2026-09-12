@@ -8,7 +8,7 @@
 
 namespace ride_automation {
 
-constexpr uint8_t kRideAutomationTraceSchemaVersion = 2;
+constexpr uint8_t kRideAutomationTraceSchemaVersion = 4;
 
 // One canonical, privacy-safe schema serves both firmware capture and host
 // replay. It contains normalized policy inputs and output, never coordinates or
@@ -100,7 +100,8 @@ inline int formatTraceJsonLine(const TraceRecord &record, char *output,
     return -1;
 
   char wheel[64], cadence[64], gps[64], gpsFix[64], uncertainty[64];
-  char stationary[64], displacement[64], imu[64];
+  char stationary[64], displacement[64], imu[64], watchSpeed[64];
+  char watchFix[64], watchAccuracy[64], watchEpoch[16], watchSequence[24];
   if (!formatTimedMetric(wheel, sizeof(wheel),
                          record.observation.wheelSpeedMetersPerSecond,
                          record.timestampMs) ||
@@ -123,8 +124,29 @@ inline int formatTraceJsonLine(const TraceRecord &record, char *output,
                          record.observation.gpsNetDisplacementMeters,
                          record.timestampMs) ||
       !formatTimedMetric(imu, sizeof(imu), record.observation.imuMotionScore,
-                         record.timestampMs))
+                         record.timestampMs) ||
+      !formatTimedMetric(watchSpeed, sizeof(watchSpeed),
+                         record.observation.watchGpsSpeedMetersPerSecond,
+                         record.timestampMs) ||
+      !formatTimedFlag(watchFix, sizeof(watchFix),
+                       record.observation.watchGpsFixValid,
+                       record.timestampMs) ||
+      !formatTimedMetric(
+          watchAccuracy, sizeof(watchAccuracy),
+          record.observation.watchGpsHorizontalUncertaintyMeters,
+          record.timestampMs))
     return -1;
+  if (record.observation.watchGpsSampleIdentityAvailable) {
+    std::snprintf(watchEpoch, sizeof(watchEpoch), "%u",
+                  static_cast<unsigned>(
+                      record.observation.watchGpsSampleEpoch));
+    std::snprintf(watchSequence, sizeof(watchSequence), "%lu",
+                  static_cast<unsigned long>(
+                      record.observation.watchGpsSampleSequence));
+  } else {
+    std::snprintf(watchEpoch, sizeof(watchEpoch), "null");
+    std::snprintf(watchSequence, sizeof(watchSequence), "null");
+  }
 
   const int written = std::snprintf(
       output, outputSize,
@@ -134,7 +156,10 @@ inline int formatTraceJsonLine(const TraceRecord &record, char *output,
       "\"cadence_rpm\":%s,\"gps_mps\":%s,\"gps_fix_valid\":%s,"
       "\"gps_source\":%u,\"gps_horizontal_uncertainty_m\":%s,"
       "\"gps_stationary\":%s,"
-      "\"gps_displacement_m\":%s,\"imu_motion_score\":%s},"
+      "\"gps_displacement_m\":%s,\"imu_motion_score\":%s,"
+      "\"watch_gps_mps\":%s,\"watch_gps_fix_valid\":%s,"
+      "\"watch_gps_horizontal_uncertainty_m\":%s,"
+      "\"watch_gps_epoch\":%s,\"watch_gps_sequence\":%s},"
       "\"output\":{\"decision\":\"%s\",\"evidence_mask\":%u,"
       "\"source_health_mask\":%u,"
       "\"decision_sequence\":%lu,\"candidate_began_at_ms\":%lu,"
@@ -146,7 +171,8 @@ inline int formatTraceJsonLine(const TraceRecord &record, char *output,
       lifecycleName(record.lifecycle), startModeName(record.settings.startMode),
       record.settings.autoPauseEnabled ? "true" : "false", wheel, cadence,
       gps, gpsFix, static_cast<unsigned>(record.observation.gpsPositionSource),
-      uncertainty, stationary, displacement, imu,
+      uncertainty, stationary, displacement, imu, watchSpeed, watchFix,
+      watchAccuracy, watchEpoch, watchSequence,
       transitionName(record.decision.transition),
       static_cast<unsigned>(record.evidenceMask),
       static_cast<unsigned>(record.decision.sourceHealthMask),
