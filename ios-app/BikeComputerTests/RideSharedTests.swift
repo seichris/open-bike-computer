@@ -906,7 +906,7 @@ enum RideSharedTests {
         var cap2 = Data("CAP2".utf8)
         cap2.append(1)
         expect(
-            WatchDirectBLEProtocolV1.capabilityClientVersion == 24 &&
+            WatchDirectBLEProtocolV1.capabilityClientVersion == 25 &&
                 WatchDirectBLEProtocolV1.scopedControllerFeature == 1 << 14 &&
                 WatchDirectBLEProtocolV1.rideAutomationFeature == 1 << 15 &&
                 WatchDirectBLEProtocolV1.gpsPositionQualityV1Feature == 1 << 17 &&
