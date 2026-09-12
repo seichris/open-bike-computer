@@ -11,7 +11,7 @@
 #include <cstring>
 #include <sys/stat.h>
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include <esp_attr.h>
 #endif
 
@@ -19,7 +19,7 @@
 #include "../storage/storage.hpp"
 #include "../runtime_watchdog_diagnostics/runtime_watchdog_diagnostics.hpp"
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include "../boot_diagnostics/boot_diagnostics.hpp"
 #endif
 
@@ -74,7 +74,7 @@ using detail::validateFieldsJson;
 using detail::validFaultCapsule;
 using detail::validFaultCapsuleEnvelope;
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 RTC_NOINIT_ATTR FaultCapsuleState retainedFaultCapsule;
 #else
 FaultCapsuleState retainedFaultCapsule = {};
@@ -325,7 +325,7 @@ void initializeFaultCapsules() {
 
   memset(&currentFaultCapsule, 0, sizeof(currentFaultCapsule));
   currentFaultCapsule.bootSequence = selectedBootSequence;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   const boot_diagnostics::Snapshot snapshot = boot_diagnostics::snapshot();
   currentFaultCapsule.resetReason = snapshot.resetReason;
   currentFaultCapsule.activeStage = static_cast<uint16_t>(snapshot.activeStage);
@@ -454,7 +454,7 @@ enum class ActiveFileCloseResult : uint8_t {
 ActiveFileCloseResult closeActiveFile() {
   if (activeFile == nullptr)
     return ActiveFileCloseResult::Ready;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   runtime_watchdog_diagnostics::notePhase(
       runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
       runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
@@ -464,7 +464,7 @@ ActiveFileCloseResult closeActiveFile() {
       storage != nullptr ? storage->flush(activeFile) : fflush(activeFile);
   const int closeResult =
       storage != nullptr ? storage->close(activeFile) : fclose(activeFile);
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   runtime_watchdog_diagnostics::notePhase(
       runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
       runtime_watchdog_diagnostics::Phase::Waiting,
@@ -709,7 +709,7 @@ bool prepareChunkWriteReserve() {
 }
 
 bool writeQueuedEvent(const QueuedEvent &event) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   runtime_watchdog_diagnostics::notePhase(
       runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
       runtime_watchdog_diagnostics::Phase::DiagnosticsWrite,
@@ -776,7 +776,7 @@ bool writeQueuedEvent(const QueuedEvent &event) {
   activeFileBytes += static_cast<uint32_t>(result);
   const uint32_t nowMs = millis();
   if (event.critical || static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
     runtime_watchdog_diagnostics::notePhase(
         runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
         runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
@@ -937,7 +937,7 @@ bool completeSealIfReady() {
 }
 
 void writerTask(void *) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   runtime_watchdog_diagnostics::registerCurrentTask(
       runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
       runtime_watchdog_diagnostics::Phase::Waiting);
@@ -975,14 +975,14 @@ void writerTask(void *) {
     }
     if (dequeued) {
       writeQueuedEvent(event);
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::Waiting,
           event.sequence);
 #endif
     } else if (!hasNext || transitionPaused) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
       runtime_watchdog_diagnostics::heartbeat(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter);
 #endif
@@ -1003,7 +1003,7 @@ void writerTask(void *) {
     if (activeFile != nullptr &&
         (checkpointRequested.exchange(false) ||
          static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U)) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
@@ -1017,7 +1017,7 @@ void writerTask(void *) {
         storageErrors.fetch_add(1);
         updateFaultCapsule(Level::Error, "storage", "flush_failed", true);
       }
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::Waiting,
@@ -1029,14 +1029,14 @@ void writerTask(void *) {
     if (recoveryAllowed && storage->canRetryDiagnosticsSd() &&
         static_cast<uint32_t>(nowMs - lastMountAttemptMs) >= 5000U) {
       lastMountAttemptMs = nowMs;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::DiagnosticsRecovery,
           nextSequence.load(std::memory_order_relaxed));
 #endif
       storage->ensureDiagnosticsSdMounted();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::Waiting,

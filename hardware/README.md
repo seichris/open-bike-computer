@@ -2,7 +2,7 @@
 
 This document contains hardware pinouts and bring-up notes for the Waveshare
 ESP32-S3 Touch AMOLED boards supported by this repo, plus reference material
-for the planned ESP32-S3-ePaper-3.97 firmware port.
+for the experimental ESP32-S3-ePaper-3.97 firmware port.
 
 The 1.75" notes are the most thoroughly app-verified path and were extracted
 from the official schematic. The 2.06" notes combine Waveshare's public
@@ -38,8 +38,9 @@ link different revisions.
 
 ### ESP32-S3-ePaper-3.97
 
-Status: reference collection and implementation plan only; firmware support
-and physical qualification are pending.
+Status: experimental firmware and companion support; physical qualification
+and production publication remain gated. See the
+[board implementation and qualification notes](waveshare-epaper-397.md).
 
 - [Implementation plan](../docs/plans/waveshare-epaper-397-firmware-implementation-plan.md)
 - [Official board documentation](https://docs.waveshare.com/ESP32-S3-ePaper-3.97)

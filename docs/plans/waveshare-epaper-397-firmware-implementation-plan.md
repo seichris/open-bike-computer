@@ -8,10 +8,14 @@ and ride data, render installed offline maps, accept physical-button input, and
 support the existing authenticated transfer and update flows. Its presentation
 must suit a slow, reflective, monochrome display.
 
-This is an implementation proposal, prepared on 2026-09-12 from freshly fetched
-GitHub `main` at `ce3c5a0cfa1c5bdd428197e71a15d3d3d7973157`. The branch adds this
-plan and reference material; it does not implement or physically qualify the
-board. Rebase the implementation assessment onto current main before coding.
+This proposal was prepared on 2026-09-12 from freshly fetched GitHub `main` at
+`ce3c5a0cfa1c5bdd428197e71a15d3d3d7973157`. It is now accompanied by an
+experimental implementation on the same baseline. See the
+[implementation and qualification record](../../hardware/waveshare-epaper-397.md)
+for the implemented profiles, controls and source tests. Physical exit gates
+below remain pending; optional peripherals, automatic sleep and publication
+remain disabled. This plan's physical outcomes are not claims of completed
+hardware validation.
 
 The supplied `IMG_1132.PNG` through `IMG_1135.PNG` identify this product family.
 They show battery, battery-free `-EN`, and kit options; they do not establish

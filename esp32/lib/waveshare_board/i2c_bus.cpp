@@ -5,7 +5,7 @@
 
 #include "i2c_bus.hpp"
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 
 #include "axp2101_register_policy.hpp"
 #include "waveshare_board.hpp"
@@ -33,6 +33,9 @@ SemaphoreHandle_t busMutex = nullptr;
 bool writeAllowed(uint8_t address, uint16_t reg,
                   std::size_t registerAddressBytes,
                   std::size_t payloadBytes, const char *shape) {
+#ifdef WAVESHARE_EPAPER_397
+  if (address == AXP2101_ADDR) return false;
+#endif
   if (axp_policy::isTransactionWriteAllowed(
           address, reg, registerAddressBytes, payloadBytes)) {
     return true;
@@ -284,6 +287,9 @@ bool ensureAxp2101PowerButtonOffLevel(
     uint8_t level, Axp2101PowerButtonOffLevelResult &result,
     uint8_t attempts) {
   result = {};
+#ifdef WAVESHARE_EPAPER_397
+  return false;
+#endif
   if (level >= axp_policy::POWER_BUTTON_OFF_LEVEL_COUNT) {
     Serial.printf("AXP_WRITE_BLOCKED schema=1 reg=0x%02X level=%u "
                   "policy=power-button-off-level\n",

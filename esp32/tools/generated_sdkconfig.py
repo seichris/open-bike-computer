@@ -2140,7 +2140,7 @@ def require_validated_generated_sdkconfig_defaults(
     project_dir: Path, environment: str
 ) -> dict[str, object]:
     """Require the recorded custom-core state immediately before upload."""
-    if not environment.startswith("WAVESHARE_AMOLED_"):
+    if not environment.startswith(("WAVESHARE_AMOLED_", "WAVESHARE_EPAPER_397")):
         return {}
     defaults, environment_config = _sdkconfig_paths(project_dir, environment)
     if not os.path.lexists(defaults) or not _is_generated_sdkconfig(defaults):
@@ -2440,7 +2440,7 @@ def record_generated_sdkconfig_defaults(
         "coreCache": core_cache_status,
         **firmware_artifacts,
     }
-    if environment.startswith("WAVESHARE_AMOLED_"):
+    if environment.startswith(("WAVESHARE_AMOLED_", "WAVESHARE_EPAPER_397")):
         flash_plan = _validated_flash_plan(
             project_dir, environment, core_attestation
         )

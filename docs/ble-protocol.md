@@ -1149,6 +1149,35 @@ orientation (setting ID `37`). Firmware advertises bit `24` only with
 `MAP_STABLE_CAMERA=1`; production profiles keep it clear pending per-target
 physical qualification. This capability is independent of label orientation.
 Version `23` requests bit `25`, Watch GPS motion evidence.
+Version `24` requests bit `26`, board display/input metadata.
+
+Bit `26` requires exactly one TLV type `2`, length `8`:
+
+| Value offset | Encoding | Meaning |
+| --- | --- | --- |
+| 0 | UInt8, `1` | Metadata version |
+| 1 | UInt8 | `1` color display, `2` monochrome e-paper |
+| 2 | UInt8 bitmask | bit 0 physical buttons, bit 1 touch |
+| 3–4 | UInt16LE | Logical display width |
+| 5–6 | UInt16LE | Logical display height |
+| 7 | UInt8 bitmask | bit 0 brightness, 1 display rotation, 2 tap-to-cycle, 3 continuous camera, 4 disconnected sleep |
+
+The 3.97 board sends kind `2`, buttons `1`, dimensions `480 × 800`, settings
+`0`. AMOLED boards send kind `1`, buttons/touch `3`, their existing dimensions,
+and settings `29`. Older clients receive their existing CAPS/CAP2 shape without
+this record. The encoder's maximum response is 24 bytes including the optional
+PWR configuration and display records. A record without its feature bit, a bit
+without its record, unknown metadata version, invalid dimensions, duplicate or
+truncated records invalidate negotiation. Unknown unrelated TLV types remain
+skippable. Existing UUIDs and route/GPS/ride payloads are unchanged.
+
+E-paper firmware normalizes or rejects unsupported brightness, touch,
+automatic sleep, course-up, bird's-eye and 3D settings even when written by an
+older companion. Current iOS hides those controls and names the board from
+metadata or its exact canonical firmware target. The authenticated `DSTS`
+response additionally reports display queue/transmit/presented generations,
+completion time, full/partial counts, discarded frames, failures and busy/fault
+state. SPI/LVGL flush completion alone never establishes pairing visibility.
 Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.

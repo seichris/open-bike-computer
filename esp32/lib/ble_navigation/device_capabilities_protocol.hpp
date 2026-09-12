@@ -92,14 +92,16 @@ constexpr uint8_t POWER_BUTTON_CONFIG_TLV = 1;
 constexpr size_t POWER_BUTTON_CONFIG_BYTES = 3;
 constexpr size_t CAP2_BASE_BYTES = 9;
 constexpr size_t CAP2_MAX_BYTES =
-    CAP2_BASE_BYTES + 2 + POWER_BUTTON_CONFIG_BYTES;
+    CAP2_BASE_BYTES + 2 + POWER_BUTTON_CONFIG_BYTES + 2 +
+    ride_ble_protocol_generated::BOARD_DISPLAY_PAYLOAD_BYTES;
 
 inline size_t encodeCap2(uint32_t featureFlags, const uint8_t *powerConfig,
                          bool includePowerConfig, uint8_t *output,
-                         size_t capacity) {
+                         size_t capacity, const uint8_t *displayMetadata = nullptr) {
   const size_t required = CAP2_BASE_BYTES +
                           (includePowerConfig ? 2 + POWER_BUTTON_CONFIG_BYTES
-                                              : 0);
+                                              : 0) +
+                          (displayMetadata ? 2 + ride_ble_protocol_generated::BOARD_DISPLAY_PAYLOAD_BYTES : 0);
   if (output == nullptr || capacity < required ||
       (includePowerConfig && powerConfig == nullptr))
     return 0;
@@ -115,6 +117,13 @@ inline size_t encodeCap2(uint32_t featureFlags, const uint8_t *powerConfig,
     output[10] = POWER_BUTTON_CONFIG_BYTES;
     for (size_t index = 0; index < POWER_BUTTON_CONFIG_BYTES; ++index)
       output[11 + index] = powerConfig[index];
+  }
+  if (displayMetadata) {
+    const size_t offset = CAP2_BASE_BYTES + (includePowerConfig ? 5 : 0);
+    output[offset] = ride_ble_protocol_generated::BOARD_DISPLAY_TLV_TYPE;
+    output[offset + 1] = ride_ble_protocol_generated::BOARD_DISPLAY_PAYLOAD_BYTES;
+    for (size_t i = 0; i < ride_ble_protocol_generated::BOARD_DISPLAY_PAYLOAD_BYTES; ++i)
+      output[offset + 2 + i] = displayMetadata[i];
   }
   return required;
 }

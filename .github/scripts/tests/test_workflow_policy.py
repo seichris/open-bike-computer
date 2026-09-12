@@ -599,6 +599,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("tools/package_factory_firmware.py", general_ci)
         self.assertIn("tar -xzf", general_ci)
         self.assertIn("sha256sum --check SHA256SUMS", general_ci)
+        self.assertIn('"${BUILD_ENVIRONMENT}" == WAVESHARE_AMOLED_*_PRODUCTION', general_ci)
+        self.assertIn("startsWith(matrix.target, 'WAVESHARE_AMOLED_')", general_ci)
 
     def test_promotion_contract_requires_the_aggregate_gate(self) -> None:
         agent_instructions = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")

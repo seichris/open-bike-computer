@@ -42,6 +42,7 @@ on:
         options:
           - "175"
           - "206"
+          - "397"
           - all
 
 permissions:
@@ -164,7 +165,7 @@ jobs:
         run: |
           set -euo pipefail
           factory_args=()
-          if [[ "${BUILD_ENVIRONMENT}" == *_PRODUCTION ]]; then
+          if [[ "${BUILD_ENVIRONMENT}" == WAVESHARE_AMOLED_*_PRODUCTION ]]; then
             factory_target="${BUILD_ENVIRONMENT%_PRODUCTION}"
             factory_args=(
               --factory-output-dir
@@ -174,7 +175,7 @@ jobs:
           env -u LD_LIBRARY_PATH python3 tools/build_firmware.py \
             "${BUILD_ENVIRONMENT}" "${factory_args[@]}"
       - name: Verify production factory bundle packaging
-        if: endsWith(matrix.target, '_PRODUCTION')
+        if: endsWith(matrix.target, '_PRODUCTION') && startsWith(matrix.target, 'WAVESHARE_AMOLED_')
         env:
           BUILD_ENVIRONMENT: ${{ matrix.target }}
         run: |
@@ -561,6 +562,9 @@ jobs:
             tools/tests/test_device_capabilities_protocol.cpp \
             -o /tmp/test_device_capabilities_protocol
           /tmp/test_device_capabilities_protocol
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_epaper_display.cpp -o /tmp/test_epaper_display
+          /tmp/test_epaper_display
       - name: Ride controller lease host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \

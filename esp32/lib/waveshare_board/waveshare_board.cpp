@@ -5,7 +5,7 @@
 
 #include "waveshare_board.hpp"
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 
 #include "axp2101.hpp"
 #include <Wire.h>

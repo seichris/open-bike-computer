@@ -265,6 +265,8 @@ public:
    */
   bool forgetOwner();
   void noteOwnershipDisplayFlushCompleted();
+  void noteOwnershipDisplayGenerationCompleted(uint32_t generation);
+  bool cancelOwnershipPairing();
   bool ownershipPairingRenderedRequest(uint32_t &pairingGeneration);
   bool armOwnershipPairingConfirmation(uint32_t pairingGeneration);
   bool isOwnershipClaimed();

@@ -12,6 +12,11 @@ from collections.abc import Iterable, Sequence
 
 COMPONENTS = ("firmware_build", "firmware_host", "ios", "map_backend", "osm")
 FIRMWARE_TARGETS = {
+    "397": (
+        "WAVESHARE_EPAPER_397",
+        "WAVESHARE_EPAPER_397_DISPLAY_TEST",
+        "WAVESHARE_EPAPER_397_PRODUCTION",
+    ),
     "175": (
         "WAVESHARE_AMOLED_175",
         "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
@@ -292,7 +297,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--firmware-hardware",
-        choices=("175", "206", "all"),
+        choices=("175", "206", "397", "all"),
         default="175",
     )
     args = parser.parse_args()
