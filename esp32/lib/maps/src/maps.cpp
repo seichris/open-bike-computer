@@ -4074,6 +4074,9 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
   request.projectionSignature = projectionSignature(
       request.zoom, request.viewportWidth, request.viewportHeight,
       request.birdsEye, request.context.birdsEyePerspective);
+  request.screenInstanceID = currentMapRenderInstanceID();
+  request.screenType = currentMapRenderInstanceType();
+  request.screenProfileSignature = currentMapRenderProfileSignature();
 
   const bool followPosition = request.context.followPosition;
   request.center = followPosition && hasPresentedPose
@@ -4272,6 +4275,9 @@ bool Maps::renderRequestStillCurrent(const RenderRequest &request) const {
          request.version.mapEpoch == mapEpoch &&
          request.version.projectionEpoch == projectionEpoch &&
          request.styleSignature == styleSignature(style) &&
+         request.screenInstanceID == currentMapRenderInstanceID() &&
+         request.screenType == currentMapRenderInstanceType() &&
+         request.screenProfileSignature == currentMapRenderProfileSignature() &&
          request.navigationSignature ==
              navigationSignatureForScreen(guidanceScreenActive) &&
          request.projectionSignature == projectionSignature(
@@ -4288,6 +4294,9 @@ bool Maps::renderResultStillCurrent(const RenderResult &result) const {
   request.styleSignature = result.styleSignature;
   request.navigationSignature = result.navigationSignature;
   request.projectionSignature = result.projectionSignature;
+  request.screenInstanceID = result.screenInstanceID;
+  request.screenType = result.screenType;
+  request.screenProfileSignature = result.screenProfileSignature;
   request.zoom = result.viewport.zoom;
   request.viewportWidth = result.viewportWidth;
   request.viewportHeight = result.viewportHeight;
@@ -4477,6 +4486,9 @@ void Maps::renderWorkerLoop() {
       result.styleSignature = request.styleSignature;
       result.navigationSignature = request.navigationSignature;
       result.projectionSignature = request.projectionSignature;
+      result.screenInstanceID = request.screenInstanceID;
+      result.screenType = request.screenType;
+      result.screenProfileSignature = request.screenProfileSignature;
       result.viewportWidth = request.viewportWidth;
       result.viewportHeight = request.viewportHeight;
       result.renderWidth = request.renderWidth;

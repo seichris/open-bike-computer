@@ -9,6 +9,7 @@
 #include "../../lib/ble_navigation/device_capabilities_protocol.hpp"
 #include "../../lib/gui/src/waitingScreenLayout.hpp"
 #include "../../lib/gui/src/preConnectionPresentation.hpp"
+#include "../../lib/ble_navigation/screen_configuration.hpp"
 #include <cassert>
 #include <vector>
 #include <iostream>
@@ -145,13 +146,33 @@ int main() {
   button.sample(false, 1950);
   assert(button.sample(false, 1991) == Event::None); // A hold is not also a click.
 
+  auto mapProfile = screen_configuration_protocol::defaultMapProfile(
+      screen_configuration_protocol::ScreenType::MapNavigation);
+  mapProfile.zoomLevel = 3;
+  mapProfile.rotationMode = 1;
+  mapProfile.birdsEyeEnabled = true;
+  mapProfile.buildings3DEnabled = true;
+  const auto effective = screen_configuration::effectiveMapProfile(mapProfile);
+  assert(effective.rotationMode == 0 && !effective.birdsEyeEnabled &&
+         !effective.buildings3DEnabled && effective.zoomLevel == 3);
+  assert(mapProfile.rotationMode == 1); // Stored preferences are not mutated.
+
   using namespace device_capabilities_protocol;
   const uint8_t metadata[] = {1, 2, 1, 0xE0, 1, 0x20, 3, 0};
   const uint8_t power[] = {1, 2, 50};
   uint8_t response[CAP2_MAX_BYTES]{};
   assert(encodeCap2(0, power, true, response, sizeof(response)) == 14);
-  assert(encodeCap2(0, power, true, response, sizeof(response), metadata) == 24);
-  assert(response[14] == 2 && response[15] == 8 && response[19] == 0xE0);
-  assert(encodeCap2(0, nullptr, false, response, 18, metadata) == 0);
+  assert(encodeCap2(0, power, true, response, sizeof(response), nullptr, 0, metadata) == 24);
+  assert(response[14] == 3 && response[15] == 8 && response[19] == 0xE0);
+  assert(encodeCap2(0, nullptr, false, response, 18, nullptr, 0, metadata) == 0);
+  const uint8_t screens[SCREEN_CONFIGURATION_TLV_BYTES] = {2, 14, 1};
+  static_assert(CAP2_MAX_BYTES == 40);
+  static_assert(ride_ble_protocol_generated::BOARD_DISPLAY_METADATA_FEATURE == (1UL << 27));
+  static_assert(ride_ble_protocol_generated::BOARD_DISPLAY_METADATA_MINIMUM_CLIENT_VERSION == 25);
+  assert(encodeCap2(0, power, true, response, sizeof(response), screens, sizeof(screens), metadata) == 40);
+  assert(std::memcmp(response + 14, screens, sizeof(screens)) == 0);
+  assert(response[30] == 3 && response[31] == 8);
+  assert(std::memcmp(response + 32, metadata, sizeof(metadata)) == 0);
+  assert(encodeCap2(0, power, true, response, 39, screens, sizeof(screens), metadata) == 0);
   std::cout << "e-paper raster, transport, mailbox, recovery, input and capability tests passed\n";
 }

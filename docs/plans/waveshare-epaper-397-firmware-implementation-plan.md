@@ -17,6 +17,26 @@ below remain pending; optional peripherals, automatic sleep and publication
 remain disabled. This plan's physical outcomes are not claims of completed
 hardware validation.
 
+### Implementation progress
+
+The implementation branch also integrates main's configurable screen instances
+from `22243516`. Physical buttons follow the configured instance order, and
+display metadata uses client version 25, feature bit 27 and TLV type 3 so the
+existing screen configuration contract remains compatible.
+
+| Area | Source implementation | Remaining qualification |
+| --- | --- | --- |
+| Board target and delivery | Three build profiles, explicit pins/capabilities, locked build/provenance support and CI selection | Final firmware build checks; device identity and boot evidence |
+| Display and input | Asynchronous SSD1677 worker, packed conversion, fault recovery, test patterns, buttons and pairing visibility gate | Panel behavior, refresh limits, real input and pairing tests |
+| Screens and maps | Portrait/monochrome UI, configured screen order, stable map cadence and stale-state text | Readability, every screen control, concurrent memory and ride tests |
+| Storage and peripherals | Native one-bit SDMMC, shared RTC, read-only PMIC identity/status | Actual components, SD removal/recovery, RTC/battery measurements |
+| Companion | Versioned display metadata and unsupported-control filtering, including configurable screen profiles | Full application build and real BLE/update recovery |
+| Publication | New target excluded from factory/release publication | Hardware and production acceptance before enabling publication |
+
+Audio, IMU, SHTC3, charging/rail writes and automatic sleep remain disabled
+pending their hardware gates. No board is available; no flash or physical test
+has been performed.
+
 The supplied `IMG_1132.PNG` through `IMG_1135.PNG` identify this product family.
 They show battery, battery-free `-EN`, and kit options; they do not establish
 which PCB revision or battery is physically available. The listing and reference
@@ -104,9 +124,9 @@ AMOLED boards. Adding a PlatformIO environment alone will not enable the port.
 Audit direct AMOLED header includes and `#if`/`#else` branches across these areas.
 For example, the existing speaker fallback selects the 2.06 pin/gain set, and
 display power calls `gfx->setBrightness()` directly. Neither is valid for 3.97.
-The current screen contract is an enabled-screen mask plus default-screen
-selection; retain those semantics rather than assuming an unmerged screen-model
-proposal is present.
+The original baseline used an enabled-screen mask plus default-screen selection.
+The implementation now retains main's configurable screen instances and its
+legacy compatibility projection, including previous/next button navigation.
 
 ## Design decisions
 
@@ -442,6 +462,7 @@ measurements, then require them to pass; the advertised partial time alone is
 not a release criterion.
 
 Any later physical work follows the repository's device-identification and
-exact-image flash-confirmation procedure. This planning/reference branch does
-not authorize a build, flash, PMIC modification, or physical test, and provides
-no such evidence.
+exact-image flash-confirmation procedure. The user authorized implementation,
+source builds and a pull request. Flashing, PMIC configuration and physical
+qualification remain pending until the board is available and the exact action
+is authorized.

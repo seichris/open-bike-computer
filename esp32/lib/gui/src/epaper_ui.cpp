@@ -164,13 +164,15 @@ void process() {
   static uint32_t lastStyleMs = 0;
   static lv_obj_t *lastScreen = nullptr;
   static uint8_t lastTile = UINT8_MAX;
+  static uint32_t lastInstance = 0;
   static NavigationData lastNavigation{};
   static uint32_t lastRoute = 0;
   const uint32_t now = millis();
   lv_obj_t *screen = lv_screen_active();
   if (!screen) return;
-  if (screen != lastScreen || activeTile != lastTile) {
-    lastScreen = screen; lastTile = activeTile;
+  const uint32_t instance = currentScreenInstanceID();
+  if (screen != lastScreen || activeTile != lastTile || instance != lastInstance) {
+    lastScreen = screen; lastTile = activeTile; lastInstance = instance;
     closeContext(); epaper::invalidateContext();
     lastStyleMs = 0;
   }

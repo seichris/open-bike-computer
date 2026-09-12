@@ -775,6 +775,12 @@ struct NavigationProtocolTests {
         testDeviceCapabilitySynchronizesPowerButtonHonkOnce()
         testDeviceCapabilityRetryPolicy()
         testDeviceScreenValidation()
+        testDeviceScreenConfigurationCodecAndValidation()
+        testDeviceScreenConfigurationController()
+        testScreenCleanReconnect()
+        testScreenEditsDuringReload()
+        testScreenEditsDuringSave()
+        testScreenPendingConflictResolution()
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
         testBLEScanLifecyclePolicy()
@@ -11717,6 +11723,10 @@ struct NavigationProtocolTests {
     }
 
     static func testSettingsSheetPresentationWiring() {
+        let screensSource = try! String(contentsOfFile:
+            "ios-app/BikeComputer/BikeComputer/Views/DeviceScreensSettingsView.swift",
+            encoding: .utf8
+        )
         let settingsURL = URL(fileURLWithPath:
             "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift"
         )
@@ -11760,6 +11770,42 @@ struct NavigationProtocolTests {
                 !routesSource.contains("isImportingStrava") &&
                 !routesSource.contains(".sheet("),
             "Saved Routes requests presentation without owning a transient sheet"
+        )
+        assert(
+            settingsSource.contains("presentedSheet = .addDeviceScreen") &&
+                settingsSource.contains("case .addDeviceScreen:") &&
+                settingsSource.contains("AddDeviceScreenSheet(") &&
+                screensSource.contains("let onAddScreen: () -> Void") &&
+                screensSource.contains("onAddScreen()") &&
+                !screensSource.contains(".sheet(") &&
+                screensSource.contains("Button(\"Cancel\") { dismiss() }"),
+            "Add Screen is routed from the stable Settings presenter and dismisses only its own sheet"
+        )
+        assert(
+            !screensSource.contains("Reorder Screens") &&
+                !screensSource.contains("Done Reordering") &&
+                screensSource.contains(".onMove(perform: controller.move)") &&
+                screensSource.contains("if controller.canSave") &&
+                screensSource.contains("Button(\"Save to Bicino\")") &&
+                screensSource.contains("if controller.canDiscardChanges") &&
+                screensSource.contains("Text(\"Drag screens to reorder, add new screens or hide screens\")") &&
+                !screensSource.contains("Button(\"Save to Bike Computer\")") &&
+                !screensSource.contains(".disabled(!controller.canSave)") &&
+                !screensSource.contains(".disabled(!controller.canDiscardChanges)"),
+            "device screen actions use long-press reordering, conditional save/cancel visibility, and Bicino copy"
+        )
+        assert(
+            screensSource.contains("Text(\"Preferred\").tag(UInt8(1))") &&
+                screensSource.contains("Text(\"Local + Preferred\").tag(UInt8(2))") &&
+                screensSource.contains("Text(\"Follow Roads\").tag(UInt8(0))") &&
+                screensSource.contains("Text(\"Keep Upright\").tag(UInt8(1))"),
+            "per-instance label controls preserve the established wire semantics"
+        )
+        assert(
+            screensSource.contains("TextField(\"Name\", text: instanceBinding.name)") &&
+                screensSource.contains("controller.draft?.instances.first(where:") &&
+                !screensSource.contains("@State private var instance:"),
+            "screen editors bind to current controller state after snapshot refresh"
         )
         guard let remoteStart = settingsSource.range(
             of: "private struct RemoteDeviceDebugSettingsSection"
@@ -14590,6 +14636,11 @@ struct NavigationProtocolTests {
             for: DeviceBLEProtocol.navigationCharacteristicUUID,
             authenticatedWriteSession: writeSession
         )
+        let protectedScreenConfiguration = channelManager.devicePayloadForTesting(
+            gpsPayload,
+            for: DeviceBLEProtocol.screenConfigurationCharacteristicUUID,
+            authenticatedWriteSession: writeSession
+        )
         assertEqual(
             protectedGPS?.count,
             gpsPayload.count + AuthenticatedBLEWriteSession.frameOverhead,
@@ -14597,6 +14648,13 @@ struct NavigationProtocolTests {
         )
         assert(protectedGPS != protectedNavigation,
                "native GPS uses its characteristic-bound authenticated channel")
+        assertEqual(
+            protectedScreenConfiguration?.count,
+            gpsPayload.count + AuthenticatedBLEWriteSession.frameOverhead,
+            "screen configuration uses the protected owner transport"
+        )
+        assert(protectedScreenConfiguration != protectedNavigation,
+               "screen configuration has an independent replay sequence")
 
         var transportReady = false
         var queue = NavigationWriteQueue(maxCount: 4, priorityMaxCount: 2)
@@ -16294,10 +16352,11 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rideDiagnosticsCapabilityMask, 1 << 20, "CAP2 bit 20 advertises persistent ride diagnostics")
         assertEqual(DeviceBLEProtocol.detailedRideDiagnosticsCapabilityMask, 1 << 21, "CAP2 bit 21 advertises detailed ride diagnostics")
         assertEqual(DeviceBLEProtocol.rideDeliveryAcknowledgementCapabilityMask, 1 << 22, "CAP2 bit 22 advertises reliable ride delivery")
+        assertEqual(DeviceBLEProtocol.screenConfigurationCapabilityMask, 1 << 26, "CAP2 bit 26 advertises configurable screen instances")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 24, "capability version negotiates board display metadata")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 25, "capability version negotiates board display metadata alongside configurable screens")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationRotationSettingID, 37, "navigation orientation has an independent setting")
         assertEqual(RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature, 1 << 24, "orientation capability has its own bit")
         assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
@@ -16307,6 +16366,9 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
                     "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
                     "workout telemetry uses the dedicated 128-bit characteristic")
+        assertEqual(DeviceBLEProtocol.screenConfigurationCharacteristicUUIDString,
+                    "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005",
+                    "screen configuration uses the dedicated owner-only characteristic")
         assertEqual(DeviceBLEProtocol.workoutTelemetryFallbackPrefix, "WTLM",
                     "workout telemetry fallback remains explicitly framed")
         assertEqual(DeviceBLEProtocol.serviceRoadsVisibilityMask, 0x400, "service roads use visibility bit 10")
@@ -18318,8 +18380,8 @@ struct NavigationProtocolTests {
         assert(manager.hasReceivedDeviceCapabilities,
                "valid CAP2 completes capability negotiation")
 
-        let epaperHeader = Data("CAP2".utf8) + Data([1, 0, 0, 0, 4])
-        let epaperMetadata = Data([2, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 0])
+        let epaperHeader = Data("CAP2".utf8) + Data([1, 0, 0, 0, 8])
+        let epaperMetadata = Data([3, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 0])
         let epaperCapabilities = epaperHeader + epaperMetadata
         assert(manager.handleDeviceCapabilitiesNotification(epaperCapabilities),
                "e-paper metadata is consumed")
@@ -18333,14 +18395,23 @@ struct NavigationProtocolTests {
         assert(manager.handleDeviceCapabilitiesNotification(epaperCapabilities + Data([90, 2, 1, 2])),
                "future unknown TLVs are consumed")
         assert(manager.hasReceivedDeviceCapabilities, "unknown TLVs are skipped")
+        let screenMetadata = Data([2, 14, 1, 16, 24, 7, 31, 0, 0, 0, 255, 255, 1, 0, 0, 16])
+        let combinedHeader = Data("CAP2".utf8) + Data([1, 0, 0, 0, 12])
+        for metadata in [screenMetadata + epaperMetadata, epaperMetadata + screenMetadata] {
+            assert(manager.handleDeviceCapabilitiesNotification(combinedHeader + metadata),
+                   "screen configuration and e-paper metadata coexist in either TLV order")
+            assert(manager.hasReceivedDeviceCapabilities && manager.supportsScreenConfiguration &&
+                   manager.isEPaperDevice && !manager.supportsContinuousCamera,
+                   "screen capabilities retain the independent display restrictions")
+        }
         let malformedDisplays = [
             epaperHeader, // Feature requires its record.
             cap2 + epaperMetadata, // Record requires its feature.
             Data(epaperCapabilities.dropLast()),
             epaperCapabilities + epaperMetadata, // Duplicate.
-            epaperHeader + Data([2, 8, 2, 2, 1, 0xE0, 1, 0x20, 3, 0]), // Version.
-            epaperHeader + Data([2, 8, 1, 2, 1, 0, 0, 0x20, 3, 0]), // Zero width.
-            epaperHeader + Data([2, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 1]) // Brightness.
+            epaperHeader + Data([3, 8, 2, 2, 1, 0xE0, 1, 0x20, 3, 0]), // Version.
+            epaperHeader + Data([3, 8, 1, 2, 1, 0, 0, 0x20, 3, 0]), // Zero width.
+            epaperHeader + Data([3, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 1]) // Brightness.
         ]
         for packet in malformedDisplays {
             assert(manager.handleDeviceCapabilitiesNotification(packet), "bad display record is consumed")
@@ -18526,7 +18597,7 @@ struct NavigationProtocolTests {
         assert(independentManager.handleDeviceCapabilitiesNotification(independentFlags),
                "independent profile capability response should be consumed")
         assertEqual(independentPackets().map { $0[4] },
-                    [20, 16, 17, 18, 21, 22, 19, 8, 1, 2, 3, 9, 10, 7],
+                    [20, 16, 17, 18, 21, 22, 19, 6, 8, 1, 2, 3, 9, 10, 7],
                     "new firmware receives the independent profile before legacy Map IDs")
         let independentDetail = independentPackets().first { $0[4] == 17 }
         assertEqual(readInt32LE(independentDetail!, offset: 5), 0,
@@ -18569,7 +18640,7 @@ struct NavigationProtocolTests {
         assert(birdsEyeManager.supportsBirdsEyeMapNavigation,
                "bird's-eye capability enables the setting")
         assertEqual(birdsEyePackets().map { $0[4] },
-                    [20, 16, 17, 18, 21, 22, 19, 25, 8, 1, 2, 3, 9, 10, 7],
+                    [20, 16, 17, 18, 21, 22, 19, 25, 6, 8, 1, 2, 3, 9, 10, 7],
                     "supported firmware receives the bird's-eye preference with the Map + Navigation profile")
         let birdsEyeSetting = birdsEyePackets().first { $0[4] == 25 }
         assertEqual(readInt32LE(birdsEyeSetting!, offset: 5), 0,
@@ -18589,7 +18660,7 @@ struct NavigationProtocolTests {
             perspectiveCapabilities
         ), "bird's-eye perspective capability response should be consumed")
         assertEqual(perspectivePackets().map { $0[4] },
-                    [20, 16, 17, 18, 21, 22, 19, 25, 26, 8, 1, 2, 3, 9, 10, 7],
+                    [20, 16, 17, 18, 21, 22, 19, 25, 26, 6, 8, 1, 2, 3, 9, 10, 7],
                     "adjustable firmware receives both bird's-eye settings")
         let perspectiveSetting = perspectivePackets().first { $0[4] == 26 }
         assertEqual(readInt32LE(perspectiveSetting!, offset: 5), 2,
@@ -18618,7 +18689,7 @@ struct NavigationProtocolTests {
         let baselineCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) + Data([0])
         assert(legacyManager.handleDeviceCapabilitiesNotification(baselineCapabilities),
                "baseline capability response should be consumed")
-        assertEqual(legacyPackets().map { $0[4] }, [8, 1, 2, 3, 9, 10, 7],
+        assertEqual(legacyPackets().map { $0[4] }, [6, 8, 1, 2, 3, 9, 10, 7],
                     "legacy firmware receives only its shared Map profile IDs")
         assertEqual(legacyManager.mapPlusNavigationZoomLevel, 1,
                     "negotiation preserves the hidden independent local profile")
@@ -18639,15 +18710,15 @@ struct NavigationProtocolTests {
 
         let (lateManager, latePackets) = configuredManager()
         lateManager.useDeviceCapabilitiesFallback()
-        assertEqual(latePackets().map { $0[4] }, [8, 1, 2, 3, 9, 10, 7],
+        assertEqual(latePackets().map { $0[4] }, [6, 8, 1, 2, 3, 9, 10, 7],
                     "timeout fallback sends only the legacy shared profile")
         let lateExtendedFlags = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
             Data([DeviceBLEProtocol.independentMapProfilesCapabilityMask |
                   DeviceBLEProtocol.extendedMapVisibilityCapabilityMask])
         assert(lateManager.handleDeviceCapabilitiesNotification(lateExtendedFlags),
                "late independent profile response should still be consumed")
-        assertEqual(Array(latePackets().map { $0[4] }.suffix(14)),
-                    [20, 16, 17, 18, 21, 22, 19, 8, 1, 2, 3, 9, 10, 7],
+        assertEqual(Array(latePackets().map { $0[4] }.suffix(15)),
+                    [20, 16, 17, 18, 21, 22, 19, 6, 8, 1, 2, 3, 9, 10, 7],
                     "late extended response resends both profiles with new semantics")
         let resentMapVisibility = latePackets().last { $0[4] == 8 }
         assert(readInt32LE(resentMapVisibility!, offset: 5) &

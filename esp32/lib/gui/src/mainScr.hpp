@@ -10,6 +10,7 @@
 
 #include "maps.hpp"
 #include "mapRenderPolicy.hpp"
+#include "../../ble_navigation/screen_configuration_protocol.hpp"
 
 #include "buttonBar.hpp"
 #include "batteryStatusScr.hpp"
@@ -88,6 +89,11 @@ void showNextMainScreen();
 void showPreviousMainScreen();
 bool isMapScreenActive();
 bool isMapGuidanceScreenActive();
+uint32_t currentScreenInstanceID();
+uint32_t currentMapRenderInstanceID();
+uint8_t currentMapRenderInstanceType();
+uint32_t currentMapRenderProfileSignature();
+const screen_configuration_protocol::RideStatsLayout &currentRideStatsLayout();
 bool shouldInterruptMapRenderForScreenCycle();
 bool mapPinchOwnsInput();
 bool mapPinchBlocksMapRender();
@@ -100,3 +106,4 @@ void createMainScr();
 void toggleNavigationScreen();
 void showConfiguredDefaultMainScreen();
 void applyDeviceScreenSettings();
+void applyDeviceScreenConfiguration();
