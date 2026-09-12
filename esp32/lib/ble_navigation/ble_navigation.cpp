@@ -34,7 +34,9 @@
 #include "ride_automation_runtime.hpp"
 #include "ride_delivery_protocol.hpp"
 #include "authenticated_workout_telemetry.hpp"
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
 #include "../world_radio/world_radio_runtime.hpp"
+#endif
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
 #include "../gui/src/globalGuiDef.h"
@@ -2047,7 +2049,9 @@ static void handleAuthPayload(const std::string &frame) {
                                              std::memory_order_release);
     bleSessionSupportsWorldRadio.store(false,
                                        std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
     world_radio_runtime::reset();
+#endif
     rideDeliveryLeaseGenerationSnapshot.store(0,
                                                std::memory_order_release);
     advanceRidePayloadGeneration();
@@ -5026,7 +5030,9 @@ public:
                                              std::memory_order_release);
     bleSessionSupportsWorldRadio.store(false,
                                        std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
     world_radio_runtime::reset();
+#endif
     rideDeliveryLeaseGenerationSnapshot.store(0,
                                                std::memory_order_release);
     advanceRidePayloadGeneration();
@@ -5116,7 +5122,9 @@ public:
                                              std::memory_order_release);
     bleSessionSupportsWorldRadio.store(false,
                                        std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
     world_radio_runtime::reset();
+#endif
     rideDeliveryLeaseGenerationSnapshot.store(0,
                                                std::memory_order_release);
     advanceRidePayloadGeneration();
@@ -5247,12 +5255,14 @@ public:
           !bleSessionSupportsWorldRadio.load(std::memory_order_acquire)) {
         return;
       }
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
       if (!world_radio_runtime::ingestStatus(
               reinterpret_cast<const uint8_t *>(value.data()), value.size())) {
         Serial.println("BLE World Radio: rejected malformed or stale status");
       } else {
         ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
       }
+#endif
       return;
     }
 
