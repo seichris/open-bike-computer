@@ -354,6 +354,10 @@ enum DeviceBLEProtocol {
     static let destinationRequestPrefix =
         RideBLEGeneratedProtocolV1.destinationRequestMagic
     static let destinationStatusPrefix = "DNST"
+    static let worldRadioRequestPrefix =
+        RideBLEGeneratedProtocolV1.worldRadioRequestMagic
+    static let worldRadioStatusPrefix =
+        RideBLEGeneratedProtocolV1.worldRadioStatusMagic
     static let workoutStartRequestPrefix =
         RideBLEGeneratedProtocolV1.workoutStartRequestMagic
     static let rideDeliveryCommandPrefix =
@@ -417,6 +421,8 @@ enum DeviceBLEProtocol {
         RideBLEGeneratedProtocolV1.detailedRideDiagnosticsFeature
     static let rideDeliveryAcknowledgementCapabilityMask =
         RideBLEGeneratedProtocolV1.rideDeliveryAckFeature
+    static let worldRadioCapabilityMask =
+        RideBLEGeneratedProtocolV1.worldRadioFeature
     static let screenConfigurationCapabilityMask =
         RideBLEGeneratedProtocolV1.screenConfigurationV1Feature
     static let rendererBenchmarkSampleCapabilityMask =
@@ -438,6 +444,7 @@ enum DeviceBLEProtocol {
     static let gpsPositionCoalescingKey = "gps-position"
     static let automaticDisplayOffSettingCoalescingKey =
         "automatic-display-off-setting"
+    static let worldRadioStatusCoalescingKey = "world-radio-status"
     // Large enough for the worst schema-v1 three-favorite catalog at the
     // minimum BLE write length, without retaining a long stale GPS backlog.
     static let fallbackWriteQueueCapacity = 64
@@ -646,6 +653,7 @@ enum DeviceScreen: Int, CaseIterable, Identifiable {
     case rideStats = 2
     case mapPlusNavigation = 3
     case batteryStatus = 4
+    case worldRadio = 5
 
     var id: Int { rawValue }
     var bit: Int { 1 << rawValue }
@@ -662,6 +670,8 @@ enum DeviceScreen: Int, CaseIterable, Identifiable {
             return "Map + Navigation"
         case .batteryStatus:
             return "Battery Status"
+        case .worldRadio:
+            return "World Radio"
         }
     }
 
@@ -669,12 +679,17 @@ enum DeviceScreen: Int, CaseIterable, Identifiable {
         allCases.reduce(0) { $0 | $1.bit }
     }
 
+    static var defaultScreensMask: Int {
+        allScreensMask & ~worldRadio.bit
+    }
+
     static var legacyScreensMask: Int {
-        allScreensMask & ~batteryStatus.bit
+        allScreensMask & ~(batteryStatus.bit | worldRadio.bit)
     }
 
     static var displayOrder: [DeviceScreen] {
-        [.mapPlusNavigation, .rideStats, .map, .navigation, .batteryStatus]
+        [.mapPlusNavigation, .rideStats, .map, .navigation, .worldRadio,
+         .batteryStatus]
     }
 
     static func normalizedMask(_ rawMask: Int) -> Int {
@@ -951,6 +966,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsRideDiagnostics: Bool = false
     @Published private(set) var supportsDetailedRideDiagnostics: Bool = false
     @Published private(set) var supportsRideDeliveryAcknowledgement: Bool = false
+    @Published private(set) var supportsWorldRadio: Bool = false
     @Published private(set) var supportsScreenConfiguration: Bool = false
     @Published private(set) var supportsWatchGPSMotionEvidenceV1: Bool = false
     @Published private(set) var rideTransportPhase:
@@ -1079,7 +1095,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapPlusNavigationLabelTextSize = DeviceBLEProtocol.defaultStreetLabelTextSize
     @Published var mapPlusNavigationLabelOrientation = DeviceBLEProtocol.defaultStreetLabelOrientation
     @Published var tapToSwitchScreens: Bool = false
-    @Published var enabledDeviceScreensMask: Int = DeviceScreen.allScreensMask
+    @Published var enabledDeviceScreensMask: Int = DeviceScreen.defaultScreensMask
     @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
     @Published var deviceBrightnessPercent: Double = 100
     @Published var automaticDisplayOffEnabled: Bool = true
@@ -1366,6 +1382,7 @@ class BLEManager: NSObject, ObservableObject {
     var hasActiveTransportSession: Bool { hasActiveBLESession }
 
     var onDestinationRequest: ((DeviceDestinationRequest) -> Void)?
+    var onWorldRadioRequest: ((WorldRadioRequest) -> Void)?
     var onWorkoutStartRequest: (() -> Void)?
     var onRideAutomationFrame: ((RideAutomationFrame) -> Void)?
     var onDestinationCatalogWriteFailure: (() -> Void)?
@@ -1633,7 +1650,7 @@ class BLEManager: NSObject, ObservableObject {
         }
         tapToSwitchScreens = defaults.object(forKey: SettingsKeys.tapToSwitchScreens) as? Bool ?? false
         var storedScreensMask = defaults.object(forKey: SettingsKeys.enabledDeviceScreensMask) as? Int
-            ?? DeviceScreen.allScreensMask
+            ?? DeviceScreen.defaultScreensMask
         if !defaults.bool(forKey: SettingsKeys.batteryStatusScreenMigrated) {
             storedScreensMask |= DeviceScreen.batteryStatus.bit
             defaults.set(storedScreensMask, forKey: SettingsKeys.enabledDeviceScreensMask)
@@ -4847,7 +4864,7 @@ class BLEManager: NSObject, ObservableObject {
             settingID = DeviceBLEProtocol.mapPlusNavigationLabelDensitySettingID
             enabled = mapPlusNavigationLabelsEnabled
             density = mapPlusNavigationLabelDensity
-        case .navigation, .rideStats, .batteryStatus:
+        case .navigation, .rideStats, .batteryStatus, .worldRadio:
             return
         }
         sendSetting(
@@ -5112,6 +5129,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWorldRadio = false
         supportsScreenConfiguration = false
         deviceScreenConfigurationController.markLegacyUnsupported()
         supportsWatchGPSMotionEvidenceV1 = false
@@ -5174,7 +5192,7 @@ class BLEManager: NSObject, ObservableObject {
                 mask |= DeviceBLEProtocol.extendedVisibilityMarker
             }
             settingID = DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID
-        case .navigation, .rideStats, .batteryStatus:
+        case .navigation, .rideStats, .batteryStatus, .worldRadio:
             return
         }
 
@@ -5197,6 +5215,9 @@ class BLEManager: NSObject, ObservableObject {
         var mask = effectiveEnabledDeviceScreensMask
         if !supportsBatteryStatusScreen {
             mask |= enabledDeviceScreensMask & DeviceScreen.batteryStatus.bit
+        }
+        if !supportsWorldRadio {
+            mask |= enabledDeviceScreensMask & DeviceScreen.worldRadio.bit
         }
         if enabled {
             mask |= screen.bit
@@ -5241,7 +5262,7 @@ class BLEManager: NSObject, ObservableObject {
             mask: enabledDeviceScreensMask
         )
         var outgoingMask = Int32(effectiveEnabledDeviceScreensMask)
-        if supportsBatteryStatusScreen {
+        if supportsBatteryStatusScreen || supportsWorldRadio {
             outgoingMask |= DeviceBLEProtocol.currentScreenMaskMarker
         }
         sendSetting(id: DeviceBLEProtocol.enabledScreensSettingID,
@@ -5259,9 +5280,14 @@ class BLEManager: NSObject, ObservableObject {
 
     private var supportedDeviceScreensMask: Int {
         guard hasReceivedDeviceCapabilities else { return DeviceScreen.allScreensMask }
-        return supportsBatteryStatusScreen
-            ? DeviceScreen.allScreensMask
-            : DeviceScreen.legacyScreensMask
+        var mask = DeviceScreen.legacyScreensMask
+        if supportsBatteryStatusScreen {
+            mask |= DeviceScreen.batteryStatus.bit
+        }
+        if supportsWorldRadio {
+            mask |= DeviceScreen.worldRadio.bit
+        }
+        return mask
     }
 
     private var effectiveEnabledDeviceScreensMask: Int {
@@ -6301,6 +6327,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWorldRadio = false
         supportsScreenConfiguration = false
         supportsWatchGPSMotionEvidenceV1 = false
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
@@ -9584,6 +9611,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWorldRadio = false
         supportsScreenConfiguration = false
         deviceScreenConfigurationController.markLegacyUnsupported()
         supportsWatchGPSMotionEvidenceV1 = false
@@ -9739,6 +9767,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let hasRideDeliveryAcknowledgement =
             flags & DeviceBLEProtocol
                 .rideDeliveryAcknowledgementCapabilityMask != 0
+        let hasWorldRadio =
+            flags & DeviceBLEProtocol.worldRadioCapabilityMask != 0
         let advertisesScreenConfiguration =
             flags & DeviceBLEProtocol.screenConfigurationCapabilityMask != 0
         guard !advertisesScreenConfiguration ||
@@ -9816,7 +9846,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             hasSentMapNavigationProfileForConnection = false
         }
         if hasReceivedDeviceCapabilities &&
-            supportsBatteryStatusScreen != hasBatteryStatusScreen {
+            (supportsBatteryStatusScreen != hasBatteryStatusScreen ||
+             supportsWorldRadio != hasWorldRadio) {
             hasSentScreenSettingsForConnection = false
         }
         if hasReceivedDeviceCapabilities &&
@@ -9849,6 +9880,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             flags & DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask != 0
         supportsRideDiagnostics = hasRideDiagnostics
         supportsDetailedRideDiagnostics = hasDetailedRideDiagnostics
+        supportsWorldRadio = hasWorldRadio
         if supportsRideDeliveryAcknowledgement &&
             !hasRideDeliveryAcknowledgement {
             cancelPendingRideApplicationDeliveries(notifyFailure: true)
@@ -9929,6 +9961,22 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
     }
 
     @discardableResult
+    func sendWorldRadioStatus(_ status: WorldRadioStatus) -> Bool {
+        guard supportsWorldRadio, isNavigationReady,
+              let payload = status.encoded() else {
+            return false
+        }
+        return sendFallbackMapPacket(
+            payload,
+            label: "world radio status",
+            writeClass: .settingsControl,
+            coalescingKey: DeviceBLEProtocol.worldRadioStatusCoalescingKey,
+            prioritized: true,
+            atomically: true
+        )
+    }
+
+    @discardableResult
     func handleNavigationCharacteristicNotification(_ data: Data) -> Bool {
         if data.starts(with: RideBLEApplicationAcknowledgementV1.prefix) {
             guard supportsRideDeliveryAcknowledgement,
@@ -9953,6 +10001,19 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 return true
             }
             onRideAutomationFrame?(frame)
+            return true
+        }
+        if let request = WorldRadioRequest(data) {
+            guard isConnected, isNavigationReady, supportsWorldRadio else {
+                log("Ignored World Radio request before capability negotiation")
+                return true
+            }
+            log("Received World Radio request command=\(request.command.rawValue) id=\(request.requestID)")
+            onWorldRadioRequest?(request)
+            return true
+        }
+        if data.starts(with: Data(DeviceBLEProtocol.worldRadioRequestPrefix.utf8)) {
+            log("Rejected malformed World Radio request")
             return true
         }
         if DeviceWorkoutStartRequest.matches(data) {

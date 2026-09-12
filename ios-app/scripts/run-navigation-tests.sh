@@ -38,6 +38,8 @@ xcrun swiftc -D HOST_TESTING -parse-as-library \
 xcrun swiftc \
   -D HOST_TESTING \
   -o "${OUT}" \
+  ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift \
+  ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift \
   ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift \
@@ -96,6 +98,18 @@ xcrun swiftc \
   ios-app/BikeComputerTests/NavigationProtocolTests.swift
 
 "${OUT}"
+
+WORLD_RADIO_OUT="${TMPDIR:-/tmp}/open-bike-world-radio-tests"
+
+xcrun swiftc \
+  -D HOST_TESTING \
+  -o "${WORLD_RADIO_OUT}" \
+  ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift \
+  ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift \
+  ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputerTests/WorldRadioTests.swift
+
+"${WORLD_RADIO_OUT}"
 
 CYCLING_SENSOR_OUT="${TMPDIR:-/tmp}/open-bike-cycling-sensor-tests"
 
@@ -183,6 +197,8 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
+  ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift \
+  ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
