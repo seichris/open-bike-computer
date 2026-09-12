@@ -357,6 +357,9 @@ jobs:
       - name: Firmware manifest tests
         run: python3 -m unittest discover -s tools/tests
         working-directory: ${{ github.workspace }}
+      - name: Spoken directions protocol and session sanitizer tests
+        run: python3 ios-app/scripts/run-spoken-directions-tests.py --cpp-only
+        working-directory: ${{ github.workspace }}
       - name: Runtime ownership and allocation recovery tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -pthread \

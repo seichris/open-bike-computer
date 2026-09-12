@@ -7,6 +7,8 @@ enum NavigationWriteClass: String, CaseIterable, Equatable {
     case settingsControl = "settings"
     case transfer
     case workoutTelemetry = "workout"
+    case spokenControl = "spoken_control"
+    case spokenBulk = "spoken_bulk"
     case other
 }
 

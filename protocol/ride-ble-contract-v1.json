@@ -8,7 +8,8 @@
     "settings": "2A73",
     "auth": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002",
     "workout": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
-    "ride_automation": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004"
+    "ride_automation": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004",
+    "spoken_directions": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005"
   },
   "protected_frame_overhead": 22,
   "protected_channels": {
@@ -18,7 +19,8 @@
     "gps": 4,
     "settings": 5,
     "workout": 6,
-    "ride_automation": 7
+    "ride_automation": 7,
+    "spoken_directions": 8
   },
   "controller_roles": {
     "none": 0,
@@ -29,7 +31,7 @@
     "request_magic": "CAPS",
     "response_magic": "CAP2",
     "response_schema_version": 1,
-    "current_client_version": 23,
+    "current_client_version": 25,
     "features": {
       "device_sounds": {"bit": 0, "minimum_client_version": 1},
       "power_button_honk": {"bit": 1, "minimum_client_version": 1},
@@ -56,7 +58,9 @@
       "ride_delivery_ack": {"bit": 22, "minimum_client_version": 20},
       "renderer_benchmark_sample": {"bit": 23, "minimum_client_version": 21},
       "map_navigation_orientation": {"bit": 24, "minimum_client_version": 22},
-      "watch_gps_motion_evidence_v1": {"bit": 25, "minimum_client_version": 23}
+      "watch_gps_motion_evidence_v1": {"bit": 25, "minimum_client_version": 23},
+      "resident_spoken_prompts": {"bit": 26, "minimum_client_version": 24},
+      "dynamic_spoken_cache": {"bit": 27, "minimum_client_version": 25}
     }
   },
   "automation_source_health": {
@@ -80,7 +84,9 @@
     "completed_replay_window": 8,
     "command_types": {
       "navigation_clear": 1,
-      "workout_state": 2
+      "workout_state": 2,
+      "spoken_route_control": 3,
+      "spoken_cue": 4
     },
     "results": {
       "success": 0,
@@ -93,6 +99,33 @@
     "golden": {
       "command_hex": "52434d310102010300112233445566778899aabbccddeeff78563412aabb",
       "ack_hex": "52414b310102000000112233445566778899aabbccddeeff7856341209000000"
+    }
+  },
+  "spoken_directions": {
+    "limits": {
+      "version": 1,
+      "cue_bytes": 56,
+      "control_bytes": 36,
+      "maximum_start_lifetime_ms": 5000,
+      "progress_lease_ms": 5000,
+      "maximum_dynamic_asset_bytes": 65536,
+      "dynamic_cache_bytes": 131072,
+      "maximum_audio_frames": 128000,
+      "audio_sample_rate": 16000,
+      "audio_block_frames": 160
+    },
+    "magic": {"cue": "SCU1", "control": "SCN1", "status": "SCS1"},
+    "phases": {"advance": 0, "prepare": 1, "action": 2, "arrival": 3},
+    "maneuvers": {
+      "unknown": 0, "straight": 1, "slight_left": 2, "left": 3,
+      "sharp_left": 4, "slight_right": 5, "right": 6, "sharp_right": 7,
+      "u_turn": 8, "roundabout": 9, "arrive": 10, "rerouting": 11,
+      "continue_route": 12
+    },
+    "controls": {"activate": 1, "cancel": 2, "progress": 3, "arrived": 4},
+    "golden": {
+      "cue_hex": "5343553101010646080706050403020144332211010000000700000002000000320088130000000000000000000000000000000000000000",
+      "control_hex": "53434e310101014608070605040302014433221101000000070000000200000088130000"
     }
   }
 }

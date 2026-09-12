@@ -129,6 +129,11 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
             selected["firmware_host"] = True
             selected["ios"] = True
 
+        if path.startswith("tools/spoken_directions/"):
+            # Slice-0 Swift/C++ codec proof is host-only, not shipped firmware.
+            selected["firmware_host"] = True
+            selected["ios"] = True
+
         if path in SHARED_RIDE_BLE_CONTRACT_PATHS:
             selected["firmware_build"] = True
             selected["firmware_host"] = True

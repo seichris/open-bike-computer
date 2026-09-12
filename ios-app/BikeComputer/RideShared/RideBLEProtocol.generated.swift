@@ -10,11 +10,12 @@ enum RideBLEGeneratedProtocolV1 {
     static let authUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002"
     static let workoutUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003"
     static let rideAutomationUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004"
+    static let spokenDirectionsUUID = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005"
     static let protectedFrameOverhead = 22
     static let capabilityRequestMagic = "CAPS"
     static let capabilityResponseMagic = "CAP2"
     static let capabilitySchemaVersion: UInt8 = 1
-    static let currentClientVersion: UInt8 = 23
+    static let currentClientVersion: UInt8 = 25
     static let deviceSoundsFeature: UInt32 = 1 << 0
     static let deviceSoundsMinimumClientVersion: UInt8 = 1
     static let powerButtonHonkFeature: UInt32 = 1 << 1
@@ -67,6 +68,10 @@ enum RideBLEGeneratedProtocolV1 {
     static let mapNavigationOrientationMinimumClientVersion: UInt8 = 22
     static let watchGpsMotionEvidenceV1Feature: UInt32 = 1 << 25
     static let watchGpsMotionEvidenceV1MinimumClientVersion: UInt8 = 23
+    static let residentSpokenPromptsFeature: UInt32 = 1 << 26
+    static let residentSpokenPromptsMinimumClientVersion: UInt8 = 24
+    static let dynamicSpokenCacheFeature: UInt32 = 1 << 27
+    static let dynamicSpokenCacheMinimumClientVersion: UInt8 = 25
     static let workoutStartRequestMagic = "WREQ"
     static let destinationRequestMagic = "DREQ"
     static let applicationCommandMagic = "RCM1"
@@ -88,6 +93,7 @@ enum RideBLEGeneratedProtectedChannelV1: UInt8, Sendable {
     case settings = 5
     case workout = 6
     case rideAutomation = 7
+    case spokenDirections = 8
 }
 
 enum RideBLEGeneratedControllerRoleV1: UInt8, Sendable {
@@ -99,6 +105,8 @@ enum RideBLEGeneratedControllerRoleV1: UInt8, Sendable {
 enum RideBLEApplicationCommandTypeV1: UInt8, Equatable, Sendable {
     case navigationClear = 1
     case workoutState = 2
+    case spokenRouteControl = 3
+    case spokenCue = 4
 }
 
 enum RideBLEApplicationResultV1: UInt8, Equatable, Sendable {
@@ -108,4 +116,52 @@ enum RideBLEApplicationResultV1: UInt8, Equatable, Sendable {
     case unauthorized = 3
     case malformed = 4
     case resourceRejected = 5
+}
+
+enum SpokenDirectionsGeneratedV1 {
+    static let version = 1
+    static let cueBytes = 56
+    static let controlBytes = 36
+    static let maximumStartLifetimeMs = 5000
+    static let progressLeaseMs = 5000
+    static let maximumDynamicAssetBytes = 65536
+    static let dynamicCacheBytes = 131072
+    static let maximumAudioFrames = 128000
+    static let audioSampleRate = 16000
+    static let audioBlockFrames = 160
+    static let cueMagic = "SCU1"
+    static let controlMagic = "SCN1"
+    static let statusMagic = "SCS1"
+    static let cueHex = "5343553101010646080706050403020144332211010000000700000002000000320088130000000000000000000000000000000000000000"
+    static let controlHex = "53434e310101014608070605040302014433221101000000070000000200000088130000"
+}
+
+enum SpokenPhaseV1: UInt8, Equatable, Sendable {
+    case advance = 0
+    case prepare = 1
+    case action = 2
+    case arrival = 3
+}
+
+enum SpokenManeuverV1: UInt8, Equatable, Sendable {
+    case unknown = 0
+    case straight = 1
+    case slightLeft = 2
+    case left = 3
+    case sharpLeft = 4
+    case slightRight = 5
+    case right = 6
+    case sharpRight = 7
+    case uTurn = 8
+    case roundabout = 9
+    case arrive = 10
+    case rerouting = 11
+    case continueRoute = 12
+}
+
+enum SpokenControlActionV1: UInt8, Equatable, Sendable {
+    case activate = 1
+    case cancel = 2
+    case progress = 3
+    case arrived = 4
 }

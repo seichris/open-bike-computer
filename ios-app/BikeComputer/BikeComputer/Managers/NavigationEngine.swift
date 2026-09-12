@@ -28,6 +28,7 @@ class NavigationEngine: NSObject, ObservableObject {
     // MARK: - Private Properties
     private var currentRoute: NavigationRouteV1?
     private var navigationRuntime = NavigationRuntimeV1()
+    private let spokenDirections = SpokenDirectionsControllerV1()
     private var currentStepIndex: Int = 0
     private var currentSnapshot: NavigationManeuverSnapshot?
     private var lastManeuverStepIndex: Int?
@@ -85,6 +86,7 @@ class NavigationEngine: NSObject, ObservableObject {
             previousManager.onDeviceGPSOverrideEnded = nil
         }
         self.bleManager = manager
+        spokenDirections.transport = manager
         cancellables.removeAll()
         manager.onDeviceGPSOverrideEnded = { [weak self, weak manager] in
             guard manager?.isNavigationReady == true else { return }
@@ -95,7 +97,8 @@ class NavigationEngine: NSObject, ObservableObject {
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isReady in
-                guard isReady, let self else { return }
+                guard let self else { return }
+                if !isReady { self.spokenDirections.connectionLost(); return }
                 // @Published emits from willSet. Defer until the manager's
                 // readiness property has committed so guarded GPS/route sends
                 // do not re-read the previous false value on reconnect.
@@ -215,6 +218,7 @@ class NavigationEngine: NSObject, ObservableObject {
             stopNavigation()
             return
         }
+        spokenDirections.start(generation: navigationRuntime.generation)
         updateNavigationSummary(
             route: sharedRoute,
             remainingDistance: sharedRoute.distanceMeters
@@ -287,6 +291,7 @@ class NavigationEngine: NSObject, ObservableObject {
         currentRoute = sharedRoute
         cacheRouteCoordinates(from: sharedRoute)
         navigationEpoch &+= 1
+        spokenDirections.start(generation: navigationRuntime.generation)
         courseResolver.reset(epoch: navigationEpoch)
         currentSnapshot = nil
         lastManeuverStepIndex = nil
@@ -329,7 +334,8 @@ class NavigationEngine: NSObject, ObservableObject {
     }
     
     /// Stop navigation
-    func stopNavigation() {
+    func stopNavigation(arrived: Bool = false) {
+        spokenDirections.stop(arrived: arrived)
         let deviceLocationToRestore: (location: CLLocation, convertFromMapKitRoute: Bool)? = {
             if isSimulationMode, let latestExternalGpsLocation {
                 return (latestExternalGpsLocation, false)
@@ -548,10 +554,17 @@ class NavigationEngine: NSObject, ObservableObject {
         route: NavigationRouteV1,
         currentLocation: CLLocation
     ) {
+        if route.steps.indices.contains(runtimeSnapshot.currentStepIndex) {
+            let preferences = SpokenDirectionsPreferencesV1.load(deviceID: bleManager?.activeDeviceID)
+            spokenDirections.observe(snapshot: runtimeSnapshot,
+                step: route.steps[runtimeSnapshot.currentStepIndex], locale: route.localeIdentifier,
+                location: NavigationLocationSampleV1(location: currentLocation), now: now(),
+                enabled: preferences.enabled, paused: false, volume: preferences.volume)
+        }
         if runtimeSnapshot.maneuver == .arrive,
            runtimeSnapshot.distanceToManeuverMeters < 20 {
             print("Navigation complete!")
-            stopNavigation()
+            stopNavigation(arrived: true)
             return
         }
         if runtimeSnapshot.currentStepIndex != currentStepIndex {

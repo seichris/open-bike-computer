@@ -67,7 +67,9 @@ inline bool leaseMatches(uint32_t admittedLeaseGeneration,
 
 inline bool validCommandType(uint8_t raw) {
   return raw == static_cast<uint8_t>(CommandType::NavigationClear) ||
-         raw == static_cast<uint8_t>(CommandType::WorkoutState);
+         raw == static_cast<uint8_t>(CommandType::WorkoutState) ||
+         raw == static_cast<uint8_t>(CommandType::SpokenRouteControl) ||
+         raw == static_cast<uint8_t>(CommandType::SpokenCue);
 }
 
 inline bool validResult(uint8_t raw) {

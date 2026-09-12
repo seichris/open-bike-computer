@@ -17600,6 +17600,23 @@ struct NavigationProtocolTests {
 
     static func testWorkoutTelemetryBLETransport() {
         let channelManager = BLEManager()
+        let speechSession = AuthenticatedBLEWriteSession(
+            ownerKey: Data((0..<32).map(UInt8.init)),
+            deviceID: "00112233445566778899aabbccddeeff",
+            clientNonce: "102132435465768798a9babbdcddedef",
+            serverNonce: "ffeeddccbbaa99887766554433221100")
+        let directSpeechSession = AuthenticatedBLEWriteSession(
+            ownerKey: Data((0..<32).map(UInt8.init)),
+            deviceID: "00112233445566778899aabbccddeeff",
+            clientNonce: "102132435465768798a9babbdcddedef",
+            serverNonce: "ffeeddccbbaa99887766554433221100")
+        let speechPayload = Data("SCN1".utf8)
+        assertEqual(channelManager.devicePayloadForTesting(speechPayload,
+            for: CBUUID(string: RideBLEGeneratedProtocolV1.spokenDirectionsUUID),
+            authenticatedWriteSession: speechSession),
+            directSpeechSession.frame(payload: speechPayload, channel: .spokenDirections),
+            "native speech characteristic uses protected channel eight")
+        assert(!channelManager.isSpokenDirectionsReady, "speech fails closed before capabilities and authentication")
         let nativeWorkoutPayload = Data(ownershipHex:
             "0102030405060708090a0b0c0d0e0f10")!
         let workoutWriteSession = AuthenticatedBLEWriteSession(
