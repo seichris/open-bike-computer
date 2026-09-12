@@ -27,11 +27,20 @@
     "owner": 1,
     "watch_ride": 2
   },
+  "board_display_metadata": {
+    "tlv_type": 3,
+    "version": 1,
+    "payload_bytes": 8,
+    "layout": "version,u8 display kind,u8 input flags,u16le width,u16le height,u8 supported settings",
+    "display_kinds": {"color": 1, "monochrome_epaper": 2},
+    "input_flags": {"buttons": 1, "touch": 2},
+    "setting_flags": {"brightness": 1, "display_rotation": 2, "tap_to_cycle": 4, "continuous_camera": 8, "disconnected_sleep": 16}
+  },
   "capabilities": {
     "request_magic": "CAPS",
     "response_magic": "CAP2",
     "response_schema_version": 1,
-    "current_client_version": 24,
+    "current_client_version": 25,
     "features": {
       "device_sounds": {"bit": 0, "minimum_client_version": 1},
       "power_button_honk": {"bit": 1, "minimum_client_version": 1},
@@ -59,7 +68,8 @@
       "renderer_benchmark_sample": {"bit": 23, "minimum_client_version": 21},
       "map_navigation_orientation": {"bit": 24, "minimum_client_version": 22},
       "watch_gps_motion_evidence_v1": {"bit": 25, "minimum_client_version": 23},
-      "screen_configuration_v1": {"bit": 26, "minimum_client_version": 24}
+      "screen_configuration_v1": {"bit": 26, "minimum_client_version": 24},
+      "board_display_metadata": {"bit": 27, "minimum_client_version": 25}
     }
   },
   "screen_configuration": {

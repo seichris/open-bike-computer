@@ -132,6 +132,8 @@ def render_swift(contract: dict) -> str:
             f"    static let currentClientVersion: UInt8 = {caps['current_client_version']}",
         ]
     )
+    for name in ("tlv_type", "version", "payload_bytes"):
+        lines.append(f"    static let boardDisplay{camel(name)[0].upper() + camel(name)[1:]}: UInt8 = {contract['board_display_metadata'][name]}")
     for name, entry in caps["features"].items():
         lines.append(
             f"    static let {camel(name)}Feature: UInt32 = 1 << {entry['bit']}"
@@ -214,6 +216,8 @@ def render_cpp(contract: dict) -> str:
             f"inline constexpr uint8_t CURRENT_CLIENT_VERSION = {caps['current_client_version']};",
         ]
     )
+    for name in ("tlv_type", "version", "payload_bytes"):
+        lines.append(f"inline constexpr uint8_t BOARD_DISPLAY_{upper(name)} = {contract['board_display_metadata'][name]};")
     for name, entry in caps["features"].items():
         lines.append(
             f"inline constexpr uint32_t {upper(name)}_FEATURE = 1UL << {entry['bit']};"

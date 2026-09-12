@@ -2200,7 +2200,7 @@ private struct MapStyleSettingsView: View {
 
     var body: some View {
         Form {
-            if screen == .map {
+            if screen == .map && bleManager.supportsContinuousCamera {
                 Section(header: Text("Map Mode")) {
                     Picker("Rotation", selection: $bleManager.mapRotationMode) {
                         Text("North Up").tag(0)
@@ -2213,7 +2213,7 @@ private struct MapStyleSettingsView: View {
                 }
             }
 
-            if screen == .mapPlusNavigation {
+            if screen == .mapPlusNavigation && !bleManager.isEPaperDevice {
                 Section(header: Text("Map Mode"), footer: Text(
                     bleManager.supportsMapNavigationOrientation
                         ? "Course Up follows your direction of travel. North Up keeps the map bearing fixed. Label orientation is configured separately."
@@ -2502,57 +2502,69 @@ private struct HardwareCustomizationSettingsView: View {
 
     var body: some View {
         Form {
-            Section(
-                header: Text("Device Brightness"),
-                footer: Text("When enabled, the display dims after 15 seconds and turns off after 45 seconds unless navigation, workout, transfer, or attention activity is active.")
-            ) {
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text("Brightness")
-                        Spacer()
-                        Text("\(Int(bleManager.deviceBrightnessPercent))%")
-                            .foregroundColor(.secondary)
-                    }
-                    Slider(value: $bleManager.deviceBrightnessPercent, in: 5...100, step: 5)
-                        .onChange(of: bleManager.deviceBrightnessPercent) { newValue in
-                            bleManager.sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(newValue))
+            if bleManager.supportsDisplayBrightness {
+                Section(
+                    header: Text("Device Brightness"),
+                    footer: Text("When enabled, the display dims after 15 seconds and turns off after 45 seconds unless navigation, workout, transfer, or attention activity is active.")
+                ) {
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text("Brightness")
+                            Spacer()
+                            Text("\(Int(bleManager.deviceBrightnessPercent))%")
+                                .foregroundColor(.secondary)
                         }
-                }
+                        Slider(value: $bleManager.deviceBrightnessPercent, in: 5...100, step: 5)
+                            .onChange(of: bleManager.deviceBrightnessPercent) { newValue in
+                                bleManager.sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(newValue))
+                            }
+                    }
 
-                Toggle("Automatic Display Off", isOn: $bleManager.automaticDisplayOffEnabled)
-                    .onChange(of: bleManager.automaticDisplayOffEnabled) { newValue in
+                    Toggle("Automatic Display Off", isOn: $bleManager.automaticDisplayOffEnabled)
+                        .onChange(of: bleManager.automaticDisplayOffEnabled) { newValue in
+                            bleManager.sendSetting(
+                                id: DeviceBLEProtocol.automaticDisplayOffSettingID,
+                                value: newValue ? 1 : 0
+                            )
+                        }
+                        .disabled(!bleManager.supportsAutomaticDisplayOff)
+                }
+                .disabled(!bleManager.supportsDeviceSettings)
+
+            }
+            if bleManager.supportsDisconnectedSleep {
+                Section(header: Text("Power")) {
+                    Picker("Disconnected Sleep After", selection: $bleManager.disconnectedSleepTimeout) {
+                        ForEach(DisconnectedSleepTimeout.allCases) { timeout in
+                            Text(timeout.title).tag(timeout)
+                        }
+                    }
+                    .onChange(of: bleManager.disconnectedSleepTimeout) { newValue in
                         bleManager.sendSetting(
-                            id: DeviceBLEProtocol.automaticDisplayOffSettingID,
-                            value: newValue ? 1 : 0
+                            id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
+                            value: newValue.settingValue
                         )
                     }
-                    .disabled(!bleManager.supportsAutomaticDisplayOff)
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
-            Section(header: Text("Power")) {
-                Picker("Disconnected Sleep After", selection: $bleManager.disconnectedSleepTimeout) {
-                    ForEach(DisconnectedSleepTimeout.allCases) { timeout in
-                        Text(timeout.title).tag(timeout)
-                    }
                 }
-                .onChange(of: bleManager.disconnectedSleepTimeout) { newValue in
-                    bleManager.sendSetting(
-                        id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
-                        value: newValue.settingValue
-                    )
+                .disabled(!bleManager.supportsDeviceSettings)
+
+            }
+            if bleManager.supportsTapToCycle {
+                Section(header: Text("Screen Navigation")) {
+                    Toggle("Tap to Switch Screens", isOn: $bleManager.tapToSwitchScreens)
+                        .onChange(of: bleManager.tapToSwitchScreens) { newValue in
+                            bleManager.sendSetting(id: 11, value: newValue ? 1 : 0)
+                        }
+                }
+                .disabled(!bleManager.supportsDeviceSettings)
+
+            }
+            if bleManager.isEPaperDevice {
+                Section("E-paper controls") {
+                    Text("Up and down change screens. Press the center key for actions; hold it to return from screen controls.")
+                    Text("The display keeps its image without power. Check the connection and GPS status before relying on displayed guidance.")
                 }
             }
-            .disabled(!bleManager.supportsDeviceSettings)
-
-            Section(header: Text("Screen Navigation")) {
-                Toggle("Tap to Switch Screens", isOn: $bleManager.tapToSwitchScreens)
-                    .onChange(of: bleManager.tapToSwitchScreens) { newValue in
-                        bleManager.sendSetting(id: 11, value: newValue ? 1 : 0)
-                    }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
             DeviceSoundsSettingsSection()
         }
         .navigationTitle("Hardware Customization")

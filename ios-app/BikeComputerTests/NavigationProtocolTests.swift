@@ -13936,6 +13936,10 @@ struct NavigationProtocolTests {
 
     static func testFirmwareSourceIdentityMigration() {
         let full = String(repeating: "a", count: 40)
+        assertEqual(FirmwareSourceIdentity.fullSHA(full, target: "WAVESHARE_EPAPER_397", version: "0.3.4", build: 94), full,
+                    "new board preserves a full immutable source identity")
+        assert(FirmwareSourceIdentity.fullSHA("8a0c9df6db26", target: "WAVESHARE_EPAPER_397", version: "0.3.4", build: 93) == nil,
+               "new board cannot reuse an AMOLED historical short-SHA exception")
         assertEqual(FirmwareSourceIdentity.fullSHA(full, target: "WAVESHARE_AMOLED_175", version: "0.3.4", build: 94), full,
                     "full immutable identity is preserved")
         for target in ["WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"] {
@@ -16352,7 +16356,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 24, "capability version negotiates configurable screens alongside navigation orientation and Watch GPS motion evidence")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 25, "capability version negotiates board display metadata alongside configurable screens")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationRotationSettingID, 37, "navigation orientation has an independent setting")
         assertEqual(RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature, 1 << 24, "orientation capability has its own bit")
         assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
@@ -18375,6 +18379,49 @@ struct NavigationProtocolTests {
                "CAP2 bit 13 does not collide with remote device debugging")
         assert(manager.hasReceivedDeviceCapabilities,
                "valid CAP2 completes capability negotiation")
+
+        let epaperHeader = Data("CAP2".utf8) + Data([1, 0, 0, 0, 8])
+        let epaperMetadata = Data([3, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 0])
+        let epaperCapabilities = epaperHeader + epaperMetadata
+        assert(manager.handleDeviceCapabilitiesNotification(epaperCapabilities),
+               "e-paper metadata is consumed")
+        assert(manager.hasReceivedDeviceCapabilities && manager.isEPaperDevice,
+               "valid monochrome metadata identifies e-paper")
+        assertEqual(manager.displayMetadata?.width, 480, "portrait width")
+        assertEqual(manager.displayMetadata?.height, 800, "portrait height")
+        assert(!manager.supportsDisplayBrightness && !manager.supportsTapToCycle &&
+               !manager.supportsContinuousCamera && !manager.supportsDisconnectedSleep,
+               "unsupported e-paper settings stay hidden")
+        assert(manager.handleDeviceCapabilitiesNotification(epaperCapabilities + Data([90, 2, 1, 2])),
+               "future unknown TLVs are consumed")
+        assert(manager.hasReceivedDeviceCapabilities, "unknown TLVs are skipped")
+        let screenMetadata = Data([2, 14, 1, 16, 24, 7, 31, 0, 0, 0, 255, 255, 1, 0, 0, 16])
+        let combinedHeader = Data("CAP2".utf8) + Data([1, 0, 0, 0, 12])
+        for metadata in [screenMetadata + epaperMetadata, epaperMetadata + screenMetadata] {
+            assert(manager.handleDeviceCapabilitiesNotification(combinedHeader + metadata),
+                   "screen configuration and e-paper metadata coexist in either TLV order")
+            assert(manager.hasReceivedDeviceCapabilities && manager.supportsScreenConfiguration &&
+                   manager.isEPaperDevice && !manager.supportsContinuousCamera,
+                   "screen capabilities retain the independent display restrictions")
+        }
+        let malformedDisplays = [
+            epaperHeader, // Feature requires its record.
+            cap2 + epaperMetadata, // Record requires its feature.
+            Data(epaperCapabilities.dropLast()),
+            epaperCapabilities + epaperMetadata, // Duplicate.
+            epaperHeader + Data([3, 8, 2, 2, 1, 0xE0, 1, 0x20, 3, 0]), // Version.
+            epaperHeader + Data([3, 8, 1, 2, 1, 0, 0, 0x20, 3, 0]), // Zero width.
+            epaperHeader + Data([3, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 1]) // Brightness.
+        ]
+        for packet in malformedDisplays {
+            assert(manager.handleDeviceCapabilitiesNotification(packet), "bad display record is consumed")
+            assert(!manager.hasReceivedDeviceCapabilities && manager.displayMetadata == nil,
+                   "bad display record resets negotiation for retry")
+        }
+        assert(manager.handleDeviceCapabilitiesNotification(cap2), "legacy CAP2 remains supported")
+        assert(manager.hasReceivedDeviceCapabilities && manager.displayMetadata == nil &&
+               manager.supportsDisplayBrightness && manager.supportsTapToCycle,
+               "old AMOLED metadata retains its existing controls")
 
         let cap2WithScopedWatch = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, 0, 0x7F, 0, 0])

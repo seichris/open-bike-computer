@@ -1,7 +1,8 @@
-# Waveshare ESP32-S3 Touch AMOLED Hardware Reference
+# Waveshare ESP32-S3 Hardware Reference
 
 This document contains hardware pinouts and bring-up notes for the Waveshare
-ESP32-S3 Touch AMOLED boards supported by this repo.
+ESP32-S3 Touch AMOLED boards supported by this repo, plus reference material
+for the experimental ESP32-S3-ePaper-3.97 firmware port.
 
 The 1.75" notes are the most thoroughly app-verified path and were extracted
 from the official schematic. The 2.06" notes combine Waveshare's public
@@ -34,6 +35,24 @@ link different revisions.
 - [Official demo repository](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.06)
 - [Schematic](reference/boards/waveshare-amoled-206/esp32-s3-touch-amoled-2.06-schematic.pdf)
 - [Dimension drawing](reference/boards/waveshare-amoled-206/esp32-s3-touch-amoled-2.06-dimensions.pdf)
+
+### ESP32-S3-ePaper-3.97
+
+Status: experimental firmware and companion support; physical qualification
+and production publication remain gated. See the
+[board implementation and qualification notes](waveshare-epaper-397.md).
+
+- [Implementation plan](../docs/plans/waveshare-epaper-397-firmware-implementation-plan.md)
+- [Official board documentation](https://docs.waveshare.com/ESP32-S3-ePaper-3.97)
+- [Official resource page](https://docs.waveshare.com/ESP32-S3-ePaper-3.97/Resources-And-Documents)
+- [Local reference index](reference/boards/waveshare-epaper-397/README.md):
+  schematic, panel and component datasheets, Chinese/English ESP32-S3 manuals,
+  and the complete pinned vendor example source tree.
+- [Download and file hashes](reference/boards/waveshare-epaper-397/SOURCES.json)
+
+The resource snapshot retains the vendor's exact PDF versions in the board
+folder, including component documents that also have existing shared copies.
+General installers and flash tools are excluded from this collection.
 
 ### ESP32-S3 Manuals
 

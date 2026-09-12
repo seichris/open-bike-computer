@@ -5,7 +5,7 @@
 
 #include "axp2101.hpp"
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 
 #include "i2c_bus.hpp"
 #include "axp2101_register_policy.hpp"
@@ -51,6 +51,13 @@ bool writeRegister(uint8_t reg, uint8_t value) {
 
 bool begin() {
   pmuAvailable = i2c::probe(AXP2101_ADDR, "AXP2101");
+#ifdef WAVESHARE_EPAPER_397
+  // The listing says TG28, while the schematic/demo says AXP2101. An ACK
+  // alone does not establish the chip identity. Unknown revisions stay absent.
+  uint8_t identity = 0;
+  pmuAvailable = pmuAvailable && i2c::readRegister8(
+      AXP2101_ADDR, 0x03, identity, "PMIC identity") && identity == 0x4A;
+#endif
   return pmuAvailable;
 }
 
@@ -109,6 +116,9 @@ bool readBatteryPercentage(uint8_t &percentage) {
 }
 
 bool setPowerButtonOffLevel(PowerButtonOffLevel level) {
+#ifdef WAVESHARE_EPAPER_397
+  return false; // No PMIC writes before electrical qualification.
+#endif
   if (!pmuAvailable) {
     return false;
   }
@@ -126,6 +136,9 @@ bool setPowerButtonOffLevel(PowerButtonOffLevel level) {
 }
 
 bool setPowerButtonEventMonitoring(bool enabled) {
+#ifdef WAVESHARE_EPAPER_397
+  return false; // No PMIC writes before electrical qualification.
+#endif
   if (!pmuAvailable) {
     return false;
   }
@@ -151,6 +164,9 @@ bool setPowerButtonEventMonitoring(bool enabled) {
 }
 
 bool readAndClearPowerButtonEvents(PowerButtonEvents &events) {
+#ifdef WAVESHARE_EPAPER_397
+  return false; // No PMIC writes before electrical qualification.
+#endif
   events = {};
   if (!pmuAvailable) {
     return false;
@@ -179,6 +195,13 @@ bool readAndClearPowerButtonEvents(PowerButtonEvents &events) {
 }
 
 bool initializePowerState() {
+#ifdef WAVESHARE_EPAPER_397
+  const bool available = begin();
+  PowerStatus observed{};
+  const bool read = available && readPowerStatus(observed);
+  Serial.printf("EPAPER_PMIC available=%d identity=axp2101 statusRead=%d policy=read-only writes=0\n", available, read);
+  return read;
+#endif
 #if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
   Serial.println("Probing AXP2101 with 2.06 display-enable-only recovery...");
 #else

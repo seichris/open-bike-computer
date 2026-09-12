@@ -86,6 +86,7 @@ void zoomOutEvent(lv_event_t *event);
 void zoomInEvent(lv_event_t *event);
 void updateNavEvent(lv_event_t *event);
 void showNextMainScreen();
+void showPreviousMainScreen();
 bool isMapScreenActive();
 bool isMapGuidanceScreenActive();
 uint32_t currentScreenInstanceID();
@@ -97,7 +98,7 @@ bool shouldInterruptMapRenderForScreenCycle();
 bool mapPinchOwnsInput();
 bool mapPinchBlocksMapRender();
 bool mapMultiTouchSuppressesPrimary();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 extern volatile bool waveshareBootScreenCyclePending;
 #endif
 

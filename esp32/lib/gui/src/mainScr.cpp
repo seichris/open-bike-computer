@@ -9,6 +9,9 @@
 #include "mainScr.hpp"
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
 #include "../../ble_navigation/screen_configuration.hpp"
+#ifdef WAVESHARE_EPAPER_397
+#include "../../epaper_display/epaper_display.hpp"
+#endif
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../device_debug/device_debug_camera.hpp"
 #include "../../route_overlay/route_overlay.hpp"
@@ -24,8 +27,8 @@
 #include <algorithm>
 #include <cstring>
 #include <type_traits>
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-#include "../../panel/WAVESHARE_AMOLED_175.hpp"
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
+#include "../../panel/panelSelect.hpp"
 #endif
 #if defined(WAVESHARE_AMOLED_175)
 #include "../../utils/src/mapPinchZoom.hpp"
@@ -49,7 +52,7 @@ extern Compass compass;
 extern Gps gps;
 extern Battery battery;
 extern wayPoint loadWpt;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 extern bool touchPressed;
 #endif
 
@@ -535,7 +538,7 @@ bool isMapScreenActive() { return activeTile == MAP; }
 bool isMapGuidanceScreenActive() { return activeTile == MAP_GUIDANCE; }
 
 bool shouldInterruptMapRenderForScreenCycle() {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   if (!isMainScreen) {
     return false;
   }
@@ -555,8 +558,12 @@ bool shouldInterruptMapRenderForScreenCycle() {
       digitalRead(BOARD_BOOT_PIN) == LOW) {
     return true;
   }
+#ifdef WAVESHARE_EPAPER_397
+  return false;
+#else
   return mapRenderSettings.tapToSwitchScreens &&
          (touchPressed || digitalRead(TCH_I2C_INT) == LOW);
+#endif
 #else
   return false;
 #endif
@@ -589,7 +596,7 @@ static void applyMapInstanceProfile(
           screen_configuration_protocol::ScreenType::MapNavigation) {
     return;
   }
-  const auto &source = instance.mapProfile;
+  const auto source = screen_configuration::effectiveMapProfile(instance.mapProfile);
   ScreenMapRenderSettings &target =
       instance.type == screen_configuration_protocol::ScreenType::Map
           ? mapRenderSettings.mapStyle
@@ -1012,6 +1019,7 @@ static void renderDestinationPicker(DestinationPickerView &picker) {
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(statusContent, 12, 0);
 
+#ifndef WAVESHARE_EPAPER_397
     if (status.code == DestinationPickerStatusCode::Calculating) {
       lv_obj_t *spinner = lv_spinner_create(statusContent);
       lv_obj_set_size(spinner, 54, 54);
@@ -1023,6 +1031,7 @@ static void renderDestinationPicker(DestinationPickerView &picker) {
       lv_obj_set_style_arc_color(spinner, lv_color_white(),
                                  LV_PART_INDICATOR);
     }
+#endif
 
     lv_obj_t *label = lv_label_create(statusContent);
     lv_obj_set_width(label, LV_PCT(100));
@@ -1273,6 +1282,16 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
 
 #ifdef ENABLE_COMPASS
   heading = compass.getHeading();
+#endif
+#ifdef WAVESHARE_EPAPER_397
+  static uint32_t lastPresentationMs = 0;
+  const bool guidanceChanged = activeTile == MAP_GUIDANCE &&
+      uiChangeTracker.take(ui_update_policy::Source::Navigation);
+  if (guidanceChanged) updateMapGuidanceOverlay();
+  const bool explicitRequest = mapRenderScheduler.pendingForcedReasons() != 0;
+  if (!explicitRequest && lastPresentationMs && nowMs - lastPresentationMs < 4000)
+    return guidanceChanged;
+  lastPresentationMs = nowMs;
 #endif
   applyMapRotationForTile(static_cast<tileName>(activeTile));
 
@@ -2164,6 +2183,9 @@ static void showScreenInstance(uint8_t index) {
       !instance->enabled) {
     return;
   }
+#ifdef WAVESHARE_EPAPER_397
+  epaper::invalidateContext();
+#endif
   activeScreenInstanceIndex = index;
   activeScreenInstanceID = instance->id;
   activeScreenPayloadSignature =
@@ -2204,6 +2226,22 @@ static void revealPendingMapTileIfReady() {
   mapTileTransitionStartedMs = 0;
   mapTileTransitionUsedRenderAhead = false;
   mapTileTransition.complete();
+}
+
+void showPreviousMainScreen() {
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    showScreenInstance(screen_configuration::previousEnabledInstanceIndex(
+        document, activeScreenInstanceIndex));
+    return;
+  }
+  tileName previous = static_cast<tileName>(activeTile);
+  for (unsigned count = 0; count < 8; ++count) {
+    const tileName next = nextEnabledTile(previous);
+    if (next == activeTile) break;
+    previous = next;
+  }
+  showMainTile(previous);
 }
 
 void showNextMainScreen() {

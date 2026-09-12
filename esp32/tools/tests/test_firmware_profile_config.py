@@ -50,7 +50,7 @@ assert main_source.index("std::fflush(stdout)") < main_source.index(
 )
 assert main_source.count("heap8=%lu/%lu dma=%lu/%lu") == 2
 
-waveshare_sdkconfig = config.get("waveshare_amoled_common", "custom_sdkconfig")
+waveshare_sdkconfig = config.get("waveshare_common", "custom_sdkconfig")
 assert "CONFIG_PM_ENABLE=y" in waveshare_sdkconfig
 assert "CONFIG_PM_DFS_INIT_AUTO=n" in waveshare_sdkconfig
 assert "CONFIG_PM_PROFILING=n" in waveshare_sdkconfig
@@ -71,9 +71,9 @@ assert "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA" not in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT" not in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" not in waveshare_sdkconfig
-waveshare_unflags = config.get("waveshare_amoled_common", "build_unflags")
+waveshare_unflags = config.get("waveshare_common", "build_unflags")
 assert "-Wl,--wrap=log_printf" in waveshare_unflags
-waveshare_flags = config.get("waveshare_amoled_common", "build_flags")
+waveshare_flags = config.get("waveshare_common", "build_flags")
 expected_dynamic_tls_wrappers = {
     "mbedtls_ssl_write_client_hello",
     "mbedtls_ssl_handshake_client_step",
@@ -101,7 +101,7 @@ assert "-DBLE_RADIO_CHARACTERIZATION=1" not in waveshare_flags
 assert "-DBLE_TX_POWER_DBM=" not in waveshare_flags
 assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" not in waveshare_flags
 assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in waveshare_flags
-waveshare_dependencies = config.get("waveshare_amoled_common", "lib_deps")
+waveshare_dependencies = config.get("waveshare_common", "lib_deps")
 assert waveshare_dependencies.count("https://github.com/jgauchia/NeoGPS.git") == 1
 assert (
     "https://github.com/jgauchia/NeoGPS.git#"
@@ -122,6 +122,23 @@ diagnostic_profiles = {
         "WAVESHARE_AMOLED_206",
     ),
 }
+
+# The new board shares the locked runtime, not either AMOLED electrical policy.
+epaper_base = "waveshare_epaper_397_base"
+assert config.get(epaper_base, "extends") == "waveshare_common"
+epaper_flags = config.get(epaper_base, "build_flags")
+assert "-DWAVESHARE_EPAPER_397" in epaper_flags
+assert "-DDISABLE_TOUCH=1" in epaper_flags
+assert "-DPERSISTENT_RIDE_DIAGNOSTICS=1" in epaper_flags
+for suffix in ("", "_DISPLAY_TEST", "_PRODUCTION"):
+    environment = "env:WAVESHARE_EPAPER_397" + suffix
+    assert inherited_option(environment, "custom_firmware_target") == "WAVESHARE_EPAPER_397"
+    expected_partition = "partitions.csv" if suffix == "_PRODUCTION" else "partitions_remote_debug.csv"
+    assert inherited_option(environment, "board_build.partitions") == expected_partition
+    assert "WAVESHARE_AMOLED" not in config.get(environment, "build_flags")
+assert "-DEPAPER_DISPLAY_TEST=1" in config.get("env:WAVESHARE_EPAPER_397_DISPLAY_TEST", "build_flags")
+assert "-DEPAPER_DISPLAY_TEST" not in config.get("env:WAVESHARE_EPAPER_397_PRODUCTION", "build_flags")
+assert "-DARDUINO_USB_CDC_ON_BOOT=0" in config.get("env:WAVESHARE_EPAPER_397_PRODUCTION", "build_flags")
 for environment, (base, board_define) in diagnostic_profiles.items():
     assert config.get(environment, "extends") == base
     assert inherited_option(environment, "custom_firmware_target") == board_define

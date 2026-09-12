@@ -4,6 +4,13 @@ This document defines how a tagged production build becomes a portable
 factory-flash artifact without bypassing the repository-owned firmware runtime
 or its upload attestation.
 
+`WAVESHARE_EPAPER_397_PRODUCTION` is currently a compile/size qualification
+profile only. Factory packaging, candidate receipts, release history and
+publisher target allowlists continue to accept only AMOLED 1.75/2.06. Add the
+e-paper target to those flows only after its
+[physical qualification](../hardware/waveshare-epaper-397.md) and update recovery
+gates pass; compiling a production profile does not authorize publication.
+
 ## Source and qualification boundary
 
 `open-bike-computer` is the production firmware source of truth. Build both
