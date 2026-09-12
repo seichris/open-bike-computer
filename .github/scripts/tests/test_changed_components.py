@@ -13,6 +13,17 @@ SPEC.loader.exec_module(changed_components)
 
 
 class ChangedComponentsTests(unittest.TestCase):
+    def test_spoken_audio_prototype_selects_both_host_consumers(self) -> None:
+        for path in ("tools/spoken_directions/SpokenAssetEncoder.swift",
+                     "tools/spoken_directions/spoken_audio_decoder.hpp",
+                     "tools/spoken_directions/prepare_pack.py"):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    {"firmware_build": False, "firmware_host": True, "ios": True,
+                     "map_backend": False, "osm": False},
+                    changed_components.classify_paths([path]),
+                )
+
     def test_docs_only_change_skips_product_jobs(self) -> None:
         self.assertEqual(
             {
