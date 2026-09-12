@@ -63,9 +63,9 @@ int main() {
       (1UL << 21));
   static_assert(
       device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION == 20);
-  static_assert(device_capabilities_protocol::WORLD_RADIO_CLIENT_VERSION == 24);
+  static_assert(device_capabilities_protocol::WORLD_RADIO_CLIENT_VERSION == 25);
   static_assert(device_capabilities_protocol::WORLD_RADIO_FEATURE ==
-                (1UL << 26));
+                (1UL << 27));
   static_assert((device_capabilities_protocol::WORLD_RADIO_FEATURE &
                  (device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE |
                   device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE |
