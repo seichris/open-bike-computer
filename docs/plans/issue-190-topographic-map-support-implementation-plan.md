@@ -3,10 +3,13 @@
 ## Planning snapshot
 
 - Issue: [#190 — Add topographic map support to the device and iOS MapKit](https://github.com/seichris/open-bike-computer/issues/190)
-- Baseline: GitHub `origin/main` at `9ef7f09fce0e0d95e349e6ef9c54da137fcff286`
+- Baseline: GitHub `origin/main` at `ce3c5a0cfa1c5bdd428197e71a15d3d3d7973157`, fetched 2026-09-12
+- Previous baseline: `9ef7f09fce0e0d95e349e6ef9c54da137fcff286` (2026-08-31)
 - Planning branch: `plan/issue-190-topographic-maps`
-- Research date: 2026-08-31
-- Status: implementation plan only; no firmware, app, backend, deployment, or device changes are included in this branch
+- Plan PR: [#374](https://github.com/seichris/open-bike-computer/pull/374)
+- Architecture refresh: 2026-09-12; the branch includes the baseline above
+- Provider research date: 2026-08-31; this code-integration refresh does not renew the source terms/access reviews
+- Status: implementation plan only; the PR changes documentation, with no topography implementation or enablement
 
 ## Outcome
 
@@ -32,25 +35,25 @@ This is a durable offline-map capability, not a screenshot or web-tile experimen
 
 ## Current-main baseline
 
-The exact baseline already provides the foundations this feature should extend:
+Renderer formats 1, 2, and 3 still cover legacy vectors, street labels, and street labels plus 3D buildings. FMB v3 has extension sections 1-3; FMB v4 requires section 4 for buildings. Current generation policy, promotion, and app readers still support only renderer formats 1-3. Renderer format 4 / FMB v5, the elevation registry, contours, and the iPhone companion remain proposed work.
 
-- `tools/OSM_Extract/` creates FMB blocks from a pinned Geofabrik/OSM extract;
-- renderer formats 1, 2, and 3 correspond to legacy vector maps, street-label maps, and street-label plus 3D-building maps;
-- FMB v3 introduced canonical extension sections 1-3 for strings, shaped runs, and road labels;
-- FMB v4 added required section 4 for 3D buildings;
-- `map-platform/config/generation-profile-policy-v1.json` exposes signed, feature-versioned generation profiles;
-- the catalog and future R2 design identify maps by renderer, format version, and sorted features rather than by filenames or hard-coded “2D/3D/topographic” flags;
-- the signed Bike Map Stream v1 path validates exact file composition, producer identity, hashes, size ceilings, and reader requirements;
-- the ESP32 has one low-priority, non-LVGL render worker with cancellation checkpoints, latest-job-wins semantics, double buffers, and atomic publication;
-- iOS creates new maps at renderer format 3 and fails closed on unknown format/features; and
-- MapKit already supports Standard, Satellite, Hybrid, and Apple's `ElevationStyle.realistic` presentation.
+The following changes since the original plan affect implementation directly. These are findings from the recorded source revision and checked-in configuration, not fresh deployment or physical-device verification.
 
-Two current behaviors need explicit correction during implementation:
+| Area | Current implementation / evidence | Consequence for this feature |
+| --- | --- | --- |
+| OSM acquisition | [Source cache](../../map-platform/backend/map_platform/source_cache.py), [provider transport](../../map-platform/backend/map_platform/source_http.py), and [OSM.fr fallback contract](../osm-source-fallback.md); #396, #412, #416, #425 | Preserve resumable, checksum-verified acquisition and actual source URL/snapshot provenance. OSM.fr is an OSM/PBF availability fallback, not an elevation provider. |
+| Shared map library | [Catalog](../../map-platform/catalog/src/catalog.ts), [reader validation](../../map-platform/catalog/src/validation.ts), and [production Compose lock](../../map-platform/deploy/compose.yaml); #317, #405, #410, #417 | R2/D1 publication, grants, sharing, retention, generation classes, and development/production visibility already exist. Extend these contracts to companion assets. |
+| Automatic promotion | [Scheduler](../../map-platform/backend/map_platform/automatic_promotion.py), [converter](../../map-platform/backend/map_platform/catalog_promotion.py), and [promotion image contract](../../map-platform/deploy/promotion/README.md); #411, #413, #414, #425 | Development ZIPs can be discovered and converted to production-signed streams. Target 4 needs an explicit eligibility gate and companion promotion before this path accepts it. |
+| Durable map lifecycle | [OfflineMapManager](../../ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift), [JobStore](../../map-platform/backend/map_platform/jobs.py), and [#425 integration](../reviews/pr-425-integration-2026-09-08.md) | Reuse durable background downloads, attempt ownership, Application Support storage, replacement journals, and backend publication intents. Add companion-specific identity and recovery tests. |
+| MapKit route ownership | [MapView](../../ios-app/BikeComputer/BikeComputer/Views/MapView.swift) and [SavedRouteMapPolicy](../../ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift); #429 | Route updates already remove only owned overlays. Integrate terrain with calculated routes, alternatives, saved-route previews, offline area selection, and the existing camera policy. |
+| Firmware camera | [Stable camera contract](../map-stable-camera.md) and [mapCamera.hpp](../../esp32/lib/maps/src/mapCamera.hpp); #407 | Development profiles use accepted-camera projection and reusable decoded scenes; production still uses the legacy path. Contours must support both without implicitly enabling the new camera in production. |
+| Render/storage ownership | [Render scheduler](../firmware-map-render-scheduler.md), [MapRenderJob](../../esp32/lib/maps/src/mapRenderJob.hpp), and [runtime integration](../reviews/pr-424-integration-2026-09-08.md); #424 | Rendering, map-root probing, and activation share the existing worker. Position updates coalesce; semantic changes cancel. Contours must not introduce starvation or a second SD/cache owner. |
+| Benchmark and release evidence | [Renderer benchmark](../renderer-benchmark.md), [gate file](../../esp32/tools/renderer_benchmark_gates.json), and [factory qualification](../firmware-factory-release.md); #344, #368-#373, #384, #400, #401, #438 | Extend window-scoped diagnostics and existing memory/DMA/crypto gates. Qualify both boards and record the actual profile; production boot acceptance uses authenticated evidence rather than diagnostic serial output. |
+| BLE negotiation | [Generated ride contract](../../protocol/ride-ble-contract-v1.json), [capabilities](../../esp32/lib/ble_navigation/device_capabilities_protocol.hpp), and [visibility normalization](../../esp32/lib/ble_navigation/map_profile_protocol.hpp) | Client version is now 23, with CAP2 feature bits 0-25 allocated. New capability allocation must preserve these and stay distinct from the map-visibility mask. |
 
-1. `MapView.swift` removes **all** overlays whenever a route changes or navigation stops. A persistent topographic overlay would disappear. Overlay ownership must become typed so route updates remove only Bicino route overlays.
-2. Its delegate currently renders every `MKPolyline` as the blue route. Topographic content needs its own overlay and renderer types, with a deterministic order below the route.
+MapKit already offers Standard, Satellite, Hybrid, and realistic elevation presentation. Its delegate still treats `MKPolyline` overlays as route content, including separate saved-route/alternative styling. Add a dedicated tile-overlay renderer while retaining those identities, ordering, hit testing, and camera behavior. The original blanket-overlay-removal finding is resolved by #429 and is no longer implementation work.
 
-The topographic work must retain the current renderer worker architecture. DEM decoding, contour loading, clipping, and drawing happen off the LVGL thread and continue to honor the existing cancellation checkpoints.
+All feature phases below remain planned. Merged infrastructure does not mean any part of topographic generation or rendering has shipped. Provider choices and the optional premium boundary remain unchanged pending the dated source reviews and product decisions below.
 
 ## What “topographic” means here
 
@@ -160,6 +163,10 @@ One map pack uses one contour interval policy across its full geometry. A high-d
 
 Source rasters are fetched into a checksum-addressed, read-only elevation cache before jobs use them. User jobs never receive provider credentials and never make arbitrary upstream URLs. The downloader uses a fixed host allowlist, bounded raster dimensions, compressed/uncompressed byte limits, timeouts, checksum verification, and atomic publish into the cache.
 
+Reuse the resource, locking, cancellation, and atomic-publication patterns of `SourceCache`; give DEM adapters their own exact provider-origin policy. `source_http.py` is deliberately restricted to Geofabrik/OSM.fr and must not gain a generic arbitrary-URL escape hatch. Validate the initial URL and every redirect, and keep resume bytes and HTTP validators scoped to the same immutable provider object.
+
+The OSM side keeps its existing fallback eligibility: pinned snapshots do not switch providers, and an unpinned Geofabrik latest extract may use one researched OSM.fr candidate after an eligible availability failure. Matching region names do not prove identical coverage or data. Bind the actual PBF checksum and provenance into the combined build, preserve source-boundary checks, and resolve elevation coverage independently of whichever OSM host supplied the bytes.
+
 ## Product contract
 
 ### Map creation
@@ -204,7 +211,9 @@ Topographic Contours                            On
 
 ### Device controls
 
-Add `MAP_VISIBILITY_CONTOURS` at visibility-mask bit 13 for both Map and Map + Navigation profiles. Add bit 14 as reserved for a later hillshade contract; it must remain zero and hidden until that contract exists.
+Propose `MAP_VISIBILITY_CONTOURS` at map-visibility bit 13 for both Map and Map + Navigation profiles; bits 13-14 are still unallocated in that mask at the recorded baseline. Reserve visibility bit 14 for a later hillshade contract; it remains zero and hidden until that contract exists. This is a different namespace from CAP2 capability bits: CAP2 bit 13 is already GPS-heading support.
+
+Extend `normalizedFeatureVisibilityMask`, effective feature masks, render-job identity, persistence/migration, and iOS mask serialization together so bit 13 is not silently stripped. Preserve the bit-12 extended-visibility marker and current service-road/track compatibility behavior. Recheck allocations before implementing against a later main.
 
 Under the existing **Places & Terrain** settings group, show:
 
@@ -217,7 +226,7 @@ The toggle is capability- and active-map-gated. It can remain persisted while an
 
 ## Premium recommendation
 
-The repository has no StoreKit, RevenueCat, subscription, or premium-entitlement implementation at this baseline. Monetization is therefore a product track, not a boolean added to the map request.
+The app/backend/catalog source at this baseline still has no StoreKit, RevenueCat, subscription, or purchase-entitlement implementation. Existing App Attest, library credentials, and Keychain entitlements are separate from purchase authorization. Monetization remains a product track, not a boolean added to the map request.
 
 Recommended boundary:
 
@@ -228,7 +237,7 @@ Recommended boundary:
 - require an active entitlement for a new generation or a fresh companion download; and
 - charge for Bicino's processing/storage/delivery service, never imply ownership of the underlying public data.
 
-If enabled, use StoreKit 2 and a backend-verified App Store transaction/entitlement. App Attest proves an app installation, not a purchase. The backend must authorize both the job submission and the signed companion download; a client-only `isPremium` value is not authoritative. Apple currently requires in-app purchase to unlock digital app functionality in its [App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/).
+If enabled, use StoreKit 2 and a backend-verified App Store transaction/entitlement. App Attest proves an app installation, not a purchase. The backend authorizes job submission, and the shared catalog must also enforce entitlement when granting/resolving a companion download or a claimed shared map; API-only checks would leave an independent delivery path. A client-only `isPremium` value is not authoritative. Recheck the applicable storefront rules in Apple's [App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/) when specifying the purchase flow.
 
 The premium track also needs restore purchases, Family Sharing policy, grace-period behavior, refund/revocation handling, App Store Server Notifications, review credentials/demo content, privacy disclosures, and localized paywall copy. None of those concerns should leak into the FMB decoder.
 
@@ -238,7 +247,7 @@ If the product decision is to launch contours for free, the same architecture re
 
 ```mermaid
 flowchart LR
-    OSM["Pinned Geofabrik OSM PBF"] --> VEC["Existing vector extraction"]
+    OSM["Verified OSM PBF snapshot + provenance"] --> VEC["Existing vector extraction"]
     REG["Reviewed DEM source registry"] --> CACHE["Checksum-addressed DEM cache"]
     CACHE --> MOSAIC["Datum-normalized buffered mosaic"]
     MOSAIC --> CONTOUR["Canonical contour intermediate"]
@@ -246,16 +255,19 @@ flowchart LR
     CONTOUR --> FMB5
     CONTOUR --> IOSASSET["topography-ios-v1 .btopo tiles"]
     FMB5 --> STREAM["Signed Bike Map Stream v1"]
-    STREAM --> APP["Saved map + BLE transfer"]
-    STREAM --> DEVICE["ESP32 format-4 renderer"]
+    STREAM --> APP["Durable saved map + companion"]
+    APP --> TRANSFER["BLE negotiation + pinned HTTPS upload"]
+    TRANSFER --> DEVICE["ESP32 format-4 renderer"]
     IOSASSET --> APP
     APP --> MAPKIT["Local MKTileOverlay below route"]
-    CAT["Catalog + entitlement policy"] --> APP
+    CAT["R2/D1 catalog + delivery/entitlement policy"] --> APP
     STREAM --> CAT
     IOSASSET --> CAT
 ```
 
 The contour intermediate is job-local and not a public artifact. It records elevation, index/minor classification, source-quality flags, and unclipped line geometry in the normalized working CRS. Both encoders consume those exact lines, style/profile version, and source receipt.
+
+The diagram shows generation and consumption. The existing production promotion path separately validates the development ZIP, converts/signs its device bytes, and publishes through the same catalog. Extend that path to verify and copy the matching companion by receipt; promotion must not rerun DEM acquisition or contour generation.
 
 ## Job and generation-profile contract
 
@@ -277,7 +289,11 @@ Extend a normalized job request with:
 
 Unknown keys, layer orders, profile versions, or client-supplied source IDs fail closed. Renderer format 4 requires this exact object; formats 1-3 reject it.
 
-Add this development generation profile before any production enablement:
+First version the generation-policy contract. `GenerationProfilePolicy.load` currently accepts schema 1 only, requires exactly formats `{1, 2, 3}`, and requires every profile to appear in each channel's global or canary list. Merely appending target 4 to the JSON would prevent startup.
+
+Introduce `generation-profile-policy-v2.json` and an explicit `disabledProfiles` channel list. Global, canary, and disabled lists must be disjoint and together contain every declared profile. Continue accepting the unchanged v1 policy for older deployments. Initially put target 4 in both channels' disabled lists; after reader and gate work, move it to development canary while production stays explicitly disabled. Update startup validation, health policy hashes, image/config packaging, and capability tests together.
+
+The proposed new profile is:
 
 ```json
 {
@@ -287,7 +303,7 @@ Add this development generation profile before any production enablement:
 }
 ```
 
-Feature values remain sorted. Start it in the development channel's canary list, then a bounded allowlist, then global development. Production remains unchanged until physical validation and source/legal gates are complete.
+Use the sorted new feature set in manifests/catalog reader requirements. Preserve existing format-1/2/3 policy identities and behavior; do not reorder old configuration merely to add this profile. Development canary membership is an explicit installation allowlist. Reader support, generation eligibility, production promotion, and catalog delivery are separate gates; adding support to one must not enable the others.
 
 The build exact key and compatibility key must add:
 
@@ -300,6 +316,8 @@ The build exact key and compatibility key must add:
 - iPhone companion encoder version.
 
 A source release, terms-approved source set, datum transform, or algorithm change must never reuse stale bytes.
+
+Keep the catalog's `mapEntryId`/`contentReceipt` and compatibility-class identities authoritative. The legacy display/map-folder ID is not sufficient to distinguish Standard and topographic artifacts. Extend both generated and promoted artifact validation, including `catalog_promotion.py`, catalog publication validation, `OfflineMapReaderCompatibilityPolicy`, and signed-manifest-derived reader requirements in `BikeMapStreamFormat.swift`; those paths independently recognize formats 1-3 today.
 
 ## Terrain preprocessing
 
@@ -319,6 +337,8 @@ Add an additive terrain stage around the existing extraction pipeline rather tha
 12. Delete job scratch data after artifacts and receipts are durably published; retain only the approved source cache and normal build evidence.
 
 Generating contours independently inside each 4,096 m device block is forbidden because it creates edge discontinuities. Likewise, interval selection is map-wide, not block-wide.
+
+Give each expensive terrain subprocess an explicit `CommandExecutionPolicy`, with bounded output, progress, wall/idle limits appropriate to that stage, and cancellation. Current building calibration has a separate policy because it can be quiet for long periods. Contour generation must not accidentally inherit source-index or building-calibration timing, nor weaken the existing generic-geometry failure isolation and retry rules.
 
 ## Device byte contract
 
@@ -376,7 +396,7 @@ Renderer format 4 requires `target.topographyProfileVersion: 1` and a top-level 
 }
 ```
 
-The existing singular `source` object remains the OSM/Geofabrik vector source. DEM provenance belongs in `topography.sources`; do not overload or replace the OSM field.
+The existing singular `source` object remains the vector-source contract. Preserve its actual acquisition receipt, including a qualifying OSM.fr fallback where used; do not relabel fallback bytes as a Geofabrik snapshot. DEM provenance belongs in `topography.sources`, without replacing the OSM field. Update catalog promotion's source/attribution consistency checks for the additional DEM notices.
 
 `ATTRIBUTION.txt`, `LICENSES/`, catalog metadata, saved-map details, and sharing pages include every contributing elevation source's exact required notice and disclaimer. The firmware needs only bounded display metadata and validation counts; full license text stays in the archive/app.
 
@@ -395,13 +415,27 @@ Generate a separate content-addressed `topography-ios-v1` artifact with a `.btop
 
 The initial zoom range is a checked-in profile value, provisionally z9-z16. Phase 0 benchmarks can change it before the schema is shipped. Once shipped, a changed zoom/style contract gets a new companion profile version.
 
-The companion has its own byte ceiling, SHA-256, source receipt, retention record, and short-lived authorized download URL. It is linked to the device map by map ID plus the same topography intermediate receipt, but it is not included in Bike Map Stream and is never transferred over BLE.
+The companion has its own byte ceiling, SHA-256, source receipt, retention record, and short-lived authorized download URL. Link it to the exact catalog map entry/content receipt and the same topography intermediate receipt, rather than only the legacy map-folder ID. Bind its digest/length/profile to authenticated publication metadata and a verifiable offline receipt before use. It is excluded from Bike Map Stream and device transfer over HTTPS.
+
+### Durable download and local publication
+
+Extend the existing lifecycle instead of adding a second download manager:
+
+- `DurableMapDownloadCoordinator` owns catalog/job background downloads by immutable digest/length and transport constraints. Route companion downloads through it, preserving per-attempt UUIDs, waiter cancellation identity, renewed-URL handling, and rejection of callbacks from superseded attempts.
+- Store completed companions in the existing backup-excluded Application Support map storage. Only disposable decoded tiles/previews belong in Caches. Preserve the legacy-map migration and recovery directory.
+- `SavedMapReplacementJournal` currently commits an artifact/metadata pair. Add a versioned companion association transaction, or a companion-specific journal with the same durable commit/rollback rules. Never attach a newly downloaded companion to old device bytes merely because their filenames match.
+- Stage and validate complete bytes before publishing the association. A companion failure leaves the previously verified companion and device map usable; first-time absence is an explicit unavailable state. Recovery and deletion must be idempotent and respect active download/read leases.
+- Preserve `SavedMapListScope`: an unpromoted development-only map belongs in Developer Settings in the production app. Companion availability must not reintroduce it into ordinary Saved Maps. Extend the existing ZIP/BMAP freshness policy without treating a missing `.btopo` as proof that the device map is stale.
+
+Companion schema/receipt validation remains distinct from FMB stream validation. Background download completion does not prove that SQLite content, source binding, or reader compatibility passed. Real iOS suspension/relaunch, grant expiry, storage exhaustion, and force-quit behavior remain platform qualification items.
 
 ### MapKit
 
 Implement a `BicinoTopographyTileOverlay` subclass of [`MKTileOverlay`](https://developer.apple.com/documentation/mapkit/mktileoverlay). Apple's API supports asynchronous custom tile loading from local or remote data through [`loadTile(at:result:)`](https://developer.apple.com/documentation/mapkit/mktileoverlay/loadtile%28at%3Aresult%3A%29). The implementation reads `.btopo` through a serialized, read-only store and returns transparent PNG data. Set `canReplaceMapContent = false` so Apple remains the base map.
 
-Add the contour overlay at `.aboveRoads` and keep the Bicino route above it. Use explicit overlay classes and indexed insertion rather than relying on append order; MapKit provides level-aware overlay insertion and relative ordering. Route changes remove only the previous route overlay, not every overlay.
+Add the contour overlay at `.aboveRoads`, below every calculated route, alternative, and saved-route polyline, with a dedicated `MKTileOverlayRenderer`. Use [level-aware indexed insertion](https://developer.apple.com/documentation/mapkit/mkmapview/insertoverlay%28_%3Aat%3Alevel%3A%29) when adding or replacing a companion so late terrain arrival cannot cover an existing route. Preserve `installRouteOverlays`, `removeSavedRouteOverlay`, and the selected-alternative remove/reinsert behavior; they already manage only their owned overlays.
+
+Keep terrain orthogonal to `SavedRouteMapPolicy`'s navigation/calculated/saved-route precedence and one-time camera fit. It must survive route clearing, saved-route expiry/deselection, and route calculation without recentering the map or becoming a hit-test candidate. Offline-area selection may suppress a saved-route preview under the existing rule without deleting terrain. Maintain the existing WGS-84 route identity and main-map preview flow from #429.
 
 MapKit work must also:
 
@@ -419,6 +453,12 @@ The existing WGS84-to-GCJ-02 behavior requires a release gate. Test a known cont
 ## ESP32 rendering
 
 Add a bounded `mapContourBlock` decoder/index and contour draw stage to the existing render worker.
+
+Use the current semantic-epoch/backpressure model: map-root, style, projection, and navigation-session changes invalidate incompatible work; ordinary position/route-window updates coalesce so a useful render can finish. A strict "cancel on every newer sequence" rule would starve dense contour scenes. Publication must pass the existing semantic, coverage, dimension, and accepted-camera checks.
+
+The development-only `MAP_STABLE_CAMERA` path reuses decoded scenes and projects live route/marker content against the accepted camera. Add contours to the worker-owned scene and invalidate their cache with its map-root/scene lease; use the same camera projection as roads. Keep the production legacy path working while stable-camera production qualification is pending. Do not add a second full-screen terrain buffer or rotate a completed perspective frame to simulate a new camera.
+
+Map-root probe/activation work remains a control job on that same worker, with UI completion through its mailbox. Control jobs honor shutdown but are not cancelled by ordinary camera/style supersession. Preserve enqueue retry, failed-probe redraw, late-exit recovery, and quiescence before resizing persistent buffers. Terrain must not reintroduce UI-thread SD traversal or call into an independent block loader during activation.
 
 Render order is:
 
@@ -440,14 +480,14 @@ Contour code must:
 - reuse bounded PSRAM workspaces rather than allocate per segment;
 - clip before drawing and avoid artificial block-edge segments;
 - include style/profile and visibility bits in render-job hashing;
-- report corrupt, suppressed, admitted, and rendered counts through renderer diagnostics; and
-- publish only a complete frame for the latest job.
+- report corrupt, suppressed, admitted, and rendered counts through renderer diagnostics scoped to the captured window ID; and
+- publish only complete, still-compatible frames under the existing coalescing policy.
 
 Use muted brown minor lines and a darker/thicker index line, with day/night palette values in the checked-in style profile. Exact colors and widths are accepted from real-device captures, not an iPhone screenshot alone.
 
 ## BLE capability, status, and settings
 
-Extend `protocol/ride-ble-contract-v1.json`, regenerate Swift/C++ constants, and advance the client capability version. Add a capability bit for renderer-format-4/topographic-contour support rather than inferring support from firmware text.
+Extend `protocol/ride-ble-contract-v1.json`, regenerate Swift/C++ constants, and advance the client capability version from the current 23. At this baseline, CAP2 bit 26 and client version 24 are the next candidates; reserve them only after rechecking the current contract at implementation time. Never overwrite the existing orientation or Watch-motion capabilities, and do not confuse CAP2 bit numbers with visibility-mask bits. The new capability denotes implemented renderer-format-4/topographic-contour support, not firmware text or a successful HTTPS connection.
 
 Update the active-map status contract to report at least:
 
@@ -459,6 +499,8 @@ Update the active-map status contract to report at least:
 - whether the active map actually contains contours.
 
 `BLEManager.swift` exposes `supportsTopographicContours` and active-map health. Settings writes continue through the existing map visibility masks. A toggle is enabled only when the BLE capability, active renderer format, and active-map health agree.
+
+Keep format rejection in `MapInstallProtocolSelector` distinct from trust, producer, app-reader, and transport failures. Existing compatibility-error classification must explain why a map cannot install without retrying an unsupported format as a Wi-Fi failure. Development-signed maps require Bicino Dev and firmware that explicitly includes development trust (currently opt-in remote-debug profiles); ordinary and production firmware remain production-trust-only. No new signing bypass is implied by contour support.
 
 ## Backend, catalog, and operations
 
@@ -476,11 +518,15 @@ Add focused modules rather than growing target-3 building logic into a generic c
 
 Pin GDAL/PROJ and every required transformation grid in the worker image. Add them to the immutable producer build identity and software bill of materials. A host library found outside the container must not change production results.
 
+`map_stream_build_identity.py` currently hashes backend code/config and OSM extraction inputs, but not the whole top-level `map-platform/config/` directory. Explicitly include the terrain algorithm/style and source-policy inputs (and their hash-bound grids/data receipts); do not assume placing a policy there makes it part of the producer identity. Keep mutable rollout/approval control files separate. Requalify the converter image when terrain validation/conversion changes: the existing scheduler-only image preserves its qualified `/app` tree and cannot carry such a converter change under the old producer identity.
+
 ### Job lifecycle
 
 Add progress phases for source resolution, elevation staging, terrain normalization, contour generation, device encoding, and iPhone companion encoding. Preparation estimates and admission control include DEM bytes, expected contour density, output bytes, CPU, scratch space, and companion tile count.
 
 Reject impossible jobs before expensive processing. Existing user cancellation, retry, retention, and terminal-state semantics apply to both outputs. A device artifact can be ready while a companion fails only if the catalog represents that partial state honestly and the UI offers retry; it must never claim “iPhone + Bicino” when only one output exists.
+
+Extend `JobStore`'s durable pending-write intent and serialized index-repair path for terrain state and companion receipts. Crash/retry recovery must repair before idempotency/admission lookup and must never publish a second generation for the same request because one index lagged. Persist both output outcomes before reporting complete readiness; preserve independent retry without changing the canonical contour identity. Any incompatible journal/index migration needs a coordinated writer upgrade, as documented for #425.
 
 ### Catalog
 
@@ -493,7 +539,17 @@ Extend exact feature maps everywhere currently hard-coded to formats 1-3:
 - aliases/reuse include the full topography identity; and
 - storage stays format-agnostic, without `is_topographic` database columns or filename inference.
 
-The companion artifact is related to the same catalog map entry but has its own immutable identity and retention lease. Sharing a map includes its contour description and attribution. Shared companion access follows the existing owner/share authorization model and premium policy; possession of an object key is not authority.
+The companion artifact is related to the same catalog map entry but has its own immutable identity and retention lease. The current final-artifact publication/readers understand ZIP and Bike Map Stream semantics; add explicit companion-role/schema validation and an iPhone companion reader contract instead of pretending a `.btopo` is a firmware-installable stream. Update publication, grants, R2 byte/hash verification, generation-class selection, and retention together. Preserve the existing 16-class bound and transactional supersession; device and companion heads must not supersede one another.
+
+Sharing a map includes its contour description and attribution. Shared companion access follows the existing owner/share authorization model and premium policy; possession of an object key is not authority. Preserve development/production library scopes and the current preview-based sharing flow. Older clients must still list/download supported Standard artifacts and ignore unsupported companion roles without a decoder crash.
+
+### Promotion and delivery gates
+
+Automatic promotion is already configured separately from map generation. `listPromotionCandidates` discovers eligible development ZIPs; `promote-catalog-map` then checks exact receipts and currently rejects any feature set outside formats 1-3. Do not remove that rejection until a format-4 promotion policy is enforced at discovery, grant/conversion, and final publication, including manual CLI entry. Reader support alone is not approval to promote a source or profile.
+
+For an approved topo map, promotion must verify the development device ZIP and companion's matching intermediate/source-policy receipts, validate both formats, and publish the production stream plus verified companion under the proper production ownership and retention leases. Copy the immutable companion bytes; do not regenerate DEM/contours or claim a device-only promotion has complete iPhone content. Retry of partial publication must be idempotent and cannot silently pair a newer companion with an older map.
+
+Add target/profile-scoped delivery eligibility to both backend and catalog paths before development canary publication. Catalog library/share grants and bearer resolution need the same format-4 policy and, if selected, entitlement checks. The current global `MAP_DELIVERY_ENABLED` protects all map delivery; disabling only backend rollout does not stop catalog downloads. Add a topo-specific incident control that leaves Standard delivery available, while retaining the existing global shutdown for broader incidents. Already issued R2 URLs can remain valid for their bounded lifetime; neither switch revokes downloaded/offline bytes.
 
 ### Observability
 
@@ -531,6 +587,8 @@ If it changes device bytes, use renderer format 5 / FMB v6 with a sixth required
 
 ## Implementation phases
 
+These are future implementation slices, based on the refreshed source above. Phase 1's profile/promotion/delivery gates must land before any Phase 2 development publication can become an automatic production-promotion candidate. Existing format-3 infrastructure is reused; none of these topo phases is marked complete by this planning PR.
+
 ### Phase 0 — Evidence and source approval
 
 1. Check in the source-policy schema and review template.
@@ -541,57 +599,61 @@ If it changes device bytes, use renderer format 5 / FMB v6 with a sixth required
 6. Validate MapKit overlay ordering, tilt, scale-1/scale-2 tiles, offline behavior, and mainland-China alignment.
 7. Choose the production zoom range and checked-in device/companion budgets from evidence.
 8. Decide whether the first public release is premium. If yes, approve the StoreKit product and entitlement contract before implementation reaches production paths.
+9. Record the current format/capability allocations, source-policy hashing boundary, converter/promotion image split, and saved-map journal schema. Confirm a target-4 experiment cannot be auto-promoted by adding a reader feature alone.
 
 Exit only when the global baseline and at least one regional override pass the gate, sample outputs are reproducible, and no unresolved MapKit/geography issue is being called “global.”
 
 ### Phase 1 — Contracts and fail-closed readers
 
-1. Add renderer format 4, FMB v5 section 5, manifest topography metadata, exact feature maps, and golden vectors.
-2. Add source/topography identity schemas and fixtures.
-3. Update backend, Swift, and C++ readers to reject malformed/unknown target-4 artifacts.
-4. Add capability/status/settings protocol fields and regenerate both languages.
-5. Keep format-4 generation disabled.
+1. Add generation-policy v2 with explicit disabled profiles; retain v1 behavior and keep target 4 disabled in both channels.
+2. Define renderer format 4, FMB v5 section 5, manifest topography metadata, companion role/reader/receipt contracts, and golden vectors.
+3. Add source/topography identity schemas and producer-input hashing; update backend, catalog, promotion, Swift, and C++ validation together.
+4. Add capability/status/settings protocol fields and regenerate both languages, including visibility normalization/persistence tests.
+5. Implement target-4 promotion and backend/catalog delivery gates with denied-path tests, including direct/manual promotion and existing grant resolution.
+6. Keep generation disabled until the development reader, source, and publication contracts can all be exercised together.
 
 ### Phase 2 — Backend generation
 
 1. Implement source registry/cache and global baseline adapter.
 2. Implement normalized mosaic, filtering, contour generation, seam-safe block clipping, and statistics.
 3. Encode/validate FMB v5 and `.btopo` from one intermediate.
-4. Extend admission, progress, reuse, manifest, packaging, catalog, retention, sharing, and monitoring.
+4. Extend admission, progress, durable job intents, reuse, manifest, packaging, catalog, retention, sharing, and monitoring.
 5. Add the first regional adapter only after its independent source review.
-6. Enable development canary generation for selected installations.
+6. Enable development canary generation for selected installations while target-4 production promotion and delivery remain disabled. Exercise the real ZIP/stream/companion publication path and resumable partial outcomes.
 
 ### Phase 3 — Firmware
 
 1. Implement FMB v5 validation/decoder and contour block cache.
-2. Add renderer stage, visibility bit, style profiles, suppression, diagnostics, and active-map health.
-3. Add host tests/fuzz fixtures and build both Waveshare environments.
+2. Add renderer stage, visibility bit, style profiles, suppression, window-scoped diagnostics, and active-map health to the existing worker/scene/control-job ownership model.
+3. Add host tests/fuzz fixtures for coalescing, activation/rollback, both camera paths, and resumed SD-byte verification. Build ordinary and production profiles for both boards and check linked firmware size as well as runtime memory.
 4. Transfer and validate signed development artifacts on each physical target only under the normal device-confirmation workflow.
 
 ### Phase 4 — iOS and MapKit
 
 1. Add topographic job selection, estimates, compatibility, saved-map metadata, and attribution.
-2. Download, verify, retain, recover, and delete `.btopo` as a separate companion artifact.
-3. Implement the local tile overlay/cache and typed overlay ownership.
+2. Extend durable downloads and journaled Application Support storage to verify, retain, recover, and delete `.btopo` and its exact map association.
+3. Implement the local tile overlay/cache within the existing route-overlay ownership, saved-route preview, alternative selection, and camera policy.
 4. Add iPhone and device settings with accurate unavailable states.
-5. Exercise route changes, navigation start/stop, backgrounding, memory pressure, offline launch, overlapping maps, and corrupt companions.
+5. Exercise route changes, saved-route selection/expiry, navigation start/stop, offline area selection, background recovery, late callbacks, memory pressure, offline launch, overlapping maps, and corrupt companions.
 
 ### Phase 5 — Premium track, if selected
 
 1. Configure StoreKit 2 product/subscription metadata.
 2. Add purchase, restore, current-entitlement, transaction-update, and revocation handling.
 3. Add backend App Store transaction verification and server notifications.
-4. Gate job and companion authorization while preserving local installed-map use.
+4. Gate job and companion authorization in both backend and catalog/share paths while preserving local installed-map use.
 5. Add App Review notes/demo path, localized disclosure, privacy updates, and support/runbook material.
 
 ### Phase 6 — Canary and production rollout
 
 1. Retain renderer format 4 in development canary until all source, app, backend, and hardware gates pass.
 2. Expand by installation allowlist, then development global profile.
-3. Promote an exact signed worker image/source-policy combination.
-4. Add a small production canary; monitor generation, download, install, render, and entitlement metrics.
+3. Qualify the exact worker and production converter images, source policy, app reader, and firmware profiles. Promote through the existing digest-pinned deployment workflow; scheduler-only changes do not authorize a changed converter identity.
+4. Enable a small production cohort in both promotion and backend/catalog delivery. Verify matching device and companion receipts end to end; monitor generation, publication, download, install, render, and entitlement metrics.
 5. Expand regional adapters independently. A failing regional adapter falls back only if the manifest truthfully records that fallback and quality tier.
-6. Preserve a one-switch kill path for new format-4 generation/download. Already installed maps continue offline.
+6. Exercise coordinated target-4 generation, promotion, and catalog-delivery shutdown, including queued/manual promotions and already-issued grants. Document the bounded lifetime of R2 URLs. Already installed maps continue offline.
+
+Topography acceptance must include its own recorded source, artifact, and both-board evidence. Existing stream hardware requirements permit an optional matrix, and the general renderer gate measures buildings; neither is proof of contour acceptance. Add an explicit format-4 gate without silently changing existing format-1/2/3 approvals or declaring pending stable-camera qualification complete.
 
 ## Verification matrix
 
@@ -599,6 +661,7 @@ Exit only when the global baseline and at least one regional override pass the g
 
 - registry rejects unknown keys, duplicate priorities, invalid polygons, missing terms, non-commercial sources, and ambiguous datum/units;
 - URL allowlist, redirect, timeout, decompression, dimension, checksum, and atomic-cache tests;
+- preserve Geofabrik/OSM.fr pinned-source and fallback rules; no cross-provider resume bytes/validators, and a fallback changes the recorded OSM receipt rather than elevation coverage;
 - fixed DEM fixtures for DTM, DSM, mixed source, void, water, negative elevation, very high elevation, and datum conversion;
 - byte-identical outputs across repeated runs, worker counts, input tile order, and cache hit/miss;
 - adjacent-block contour endpoints and classifications match exactly;
@@ -608,26 +671,37 @@ Exit only when the global baseline and at least one regional override pass the g
 - existing renderer-format-1/2/3 golden outputs remain unchanged; and
 - oversize estimates and actual limits fail before artifact publication.
 
+Inject interruption between backend canonical-job and each derived-index update with both output states present. Recovery must retain idempotency and the correct device/companion readiness. Exercise terrain subprocess cancellation/timeouts, scratch admission, and failed publication without relaxing current building/generic-geometry limits.
+
 ### Binary, manifest, and catalog
 
 - shared Python/Swift/C++ golden vectors for valid format 4 / FMB v5;
 - truncation, CRC, length, count, ordering, reserved-bit, overflow, path, hash, and signature rejection;
 - format 4 requires exactly the target-4 feature/profile/topography contract;
+- generation-policy v1 remains valid; v2 rejects overlapping/missing channel assignments and never advertises a disabled profile;
 - formats 1-3 reject topography-only fields where they would create an ambiguous target;
 - old readers reject format 4 cleanly and keep the active map;
 - stable identity changes for every source/profile/algorithm change and stays stable for equivalent requests;
-- catalog, promotion, sharing, retention, and reader compatibility all agree on exact features; and
-- device stream excludes `.btopo`, while the companion catalog link binds the same intermediate receipt.
+- catalog, promotion, sharing, retention, and reader compatibility all agree on exact features;
+- device stream excludes `.btopo`, while the companion catalog link binds the exact content/intermediate receipts;
+- promotion discovery, direct CLI/grants, conversion, and final publication reject unapproved target-4 content even when a reader supports it;
+- approved promotion validates both outputs without refetching OSM/DEM, handles lost finalize responses/partial retry, and retains matching attribution;
+- device/companion generation classes, leases, and the 16-class bound prevent cross-role replacement or deletion while in use; and
+- catalog grant creation and resolution enforce delivery/entitlement independently of backend rollout, including previously issued library/share grants.
 
 ### iOS
 
 - `.btopo` schema/hash/tile validation, corrupt/missing tile behavior, cache eviction, and recovery;
-- contour overlay survives route replacement and navigation stop;
+- contour overlay survives route replacement, navigation stop, saved-route expiry/deselection, offline-area selection, and alternative-route reselection;
 - route renderer never mistakes contour content for the blue route;
-- overlay stays below route/markers and remains readable on Standard, Satellite, Hybrid, flat, and realistic elevation modes;
+- late companion arrival stays below every route/marker and remains readable on Standard, Satellite, Hybrid, flat, and realistic elevation modes;
+- terrain replacement never changes saved-route identity, hit-test selection, one-time camera fitting, or free-pan ownership;
 - airplane-mode use after a completed download;
 - memory-pressure and rapid pan/zoom cancellation without main-thread file I/O;
 - overlapping companion selection is deterministic;
+- attempt A cancellation or late delegate callbacks cannot replace/delete attempt B's verified companion, including renewed URL and changed-host-policy cases;
+- process death at each journal boundary recovers an old or new valid artifact/metadata/association; storage pressure never treats downloaded companions as disposable tiles;
+- missing companions are shown independently of ZIP/BMAP freshness; unpromoted development maps remain in Developer Settings;
 - entitlement allowed/expired/revoked/offline/restore states, if premium;
 - attribution accessible from the map and saved-map details; and
 - coordinate alignment control points inside and outside mainland China.
@@ -637,25 +711,31 @@ Exit only when the global baseline and at least one regional override pass the g
 - FMB v1-v5 parser/validator compatibility and fuzz corpus;
 - zero-contour, maximum-density, corrupt, source-boundary, and cross-block fixtures;
 - cancellation during decode, admission, projection, clipping, and drawing;
-- latest-job-wins and atomic frame publication under rapid pan/zoom/navigation changes;
+- position coalescing makes forward progress under rapid GPS/route-window updates; semantic invalidation and atomic publication reject incompatible frames;
+- contours share roads' accepted-camera projection and scene lease, with both `MAP_STABLE_CAMERA` paths tested independently;
+- control-job activation/probe/rollback, failed-probe redraw, worker resize/quiescence, and resumed SD-prefix rehash/compare retain the current ownership and recovery contract;
 - deterministic density suppression retains index contours before minor contours;
 - visibility masks and persistence for Map and Map + Navigation;
-- capability/status/settings round trips; and
+- capability/status/settings round trips without stripping contour bits or clobbering current CAP2 bits; and
 - no LVGL call from the worker and no unbounded render-path allocation.
 
 ### Physical acceptance
 
-Test the 1.75-inch and 2.06-inch Waveshare boards separately with the exact signed artifact and recorded firmware SHA.
+Test the 1.75-inch and 2.06-inch Waveshare boards separately with the exact signed artifact, app identity, firmware SHA, and firmware profile. Keep development-trust/remote-debug evidence separate from ordinary and production evidence. Production boot confirmation follows the authenticated `boot/acceptance` and `verify_firmware_boot_acceptance.py` path in the [factory qualification guide](../firmware-factory-release.md); serial `BOOT_META` describes diagnostic-profile bytes only.
 
 - build, upload, boot, SD initialization, map transfer, activation, reboot persistence, and rollback;
 - mountainous, flat, urban/DSM-noise, regional/global boundary, and maximum-admitted packs;
 - day/night colors, flat/bird's-eye views, Map/Map + Navigation profiles, and contour toggle;
 - route/maneuver/marker readability over the densest accepted contour scene;
-- pan, pinch, heading, navigation start/stop, reroute, BLE transfer, and worker cancellation stress;
-- renderer diagnostic capture for block decode, contour admission/draw, frame completion, PSRAM high-water, and SD I/O;
+- pan, pinch, heading, navigation start/stop, reroute, BLE control/HTTPS transfer, and worker cancellation stress;
+- extend the existing secure iPhone benchmark controller and fixture validator for format 4, capturing block decode, contour admission/draw, frame completion, PSRAM/DMA/internal-RAM headroom, SD I/O, and accepted-camera metadata;
+- compare contours on/off with the same topographic map receipt, board/profile, and route in separate identified diagnostic windows; retain the existing format-3 regression run separately;
+- reject stale/cross-window or incomplete checkpoint evidence, and preserve existing memory, crypto, UI/flush, and route-freshness thresholds. Add contour density/seam acceptance independently of the building-reach ranking;
 - no watchdog reset, incomplete frame, black screen, corrupt active map, or regression in touch/route responsiveness;
 - UI input latency p95 no worse than 10% from the same-map contour-off baseline and no new stall above 50 ms; and
 - battery/power comparison long enough to detect sustained hill/contour rendering cost.
+
+Account for remote HTTPS capture overhead and confirm performance through the supported ordinary-profile BLE metrics path with a production-trusted map. Stable-camera lag targets and its production-disabled status remain governed by its own qualification. Runtime gates do not replace linked-image/OTA partition-size checks for both ordinary and production firmware; recent runtime work already required size remediation.
 
 Physical evidence from one board does not validate the other. Simulator, host, CI, and iPhone evidence do not substitute for either device.
 
@@ -664,9 +744,9 @@ Physical evidence from one board does not validate the other. Simulator, host, C
 Rollback is layered:
 
 1. Disable the affected regional source adapter; new jobs use the next reviewed source and a different identity.
-2. Disable target-4 generation in development/production policy.
-3. Stop issuing new companion URLs while preserving immutable retained bytes for investigation.
-4. Remove format 4 from compatible catalog responses without deleting user Standard maps.
+2. Disable target-4 generation and its automatic/manual promotion eligibility in development/production policy; reject queued work at execution as well as discovery.
+3. Disable target-4 backend and catalog delivery, including new companion grants and resolution of previously issued catalog grants. Use the existing global `MAP_DELIVERY_ENABLED=0` and stop automatic promotion only when the incident affects all maps.
+4. Remove format 4 from compatible catalog responses without deleting user Standard maps or mutating retained immutable bytes. Previously issued R2 URLs may work for their bounded lifetime; local/downloaded maps are not remotely revoked by these controls.
 5. Ship an app-side overlay kill switch for a MapKit-only rendering defect.
 6. If firmware rendering is unsafe, default the contour visibility bit off or ship a firmware fix; the atomic installer preserves the prior active map when a new artifact is invalid.
 
@@ -680,11 +760,11 @@ Issue #190 is complete only when:
 2. rectangle, polygon, and route-corridor jobs deterministically produce contour artifacts;
 3. renderer format 4 / FMB v5 and its signed manifest are documented, golden-tested, and backward compatible;
 4. the ESP32 renders contours below navigation content with bounded memory/time and independent visibility;
-5. MapKit renders the matching selected-area companion offline without losing routes or misrepresenting Apple's 3D Terrain setting;
+5. MapKit renders the matching selected-area companion offline through durable storage and download recovery, preserving routes, saved-route previews, camera ownership, and Apple's separate 3D Terrain setting;
 6. provenance, source quality, required attribution, and disclaimers survive generation, catalog, download, archive, map details, and sharing;
 7. compatibility, active-map health, settings, and failure states are truthful;
 8. both Waveshare targets and representative iPhones pass the physical matrix on exact artifacts/SHAs;
-9. production canary monitoring and rollback are exercised;
+9. production promotion binds both artifacts correctly, and coordinated backend/catalog/promotion canary monitoring and rollback are exercised;
 10. unsupported countries/MapKit coordinate cases are suppressed or accurately disclosed rather than called global; and
 11. if premium, StoreKit/backend entitlement, restore/revocation, App Review, and expired-local-map behavior are complete.
 
