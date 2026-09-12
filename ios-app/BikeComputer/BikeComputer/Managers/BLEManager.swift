@@ -1140,6 +1140,16 @@ class BLEManager: NSObject, ObservableObject {
     private var settingsCharacteristic: CBCharacteristic?
     private var workoutTelemetryCharacteristic: CBCharacteristic?
     private var rideAutomationCharacteristic: CBCharacteristic?
+    private var spokenDirectionsCharacteristic: CBCharacteristic?
+    private let spokenDirectionsCharacteristicUUID = CBUUID(string: RideBLEGeneratedProtocolV1.spokenDirectionsUUID)
+    private var spokenDirectionsCapabilityFlags: UInt32 = 0
+
+    var spokenDirectionsConnectionGeneration: UInt64 { rideDeliveryConnectionGeneration }
+    var isSpokenDirectionsReady: Bool {
+        isConnected && isNavigationReady && hasReceivedDeviceCapabilities &&
+        supportsRideDeliveryAcknowledgement && spokenDirectionsCharacteristic != nil &&
+        spokenDirectionsCapabilityFlags & RideBLEGeneratedProtocolV1.residentSpokenPromptsFeature != 0
+    }
     private var workoutTelemetryWriteEndpointForTesting: WorkoutTelemetryWriteEndpoint?
     var workoutMotionUptime = { ProcessInfo.processInfo.systemUptime }
     private var deviceInformation: [CBUUID: String] = [:]
@@ -4288,6 +4298,64 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    /// Speech shares the single ATT/application-ACK writer. The caller owns
+    /// lifecycle fencing and absolute deadlines; preparePayload runs again at
+    /// every physical dispatch, including retries, before protected framing.
+    @discardableResult
+    func sendSpokenDirectionsCommand(
+        commandType: RideBLEApplicationCommandTypeV1,
+        payload: Data,
+        preparePayload: @escaping () -> Data?,
+        completion: @escaping (Bool) -> Void
+    ) -> Bool {
+        guard commandType == .spokenRouteControl || commandType == .spokenCue,
+              isSpokenDirectionsReady,
+              let peripheral = connectedPeripheral,
+              let characteristic = spokenDirectionsCharacteristic,
+              let writeType = preferredWriteType(for: characteristic) else { return false }
+        let connection = rideDeliveryConnectionGeneration
+        let expectsResponse = writeType == .withResponse
+        return enqueueAcknowledgedRideApplicationGroup(
+            commandType: commandType, payloads: [payload],
+            completionHandlers: [{ completion(true) }],
+            dropHandlers: [{ completion(false) }],
+            failureHandlers: [{ completion(false) }]
+        ) { [weak self, weak peripheral, weak characteristic] _, wrapped, commandID, onDispatch, onDrop, onFailure in
+            guard let self, let peripheral, let characteristic,
+                  let envelope = RideBLEApplicationCommandEnvelopeV1.decode(wrapped),
+                  wrapped.count + AuthenticatedBLEWriteSession.frameOverhead <=
+                    peripheral.maximumWriteValueLength(for: writeType) else { return nil }
+            return NavigationWrite(
+                data: wrapped, label: "spoken directions command",
+                prepareData: { [weak self, weak peripheral] in
+                    guard let self, let peripheral, self.isSpokenDirectionsReady,
+                          self.rideDeliveryConnectionGeneration == connection,
+                          let fresh = preparePayload(), fresh.count == payload.count,
+                          let encoded = RideBLEApplicationCommandEnvelopeV1(
+                            commandType: envelope.commandType, memberIndex: envelope.memberIndex,
+                            memberCount: envelope.memberCount, commandID: envelope.commandID,
+                            stateGeneration: envelope.stateGeneration, payload: fresh).encoded(),
+                          encoded.count + AuthenticatedBLEWriteSession.frameOverhead <=
+                            peripheral.maximumWriteValueLength(for: writeType) else { return nil }
+                    return encoded
+                },
+                transportWrite: { [weak self, weak peripheral, weak characteristic] bytes in
+                    guard let self, let peripheral, let characteristic else { return }
+                    self.writeDeviceData(bytes, to: characteristic, on: peripheral, type: writeType)
+                },
+                onWrite: onDispatch, onDrop: onDrop, onWriteFailure: onFailure,
+                transportCanSend: { [weak self, weak peripheral] in
+                    guard let self, let peripheral else { return false }
+                    return expectsResponse ? !self.writeWithResponseInFlight : peripheral.canSendWriteWithoutResponse
+                },
+                transportExpectsWriteResponse: expectsResponse,
+                transportCharacteristicUUIDString: characteristic.uuid.uuidString,
+                applicationCommandID: commandID, writeClass: .spokenControl,
+                coalescingKey: "spoken-\(commandID.uuidString.lowercased())"
+            )
+        }
+    }
+
     private func enqueueAcknowledgedRideApplicationGroup(
         commandType: RideBLEApplicationCommandTypeV1,
         payloads: [Data],
@@ -6051,6 +6119,8 @@ class BLEManager: NSObject, ObservableObject {
         settingsCharacteristic = nil
         workoutTelemetryCharacteristic = nil
         rideAutomationCharacteristic = nil
+        spokenDirectionsCharacteristic = nil
+        spokenDirectionsCapabilityFlags = 0
         navigationWriteEndpoint = nil
         isNavigationReady = false
         deviceGPSOverrideToken = nil
@@ -6126,6 +6196,8 @@ class BLEManager: NSObject, ObservableObject {
         settingsCharacteristic = nil
         workoutTelemetryCharacteristic = nil
         rideAutomationCharacteristic = nil
+        spokenDirectionsCharacteristic = nil
+        spokenDirectionsCapabilityFlags = 0
         navigationWriteEndpoint = nil
         isNavigationReady = false
         deviceGPSOverrideToken = nil
@@ -8522,10 +8594,10 @@ class BLEManager: NSObject, ObservableObject {
         if owner == .authentication { return .authentication }
         if applicationCommandID != nil { return .criticalApplication }
         switch writeClass {
-        case .transfer, .settingsControl: return .transferControl
+        case .transfer, .settingsControl, .spokenControl: return .transferControl
         case .navigationSnapshot, .gpsPosition, .route,
              .workoutTelemetry: return .replaceableSnapshot
-        case .other: return .other
+        case .spokenBulk, .other: return .other
         }
     }
 
@@ -8547,6 +8619,7 @@ class BLEManager: NSObject, ObservableObject {
         if uuid == settingsCharacteristicUUID { return .settings }
         if uuid == workoutTelemetryCharacteristicUUID { return .workout }
         if uuid == rideAutomationCharacteristicUUID { return .rideAutomation }
+        if uuid == spokenDirectionsCharacteristicUUID { return .spokenDirections }
         return nil
     }
 
@@ -8582,6 +8655,8 @@ class BLEManager: NSObject, ObservableObject {
 }
 
 // MARK: - CBCentralManagerDelegate
+
+extension BLEManager: SpokenDirectionsTransportV1 {}
 
 extension BLEManager: @preconcurrency CBCentralManagerDelegate {
 
@@ -8935,6 +9010,8 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         settingsCharacteristic = nil
         workoutTelemetryCharacteristic = nil
         rideAutomationCharacteristic = nil
+        spokenDirectionsCharacteristic = nil
+        spokenDirectionsCapabilityFlags = 0
         navigationWriteEndpoint = nil
         isNavigationReady = false
         deviceGPSOverrideToken = nil
@@ -9213,6 +9290,13 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                     continue
                 }
                 rideAutomationCharacteristic = characteristic
+                if characteristic.properties.contains(.notify) {
+                    peripheral.setNotifyValue(true, for: characteristic)
+                }
+            }
+            if characteristic.uuid == spokenDirectionsCharacteristicUUID,
+               preferredWriteType(for: characteristic) != nil {
+                spokenDirectionsCharacteristic = characteristic
                 if characteristic.properties.contains(.notify) {
                     peripheral.setNotifyValue(true, for: characteristic)
                 }
@@ -9690,6 +9774,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             cancelPendingRideApplicationDeliveries(notifyFailure: true)
         }
         supportsRideDeliveryAcknowledgement = hasRideDeliveryAcknowledgement
+        spokenDirectionsCapabilityFlags = flags
         supportsWatchGPSMotionEvidenceV1 = hasWatchGPSMotionEvidenceV1
         if hasRideDiagnostics {
             sendDiagnosticsCaptureBindingIfNeeded()

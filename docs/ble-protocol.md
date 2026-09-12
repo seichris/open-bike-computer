@@ -62,6 +62,78 @@ Fallback frame prefixes:
 
 ## Device ownership and authentication
 
+### Spoken directions v1 (implementation in progress)
+
+The generated contract reserves native characteristic
+`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005`, protected channel **8**, resident-ready
+feature bit **26** (client 24), and dynamic-ready bit **27** (client 25).
+The current generated client version is 25. The parser/session and iPhone
+navigation/writer integration are implemented; firmware playback/installation
+integration is not yet complete. Firmware does **not** advertise these bits
+merely because the constants exist. Neither production audio nor physical
+qualification is implied. There is no legacy-characteristic fallback.
+
+All commands are owner-only. A scoped Watch controller cannot authorize
+channel 8, including when it owns the ride lease. Plaintext commands below are
+single-member `RCM1` groups: command type 3 for route control, 4 for cues.
+Existing `RAK1` application acknowledgements report admission, not audible
+completion. Both the ATT response and the application ACK barriers remain in
+force. Retries keep the same command identity and recompute remaining lifetime
+at physical dispatch **before** `S2` authenticated framing; a retry never renews
+an absolute cue deadline. Text, coordinates, and asset audio are not logged.
+
+All integer fields below are unsigned little-endian. Unknown enum values,
+nonzero reserved bytes, invalid combinations, and non-exact lengths fail
+closed. The canonical constants and cross-language goldens are in
+`protocol/ride-ble-contract-v1.json`.
+
+| `SCU1` cue offset | Bytes | Meaning |
+| --- | --- | --- |
+| 0 | 4 | ASCII `SCU1` |
+| 4 | 1 | Version 1 |
+| 5 / 6 / 7 | 1 each | Phase / semantic maneuver / volume 0–100 |
+| 8 | 8 | Nonzero random route token |
+| 16 / 20 / 24 / 28 | 4 each | Nonzero runtime generation / cue sequence / step ID / progress revision |
+| 32 | 2 | Prepare distance 50, 100, or 200 m; otherwise zero |
+| 34 | 2 | Remaining start lifetime 1–5000 ms |
+| 36 | 1 | Exactly 1 for arrival, otherwise 0 |
+| 37 | 3 | Reserved zero |
+| 40 | 16 | Dynamic asset key for prepare only; all-zero selects resident |
+
+`SCU1` is exactly 56 bytes. Phases are advance=0 (not admitted in v1),
+prepare=1, action=2, arrival=3. Maneuvers are unknown=0 (not admitted),
+straight=1, slight-left=2, left=3, sharp-left=4, slight-right=5, right=6,
+sharp-right=7, U-turn=8, roundabout=9, arrive=10, rerouting=11, continue=12.
+Directional maneuvers accept prepare/action; arrive accepts only arrival;
+rerouting/continue accept only action. The phone uses a separate conservative
+English classifier, not the legacy visual icon substring matcher.
+
+| `SCN1` control offset | Bytes | Meaning |
+| --- | --- | --- |
+| 0 / 4 | 4 / 1 | ASCII `SCN1` / version 1 |
+| 5 / 6 / 7 | 1 each | Action / enabled 0 or 1 / volume 0–100 |
+| 8 | 8 | Nonzero route token |
+| 16 / 20 / 24 / 28 | 4 each | Nonzero generation / control revision / step ID / progress revision |
+| 32 / 34 | 2 each | Remaining progress lease 1–5000 ms / reserved zero |
+
+`SCN1` is exactly 36 bytes. Actions are activate=1, cancel=2, progress=3,
+arrived=4. Activate replaces the route under an increasing control revision;
+progress matches that revision and advances the progress revision. Cancel and
+arrived require a newer control revision and exact route identity. Arrival is
+admitted only while the progress lease is live, grants a single non-renewable
+8-second terminal grace, and admits no further cues. Disconnect invalidates all
+work. Lease renewal never revives a pending cue or clears a consumed phase on
+the same step. A new step cancels old-step playback and seeds a new phase ledger.
+
+The iPhone adapter has one in-flight speech transaction. Busy, muted, stale,
+off-route, stationary, restored, or disconnected observations consume missed
+thresholds rather than queueing catch-up speech. Per-device preferences default
+off with volume 70%; they are independent of Device Sounds visibility. An
+uncertain control result cancels the route and suppresses speech until a new
+authenticated connection, preserving the consumed-phase ledger. The pending
+arrival cue is ordered before its terminal control and before the engine's
+arrival teardown. Dynamic rendering/transfer and the settings UI remain pending.
+
 Every ownership-capable ESP32 derives its stable 128-bit device ID as the first
 16 bytes of `SHA-256("BikeComputer device ID v2" || eFuseBaseMAC)` and caches it
 in NVS. A missing/corrupt cached ID is recreated only when no owner artifacts

@@ -51,6 +51,12 @@ def load_contract() -> dict:
     for value in [contract["service_uuid"], *contract["characteristics"].values()]:
         if not uuid_pattern.fullmatch(value):
             raise SystemExit(f"invalid uppercase UUID: {value}")
+    uuids = list(contract["characteristics"].values())
+    if len(uuids) != len(set(uuids)):
+        raise SystemExit("characteristic UUIDs must be unique")
+    channels = list(contract["protected_channels"].values())
+    if len(channels) != len(set(channels)) or any(type(v) is not int or not 1 <= v <= 255 for v in channels):
+        raise SystemExit("protected channels must be unique nonzero bytes")
     features = contract["capabilities"]["features"]
     bits = [entry["bit"] for entry in features.values()]
     if len(bits) != len(set(bits)) or any(bit < 0 or bit > 31 for bit in bits):
@@ -91,7 +97,33 @@ def load_contract() -> dict:
         or int.from_bytes(acknowledgement[24:28], "little") == 0
     ):
         raise SystemExit("application delivery goldens violate the v1 layout")
+    speech = contract["spoken_directions"]
+    validate_spoken_contract(speech)
     return contract
+
+
+def validate_spoken_contract(speech: dict) -> None:
+    limits = speech["limits"]
+    if any(type(v) is not int or not 1 <= v <= 0xFFFFFFFF for v in limits.values()):
+        raise SystemExit("speech limits must be positive UInt32 values")
+    if (limits["version"], limits["cue_bytes"], limits["control_bytes"]) != (1, 56, 36):
+        raise SystemExit("speech v1 requires exact 56-byte cues and 36-byte controls")
+    if limits["maximum_start_lifetime_ms"] > 5000 or limits["progress_lease_ms"] > 5000:
+        raise SystemExit("speech lifetimes exceed the v1 freshness bound")
+    if limits["maximum_dynamic_asset_bytes"] > 65536 or limits["dynamic_cache_bytes"] > 131072:
+        raise SystemExit("speech cache exceeds the v1 bounded allocation")
+    if limits["audio_sample_rate"] != 16000 or limits["audio_block_frames"] != 160 or limits["maximum_audio_frames"] > 128000:
+        raise SystemExit("speech format exceeds the reviewed v1 audio bounds")
+    for group in ("phases", "maneuvers", "controls"):
+        values = list(speech[group].values())
+        if len(values) != len(set(values)) or any(type(v) is not int or not 0 <= v <= 255 for v in values):
+            raise SystemExit("speech enum values must be unique bytes")
+    for value in speech["magic"].values():
+        if len(value.encode("ascii")) != 4:
+            raise SystemExit("speech magic must contain four ASCII bytes")
+    for name in ("cue", "control"):
+        if len(bytes.fromhex(speech["golden"][name + "_hex"])) != speech["limits"][name + "_bytes"]:
+            raise SystemExit("speech golden length mismatch")
 
 
 def render_swift(contract: dict) -> str:
@@ -154,6 +186,20 @@ def render_swift(contract: dict) -> str:
     for name, value in delivery["results"].items():
         lines.append(f"    case {camel(name)} = {value}")
     lines.extend(["}", ""])
+    speech = contract["spoken_directions"]
+    lines.append("enum SpokenDirectionsGeneratedV1 {")
+    for name, value in speech["limits"].items():
+        lines.append(f"    static let {camel(name)} = {value}")
+    for name, value in speech["magic"].items():
+        lines.append(f'    static let {camel(name)}Magic = "{value}"')
+    for name, value in speech["golden"].items():
+        lines.append(f'    static let {camel(name)} = "{value}"')
+    lines.extend(["}", ""])
+    for group, name in (("phases", "SpokenPhaseV1"), ("maneuvers", "SpokenManeuverV1"), ("controls", "SpokenControlActionV1")):
+        lines.append(f"enum {name}: UInt8, Equatable, Sendable {{")
+        for key, value in speech[group].items():
+            lines.append(f"    case {camel(key)} = {value}")
+        lines.extend(["}", ""])
     return "\n".join(lines)
 
 
@@ -215,7 +261,20 @@ def render_cpp(contract: dict) -> str:
     lines.extend(["};", "", "enum class ApplicationResult : uint8_t {"])
     for name, value in delivery["results"].items():
         lines.append(f"  {pascal(name)} = {value},")
-    lines.extend(["};", "", "} // namespace ride_ble_protocol_generated", ""])
+    lines.extend(["};", ""])
+    speech = contract["spoken_directions"]
+    for name, value in speech["limits"].items():
+        lines.append(f"inline constexpr uint32_t SPOKEN_{upper(name)} = {value};")
+    for name, value in speech["magic"].items():
+        lines.append(f'inline constexpr char SPOKEN_{upper(name)}_MAGIC[] = "{value}";')
+    for name, value in speech["golden"].items():
+        lines.append(f'inline constexpr char SPOKEN_{upper(name)}[] = "{value}";')
+    for group, name in (("phases", "SpokenPhase"), ("maneuvers", "SpokenManeuver"), ("controls", "SpokenControlAction")):
+        lines.append(f"enum class {name} : uint8_t {{")
+        for key, value in speech[group].items():
+            lines.append(f"  {pascal(key)} = {value},")
+        lines.extend(["};", ""])
+    lines.extend(["} // namespace ride_ble_protocol_generated", ""])
     return "\n".join(lines)
 
 

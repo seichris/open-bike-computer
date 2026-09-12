@@ -590,6 +590,7 @@ int main() {
   assert(watchDevice.authorizeRideWrite(
       AuthenticatedChannel::RideAutomation, 65));
   assert(!watchDevice.authorizeRideWrite(AuthenticatedChannel::Settings, 66));
+  assert(!watchDevice.authorizeRideWrite(AuthenticatedChannel::SpokenDirections, 66));
   assert(watchDevice.handle("NAME|5761746368", 66).response ==
          "ERROR|rename_rejected");
   assert(watchDevice.handle("UNPAIR", 67).response ==
@@ -1157,6 +1158,18 @@ int main() {
          rideDecision.size() + AUTHENTICATED_FRAME_OVERHEAD);
   assert(static_cast<uint8_t>(notification[0]) == 'R');
   assert(static_cast<uint8_t>(notification[1]) == '2');
+
+  DeviceOwnership speechNotifier;
+  speechNotifier.setAuthenticatedSessionKeysForTesting(goldenWriteKey, goldenNotifyKey);
+  assert(speechNotifier.authorizeRideWrite(AuthenticatedChannel::SpokenDirections, 1));
+  assert(speechNotifier.protectAuthenticatedPayload(
+      AuthenticatedChannel::SpokenDirections, rideDecision, notification));
+  assert(notification.size() == rideDecision.size() + AUTHENTICATED_FRAME_OVERHEAD);
+  const auto speechWrite = writeFrame(goldenWriteKey, AuthenticatedChannel::SpokenDirections, 1, rideDecision);
+  assert(speechNotifier.unwrapAuthenticatedPayload(AuthenticatedChannel::SpokenDirections, speechWrite, plaintext));
+  assert(plaintext == rideDecision);
+  assert(!speechNotifier.unwrapAuthenticatedPayload(AuthenticatedChannel::SpokenDirections, speechWrite, plaintext));
+  assert(!speechNotifier.unwrapAuthenticatedPayload(AuthenticatedChannel::Navigation, speechWrite, plaintext));
 
   std::cout << "device ownership state tests passed\n";
   return 0;

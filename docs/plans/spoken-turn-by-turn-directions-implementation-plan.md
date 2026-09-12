@@ -352,7 +352,7 @@ Version 1 defaults are:
 
 ```text
 supported distance buckets     50 m, 100 m, 200 m
-prepare target lead            clamp(smoothedSpeed * 8 s, 50 m, 200 m)
+prepare target lead            clamp(max(smoothedSpeed * 8 s, action lead + minimum gap), 50 m, 200 m)
 prepare spoken bucket          smallest supported bucket >= target lead
 action lead                    clamp(smoothedSpeed * 3 s, 25 m, 60 m)
 runtime step-advance band      20 m
@@ -361,6 +361,13 @@ maximum ordinary cues/step     2 (one prepare, one action)
 ```
 
 Rules:
+
+- Implementation consistency correction: select the prepare bucket only after
+  calculating the action lead and minimum gap. At the 5 m/s fallback speed,
+  the original 50 m bucket left only 25 m before action, which could never
+  satisfy the mandatory 35 m gap. The corrected default selects 100 m;
+  50 m remains supported on the wire and in the resident pack. These are
+  provisional timing defaults, not physically qualified acoustic results.
 
 - Clamp valid measured speed to `2...15 m/s`; use `5 m/s` when speed is absent,
   stale, negative, or non-finite. Smooth speed for threshold selection, but do

@@ -13,9 +13,10 @@ inline constexpr char SETTINGS_UUID[] = "2A73";
 inline constexpr char AUTH_UUID[] = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002";
 inline constexpr char WORKOUT_UUID[] = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003";
 inline constexpr char RIDE_AUTOMATION_UUID[] = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004";
+inline constexpr char SPOKEN_DIRECTIONS_UUID[] = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005";
 inline constexpr std::size_t PROTECTED_FRAME_OVERHEAD = 22;
 inline constexpr uint8_t CAPABILITY_SCHEMA_VERSION = 1;
-inline constexpr uint8_t CURRENT_CLIENT_VERSION = 23;
+inline constexpr uint8_t CURRENT_CLIENT_VERSION = 25;
 inline constexpr uint32_t DEVICE_SOUNDS_FEATURE = 1UL << 0;
 inline constexpr uint8_t DEVICE_SOUNDS_MINIMUM_CLIENT_VERSION = 1;
 inline constexpr uint32_t POWER_BUTTON_HONK_FEATURE = 1UL << 1;
@@ -68,6 +69,10 @@ inline constexpr uint32_t MAP_NAVIGATION_ORIENTATION_FEATURE = 1UL << 24;
 inline constexpr uint8_t MAP_NAVIGATION_ORIENTATION_MINIMUM_CLIENT_VERSION = 22;
 inline constexpr uint32_t WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE = 1UL << 25;
 inline constexpr uint8_t WATCH_GPS_MOTION_EVIDENCE_V1_MINIMUM_CLIENT_VERSION = 23;
+inline constexpr uint32_t RESIDENT_SPOKEN_PROMPTS_FEATURE = 1UL << 26;
+inline constexpr uint8_t RESIDENT_SPOKEN_PROMPTS_MINIMUM_CLIENT_VERSION = 24;
+inline constexpr uint32_t DYNAMIC_SPOKEN_CACHE_FEATURE = 1UL << 27;
+inline constexpr uint8_t DYNAMIC_SPOKEN_CACHE_MINIMUM_CLIENT_VERSION = 25;
 inline constexpr uint16_t SOURCE_HEALTH_MASK = 31;
 inline constexpr uint16_t SOURCE_HEALTH_WHEEL_FRESH = 1U << 0;
 inline constexpr uint16_t SOURCE_HEALTH_CADENCE_FRESH = 1U << 1;
@@ -92,6 +97,7 @@ enum class ProtectedChannel : uint8_t {
   Settings = 5,
   Workout = 6,
   RideAutomation = 7,
+  SpokenDirections = 8,
 };
 
 enum class ControllerRole : uint8_t {
@@ -103,6 +109,8 @@ enum class ControllerRole : uint8_t {
 enum class ApplicationCommandType : uint8_t {
   NavigationClear = 1,
   WorkoutState = 2,
+  SpokenRouteControl = 3,
+  SpokenCue = 4,
 };
 
 enum class ApplicationResult : uint8_t {
@@ -112,6 +120,51 @@ enum class ApplicationResult : uint8_t {
   Unauthorized = 3,
   Malformed = 4,
   ResourceRejected = 5,
+};
+
+inline constexpr uint32_t SPOKEN_VERSION = 1;
+inline constexpr uint32_t SPOKEN_CUE_BYTES = 56;
+inline constexpr uint32_t SPOKEN_CONTROL_BYTES = 36;
+inline constexpr uint32_t SPOKEN_MAXIMUM_START_LIFETIME_MS = 5000;
+inline constexpr uint32_t SPOKEN_PROGRESS_LEASE_MS = 5000;
+inline constexpr uint32_t SPOKEN_MAXIMUM_DYNAMIC_ASSET_BYTES = 65536;
+inline constexpr uint32_t SPOKEN_DYNAMIC_CACHE_BYTES = 131072;
+inline constexpr uint32_t SPOKEN_MAXIMUM_AUDIO_FRAMES = 128000;
+inline constexpr uint32_t SPOKEN_AUDIO_SAMPLE_RATE = 16000;
+inline constexpr uint32_t SPOKEN_AUDIO_BLOCK_FRAMES = 160;
+inline constexpr char SPOKEN_CUE_MAGIC[] = "SCU1";
+inline constexpr char SPOKEN_CONTROL_MAGIC[] = "SCN1";
+inline constexpr char SPOKEN_STATUS_MAGIC[] = "SCS1";
+inline constexpr char SPOKEN_CUE_HEX[] = "5343553101010646080706050403020144332211010000000700000002000000320088130000000000000000000000000000000000000000";
+inline constexpr char SPOKEN_CONTROL_HEX[] = "53434e310101014608070605040302014433221101000000070000000200000088130000";
+enum class SpokenPhase : uint8_t {
+  Advance = 0,
+  Prepare = 1,
+  Action = 2,
+  Arrival = 3,
+};
+
+enum class SpokenManeuver : uint8_t {
+  Unknown = 0,
+  Straight = 1,
+  SlightLeft = 2,
+  Left = 3,
+  SharpLeft = 4,
+  SlightRight = 5,
+  Right = 6,
+  SharpRight = 7,
+  UTurn = 8,
+  Roundabout = 9,
+  Arrive = 10,
+  Rerouting = 11,
+  ContinueRoute = 12,
+};
+
+enum class SpokenControlAction : uint8_t {
+  Activate = 1,
+  Cancel = 2,
+  Progress = 3,
+  Arrived = 4,
 };
 
 } // namespace ride_ble_protocol_generated

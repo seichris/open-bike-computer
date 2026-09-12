@@ -9,6 +9,7 @@ OUT="${TMPDIR:-/tmp}/open-bike-navigation-tests"
 cd "${REPO_DIR}"
 
 python3 tools/spoken_directions/run_tests.py
+python3 "${SCRIPT_DIR}/run-spoken-directions-tests.py"
 
 python3 "${SCRIPT_DIR}/run-durable-map-attempt-tests.py"
 
@@ -50,6 +51,11 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift \
   ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
+  ios-app/BikeComputer/RideShared/SpokenDirectionsContract.swift \
+  ios-app/BikeComputer/RideShared/SpokenManeuverClassifier.swift \
+  ios-app/BikeComputer/RideShared/SpokenCueScheduler.swift \
+  ios-app/BikeComputer/RideShared/SpokenDirectionsController.swift \
+  ios-app/BikeComputer/RideShared/SpokenDirectionsPreferences.swift \
   ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift \
   ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift \
   ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift \
@@ -184,6 +190,11 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift \
   ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
+  ios-app/BikeComputer/RideShared/SpokenDirectionsContract.swift \
+  ios-app/BikeComputer/RideShared/SpokenManeuverClassifier.swift \
+  ios-app/BikeComputer/RideShared/SpokenCueScheduler.swift \
+  ios-app/BikeComputer/RideShared/SpokenDirectionsController.swift \
+  ios-app/BikeComputer/RideShared/SpokenDirectionsPreferences.swift \
   ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift \
   ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift \
   ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift \

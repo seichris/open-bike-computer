@@ -1188,7 +1188,8 @@ bool DeviceOwnership::authorizeRideWrite(AuthenticatedChannel channel,
     return false;
   }
   if (sessionRole_ == SessionRole::WatchRide &&
-      channel == AuthenticatedChannel::Settings) {
+      (channel == AuthenticatedChannel::Settings ||
+       channel == AuthenticatedChannel::SpokenDirections)) {
     return false;
   }
   if (channel != AuthenticatedChannel::Navigation &&
@@ -1196,7 +1197,8 @@ bool DeviceOwnership::authorizeRideWrite(AuthenticatedChannel channel,
       channel != AuthenticatedChannel::Gps &&
       channel != AuthenticatedChannel::Settings &&
       channel != AuthenticatedChannel::Workout &&
-      channel != AuthenticatedChannel::RideAutomation) {
+      channel != AuthenticatedChannel::RideAutomation &&
+      channel != AuthenticatedChannel::SpokenDirections) {
     return false;
   }
   if (rideLease_.recordActivity(currentControllerIdentity(), nowMs)) {
