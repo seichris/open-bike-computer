@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "policyVersion": 1,
+  "access": "free",
+  "sources": [
+    {
+      "id": "copernicus-glo30-public-2021",
+      "priority": 100,
+      "adapter": "copernicus-cog-v1",
+      "datasetRelease": "2021",
+      "resolutionM": 30,
+      "surfaceModel": "dsm",
+      "horizontalCrs": "EPSG:4326",
+      "verticalDatum": "EPSG:3855",
+      "verticalUnits": "m",
+      "origin": "https://copernicus-dem-30m.s3.amazonaws.com",
+      "tileIndexSha256": "10604e3052c98a09e9216f1a8f0a555a04148419757575f783d4937fd44316dc",
+      "tileIndexBytes": 1110900,
+      "tileCount": 26450,
+      "termsUrl": "https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Data/DEM/resources/license/License-COPDEM-30.pdf",
+      "attributionUrl": "https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM",
+      "accessReviewedAt": "2026-09-12",
+      "productionApproved": false
+    },
+    {
+      "id": "copernicus-glo90-2021",
+      "priority": 50,
+      "adapter": "copernicus-cog-v1",
+      "datasetRelease": "2021",
+      "resolutionM": 90,
+      "surfaceModel": "dsm",
+      "horizontalCrs": "EPSG:4326",
+      "verticalDatum": "EPSG:3855",
+      "verticalUnits": "m",
+      "origin": "https://copernicus-dem-90m.s3.amazonaws.com",
+      "tileIndexSha256": "e5a5efe088e70506bc1007d22006bdcb09b0ec03177b62f9652363c13f49ed97",
+      "tileIndexBytes": 1111950,
+      "tileCount": 26475,
+      "termsUrl": "https://copernicus-dem-90m.s3.amazonaws.com/readme.html",
+      "attributionUrl": "https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM",
+      "accessReviewedAt": "2026-09-12",
+      "productionApproved": false
+    }
+  ]
+}

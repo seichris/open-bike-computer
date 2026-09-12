@@ -8,8 +8,10 @@
 - Planning branch: `plan/issue-190-topographic-maps`
 - Plan PR: [#374](https://github.com/seichris/open-bike-computer/pull/374)
 - Architecture refresh: 2026-09-12; the branch includes the baseline above
-- Provider research date: 2026-08-31; this code-integration refresh does not renew the source terms/access reviews
-- Status: implementation plan only; the PR changes documentation, with no topography implementation or enablement
+- Provider research date: 2026-08-31; public Copernicus acquisition and catalog coverage rechecked 2026-09-12. Regional source reviews still need renewal before implementation.
+- Product decision, 2026-09-12: **free**, prioritizing the broadest practical global coverage; no purchase or subscription requirement.
+- Implementation branch: `feature/topographic-maps`, following the documentation-only PR above.
+- Status: global source selection, verified acquisition, bounded contour evidence, and disabled-profile policy implemented; app/device artifacts and production enablement remain unfinished. See [implementation status and operator runbook](../topography-pipeline.md).
 
 ## Outcome
 
@@ -26,11 +28,11 @@ This is a durable offline-map capability, not a screenshot or web-tile experimen
 ## Executive recommendation
 
 1. Use raw, version-pinned elevation rasters, not a third-party rendered topographic tile service.
-2. Use **Copernicus DEM GLO-30** as the initial worldwide baseline. Prefer reviewed regional bare-earth DTMs where they provide materially better data and fall back to the global source across gaps.
+2. Use **Copernicus DEM GLO-30** with **GLO-90** fallback for the initial broad global baseline. The implemented public 2021 catalogs cover 26,450 and 26,475 one-degree geocells respectively, not every possible pixel. Prefer reviewed regional bare-earth DTMs where they provide materially better data. Registered newer/full GLO-30 releases are a separate adapter, not an assumed property of the public mirror.
 3. Generate a single canonical contour intermediate per map job, then encode it separately for the ESP32 and iPhone. This makes the two surfaces visually consistent without forcing either client to consume the other's binary format.
 4. Assign **renderer format 4 / FMB v5** to the first contour-capable device artifact. Keep Bike Map Stream v1 and canonical manifest schema v1; both are already extensible.
 5. Produce a separate, content-addressed `topography-ios-v1` companion asset for MapKit. Do not send iPhone raster tiles to the ESP32.
-6. Treat “Offline Topographic Maps” as a good premium candidate because generation, storage, source operations, and delivery create continuing cost. Keep the firmware decoder and renderer universal; gate new premium generation/download at the app and backend, never with a firmware lock or a local boolean.
+6. Make topographic generation, download, transfer, and offline use **free**. Preserve existing installation authentication, fair-use limits, ownership, and sharing; do not introduce StoreKit or a purchase-entitlement service.
 7. Keep Apple's existing **3D Terrain** setting free and distinct. It selects MapKit's realistic elevation presentation; it is not a contour map and it cannot provide the device's offline layer.
 
 ## Current-main baseline
@@ -53,7 +55,7 @@ The following changes since the original plan affect implementation directly. Th
 
 MapKit already offers Standard, Satellite, Hybrid, and realistic elevation presentation. Its delegate still treats `MKPolyline` overlays as route content, including separate saved-route/alternative styling. Add a dedicated tile-overlay renderer while retaining those identities, ordering, hit testing, and camera behavior. The original blanket-overlay-removal finding is resolved by #429 and is no longer implementation work.
 
-All feature phases below remain planned. Merged infrastructure does not mean any part of topographic generation or rendering has shipped. Provider choices and the optional premium boundary remain unchanged pending the dated source reviews and product decisions below.
+The baseline table describes `main` before this implementation branch. Source-policy/acquisition and contour-evidence work now exist, but no topographic app/device rendering has shipped. The free-access decision is settled; production source approval and the remaining end-to-end gates are not.
 
 ## What “topographic” means here
 
@@ -123,7 +125,7 @@ For Singapore, mainland China, Hong Kong, Japan, most of Africa, South America, 
 
 ## Deterministic source policy
 
-Add `map-platform/config/topography-source-policy-v1.json` as the only production source registry. Each entry contains:
+`map-platform/config/topography-source-policy-v1.json` now defines the strict **acquisition-only** registry: pinned public Copernicus catalogs, exact origins, release, CRS/datum, free access, and `productionApproved: false`. It cannot authorize production by changing a boolean. The following is the fuller **future production** schema, not the current acquisition schema; introduce an explicit versioned migration once coverage geometry, masks, legal notices, and distribution review are complete:
 
 ```text
 id
@@ -176,7 +178,7 @@ Offline map creation gains a detail choice:
 ```text
 Map detail
 ○ Standard
-● Topographic contours                         Premium
+● Topographic contours                         Free
   Adds offline terrain contours on iPhone and Bicino.
 ```
 
@@ -224,24 +226,13 @@ Show elevation contours when the active map includes them.
 
 The toggle is capability- and active-map-gated. It can remain persisted while an older map is active, but the UI explains why no contours are drawn. There is no contour-interval control on the device.
 
-## Premium recommendation
+## Free access and global coverage decision
 
-The app/backend/catalog source at this baseline still has no StoreKit, RevenueCat, subscription, or purchase-entitlement implementation. Existing App Attest, library credentials, and Keychain entitlements are separate from purchase authorization. Monetization remains a product track, not a boolean added to the map request.
+The user selected **free** on 2026-09-12. Topographic generation, iPhone companion downloads, device transfer, sharing, and offline use require no subscription or purchase. Do not implement a paywall, a client premium flag, or a backend purchase-entitlement service. Existing App Attest, installation ownership, catalog grants, fair-use limits, and resource admission still apply.
 
-Recommended boundary:
+Maximize geographic reach before adding fine local detail. Use the public GLO-30 catalog where available, GLO-90 for its additional cells, and explicitly report unresolved coverage. The coarse mode uses 50 m minor / 250 m index contours; standard mode uses 20 m / 100 m. These are contour spacing policies, not accuracy claims. A mixed-source sample uses the coarsest contributing tier throughout.
 
-- keep Standard maps and Apple's existing 3D Terrain option free;
-- sell **Offline Topographic Maps** as access to new contour-map generation and iPhone companion downloads;
-- keep format-4 decoding, transfer, and rendering available in every firmware build;
-- allow already installed device maps and already downloaded iPhone companions to keep working offline after entitlement expiry;
-- require an active entitlement for a new generation or a fresh companion download; and
-- charge for Bicino's processing/storage/delivery service, never imply ownership of the underlying public data.
-
-If enabled, use StoreKit 2 and a backend-verified App Store transaction/entitlement. App Attest proves an app installation, not a purchase. The backend authorizes job submission, and the shared catalog must also enforce entitlement when granting/resolving a companion download or a claimed shared map; API-only checks would leave an independent delivery path. A client-only `isPremium` value is not authoritative. Recheck the applicable storefront rules in Apple's [App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/) when specifying the purchase flow.
-
-The premium track also needs restore purchases, Family Sharing policy, grace-period behavior, refund/revocation handling, App Store Server Notifications, review credentials/demo content, privacy disclosures, and localized paywall copy. None of those concerns should leak into the FMB decoder.
-
-If the product decision is to launch contours for free, the same architecture remains valid: the entitlement policy returns allowed for every eligible installation and the premium UI is omitted.
+Add approved regional DTMs independently, retaining the global baseline outside each exact coverage area. Free app access does not waive redistribution terms or make noncommercial-only inputs appropriate for a commercial product. Never turn a catalog gap into a flat zero-elevation surface or silently replace a failed download with a different source.
 
 ## Target architecture
 
@@ -260,7 +251,7 @@ flowchart LR
     TRANSFER --> DEVICE["ESP32 format-4 renderer"]
     IOSASSET --> APP
     APP --> MAPKIT["Local MKTileOverlay below route"]
-    CAT["R2/D1 catalog + delivery/entitlement policy"] --> APP
+    CAT["R2/D1 catalog + delivery/authorization policy"] --> APP
     STREAM --> CAT
     IOSASSET --> CAT
 ```
@@ -541,7 +532,7 @@ Extend exact feature maps everywhere currently hard-coded to formats 1-3:
 
 The companion artifact is related to the same catalog map entry but has its own immutable identity and retention lease. The current final-artifact publication/readers understand ZIP and Bike Map Stream semantics; add explicit companion-role/schema validation and an iPhone companion reader contract instead of pretending a `.btopo` is a firmware-installable stream. Update publication, grants, R2 byte/hash verification, generation-class selection, and retention together. Preserve the existing 16-class bound and transactional supersession; device and companion heads must not supersede one another.
 
-Sharing a map includes its contour description and attribution. Shared companion access follows the existing owner/share authorization model and premium policy; possession of an object key is not authority. Preserve development/production library scopes and the current preview-based sharing flow. Older clients must still list/download supported Standard artifacts and ignore unsupported companion roles without a decoder crash.
+Sharing a map includes its contour description and attribution. Shared companion access follows the existing owner/share authorization model, without a purchase requirement; possession of an object key is not authority. Preserve development/production library scopes and the current preview-based sharing flow. Older clients must still list/download supported Standard artifacts and ignore unsupported companion roles without a decoder crash.
 
 ### Promotion and delivery gates
 
@@ -549,7 +540,7 @@ Automatic promotion is already configured separately from map generation. `listP
 
 For an approved topo map, promotion must verify the development device ZIP and companion's matching intermediate/source-policy receipts, validate both formats, and publish the production stream plus verified companion under the proper production ownership and retention leases. Copy the immutable companion bytes; do not regenerate DEM/contours or claim a device-only promotion has complete iPhone content. Retry of partial publication must be idempotent and cannot silently pair a newer companion with an older map.
 
-Add target/profile-scoped delivery eligibility to both backend and catalog paths before development canary publication. Catalog library/share grants and bearer resolution need the same format-4 policy and, if selected, entitlement checks. The current global `MAP_DELIVERY_ENABLED` protects all map delivery; disabling only backend rollout does not stop catalog downloads. Add a topo-specific incident control that leaves Standard delivery available, while retaining the existing global shutdown for broader incidents. Already issued R2 URLs can remain valid for their bounded lifetime; neither switch revokes downloaded/offline bytes.
+Add target/profile-scoped delivery eligibility to both backend and catalog paths before development canary publication. Catalog library/share grants and bearer resolution need the same format-4 eligibility and ownership checks, without a purchase requirement. The current global `MAP_DELIVERY_ENABLED` protects all map delivery; disabling only backend rollout does not stop catalog downloads. Add a topo-specific incident control that leaves Standard delivery available, while retaining the existing global shutdown for broader incidents. Already issued R2 URLs can remain valid for their bounded lifetime; neither switch revokes downloaded/offline bytes.
 
 ### Observability
 
@@ -587,7 +578,7 @@ If it changes device bytes, use renderer format 5 / FMB v6 with a sixth required
 
 ## Implementation phases
 
-These are future implementation slices, based on the refreshed source above. Phase 1's profile/promotion/delivery gates must land before any Phase 2 development publication can become an automatic production-promotion candidate. Existing format-3 infrastructure is reused; none of these topo phases is marked complete by this planning PR.
+These are implementation slices, not a claim that each phase has shipped. The [implementation status](../topography-pipeline.md) records the acquisition and evidence portions now implemented. Phase 1's profile/promotion/delivery gates must land before any Phase 2 development publication can become an automatic production-promotion candidate. Existing format-3 infrastructure is reused.
 
 ### Phase 0 — Evidence and source approval
 
@@ -598,7 +589,7 @@ These are future implementation slices, based on the refreshed source above. Pha
 5. Measure contour intervals, smoothing, simplification, FMB size, companion size, seam quality, route contrast, and generation cost.
 6. Validate MapKit overlay ordering, tilt, scale-1/scale-2 tiles, offline behavior, and mainland-China alignment.
 7. Choose the production zoom range and checked-in device/companion budgets from evidence.
-8. Decide whether the first public release is premium. If yes, approve the StoreKit product and entitlement contract before implementation reaches production paths.
+8. **Decided:** first public release is free. Preserve installation authorization and resource budgets without adding purchase checks.
 9. Record the current format/capability allocations, source-policy hashing boundary, converter/promotion image split, and saved-map journal schema. Confirm a target-4 experiment cannot be auto-promoted by adding a reader feature alone.
 
 Exit only when the global baseline and at least one regional override pass the gate, sample outputs are reproducible, and no unresolved MapKit/geography issue is being called “global.”
@@ -636,20 +627,18 @@ Exit only when the global baseline and at least one regional override pass the g
 4. Add iPhone and device settings with accurate unavailable states.
 5. Exercise route changes, saved-route selection/expiry, navigation start/stop, offline area selection, background recovery, late callbacks, memory pressure, offline launch, overlapping maps, and corrupt companions.
 
-### Phase 5 — Premium track, if selected
+### Phase 5 — Free access qualification
 
-1. Configure StoreKit 2 product/subscription metadata.
-2. Add purchase, restore, current-entitlement, transaction-update, and revocation handling.
-3. Add backend App Store transaction verification and server notifications.
-4. Gate job and companion authorization in both backend and catalog/share paths while preserving local installed-map use.
-5. Add App Review notes/demo path, localized disclosure, privacy updates, and support/runbook material.
+1. Verify no purchase/entitlement check blocks generation, download, sharing, transfer, or offline use.
+2. Exercise existing installation/owner/share authorization and fair-use limits for both companion and device artifacts.
+3. Add localized source-quality and unavailable-area disclosures, attribution, and support/runbook material.
 
 ### Phase 6 — Canary and production rollout
 
 1. Retain renderer format 4 in development canary until all source, app, backend, and hardware gates pass.
 2. Expand by installation allowlist, then development global profile.
 3. Qualify the exact worker and production converter images, source policy, app reader, and firmware profiles. Promote through the existing digest-pinned deployment workflow; scheduler-only changes do not authorize a changed converter identity.
-4. Enable a small production cohort in both promotion and backend/catalog delivery. Verify matching device and companion receipts end to end; monitor generation, publication, download, install, render, and entitlement metrics.
+4. Enable a small production cohort in both promotion and backend/catalog delivery. Verify matching device and companion receipts end to end; monitor generation, publication, download, install, render, authorization, and resource metrics.
 5. Expand regional adapters independently. A failing regional adapter falls back only if the manifest truthfully records that fallback and quality tier.
 6. Exercise coordinated target-4 generation, promotion, and catalog-delivery shutdown, including queued/manual promotions and already-issued grants. Document the bounded lifetime of R2 URLs. Already installed maps continue offline.
 
@@ -687,7 +676,7 @@ Inject interruption between backend canonical-job and each derived-index update 
 - promotion discovery, direct CLI/grants, conversion, and final publication reject unapproved target-4 content even when a reader supports it;
 - approved promotion validates both outputs without refetching OSM/DEM, handles lost finalize responses/partial retry, and retains matching attribution;
 - device/companion generation classes, leases, and the 16-class bound prevent cross-role replacement or deletion while in use; and
-- catalog grant creation and resolution enforce delivery/entitlement independently of backend rollout, including previously issued library/share grants.
+- catalog grant creation and resolution enforce delivery/authorization independently of backend rollout, including previously issued library/share grants.
 
 ### iOS
 
@@ -702,7 +691,7 @@ Inject interruption between backend canonical-job and each derived-index update 
 - attempt A cancellation or late delegate callbacks cannot replace/delete attempt B's verified companion, including renewed URL and changed-host-policy cases;
 - process death at each journal boundary recovers an old or new valid artifact/metadata/association; storage pressure never treats downloaded companions as disposable tiles;
 - missing companions are shown independently of ZIP/BMAP freshness; unpromoted development maps remain in Developer Settings;
-- entitlement allowed/expired/revoked/offline/restore states, if premium;
+- free access with installation/owner/share authorization, fair-use limits, and offline use;
 - attribution accessible from the map and saved-map details; and
 - coordinate alignment control points inside and outside mainland China.
 
@@ -766,7 +755,7 @@ Issue #190 is complete only when:
 8. both Waveshare targets and representative iPhones pass the physical matrix on exact artifacts/SHAs;
 9. production promotion binds both artifacts correctly, and coordinated backend/catalog/promotion canary monitoring and rollback are exercised;
 10. unsupported countries/MapKit coordinate cases are suppressed or accurately disclosed rather than called global; and
-11. if premium, StoreKit/backend entitlement, restore/revocation, App Review, and expired-local-map behavior are complete.
+11. generation, download, sharing, transfer, and offline use are free, with existing installation authorization and fair-use protection intact.
 
 ## Deliberate non-goals for the first release
 
@@ -780,9 +769,8 @@ Issue #190 is complete only when:
 - terrain mesh or 3D ground extrusion on the ESP32; and
 - production hillshade before its separate hardware budget is proven.
 
-## Decisions requiring product approval before implementation
+## Product direction and remaining choices
 
-1. Launch contours as free or as **Offline Topographic Maps** premium. This plan recommends premium generation/download with universal firmware decoding.
-2. Choose the first regional-adapter set after the global baseline. Recommended first set: US 3DEP, England EA DTM, France RGE ALTI, and one small-country high-detail adapter for seam/cost validation.
-3. If premium, choose subscription versus non-consumable purchase, price, Family Sharing, grace period, and fresh-download behavior after expiry.
-4. Decide whether a later iPhone-only online contour preview is valuable. It is not required for the offline selected-area v1 and must not become an anonymous public tile dependency.
+1. **Settled:** free topographic maps, prioritizing the broadest practical global coverage.
+2. Regional detail follows the global baseline. Prioritize US 3DEP, England EA DTM, France RGE ALTI, then other independently approved country products from the shortlist; none is enabled merely by appearing in this document.
+3. A later iPhone-only online contour preview is optional. It is not required for the offline selected-area v1 and must not become an anonymous public tile dependency.

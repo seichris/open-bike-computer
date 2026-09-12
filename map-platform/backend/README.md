@@ -7,6 +7,8 @@ contract and operating procedure.
 
 ## What is implemented
 
+- Operator-only [free global elevation acquisition and contour evidence](../../docs/topography-pipeline.md)
+  via `map-topography`; topographic user jobs and app/device artifacts remain disabled.
 - `POST /v1/map-jobs` for curated, custom bbox, custom polygon, and route
   corridor requests, with installation-scoped idempotency metadata.
 - Installation-authenticated creation, job/list reads, map-pack reads, and
