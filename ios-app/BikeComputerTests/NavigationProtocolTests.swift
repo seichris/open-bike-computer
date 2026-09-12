@@ -11782,6 +11782,19 @@ struct NavigationProtocolTests {
             "Add Screen is routed from the stable Settings presenter and dismisses only its own sheet"
         )
         assert(
+            !screensSource.contains("Reorder Screens") &&
+                !screensSource.contains("Done Reordering") &&
+                screensSource.contains(".onMove(perform: controller.move)") &&
+                screensSource.contains("if controller.canSave") &&
+                screensSource.contains("Button(\"Save to Bicino\")") &&
+                screensSource.contains("if controller.canDiscardChanges") &&
+                screensSource.contains("Text(\"Drag screens to reorder, add new screens or hide screens\")") &&
+                !screensSource.contains("Button(\"Save to Bike Computer\")") &&
+                !screensSource.contains(".disabled(!controller.canSave)") &&
+                !screensSource.contains(".disabled(!controller.canDiscardChanges)"),
+            "device screen actions use long-press reordering, conditional save/cancel visibility, and Bicino copy"
+        )
+        assert(
             screensSource.contains("Text(\"Preferred\").tag(UInt8(1))") &&
                 screensSource.contains("Text(\"Local + Preferred\").tag(UInt8(2))") &&
                 screensSource.contains("Text(\"Follow Roads\").tag(UInt8(0))") &&

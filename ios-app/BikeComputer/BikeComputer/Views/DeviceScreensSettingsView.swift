@@ -3,7 +3,6 @@ import SwiftUI
 struct ConfigurableDeviceScreensSettingsSection: View {
     @ObservedObject var controller: DeviceScreenConfigurationController
     let onAddScreen: () -> Void
-    @State private var editMode: EditMode = .inactive
 
     var body: some View {
         Section {
@@ -60,17 +59,6 @@ struct ConfigurableDeviceScreensSettingsSection: View {
                 .onMove(perform: controller.move)
 
                 Button {
-                    withAnimation {
-                        editMode = editMode == .active ? .inactive : .active
-                    }
-                } label: {
-                    Label(
-                        editMode == .active ? "Done Reordering" : "Reorder Screens",
-                        systemImage: "arrow.up.arrow.down"
-                    )
-                }
-
-                Button {
                     onAddScreen()
                 } label: {
                     Label("Add Screen", systemImage: "plus")
@@ -78,23 +66,24 @@ struct ConfigurableDeviceScreensSettingsSection: View {
                 .disabled(!canAdd(to: document))
                 .accessibilityIdentifier("device-screen-add")
 
-                Button("Save to Bike Computer") {
-                    controller.save()
+                if controller.canSave {
+                    Button("Save to Bicino") {
+                        controller.save()
+                    }
+                    .accessibilityIdentifier("device-screen-save")
                 }
-                .disabled(!controller.canSave)
-                .accessibilityIdentifier("device-screen-save")
 
-                Button("Cancel Changes", role: .destructive) {
-                    controller.reloadDeviceSettings()
+                if controller.canDiscardChanges {
+                    Button("Cancel Changes", role: .destructive) {
+                        controller.reloadDeviceSettings()
+                    }
                 }
-                .disabled(!controller.canDiscardChanges)
             }
         } header: {
             Text("Device Screens")
         } footer: {
-            Text("Add duplicate screen types, reorder them, and give every Map, Map + Navigation, and Ride Stats screen its own settings. Changes are sent as one atomic configuration when you save.")
+            Text("Drag screens to reorder, add new screens or hide screens")
         }
-        .environment(\.editMode, $editMode)
     }
 
     @ViewBuilder
