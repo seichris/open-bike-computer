@@ -13,9 +13,10 @@ inline constexpr char SETTINGS_UUID[] = "2A73";
 inline constexpr char AUTH_UUID[] = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002";
 inline constexpr char WORKOUT_UUID[] = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003";
 inline constexpr char RIDE_AUTOMATION_UUID[] = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004";
+inline constexpr char SCREEN_CONFIGURATION_UUID[] = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005";
 inline constexpr std::size_t PROTECTED_FRAME_OVERHEAD = 22;
 inline constexpr uint8_t CAPABILITY_SCHEMA_VERSION = 1;
-inline constexpr uint8_t CURRENT_CLIENT_VERSION = 23;
+inline constexpr uint8_t CURRENT_CLIENT_VERSION = 24;
 inline constexpr uint32_t DEVICE_SOUNDS_FEATURE = 1UL << 0;
 inline constexpr uint8_t DEVICE_SOUNDS_MINIMUM_CLIENT_VERSION = 1;
 inline constexpr uint32_t POWER_BUTTON_HONK_FEATURE = 1UL << 1;
@@ -68,6 +69,18 @@ inline constexpr uint32_t MAP_NAVIGATION_ORIENTATION_FEATURE = 1UL << 24;
 inline constexpr uint8_t MAP_NAVIGATION_ORIENTATION_MINIMUM_CLIENT_VERSION = 22;
 inline constexpr uint32_t WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE = 1UL << 25;
 inline constexpr uint8_t WATCH_GPS_MOTION_EVIDENCE_V1_MINIMUM_CLIENT_VERSION = 23;
+inline constexpr uint32_t SCREEN_CONFIGURATION_V1_FEATURE = 1UL << 26;
+inline constexpr uint8_t SCREEN_CONFIGURATION_V1_MINIMUM_CLIENT_VERSION = 24;
+inline constexpr uint8_t SCREEN_CONFIGURATION_SCHEMA_VERSION = 1;
+inline constexpr uint8_t SCREEN_CONFIGURATION_CAPABILITY_TLV_TYPE = 2;
+inline constexpr std::size_t MAXIMUM_SCREEN_CONFIGURATION_INSTANCES = 16;
+inline constexpr std::size_t MAXIMUM_SCREEN_CONFIGURATION_NAME_BYTES = 24;
+inline constexpr std::size_t RIDE_STATS_CONFIGURATION_SLOT_COUNT = 7;
+inline constexpr std::size_t MAXIMUM_SCREEN_CONFIGURATION_DOCUMENT_BYTES = 4096;
+inline constexpr char SCREEN_CONFIGURATION_REQUEST_MAGIC[] = "SCRQ";
+inline constexpr char SCREEN_CONFIGURATION_UPLOAD_MAGIC[] = "SCUP";
+inline constexpr char SCREEN_CONFIGURATION_DOWNLOAD_MAGIC[] = "SCDN";
+inline constexpr char SCREEN_CONFIGURATION_ACK_MAGIC[] = "SCAK";
 inline constexpr uint16_t SOURCE_HEALTH_MASK = 31;
 inline constexpr uint16_t SOURCE_HEALTH_WHEEL_FRESH = 1U << 0;
 inline constexpr uint16_t SOURCE_HEALTH_CADENCE_FRESH = 1U << 1;
@@ -92,6 +105,7 @@ enum class ProtectedChannel : uint8_t {
   Settings = 5,
   Workout = 6,
   RideAutomation = 7,
+  ScreenConfiguration = 8,
 };
 
 enum class ControllerRole : uint8_t {
@@ -112,6 +126,16 @@ enum class ApplicationResult : uint8_t {
   Unauthorized = 3,
   Malformed = 4,
   ResourceRejected = 5,
+};
+
+enum class ScreenConfigurationResult : uint8_t {
+  Applied = 0,
+  Conflict = 1,
+  Malformed = 2,
+  Unsupported = 3,
+  PersistenceFailed = 4,
+  Busy = 5,
+  Unauthorized = 6,
 };
 
 } // namespace ride_ble_protocol_generated
