@@ -11,7 +11,7 @@ Wi-Fi for this feature.
 This PR exposes World Radio only in development firmware with
 `FIRMWARE_DIAGNOSTICS=1`, including the ordinary and remote-debug Waveshare
 profiles. It is still off by default in Device Screens. Production profiles
-omit the screen, its map allocation, and capability bit 26; iOS hides the
+omit the screen, its map allocation, and capability bit 27; iOS hides the
 option when that bit is absent. Enabling it for production requires physical
 qualification and a firmware size budget that fits the existing 3 MiB OTA
 partition. No partition offsets or sizes change in this PR.

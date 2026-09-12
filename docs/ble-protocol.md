@@ -1314,8 +1314,8 @@ Atomic renderer replay sample, CAP2 schema 1, only feature bit 23:
 Watch GPS motion evidence, CAP2 schema 1, only feature bit 25:
 43 41 50 32 01 00 00 00 02
 
-World Radio, CAP2 schema 1, only feature bit 26:
-43 41 50 32 01 00 00 00 04
+World Radio, CAP2 schema 1, only feature bit 27:
+43 41 50 32 01 00 00 00 08
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and

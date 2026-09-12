@@ -18424,7 +18424,7 @@ struct NavigationProtocolTests {
                "main firmware cannot be mistaken for World Radio firmware")
 
         let cap2WithWorldRadio = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
-            Data([1, 0, 0, 0x84, 0x07])
+            Data([1, 0, 0, 0x84, 0x0B])
         assert(manager.handleDeviceCapabilitiesNotification(cap2WithWorldRadio),
                "World Radio is negotiated alongside main features")
         assert(manager.supportsWorldRadio && manager.supportsRendererBenchmarkSample &&
