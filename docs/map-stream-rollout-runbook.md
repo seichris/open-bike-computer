@@ -224,7 +224,11 @@ Rollback by reducing basis points, switching to the tested allowlist, or setting
 the mode to `disabled`. Keep ZIP artifacts only for local preview or later
 regeneration; do not re-enable unsigned device transfer as a rollback.
 
-Rollout changes stop new stream metadata and URL refreshes immediately. A
+Backend rollout changes stop that API's new stream metadata and URL refreshes.
+The catalog is an independent delivery path: also set its
+`MAP_DELIVERY_ENABLED=0` binding to stop new grants and bearer resolution.
+Keep that configuration disabled across subsequent deployments until an explicit
+reviewed re-enable; the checked-in normal-operation value is `1`. A
 previously issued immutable download URL can remain usable for its bounded
 15-minute lifetime, so emergency response must also disable device transfer or
 quarantine the referenced object when immediate byte-level revocation is
@@ -256,9 +260,21 @@ still-valid old artifact.
 
 For a suspected signing-key compromise:
 
-1. Set rollout mode to `disabled` immediately. This hides stream metadata and
-   stops new device installations; existing ZIP previews remain local-only.
-2. Disable stream generation on workers and revoke the private secret.
+1. Set the catalog Worker binding `MAP_DELIVERY_ENABLED=0` in every affected
+   environment through the approved configuration deployment procedure, and
+   set the backend rollout mode to `disabled`. These are separate controls:
+   backend rollout alone does **not** stop the shared/private catalog path.
+   The catalog requires the exact value `1` to issue library grants or resolve
+   library/promotion grants; missing or invalid values fail closed. Verify both
+   new grant requests and resolution of an already-issued catalog grant return
+   503. This does not revoke an R2 presigned URL already issued (15-minute TTL),
+   an in-flight request, downloaded bytes, or a device-local paused transfer.
+2. Disable stream generation, set `MAP_PLATFORM_AUTO_PROMOTION_ENABLED=0`
+   and stop the automatic-promotion service, then revoke the private secret.
+   For immediate containment of an already issued R2 URL, use the separately
+   authorized R2 credential/object revocation procedure. A compromised key in
+   an offline device's compiled trust set requires firmware trust removal and
+   explicit paused-session invalidation; a server switch cannot achieve that.
 3. Preserve logs containing job ID, key ID, manifest receipt, and artifact
    receipt; never log or retrieve the private key through application logs.
 4. Add and ship a replacement public key before resuming generation.

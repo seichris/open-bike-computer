@@ -1,5 +1,11 @@
 # BLE Protocol
 
+Remote-debug renderer metrics may additionally expose schema-1 `deliveryTiming`
+records; see [delivery-stage timing](renderer-benchmark.md#completed-results-and-delivery-stage-timing).
+These payload-free, device-clock diagnostic fields do not change BLE framing,
+authentication, UUIDs, capability negotiation, or ATT/application-ACK semantics.
+Ordinary and production profiles omit them; clients must accept their absence.
+
 The ESP32 advertises BLE service UUID
 `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1800` under its user-assigned device name.
 An unregistered device uses `BikeComputer XXYY`, where `XXYY` is derived from
@@ -29,7 +35,7 @@ navigation-ready.
 | `2A6F` | iOS -> ESP32 | Binary route geometry | Upcoming route polyline for the device map view. |
 | `2A72` | iOS -> ESP32 | Binary GPS position | Current device position and heading for the map view. |
 | `2A73` | iOS -> ESP32 | Binary setting packet | Runtime map-renderer, device-screen, and phone-status values. |
-| `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003` | iOS/Watch -> ESP32 | Fixed 16-byte core/extended or 28-byte origin workout frame | Watch-owned workout state and optional live metrics/provenance for Ride Stats. |
+| `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003` | iOS/Watch -> ESP32 | Fixed 16-byte core/extended/Watch-motion or 28-byte origin workout frame | Watch-owned workout state, optional live metrics/provenance, and capability-gated raw Watch GPS motion evidence. |
 | `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004` | bidirectional | Fixed 52-byte `RAUT` v2 frame | Internal, feature-gated ride-detection decisions, configuration, prompt responses, cancellations, acknowledgements, confirmations, and resynchronization. |
 
 `DistanceMeters` is an unsigned 16-bit decimal value (`0...65535`). The iOS
@@ -51,7 +57,7 @@ Fallback frame prefixes:
 | `MAPR` | route geometry packet |
 | `GPSP` | GPS position packet |
 | `MSET` | map setting packet |
-| `WTLM` | one fixed 16-byte core/extended or 28-byte origin workout frame; prefix plus payload is exactly 20 or 32 plaintext bytes before the protected session envelope described below |
+| `WTLM` | one fixed 16-byte core/extended/Watch-motion or 28-byte origin workout frame; prefix plus payload is exactly 20 or 32 plaintext bytes before the protected session envelope described below |
 | `RAUT` | one fixed 52-byte ride-automation frame; prefix plus payload is exactly 56 plaintext bytes before ownership-v2 protection |
 
 ## Device ownership and authentication
@@ -159,7 +165,9 @@ Channels are `1=auth`, `2=navigation`, `3=route`, `4=GPS`, `5=settings`,
 `6=workout`, and `7=ride automation`.
 Each direction has an independent strictly increasing sequence per channel.
 Receivers reject zero, replayed, out-of-order, wrong-channel, or invalid-tag
-frames. The 12-byte nonce is `Channel || 7 zero bytes || Sequence`. Additional
+frames. Sequence gaps are accepted; this lets a newer replaceable-state frame
+remain valid if an earlier frame was dropped after its sequence was assigned.
+The 12-byte nonce is `Channel || 7 zero bytes || Sequence`. Additional
 authenticated data is ASCII `write2|` for `S2` or `notify2|` for `R2`, followed
 by the one-byte channel and four-byte sequence. The frame adds 22 bytes, so iOS
 subtracts that overhead before packet sizing.
@@ -536,7 +544,7 @@ ordered.
 
 Workout telemetry is iOS/Watch-to-device, RAM-only, and accepted only after the
 existing local authentication handshake. The logical native payload is exactly
-16 bytes for core/extended frames or 28 bytes for the optional origin frame. In
+16 bytes for core/extended/Watch-motion frames or 28 bytes for the optional origin frame. In
 an ownership-v2 session it is carried in an `S2` frame on protected channel `6`,
 for a 38- or 50-byte native wire write. Current firmware exposes the
 native characteristic with both write properties, so iOS uses acknowledged
@@ -547,7 +555,7 @@ workout characteristic uses this fallback whenever the navigation
 characteristic supports acknowledged writes:
 
 ```text
-"WTLM" | 16-byte core/extended or 28-byte origin workout frame
+"WTLM" | 16-byte core/extended/Watch-motion or 28-byte origin workout frame
 ```
 
 The fallback plaintext is exactly 20 or 32 bytes before ownership-v2 protection
@@ -643,7 +651,7 @@ HealthKit active/moving time.
 | Offset | Size | Field |
 | ---: | ---: | --- |
 | `0` | 1 | frame kind `3` |
-| `1` | 1 | pause origin: `0` none/confirmation pending, `1` manual, `2` automatic |
+| `1` | 1 | pause origin: `0` none/confirmation pending, `1` manual, `2` automatic, `3` system, `4` unknown |
 | `2` | 2 | session token, `UInt16LE` |
 | `4` | 4 | wall elapsed seconds, `UInt32LE`; `0xFFFFFFFF` unavailable |
 | `8` | 16 | authoritative Watch session UUID in RFC 4122 byte order; all zero unavailable |
@@ -653,8 +661,10 @@ HealthKit active/moving time.
 
 Pause origin may be non-zero only for a paused session. A paused snapshot may
 temporarily use zero while Watch-side provenance is being durably confirmed;
-consumers must treat that value conservatively and never auto-resume from it.
-Any automatic origin requires a non-zero detector profile version.
+consumers must treat none, system, and unknown conservatively and never
+auto-resume from them. Only an explicit user action is manual. An uncorroborated
+HealthKit/session callback is unknown, and a system-attributed callback is
+system. Any automatic origin requires a non-zero detector profile version.
 Origin/timing frames
 must match the retained session token and never create a workout on their own.
 iOS queues core, extended, and origin atomically for initial publication,
@@ -662,6 +672,30 @@ state/origin changes, and authenticated reconnect. Ordinary metric heartbeats
 continue to coalesce the core/extended pair; the origin frame has its own
 coalescing identity and is resent when its values change. Firmware retains the
 last valid origin frame in RAM and marks it stale with the associated workout.
+
+### Watch motion frame, kind `4`
+
+This frame is accepted only after CAP2 bit `24` is negotiated. It transports
+raw Watch workout-location speed rather than the presentation-selected speed.
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| `0` | 1 | frame kind `4` |
+| `1` | 1 | flags: bit 0 valid fix, bit 1 speed available, bit 2 accuracy available, bit 3 current source sample, bit 4 automatically-paused phase; bits 5...7 zero |
+| `2` | 2 | active workout session token, `UInt16LE` |
+| `4` | 4 | producer sample sequence, nonzero `UInt32LE` |
+| `8` | 2 | speed in centimetres/second, `UInt16LE` |
+| `10` | 2 | horizontal accuracy in decimetres, `UInt16LE` |
+| `12` | 2 | sample age at send time in milliseconds, `UInt16LE` |
+| `14` | 2 | persisted producer epoch, nonzero `UInt16LE` |
+
+The token and confirmed running/automatically-paused phase must match retained
+workout state. Duplicate or regressing sequences, old epochs, malformed flags,
+and unauthenticated frames do not mutate evidence. Lifecycle changes clear the
+retained motion sample. Firmware qualifies the source at three-second freshness
+and `12.5 m` maximum horizontal uncertainty; candidate time comes from distinct
+sample capture times, with a three-second maximum gap. No coordinates are
+included.
 
 iOS coalesces numeric changes to at most one update per second and sends
 state/token and fresh-to-stale transitions immediately. Every new-contract
@@ -1099,14 +1133,22 @@ connected-display automatic inactivity control (setting ID `36`), and bit `20`
 negotiates persistent, privacy-bounded ride diagnostics and the authenticated
 device-log transfer mode. Bit `21` reports support for the optional detailed
 one-Hz ride-automation trace. Bit `22` reports the application-confirmed
-critical ride-delivery contract described above. Client version `11` requests
+critical ride-delivery contract described above. Bit `23` reports the atomic
+renderer replay sample described below. Bit `24` reports independent map navigation
+orientation. Bit `25` reports the Watch GPS
+motion-evidence frame and is advertised only with internal ride control. Client version `11` requests
 bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
 without the newer features. Client version `16` requests bits `18` and `19`,
 including the authenticated renderer-diagnostics contract and the already
 released automatic-display setting. Version `18` requests bit `20`, version
-`19` requests bit `21`, and version `20` requests bit `22`.
+`19` requests bit `21`, version `20` requests bit `22`, and version `21`
+requests bit `23`. Version `22` requests bit `24`, independent Map + Navigation
+orientation (setting ID `37`). Firmware advertises bit `24` only with
+`MAP_STABLE_CAMERA=1`; production profiles keep it clear pending per-target
+physical qualification. This capability is independent of label orientation.
+Version `23` requests bit `25`, Watch GPS motion evidence.
 Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
@@ -1164,6 +1206,12 @@ Detailed ride diagnostics, CAP2 schema 1, only feature bit 21:
 
 Application-confirmed ride delivery, CAP2 schema 1, only feature bit 22:
 43 41 50 32 01 00 00 40 00
+
+Atomic renderer replay sample, CAP2 schema 1, only feature bit 23:
+43 41 50 32 01 00 00 80 00
+
+Watch GPS motion evidence, CAP2 schema 1, only feature bit 25:
+43 41 50 32 01 00 00 00 02
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -1208,6 +1256,31 @@ render-job outcomes, UI/display/GPS gaps, prediction state, fixture-marker
 freshness, and remote-debug overhead. It intentionally contains no route
 coordinates, network credentials, or transfer token.
 
+Diagnostic firmware also includes a session-scoped `replayTransport` object.
+Its bounded counters distinguish authenticated GPS envelope acceptance,
+RBS1 detection and decoding, GPS-mailbox admission, and marker acceptance or
+rejection (`invalid`, `no_active_window`, `active_fixture_unavailable`, or
+`fixture_mismatch`). Last-event state contains only monotonic timestamps,
+window/sample/loop identifiers, and four-byte fixture-hash tags. It is reset at
+diagnostics-session end, is not reset by a new measurement window, and contains
+no owner key, ciphertext, plaintext GPS payload, network credential, transfer
+token, certificate, or pin.
+The DMA-crypto rejection and operation-failure fields are deltas from the
+counter baseline captured at the start of the active measurement window; the
+DMA object identifies that contract as `cryptoCountersScope: "window"`. The
+separate authenticated device-status diagnostics retain their lifetime scope.
+
+Each diagnostic DMA region also includes
+`windowMinimumFreeAttribution` and
+`windowMinimumLargestBlockAttribution`. Both bounded objects contain `phase`,
+`observedAtMs`, `value`, and `frameTransferActive`. The allowed phase values are
+`unknown`, `session_start`, `session_end`, `window_start`, `periodic`,
+`render_complete`, and `metrics_snapshot`. Attribution changes only when a
+strictly lower window minimum is observed, so equal allocator readings retain
+the first phase. The frame field is only a correlation bit; no frame bytes,
+HTTP authorization material, token, certificate, pin, SSID, or password is
+retained.
+
 The checked-in benchmark replay marks every exact 1 Hz GPS sample with:
 
 ```text
@@ -1221,6 +1294,38 @@ marker. Firmware accepts a marker only when its hash matches the active
 measurement window. This prevents an otherwise plausible GPS stream from being
 attributed to the pinned fixture and lets a later checkpoint frame be tied to
 the intended position sample.
+
+Client version `21` and CAP2 feature bit `23` replace the two-write replay pair
+with one GPS-characteristic payload:
+
+```text
+"RBS1" | GPSLength: UInt8 | GPSPosition: GPSLength bytes |
+         RendererMarker: complete 44-byte RBM1 frame
+```
+
+`GPSLength` must be one of the canonical GPS packet lengths (`8`, `10`, `14`,
+`30`, or `36`), and the complete unprotected frame is at most 85 bytes. The
+frame uses the existing authenticated GPS channel and a native write that fits
+together with its protected-frame overhead. Like ordinary GPS, iOS prefers
+acknowledged writes when advertised and fitting, retaining native
+write-without-response with CoreBluetooth flow control for compatibility.
+There is no navigation-characteristic fallback. Both native ATT write modes
+already enter the firmware's same authenticated GPS callback. Firmware
+validates both members, queues the GPS state first, and accepts the marker only
+if that queue operation succeeded. iOS retains at most one unsent complete
+sample, so coalescing cannot split, reorder, or mismatch GPS and marker state.
+This uses one atomic payload per one-Hz tick and prevents the marker from
+being stranded behind the GPS half of the same logical sample. An ATT response
+only confirms transport completion; benchmark acceptance still requires a
+matching marker in the active firmware measurement window.
+
+The iOS secure sweep waits for setup writes and their acknowledgements to
+settle, opens and verifies the HTTPS measurement window and fixture identities,
+then acquires the replay GPS lease. Atomic samples use the existing shared
+writer and a single coalescing key; they do not bypass authentication, ATT, or
+application-acknowledgement ordering. Releasing the lease discards any unsent
+sample. A secure sweep requires both renderer diagnostics and atomic-sample
+capabilities; it never falls back to the legacy two-write pair.
 
 For confirmation on an ordinary diagnostic build, iOS starts a session-scoped
 measurement window with:
@@ -1266,6 +1371,24 @@ ID `36` is sent only after a valid `CAP2` response advertises bit `19`.
 Firmware without that bit is never offered the Automatic Display Off toggle;
 the setting remains app-local until a compatible connected display is
 negotiated.
+
+### Independent navigation orientation setting
+
+ID `37` selects Map + Navigation rotation: `0` North Up, `1` Course Up.
+Other values normalize to Course Up. Firmware rejects this ID unless the
+authenticated session negotiated client version 22 or newer and the stable
+camera implementation is enabled. iOS sends it only with CAP2 bit 24 and
+independent-profile support; missing support keeps the preference app-local.
+A newly advertised capability resynchronizes the retained preference.
+
+The firmware NVS key is `mapSettings/navRotMode`, default `1`; the app key is
+`mapPlusNavigationSettings.rotationMode`, default `1`. Neither migration nor
+writes modify Map's existing rotation setting. Idle guidance is North Up;
+active guidance uses the selected mode. Legacy/production firmware retains
+its existing forced Course Up behavior while navigating.
+
+Keep Upright / Follow Roads remains the separate label setting ID `34`.
+See [stable camera implementation and qualification](map-stable-camera.md).
 
 ## Destination Picker
 
@@ -1437,6 +1560,8 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `DTRN` | iOS -> ESP32 | `tls\|cancel` | Delete a staged identity without changing the active identity. |
 | `DTRN` | iOS -> ESP32 | `exit` | Exit the active map, firmware, debug, or diagnostics transfer mode. |
 | `DSTS` | iOS -> ESP32 | empty | Request generic device-transfer status and the current HTTPS credential/pin. |
+| `DSTS` | ESP32 -> iOS | UTF-8 JSON | Complete generic device-transfer status when it fits one authenticated notification. |
+| `DSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Chunked generic device-transfer status. |
 
 The device preserves a detailed binding through short BLE gaps. If the last
 confirmed workout lifecycle was active and workout telemetry remains stale for
@@ -1470,6 +1595,13 @@ continues to use it. Otherwise `MSTC` responses fit the minimum BLE notification
 payload: ASCII `MSTC`, a one-byte transfer id, zero-based chunk index, chunk
 count, and up to 13 JSON bytes (20 bytes total). The app reassembles chunks by
 transfer id and accepts both forms.
+
+Generic device-transfer status uses the equivalent `DSTS{...}` direct response
+or `DSTC` chunk header. Firmware keeps an incomplete `DSTC` snapshot on the
+owner task and resumes it only as the bounded authenticated-notification queue
+drains. A request received while that snapshot is pending continues the same
+transfer instead of assigning a new transfer id and stranding the iOS
+reassembler with another partial response.
 
 The HTTPS credential is not part of the map-status payload. Current iOS clients
 send `DTRNenter|map`, which applies map mode and publishes a fresh generic
@@ -1664,10 +1796,15 @@ Status responses should include:
   verification key is compiled into firmware. Version `1` is never advertised.
 - `streamFormatVersions`: accepted device-native stream versions when protocol
   v2 is available.
-- `streamTrust`: exact production verification capabilities, each encoded as
-  `keyId=SHA256(X9.63 public key)`. iOS selects v2 only when the artifact's key
-  identity matches one of these entries; a device with an older or rotated-out
-  trust set rejects installation until firmware or the artifact is updated.
+- `streamTrust`: exact verification capabilities compiled into the running
+  profile, each encoded as `keyId=SHA256(X9.63 public key)`. Ordinary and
+  production firmware advertise only the production registry. Opt-in
+  `*_REMOTE_DEBUG` profiles additionally advertise the Bicino Dev public signer
+  so development-signed streams can be tested on dedicated hardware; release
+  workflows never build those profiles. iOS selects v2 only when the artifact's
+  key identity matches one of these entries; a device with an older or
+  rotated-out trust set rejects installation until firmware or the artifact is
+  updated.
 - `baseUrl`: temporary HTTPS base URL when transfer mode is enabled.
 - `transferGeneration`: nonzero boot-local authorization generation. BLE
   disconnect, exit, or mode replacement increments it so in-flight requests

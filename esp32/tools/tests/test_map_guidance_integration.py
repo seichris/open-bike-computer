@@ -95,7 +95,11 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
 
     def test_worker_owns_block_io_and_raw_back_buffer_only(self):
         worker = function_body(MAP_RENDERER_SOURCE, "void Maps::renderWorkerLoop")
-        self.assertIn("getMapBlocks", worker)
+        self.assertIn("prepareMapScene", worker)
+        preparation = function_body(MAP_RENDERER_SOURCE, "bool Maps::prepareMapScene")
+        self.assertIn("getMapBlocks", preparation)
+        self.assertIn("preparedScene.covers", preparation)
+        self.assertNotIn("lv_", preparation)
         self.assertIn("readVectorMap", worker)
         self.assertIn("map_surface::Rgb565Surface target", worker)
         self.assertIn("bufMapTemp", worker)
@@ -103,6 +107,29 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertNotIn("lv_canvas_set_buffer", worker)
         self.assertNotIn("lv_obj_", worker)
         self.assertNotIn("lv_img_", worker)
+
+    def test_stable_camera_uses_accepted_projection_without_bitmap_rotation(self):
+        transform = function_body(MAP_RENDERER_SOURCE, "void Maps::updatePresentedFrameTransform")
+        stable = transform.split("if (map_profile_protocol::STABLE_CAMERA_ENABLED)", 1)[1].split("return;", 1)[0]
+        self.assertIn("lv_img_set_angle(canvasMap, 0)", stable)
+        self.assertNotIn("desiredRotation", stable)
+        presenter = function_body(MAP_RENDERER_SOURCE, "void Maps::serviceStableCamera")
+        self.assertIn("cameraLag.observe(required, nowMs)", presenter)
+        self.assertIn("cameraLag.expired(nowMs)", presenter)
+        self.assertIn("visibleRenderResult.labelOrientation", presenter)
+        marker = function_body(MAP_RENDERER_SOURCE, "void Maps::updatePositionOverlay")
+        self.assertIn("map_camera::markerAngle(visibleProjection, rider", marker)
+        self.assertIn("visibleProjection.projectWorld(rider)", marker)
+
+    def test_frame_capture_uses_narrow_gui_owner_interface(self):
+        capture = (ESP32_ROOT / "lib/device_debug/device_debug_frame_store.cpp").read_text()
+        self.assertNotIn("mainScr.hpp", capture)
+        self.assertIn("captureMapCameraForPanelFrame()", capture)
+        self.assertIn("device_debug::captureMapCameraForPanelFrame()", MAIN_SCREEN_SOURCE)
+        self.assertLess(MAIN_SCREEN_SOURCE.index("Maps mapView;"),
+                        MAIN_SCREEN_SOURCE.index("device_debug::captureMapCameraForPanelFrame()"))
+        widgets = (ESP32_ROOT / "lib/gui/src/widgets.hpp").read_text()
+        self.assertIn('"../../utils/src/gpsMath.hpp"', widgets)
 
         raw_map = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap")
         raw_labels = function_body(MAP_RENDERER_SOURCE, "bool Maps::drawStreetLabels")
@@ -120,6 +147,17 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertNotIn("xTaskCreatePinnedToCore(", start)
         self.assertIn("vTaskDeleteWithCaps(nullptr)", thunk)
         self.assertNotIn("vTaskDelete(nullptr)", thunk)
+
+    def test_round_panel_sizes_overscan_without_spending_coverage_margin(self):
+        request = function_body(
+            MAP_RENDERER_SOURCE, "bool Maps::buildRenderRequestForScreen"
+        )
+        self.assertIn("MAP_RENDER_MINIMUM_OVERSCAN_PIXELS = 64", MAP_HEADER_SOURCE)
+        self.assertIn("MAP_RENDER_ROUND_VIEWPORT", request)
+        self.assertIn("map_presentation::refreshLeadPixels", request)
+        self.assertIn("MAP_RENDER_SAFETY_PIXELS + 8U", request)
+        self.assertIn("request.overscanPixels - MAP_RENDER_SAFETY_PIXELS", request)
+        self.assertIn("request.viewportWidth + request.overscanPixels * 2U", request)
 
     def test_amoled_lvgl_pool_uses_psram_to_preserve_wifi_headroom(self):
         gate = (

@@ -103,8 +103,15 @@ inline double mercatorScaleForLatitude(double latitudeDegrees) {
 
 class Projection {
 public:
-  Projection() = default;
-  explicit Projection(const Config &config) : config_(config) {
+  Projection() : Projection(Config{}) {}
+  explicit Projection(const Config &config)
+      : config_(config),
+        worldToScreenScale_(
+            map_transform::worldToScreenScale(config.zoom)),
+        screenToWorldScale_(
+            map_transform::screenToWorldScale(config.zoom)),
+        rotationCosine_(std::cos(config.rotationRad)),
+        rotationSine_(std::sin(config.rotationRad)) {
     const auto applyTopScale = [this](double topScale) {
       config_.topEdgeScale = topScale;
       focalDistance_ = config_.anchorY / (1.0 - topScale);
@@ -148,20 +155,30 @@ public:
   double nearPlaneForward() const { return nearPlaneForward_; }
 
   GroundPoint groundForWorld(map_transform::WorldPoint world) const {
-    const map_transform::ScreenDelta rotated = map_transform::worldToScreen(
-        {world.x - config_.worldOrigin.x, world.y - config_.worldOrigin.y},
-        config_.zoom, config_.rotationRad);
-    return {rotated.x - config_.rasterCellOffset.x,
-            -rotated.y + config_.rasterCellOffset.y};
+    // Zoom and rotation are immutable for a render request. Applying their
+    // cached coefficients here avoids two software trigonometric calls for
+    // every polygon, road, label, and building point in a frame.
+    const double unrotatedX =
+        (world.x - config_.worldOrigin.x) * worldToScreenScale_;
+    const double unrotatedY =
+        -(world.y - config_.worldOrigin.y) * worldToScreenScale_;
+    const double rotatedX =
+        unrotatedX * rotationCosine_ - unrotatedY * rotationSine_;
+    const double rotatedY =
+        unrotatedX * rotationSine_ + unrotatedY * rotationCosine_;
+    return {rotatedX - config_.rasterCellOffset.x,
+            -rotatedY + config_.rasterCellOffset.y};
   }
 
   map_transform::WorldPoint worldForGround(GroundPoint ground) const {
-    const map_transform::WorldPoint delta = map_transform::screenToWorld(
-        {ground.lateral + config_.rasterCellOffset.x,
-         -ground.forward + config_.rasterCellOffset.y},
-        config_.zoom, config_.rotationRad);
-    return {config_.worldOrigin.x + delta.x,
-            config_.worldOrigin.y + delta.y};
+    const double screenX = ground.lateral + config_.rasterCellOffset.x;
+    const double screenY = -ground.forward + config_.rasterCellOffset.y;
+    const double unrotatedX =
+        screenX * rotationCosine_ + screenY * rotationSine_;
+    const double unrotatedY =
+        -screenX * rotationSine_ + screenY * rotationCosine_;
+    return {config_.worldOrigin.x + unrotatedX * screenToWorldScale_,
+            config_.worldOrigin.y - unrotatedY * screenToWorldScale_};
   }
 
   ProjectedPoint projectGround(GroundPoint ground) const {
@@ -298,6 +315,12 @@ private:
   }
 
   Config config_{};
+  double worldToScreenScale_ =
+      map_transform::worldToScreenScale(config_.zoom);
+  double screenToWorldScale_ =
+      map_transform::screenToWorldScale(config_.zoom);
+  double rotationCosine_ = 1.0;
+  double rotationSine_ = 0.0;
   double focalDistance_ = 1.0;
   double nearPlaneForward_ = -1.0;
 };

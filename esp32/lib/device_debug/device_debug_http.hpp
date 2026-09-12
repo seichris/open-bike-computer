@@ -26,6 +26,8 @@ public:
       const device_transfer::HttpRequest &request) const override;
   void responseDidComplete(const device_transfer::HttpRequest &request,
                            bool peerClosedCleanly) override;
+  void responseDidAbort(
+      const device_transfer::HttpRequest &request) override;
   bool takeWakeRequest();
   bool bootPressRequested() const;
   bool takeBootPressRequest();
@@ -65,7 +67,13 @@ private:
   uint32_t lastFrameResponseMs_ = 0;
   uint32_t lastFrameResponseDurationMs_ = 0;
   uint32_t maxFrameResponseDurationMs_ = 0;
-  uint32_t lastFrameResponseBytes_ = 0;
+  uint32_t lastFrameExpectedBytes_ = 0;
+  uint32_t lastFrameActualBytes_ = 0;
+  uint32_t lastFrameSnapshotWaitUs_ = 0;
+  uint32_t maxFrameSnapshotWaitUs_ = 0;
+  uint32_t lastFrameCrcUs_ = 0;
+  uint32_t maxFrameCrcUs_ = 0;
+  device_transfer::HttpResponseWriteDiagnostics lastFrameWriteDiagnostics_{};
 };
 
 } // namespace device_debug

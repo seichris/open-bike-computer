@@ -294,11 +294,59 @@ final class PhoneRouteLibrary: ObservableObject {
         connectivity.sendRouteImmediately(record)
     }
 
+    @discardableResult
+    func cancelSendToWatch(_ summary: PlannedRouteSummaryV1) -> Bool {
+        let identity = identity(for: summary)
+        let key = Self.receiptKey(identity)
+        guard pendingInstallKeys.contains(key) else { return true }
+        guard connectivity.cancelRouteTransfers(identity) > 0 else {
+            return false
+        }
+        pendingInstallKeys.remove(key)
+        persistPendingInstalls()
+        watchSyncState[identity] = readyReceiptKeys.contains(key)
+            ? .ready
+            : .localOnly
+        return true
+    }
+
     func displayName(for summary: PlannedRouteSummaryV1) -> String {
         displayNames.displayName(
             routeID: summary.id,
             defaultName: summary.name
         )
+    }
+
+    /// Resolve only the selected immutable identity through normal archive
+    /// validation and retention. A successful preview read has no write or
+    /// Watch-transfer side effects and never falls back to another revision.
+    func mapSelection(
+        for summary: PlannedRouteSummaryV1
+    ) throws -> SavedRouteMapSelection {
+        let name = displayName(for: summary)
+        do {
+            let record = try store.record(
+                matching: identity(for: summary),
+                now: now()
+            )
+            // The clock may have crossed the retention deadline while reading.
+            try record.archive.validate(purpose: .offlineNavigation, now: now())
+            return SavedRouteMapSelection(
+                identity: WatchRouteIdentityV1(archive: record.archive),
+                displayName: displayName(for: record.summary),
+                route: record.archive.route,
+                createdAt: record.archive.createdAt,
+                deleteAfter: record.archive.deleteAfter
+            )
+        } catch {
+            // Publish deletion, corruption, or replacement to any open preview
+            // using the same cleanup and Watch-retention path as the library.
+            reload()
+            if let deadline = summary.deleteAfter, now() >= deadline {
+                throw SavedRouteMapError.expired(name)
+            }
+            throw SavedRouteMapError.unavailable(name)
+        }
     }
 
     @discardableResult

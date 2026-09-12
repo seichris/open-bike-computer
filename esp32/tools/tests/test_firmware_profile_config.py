@@ -94,6 +94,7 @@ assert "-DARDUINO_USB_CDC_ON_BOOT=" not in waveshare_flags
 assert "-DBLE_RADIO_CHARACTERIZATION=1" not in waveshare_flags
 assert "-DBLE_TX_POWER_DBM=" not in waveshare_flags
 assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" not in waveshare_flags
+assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in waveshare_flags
 waveshare_dependencies = config.get("waveshare_amoled_common", "lib_deps")
 assert waveshare_dependencies.count("https://github.com/jgauchia/NeoGPS.git") == 1
 assert (
@@ -126,8 +127,10 @@ for environment, (base, board_define) in diagnostic_profiles.items():
     assert "-DFIRMWARE_DIAGNOSTICS=1" in flags
     assert "-DARDUINO_USB_CDC_ON_BOOT=1" in flags
     assert "-DRIDE_AUTOMATION_SHADOW=1" in flags
+    assert "-DMAP_STABLE_CAMERA=1" in flags
     assert "-DRIDE_AUTOMATION_INTERNAL_CONTROL=1" in flags
     assert "-DRIDE_AUTOMATION_AUTOMATIC_START=1" not in flags
+    assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in flags
     assert (
         inherited_option(environment, "board_build.partitions")
         == "partitions_remote_debug.csv"
@@ -159,12 +162,14 @@ for environment, target in expected_targets.items():
     assert "-DFIRMWARE_DIAGNOSTICS=1" not in flags
     assert "-DARDUINO_USB_CDC_ON_BOOT=1" not in flags
     assert "-DRIDE_AUTOMATION_SHADOW=1" not in flags
+    assert "-DMAP_STABLE_CAMERA=1" not in flags
     assert "-DRIDE_AUTOMATION_INTERNAL_CONTROL=1" not in flags
     assert "-DRIDE_AUTOMATION_AUTOMATIC_START=1" not in flags
     unflags = config.get(environment, "build_unflags")
     assert "${waveshare_amoled_common.build_unflags}" in unflags
     assert "-DDEBUG=1" not in unflags
     assert "-DDEVICE_REMOTE_DEBUG=1" not in flags
+    assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in flags
     assert (
         inherited_option(environment, "board_build.partitions")
         == "partitions.csv"
@@ -186,6 +191,16 @@ for environment, (base, target) in remote_debug_profiles.items():
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
     assert "-DDEVICE_REMOTE_DEBUG=1" in flags
+    assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" in flags
+
+for environment in config.sections():
+    if not environment.startswith("env:") or environment in remote_debug_profiles:
+        continue
+    assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in config.get(
+        environment,
+        "build_flags",
+        fallback="",
+    )
 
 large_diagnostic_profiles = (
     *remote_debug_profiles,
@@ -235,6 +250,14 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y" in sdkconfig
     assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n" not in sdkconfig
     assert "CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y" in sdkconfig
+    for watchdog_setting in (
+        "CONFIG_ESP_TASK_WDT_INIT=y",
+        "CONFIG_ESP_TASK_WDT_PANIC=y",
+        "CONFIG_ESP_TASK_WDT_TIMEOUT_S=5",
+        "CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y",
+        "CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n",
+    ):
+        assert watchdog_setting in inherited_option(environment, "custom_sdkconfig")
     assert "CONFIG_ARDUINO_LOOP_STACK_SIZE=16384" in sdkconfig
     assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in sdkconfig
     assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536" in sdkconfig

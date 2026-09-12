@@ -137,6 +137,30 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
                 )
             }
             .store(in: &cancellables)
+        Publishers.CombineLatest3(
+            workoutManager.$latestEnvelope,
+            workoutManager.$snapshot,
+            workoutManager.$isRecovering
+        )
+            .sink { [weak connectivityCoordinator]
+                envelope, snapshot, recovering in
+                // The initial idle value is not an authoritative tombstone
+                // while HealthKit recovery is still resolving the workout.
+                guard !recovering else { return }
+                if let envelope,
+                   let observation = WatchCyclingSensorObservationV1(
+                       envelope: envelope
+                   ) {
+                    connectivityCoordinator?.publishCyclingSensorObservation(
+                        observation
+                    )
+                } else if envelope == nil && !snapshot.state.isActive {
+                    connectivityCoordinator?.publishCyclingSensorObservation(
+                        .inactive(at: Date())
+                    )
+                }
+            }
+            .store(in: &cancellables)
         connectivityCoordinator.activate()
         navigationManager.recoverIfNeeded()
         workoutManager.$isRecovering

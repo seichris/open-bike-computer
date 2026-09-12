@@ -130,14 +130,17 @@ and `AWS_SECRET_ACCESS_KEY`. Give the API separate read-only credentials through
 
 Development streams use a dedicated development-only P-256 signing identity.
 The Bicino Dev build may trust its public key in addition to production public
-keys, but Bicino production must remain production-only. Configure the
-development worker with `MAP_PLATFORM_MAP_SIGNING_KEY_ID=map-dev-2026-08` and
-the matching private key through
-`MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64`. Never copy the production
+keys. Device installation of those streams requires an opt-in
+`*_REMOTE_DEBUG` firmware profile, which compiles the same public key in
+addition to production trust. Ordinary, production, factory, and release
+firmware remain production-only. Configure the development worker with
+`MAP_PLATFORM_MAP_SIGNING_KEY_ID=map-dev-2026-08` and the matching private key
+through `MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64`. Never copy the production
 private key to development or either private key into the app, catalog Worker,
 repository, logs, or API service. Rotate the development identity by first
-shipping its new public key in Bicino Dev, then changing the development worker
-signer; retain old public keys while their maps remain downloadable.
+shipping its new public key in Bicino Dev and remote-debug firmware, then
+changing the development worker signer; retain old public keys while their maps
+remain downloadable.
 
 Every stream publication persists a versioned reader contract covering the
 stream format, manifest schema, renderer format version, and required features.

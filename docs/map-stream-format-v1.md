@@ -175,10 +175,14 @@ Integrity failures never automatically fall back to protocol v1.
 
 ## Production Trust Registry
 
-`map-platform/config/map-stream-trust.json` is the only source of production verification
-keys. `map-platform/backend/tools/generate_map_stream_trust.py` validates that registry and
-generates both the Swift and firmware trust lists; CI rejects drift, malformed
-P-256 points, private fields, duplicate keys, excessive active keys, and the
+`map-platform/config/map-stream-trust.json` is the only source of production
+verification keys. `map-platform/backend/tools/generate_map_stream_trust.py`
+validates that registry and generates both the Swift and firmware production
+trust lists. The same generator reads the non-secret Bicino Dev public identity
+from `ios-app/BikeComputer/Configuration/Development.xcconfig` and generates a
+separate include consumed only by opt-in `*_REMOTE_DEBUG` firmware. CI rejects
+drift, overlap between development and production trust, malformed P-256
+points, private fields, duplicate keys, excessive active keys, and the
 golden-vector identities below. Rotation is additive and follows
 `docs/map-stream-rollout-runbook.md`.
 

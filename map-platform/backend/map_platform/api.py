@@ -791,7 +791,15 @@ def create_app(
             alias="X-Installation-Token",
         ),
     ) -> dict[str, Any]:
-        if clientInstallationId is None:
+        installation_id = token = None
+        if clientInstallationId is not None:
+            try:
+                installation_id, token = installation_store.refresh(
+                    clientInstallationId, x_installation_token,
+                )
+            except InstallationCredentialError as exc:
+                raise HTTPException(status_code=401, detail=str(exc)) from exc
+        if clientInstallationId is None or (isinstance(payload, dict) and set(payload) == {"appAttest"}):
             del request
             if not isinstance(payload, dict) or set(payload) != {"appAttest"}:
                 raise AppAttestError(
@@ -826,7 +834,13 @@ def create_app(
                 field="App Attest object",
                 maximum_bytes=APP_ATTEST_MAX_OBJECT_BYTES,
             )
-            installation_id, token = installation_store.issue()
+            if installation_id is None:
+                installation_id, token = installation_store.issue()
+            elif app_attest_store.key_id_for_installation(installation_id) is not None:
+                raise AppAttestError(
+                    "app_attest_invalid_attestation",
+                    "installation is already bound to an App Attest key",
+                )
             app_attest_store.enroll(
                 installation_id=installation_id,
                 challenge_id=challenge_id,
@@ -837,13 +851,6 @@ def create_app(
         else:
             if payload is not None and payload != {}:
                 raise HTTPException(status_code=400, detail="refresh body is not allowed")
-            try:
-                installation_id, token = installation_store.refresh(
-                    clientInstallationId,
-                    x_installation_token,
-                )
-            except InstallationCredentialError as exc:
-                raise HTTPException(status_code=401, detail=str(exc)) from exc
             key_id = app_attest_store.key_id_for_installation(installation_id)
             if key_id is None:
                 raise AppAttestError(
