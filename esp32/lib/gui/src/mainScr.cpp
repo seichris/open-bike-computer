@@ -2247,6 +2247,12 @@ void applyDeviceScreenSettings() {
       if (activeScreenPayloadSignature !=
           screen_configuration::screenPayloadSignature(matching)) {
         showScreenInstance(matchingIndex);
+      } else if (isMapBackedTile(static_cast<tileName>(activeTile))) {
+        // Legacy scalar handling temporarily uses the shared settings. Restore
+        // the visible instance even when only a different instance changed.
+        applyMapInstanceProfile(matching);
+        zoom = currentMapStyleSettings().zoomLevel;
+        applyMapRotationForTile(static_cast<tileName>(activeTile));
       } else if (!isMapBackedTile(static_cast<tileName>(activeTile))) {
         // The visible payload is unchanged, but reordering/enabling another
         // instance can change which map should be rendered ahead.

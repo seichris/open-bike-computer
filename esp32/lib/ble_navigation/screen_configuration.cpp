@@ -53,6 +53,8 @@ char activeSlot = 'A';
 uint32_t activeLegacyDigest = 0;
 uint32_t legacyChangedAtMs = 0;
 bool legacyChangePending = false;
+bool legacyMaskPending = false;
+bool legacyDefaultPending = false;
 uint32_t internalRequestID = 0x40000000UL;
 std::array<uint8_t, kMaximumSlotBytes> slotBuffer{};
 std::array<uint8_t, screen_configuration_protocol::MAX_DOCUMENT_BYTES>
@@ -193,7 +195,9 @@ void projectDocument(const Document &document, MapRenderSettings &settings) {
 }
 
 bool writeLegacyProjection(const Document &document,
-                           MapRenderSettings &settings) {
+                           MapRenderSettings settings) {
+  // NVS is the compatibility projection, not the currently visible instance.
+  // Never replace a duplicate's render-time settings while mirroring a save.
   projectDocument(document, settings);
   Preferences legacy;
   if (!legacy.begin("mapSettings", false))
@@ -225,10 +229,7 @@ bool writeLegacyProjection(const Document &document,
   return wrote;
 }
 
-bool verifyLegacyProjection(const Document &document,
-                            const MapRenderSettings &current,
-                            uint32_t expectedDigest) {
-  MapRenderSettings verified = current;
+bool readLegacyProjection(MapRenderSettings &verified) {
   Preferences legacy;
   if (!legacy.begin("mapSettings", true))
     return false;
@@ -249,6 +250,15 @@ bool verifyLegacyProjection(const Document &document,
       legacy.getUInt("visMask", 0) &
       map_profile_protocol::VISIBILITY_OVERLAY_MASK;
   legacy.end();
+  return true;
+}
+
+bool verifyLegacyProjection(const Document &document,
+                            const MapRenderSettings &current,
+                            uint32_t expectedDigest) {
+  MapRenderSettings verified = current;
+  if (!readLegacyProjection(verified))
+    return false;
   MapRenderSettings expected = current;
   projectDocument(document, expected);
   return legacyDigest(verified) == expectedDigest &&
@@ -379,20 +389,51 @@ const ReplayRecord *findReplay(uint32_t requestID) {
   return nullptr;
 }
 
-void importLegacy(Document &document, const MapRenderSettings &legacy) {
+void importLegacy(Document &document, const MapRenderSettings &legacy,
+                  bool importMask, bool importDefault) {
+  MapRenderSettings previous = legacy;
+  projectDocument(document, previous);
+  auto importProfile = [&](ScreenInstance &instance,
+                           const ScreenMapRenderSettings &stored,
+                           const ScreenMapRenderSettings &oldProjection) {
+    const MapProfile before = captureProfile(oldProjection, previous, instance.type);
+    const MapProfile after = captureProfile(stored, legacy, instance.type);
+    // In particular, a shared legacy overlay value must not replace a distinct
+    // Map + Navigation overlay unless that legacy value actually changed.
+    uint8_t MapProfile::*const fields[] = {
+        &MapProfile::minPolygonSize, &MapProfile::detailLevel,
+        &MapProfile::routeLineWidth, &MapProfile::streetLineWidth,
+        &MapProfile::positionMarkerScale, &MapProfile::zoomLevel,
+        &MapProfile::labelDensity, &MapProfile::labelLanguageMode,
+        &MapProfile::labelTextSize, &MapProfile::labelOrientation,
+        &MapProfile::rotationMode, &MapProfile::birdsEyePerspective};
+    for (auto field : fields) {
+      if (before.*field != after.*field)
+        instance.mapProfile.*field = after.*field;
+    }
+    const uint32_t changedVisibility = before.visibilityMask ^ after.visibilityMask;
+    instance.mapProfile.visibilityMask =
+        (instance.mapProfile.visibilityMask & ~changedVisibility) |
+        (after.visibilityMask & changedVisibility);
+    if (before.birdsEyeEnabled != after.birdsEyeEnabled)
+      instance.mapProfile.birdsEyeEnabled = after.birdsEyeEnabled;
+    if (before.buildings3DEnabled != after.buildings3DEnabled)
+      instance.mapProfile.buildings3DEnabled = after.buildings3DEnabled;
+  };
   const uint8_t mask = legacy.enabledScreensMask & DEVICE_SCREEN_SUPPORTED_MASK;
   bool represented[5]{};
   for (uint8_t index = 0; index < document.instanceCount; ++index) {
     ScreenInstance &instance = document.instances[index];
     const uint8_t rawType = static_cast<uint8_t>(instance.type);
     represented[rawType] = true;
-    instance.enabled = (mask & (1U << rawType)) != 0;
+    if (importMask)
+      instance.enabled = (mask & (1U << rawType)) != 0;
   }
   for (uint8_t rawType = 0; rawType < 5 &&
                             document.instanceCount <
                                 screen_configuration_protocol::MAX_INSTANCES;
        ++rawType) {
-    if (represented[rawType] || (mask & (1U << rawType)) == 0)
+    if (!importMask || represented[rawType] || (mask & (1U << rawType)) == 0)
       continue;
     ScreenInstance &instance = document.instances[document.instanceCount++];
     instance = {};
@@ -415,18 +456,18 @@ void importLegacy(Document &document, const MapRenderSettings &legacy) {
 
   if (ScreenInstance *map = const_cast<ScreenInstance *>(
           primaryInstance(document, ScreenType::Map))) {
-    map->mapProfile = captureProfile(legacy.mapStyle, legacy, ScreenType::Map);
+    importProfile(*map, legacy.mapStyle, previous.mapStyle);
   }
   if (ScreenInstance *navigation = const_cast<ScreenInstance *>(
           primaryInstance(document, ScreenType::MapNavigation))) {
-    navigation->mapProfile = captureProfile(
-        legacy.mapNavigationStyle, legacy, ScreenType::MapNavigation);
+    importProfile(*navigation, legacy.mapNavigationStyle,
+                  previous.mapNavigationStyle);
   }
   const ScreenType defaultType = legacy.defaultScreen <= 4
                                      ? static_cast<ScreenType>(legacy.defaultScreen)
                                      : ScreenType::MapNavigation;
   const ScreenInstance *newDefault = primaryInstance(document, defaultType);
-  if (newDefault != nullptr && newDefault->enabled)
+  if (importDefault && newDefault != nullptr && newDefault->enabled)
     document.defaultInstanceID = newDefault->id;
   if (screen_configuration_protocol::validate(document) !=
       screen_configuration_protocol::ValidationError::None) {
@@ -525,6 +566,7 @@ bool initialize(const MapRenderSettings &legacy) {
     active = {1, migrated};
     activeSlot = 'A';
     activeLegacyDigest = projectionDigest;
+    projectDocument(active.document, mapRenderSettings);
     ready = true;
     Serial.printf("BLE screens: migrated legacy settings revision=1 count=%u\n",
                   migrated.instanceCount);
@@ -556,15 +598,19 @@ bool initialize(const MapRenderSettings &legacy) {
     }
   } else if (currentLegacyDigest != activeLegacyDigest) {
     Document imported = active.document;
-    importLegacy(imported, legacy);
+    const uint8_t defaultIndex = defaultInstanceIndex(imported);
+    importLegacy(imported, legacy,
+                 legacy.enabledScreensMask != screenMask(imported),
+                 defaultIndex == kInvalidInstanceIndex ||
+                     legacy.defaultScreen != static_cast<uint8_t>(
+                         imported.instances[defaultIndex].type));
     const uint32_t request = ++internalRequestID;
     const std::size_t length = screen_configuration_protocol::encodeDocument(
         imported, documentBuffer.data(), documentBuffer.size());
     if (length != 0)
       (void)commit(request, active.revision, documentBuffer.data(), length);
-  } else {
-    projectDocument(active.document, mapRenderSettings);
   }
+  projectDocument(active.document, mapRenderSettings);
   Serial.printf("BLE screens: loaded revision=%lu count=%u slot=%c\n",
                 static_cast<unsigned long>(active.revision),
                 active.document.instanceCount, activeSlot);
@@ -644,7 +690,6 @@ CommitOutcome commit(uint32_t requestID, uint32_t baseRevision,
     if (previousSlot.valid)
       (void)writeHead(previousHeadSlot, previousHeadRevision,
                       previousSlot.blobCRC);
-    projectDocument(active.document, mapRenderSettings);
     if (writeLegacyProjection(active.document, mapRenderSettings) &&
         verifyLegacyProjection(active.document, mapRenderSettings,
                                activeLegacyDigest)) {
@@ -659,6 +704,8 @@ CommitOutcome commit(uint32_t requestID, uint32_t baseRevision,
   active = {candidateRevision, candidate};
   activeSlot = nextSlot;
   activeLegacyDigest = projectionDigest;
+  mapRenderSettings.enabledScreensMask = projected.enabledScreensMask;
+  mapRenderSettings.defaultScreen = projected.defaultScreen;
   outcome.result = CommitResult::Applied;
   outcome.revision = candidateRevision;
   outcome.documentCRC = candidateCRC;
@@ -676,11 +723,13 @@ void applySnapshotToLegacyRuntime(MapRenderSettings &settings) {
     projectDocument(active.document, settings);
 }
 
-void noteLegacySettingsChanged(uint32_t nowMs) {
+void noteLegacySettingsChanged(uint32_t nowMs, uint8_t settingID) {
   if (!ready)
     return;
   legacyChangedAtMs = nowMs;
   legacyChangePending = true;
+  legacyMaskPending = legacyMaskPending || settingID == 13;
+  legacyDefaultPending = legacyDefaultPending || settingID == 14;
 }
 
 bool processLegacySettings(MapRenderSettings &settings, uint32_t nowMs) {
@@ -689,7 +738,18 @@ bool processLegacySettings(MapRenderSettings &settings, uint32_t nowMs) {
     return false;
   legacyChangePending = false;
   Document imported = active.document;
-  importLegacy(imported, settings);
+  // A secondary instance (or a render-ahead profile) may currently occupy the
+  // shared renderer settings. Only persisted legacy writes may update primary
+  // instances; importing renderer state would copy unrelated duplicate fields.
+  MapRenderSettings persisted = settings;
+  if (!readLegacyProjection(persisted)) {
+    legacyChangePending = true;
+    legacyChangedAtMs = nowMs;
+    return false;
+  }
+  importLegacy(imported, persisted, legacyMaskPending, legacyDefaultPending);
+  legacyMaskPending = false;
+  legacyDefaultPending = false;
   const std::size_t length = screen_configuration_protocol::encodeDocument(
       imported, documentBuffer.data(), documentBuffer.size());
   if (length == 0)
@@ -702,6 +762,9 @@ bool processLegacySettings(MapRenderSettings &settings, uint32_t nowMs) {
       .published;
 }
 
-void resetTransferState() { legacyChangePending = false; }
+void resetTransferState() {
+  // Legacy scalar writes are already persisted. A BLE disconnect must not
+  // discard their pending import into the canonical screen document.
+}
 
 } // namespace screen_configuration

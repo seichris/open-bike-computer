@@ -182,7 +182,7 @@ const Snapshot &activeSnapshot();
 CommitOutcome commit(uint32_t requestID, uint32_t baseRevision,
                      const uint8_t *document, std::size_t length);
 void applySnapshotToLegacyRuntime(::MapRenderSettings &settings);
-void noteLegacySettingsChanged(uint32_t nowMs);
+void noteLegacySettingsChanged(uint32_t nowMs, uint8_t settingID);
 bool processLegacySettings(::MapRenderSettings &settings, uint32_t nowMs);
 void resetTransferState();
 

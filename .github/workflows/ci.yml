@@ -591,6 +591,11 @@ jobs:
             tools/tests/test_screen_configuration_policy.cpp \
             -o /tmp/test_screen_configuration_policy
           /tmp/test_screen_configuration_policy
+          g++ -std=c++17 -Wall -Wextra -Werror -Itools/tests/host_stubs \
+            tools/tests/test_screen_configuration_store.cpp \
+            -o /tmp/test_screen_configuration_store
+          /tmp/test_screen_configuration_store
+          /tmp/test_screen_configuration_store legacy
           g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_ride_stats_widget.cpp \
             -o /tmp/test_ride_stats_widget

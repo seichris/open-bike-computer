@@ -2,7 +2,7 @@ import SwiftUI
 
 struct ConfigurableDeviceScreensSettingsSection: View {
     @ObservedObject var controller: DeviceScreenConfigurationController
-    @State private var isAddingScreen = false
+    let onAddScreen: () -> Void
     @State private var editMode: EditMode = .inactive
 
     var body: some View {
@@ -71,7 +71,7 @@ struct ConfigurableDeviceScreensSettingsSection: View {
                 }
 
                 Button {
-                    isAddingScreen = true
+                    onAddScreen()
                 } label: {
                     Label("Add Screen", systemImage: "plus")
                 }
@@ -87,15 +87,12 @@ struct ConfigurableDeviceScreensSettingsSection: View {
                 Button("Cancel Changes", role: .destructive) {
                     controller.reloadDeviceSettings()
                 }
-                .disabled(!controller.hasUnsavedChanges)
+                .disabled(!controller.canDiscardChanges)
             }
         } header: {
             Text("Device Screens")
         } footer: {
             Text("Add duplicate screen types, reorder them, and give every Map, Map + Navigation, and Ride Stats screen its own settings. Changes are sent as one atomic configuration when you save.")
-        }
-        .sheet(isPresented: $isAddingScreen) {
-            addScreenSheet
         }
         .environment(\.editMode, $editMode)
     }
@@ -124,6 +121,7 @@ struct ConfigurableDeviceScreensSettingsSection: View {
                         controller.keepDraftAfterConflict()
                     }
                 }
+                .disabled(!controller.canResolveConflict)
             }
         case let .failed(message):
             VStack(alignment: .leading, spacing: 8) {
@@ -137,30 +135,6 @@ struct ConfigurableDeviceScreensSettingsSection: View {
             Text("This firmware uses the original fixed screen settings.")
                 .foregroundStyle(.secondary)
         }
-    }
-
-    private var addScreenSheet: some View {
-        NavigationStack {
-            List(supportedScreenTypes) { type in
-                Button {
-                    try? controller.add(type: type, after: controller.draft?.instances.last?.id)
-                    isAddingScreen = false
-                } label: {
-                    Label(type.title, systemImage: icon(for: type))
-                }
-            }
-            .navigationTitle("Add Screen")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { isAddingScreen = false }
-                }
-            }
-        }
-    }
-
-    private var supportedScreenTypes: [ConfiguredDeviceScreenType] {
-        guard let capabilities = controller.capabilities else { return [] }
-        return ConfiguredDeviceScreenType.allCases.filter(capabilities.supports)
     }
 
     private func canAdd(to document: DeviceScreenConfigurationDocument) -> Bool {
@@ -193,31 +167,83 @@ struct ConfigurableDeviceScreensSettingsSection: View {
     }
 }
 
+// The stable Settings root owns presentation; the sheet dismisses only itself.
+struct AddDeviceScreenSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var controller: DeviceScreenConfigurationController
+    @State private var errorMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let errorMessage {
+                    Text(errorMessage).foregroundStyle(.red)
+                }
+                ForEach(supportedScreenTypes) { type in
+                    Button(type.title) {
+                        do {
+                            try controller.add(
+                                type: type,
+                                after: controller.draft?.instances.last?.id
+                            )
+                            dismiss()
+                        } catch {
+                            errorMessage = String(describing: error)
+                        }
+                    }
+                    .disabled(controller.draft == nil)
+                    .accessibilityIdentifier("device-screen-add-type-\(type.rawValue)")
+                }
+            }
+            .navigationTitle("Add Screen")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private var supportedScreenTypes: [ConfiguredDeviceScreenType] {
+        guard let capabilities = controller.capabilities else { return [] }
+        return ConfiguredDeviceScreenType.allCases.filter(capabilities.supports)
+    }
+}
+
 private struct DeviceScreenInstanceEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var bleManager: BLEManager
     @ObservedObject var controller: DeviceScreenConfigurationController
-    @State private var instance: DeviceScreenInstance
+    private let initialInstance: DeviceScreenInstance
 
     init(
         controller: DeviceScreenConfigurationController,
         instance: DeviceScreenInstance
     ) {
         self.controller = controller
-        _instance = State(initialValue: instance)
+        initialInstance = instance
+    }
+
+    private var instance: DeviceScreenInstance {
+        controller.draft?.instances.first(where: { $0.id == initialInstance.id })
+            ?? initialInstance
+    }
+
+    private var instanceBinding: Binding<DeviceScreenInstance> {
+        Binding(get: { instance }, set: { controller.update(instance: $0) })
     }
 
     var body: some View {
         Form {
             Section("Screen") {
-                TextField("Name", text: $instance.name)
+                TextField("Name", text: instanceBinding.name)
                 Text("\(instance.name.utf8.count) of \(maximumNameBytes) bytes")
                     .font(.caption)
                     .foregroundStyle(
                         instance.name.utf8.count > maximumNameBytes
                             ? .red : .secondary
                     )
-                Toggle("Show while cycling", isOn: $instance.enabled)
+                Toggle("Show while cycling", isOn: instanceBinding.enabled)
                     .disabled(isOnlyEnabledScreen)
                 Button("Make Default") {
                     controller.setDefault(instanceID: instance.id)
@@ -257,9 +283,6 @@ private struct DeviceScreenInstanceEditorView: View {
         }
         .navigationTitle(instance.name)
         .navigationBarTitleDisplayMode(.inline)
-        .onChange(of: instance) { updated in
-            controller.update(instance: updated)
-        }
     }
 
     private var isDefault: Bool {
@@ -292,14 +315,22 @@ private struct DeviceScreenInstanceEditorView: View {
     private var mapProfileBinding: Binding<DeviceScreenMapProfile> {
         Binding(
             get: { instance.mapProfile ?? .mapDefault },
-            set: { instance.mapProfile = $0 }
+            set: { profile in
+                var updated = instance
+                updated.mapProfile = profile
+                controller.update(instance: updated)
+            }
         )
     }
 
     private var rideStatsLayoutBinding: Binding<RideStatsLayout> {
         Binding(
             get: { instance.rideStatsLayout ?? RideStatsLayout() },
-            set: { instance.rideStatsLayout = $0 }
+            set: { layout in
+                var updated = instance
+                updated.rideStatsLayout = layout
+                controller.update(instance: updated)
+            }
         )
     }
 }
@@ -344,8 +375,8 @@ private struct DeviceScreenMapProfileEditor: View {
             .disabled(profile.labelDensity == 0)
             Picker("Language", selection: $profile.labelLanguageMode) {
                 Text("Local").tag(UInt8(0))
-                Text("English").tag(UInt8(1))
-                Text("Automatic").tag(UInt8(2))
+                Text("Preferred").tag(UInt8(1))
+                Text("Local + Preferred").tag(UInt8(2))
             }
             Picker("Text Size", selection: $profile.labelTextSize) {
                 Text("Small").tag(UInt8(0))
@@ -353,8 +384,8 @@ private struct DeviceScreenMapProfileEditor: View {
                 Text("Large").tag(UInt8(2))
             }
             Picker("Orientation", selection: $profile.labelOrientation) {
-                Text("Map Aligned").tag(UInt8(0))
-                Text("Screen Aligned").tag(UInt8(1))
+                Text("Follow Roads").tag(UInt8(0))
+                Text("Keep Upright").tag(UInt8(1))
             }
         }
 

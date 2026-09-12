@@ -777,6 +777,10 @@ struct NavigationProtocolTests {
         testDeviceScreenValidation()
         testDeviceScreenConfigurationCodecAndValidation()
         testDeviceScreenConfigurationController()
+        testScreenCleanReconnect()
+        testScreenEditsDuringReload()
+        testScreenEditsDuringSave()
+        testScreenPendingConflictResolution()
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
         testBLEScanLifecyclePolicy()
@@ -11719,6 +11723,10 @@ struct NavigationProtocolTests {
     }
 
     static func testSettingsSheetPresentationWiring() {
+        let screensSource = try! String(contentsOfFile:
+            "ios-app/BikeComputer/BikeComputer/Views/DeviceScreensSettingsView.swift",
+            encoding: .utf8
+        )
         let settingsURL = URL(fileURLWithPath:
             "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift"
         )
@@ -11762,6 +11770,29 @@ struct NavigationProtocolTests {
                 !routesSource.contains("isImportingStrava") &&
                 !routesSource.contains(".sheet("),
             "Saved Routes requests presentation without owning a transient sheet"
+        )
+        assert(
+            settingsSource.contains("presentedSheet = .addDeviceScreen") &&
+                settingsSource.contains("case .addDeviceScreen:") &&
+                settingsSource.contains("AddDeviceScreenSheet(") &&
+                screensSource.contains("let onAddScreen: () -> Void") &&
+                screensSource.contains("onAddScreen()") &&
+                !screensSource.contains(".sheet(") &&
+                screensSource.contains("Button(\"Cancel\") { dismiss() }"),
+            "Add Screen is routed from the stable Settings presenter and dismisses only its own sheet"
+        )
+        assert(
+            screensSource.contains("Text(\"Preferred\").tag(UInt8(1))") &&
+                screensSource.contains("Text(\"Local + Preferred\").tag(UInt8(2))") &&
+                screensSource.contains("Text(\"Follow Roads\").tag(UInt8(0))") &&
+                screensSource.contains("Text(\"Keep Upright\").tag(UInt8(1))"),
+            "per-instance label controls preserve the established wire semantics"
+        )
+        assert(
+            screensSource.contains("TextField(\"Name\", text: instanceBinding.name)") &&
+                screensSource.contains("controller.draft?.instances.first(where:") &&
+                !screensSource.contains("@State private var instance:"),
+            "screen editors bind to current controller state after snapshot refresh"
         )
         guard let remoteStart = settingsSource.range(
             of: "private struct RemoteDeviceDebugSettingsSection"

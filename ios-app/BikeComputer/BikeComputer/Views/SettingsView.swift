@@ -12,11 +12,14 @@ import MapKit
 import WebKit
 
 private enum SettingsSheetDestination: Identifiable, Equatable {
+    case addDeviceScreen
     case stravaRouteImport
     case savedMapShare(URL)
 
     var id: String {
         switch self {
+        case .addDeviceScreen:
+            return "add-device-screen"
         case .stravaRouteImport:
             return "strava-route-import"
         case .savedMapShare(let url):
@@ -143,7 +146,10 @@ struct SettingsView: View {
                     if bleManager.supportsScreenConfiguration {
                         ConfigurableDeviceScreensSettingsSection(
                             controller: bleManager
-                                .deviceScreenConfigurationController
+                                .deviceScreenConfigurationController,
+                            onAddScreen: {
+                                presentedSheet = .addDeviceScreen
+                            }
                         )
                     } else {
                         DeviceScreensSettingsSection(
@@ -298,6 +304,10 @@ struct SettingsView: View {
         for destination: SettingsSheetDestination
     ) -> some View {
         switch destination {
+        case .addDeviceScreen:
+            AddDeviceScreenSheet(
+                controller: bleManager.deviceScreenConfigurationController
+            )
         case .stravaRouteImport:
             StravaRouteImportView(
                 coordinator: stravaIntegrationCoordinator

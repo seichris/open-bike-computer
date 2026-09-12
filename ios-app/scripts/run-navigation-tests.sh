@@ -92,6 +92,7 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
   ios-app/BikeComputerTests/DeviceScreenConfigurationTests.swift \
+  ios-app/BikeComputerTests/DeviceScreenConfigurationStateTests.swift \
   ios-app/BikeComputerTests/NavigationProtocolTests.swift
 
 "${OUT}"

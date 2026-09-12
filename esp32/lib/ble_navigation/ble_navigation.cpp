@@ -5005,7 +5005,7 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
        settingId <=
            map_profile_protocol::MAP_NAVIGATION_3D_BUILDINGS_SETTING_ID);
   if (changesScreenDocument)
-    screen_configuration::noteLegacySettingsChanged(millis());
+    screen_configuration::noteLegacySettingsChanged(millis(), settingId);
 }
 
 static void handleMapSettingPayload(const uint8_t *data, size_t len,

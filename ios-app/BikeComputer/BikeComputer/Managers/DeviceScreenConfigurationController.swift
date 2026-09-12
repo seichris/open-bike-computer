@@ -154,7 +154,13 @@ final class DeviceScreenConfigurationController: ObservableObject {
     @Published private(set) var capabilities: DeviceScreenConfigurationCapabilities?
     @Published private(set) var acknowledgedDocument: DeviceScreenConfigurationDocument?
     @Published private(set) var acknowledgedRevision: UInt32 = 0
-    @Published var draft: DeviceScreenConfigurationDocument?
+    @Published var draft: DeviceScreenConfigurationDocument? {
+        didSet {
+            if snapshotRequestID != nil, draft != oldValue {
+                preserveDraftOnSnapshot = hasUnsavedChanges
+            }
+        }
+    }
 
     private var connectedDeviceID: String?
     private var draftDeviceID: String?
@@ -200,6 +206,16 @@ final class DeviceScreenConfigurationController: ObservableObject {
         draft != nil && draft != acknowledgedDocument
     }
 
+    var canResolveConflict: Bool {
+        state == .conflict && snapshotRequestID == nil && saveRequestID == nil
+    }
+
+    var canDiscardChanges: Bool {
+        hasUnsavedChanges && connectedDeviceID != nil &&
+            snapshotRequestID == nil && saveRequestID == nil &&
+            (state == .ready || canResolveConflict)
+    }
+
     func connect(
         deviceID: String,
         generation: UInt64,
@@ -209,7 +225,7 @@ final class DeviceScreenConfigurationController: ObservableObject {
     ) {
         let cached = cachedDocument(deviceID: deviceID)
         let shouldPreserveDraft = draftDeviceID == deviceID &&
-            draft != nil && draft != cached
+            hasUnsavedChanges
         clearSession(preserveDraft: shouldPreserveDraft)
         preserveDraftOnSnapshot = shouldPreserveDraft
         guard maximumPlaintextWriteBytes >
@@ -385,7 +401,7 @@ final class DeviceScreenConfigurationController: ObservableObject {
     }
 
     func reloadDeviceSettings() {
-        guard let acknowledgedDocument else { return }
+        guard canDiscardChanges, let acknowledgedDocument else { return }
         preserveDraftOnSnapshot = false
         draft = acknowledgedDocument
         draftDeviceID = connectedDeviceID
@@ -393,7 +409,7 @@ final class DeviceScreenConfigurationController: ObservableObject {
     }
 
     func keepDraftAfterConflict() {
-        guard state == .conflict, draft != nil else { return }
+        guard canResolveConflict, draft != nil else { return }
         preserveDraftOnSnapshot = true
         state = .ready
     }
@@ -504,7 +520,11 @@ final class DeviceScreenConfigurationController: ObservableObject {
             }
             acknowledgedDocument = document
             acknowledgedRevision = acknowledgement.revision
-            draft = document
+            // The submitted value is now authoritative, but the editor remains
+            // usable during transport. Keep edits made after submission dirty.
+            if draft == saveDocument {
+                draft = document
+            }
             draftDeviceID = deviceID
             cache(document: document, revision: acknowledgement.revision, deviceID: deviceID)
             state = .ready
