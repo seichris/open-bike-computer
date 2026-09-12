@@ -1,4 +1,7 @@
+// Arduino.h defines bit() before the main screen includes this registry.
+#define bit(b) (1UL << (b))
 #include "../../lib/gui/src/mainScreenRegistry.hpp"
+#undef bit
 
 #include <cassert>
 #include <iostream>
@@ -17,7 +20,7 @@ int main() {
   assert(nextEnabled(NAV, SUPPORTED_MASK) == WORLD_RADIO);
   assert(nextEnabled(WORLD_RADIO, SUPPORTED_MASK) == BATTERY_STATUS);
   assert(nextEnabled(COMPASS, SUPPORTED_MASK) == NAV);
-  assert(nextEnabled(NAV, static_cast<uint8_t>(SUPPORTED_MASK & ~bit(DeviceScreenId::WorldRadio))) ==
+  assert(nextEnabled(NAV, static_cast<uint8_t>(SUPPORTED_MASK & ~screenBit(DeviceScreenId::WorldRadio))) ==
          BATTERY_STATUS);
   tileName next = WORLD_RADIO;
   assert(nextEnabledMapBacked(RIDESTATS, SUPPORTED_MASK, next));
