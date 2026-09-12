@@ -1,4 +1,8 @@
+// Firmware builds define VERSION as a string in their compiler flags.
+// Keep the codec usable under that same preprocessor environment.
+#define VERSION "firmware-build-version"
 #include "../../lib/world_radio/world_radio_protocol.hpp"
+#undef VERSION
 
 #include <cassert>
 #include <cstring>
@@ -15,7 +19,7 @@ int main() {
   uint8_t requestBytes[REQUEST_BYTES]{};
   assert(encodeRequest(request, requestBytes, sizeof(requestBytes)));
   assert(std::memcmp(requestBytes, "WRQ1", 4) == 0);
-  assert(requestBytes[4] == VERSION);
+  assert(requestBytes[4] == 1);
   Request decodedRequest{};
   assert(decodeRequest(requestBytes, sizeof(requestBytes), decodedRequest));
   assert(decodedRequest.command == request.command);

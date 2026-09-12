@@ -8,7 +8,7 @@ namespace world_radio_protocol {
 
 inline constexpr char REQUEST_MAGIC[] = "WRQ1";
 inline constexpr char STATUS_MAGIC[] = "WRS1";
-inline constexpr uint8_t VERSION = 1;
+inline constexpr uint8_t PROTOCOL_VERSION = 1;
 inline constexpr std::size_t REQUEST_BYTES = 20;
 inline constexpr std::size_t STATUS_HEADER_BYTES = 32;
 inline constexpr std::size_t STATUS_MAX_BYTES = 160;
@@ -144,7 +144,7 @@ inline bool encodeRequest(const Request &request, uint8_t *output,
 
   std::memset(output, 0, REQUEST_BYTES);
   std::memcpy(output, REQUEST_MAGIC, 4);
-  output[4] = VERSION;
+  output[4] = PROTOCOL_VERSION;
   output[5] = static_cast<uint8_t>(request.command);
   output[6] = request.flags;
   writeU32(output + 8, request.requestId);
@@ -156,7 +156,7 @@ inline bool encodeRequest(const Request &request, uint8_t *output,
 inline bool decodeRequest(const uint8_t *input, std::size_t length,
                           Request &request) {
   if (input == nullptr || length != REQUEST_BYTES ||
-      std::memcmp(input, REQUEST_MAGIC, 4) != 0 || input[4] != VERSION ||
+      std::memcmp(input, REQUEST_MAGIC, 4) != 0 || input[4] != PROTOCOL_VERSION ||
       input[7] != 0) {
     return false;
   }
@@ -196,7 +196,7 @@ inline bool encodeStatus(const Status &status, uint8_t *output,
 
   std::memset(output, 0, total);
   std::memcpy(output, STATUS_MAGIC, 4);
-  output[4] = VERSION;
+  output[4] = PROTOCOL_VERSION;
   output[5] = static_cast<uint8_t>(status.state);
   output[6] = (status.favorite ? STATUS_FLAG_FAVORITE : 0) |
               (status.hasStation ? STATUS_FLAG_HAS_STATION : 0);
@@ -226,7 +226,7 @@ inline bool decodeStatus(const uint8_t *input, std::size_t length,
                          Status &status) {
   if (input == nullptr || length < STATUS_HEADER_BYTES ||
       length > STATUS_MAX_BYTES || std::memcmp(input, STATUS_MAGIC, 4) != 0 ||
-      input[4] != VERSION || input[9] != 0 || input[29] != 0 ||
+      input[4] != PROTOCOL_VERSION || input[9] != 0 || input[29] != 0 ||
       input[30] != 0 || input[31] != 0) {
     return false;
   }
