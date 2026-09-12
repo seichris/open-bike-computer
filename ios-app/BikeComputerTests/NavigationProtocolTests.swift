@@ -18399,15 +18399,22 @@ struct NavigationProtocolTests {
         assert(manager.hasReceivedDeviceCapabilities,
                "valid CAP2 completes capability negotiation")
 
-        let cap2WithMapPois =
+        let cap2WithRendererReplay =
             Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, 0, 0x11, 0x80, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithRendererReplay),
+               "CAP2 renderer replay notification should be consumed")
+        assert(!manager.supportsMapPois,
+               "released renderer replay bit 23 must not enable map POIs")
+        let cap2WithMapPois =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0x11, 0, 0x04])
         assert(manager.handleDeviceCapabilitiesNotification(cap2WithMapPois),
                "CAP2 map POI notification should be consumed")
         assert(manager.supportsStreetLabels && manager.supports3DBuildings,
                "the target-4 fixture carries its prerequisite capabilities")
         assert(manager.supportsMapPois,
-               "CAP2 bit 23 enables map POI profiles and controls")
+               "CAP2 bit 26 enables map POI profiles and controls")
 
         let cap2WithScopedWatch = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, 0, 0x7F, 0, 0])
@@ -20760,7 +20767,7 @@ struct NavigationProtocolTests {
         let poiManager = BLEManager()
         let poiCapabilities =
             Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
-            Data([1, 0, 0, 0x80, 0])
+            Data([1, 0, 0, 0, 0x04])
         assert(poiManager.handleDeviceCapabilitiesNotification(poiCapabilities),
                "CAP2 map POI capability is accepted")
         poiManager.isConnected = true
