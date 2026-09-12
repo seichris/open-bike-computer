@@ -198,6 +198,10 @@ Local pre-publication evidence (macOS arm64, Swift 6.3.3, Apple clang 21):
 - Swift/C++ host proof passed, including C++ AddressSanitizer and UBSan.
 - Root tooling: 110 tests passed, including 13 new prototype/preparation tests.
 - Workflow routing/policy: 80 tests passed.
+- The full navigation helper aggregate passed, including the new cross-language
+  proof and existing navigation, cycling-sensor, map-appearance, and saved-map
+  Catalyst tests. The opt-in live MapKit snapshot smoke test was skipped by
+  the existing script; no live navigation test is claimed.
 - Generated BLE contract verification and whitespace checks passed; the
   production BLE contract is unchanged.
 
