@@ -258,7 +258,7 @@ void createWaitingScr() {
   welcomeGroup = createTransparentGroup(waitingScreen);
   const pre_connection_presentation::Content welcomeContent =
       pre_connection_presentation::content(Phase::Welcome);
-  createLabel(welcomeGroup, layout.welcomeHeadline, &lv_font_montserrat_42,
+  createLabel(welcomeGroup, layout.welcomeHeadline, &lv_font_montserrat_38,
               lv_color_white(), welcomeContent.headline);
   lv_obj_t *qr = lv_image_create(welcomeGroup);
   lv_image_set_src(qr, &bicino_app_qr);
