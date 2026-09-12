@@ -478,6 +478,21 @@ static void testRejectsUnsafeManifestPath() {
   auto status = installer.validateManifestText(manifestText, manifest);
   assert(!status.ok);
   assert(status.code == "manifest_path");
+
+  for (const auto &path : {"VECTMAP/map-1/./evil.fmb",
+                           "VECTMAP/map-1//evil.fmb",
+                           "VECTMAP/map-1/.hidden/evil.fmb",
+                           "VECTMAP/map-1/nested/.hidden.fmb",
+                           "VECTMAP/map-1/nested/name..fmb",
+                           "/VECTMAP/map-1/evil.fmb"}) {
+    const std::string unsafe =
+        "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"files\":[{\"path\":\"" +
+        std::string(path) + "\",\"bytes\":1,\"sha256\":\"" +
+        std::string(64, '0') + "\"}]}";
+    const auto rejected = installer.validateManifestText(unsafe, manifest);
+    assert(!rejected.ok);
+    assert(rejected.code == "manifest_path");
+  }
 }
 
 static void testTargetFourRequiresCompletePoiSummary() {

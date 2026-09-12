@@ -98,6 +98,29 @@ int main() {
   assert(cropped.size() == 1);
   assert(cropped[0].candidate.category == Category::PublicToilets);
 
+  // Exercise the full bounded sort in reverse order against the former stable
+  // sort contract, including equal priority/distance candidates and both modes.
+  for (bool guidance : {false, true}) {
+    MapPoiLayoutVector<Candidate> input;
+    for (int index = static_cast<int>(kMaximumCandidates) - 1; index >= 0; --index)
+      input.push_back({20.0F + (index % 16) * 24.0F,
+                       20.0F + (index / 16) * 24.0F,
+                       static_cast<double>(index % 7),
+                       static_cast<Category>(index % 5 + 1), 0,
+                       static_cast<uint16_t>(index),
+                       static_cast<uint8_t>(index % 4)});
+    auto expected = input;
+    std::stable_sort(expected.begin(), expected.end(),
+        [guidance](const Candidate &a, const Candidate &b) {
+          return better(a, b, guidance);
+        });
+    const auto sorted = place(std::move(input), {500, 500}, guidance, {});
+    assert(sorted.size() == (guidance ? kMaximumGuidancePlacements
+                                      : kMaximumMapPlacements));
+    for (size_t index = 0; index < sorted.size(); ++index)
+      assert(sorted[index].candidate.recordOrder == expected[index].recordOrder);
+  }
+
   std::cout << "map POI layout tests passed\n";
   return 0;
 }

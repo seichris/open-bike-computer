@@ -101,10 +101,18 @@ place(MapPoiLayoutVector<Candidate> candidates,
       Diagnostics *diagnostics) {
   Diagnostics local;
   local.gathered = candidates.size();
-  std::stable_sort(candidates.begin(), candidates.end(),
-                   [&](const Candidate &left, const Candidate &right) {
-                     return better(left, right, guidance);
-                   });
+  // At most 256 candidates: stable insertion sort needs no temporary heap
+  // allocation or general-purpose merge-sort implementation in the OTA image.
+  for (size_t index = 1; index < candidates.size(); ++index) {
+    const Candidate candidate = candidates[index];
+    size_t position = index;
+    while (position > 0 &&
+           better(candidate, candidates[position - 1], guidance)) {
+      candidates[position] = candidates[position - 1];
+      --position;
+    }
+    candidates[position] = candidate;
+  }
   const size_t maximum =
       guidance ? kMaximumGuidancePlacements : kMaximumMapPlacements;
   MapPoiLayoutVector<Placement> placements;

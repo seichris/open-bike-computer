@@ -17,7 +17,6 @@
 #include <fcntl.h>
 #include <fstream>
 #include <limits>
-#include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -764,13 +763,8 @@ static bool isHexSha256(const std::string &value) {
 }
 
 static bool hasHiddenPathComponent(const std::string &path) {
-  std::stringstream stream(path);
-  std::string part;
-  while (std::getline(stream, part, '/')) {
-    if (!part.empty() && part[0] == '.')
-      return true;
-  }
-  return false;
+  return (!path.empty() && path.front() == '.') ||
+         path.find("/.") != std::string::npos;
 }
 
 static uint32_t rotr(uint32_t value, uint32_t bits) {
@@ -2975,11 +2969,14 @@ bool MapTransferInstaller::safeRelativePath(const std::string &path) const {
       path.find('\\') != std::string::npos ||
       path.find("//") != std::string::npos)
     return false;
-  std::stringstream stream(path);
-  std::string part;
-  while (std::getline(stream, part, '/')) {
-    if (part.empty() || part == "." || part == "..")
+  for (size_t start = 0; start < path.size();) {
+    const size_t slash = path.find('/', start);
+    const size_t end = slash == std::string::npos ? path.size() : slash;
+    const size_t length = end - start;
+    if (length == 0 || (length == 1 && path[start] == '.') ||
+        (length == 2 && path[start] == '.' && path[start + 1] == '.'))
       return false;
+    start = end + 1;
   }
   return path.find("..") == std::string::npos;
 }
