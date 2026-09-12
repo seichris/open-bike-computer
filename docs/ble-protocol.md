@@ -1153,6 +1153,8 @@ Version `24` requests bit `26`, World Radio. The iPhone negotiates version
 `24`; direct Watch control stays at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
+Firmware advertises it only with `FIRMWARE_DIAGNOSTICS=1`; production
+omits both the screen and capability pending physical and OTA-size qualification.
 Its owner-authenticated `WRQ1` requests and `WRS1` status use the existing
 navigation characteristic; stream discovery and playback run on the iPhone.
 See [World Radio](world-radio.md) and the bounded codecs in

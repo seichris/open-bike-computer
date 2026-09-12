@@ -3539,8 +3539,7 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::RIDE_DELIVERY_ACK_FEATURE;
     }
-    if (clientVersion >=
-        device_capabilities_protocol::WORLD_RADIO_CLIENT_VERSION) {
+    if (world_radio_config::supportsClient(clientVersion)) {
       featureFlags |= device_capabilities_protocol::WORLD_RADIO_FEATURE;
     }
     responseSize = device_capabilities_protocol::encodeCap2(
@@ -3619,7 +3618,7 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
             device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION,
         std::memory_order_release);
     bleSessionSupportsWorldRadio.store(
-        clientVersion >= device_capabilities_protocol::WORLD_RADIO_CLIENT_VERSION,
+        world_radio_config::supportsClient(clientVersion),
         std::memory_order_release);
     bleSessionSupportsExplicitInvalidGpsHeading.store(
         clientVersion >=
@@ -5239,7 +5238,7 @@ public:
       return;
     }
 
-    if (value.size() >= 4 &&
+    if (world_radio_config::ENABLED && value.size() >= 4 &&
         std::memcmp(value.data(),
                     ride_ble_protocol_generated::WORLD_RADIO_STATUS_MAGIC,
                     4) == 0) {
@@ -6201,7 +6200,8 @@ void BLENavigationServer::setNavigationActivity(bool active) {
 }
 
 bool BLENavigationServer::canRequestWorldRadio() const {
-  return connected && bleSessionAuthenticated && pNavCharacteristic != nullptr &&
+  return world_radio_config::ENABLED && connected && bleSessionAuthenticated &&
+         pNavCharacteristic != nullptr &&
          bleSessionSupportsWorldRadio.load(std::memory_order_acquire);
 }
 

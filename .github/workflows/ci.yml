@@ -198,6 +198,22 @@ jobs:
             echo "Non-debug firmware contains the development map signer"
             exit 1
           fi
+      - name: Verify World Radio preview artifact gate
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          has_radio=false
+          if grep -aFq "WORLD RADIO" ".pio/build/${BUILD_ENVIRONMENT}/firmware.bin"; then
+            has_radio=true
+          fi
+          case "$BUILD_ENVIRONMENT" in
+            *_PRODUCTION)
+              test "$has_radio" = false
+              ;;
+            *)
+              test "$has_radio" = true
+              ;;
+          esac
       - name: Verify ordinary artifacts include persistent diagnostics capability
         if: ${{ !contains(matrix.target, '_REMOTE_DEBUG') }}
         run: |
@@ -618,6 +634,10 @@ jobs:
               -o "/tmp/${test}"
             "/tmp/${test}"
           done
+          g++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=1 \
+            tools/tests/test_main_screen_registry.cpp \
+            -o /tmp/test_main_screen_registry_development
+          /tmp/test_main_screen_registry_development
       - name: Device ownership crypto host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \

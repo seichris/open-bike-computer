@@ -21,6 +21,7 @@
 #include "renderer_diagnostics_ble_protocol.hpp"
 #include "ride_ble_protocol.generated.hpp"
 #include "../world_radio/world_radio_protocol.hpp"
+#include "../world_radio/world_radio_config.hpp"
 
 // Forward declarations - actual NimBLE includes only in .cpp
 class NimBLEServer;
@@ -66,7 +67,8 @@ enum DeviceScreenSetting : uint8_t {
 static constexpr uint8_t DEVICE_SCREEN_SUPPORTED_MASK =
     (1 << DEVICE_SCREEN_MAP) | (1 << DEVICE_SCREEN_NAVIGATION) |
     (1 << DEVICE_SCREEN_RIDE_STATS) | (1 << DEVICE_SCREEN_MAP_PLUS_NAVIGATION) |
-    (1 << DEVICE_SCREEN_BATTERY_STATUS) | (1 << DEVICE_SCREEN_WORLD_RADIO);
+    (1 << DEVICE_SCREEN_BATTERY_STATUS) |
+    (world_radio_config::ENABLED ? (1 << DEVICE_SCREEN_WORLD_RADIO) : 0);
 static constexpr uint8_t DEVICE_SCREEN_DEFAULT_MASK =
     DEVICE_SCREEN_SUPPORTED_MASK & ~(1 << DEVICE_SCREEN_WORLD_RADIO);
 

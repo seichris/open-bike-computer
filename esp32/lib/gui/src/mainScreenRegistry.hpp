@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mainScreenTypes.hpp"
+#include "../../world_radio/world_radio_config.hpp"
 
 #include <array>
 #include <cstddef>
@@ -24,13 +25,15 @@ struct Descriptor {
   const char *debugName;
 };
 
-inline constexpr std::array<Descriptor, 6> SCREENS{{
+inline constexpr std::array<Descriptor, world_radio_config::ENABLED ? 6 : 5> SCREENS{{
     {MAP_GUIDANCE, DeviceScreenId::MapPlusNavigation, true,
      "map guidance"},
     {RIDESTATS, DeviceScreenId::RideStats, false, "ride telemetry"},
     {MAP, DeviceScreenId::Map, true, "map"},
     {NAV, DeviceScreenId::Navigation, false, "navigation"},
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
     {WORLD_RADIO, DeviceScreenId::WorldRadio, false, "world radio"},
+#endif
     {BATTERY_STATUS, DeviceScreenId::BatteryStatus, false, "battery status"},
 }};
 

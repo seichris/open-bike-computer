@@ -1261,7 +1261,9 @@ void updateMainScreen(lv_timer_t *t) {
     }
 
     case WORLD_RADIO:
-      updateWorldRadioScr();
+      if constexpr (world_radio_config::ENABLED) {
+        updateWorldRadioScr();
+      }
       break;
 
     case SATTRACK:
@@ -1866,7 +1868,8 @@ static void createMapGuidanceOverlay() {
 }
 
 static void showMainTile(tileName tile) {
-  if (!mapTile || !navTile || !rideStatsTile || !batteryStatusTile || !worldRadioTile ||
+  if (!mapTile || !navTile || !rideStatsTile || !batteryStatusTile ||
+      (world_radio_config::ENABLED && !worldRadioTile) ||
       !mapGuidanceOverlay) {
     return;
   }
@@ -1929,7 +1932,9 @@ static void showMainTile(tileName tile) {
     lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+    if (worldRadioTile != nullptr) {
+      lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
   }
 
@@ -1972,9 +1977,11 @@ static void showMainTile(tileName tile) {
     log_i("UI: switched to battery status screen");
     break;
   case WORLD_RADIO:
-    lv_obj_clear_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
-    activateWorldRadioScr();
-    log_i("UI: switched to world radio screen");
+    if constexpr (world_radio_config::ENABLED) {
+      lv_obj_clear_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+      activateWorldRadioScr();
+      log_i("UI: switched to world radio screen");
+    }
     break;
   case MAP:
   default:
@@ -1996,7 +2003,9 @@ static void revealPendingMapTileIfReady() {
 
   lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+  if (worldRadioTile != nullptr) {
+    lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+  }
   lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
 
@@ -2026,7 +2035,8 @@ void showConfiguredDefaultMainScreen() { showMainTile(configuredDefaultTile()); 
 
 void applyDeviceScreenSettings() {
   if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
-      !batteryStatusTile || !worldRadioTile || !mapGuidanceOverlay) {
+      !batteryStatusTile || (world_radio_config::ENABLED && !worldRadioTile) ||
+      !mapGuidanceOverlay) {
     return;
   }
 
@@ -2054,7 +2064,8 @@ static void mapGuidanceOverlayTapEvent(lv_event_t *event) {
 
 void toggleNavigationScreen() {
   if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
-      !batteryStatusTile || !worldRadioTile || !mapGuidanceOverlay) {
+      !batteryStatusTile || (world_radio_config::ENABLED && !worldRadioTile) ||
+      !mapGuidanceOverlay) {
     return;
   }
 
@@ -2126,18 +2137,20 @@ void createMainScr() {
                       NULL);
   lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
 
-  worldRadioTile = lv_obj_create(mainScreen);
-  lv_obj_remove_style_all(worldRadioTile);
-  lv_obj_set_size(worldRadioTile, TFT_WIDTH, TFT_HEIGHT);
-  lv_obj_set_pos(worldRadioTile, 0, 0);
-  lv_obj_clear_flag(worldRadioTile, LV_OBJ_FLAG_SCROLLABLE);
-  WorldRadioScreenCallbacks worldRadioCallbacks{};
-  worldRadioCallbacks.sendRequest = sendWorldRadioRequest;
-  worldRadioCallbacks.cycleScreen = cycleFromWorldRadio;
-  worldRadioCallbacks.tapToSwitchScreens = worldRadioTapCyclesScreens;
-  worldRadioCallbacks.phoneReady = worldRadioPhoneReady;
-  worldRadioScr(worldRadioTile, worldRadioCallbacks);
-  lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+  if constexpr (world_radio_config::ENABLED) {
+    worldRadioTile = lv_obj_create(mainScreen);
+    lv_obj_remove_style_all(worldRadioTile);
+    lv_obj_set_size(worldRadioTile, TFT_WIDTH, TFT_HEIGHT);
+    lv_obj_set_pos(worldRadioTile, 0, 0);
+    lv_obj_clear_flag(worldRadioTile, LV_OBJ_FLAG_SCROLLABLE);
+    WorldRadioScreenCallbacks worldRadioCallbacks{};
+    worldRadioCallbacks.sendRequest = sendWorldRadioRequest;
+    worldRadioCallbacks.cycleScreen = cycleFromWorldRadio;
+    worldRadioCallbacks.tapToSwitchScreens = worldRadioTapCyclesScreens;
+    worldRadioCallbacks.phoneReady = worldRadioPhoneReady;
+    worldRadioScr(worldRadioTile, worldRadioCallbacks);
+    lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+  }
 
   batteryStatusTile = lv_obj_create(mainScreen);
   lv_obj_remove_style_all(batteryStatusTile);
