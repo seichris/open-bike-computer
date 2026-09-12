@@ -131,7 +131,9 @@ static std::atomic<bool> bleSessionSupportsRendererDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRendererBenchmarkSample{false};
 static std::atomic<bool> bleSessionSupportsRideDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRideDeliveryAck{false};
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
 static std::atomic<bool> bleSessionSupportsWorldRadio{false};
+#endif
 // Captured while the ownership mutex is held by the accepted ride write. The
 // application ACK path runs in the same NimBLE callback and must never fall
 // back to lease generation zero merely because another task briefly owns the
@@ -2047,8 +2049,10 @@ static void handleAuthPayload(const std::string &frame) {
                                             std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
     bleSessionSupportsWorldRadio.store(false,
                                        std::memory_order_release);
+#endif
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
     world_radio_runtime::reset();
 #endif
@@ -3621,9 +3625,11 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
         clientVersion >=
             device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION,
         std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
     bleSessionSupportsWorldRadio.store(
         world_radio_config::supportsClient(clientVersion),
         std::memory_order_release);
+#endif
     bleSessionSupportsExplicitInvalidGpsHeading.store(
         clientVersion >=
             device_capabilities_protocol::EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION,
@@ -5028,8 +5034,10 @@ public:
                                             std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
     bleSessionSupportsWorldRadio.store(false,
                                        std::memory_order_release);
+#endif
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
     world_radio_runtime::reset();
 #endif
@@ -5120,8 +5128,10 @@ public:
                                             std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
     bleSessionSupportsWorldRadio.store(false,
                                        std::memory_order_release);
+#endif
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
     world_radio_runtime::reset();
 #endif
@@ -5246,7 +5256,8 @@ public:
       return;
     }
 
-    if (world_radio_config::ENABLED && value.size() >= 4 &&
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    if (value.size() >= 4 &&
         std::memcmp(value.data(),
                     ride_ble_protocol_generated::WORLD_RADIO_STATUS_MAGIC,
                     4) == 0) {
@@ -5552,6 +5563,7 @@ public:
       }
       return;
     }
+#endif
 #endif
 
     queueMapInput(PendingMapInputType::Gps, (const uint8_t *)value.data(),
@@ -6210,9 +6222,13 @@ void BLENavigationServer::setNavigationActivity(bool active) {
 }
 
 bool BLENavigationServer::canRequestWorldRadio() const {
+#if !defined(FIRMWARE_DIAGNOSTICS) || !FIRMWARE_DIAGNOSTICS
+  return false;
+#else
   return world_radio_config::ENABLED && connected && bleSessionAuthenticated &&
          pNavCharacteristic != nullptr &&
          bleSessionSupportsWorldRadio.load(std::memory_order_acquire);
+#endif
 }
 
 bool BLENavigationServer::requestWorldRadio(
