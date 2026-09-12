@@ -12,6 +12,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     fonts-noto-core \
     gdal-bin \
     git \
+    libexpat1 \
     mapnik-utils \
     osmium-tool \
     python-is-python3 \
@@ -33,7 +34,7 @@ COPY tools/OSM_Extract /app/tools/OSM_Extract
 RUN ln -s /app/map-platform/backend /app/backend \
   && ln -s /app/map-platform/config /app/config
 
-RUN python -m pip install '/app/map-platform/backend[api,object-storage]' \
+RUN python -m pip install '/app/map-platform/backend[api,object-storage,topography]' \
   && python -m pip install "matplotlib<3.6" pyyaml
 
 ENV PYTHONPATH=/app/map-platform/backend

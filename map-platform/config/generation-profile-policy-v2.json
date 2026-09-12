@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 2,
+  "profiles": [
+    {"id": "legacy-vector-v1", "rendererFormatVersion": 1, "features": []},
+    {"id": "street-labels-v1", "rendererFormatVersion": 2, "features": ["street-labels"]},
+    {"id": "buildings-3d-v1", "rendererFormatVersion": 3, "features": ["street-labels", "3d-buildings"]},
+    {"id": "topographic-contours-v1", "rendererFormatVersion": 4, "features": ["3d-buildings", "contours", "street-labels"]}
+  ],
+  "channels": {
+    "development": {
+      "globalProfiles": ["legacy-vector-v1", "street-labels-v1", "buildings-3d-v1"],
+      "canaryProfiles": [],
+      "disabledProfiles": ["topographic-contours-v1"]
+    },
+    "production": {
+      "globalProfiles": ["legacy-vector-v1", "street-labels-v1", "buildings-3d-v1"],
+      "canaryProfiles": [],
+      "disabledProfiles": ["topographic-contours-v1"]
+    }
+  }
+}

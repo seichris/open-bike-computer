@@ -98,6 +98,15 @@ class BuildingProgressProjectionTests(unittest.TestCase):
 
 
 class MapJobRunAPITests(unittest.TestCase):
+    def test_health_does_not_advertise_topography_generation(self):
+        from map_platform.topography_sources import load_topography_source_policy
+
+        response = self.client.get("/healthz")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["topography"],
+                         load_topography_source_policy(self.repo_root).public_summary())
+        self.assertFalse(response.json()["topography"]["generationEnabled"])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.repo_root = Path(__file__).resolve().parents[3]

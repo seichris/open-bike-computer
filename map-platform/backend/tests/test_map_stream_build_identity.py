@@ -96,6 +96,7 @@ class MapStreamBuildIdentityTests(unittest.TestCase):
     def test_worker_identity_hashes_relocated_osm_extract_sources(self):
         repo_root = Path(__file__).resolve().parents[3]
         logical_names = {name for name, _ in worker_source_inputs(repo_root)}
+        self.assertIn("map-platform/config/topography-source-policy-v1.json", logical_names)
 
         self.assertTrue(
             any(name.startswith("tools/OSM_Extract/conf/") for name in logical_names)

@@ -123,7 +123,7 @@ jobs:
           python-version: "3.12"
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Install backend test dependencies
-        run: python -m pip install -e '.[test,object-storage]'
+        run: python -m pip install -e '.[test,object-storage,topography]'
       - name: Python syntax
         run: >-
           python -m py_compile
