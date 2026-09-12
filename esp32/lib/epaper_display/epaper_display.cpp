@@ -16,6 +16,7 @@
 #include <lvgl.h>
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 
 extern lv_display_t *display; // Owned by the shared LVGL setup module.
 volatile uint32_t displayFlushCount = 0, lastDisplayFlushMs = 0;

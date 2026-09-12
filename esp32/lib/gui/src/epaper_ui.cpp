@@ -164,7 +164,7 @@ void process() {
   static uint32_t lastStyleMs = 0;
   static lv_obj_t *lastScreen = nullptr;
   static uint8_t lastTile = UINT8_MAX;
-  static String lastInstruction;
+  static NavigationData lastNavigation{};
   static uint32_t lastRoute = 0;
   const uint32_t now = millis();
   lv_obj_t *screen = lv_screen_active();
@@ -176,8 +176,8 @@ void process() {
   }
   const NavigationData nav = getCurrentNavigationData();
   const uint32_t route = routeOverlay.revision();
-  if (nav.instruction != lastInstruction || route != lastRoute) {
-    lastInstruction = nav.instruction;
+  if (std::strcmp(nav.instruction, lastNavigation.instruction) != 0 || route != lastRoute) {
+    lastNavigation = nav;
     lastRoute = route;
     epaper::invalidateContext();
   }

@@ -1,3 +1,5 @@
+#define WAVESHARE_EPAPER_397 1
+#include "../../include/board_traits.hpp"
 #include "../../lib/epaper_display/epaper_raster.hpp"
 #include "../../lib/epaper_display/epaper_policy.hpp"
 #include "../../lib/epaper_display/frame_mailbox.hpp"
@@ -6,6 +8,7 @@
 #include "../../lib/ble_navigation/ownership_button_policy.hpp"
 #include "../../lib/ble_navigation/device_capabilities_protocol.hpp"
 #include "../../lib/gui/src/waitingScreenLayout.hpp"
+#include "../../lib/gui/src/preConnectionPresentation.hpp"
 #include <cassert>
 #include <vector>
 #include <iostream>
@@ -33,6 +36,17 @@ struct FakeTransport {
 
 int main() {
   using namespace epaper;
+  static_assert(board_traits::epaper && !board_traits::touch &&
+                !board_traits::brightness && !board_traits::qualifiedPowerControl);
+  static_assert(board_traits::width == logicalWidth && board_traits::height == logicalHeight);
+  static_assert(board_traits::sda == 41 && board_traits::scl == 42);
+  static_assert(board_traits::sdClock == 16 && board_traits::sdCommand == 17 && board_traits::sdData == 15);
+  static_assert(board_traits::epdClock == 11 && board_traits::epdMosi == 12 &&
+                board_traits::epdCs == 10 && board_traits::epdDc == 9 &&
+                board_traits::epdReset == 46 && board_traits::epdBusy == 3);
+  static_assert(board_traits::up == 4 && board_traits::center == 5 && board_traits::down == 6);
+  assert(std::strstr(pre_connection_presentation::content(
+      pre_connection_presentation::Phase::PairingComparison).copy, "center key"));
   static_assert(frameBytes == 48000 && rgbBytes == 768000);
   static_assert(waiting_screen_layout::isValid(
       waiting_screen_layout::makeLayout(480, 800)));
