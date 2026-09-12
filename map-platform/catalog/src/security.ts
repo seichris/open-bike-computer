@@ -74,6 +74,22 @@ export interface VerifiedServiceRequest {
   channel: Channel;
 }
 
+function supportedServiceRequestKey(request: Request, key: string): boolean {
+  if (/^[A-Za-z0-9._:-]{8,128}$/.test(key)) return true;
+
+  // Older map backends included the publication ID and credential digest.
+  // Accept that exact format only for its matching attachment operation.
+  const legacy = key.match(
+    /^attach:(publication:(?:development|production):[0-9a-f]{64}):[0-9a-f]{64}$/,
+  );
+  return (
+    legacy !== null &&
+    request.method === "POST" &&
+    new URL(request.url).pathname ===
+      `/v1/internal/publications/${encodeURIComponent(legacy[1])}/attach-library`
+  );
+}
+
 export async function verifyServiceRequest(
   request: Request,
   env: Env,
@@ -85,7 +101,7 @@ export async function verifyServiceRequest(
   if (
     !SERVICE_KEY_ID.test(keyID) ||
     !/^[0-9]{10,13}$/.test(timestamp) ||
-    !/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey) ||
+    !supportedServiceRequestKey(request, idempotencyKey) ||
     !HEX_64.test(suppliedSignature)
   ) {
     throw new HttpError(401, "invalid service authorization");

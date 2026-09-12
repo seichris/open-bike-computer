@@ -58,8 +58,13 @@ constexpr bool transferInactivityElapsed(uint32_t nowMs,
                                          uint32_t lastUsefulTrafficMs,
                                          uint32_t timeoutMs,
                                          bool authorizedRequestInProgress) {
+  const uint32_t elapsed = elapsedMs(nowMs, lastUsefulTrafficMs);
+  // The UI task samples nowMs before the HTTPS worker can publish newer
+  // authenticated traffic. Treat a modular delta in the upper half-range as
+  // a slightly future timestamp, not as nearly 2^32 ms of inactivity. Real
+  // timer wrap remains a small forward delta and is still accepted.
   return timeoutMs > 0 && !authorizedRequestInProgress &&
-         elapsedMs(nowMs, lastUsefulTrafficMs) >= timeoutMs;
+         elapsed < 0x8000'0000U && elapsed >= timeoutMs;
 }
 
 constexpr bool maneuverDataBecameActive(uint16_t previousDistanceMeters,

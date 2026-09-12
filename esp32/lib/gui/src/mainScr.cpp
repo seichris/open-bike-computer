@@ -11,6 +11,7 @@
 #include "worldRadioScr.hpp"
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
 #include "../../power_metrics/power_metrics.hpp"
+#include "../../device_debug/device_debug_camera.hpp"
 #include "../../route_overlay/route_overlay.hpp"
 #include "../../ride_automation/ride_automation_runtime.hpp"
 #include "destinationPickerLayout.hpp"
@@ -33,6 +34,7 @@
 // #include "../../compass/compass.hpp"
 
 bool isMainScreen = false; // Flag to indicate main screen is selected
+
 bool isScrolled = true;    // Flag to indicate when tileview was scrolled
 bool isReady = false;      // Flag to indicate when tileview scroll was finished
 bool isScrollingMap = false;  // Flag to indicate if map is scrolling
@@ -255,6 +257,7 @@ uint64_t settingsSignature() {
   hashScreenMapSettings(hash, mapRenderSettings.mapStyle);
   hashScreenMapSettings(hash, mapRenderSettings.mapNavigationStyle);
   hashScalar(hash, mapRenderSettings.mapRotationMode);
+  hashScalar(hash, mapRenderSettings.mapNavigationRotationMode);
   hashScalar(hash, mapRenderSettings.tapToSwitchScreens);
   hashScalar(hash, mapRenderSettings.enabledScreensMask);
   hashScalar(hash, mapRenderSettings.defaultScreen);
@@ -340,6 +343,12 @@ void setImageAngleIfChanged(lv_obj_t *image, int16_t angle) {
 } // namespace
 
 Maps mapView;
+
+#if DEVICE_REMOTE_DEBUG
+renderer_diagnostics::CameraSample device_debug::captureMapCameraForPanelFrame() {
+  return mapView.captureCameraMetadata();
+}
+#endif
 static map_tap_arbiter::Controller mapTapController;
 static bool currentCourseUpHeading(uint16_t &headingDegrees);
 
@@ -635,7 +644,7 @@ static uint8_t normalizedDefaultDeviceScreen() {
 }
 
 static tileName configuredDefaultTile() {
-  return tileForDeviceScreen(normalizedDefaultDeviceScreen());
+  return main_screen_registry::tileForDeviceScreen(normalizedDefaultDeviceScreen());
 }
 
 static tileName nextEnabledTile(tileName current) {
@@ -697,7 +706,9 @@ static void setNavigationDistanceLabel(lv_obj_t *label,
 static void applyMapRotationForTile(tileName tile) {
   if (tile == MAP_GUIDANCE) {
     const Maps::RotationMode desiredMode =
-        isGuidanceNavigating() ? Maps::ROT_COURSE_UP : Maps::ROT_NORTH_UP;
+        map_profile_protocol::guidanceCourseUp(
+            isGuidanceNavigating(), mapRenderSettings.mapNavigationRotationMode)
+            ? Maps::ROT_COURSE_UP : Maps::ROT_NORTH_UP;
     if (mapView.rotationMode != desiredMode) {
       mapView.rotationMode = desiredMode;
       if (desiredMode == Maps::ROT_NORTH_UP) {

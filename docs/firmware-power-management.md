@@ -310,7 +310,10 @@ connection-policy, and SD-clock experiments. Their candidate values are not
 production defaults. Effective iOS-negotiated BLE parameters, rather than
 requested values, are authoritative when comparing runs.
 
-Production currently keeps the known-good BLE TX power, NimBLE policy, 4 MHz SD
+Production currently keeps the known-good BLE TX power and NimBLE policy. Native
+one-bit SDMMC defaults to 20 MHz (`SDMMC_FREQ_DEFAULT`); 4 MHz applies only to
+legacy SPI recovery. Capture the effective backend and `freqKHz` from `SDIO`
+boot evidence for every comparison. Keep the configured SD
 clock, PMU rails, and 250 ms AXP power-button polling. See
 [Firmware battery-life hardware validation](firmware-battery-life-hardware-validation.md)
 for the measurement procedure, trace schema, experiment matrix, and detailed

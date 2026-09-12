@@ -406,6 +406,35 @@ class CatalogTests(unittest.TestCase):
         request = open_url.call_args.args[0]
         self.assertEqual(request.get_header("User-agent"), "BicinoMapPlatform/1.0")
 
+    def test_attachment_request_keys_fit_service_auth_and_preserve_identity(self):
+        response = Mock()
+        response.read.return_value = b"{}"
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=None)
+        client = CatalogClient("https://maps.invalid", "development", "dev", "x" * 32)
+
+        def request_key(publication, credential, alias=None):
+            with patch("map_platform.catalog.urlopen", return_value=response) as open_url:
+                client.attach_library(
+                    publication_id_value=publication,
+                    library_credential=credential,
+                    alias=alias,
+                )
+            request = open_url.call_args.args[0]
+            key = request.get_header("X-catalog-idempotency-key")
+            # Match the catalog Worker's verifyServiceRequest header contract.
+            self.assertRegex(key, r"\A[A-Za-z0-9._:-]{8,128}\Z")
+            return key
+
+        for channel in ("development", "production"):
+            with self.subTest(channel=channel):
+                publication = publication_payload(ready_job(), channel)["publicationId"]
+                first = request_key(publication, "a" * 64)
+                self.assertEqual(first, request_key(publication, "a" * 64, "New alias"))
+                self.assertNotEqual(first, request_key(publication, "b" * 64))
+                self.assertNotEqual(first, request_key(publication + "-other", "a" * 64))
+        request_key("p" * 128, "a" * 128)
+
     def test_catalog_delivery_identity_only_accepts_complete_firmware_tuple(self):
         with patch.dict(
             os.environ,

@@ -118,7 +118,7 @@ class AppAttestTestClient:
         self._installations: dict[str, TestInstallation] = {}
         self._lock = threading.Lock()
 
-    def issue_installation(self, client) -> dict[str, str]:
+    def issue_installation(self, client, *, existing_credential=None) -> dict[str, str]:
         challenge_response = client.post(
             "/v1/installations/app-attest/challenges",
             json={"purpose": APP_ATTEST_ATTESTATION_PURPOSE},
@@ -147,6 +147,8 @@ class AppAttestTestClient:
         )
         response = client.post(
             "/v1/installations",
+            params={"clientInstallationId": existing_credential["clientInstallationId"]} if existing_credential else None,
+            headers={"X-Installation-Token": existing_credential["clientInstallationToken"]} if existing_credential else None,
             json={
                 "appAttest": {
                     "challengeId": challenge_document["challengeId"],

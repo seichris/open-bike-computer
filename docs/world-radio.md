@@ -22,6 +22,12 @@ Wi-Fi for this feature.
 
 ## Privacy and security
 
+- Both endpoints must use the updated World Radio contract: client version 24
+  and CAP2 feature bit 26. Earlier draft builds used bit 23, which is now
+  reserved for renderer replay samples; rebuild both iPhone and firmware when
+  moving from those drafts. The Watch keeps client version 23 for its GPS
+  motion-evidence support and does not host radio playback.
+
 - World Radio uses the existing owner-authenticated BLE envelope.
 - Station and coordinate requests are sent only to the connected iPhone.
 - The device receives no station URL and cannot fetch internet content.

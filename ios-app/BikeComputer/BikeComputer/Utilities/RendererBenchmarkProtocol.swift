@@ -72,6 +72,75 @@ struct RendererBenchmarkFixture: Codable, Equatable {
     }
 }
 
+struct RendererBenchmarkRouteCoverage: Equatable {
+    let routeBounds: OfflineMapPreviewBounds
+    let firstOutsidePointIndex: Int?
+    let firstOutsidePoint: RendererBenchmarkPoint?
+
+    var coversEntireRoute: Bool {
+        firstOutsidePointIndex == nil
+    }
+
+    init?(
+        fixture: RendererBenchmarkFixture,
+        mapBounds: OfflineMapPreviewBounds
+    ) {
+        guard let minimumLongitude = fixture.points.map(\.longitude).min(),
+              let minimumLatitude = fixture.points.map(\.latitude).min(),
+              let maximumLongitude = fixture.points.map(\.longitude).max(),
+              let maximumLatitude = fixture.points.map(\.latitude).max(),
+              let routeBounds = OfflineMapPreviewBounds(coordinates: [
+                minimumLongitude,
+                minimumLatitude,
+                maximumLongitude,
+                maximumLatitude,
+              ]) else {
+            return nil
+        }
+        self.routeBounds = routeBounds
+        firstOutsidePointIndex = fixture.points.firstIndex { point in
+            point.longitude < mapBounds.minLongitude ||
+                point.longitude > mapBounds.maxLongitude ||
+                point.latitude < mapBounds.minLatitude ||
+                point.latitude > mapBounds.maxLatitude
+        }
+        firstOutsidePoint = firstOutsidePointIndex.map { fixture.points[$0] }
+    }
+
+    func failureDescription(mapBounds: OfflineMapPreviewBounds) -> String {
+        let mapDescription = Self.boundsDescription(mapBounds)
+        let routeDescription = Self.boundsDescription(routeBounds)
+        let sampleDescription: String
+        if let firstOutsidePointIndex, let firstOutsidePoint {
+            sampleDescription = String(
+                format: " firstOutside=%d:(%.7f,%.7f)",
+                locale: Locale(identifier: "en_US_POSIX"),
+                firstOutsidePointIndex,
+                firstOutsidePoint.longitude,
+                firstOutsidePoint.latitude
+            )
+        } else {
+            sampleDescription = ""
+        }
+        return "The active signed map does not cover the pinned Shanghai route. " +
+            "map=[\(mapDescription)] route=[\(routeDescription)]" +
+            sampleDescription
+    }
+
+    private static func boundsDescription(
+        _ bounds: OfflineMapPreviewBounds
+    ) -> String {
+        String(
+            format: "%.7f,%.7f,%.7f,%.7f",
+            locale: Locale(identifier: "en_US_POSIX"),
+            bounds.minLongitude,
+            bounds.minLatitude,
+            bounds.maxLongitude,
+            bounds.maxLatitude
+        )
+    }
+}
+
 enum RendererBenchmarkProfile: UInt8, CaseIterable, Identifiable {
     case flat = 0
     case current = 1
@@ -87,6 +156,14 @@ enum RendererBenchmarkProfile: UInt8, CaseIterable, Identifiable {
         case .medium: return "Medium (40)"
         case .high: return "High (48)"
         }
+    }
+}
+
+enum RendererBenchmarkCleanupPolicy {
+    static func requiresCurrentProfileRestore(
+        after profile: RendererBenchmarkProfile
+    ) -> Bool {
+        profile != .current
     }
 }
 
@@ -150,6 +227,25 @@ enum RendererBenchmarkMarkerPacket {
         data.appendUInt16LE(UInt16(sampleCount))
         data.appendUInt32LE(loop)
         return data.count == byteCount ? data : nil
+    }
+}
+
+enum RendererBenchmarkSamplePacket {
+    static let supportedGPSByteCounts: Set<Int> = [8, 10, 14, 30, 36]
+    static let maximumByteCount = 4 + 1 + 36 + RendererBenchmarkMarkerPacket.byteCount
+
+    static func data(gpsPosition: Data, marker: Data) -> Data? {
+        guard supportedGPSByteCounts.contains(gpsPosition.count),
+              marker.count == RendererBenchmarkMarkerPacket.byteCount,
+              String(data: marker.prefix(4), encoding: .utf8) ==
+                DeviceBLEProtocol.rendererBenchmarkMarkerPrefix else {
+            return nil
+        }
+        var data = Data(DeviceBLEProtocol.rendererBenchmarkSamplePrefix.utf8)
+        data.append(UInt8(gpsPosition.count))
+        data.append(gpsPosition)
+        data.append(marker)
+        return data.count <= maximumByteCount ? data : nil
     }
 }
 

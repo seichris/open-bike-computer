@@ -227,6 +227,14 @@ int main() {
   assert(display_inactivity::transferInactivityElapsed(
       300'000, 0, display_inactivity::kTransferInactivityTimeoutMs, false));
   assert(!display_inactivity::transferInactivityElapsed(
+      999, 1'000, display_inactivity::kTransferInactivityTimeoutMs, false));
+  constexpr uint32_t transferNearWrap =
+      std::numeric_limits<uint32_t>::max() - 1'000;
+  assert(display_inactivity::transferInactivityElapsed(
+      transferNearWrap + display_inactivity::kTransferInactivityTimeoutMs,
+      transferNearWrap, display_inactivity::kTransferInactivityTimeoutMs,
+      false));
+  assert(!display_inactivity::transferInactivityElapsed(
       600'000, 0, display_inactivity::kTransferInactivityTimeoutMs, true));
   assert(!display_inactivity::transferInactivityElapsed(600'000, 0, 0,
                                                         false));

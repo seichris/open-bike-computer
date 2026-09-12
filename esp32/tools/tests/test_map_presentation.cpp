@@ -39,6 +39,35 @@ int main() {
   assert(!frameCoversViewport(658.0, 658.0, 466.0, 466.0,
                               {329.0, 329.0}, {233.0, 233.0}, kPi / 4.0,
                               16.0));
+  // The round 1.75-inch window has no visible square corners. Its complete
+  // physical circle remains covered through rotation, including with the
+  // shorter centered viewport used when the map toolbar is visible.
+  assert(frameCoversViewport(658.0, 658.0, 466.0, 466.0,
+                             {329.0, 329.0}, {233.0, 233.0}, kPi / 4.0,
+                             16.0, true));
+  assert(frameCoversViewport(658.0, 658.0, 466.0, 366.0,
+                             {329.0, 329.0}, {233.0, 183.0}, kPi / 2.0,
+                             16.0, true));
+  assert(frameCoversViewport(658.0, 658.0, 466.0, 466.0,
+                             {409.0, 329.0}, {233.0, 233.0}, kPi / 2.0,
+                             16.0, true));
+  assert(!frameCoversViewport(658.0, 658.0, 466.0, 466.0,
+                              {410.0, 329.0}, {233.0, 233.0}, kPi / 2.0,
+                              16.0, true));
+  assert(minimumRoundViewportOverscan(466, 466, 16, 64) == 64);
+  assert(minimumRoundViewportOverscan(466, 366, 16, 64) == 66);
+  assert(minimumRoundViewportOverscan(365, 466, 16, 64) == 67);
+  assert(minimumRoundViewportOverscan(0, UINT16_MAX, UINT16_MAX, 0) ==
+         UINT16_MAX);
+  // The supported toolbar layout is 466x366. A 64 px gutter creates a
+  // 594x494 source and fails the unchanged circular coverage proof by two
+  // pixels; the geometry-derived 66 px gutter creates 598x498 and passes.
+  assert(!frameCoversViewport(594.0, 494.0, 466.0, 366.0,
+                              {297.0, 247.0}, {233.0, 183.0}, 0.0, 16.0,
+                              true));
+  assert(frameCoversViewport(598.0, 498.0, 466.0, 366.0,
+                             {299.0, 249.0}, {233.0, 183.0}, 0.0, 16.0,
+                             true));
 
   HeadingResolver resolver;
   double heading = -1.0;
@@ -256,5 +285,12 @@ int main() {
   assert(std::fabs(refreshLeadPixels(10.0, 2.0, 1200, 16.0, 32.0, 96.0) -
                    40.0) < 1e-9);
   assert(refreshLeadPixels(100.0, 10.0, 5000, 16.0, 32.0, 96.0) == 96.0);
+  // The round-panel request uses the same bounded lead calculation to select
+  // its gutter. Jing'an replay speed stays at the requested floor, while a fast,
+  // close-zoom ride retains the original 96 px ceiling.
+  assert(refreshLeadPixels(6.868, 0.584, 2500, 24.0, 64.0, 96.0) ==
+         64.0);
+  assert(refreshLeadPixels(35.0, 1.75, 2500, 24.0, 64.0, 96.0) ==
+         96.0);
   return 0;
 }
