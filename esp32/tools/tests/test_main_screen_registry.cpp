@@ -10,7 +10,7 @@ int main() {
   using namespace main_screen_registry;
 
   static_assert(!world_radio_config::supportsClient(23));
-  static_assert(world_radio_config::supportsClient(24) ==
+  static_assert(world_radio_config::supportsClient(25) ==
                 world_radio_config::ENABLED);
   static_assert(world_radio_config::supportsClient(255) ==
                 world_radio_config::ENABLED);
