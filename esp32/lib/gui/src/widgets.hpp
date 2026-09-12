@@ -9,7 +9,7 @@
 #pragma once
 
 #include "../../lvgl/src/lvglFuncs.hpp"
-#include "gpsMath.hpp"
+#include "../../utils/src/gpsMath.hpp"
 #include "settings.hpp"
 
 /**

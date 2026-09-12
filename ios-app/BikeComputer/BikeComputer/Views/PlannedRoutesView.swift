@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct SavedRoutesSettingsSection: View {
     @ObservedObject var routeLibrary: PhoneRouteLibrary
     @ObservedObject var stravaCoordinator: StravaIntegrationCoordinator
+    @Environment(\.savedRouteMapAction) private var mapAction
     let onImportFromStrava: () -> Void
     @FocusState private var focusedRouteID: UUID?
     @State private var renameInteraction = SavedRouteRenameInteraction()
@@ -60,11 +61,11 @@ struct SavedRoutesSettingsSection: View {
             Text("Saved Routes")
         } footer: {
             Text(
-                "Save GPX route files to your Apple watch for offline navigation"
+                "Preview saved routes on the map, or send them to Apple Watch for offline navigation."
             )
         }
         .alert(
-            "Route Sync Error",
+            "Saved Route Error",
             isPresented: Binding(
                 get: { errorMessage != nil },
                 set: { if !$0 { errorMessage = nil } }
@@ -129,6 +130,11 @@ struct SavedRoutesSettingsSection: View {
                     .contentShape(Rectangle())
                     .onTapGesture { focusedRouteID = nil }
 
+                mapPreviewButton(
+                    route: route,
+                    displayName: displayName
+                )
+
                 watchStatusControl(
                     status,
                     route: route,
@@ -163,11 +169,6 @@ struct SavedRoutesSettingsSection: View {
                 .accessibilityLabel("Delete \(displayName)")
             }
 
-            Text("\(route.source.label) → \(route.destination.label)")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-
             if route.providerID == RouteProviderPolicyV1.strava.providerID {
                 stravaAttribution(
                     sourceReference: route.sourceReference,
@@ -184,6 +185,38 @@ struct SavedRoutesSettingsSection: View {
         .padding(.vertical, 4)
     }
 
+    private func mapPreviewButton(
+        route: PlannedRouteSummaryV1,
+        displayName: String
+    ) -> some View {
+        // This is a local read, independent of Watch transfer state. Keep it
+        // beside the Watch upload action so each route's controls stay together.
+        Button {
+            finishRenaming()
+            focusedRouteID = nil
+            guard let mapAction else { return }
+            do {
+                try mapAction.perform {
+                    try routeLibrary.mapSelection(for: route)
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        } label: {
+            Image(systemName: "map")
+                .frame(width: 32, height: 32)
+        }
+        .buttonStyle(.borderless)
+        .disabled(mapAction == nil || mapAction?.isNavigationActive == true)
+        .accessibilityLabel("Show \(displayName) on map")
+        .accessibilityHint(
+            mapAction?.isNavigationActive == true
+                ? "Available after navigation stops"
+                : "Previews the saved route without starting navigation"
+        )
+        .accessibilityIdentifier("showSavedRouteOnMap-\(route.id.uuidString)")
+    }
+
     private func expiredStravaRow(
         _ bookmark: StravaRouteReloadBookmarkV1
     ) -> some View {
@@ -195,6 +228,11 @@ struct SavedRoutesSettingsSection: View {
                     .lineLimit(2)
 
                 Spacer()
+
+                Image(systemName: "clock.badge.exclamationmark")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 32, height: 32)
+                    .accessibilityLabel("Expired")
 
                 stravaReloadButton(
                     routeID: bookmark.routeID,
@@ -217,10 +255,6 @@ struct SavedRoutesSettingsSection: View {
                 .buttonStyle(.borderless)
                 .accessibilityLabel("Delete \(displayName)")
             }
-
-            Label("Expired", systemImage: "clock.badge.exclamationmark")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
 
             HStack(spacing: 10) {
                 if let url = URL(string: bookmark.canonicalURL) {
@@ -336,10 +370,7 @@ struct SavedRoutesSettingsSection: View {
                 .frame(width: 32, height: 32)
                 .accessibilityLabel("\(displayName) is saved on Apple Watch")
         case .transferring:
-            ProgressView()
-                .controlSize(.small)
-                .frame(width: 32, height: 32)
-                .accessibilityLabel("Sending \(displayName) to Apple Watch")
+            cancelSendButton(route, displayName: displayName)
         case .deleting:
             ProgressView()
                 .controlSize(.small)
@@ -383,6 +414,26 @@ struct SavedRoutesSettingsSection: View {
         }
         .buttonStyle(.borderless)
         .accessibilityLabel("Send \(displayName) to Apple Watch")
+    }
+
+    private func cancelSendButton(
+        _ route: PlannedRouteSummaryV1,
+        displayName: String
+    ) -> some View {
+        Button(role: .destructive) {
+            finishRenaming()
+            focusedRouteID = nil
+            if !routeLibrary.cancelSendToWatch(route) {
+                errorMessage =
+                    "The queued Watch transfer is no longer cancellable. " +
+                    "Keep the iPhone and Watch nearby so its final status can arrive."
+            }
+        } label: {
+            Image(systemName: "xmark.circle")
+                .frame(width: 32, height: 32)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel("Cancel sending \(displayName) to Apple Watch")
     }
 
     private func transientStatus(

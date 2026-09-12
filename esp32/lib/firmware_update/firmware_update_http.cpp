@@ -156,6 +156,8 @@ static std::string otaStateName(const esp_partition_t *partition) {
     return "unknown";
   esp_ota_img_states_t state;
   esp_err_t result = esp_ota_get_state_partition(partition, &state);
+  if (result == ESP_ERR_NOT_FOUND)
+    return "untracked"; // USB/factory image with no OTA state entry
   if (result != ESP_OK)
     return "unknown";
   switch (state) {
@@ -259,7 +261,8 @@ static bool verifyManifestSignature(const std::string &payload,
 void FirmwareUpdateHttpServer::configure(
     device_transfer::HttpTransferServer *sharedServer, uint16_t port) {
   if (stateMutex_ == nullptr)
-    stateMutex_ = xSemaphoreCreateMutex();
+    stateMutex_ = xSemaphoreCreateMutexStatic(&stateMutexStorage_);
+  configASSERT(stateMutex_ != nullptr);
   transferServer_ = sharedServer == nullptr ? &ownedTransferServer_ : sharedServer;
   if (sharedServer == nullptr)
     transferServer_->configure(port, "BikeComputer-Transfer");
@@ -267,10 +270,12 @@ void FirmwareUpdateHttpServer::configure(
 }
 
 bool FirmwareUpdateHttpServer::setEnabled(bool enabled) {
-  if (!enabled)
-    resetUploadState();
+  // UI/callback callers revoke admission only. The HTTP owner aborts after
+  // the last begin/write/end call has unwound, including idle uploads.
   return transferServer_->setEnabled(enabled, enabled ? "firmware" : "");
 }
+
+void FirmwareUpdateHttpServer::workerWillStop() { resetUploadState(); }
 
 void FirmwareUpdateHttpServer::setLastError(const std::string &code,
                                             const std::string &message) {
@@ -343,15 +348,42 @@ std::string FirmwareUpdateHttpServer::statusJson() const {
   return body;
 }
 
-void FirmwareUpdateHttpServer::markRunningAppValid() {
+std::string FirmwareUpdateHttpServer::bootAcceptanceJson(bool ready) const {
+  return firmware_metadata::bootAcceptanceJson(
+      ready, otaStateName(esp_ota_get_running_partition()).c_str());
+}
+
+bool FirmwareUpdateHttpServer::markRunningAppValid() {
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  if (running == nullptr)
+    return false;
+  esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+  const esp_err_t query = esp_ota_get_state_partition(running, &state);
+  // USB/factory provisioning has no pending OTA record. It still needs the
+  // application's readiness checks, but there is nothing to confirm.
+  if (query == ESP_ERR_NOT_FOUND ||
+      (query == ESP_OK && (state == ESP_OTA_IMG_VALID ||
+                           state == ESP_OTA_IMG_UNDEFINED)))
+    return true;
+  if (query != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY)
+    return false;
+  const esp_err_t result = esp_ota_mark_app_valid_cancel_rollback();
+  if (result != ESP_OK)
+    return false;
+  return esp_ota_get_state_partition(running, &state) == ESP_OK &&
+         state == ESP_OTA_IMG_VALID;
+}
+
+void FirmwareUpdateHttpServer::rejectRunningApp() {
   const esp_partition_t *running = esp_ota_get_running_partition();
   esp_ota_img_states_t state;
   if (running != nullptr &&
       esp_ota_get_state_partition(running, &state) == ESP_OK &&
       state == ESP_OTA_IMG_PENDING_VERIFY) {
-    esp_err_t result = esp_ota_mark_app_valid_cancel_rollback();
-    Serial.printf("FIRMWARE_UPDATE: mark running app valid result=%s\n",
-                  esp_err_to_name(result));
+    // Returns only on failure (e.g. no eligible previous slot). Never proceed
+    // to readiness; restarting leaves bootloader rollback in control.
+    (void)esp_ota_mark_app_invalid_rollback_and_reboot();
+    ESP.restart();
   }
 }
 

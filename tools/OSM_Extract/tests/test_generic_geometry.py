@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 from shapely import Polygon, box, set_precision
@@ -22,6 +23,7 @@ from funcs import (  # noqa: E402
     get_geoms,
     render_map,
 )
+import funcs  # noqa: E402
 from map_format import write_fmb  # noqa: E402
 
 
@@ -228,6 +230,56 @@ class GenericGeometryTests(unittest.TestCase):
 
         with self.assertRaises(GenericGeometryError):
             _validate_quantized_decomposition(source, [filled], 0, 0)
+
+    def test_invalid_block_polygon_is_dropped_with_bounded_diagnostics(self):
+        invalid = styled_feature(
+            Polygon([(0, 0), (10, 0), (10, 10), (0, 0)]),
+            "w123",
+        )
+        invalid["_source_geometry_component"] = 2
+        valid = styled_feature(
+            Polygon([(20, 0), (30, 0), (30, 10), (20, 0)]),
+            "w456",
+        )
+        diagnostics = {}
+        snap_to_fmb_precision = funcs._snap_to_fmb_precision
+
+        def fail_one_source(polygon):
+            if polygon.bounds[0] < 20:
+                raise GenericGeometryError(
+                    "generic polygon becomes invalid at FMB coordinate precision"
+                )
+            return snap_to_fmb_precision(polygon)
+
+        with patch(
+            "funcs._snap_to_fmb_precision",
+            side_effect=fail_one_source,
+        ):
+            pieces = clip_polygons(
+                [invalid, valid],
+                box(0, 0, 40, 40),
+                geometry_diagnostics=diagnostics,
+            )
+
+        self.assertEqual([item["id"] for item in pieces], ["w456"])
+        self.assertEqual(diagnostics["droppedGeometryCount"], 1)
+        self.assertEqual(
+            diagnostics["droppedByCode"],
+            {"invalid_block_polygon": 1},
+        )
+        self.assertEqual(
+            diagnostics["droppedGeometrySamples"],
+            [
+                {
+                    "blockOrigin": [0, 0],
+                    "component": 2,
+                    "reason": (
+                        "generic polygon becomes invalid at FMB coordinate precision"
+                    ),
+                    "sourceGeometryKey": "w123",
+                }
+            ],
+        )
 
     def test_amplification_limit_fails_closed(self):
         source = Polygon(

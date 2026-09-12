@@ -150,7 +150,9 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             }
             .store(in: &cancellables)
         cyclingSensorDetectionCoordinator.bind(
-            to: workoutMirrorManager.store
+            to: workoutMirrorManager.store,
+            watchObservations: watchConnectivityCoordinator
+                .$cyclingSensorObservation.eraseToAnyPublisher()
         )
         locationManager.bindWorkoutMetricsStore(
             workoutMirrorManager.store
@@ -337,6 +339,10 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         handleEventsForBackgroundURLSession identifier: String,
         completionHandler: @escaping () -> Void
     ) {
+        if identifier == DurableMapDownloadCoordinator.sessionIdentifier {
+            DurableMapDownloadCoordinator.shared.handleEvents(completionHandler: completionHandler)
+            return
+        }
         guard identifier == BackgroundMapUploadCoordinator.sessionIdentifier else {
             completionHandler()
             return

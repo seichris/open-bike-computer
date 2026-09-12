@@ -1,5 +1,6 @@
 #include "../../lib/ble_navigation/map_profile_protocol.hpp"
 #include "../../lib/maps/src/mapPoiLayout.hpp"
+#include "../../lib/maps/src/mapPoiIcon.hpp"
 
 #include <cassert>
 #include <iostream>
@@ -61,6 +62,41 @@ int main() {
       place(std::move(many), {300, 200}, true, {}, &diagnostics);
   assert(guidancePlacements.size() == kMaximumGuidancePlacements);
   assert(diagnostics.capacityDeferred > 0);
+
+  // Stable-camera icons are rasterized in a visible crop with the backing
+  // surface's stride. They must neither touch the gutter nor change size.
+  constexpr int gutter = 16;
+  constexpr int width = 200;
+  constexpr int stride = width + 2 * gutter;
+  constexpr uint16_t untouched = 0x1234;
+  std::vector<uint16_t> backing(stride * stride, untouched);
+  map_surface::Rgb565Surface crop{
+      backing.data() + gutter * stride + gutter, width, width, stride};
+  for (int category = 1; category <= 5; ++category) {
+    std::fill(backing.begin(), backing.end(), untouched);
+    map_poi_icon::draw(crop, 50, 50, static_cast<Category>(category));
+    size_t painted = 0;
+    for (int y = 0; y < stride; ++y) {
+      for (int x = 0; x < stride; ++x) {
+        if (backing[y * stride + x] == untouched)
+          continue;
+        assert(x >= gutter + 43 && x < gutter + 57);
+        assert(y >= gutter + 43 && y < gutter + 57);
+        ++painted;
+      }
+    }
+    assert(painted == map_poi_icon::kSize * map_poi_icon::kSize);
+  }
+
+  // The same crop coordinates reject icons under guidance and rider overlays.
+  MapPoiLayoutVector<Candidate> croppedCandidates{
+      {100, 34, 0, Category::Shops, 0, 0, 0},
+      {100, 130, 0, Category::GasStations, 0, 1, 0},
+      {40, 100, 0, Category::PublicToilets, 0, 2, 0}};
+  const auto cropped = place(std::move(croppedCandidates), {width, width},
+      true, {{100, 34, width, 68}, {100, 130, 30, 30}});
+  assert(cropped.size() == 1);
+  assert(cropped[0].candidate.category == Category::PublicToilets);
 
   std::cout << "map POI layout tests passed\n";
   return 0;

@@ -66,11 +66,14 @@ class FakePipeline:
 
 
 class DeterministicFailurePipeline:
+    def __init__(self, code="building_object_limit_exceeded"):
+        self.code = code
+
     def build(self, job, on_status=None, on_progress=None):
         del job, on_status, on_progress
         raise BuildingScopeError(
-            "building_object_limit_exceeded",
-            "building closure exceeds the job object limit",
+            self.code,
+            "deterministic map build failure",
         )
 
 
@@ -1104,6 +1107,32 @@ class WorkerTests(unittest.TestCase):
             self.assertIsNotNone(loaded.finished_at)
             self.assertFalse(next_result.processed)
             self.assertEqual(store.get(job.job_id).attempts, 1)
+
+    def test_worker_does_not_retry_deterministic_generic_geometry_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp)
+            service = MapJobService(SourceIndex([self.source]), store)
+            job = service.create_job(
+                {
+                    "mode": "custom_bbox",
+                    "bbox": [103.75, 1.24, 103.93, 1.37],
+                }
+            )
+
+            worker = MapWorker(
+                store,
+                DeterministicFailurePipeline("generic_geometry_invalid"),
+                worker_id="worker-test",
+            )
+            result = worker.run_next()
+            next_result = worker.run_next()
+            loaded = store.get(job.job_id)
+
+            self.assertTrue(result.processed)
+            self.assertEqual(loaded.status, JobStatus.FAILED)
+            self.assertEqual(loaded.attempts, 1)
+            self.assertEqual(loaded.error_code, "generic_geometry_invalid")
+            self.assertFalse(next_result.processed)
 
     def test_worker_does_not_retry_exhausted_child_failure(self):
         with tempfile.TemporaryDirectory() as tmp:

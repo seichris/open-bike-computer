@@ -6,7 +6,6 @@ import os
 import re
 import threading
 import time
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,10 +13,15 @@ from typing import Any
 from .geometry import bbox_area_km2
 from .models import Bounds, SourceRegion
 from .sources import SourceResolutionError, contains_bounds
+from .source_http import open_geofabrik_url, validate_geofabrik_url
 
 DEFAULT_GEOFABRIK_INDEX_URL = "https://download.geofabrik.de/index-v1.json"
 DEFAULT_CACHE_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_FAILURE_COOLDOWN_SECONDS = 30
+MAX_CATALOG_BYTES = 32 * 1024 * 1024
+MAX_CATALOG_FEATURES = 10000
+MAX_CATALOG_NODES = 2000000
+MAX_CATALOG_DEPTH = 16
 
 
 @dataclass(frozen=True)
@@ -140,20 +144,22 @@ class GeofabrikSourceProvider:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             if self._cache_is_fresh():
-                return json.loads(self.cache_path.read_text())
+                with self.cache_path.open("rb") as cached:
+                    return self._read_catalog(cached)
             try:
-                with urllib.request.urlopen(
+                with open_geofabrik_url(
                     self.index_url,
                     timeout=self.request_timeout_seconds,
                 ) as response:
-                    catalog = json.loads(response.read().decode("utf-8"))
+                    catalog = self._read_catalog(response)
             except Exception:
                 if self.cache_path.exists():
-                    return json.loads(self.cache_path.read_text())
+                    with self.cache_path.open("rb") as cached:
+                        return self._read_catalog(cached)
                 raise
 
             tmp_path = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
-            tmp_path.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n")
+            tmp_path.write_text(json.dumps(catalog, separators=(",", ":"), ensure_ascii=False) + "\n")
             tmp_path.replace(self.cache_path)
             return catalog
         finally:
@@ -167,9 +173,31 @@ class GeofabrikSourceProvider:
             return False
         return time.time() - self.cache_path.stat().st_mtime < self.cache_ttl_seconds
 
+    def _read_catalog(self, response) -> dict[str, Any]:
+        payload = response.read(MAX_CATALOG_BYTES + 1)
+        if len(payload) > MAX_CATALOG_BYTES:
+            raise SourceResolutionError("Geofabrik catalog exceeds byte limit")
+        catalog = json.loads(payload)
+        # Validate BEFORE replacing the last known-good cache. Bound both tree
+        # depth and total nodes, including unused properties and coordinates.
+        pending = [(catalog, 0)]
+        count = 0
+        while pending:
+            node, depth = pending.pop()
+            count += 1
+            if depth > MAX_CATALOG_DEPTH or count + len(pending) > MAX_CATALOG_NODES:
+                raise SourceResolutionError("Geofabrik catalog exceeds structural limits")
+            children = node.values() if isinstance(node, dict) else node if isinstance(node, list) else ()
+            for child in children:
+                pending.append((child, depth + 1))
+                if count + len(pending) > MAX_CATALOG_NODES:
+                    raise SourceResolutionError("Geofabrik catalog exceeds structural limits")
+        self._parse_regions(catalog)
+        return catalog
+
     def _parse_regions(self, catalog: dict[str, Any]) -> list[GeofabrikCatalogRegion]:
-        features = catalog.get("features")
-        if not isinstance(features, list):
+        features = catalog.get("features") if isinstance(catalog, dict) else None
+        if not isinstance(features, list) or len(features) > MAX_CATALOG_FEATURES:
             raise SourceResolutionError("Geofabrik catalog has no features")
         regions: list[GeofabrikCatalogRegion] = []
         for feature in features:
@@ -192,15 +220,19 @@ class GeofabrikSourceProvider:
             return None
         source_id = str(properties.get("id", "")).strip()
         pbf_url = (properties.get("urls") or {}).get("pbf") if isinstance(properties.get("urls"), dict) else None
-        if not source_id or not pbf_url:
+        if not source_id or len(source_id) > 180 or not pbf_url:
             return None
+        try:
+            validate_geofabrik_url(pbf_url)
+        except ValueError as exc:
+            raise SourceResolutionError(str(exc)) from exc
         bounds = _bounds_for_geojson_geometry(geometry)
         safe_id = _safe_id(source_id)
         return GeofabrikCatalogRegion(
             source_region=SourceRegion(
                 id=f"geofabrik-{safe_id}",
                 provider="geofabrik",
-                name=str(properties.get("name") or source_id),
+                name=str(properties.get("name") or source_id)[:256],
                 url=str(pbf_url),
                 bounds=bounds,
                 local_path=f"backend/data/source-pbf/geofabrik/{safe_id}-latest.osm.pbf",

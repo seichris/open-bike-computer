@@ -18,7 +18,7 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
     private weak var bleManager: BLEManager?
     private var fixture: RendererBenchmarkFixture?
     private var fixtureSHA256 = Data()
-    private var timer: Timer?
+    private let scheduler = RendererBenchmarkReplayScheduler()
     private var emittedSampleCount: UInt64 = 0
     private var capturedRendererRevision: UInt64 = 0
     private var ordinarySnapshots: [String] = []
@@ -26,9 +26,11 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
     private var idleTimerWasDisabled = false
     private var ownsIdleTimerOverride = false
     private var deviceGPSOverrideToken: UUID?
+    private var replayTimerCallbacks: UInt64 = 0
+    private var lastReplayTimerLatenessMs: Int = 0
+    private var maximumReplayTimerLatenessMs: Int = 0
 
     deinit {
-        timer?.invalidate()
         let manager = bleManager
         let token = deviceGPSOverrideToken
         let shouldRestoreIdleTimer = ownsIdleTimerOverride
@@ -61,9 +63,10 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
         }
         guard bleManager.isConnected,
               bleManager.isNavigationReady,
-              bleManager.supportsRendererDiagnostics else {
+              bleManager.supportsRendererDiagnostics,
+              bleManager.supportsRendererBenchmarkSample else {
             errorMessage =
-                "Connect an authenticated diagnostics firmware build first."
+                "Connect diagnostics firmware with atomic renderer replay support first."
             status = "Unavailable"
             return
         }
@@ -78,6 +81,9 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             sampleCount = loaded.fixture.points.count
             loop = 0
             emittedSampleCount = 0
+            replayTimerCallbacks = 0
+            lastReplayTimerLatenessMs = 0
+            maximumReplayTimerLatenessMs = 0
             capturedRendererRevision = bleManager.rendererDiagnosticsRevision
             ordinarySnapshots.removeAll(keepingCapacity: true)
             ordinarySnapshotCount = 0
@@ -110,19 +116,10 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             idleTimerWasDisabled = UIApplication.shared.isIdleTimerDisabled
             UIApplication.shared.isIdleTimerDisabled = true
             ownsIdleTimerOverride = true
+            scheduler.start { [weak self] latenessMs in
+                self?.handleReplayTick(latenessMs: latenessMs)
+            }
             emitCurrentSample()
-            guard isRunning else { return }
-
-            let timer = Timer(
-                timeInterval: 1,
-                target: self,
-                selector: #selector(handleReplayTimer(_:)),
-                userInfo: nil,
-                repeats: true
-            )
-            timer.tolerance = 0.05
-            self.timer = timer
-            RunLoop.main.add(timer, forMode: .common)
         } catch {
             errorMessage = error.localizedDescription
             status = "Fixture failed"
@@ -131,8 +128,7 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
 
     func stop(clearRoute: Bool = true, restoreCurrent: Bool = true) {
         captureLatestOrdinarySnapshot()
-        timer?.invalidate()
-        timer = nil
+        scheduler.stop()
         if clearRoute, isRunning {
             bleManager?.clearRouteGeometry()
         }
@@ -166,8 +162,26 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
         )
     }
 
-    @objc private func handleReplayTimer(_ timer: Timer) {
+    private func handleReplayTick(latenessMs: Int) {
+        guard isRunning else { return }
+        lastReplayTimerLatenessMs = latenessMs
+        maximumReplayTimerLatenessMs = max(
+            maximumReplayTimerLatenessMs, latenessMs
+        )
+        replayTimerCallbacks &+= 1
         emitCurrentSample()
+    }
+
+    func rendererBenchmarkReplayTimingEvidence()
+        -> RendererBenchmarkReplayTimingEvidence {
+        RendererBenchmarkReplayTimingEvidence(
+            schema: 1,
+            emittedSamples: emittedSampleCount,
+            timerCallbacks: replayTimerCallbacks,
+            lastTimerLatenessMs: lastReplayTimerLatenessMs,
+            maximumTimerLatenessMs: maximumReplayTimerLatenessMs,
+            schedulerActive: scheduler.isScheduled
+        )
     }
 
     private func emitCurrentSample() {
@@ -176,6 +190,7 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
               bleManager.isConnected,
               bleManager.isNavigationReady,
               bleManager.supportsRendererDiagnostics,
+              bleManager.supportsRendererBenchmarkSample,
               let fixture,
               fixture.points.indices.contains(sampleIndex),
               let routeData = RendererBenchmarkRouteGeometry.data(
@@ -208,10 +223,14 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
             }
         }
         let now = Date()
-        guard bleManager.sendGPSPosition(
+        let gpsPosition = DeviceGPSPacketBuilder.data(
             lat: point.latitude,
             lon: point.longitude,
-            heading: heading,
+            heading: DeviceGPSHeadingWirePolicy.heading(
+                heading,
+                supportsExplicitInvalidHeading:
+                    bleManager.supportsExplicitInvalidGPSHeading
+            ),
             speedMetersPerSecond: fixture.nominalSpeedMetersPerSecond,
             altitudeMeters: 8,
             distanceTraveledMeters:
@@ -222,23 +241,21 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
                 Double(fixture.points.count - sampleIndex) *
                 fixture.nominalSpeedMetersPerSecond,
             horizontalAccuracyMeters: 3,
-            locationTimestamp: now
-        ) else {
-            errorMessage = "The benchmark GPS sample could not be queued."
-            status = "Stopped"
-            stop()
-            return
-        }
-        // Keep the marker behind its GPS write in the serialized navigation
-        // queue. A frame captured after firmware accepts the marker can then
-        // be attributed to this sample rather than the previous position.
-        guard bleManager.sendRendererBenchmarkMarker(
+            locationTimestamp: now,
+            includeRideDetectionQuality:
+                bleManager.supportsGPSPositionQualityV1
+        )
+        // GPS and its marker share one authenticated GPS-channel write. This
+        // keeps their order atomic and consumes only one CoreBluetooth
+        // write-without-response credit per one-Hz replay tick.
+        guard bleManager.sendRendererBenchmarkSample(
+            gpsPosition: gpsPosition,
             fixtureSHA256: fixtureSHA256,
             sampleIndex: sampleIndex,
             sampleCount: fixture.points.count,
             loop: loop
         ) else {
-            errorMessage = "The benchmark marker could not be queued."
+            errorMessage = "The atomic benchmark sample could not be queued."
             status = "Stopped"
             stop()
             return
@@ -282,6 +299,9 @@ final class RendererBenchmarkReplayCoordinator: NSObject, ObservableObject {
         guard isRunning,
               let bleManager,
               !bleManager.supportsRemoteDeviceDebug,
+              RendererBenchmarkCleanupPolicy.requiresCurrentProfileRestore(
+                after: selectedOrdinaryProfile
+              ),
               fixture != nil,
               fixtureSHA256.count == 32,
               !fixtureID.isEmpty else {

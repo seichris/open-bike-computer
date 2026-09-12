@@ -28,7 +28,10 @@ FULL_CI_PATHS = {
     ".github/workflows/ci.yml",
 }
 FIRMWARE_HOST_ONLY_PATH_PREFIXES = ("esp32/tools/tests/",)
-FIRMWARE_HOST_PATH_PREFIXES = (".github/actions/require-immutable-releases/",)
+FIRMWARE_HOST_PATH_PREFIXES = (
+    ".github/actions/require-immutable-releases/",
+    ".github/actions/require-firmware-release-controls/",
+)
 FIRMWARE_WORKFLOW_PATHS = {
     ".github/workflows/firmware-diagnostics.yml",
     ".github/workflows/firmware-release-candidate.yml",
@@ -62,6 +65,10 @@ SHARED_RIDE_BLE_CONTRACT_PATHS = {
     "tools/generate_ride_ble_contract.py",
 }
 FIRMWARE_RELEASE_TOOL_PATHS = {
+    ".github/firmware-release-authority.json",
+    ".github/scripts/firmware_key_migration.py",
+    ".github/scripts/firmware_release_controls.py",
+    ".github/workflows/firmware-key-migration.yml",
     ".github/scripts/firmware_release_gate.py",
     "tools/factory_release_manifest.py",
     "tools/firmware_release_candidate.py",

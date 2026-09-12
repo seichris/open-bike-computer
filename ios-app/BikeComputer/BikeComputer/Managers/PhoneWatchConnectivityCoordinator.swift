@@ -14,6 +14,9 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     @Published private(set) var workoutHealthSetupSnapshot:
         WorkoutHealthSetupSnapshotV1?
 
+    @Published private(set) var cyclingSensorObservation:
+        WatchCyclingSensorObservationV1?
+
     var onRouteAcknowledgement: ((WatchRouteSyncMessageV1) -> Void)?
     var onDirectRidePreparationRequest:
         ((WatchDirectRidePreparationRequestV1) ->
@@ -23,6 +26,8 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     private let session: WCSession?
     private let defaults: UserDefaults
     private var hasActivated = false
+    private var intentionallyCancelledRouteTransferIDs =
+        Set<ObjectIdentifier>()
     private var pendingControllerRevocations: [WatchControllerRequestV1] = []
     private var coordinateFavoritesEnvelope: CoordinateFavoritesEnvelopeV1?
     private var routeDisplayNamesEnvelope:
@@ -494,6 +499,26 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         )
     }
 
+    @discardableResult
+    func cancelRouteTransfers(
+        _ identity: WatchRouteIdentityV1
+    ) -> Int {
+        guard let session else { return 0 }
+        let matchingTransfers = session.outstandingFileTransfers.filter {
+            WatchRouteSyncMessageV1.isInstallTransfer(
+                $0.file.metadata,
+                matching: identity
+            )
+        }
+        matchingTransfers.forEach {
+            intentionallyCancelledRouteTransferIDs.insert(
+                ObjectIdentifier($0)
+            )
+            $0.cancel()
+        }
+        return matchingTransfers.count
+    }
+
     /// Attempts the high-priority route path while Watch is reachable. The
     /// caller always queues `transferRoute` first so a failed live message
     /// still has a durable background fallback.
@@ -552,12 +577,24 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     fileprivate func refreshState(activationFailed: Bool? = nil) {
         guard let session else {
             workoutHealthSetupSnapshot = nil
+            cyclingSensorObservation = nil
             state = PhoneWatchConnectivityStateV1()
             return
         }
         let activated = session.activationState == .activated
         let paired = activated && session.isPaired
         let watchAppInstalled = paired && session.isWatchAppInstalled
+        // Read the latest context on activation as well as delivery. A phone
+        // launched after the sensor started must not wait for another packet.
+        if watchAppInstalled,
+           let data = session.receivedApplicationContext[
+               WatchCyclingSensorObservationV1.applicationContextKey
+           ] as? Data {
+            cyclingSensorObservation = try?
+                WatchCyclingSensorObservationV1.decode(data)
+        } else {
+            cyclingSensorObservation = nil
+        }
         let watchMetadata: WatchDeviceMetadataV1?
         if watchAppInstalled,
            let data = session.receivedApplicationContext[
@@ -649,6 +686,11 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         _ transfer: WCSessionFileTransfer,
         error: Error?
     ) {
+        if intentionallyCancelledRouteTransferIDs.remove(
+            ObjectIdentifier(transfer)
+        ) != nil {
+            return
+        }
         guard let error,
               let metadata = transfer.file.metadata,
               let install = WatchRouteSyncMessageV1(propertyList: metadata),

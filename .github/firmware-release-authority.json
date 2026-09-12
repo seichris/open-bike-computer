@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "repository": "seichris/open-bike-computer",
+  "reviewMode": "single-maintainer",
+  "reviewer": {"type": "User", "id": 25006584, "login": "seichris"},
+  "decision": "Maintainer explicitly approved self-review on 2026-09-07; this is not independent review."
+}

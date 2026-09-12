@@ -1,6 +1,7 @@
 #pragma once
 
 #include "device_debug_protocol.hpp"
+#include "../renderer_diagnostics/renderer_diagnostics_policy.hpp"
 
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
@@ -52,6 +53,7 @@ struct FrameSnapshot {
   uint16_t height = 0;
   uint16_t strideBytes = 0;
   uint32_t payloadBytes = 0;
+  renderer_diagnostics::CameraSample camera{};
 };
 
 class FrameStore {
@@ -84,6 +86,7 @@ private:
   TargetGeometry geometry_{};
   uint32_t payloadBytes_ = 0;
   uint32_t capturedAtMs_ = 0;
+  renderer_diagnostics::CameraSample capturedCamera_{};
   uint32_t lastCaptureMs_ = 0;
   bool consumerLocked_ = false;
   std::atomic<bool> active_{false};

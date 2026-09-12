@@ -517,7 +517,7 @@ or every source POI.
 
 ### Capability
 
-Add `map_pois` at CAP2 bit 23 with minimum client version 21 in
+Add `map_pois` at CAP2 bit 26 with minimum client version 24 in
 `protocol/ride-ble-contract-v1.json`, then regenerate the Swift and C++ protocol
 files. Update capability golden vectors and Watch/iPhone compatibility tests.
 
@@ -652,7 +652,7 @@ limit fixtures fail with typed errors.
 1. Add signed target-4/FMB v5 install validation and runtime decode.
 2. Add bounded POI selection, collision, icons, street-label reservations, and
    diagnostics.
-3. Add visibility bits, NVS defaults, render invalidation, and CAP2 bit 23.
+3. Add visibility bits, NVS defaults, render invalidation, and CAP2 bit 26.
 4. Build ordinary and production firmware for both board targets through the
    repository build/CI paths.
 
