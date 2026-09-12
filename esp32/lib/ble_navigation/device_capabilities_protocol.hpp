@@ -33,6 +33,8 @@ constexpr uint8_t DETAILED_RIDE_DIAGNOSTICS_CLIENT_VERSION =
         DETAILED_RIDE_DIAGNOSTICS_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t RIDE_DELIVERY_ACK_CLIENT_VERSION =
     ride_ble_protocol_generated::RIDE_DELIVERY_ACK_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t MAP_POIS_CLIENT_VERSION =
+    ride_ble_protocol_generated::MAP_POIS_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t RENDERER_BENCHMARK_SAMPLE_CLIENT_VERSION =
     ride_ble_protocol_generated::
         RENDERER_BENCHMARK_SAMPLE_MINIMUM_CLIENT_VERSION;
@@ -75,6 +77,8 @@ constexpr uint32_t DETAILED_RIDE_DIAGNOSTICS_FEATURE =
     ride_ble_protocol_generated::DETAILED_RIDE_DIAGNOSTICS_FEATURE;
 constexpr uint32_t RIDE_DELIVERY_ACK_FEATURE =
     ride_ble_protocol_generated::RIDE_DELIVERY_ACK_FEATURE;
+constexpr uint32_t MAP_POIS_FEATURE =
+    ride_ble_protocol_generated::MAP_POIS_FEATURE;
 constexpr uint32_t RENDERER_BENCHMARK_SAMPLE_FEATURE =
     ride_ble_protocol_generated::RENDERER_BENCHMARK_SAMPLE_FEATURE;
 constexpr uint32_t WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE =

@@ -9,6 +9,7 @@ FMB_V3_SECTION_STRINGS = 1
 FMB_V3_SECTION_RUNS = 2
 FMB_V3_SECTION_ROAD_LABELS = 3
 FMB_V4_SECTION_BUILDINGS = 4
+FMB_V5_SECTION_POIS = 5
 FMB_V3_CRITICAL_SECTION = 1
 MAX_BLOCK_STRINGS = 4096
 MAX_BLOCK_STRING_BYTES = 256 * 1024
@@ -19,6 +20,7 @@ MAX_LABEL_VARIANTS = 8
 MAX_BLOCK_BUILDINGS = 12288
 MAX_BUILDING_RINGS = 32
 MAX_BUILDING_POINTS = 131072
+MAX_BLOCK_POIS = 16384
 
 _DIRECTORY_HEADER = struct.Struct("<4sB3x")
 _DIRECTORY_ENTRY = struct.Struct("<BBHIII")
@@ -29,6 +31,8 @@ _LABEL_CANDIDATE = struct.Struct("<hhhhBB")
 _BUILDING_SECTION_HEADER = struct.Struct("<HHI")
 _BUILDING_FIXED = struct.Struct("<BBBBHHhhhhH")
 _BUILDING_RING = struct.Struct("<HBB")
+_POI_SECTION_HEADER = struct.Struct("<HHI")
+_POI_RECORD = struct.Struct("<hhBBBB")
 
 _VARIANT_KIND = {
     "local": 0,
@@ -44,6 +48,14 @@ class MapFormatError(ValueError):
 
 class MapFormatLimitError(MapFormatError):
     code = "building_artifact_too_large"
+
+
+class PoiMapFormatError(MapFormatError):
+    code = "poi_artifact_validation_failed"
+
+
+class PoiMapFormatLimitError(PoiMapFormatError):
+    code = "poi_artifact_too_large"
 
 
 def _append_polygon(file, feature, min_x, min_y):
@@ -387,6 +399,67 @@ def _validated_building_section(section, metadata):
 _building_section = encode_building_section
 
 
+def _poi_value(record, key):
+    if isinstance(record, dict):
+        return record[key]
+    return getattr(record, key)
+
+
+def encode_poi_section(records):
+    if records is None:
+        raise PoiMapFormatError("target-4 POI records are required")
+    records = list(records)
+    if len(records) > MAX_BLOCK_POIS:
+        raise PoiMapFormatLimitError("POI record count exceeds FMB v5 limits")
+    category_mask = 0
+    encoded_records = bytearray()
+    previous = None
+    category_counts = [0, 0, 0, 0, 0]
+    for record in records:
+        values = tuple(
+            int(_poi_value(record, key))
+            for key in (
+                "local_x",
+                "local_y",
+                "category",
+                "maximum_zoom",
+                "rank",
+                "flags",
+            )
+        )
+        local_x, local_y, category, maximum_zoom, rank, flags = values
+        if (
+            not 0 <= local_x <= 4095
+            or not 0 <= local_y <= 4095
+            or not 1 <= category <= 5
+            or not 0 <= maximum_zoom <= 5
+            or not 0 <= rank <= 3
+            or flags != 0
+        ):
+            raise PoiMapFormatError("POI record is invalid")
+        ordering = (local_x, local_y, category, rank, maximum_zoom, flags)
+        if previous is not None and ordering < previous:
+            raise PoiMapFormatError("POI records are not canonically ordered")
+        previous = ordering
+        category_mask |= 1 << (category - 1)
+        category_counts[category - 1] += 1
+        encoded_records.extend(_POI_RECORD.pack(*values))
+    section = bytearray(
+        _POI_SECTION_HEADER.pack(len(records), _POI_RECORD.size, category_mask)
+    )
+    section.extend(encoded_records)
+    return bytes(section), {
+        "pois": len(records),
+        "poiBytes": len(section),
+        "poiCategoryMask": category_mask,
+        "shopsCount": category_counts[0],
+        "restaurantsAndCafesCount": category_counts[1],
+        "publicToiletsCount": category_counts[2],
+        "gasStationsCount": category_counts[3],
+        "bicycleServicesCount": category_counts[4],
+    }
+
+
 def _append_directory(data, magic, sections):
     if len(magic) != 4 or not 1 <= len(sections) <= 255:
         raise MapFormatError("extension directory header is invalid")
@@ -424,21 +497,38 @@ def write_fmb(
     polylines,
     min_x,
     min_y,
+    *,
+    renderer_target,
     font_builder=None,
     building_records=None,
     building_section=None,
     building_metadata=None,
+    poi_records=None,
 ):
-    """Write a renderer-format-specific FMB v2, v3, or v4 block."""
+    """Write one explicit renderer-target FMB v2, v3, v4, or v5 block."""
 
+    if renderer_target not in {1, 2, 3, 4}:
+        raise MapFormatError("renderer target is unsupported")
     if building_records is not None and building_section is not None:
         raise MapFormatError("building records and preencoded section are mutually exclusive")
     has_buildings = building_records is not None or building_section is not None
+    if renderer_target >= 3 and not has_buildings:
+        raise MapFormatError("renderer target requires a building section")
+    if renderer_target < 3 and has_buildings:
+        raise MapFormatError("renderer target does not support buildings")
+    if renderer_target >= 2 and font_builder is None:
+        raise MapFormatError("renderer target requires the street-label font/profile")
+    if renderer_target == 1 and font_builder is not None:
+        raise MapFormatError("renderer target 1 does not support labels")
     if has_buildings and font_builder is None:
         raise MapFormatError("FMB v4 requires the street-label font/profile")
     if building_section is None and building_metadata is not None:
         raise MapFormatError("preencoded building metadata requires a section")
-    version = 4 if has_buildings else (3 if font_builder is not None else 2)
+    if renderer_target == 4 and poi_records is None:
+        raise PoiMapFormatError("renderer target 4 requires a POI section")
+    if renderer_target != 4 and poi_records is not None:
+        raise PoiMapFormatError("renderer target does not support POIs")
+    version = renderer_target + 1
     data = bytearray(b"FMB" + bytes((version,)))
     data.extend(struct.pack("<H", len(polygons)))
     for feature in polygons:
@@ -456,13 +546,35 @@ def write_fmb(
         "buildings": 0,
         "buildingPoints": 0,
         "buildingBytes": 0,
+        "pois": 0,
+        "poiBytes": 0,
+        "poiCategoryMask": 0,
+        "shopsCount": 0,
+        "restaurantsAndCafesCount": 0,
+        "publicToiletsCount": 0,
+        "gasStationsCount": 0,
+        "bicycleServicesCount": 0,
     }
     if font_builder is not None:
         sections, metadata = _label_sections(
             polylines, min_x, min_y, font_builder
         )
-        metadata.update({"buildings": 0, "buildingPoints": 0, "buildingBytes": 0})
-        if has_buildings:
+        metadata.update(
+            {
+                "buildings": 0,
+                "buildingPoints": 0,
+                "buildingBytes": 0,
+                "pois": 0,
+                "poiBytes": 0,
+                "poiCategoryMask": 0,
+                "shopsCount": 0,
+                "restaurantsAndCafesCount": 0,
+                "publicToiletsCount": 0,
+                "gasStationsCount": 0,
+                "bicycleServicesCount": 0,
+            }
+        )
+        if renderer_target >= 3:
             if building_section is None:
                 encoded_section, encoded_metadata = encode_building_section(
                     building_records
@@ -474,7 +586,13 @@ def write_fmb(
                 )
             sections = (*sections, (FMB_V4_SECTION_BUILDINGS, encoded_section))
             metadata.update(encoded_metadata)
-            _append_directory(data, b"EXT4", sections)
+            if renderer_target == 4:
+                poi_section, poi_metadata = encode_poi_section(poi_records)
+                sections = (*sections, (FMB_V5_SECTION_POIS, poi_section))
+                metadata.update(poi_metadata)
+                _append_directory(data, b"EXT5", sections)
+            else:
+                _append_directory(data, b"EXT4", sections)
         else:
             _append_directory(data, b"EXT3", sections)
 

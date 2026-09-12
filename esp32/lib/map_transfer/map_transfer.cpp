@@ -1,7 +1,10 @@
 #include "map_transfer.hpp"
+#include "map_file_io.hpp"
 #include "../maps/src/mapRendererFileValidator.hpp"
 #include "../maps/src/mapFontAsset.hpp"
+#include "../maps/src/mapBuildingBlock.hpp"
 #include "../maps/src/mapLabelBlock.hpp"
+#include "../maps/src/mapPoiBlock.hpp"
 
 #include <algorithm>
 #include <array>
@@ -13,9 +16,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
-#include <fstream>
 #include <limits>
-#include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -407,6 +408,43 @@ static uint64_t jsonUintValue(const std::string &json, const std::string &key) {
   return value;
 }
 
+static std::string jsonObjectValue(const std::string &json,
+                                   const std::string &key) {
+  const std::string needle = "\"" + key + "\"";
+  size_t cursor = json.find(needle);
+  if (cursor == std::string::npos)
+    return {};
+  cursor = json.find('{', cursor + needle.size());
+  if (cursor == std::string::npos)
+    return {};
+  const size_t start = cursor;
+  size_t depth = 0;
+  bool inString = false;
+  bool escaped = false;
+  for (; cursor < json.size(); ++cursor) {
+    const char value = json[cursor];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inString && value == '\\') {
+      escaped = true;
+      continue;
+    }
+    if (value == '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString)
+      continue;
+    if (value == '{')
+      ++depth;
+    else if (value == '}' && --depth == 0)
+      return json.substr(start, cursor - start + 1U);
+  }
+  return {};
+}
+
 static std::vector<std::string>
 jsonStringArrayValue(const std::string &json, const std::string &key,
                      bool *valid = nullptr) {
@@ -507,6 +545,7 @@ static MapTargetMetadata targetMetadata(const MapManifest &manifest) {
   target.labelLanguages = manifest.labelLanguages;
   target.internationalFallback = manifest.internationalFallback;
   target.buildingProfileVersion = manifest.buildingProfileVersion;
+  target.poiProfileVersion = manifest.poiProfileVersion;
   return target;
 }
 
@@ -514,7 +553,7 @@ static bool targetMetadataEmpty(const MapTargetMetadata &target) {
   return target.renderer.empty() && target.formatVersion == 0 &&
          target.labelProfileVersion == 0 && target.labelLanguages.empty() &&
          target.internationalFallback.empty() &&
-         target.buildingProfileVersion == 0;
+         target.buildingProfileVersion == 0 && target.poiProfileVersion == 0;
 }
 
 static bool targetMetadataValid(const MapTargetMetadata &target) {
@@ -522,14 +561,14 @@ static bool targetMetadataValid(const MapTargetMetadata &target) {
     return true;
   if (target.renderer != "esp32-fmb" ||
       (target.formatVersion != 1 && target.formatVersion != 2 &&
-       target.formatVersion != 3)) {
+       target.formatVersion != 3 && target.formatVersion != 4)) {
     return false;
   }
   if (target.formatVersion == 1) {
     return target.labelProfileVersion == 0 &&
            target.labelLanguages.empty() &&
            target.internationalFallback.empty() &&
-           target.buildingProfileVersion == 0;
+           target.buildingProfileVersion == 0 && target.poiProfileVersion == 0;
   }
   if (target.labelProfileVersion != 1 ||
       target.labelLanguages.size() > 3 ||
@@ -545,8 +584,13 @@ static bool targetMetadataValid(const MapTargetMetadata &target) {
         return false;
     }
   }
-  return target.formatVersion == 3 ? target.buildingProfileVersion == 1
-                                   : target.buildingProfileVersion == 0;
+  const bool buildingsValid = target.formatVersion >= 3
+                                  ? target.buildingProfileVersion == 1
+                                  : target.buildingProfileVersion == 0;
+  const bool poisValid = target.formatVersion == 4
+                             ? target.poiProfileVersion == 1
+                             : target.poiProfileVersion == 0;
+  return buildingsValid && poisValid;
 }
 
 static bool targetMetadataMatches(const MapTargetMetadata &left,
@@ -556,7 +600,8 @@ static bool targetMetadataMatches(const MapTargetMetadata &left,
          left.labelProfileVersion == right.labelProfileVersion &&
          left.labelLanguages == right.labelLanguages &&
          left.internationalFallback == right.internationalFallback &&
-         left.buildingProfileVersion == right.buildingProfileVersion;
+         left.buildingProfileVersion == right.buildingProfileVersion &&
+         left.poiProfileVersion == right.poiProfileVersion;
 }
 
 static MapTargetMetadata targetMetadataFromJson(const std::string &json,
@@ -576,6 +621,7 @@ static MapTargetMetadata targetMetadataFromJson(const std::string &json,
   const std::string languagesKey = key("LabelLanguages");
   const std::string fallbackKey = key("InternationalFallback");
   const std::string buildingProfileKey = key("BuildingProfileVersion");
+  const std::string poiProfileKey = key("PoiProfileVersion");
   const auto hasKey = [&](const std::string &name) {
     return json.find("\"" + name + "\"") != std::string::npos;
   };
@@ -593,15 +639,18 @@ static MapTargetMetadata targetMetadataFromJson(const std::string &json,
       jsonUintValue(json, buildingProfileKey);
   target.buildingProfileVersion =
       static_cast<uint32_t>(buildingProfileVersion);
+  const uint64_t poiProfileVersion = jsonUintValue(json, poiProfileKey);
+  target.poiProfileVersion = static_cast<uint32_t>(poiProfileVersion);
   const bool metadataPresent =
       hasKey(rendererKey) || hasKey(formatKey) || hasKey(profileKey) ||
       hasKey(languagesKey) || hasKey(fallbackKey) ||
-      hasKey(buildingProfileKey);
+      hasKey(buildingProfileKey) || hasKey(poiProfileKey);
   if (valid != nullptr) {
     *valid = (!metadataPresent || languagesValid) &&
              formatVersion <= UINT32_MAX &&
              labelProfileVersion <= UINT32_MAX &&
-             buildingProfileVersion <= UINT32_MAX;
+             buildingProfileVersion <= UINT32_MAX &&
+             poiProfileVersion <= UINT32_MAX;
   }
   return target;
 }
@@ -632,7 +681,9 @@ static std::string targetMetadataJson(const MapTargetMetadata &target,
   json += "],\"" + key("InternationalFallback") + "\":\"" +
           jsonEscape(target.internationalFallback) + "\",\"" +
           key("BuildingProfileVersion") + "\":" +
-          std::to_string(target.buildingProfileVersion);
+          std::to_string(target.buildingProfileVersion) + ",\"" +
+          key("PoiProfileVersion") + "\":" +
+          std::to_string(target.poiProfileVersion);
   return json;
 }
 
@@ -712,13 +763,8 @@ static bool isHexSha256(const std::string &value) {
 }
 
 static bool hasHiddenPathComponent(const std::string &path) {
-  std::stringstream stream(path);
-  std::string part;
-  while (std::getline(stream, part, '/')) {
-    if (!part.empty() && part[0] == '.')
-      return true;
-  }
-  return false;
+  return (!path.empty() && path.front() == '.') ||
+         path.find("/.") != std::string::npos;
 }
 
 static uint32_t rotr(uint32_t value, uint32_t bits) {
@@ -937,18 +983,35 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
       jsonStringValue(manifestText, "internationalFallback");
   manifest.buildingProfileVersion = static_cast<uint32_t>(
       jsonUintValue(manifestText, "buildingProfileVersion"));
+  manifest.poiProfileVersion = static_cast<uint32_t>(
+      jsonUintValue(manifestText, "poiProfileVersion"));
+  const std::string buildingSummary =
+      jsonObjectValue(manifestText, "buildings");
+  const std::string poiSummary = jsonObjectValue(manifestText, "pois");
   manifest.buildingRecordCount = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "recordCount"));
+      jsonUintValue(buildingSummary, "recordCount"));
   manifest.buildingProvenanceCounts[0] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "explicitHeightCount"));
+      jsonUintValue(buildingSummary, "explicitHeightCount"));
   manifest.buildingProvenanceCounts[1] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "levelsHeightCount"));
+      jsonUintValue(buildingSummary, "levelsHeightCount"));
   manifest.buildingProvenanceCounts[2] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "inheritedHeightCount"));
+      jsonUintValue(buildingSummary, "inheritedHeightCount"));
   manifest.buildingProvenanceCounts[3] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "localMedianHeightCount"));
+      jsonUintValue(buildingSummary, "localMedianHeightCount"));
   manifest.buildingProvenanceCounts[4] = static_cast<uint32_t>(
-      jsonUintValue(manifestText, "classDefaultHeightCount"));
+      jsonUintValue(buildingSummary, "classDefaultHeightCount"));
+  manifest.poiRecordCount =
+      static_cast<uint32_t>(jsonUintValue(poiSummary, "recordCount"));
+  manifest.poiCategoryCounts[0] =
+      static_cast<uint32_t>(jsonUintValue(poiSummary, "shopsCount"));
+  manifest.poiCategoryCounts[1] = static_cast<uint32_t>(
+      jsonUintValue(poiSummary, "restaurantsAndCafesCount"));
+  manifest.poiCategoryCounts[2] = static_cast<uint32_t>(
+      jsonUintValue(poiSummary, "publicToiletsCount"));
+  manifest.poiCategoryCounts[3] = static_cast<uint32_t>(
+      jsonUintValue(poiSummary, "gasStationsCount"));
+  manifest.poiCategoryCounts[4] = static_cast<uint32_t>(
+      jsonUintValue(poiSummary, "bicycleServicesCount"));
   manifest.minimumFirmwareVersion =
       jsonStringValue(manifestText, "minFirmwareVersion");
   if (manifest.renderer.empty() && manifest.formatVersion == 0) {
@@ -1002,13 +1065,14 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
     return fail("manifest_files", "manifest contains no map files");
   if (manifest.renderer != "esp32-fmb" ||
       (manifest.formatVersion != 1 && manifest.formatVersion != 2 &&
-       manifest.formatVersion != 3))
+       manifest.formatVersion != 3 && manifest.formatVersion != 4))
     return fail("manifest_target", "manifest renderer target is unsupported");
-  if (((manifest.formatVersion == 2 || manifest.formatVersion == 3) &&
+  if (((manifest.formatVersion == 2 || manifest.formatVersion == 3 ||
+        manifest.formatVersion == 4) &&
        (fontAssetCount != 1 || legacyTextBlockCount != 0)) ||
       (manifest.formatVersion == 1 && fontAssetCount != 0))
     return fail("manifest_target", "manifest files do not match renderer target");
-  if (manifest.formatVersion == 2 || manifest.formatVersion == 3) {
+  if (manifest.formatVersion >= 2) {
     bool uniqueLanguages = true;
     for (size_t index = 0; index < manifest.labelLanguages.size(); ++index)
       for (size_t other = index + 1; other < manifest.labelLanguages.size(); ++other)
@@ -1030,13 +1094,34 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
   uint64_t provenanceTotal = 0;
   for (uint32_t count : manifest.buildingProvenanceCounts)
     provenanceTotal += count;
-  if (manifest.formatVersion == 3) {
+  if (manifest.formatVersion >= 3) {
     if (manifest.buildingProfileVersion != 1 ||
         provenanceTotal != manifest.buildingRecordCount)
       return fail("manifest_buildings", "manifest building profile is invalid");
   } else if (manifest.buildingProfileVersion != 0 ||
              manifest.buildingRecordCount != 0 || provenanceTotal != 0) {
-    return fail("manifest_buildings", "non-v3 manifest contains building metadata");
+    return fail("manifest_buildings", "legacy manifest contains building metadata");
+  }
+  uint64_t poiTotal = 0;
+  for (uint32_t count : manifest.poiCategoryCounts)
+    poiTotal += count;
+  if (manifest.formatVersion == 4) {
+    static constexpr const char *kRequiredPoiSummaryKeys[] = {
+        "recordCount", "shopsCount", "restaurantsAndCafesCount",
+        "publicToiletsCount", "gasStationsCount", "bicycleServicesCount"};
+    bool completePoiSummary = true;
+    for (const char *key : kRequiredPoiSummaryKeys) {
+      completePoiSummary =
+          completePoiSummary &&
+          poiSummary.find(std::string("\"") + key + "\"") !=
+              std::string::npos;
+    }
+    if (manifest.poiProfileVersion != 1 || poiSummary.empty() ||
+        !completePoiSummary || poiTotal != manifest.poiRecordCount)
+      return fail("manifest_pois", "manifest POI profile is invalid");
+  } else if (manifest.poiProfileVersion != 0 || manifest.poiRecordCount != 0 ||
+             poiTotal != 0 || !poiSummary.empty()) {
+    return fail("manifest_pois", "legacy manifest contains POI metadata");
   }
   return {true, "ok", ""};
 }
@@ -1077,7 +1162,7 @@ InstallStatus MapTransferInstaller::validateStagedMap(
       // uploads are hashed while streaming and only reach activation with a
       // verification receipt, so the normal activation path performs no
       // full-file reads.
-      std::ifstream input(stagedPath, std::ios::binary);
+      MapReadFile input(stagedPath);
       if (!input)
         return fail("file_sha256", "could not read staged map file: " +
                                        file.path);
@@ -1086,7 +1171,7 @@ InstallStatus MapTransferInstaller::validateStagedMap(
       std::array<uint8_t, 4096> buffer = {};
       while (input) {
         input.read(reinterpret_cast<char *>(buffer.data()), buffer.size());
-        const std::streamsize count = input.gcount();
+        const size_t count = input.gcount();
         if (count <= 0)
           break;
         hasher.update(buffer.data(), static_cast<size_t>(count));
@@ -1141,7 +1226,7 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
   uint64_t archiveBytes = 0;
   if (!fileSize(archivePath, archiveBytes))
     return fail("archive_missing", "staged archive is missing");
-  std::ifstream input(archivePath, std::ios::binary);
+  MapReadFile input(archivePath);
   if (!input)
     return fail("archive_open", "could not open staged archive");
 
@@ -1166,10 +1251,10 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
   reportScanProgress(0, true);
   while (offset + 4 <= archiveBytes) {
     uint8_t signatureBytes[4] = {};
-    input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    input.seek(static_cast<off_t>(offset));
     input.read(reinterpret_cast<char *>(signatureBytes),
                sizeof(signatureBytes));
-    if (input.gcount() != static_cast<std::streamsize>(sizeof(signatureBytes)))
+    if (input.gcount() != static_cast<size_t>(sizeof(signatureBytes)))
       break;
     const uint32_t signature = readLe32(signatureBytes);
     if (signature == kZipCentralHeaderSignature ||
@@ -1185,7 +1270,7 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
 
     uint8_t header[26] = {};
     input.read(reinterpret_cast<char *>(header), sizeof(header));
-    if (input.gcount() != static_cast<std::streamsize>(sizeof(header))) {
+    if (input.gcount() != static_cast<size_t>(sizeof(header))) {
       return fail("archive_truncated", "stored archive header is truncated");
     }
     const uint16_t flags = readLe16(header + 2);
@@ -1202,8 +1287,8 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
     }
 
     std::string path(nameLength, '\0');
-    input.read(path.data(), static_cast<std::streamsize>(nameLength));
-    if (input.gcount() != static_cast<std::streamsize>(nameLength) ||
+    input.read(path.data(), static_cast<size_t>(nameLength));
+    if (input.gcount() != static_cast<size_t>(nameLength) ||
         path.find('\0') != std::string::npos) {
       return fail("archive_path", "map archive contains an invalid path");
     }
@@ -1244,26 +1329,25 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
 
   const std::string manifestPath = joinPath(root, "manifest.json");
   const std::string manifestTemp = manifestPath + ".part";
-  std::ofstream manifestOutput(manifestTemp,
-                               std::ios::binary | std::ios::trunc);
+  MapWriteFile manifestOutput(manifestTemp);
   if (!manifestOutput)
     return fail("archive_write", "could not create extracted manifest");
   input.clear();
-  input.seekg(static_cast<std::streamoff>(manifestOffset), std::ios::beg);
+  input.seek(static_cast<off_t>(manifestOffset));
   std::array<uint8_t, 4096> buffer = {};
   uint64_t remaining = manifestBytes;
   while (remaining > 0) {
     const size_t count =
         static_cast<size_t>(std::min<uint64_t>(remaining, buffer.size()));
     input.read(reinterpret_cast<char *>(buffer.data()),
-               static_cast<std::streamsize>(count));
-    if (input.gcount() != static_cast<std::streamsize>(count)) {
+               static_cast<size_t>(count));
+    if (input.gcount() != static_cast<size_t>(count)) {
       manifestOutput.close();
       removeTree(manifestTemp);
       return fail("archive_truncated", "map archive data is truncated");
     }
     manifestOutput.write(reinterpret_cast<const char *>(buffer.data()),
-                         static_cast<std::streamsize>(count));
+                         static_cast<size_t>(count));
     if (!manifestOutput) {
       manifestOutput.close();
       removeTree(manifestTemp);
@@ -1308,10 +1392,10 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
   sawCentralDirectory = false;
   while (offset + 4 <= archiveBytes) {
     uint8_t signatureBytes[4] = {};
-    input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    input.seek(static_cast<off_t>(offset));
     input.read(reinterpret_cast<char *>(signatureBytes),
                sizeof(signatureBytes));
-    if (input.gcount() != static_cast<std::streamsize>(sizeof(signatureBytes)))
+    if (input.gcount() != static_cast<size_t>(sizeof(signatureBytes)))
       break;
     const uint32_t signature = readLe32(signatureBytes);
     if (signature == kZipCentralHeaderSignature ||
@@ -1325,14 +1409,14 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
 
     uint8_t header[26] = {};
     input.read(reinterpret_cast<char *>(header), sizeof(header));
-    if (input.gcount() != static_cast<std::streamsize>(sizeof(header)))
+    if (input.gcount() != static_cast<size_t>(sizeof(header)))
       return fail("archive_truncated", "stored archive header is truncated");
     const uint64_t compressedSize = readLe32(header + 14);
     const uint16_t nameLength = readLe16(header + 22);
     const uint16_t extraLength = readLe16(header + 24);
     std::string path(nameLength, '\0');
-    input.read(path.data(), static_cast<std::streamsize>(nameLength));
-    if (input.gcount() != static_cast<std::streamsize>(nameLength))
+    input.read(path.data(), static_cast<size_t>(nameLength));
+    if (input.gcount() != static_cast<size_t>(nameLength))
       return fail("archive_path", "map archive contains an invalid path");
     const uint64_t dataOffset = offset + 30 + nameLength + extraLength;
     const bool isMapFile = startsWith(path, kVectMapPrefix) &&
@@ -1362,10 +1446,10 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
       if (!mkdirs(dirnameOf(destination)))
         return fail("archive_mkdir",
                     "could not create extracted map directory");
-      std::ofstream output(tempDestination, std::ios::binary | std::ios::trunc);
+      MapWriteFile output(tempDestination);
       if (!output)
         return fail("archive_write", "could not create extracted map file");
-      input.seekg(static_cast<std::streamoff>(dataOffset), std::ios::beg);
+      input.seek(static_cast<off_t>(dataOffset));
       Sha256Hasher hasher;
       map_renderer_format::StreamValidator rendererValidator(path);
       remaining = compressedSize;
@@ -1373,8 +1457,8 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
         const size_t count =
             static_cast<size_t>(std::min<uint64_t>(remaining, buffer.size()));
         input.read(reinterpret_cast<char *>(buffer.data()),
-                   static_cast<std::streamsize>(count));
-        if (input.gcount() != static_cast<std::streamsize>(count)) {
+                   static_cast<size_t>(count));
+        if (input.gcount() != static_cast<size_t>(count)) {
           output.close();
           removeTree(tempDestination);
           return fail("archive_truncated", "map archive data is truncated");
@@ -1388,7 +1472,7 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
                           path);
         }
         output.write(reinterpret_cast<const char *>(buffer.data()),
-                     static_cast<std::streamsize>(count));
+                     static_cast<size_t>(count));
         if (!output) {
           output.close();
           removeTree(tempDestination);
@@ -2884,11 +2968,14 @@ bool MapTransferInstaller::safeRelativePath(const std::string &path) const {
       path.find('\\') != std::string::npos ||
       path.find("//") != std::string::npos)
     return false;
-  std::stringstream stream(path);
-  std::string part;
-  while (std::getline(stream, part, '/')) {
-    if (part.empty() || part == "." || part == "..")
+  for (size_t start = 0; start < path.size();) {
+    const size_t slash = path.find('/', start);
+    const size_t end = slash == std::string::npos ? path.size() : slash;
+    const size_t length = end - start;
+    if (length == 0 || (length == 1 && path[start] == '.') ||
+        (length == 2 && path[start] == '.' && path[start + 1] == '.'))
       return false;
+    start = end + 1;
   }
   return path.find("..") == std::string::npos;
 }
@@ -2922,16 +3009,16 @@ bool MapTransferInstaller::mkdirs(const std::string &path) const {
 
 bool MapTransferInstaller::copyFile(const std::string &from,
                                     const std::string &to) const {
-  std::ifstream input(from, std::ios::binary);
+  MapReadFile input(from);
   if (!input)
     return false;
-  std::ofstream output(to, std::ios::binary | std::ios::trunc);
+  MapWriteFile output(to);
   if (!output)
     return false;
   std::array<char, 4096> buffer = {};
   while (input.good()) {
     input.read(buffer.data(), buffer.size());
-    const std::streamsize count = input.gcount();
+    const size_t count = input.gcount();
     if (count > 0)
       output.write(buffer.data(), count);
     if (!output.good())
@@ -3064,6 +3151,12 @@ MapTransferInstaller::manifestReceipt(const MapManifest &manifest) const {
            std::to_string(manifest.buildingRecordCount) + "\n";
   for (uint32_t count : manifest.buildingProvenanceCounts)
     value += std::to_string(count) + "\n";
+  if (manifest.formatVersion == 4) {
+    value += std::to_string(manifest.poiProfileVersion) + "\n" +
+             std::to_string(manifest.poiRecordCount) + "\n";
+    for (uint32_t count : manifest.poiCategoryCounts)
+      value += std::to_string(count) + "\n";
+  }
   value +=
            manifest.minimumFirmwareVersion + "\n";
   for (const ManifestFile &file : manifest.files) {
@@ -3091,7 +3184,7 @@ MapTransferInstaller::readInstalledManifest(const std::string &root,
 InstallStatus MapTransferInstaller::validateLabelContracts(
     const std::string &root, const MapManifest &manifest,
     bool useManifestPaths) const try {
-  if (manifest.formatVersion != 2 && manifest.formatVersion != 3)
+  if (manifest.formatVersion < 2 || manifest.formatVersion > 4)
     return {true, "ok", ""};
   const auto resolvedPath = [&](const ManifestFile &file) {
     if (useManifestPaths)
@@ -3120,6 +3213,11 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
     if (font.language(index) != manifest.labelLanguages[index])
       return fail("label_languages", "FMA1 languages do not match manifest");
 
+  uint64_t buildingRecords = 0;
+  std::array<uint64_t, 5> buildingProvenance = {};
+  uint64_t poiRecords = 0;
+  std::array<uint64_t, 5> poiCategories = {};
+
   for (const ManifestFile &file : manifest.files) {
     if (file.path.size() < 4 ||
         file.path.compare(file.path.size() - 4, 4, ".fmb") != 0)
@@ -3127,18 +3225,18 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
     const std::string path = resolvedPath(file);
     if (path.empty())
       return fail("label_block_path", "label-aware block path is invalid");
-    std::ifstream input(path, std::ios::binary | std::ios::ate);
-    if (!input || input.tellg() <= 0 ||
-        static_cast<uint64_t>(input.tellg()) >
+    MapReadFile input(path, true);
+    if (!input || input.tell() <= 0 ||
+        static_cast<uint64_t>(input.tell()) >
             map_block_format::kMaximumBlockBytes)
       return fail("label_block_open", "could not read label-aware FMB block");
-    const size_t size = static_cast<size_t>(input.tellg());
-    input.seekg(0, std::ios::beg);
+    const size_t size = static_cast<size_t>(input.tell());
+    input.seek(0);
     std::vector<uint8_t> bytes(size);
     input.read(reinterpret_cast<char *>(bytes.data()),
-               static_cast<std::streamsize>(bytes.size()));
+               static_cast<size_t>(bytes.size()));
     const uint8_t expectedBlockVersion =
-        manifest.formatVersion == 3 ? 4 : 3;
+        static_cast<uint8_t>(manifest.formatVersion + 1U);
     if (!input || bytes.size() < 4 || bytes[3] != expectedBlockVersion)
       return fail("label_block_version",
                   "map block version does not match renderer target");
@@ -3152,6 +3250,37 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
       return fail("label_block_contract",
                   "FMB label references do not match FMA1");
     }
+    if (manifest.formatVersion >= 3) {
+      map_building_block::Block buildings;
+      if (!map_building_block::decode(bytes.data(), bytes.size(), buildings,
+                                      &error))
+        return fail("building_block_contract", "FMB building section is invalid");
+      buildingRecords += buildings.stats.records;
+      for (size_t index = 0; index < buildingProvenance.size(); ++index)
+        buildingProvenance[index] += buildings.stats.provenance[index];
+    }
+    if (manifest.formatVersion == 4) {
+      map_poi_block::Block pois;
+      if (!map_poi_block::decode(bytes.data(), bytes.size(), pois, &error))
+        return fail("poi_block_contract", "FMB POI section is invalid");
+      poiRecords += pois.stats.records;
+      for (size_t index = 0; index < poiCategories.size(); ++index)
+        poiCategories[index] += pois.stats.categories[index];
+    }
+  }
+  if (manifest.formatVersion >= 3) {
+    if (buildingRecords != manifest.buildingRecordCount)
+      return fail("building_block_contract", "FMB building counts do not match manifest");
+    for (size_t index = 0; index < buildingProvenance.size(); ++index)
+      if (buildingProvenance[index] != manifest.buildingProvenanceCounts[index])
+        return fail("building_block_contract", "FMB building counts do not match manifest");
+  }
+  if (manifest.formatVersion == 4) {
+    if (poiRecords != manifest.poiRecordCount)
+      return fail("poi_block_contract", "FMB POI counts do not match manifest");
+    for (size_t index = 0; index < poiCategories.size(); ++index)
+      if (poiCategories[index] != manifest.poiCategoryCounts[index])
+        return fail("poi_block_contract", "FMB POI counts do not match manifest");
   }
   return {true, "ok", ""};
 }
@@ -3330,14 +3459,14 @@ bool MapTransferInstaller::fileSize(const std::string &path,
 
 bool MapTransferInstaller::fileSha256Hex(const std::string &path,
                                          std::string &hex) const {
-  std::ifstream input(path, std::ios::binary);
+  MapReadFile input(path);
   if (!input)
     return false;
   Sha256Hasher sha;
   std::array<uint8_t, 1024> buffer = {};
   while (input.good()) {
     input.read(reinterpret_cast<char *>(buffer.data()), buffer.size());
-    std::streamsize n = input.gcount();
+    size_t n = input.gcount();
     if (n > 0)
       sha.update(buffer.data(), static_cast<size_t>(n));
   }
@@ -3351,10 +3480,10 @@ bool MapTransferInstaller::writeTextFile(const std::string &path,
                                          const std::string &text) const {
   if (!mkdirs(dirnameOf(path)))
     return false;
-  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  MapWriteFile output(path);
   if (!output)
     return false;
-  output << text;
+  output.write(text.data(), text.size());
   output.flush();
   if (!output.good())
     return false;
@@ -3400,12 +3529,10 @@ bool MapTransferInstaller::readTextFile(const std::string &path,
   uint64_t size = 0;
   if (!fileSize(path, size) || size > maxBytes)
     return false;
-  std::ifstream input(path, std::ios::binary);
+  MapReadFile input(path);
   if (!input)
     return false;
-  text.assign((std::istreambuf_iterator<char>(input)),
-              std::istreambuf_iterator<char>());
-  return true;
+  return input.readAll(text, maxBytes);
 }
 
 } // namespace map_transfer

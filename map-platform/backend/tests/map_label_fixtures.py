@@ -131,6 +131,51 @@ def one_building_fmb4(
     return bytes(data)
 
 
+def fmb5_with_pois(
+    poi_records: tuple[tuple[int, int, int, int, int, int], ...] = (
+        (12, 34, 2, 3, 2, 0),
+        (100, 200, 5, 3, 0, 0),
+    ),
+    profile_fingerprint: int = 0x12345678,
+) -> bytes:
+    """Promote the shared FMB v4 fixture with a manually encoded POI section."""
+    source = bytearray(one_building_fmb4(profile_fingerprint))
+    directory = _base_geometry_end(source)
+    base = bytearray(source[:directory])
+    base[3] = 5
+    sections = []
+    for section_type in range(1, 5):
+        _entry, offset, length = _section_span(source, section_type)
+        sections.append(bytes(source[offset : offset + length]))
+    category_mask = 0
+    for _x, _y, category, _maximum_zoom, _rank, _flags in poi_records:
+        category_mask |= 1 << (category - 1)
+    poi_section = bytearray(struct.pack("<HHI", len(poi_records), 8, category_mask))
+    for record in poi_records:
+        poi_section.extend(struct.pack("<hhBBBB", *record))
+    sections.append(bytes(poi_section))
+
+    data = base
+    data.extend(b"EXT5\x05\0\0\0")
+    offset = len(data) + len(sections) * 16
+    for section_type, section in enumerate(sections, 1):
+        data.extend(
+            struct.pack(
+                "<BBHIII",
+                section_type,
+                1,
+                0,
+                offset,
+                len(section),
+                zlib.crc32(section) & 0xFFFFFFFF,
+            )
+        )
+        offset += len(section)
+    for section in sections:
+        data.extend(section)
+    return bytes(data)
+
+
 def one_label_fma1(profile_fingerprint: int = 0x12345678) -> bytes:
     language_table = b"\x02en"
     face_name = b"test"

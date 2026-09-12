@@ -198,13 +198,28 @@ struct BuildingPassSample {
   bool allocationFallback = false;
 };
 
+struct PoiPassSample {
+  uint32_t candidates = 0;
+  uint32_t accepted = 0;
+  uint32_t collisionRejected = 0;
+  uint32_t offscreen = 0;
+  uint32_t capacityDeferred = 0;
+  uint32_t decodedRecords = 0;
+  uint32_t decodedBytes = 0;
+  std::array<uint32_t, 5> acceptedCategories{};
+};
+
 struct RenderSample {
   uint32_t totalMs = 0;
   uint32_t blockLoadMs = 0;
   uint32_t drawMs = 0;
   uint32_t buildingProjectionMs = 0;
   uint32_t buildingDrawMs = 0;
+  uint32_t poiGatherMs = 0;
+  uint32_t poiLayoutMs = 0;
+  uint32_t poiDrawMs = 0;
   BuildingPassSample buildings{};
+  PoiPassSample pois{};
 };
 
 struct JobCounters {
@@ -370,11 +385,16 @@ struct Snapshot {
   TimingSummary buildingProjection{};
   TimingSummary buildingDraw{};
   TimingSummary buildingTotal{};
+  TimingSummary poiGather{};
+  TimingSummary poiLayout{};
+  TimingSummary poiDraw{};
+  TimingSummary poiTotal{};
   TimingSummary displayFlush{};
   CameraSample camera{};
   TimingSummary cameraLag{};
   uint16_t maximumMarkerResidualTenths = 0;
   BuildingPassSample buildings{};
+  PoiPassSample pois{};
   std::array<uint32_t, 6> limiterPasses{};
   JobCounters jobs{};
   uint32_t interrupted = 0;
@@ -725,12 +745,17 @@ public:
     result.buildingProjection = buildingProjection_.summary();
     result.buildingDraw = buildingDraw_.summary();
     result.buildingTotal = buildingTotal_.summary();
+    result.poiGather = poiGather_.summary();
+    result.poiLayout = poiLayout_.summary();
+    result.poiDraw = poiDraw_.summary();
+    result.poiTotal = poiTotal_.summary();
     result.displayFlush = displayFlush_.summary();
     result.camera = camera_;
     result.cameraLag = cameraLag_.summary();
     result.maximumMarkerResidualTenths = maximumMarkerResidualTenths_;
     result.buildings = buildings_;
     result.buildings.allocationFallback = allocationFallbackObserved_;
+    result.pois = pois_;
     result.limiterPasses = limiterPasses_;
     result.jobs = jobs_;
     result.interrupted = interrupted_;
@@ -756,7 +781,12 @@ private:
     buildingProjection_.note(sample.buildingProjectionMs);
     buildingDraw_.note(sample.buildingDrawMs);
     buildingTotal_.note(sample.buildingProjectionMs + sample.buildingDrawMs);
+    poiGather_.note(sample.poiGatherMs);
+    poiLayout_.note(sample.poiLayoutMs);
+    poiDraw_.note(sample.poiDrawMs);
+    poiTotal_.note(sample.poiGatherMs + sample.poiLayoutMs + sample.poiDrawMs);
     buildings_ = sample.buildings;
+    pois_ = sample.pois;
     allocationFallbackObserved_ =
         allocationFallbackObserved_ || sample.buildings.allocationFallback;
     for (size_t index = 0; index < limiterPasses_.size(); ++index) {
@@ -849,11 +879,16 @@ private:
     buildingProjection_.reset();
     buildingDraw_.reset();
     buildingTotal_.reset();
+    poiGather_.reset();
+    poiLayout_.reset();
+    poiDraw_.reset();
+    poiTotal_.reset();
     displayFlush_.reset();
     camera_ = {};
     cameraLag_.reset();
     maximumMarkerResidualTenths_ = 0;
     buildings_ = {};
+    pois_ = {};
     allocationFallbackObserved_ = false;
     limiterPasses_.fill(0);
     jobs_ = {};
@@ -896,11 +931,16 @@ private:
   TimingHistogram buildingProjection_{};
   TimingHistogram buildingDraw_{};
   TimingHistogram buildingTotal_{};
+  TimingHistogram poiGather_{};
+  TimingHistogram poiLayout_{};
+  TimingHistogram poiDraw_{};
+  TimingHistogram poiTotal_{};
   TimingHistogram displayFlush_{};
   CameraSample camera_{};
   TimingHistogram cameraLag_{};
   uint16_t maximumMarkerResidualTenths_ = 0;
   BuildingPassSample buildings_{};
+  PoiPassSample pois_{};
   bool allocationFallbackObserved_ = false;
   std::array<uint32_t, 6> limiterPasses_{};
   JobCounters jobs_{};

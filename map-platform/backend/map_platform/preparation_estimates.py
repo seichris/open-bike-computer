@@ -18,7 +18,7 @@ from .building_identity import (
     BUILDING_SOURCE_INDEX_ALGORITHM_VERSION,
 )
 from .building_scope import BUILDING_SCOPE_POLICY_VERSION
-from .map_buildings import BUILDING_PROFILE_VERSION
+from .map_buildings import BUILDING_PROFILE_VERSION, renderer_includes_buildings
 from .map_labels import renderer_format_version
 from .models import JobStatus, MapJob, utc_now_iso
 
@@ -256,7 +256,7 @@ class PreparationEstimator:
     ) -> dict[str, Any]:
         renderer = renderer_format_version(job.request)
         effective_preprocessing_mode = (
-            preprocessing_mode if renderer == 3 else "legacy"
+            preprocessing_mode if renderer_includes_buildings(renderer) else "legacy"
         )
         performance_key = performance_compatibility_key(
             profile=self.profile,
@@ -770,7 +770,11 @@ class PreparationEstimateCoordinator:
             return
         active = list(active_jobs)
         renderer = renderer_format_version(job.request)
-        effective_mode = self.preprocessing_mode if renderer == 3 else "legacy"
+        effective_mode = (
+            self.preprocessing_mode
+            if renderer_includes_buildings(renderer)
+            else "legacy"
+        )
         expected_performance_key = performance_compatibility_key(
             profile=self.estimator.profile,
             config=self.config,
@@ -818,18 +822,20 @@ class PreparationEstimateCoordinator:
                     config=self.config,
                     renderer=renderer,
                     preprocessing_mode=(
-                        self.preprocessing_mode if renderer == 3 else "legacy"
+                        self.preprocessing_mode
+                        if renderer_includes_buildings(renderer)
+                        else "legacy"
                     ),
                     rules_sha256=self.rules_sha256,
                 )
-                for renderer in (1, 2, 3)
+                for renderer in (1, 2, 3, 4)
             }
             self.capability_store.publish(
                 worker_id=worker_id,
                 performance_compatibility_keys=keys,
                 worker_class=self.config.worker_class,
                 preprocessing_modes={self.preprocessing_mode},
-                renderer_formats={1, 2, 3},
+                renderer_formats={1, 2, 3, 4},
                 model_version=self.estimator.profile.model_version,
                 profile_sha256=self.estimator.profile.sha256,
             )
@@ -964,7 +970,7 @@ class PreparationEstimateCoordinator:
         renderer = renderer_format_version(job.request)
         mode = (
             job.building_preprocessing_mode or self.preprocessing_mode
-            if renderer == 3
+            if renderer_includes_buildings(renderer)
             else "legacy"
         )
         expected_key = performance_compatibility_key(
@@ -1332,7 +1338,7 @@ def validate_estimator_context(value: Any) -> dict[str, Any]:
         raise ValueError("estimator context fields are invalid")
     if value["schemaVersion"] != ESTIMATOR_CONTEXT_SCHEMA_VERSION:
         raise ValueError("estimator context schema is unsupported")
-    renderer = _bounded_int(value["rendererFormatVersion"], 1, 3)
+    renderer = _bounded_int(value["rendererFormatVersion"], 1, 4)
     mode = value["preprocessingMode"]
     if mode not in {"legacy", "shadow", "selected", "chunked_allowlist", "chunked"}:
         raise ValueError("estimator preprocessing mode is invalid")

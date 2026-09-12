@@ -94,6 +94,8 @@ int main() {
   assert(loadedMap.streetLineWidth == DEFAULT_STREET_WIDTH);
   assert(loadedMap.positionMarkerScale == 2);
   assert(loadedMap.zoomLevel == MAP_DEFAULT_ZOOM_LEVEL);
+  assert((loadedMap.visibilityMask & VISIBILITY_POI_MASK) ==
+         VISIBILITY_POI_MASK);
   assert(loadedNavigation.detailLevel ==
          MAP_NAVIGATION_DEFAULT_DETAIL_LEVEL);
   assert(loadedNavigation.routeLineWidth ==
@@ -103,6 +105,7 @@ int main() {
   assert(loadedNavigation.zoomLevel == MAP_NAVIGATION_DEFAULT_ZOOM_LEVEL);
   assert(loadedNavigation.visibilityMask ==
          MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK);
+  assert((loadedNavigation.visibilityMask & VISIBILITY_POI_MASK) == 0);
   assert(loadedMap.labelDensity == DEFAULT_LABEL_DENSITY);
   assert(loadedMap.labelLanguageMode == DEFAULT_LABEL_LANGUAGE_MODE);
   assert(loadedMap.labelTextSize == DEFAULT_LABEL_TEXT_SIZE);
@@ -123,10 +126,13 @@ int main() {
   legacyStore.putUChar("zoomLevel", legacyMap.zoomLevel);
   legacyStore.putUInt("visMask", legacyMap.visibilityMask);
   map_profile_persistence::load(legacyStore, loadedMap, loadedNavigation);
-  assert(loadedMap.visibilityMask == VISIBILITY_EXTENDED_FEATURE_MASK);
+  assert(loadedMap.visibilityMask ==
+         (VISIBILITY_EXTENDED_FEATURE_MASK & ~VISIBILITY_POI_MASK));
+  assert((loadedMap.visibilityMask & VISIBILITY_POI_MASK) == 0);
   assert(loadedMap.streetLineWidth == 8);
   assert(legacyStore.getUChar("streetWidth", 0) == 8);
-  assert(loadedNavigation.visibilityMask == VISIBILITY_EXTENDED_FEATURE_MASK);
+  assert(loadedNavigation.visibilityMask ==
+         (VISIBILITY_EXTENDED_FEATURE_MASK & ~VISIBILITY_POI_MASK));
   assert(loadedNavigation.streetLineWidth == 8);
   assert(loadedNavigation.zoomLevel == legacyMap.zoomLevel);
   assert(loadedNavigation.labelDensity ==

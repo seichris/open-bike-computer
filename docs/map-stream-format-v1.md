@@ -65,13 +65,18 @@ SHA-256. Renderer target `esp32-fmb` format `1` accepts `.fmb` and legacy
 `.fmp` blocks and forbids font assets. Format `2` accepts FMB v3 blocks plus
 exactly one `VECTMAP/<mapId>/assets/street-labels.fma`, and forbids `.fmp`.
 Format `3` accepts FMB v4 blocks plus exactly one matching FMA1 asset and also
-forbids `.fmp`. Targets 2 and 3 bind `labelProfileVersion`, ordered
-`labelLanguages`, and `internationalFallback`. Target 3 additionally binds
+forbids `.fmp`. Format `4` accepts FMB v5 blocks plus exactly one matching FMA1
+asset and forbids `.fmp`. Targets 2 through 4 bind `labelProfileVersion`, ordered
+`labelLanguages`, and `internationalFallback`. Targets 3 and 4 additionally bind
 `buildingProfileVersion: 1` and the top-level `buildings` object containing
 `recordCount`, `explicitHeightCount`, `levelsHeightCount`,
 `inheritedHeightCount`, `localMedianHeightCount`, and
 `classDefaultHeightCount`. The five provenance counts must sum exactly to the
-record count. Payload order is exactly manifest file order.
+record count. Target 4 also binds `poiProfileVersion: 1` and a top-level `pois`
+object containing `recordCount`, `shopsCount`, `restaurantsAndCafesCount`,
+`publicToiletsCount`, `gasStationsCount`, and `bicycleServicesCount`. The five
+category counts must sum exactly to the POI record count. Payload order is
+exactly manifest file order.
 Production manifests also include a `producer` object containing the immutable
 64-character lowercase `buildSha256` derived inside the worker-image build from
 the exact worker/pipeline sources, dependency inventories, and native
@@ -165,8 +170,8 @@ Readers fail closed on:
 - malformed, unsupported, or non-canonical signature envelope;
 - unknown/revoked key ID or invalid signature;
 - unsafe, duplicate, missing, or reordered manifest paths;
-- a renderer target/file composition mismatch, missing target-2/3 profile,
-  invalid target-3 building summary, or FMB/FMA profile/reference mismatch;
+- a renderer target/file composition mismatch, missing target-2/3/4 profile,
+  invalid building or target-4 POI summary, or FMB/FMA profile/reference mismatch;
 - file-count or payload-size mismatch;
 - per-file hash mismatch;
 - truncation or trailing bytes.

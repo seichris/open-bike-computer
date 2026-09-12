@@ -42,6 +42,9 @@ struct MapManifest {
   uint32_t buildingProfileVersion = 0;
   uint32_t buildingRecordCount = 0;
   uint32_t buildingProvenanceCounts[5] = {0, 0, 0, 0, 0};
+  uint32_t poiProfileVersion = 0;
+  uint32_t poiRecordCount = 0;
+  uint32_t poiCategoryCounts[5] = {0, 0, 0, 0, 0};
   std::string minimumFirmwareVersion;
   std::vector<ManifestFile> files;
 };
@@ -69,6 +72,7 @@ struct MapTargetMetadata {
   std::vector<std::string> labelLanguages;
   std::string internationalFallback;
   uint32_t buildingProfileVersion = 0;
+  uint32_t poiProfileVersion = 0;
 };
 
 struct ActiveMapSelection {

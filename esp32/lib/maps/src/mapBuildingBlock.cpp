@@ -35,7 +35,7 @@ bool take(size_t amount, size_t size, size_t &offset) {
 }
 
 bool baseEnd(const uint8_t *data, size_t size, size_t &offset) {
-  if (size < 6 || data[3] != 4)
+  if (size < 6 || (data[3] != 4 && data[3] != 5))
     return false;
   offset = 4;
   const uint16_t polygonCount = le16(data + offset);
@@ -84,13 +84,14 @@ bool decode(const uint8_t *data, size_t size, Block &output,
     return map_block_format::validate(data, size)
                ? true
                : fail(error, "invalid legacy FMB block");
-  if (data[3] != 4 || !map_block_format::validate(data, size))
-    return fail(error, "invalid FMB v4 block");
+  if (data[3] > 5 || !map_block_format::validate(data, size))
+    return fail(error, "invalid building-aware FMB block");
 
   size_t directoryOffset = 0;
-  if (!baseEnd(data, size, directoryOffset) ||
-      directoryOffset > size || size - directoryOffset < 72U)
-    return fail(error, "invalid FMB v4 geometry boundary");
+  if (!baseEnd(data, size, directoryOffset) || directoryOffset > size ||
+      size - directoryOffset <
+          8U + static_cast<size_t>(data[3]) * 16U)
+    return fail(error, "invalid building-aware FMB geometry boundary");
   const size_t entry = directoryOffset + 8U + 3U * 16U;
   if (data[entry] != 4)
     return fail(error, "missing FMB v4 building section");

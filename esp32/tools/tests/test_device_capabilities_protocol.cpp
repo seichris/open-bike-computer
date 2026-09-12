@@ -65,6 +65,9 @@ int main() {
       device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION == 20);
   static_assert(device_capabilities_protocol::RIDE_DELIVERY_ACK_FEATURE ==
                 (1UL << 22));
+  static_assert(device_capabilities_protocol::MAP_POIS_CLIENT_VERSION == 24);
+  static_assert(device_capabilities_protocol::MAP_POIS_FEATURE ==
+                (1UL << 26));
   static_assert(device_capabilities_protocol::
                     RENDERER_BENCHMARK_SAMPLE_CLIENT_VERSION == 21);
   static_assert(
@@ -174,6 +177,14 @@ int main() {
   assert(rideDeliveryAckSize == sizeof(expectedRideDeliveryAck));
   for (size_t index = 0; index < rideDeliveryAckSize; ++index)
     assert(output[index] == expectedRideDeliveryAck[index]);
+  const size_t mapPoisSize = device_capabilities_protocol::encodeCap2(
+      device_capabilities_protocol::MAP_POIS_FEATURE, nullptr, false, output,
+      sizeof(output));
+  const uint8_t expectedMapPois[] = {
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x00, 0x04};
+  assert(mapPoisSize == sizeof(expectedMapPois));
+  for (size_t index = 0; index < mapPoisSize; ++index)
+    assert(output[index] == expectedMapPois[index]);
   const size_t rendererBenchmarkSampleSize =
       device_capabilities_protocol::encodeCap2(
           device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE,

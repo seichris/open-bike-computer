@@ -20,6 +20,15 @@
         "street-labels",
         "3d-buildings"
       ]
+    },
+    {
+      "id": "map-pois-v1",
+      "rendererFormatVersion": 4,
+      "features": [
+        "street-labels",
+        "3d-buildings",
+        "map-pois"
+      ]
     }
   ],
   "channels": {
@@ -27,7 +36,8 @@
       "globalProfiles": [
         "legacy-vector-v1",
         "street-labels-v1",
-        "buildings-3d-v1"
+        "buildings-3d-v1",
+        "map-pois-v1"
       ],
       "canaryProfiles": []
     },
@@ -37,7 +47,9 @@
         "street-labels-v1",
         "buildings-3d-v1"
       ],
-      "canaryProfiles": []
+      "canaryProfiles": [
+        "map-pois-v1"
+      ]
     }
   }
 }

@@ -115,7 +115,14 @@ one-metre quantization.
 - format 1 writes the existing FMB v2 blocks;
 - format 2 writes FMB v3 blocks plus the shared FMA1 street-label asset; and
 - format 3 writes FMB v4 blocks with the same label sections plus the bounded
-  building section documented in [`docs/fmb-v4.md`](../../docs/fmb-v4.md).
+  building section documented in [`docs/fmb-v4.md`](../../docs/fmb-v4.md); and
+- format 4 writes FMB v5 blocks with those sections plus the required bounded
+  POI section documented in [`docs/fmb-v5.md`](../../docs/fmb-v5.md).
+
+Format 4 classifies the checked-in Shops, Restaurants & Cafes, Public Toilets,
+Gas Stations, and Bicycle Shops & Repair rules during extraction. It emits a
+valid section even when a block has zero matching POIs and reports deterministic
+category totals for signed-manifest verification.
 
 The format-3 stage reads `building=*` and `building:part=*` ways and
 multipolygon relations directly from the clipped Geofabrik/OSM PBF. It keeps

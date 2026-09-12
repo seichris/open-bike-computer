@@ -478,6 +478,52 @@ static void testRejectsUnsafeManifestPath() {
   auto status = installer.validateManifestText(manifestText, manifest);
   assert(!status.ok);
   assert(status.code == "manifest_path");
+
+  for (const auto &path : {"VECTMAP/map-1/./evil.fmb",
+                           "VECTMAP/map-1//evil.fmb",
+                           "VECTMAP/map-1/.hidden/evil.fmb",
+                           "VECTMAP/map-1/nested/.hidden.fmb",
+                           "VECTMAP/map-1/nested/name..fmb",
+                           "/VECTMAP/map-1/evil.fmb"}) {
+    const std::string unsafe =
+        "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"files\":[{\"path\":\"" +
+        std::string(path) + "\",\"bytes\":1,\"sha256\":\"" +
+        std::string(64, '0') + "\"}]}";
+    const auto rejected = installer.validateManifestText(unsafe, manifest);
+    assert(!rejected.ok);
+    assert(rejected.code == "manifest_path");
+  }
+}
+
+static void testTargetFourRequiresCompletePoiSummary() {
+  MapTransferInstaller installer("/tmp/root");
+  MapManifest manifest;
+  const std::string target =
+      "\"target\":{\"renderer\":\"esp32-fmb\",\"formatVersion\":4,"
+      "\"labelProfileVersion\":1,\"labelLanguages\":[\"en\"],"
+      "\"internationalFallback\":\"en\",\"buildingProfileVersion\":1,"
+      "\"poiProfileVersion\":1},"
+      "\"buildings\":{\"recordCount\":0,\"explicitHeightCount\":0,"
+      "\"levelsHeightCount\":0,\"inheritedHeightCount\":0,"
+      "\"localMedianHeightCount\":0,\"classDefaultHeightCount\":0},"
+      "\"pois\":{\"recordCount\":0,\"shopsCount\":0,"
+      "\"restaurantsAndCafesCount\":0,\"publicToiletsCount\":0,"
+      "\"gasStationsCount\":0,\"bicycleServicesCount\":0},";
+  const std::string files =
+      "\"files\":[{\"path\":\"VECTMAP/map-4/+0000+0000/1.fmb\","
+      "\"bytes\":1,\"sha256\":\"" + std::string(64, '0') +
+      "\"},{\"path\":\"VECTMAP/map-4/assets/street-labels.fma\","
+      "\"bytes\":1,\"sha256\":\"" + std::string(64, '1') + "\"}]}";
+  const std::string valid =
+      "{\"schemaVersion\":1,\"mapId\":\"map-4\"," + target + files;
+  assert(installer.validateManifestText(valid, manifest).ok);
+
+  std::string missingCategory = valid;
+  const std::string field = "\"shopsCount\":0,";
+  missingCategory.erase(missingCategory.find(field), field.size());
+  const auto status = installer.validateManifestText(missingCategory, manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_pois");
 }
 
 static std::string presentationManifest(const std::string &metadata) {
@@ -1472,6 +1518,7 @@ int main() {
   testTargetThreeBuildingContractValidation();
   testActivationStateTracksAttemptsAndCompactStatus();
   testRejectsUnsafeManifestPath();
+  testTargetFourRequiresCompletePoiSummary();
   testParsesOptionalActiveMapPresentationMetadata();
   testIgnoresInvalidOptionalActiveMapPresentationMetadata();
   testBindsActivePresentationToManifestReceipt();

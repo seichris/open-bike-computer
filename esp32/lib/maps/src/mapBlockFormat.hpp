@@ -23,6 +23,7 @@ constexpr uint8_t kMaximumGlyphsPerRun = 192;
 constexpr uint32_t kMaximumBuildings = 12288;
 constexpr uint32_t kMaximumBuildingRings = 32;
 constexpr uint32_t kMaximumBuildingPoints = 131072;
+constexpr uint32_t kMaximumPois = 16384;
 
 // Performs the same structural walk as the renderer without allocating or
 // dereferencing beyond the supplied bytes. Only renderer-supported binary map
@@ -70,6 +71,8 @@ private:
     BuildingRingHeader,
     BuildingRingPoints,
     BuildingWallMask,
+    PoiHeader,
+    PoiRecord,
     Complete,
   };
   enum class AsciiState {
@@ -113,7 +116,7 @@ private:
     uint32_t length = 0;
     uint32_t crc32 = 0;
   };
-  V3Section v3Sections_[4] = {};
+  V3Section v3Sections_[5] = {};
   uint8_t v3Directory_[16] = {};
   size_t v3DirectorySize_ = 0;
   uint8_t v3SectionCount_ = 0;
@@ -146,6 +149,14 @@ private:
   uint8_t v4CurrentBuildingFlags_ = 0;
   int16_t v4DeclaredBounds_[4] = {};
   int16_t v4ActualBounds_[4] = {};
+  uint32_t v5DeclaredCategoryMask_ = 0;
+  uint32_t v5ActualCategoryMask_ = 0;
+  bool v5HasPreviousPoi_ = false;
+  int16_t v5PreviousPoiX_ = 0;
+  int16_t v5PreviousPoiY_ = 0;
+  uint8_t v5PreviousPoiCategory_ = 0;
+  uint8_t v5PreviousPoiRank_ = 0;
+  uint8_t v5PreviousPoiMaximumZoom_ = 0;
   AsciiState asciiState_ = AsciiState::PolygonHeader;
   std::string line_;
   CoordinateState coordinateState_ = CoordinateState::Prefix;

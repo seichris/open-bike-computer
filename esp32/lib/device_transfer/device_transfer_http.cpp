@@ -8,7 +8,6 @@
 #include <cstdio>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
-#include <sstream>
 
 namespace device_transfer {
 namespace {
@@ -967,15 +966,7 @@ bool HttpTransferServer::handleClient(TransferClient &client,
   }
 
   HttpRequest request;
-  std::string version;
-  std::string requestLineTrailing;
-  {
-    std::stringstream requestStream(requestLine);
-    requestStream >> request.method >> request.path >> version;
-    requestStream >> requestLineTrailing;
-  }
-  if (request.method.empty() || request.path.empty() ||
-      version != "HTTP/1.1" || !requestLineTrailing.empty()) {
+  if (!parseHttpRequestLine(requestLine, request.method, request.path)) {
     sendError(client, 400, "bad_request", "invalid request line");
     return false;
   }
@@ -1030,8 +1021,6 @@ bool HttpTransferServer::handleClient(TransferClient &client,
   // renderer metrics take their heap sample or build a response so a short
   // request line/header cannot overlap those bounded allocations.
   std::string().swap(requestLine);
-  std::string().swap(version);
-  std::string().swap(requestLineTrailing);
   std::string().swap(line);
   client.setHttpRequestBodyLength(request.hasContentLength
                                       ? request.contentLength

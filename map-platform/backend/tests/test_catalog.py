@@ -208,6 +208,21 @@ class CatalogTests(unittest.TestCase):
         )
         self.assertEqual(map_entry_id(job), first)
 
+    def test_target_four_catalog_requires_cumulative_poi_features(self):
+        job = ready_job()
+        job.request["target"]["rendererFormatVersion"] = 4
+
+        payload = publication_payload(job, "production")
+
+        self.assertEqual(
+            payload["features"],
+            ["street-labels", "3d-buildings", "map-pois"],
+        )
+        self.assertEqual(
+            payload["artifacts"][0]["readerRequirements"]["requiredFeatures"],
+            ["street-labels", "3d-buildings", "map-pois"],
+        )
+
     def test_ready_publication_is_persisted_without_changing_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = JobStore(Path(tmp) / "jobs")

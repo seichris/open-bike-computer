@@ -85,9 +85,9 @@ class GenerationProfilePolicy:
                 tuple(features),
             )
             formats.add(renderer_format)
-        if formats != {1, 2, 3}:
+        if formats != {1, 2, 3, 4}:
             raise ValueError(
-                "generation profile policy schemaVersion 1 requires renderer formats 1, 2, and 3"
+                "generation profile policy schemaVersion 1 requires renderer formats 1, 2, 3, and 4"
             )
 
         raw_channels = payload.get("channels")

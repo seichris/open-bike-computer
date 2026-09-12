@@ -18,6 +18,7 @@
 #include "mapLabelRasterizer.hpp"
 #include "mapLabelSelection.hpp"
 #include "mapLineStyle.hpp"
+#include "mapPoiIcon.hpp"
 #include "mapTransform.hpp"
 #include "map_projection.hpp"
 #include "../../ble_navigation/ble_navigation.hpp"
@@ -280,7 +281,8 @@ bool Maps::LabelLayoutCacheKey::operator==(
          screenWidth == other.screenWidth && screenHeight == other.screenHeight &&
          fontFingerprint == other.fontFingerprint &&
          visibilityMask == other.visibilityMask &&
-         blockSignature == other.blockSignature && zoom == other.zoom &&
+         blockSignature == other.blockSignature &&
+         poiSignature == other.poiSignature && zoom == other.zoom &&
          density == other.density && languageMode == other.languageMode &&
          textSize == other.textSize && orientation == other.orientation &&
          markerX == other.markerX && markerY == other.markerY &&
@@ -1700,6 +1702,16 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
       return new MapBlock();
     }
   }
+  if (version >= 5) {
+    std::string poiError;
+    if (!map_poi_block::decode(reinterpret_cast<const uint8_t *>(file),
+                               fileSize, mblock->poiData, &poiError)) {
+      ESP_LOGE(TAG, "Could not decode FMB v5 POIs: %s", poiError.c_str());
+      Maps::isMapFound = false;
+      delete mblock;
+      return new MapBlock();
+    }
+  }
 
   // Build spatial grid for polygon culling optimization
   const uint32_t gridStartMs = MAPIO_TIME_MS();
@@ -1716,7 +1728,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   const uint32_t gridMs = MAPIO_TIME_MS() - gridStartMs;
   MAPIO_LOG("MAPIO: vector-parse format=binary size=%u version=%u "
             "polygons=%u lines=%u buildingRecords=%u buildingRings=%u "
-            "buildingPoints=%u heightExplicit=%u heightLevels=%u "
+            "buildingPoints=%u poiRecords=%u heightExplicit=%u heightLevels=%u "
             "heightInherited=%u heightLocalMedian=%u heightClassDefault=%u "
             "parseMs=%lu gridMs=%lu totalMs=%lu\n",
             (unsigned)fileSize, version, (unsigned)mblock->polygons.size(),
@@ -1724,6 +1736,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
             (unsigned)mblock->buildingData.stats.records,
             (unsigned)mblock->buildingData.stats.rings,
             (unsigned)mblock->buildingData.stats.points,
+            (unsigned)mblock->poiData.stats.records,
             (unsigned)mblock->buildingData.stats.provenance[0],
             (unsigned)mblock->buildingData.stats.provenance[1],
             (unsigned)mblock->buildingData.stats.provenance[2],
@@ -2140,6 +2153,7 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
     mixSignature(block->formatVersion);
     mixSignature(block->labelData.profileFingerprint);
     mixSignature(static_cast<uint32_t>(block->labelData.labels.size()));
+    mixSignature(static_cast<uint32_t>(block->poiData.records.size()));
   }
   const bool guidance = context.guidanceScreenActive;
   const LabelLayoutCacheKey cacheKey{
@@ -2151,6 +2165,7 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
       labelFontAsset.profileFingerprint(),
       style.visibilityMask,
       blockSignature,
+      poiLayoutSignature,
       zoom,
       style.labelDensity,
       style.labelLanguageMode,
@@ -2326,7 +2341,8 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
 
   if (options.empty())
     return true;
-  std::vector<map_label_layout::ReservedRegion> reserved;
+  MapLabelLayoutVector<map_label_layout::ReservedRegion> reserved =
+      poiReservedRegions;
   if (markerVisible) {
     const float markerSize = static_cast<float>(
         navigation_visual_style::POSITION_MARKER_BASE_SIZE *
@@ -2538,6 +2554,8 @@ bool Maps::readVectorMap(
   const bool mapNavigationActive = context.guidanceScreenActive;
   const uint32_t drawStartMs = MAPIO_TIME_MS();
   surface.clear(BACKGROUND_COLOR);
+  poiReservedRegions.clear();
+  poiLayoutSignature = 1469598103934665603ULL;
 
   if (!Maps::isMapFound.load(std::memory_order_acquire) ||
       memCache.blocks.empty()) {
@@ -3557,6 +3575,154 @@ bool Maps::readVectorMap(
     return false;
   }
 
+  map_poi_layout::Diagnostics poiDiagnostics{};
+  uint32_t decodedPoiRecords = 0;
+  uint32_t decodedPoiBytes = 0;
+  uint32_t poiGatherMs = 0;
+  uint32_t poiLayoutMs = 0;
+  uint32_t poiDrawMs = 0;
+  try {
+    const uint32_t poiGatherStartMs = MAPIO_TIME_MS();
+    // POIs and street labels must share visible-crop coordinates. The stable
+    // camera projects into an overscanned backing surface, not the viewport.
+    auto poiSurface = surface;
+    int32_t poiGutter = 0;
+    if (map_profile_protocol::STABLE_CAMERA_ENABLED &&
+        context.labelViewportWidth > 0 && context.labelViewportHeight > 0) {
+      poiGutter = context.labelGutter;
+      if (poiGutter * 2 + context.labelViewportWidth > surface.width ||
+          poiGutter * 2 + context.labelViewportHeight > surface.height)
+        return false;
+      poiSurface.pixels += poiGutter * surface.stridePixels + poiGutter;
+      poiSurface.width = context.labelViewportWidth;
+      poiSurface.height = context.labelViewportHeight;
+    }
+    MapPoiLayoutVector<map_poi_layout::Candidate> poiCandidates;
+    poiCandidates.reserve(map_poi_layout::kMaximumCandidates);
+    MapLabelLayoutVector<map_label_layout::ReservedRegion> poiReserved;
+    if (context.showCurrentPosition) {
+      const auto projectedMarker = projection.projectWorld(
+          map_profile_protocol::STABLE_CAMERA_ENABLED
+              ? context.presentedWorld : context.measuredGpsWorld);
+      if (projectedMarker.valid) {
+        const float markerSize = static_cast<float>(
+            navigation_visual_style::POSITION_MARKER_BASE_SIZE *
+            std::max<uint8_t>(1, context.markerScale));
+        poiReserved.push_back(
+            {static_cast<float>(projectedMarker.x - poiGutter),
+             static_cast<float>(projectedMarker.y - poiGutter),
+             markerSize, markerSize});
+      }
+    }
+    if (context.guidanceScreenActive) {
+      poiReserved.push_back({poiSurface.width * 0.5F, 34.0F,
+                             static_cast<float>(poiSurface.width), 68.0F});
+    }
+
+    for (size_t blockIndex = 0; blockIndex < memCache.blocks.size();
+         ++blockIndex) {
+      MapBlock *block = memCache.blocks[blockIndex];
+      if (block == nullptr || !block->inView || block->formatVersion < 5)
+        continue;
+      decodedPoiRecords += block->poiData.stats.records;
+      decodedPoiBytes += static_cast<uint32_t>(block->poiData.decodedBytes());
+      for (size_t recordIndex = 0;
+           recordIndex < block->poiData.records.size(); ++recordIndex) {
+        if ((recordIndex & 0x3fU) == 0 && shouldCancelMapRenderWork())
+          return false;
+        const auto &record = block->poiData.records[recordIndex];
+        if (zoom > record.maximumZoom ||
+            (style.visibilityMask &
+             map_poi_layout::visibilityBit(record.category)) == 0) {
+          continue;
+        }
+        const map_transform::WorldPoint world{
+            static_cast<double>(block->offset.x + record.localX),
+            static_cast<double>(block->offset.y + record.localY)};
+        const auto projected = projection.projectWorld(world);
+        if (!projected.valid) {
+          ++poiDiagnostics.offscreen;
+          continue;
+        }
+        const double riderX = world.x - context.presentedWorld.x;
+        const double riderY = world.y - context.presentedWorld.y;
+        map_poi_layout::retainBounded(
+            poiCandidates,
+            {static_cast<float>(projected.x - poiGutter),
+             static_cast<float>(projected.y - poiGutter),
+             riderX * riderX + riderY * riderY,
+             record.category, static_cast<uint16_t>(blockIndex),
+             static_cast<uint16_t>(recordIndex), record.rank},
+            context.guidanceScreenActive, &poiDiagnostics);
+      }
+    }
+    poiGatherMs = MAPIO_TIME_MS() - poiGatherStartMs;
+    const uint32_t poiLayoutStartMs = MAPIO_TIME_MS();
+    auto poiPlacements = map_poi_layout::place(
+        std::move(poiCandidates),
+        {static_cast<float>(poiSurface.width),
+         static_cast<float>(poiSurface.height)},
+        context.guidanceScreenActive, poiReserved, &poiDiagnostics);
+    poiLayoutMs = MAPIO_TIME_MS() - poiLayoutStartMs;
+    const uint32_t poiDrawStartMs = MAPIO_TIME_MS();
+    const auto mixPoiSignature = [&](uint32_t value) {
+      poiLayoutSignature ^= value;
+      poiLayoutSignature *= 1099511628211ULL;
+    };
+    for (const auto &placement : poiPlacements) {
+      const int32_t x = map_transform::quantizePixel(placement.candidate.x);
+      const int32_t y = map_transform::quantizePixel(placement.candidate.y);
+      map_poi_icon::draw(poiSurface, x, y, placement.candidate.category);
+      poiReservedRegions.push_back(
+          {static_cast<float>(x), static_cast<float>(y),
+           map_poi_layout::kIconSize + 2.0F * map_poi_layout::kIconPadding,
+           map_poi_layout::kIconSize + 2.0F * map_poi_layout::kIconPadding});
+      mixPoiSignature(static_cast<uint32_t>(x));
+      mixPoiSignature(static_cast<uint32_t>(y));
+      mixPoiSignature(static_cast<uint32_t>(placement.candidate.category));
+    }
+    poiDrawMs = MAPIO_TIME_MS() - poiDrawStartMs;
+  } catch (const std::bad_alloc &) {
+    // The worker publishes only complete frames. Returning false preserves the
+    // prior frame and lets the latest semantic request retry.
+    return false;
+  }
+
+  if (diagnostics != nullptr) {
+    diagnostics->candidatePois = static_cast<uint32_t>(poiDiagnostics.gathered);
+    diagnostics->acceptedPois = static_cast<uint32_t>(poiDiagnostics.accepted);
+    diagnostics->collisionRejectedPois =
+        static_cast<uint32_t>(poiDiagnostics.collisionRejected);
+    diagnostics->offscreenPois = static_cast<uint32_t>(poiDiagnostics.offscreen);
+    diagnostics->capacityDeferredPois =
+        static_cast<uint32_t>(poiDiagnostics.capacityDeferred);
+    diagnostics->decodedPoiRecords = decodedPoiRecords;
+    diagnostics->decodedPoiBytes = decodedPoiBytes;
+    diagnostics->poiGatherMs = poiGatherMs;
+    diagnostics->poiLayoutMs = poiLayoutMs;
+    diagnostics->poiDrawMs = poiDrawMs;
+    for (size_t index = 0; index < poiDiagnostics.acceptedCategories.size();
+         ++index) {
+      diagnostics->acceptedPoiCategories[index] =
+          static_cast<uint32_t>(poiDiagnostics.acceptedCategories[index]);
+    }
+  }
+  MAPIO_LOG(
+      "MAPIO: pois candidates=%u accepted=%u collision=%u offscreen=%u "
+      "capacity=%u decodedRecords=%u decodedBytes=%u gatherMs=%lu "
+      "layoutMs=%lu drawMs=%lu categories=%u,%u,%u,%u,%u\n",
+      (unsigned)poiDiagnostics.gathered, (unsigned)poiDiagnostics.accepted,
+      (unsigned)poiDiagnostics.collisionRejected,
+      (unsigned)poiDiagnostics.offscreen,
+      (unsigned)poiDiagnostics.capacityDeferred, (unsigned)decodedPoiRecords,
+      (unsigned)decodedPoiBytes, (unsigned long)poiGatherMs,
+      (unsigned long)poiLayoutMs, (unsigned long)poiDrawMs,
+      (unsigned)poiDiagnostics.acceptedCategories[0],
+      (unsigned)poiDiagnostics.acceptedCategories[1],
+      (unsigned)poiDiagnostics.acceptedCategories[2],
+      (unsigned)poiDiagnostics.acceptedCategories[3],
+      (unsigned)poiDiagnostics.acceptedCategories[4]);
+
   if (drawLabels) {
     map_surface::LabelSurface labelSurface;
     labelSurface.color = surface;
@@ -4537,6 +4703,9 @@ void Maps::renderWorkerLoop() {
         diagnosticsSample.buildingProjectionMs =
             result.raster.buildingProjectionMs;
         diagnosticsSample.buildingDrawMs = result.raster.buildingDrawMs;
+        diagnosticsSample.poiGatherMs = result.raster.poiGatherMs;
+        diagnosticsSample.poiLayoutMs = result.raster.poiLayoutMs;
+        diagnosticsSample.poiDrawMs = result.raster.poiDrawMs;
         diagnosticsSample.buildings = {
             result.raster.candidateBuildings,
             result.raster.selectedBuildings,
@@ -4549,6 +4718,16 @@ void Maps::renderWorkerLoop() {
             result.raster.extrudedFarthestDistancePx,
             result.raster.buildingLimiterFlags,
             result.raster.allocationFallback,
+        };
+        diagnosticsSample.pois = {
+            result.raster.candidatePois,
+            result.raster.acceptedPois,
+            result.raster.collisionRejectedPois,
+            result.raster.offscreenPois,
+            result.raster.capacityDeferredPois,
+            result.raster.decodedPoiRecords,
+            result.raster.decodedPoiBytes,
+            result.raster.acceptedPoiCategories,
         };
         renderer_diagnostics::noteRenderForWindow(
             request.context.rendererDiagnosticsWindowId,

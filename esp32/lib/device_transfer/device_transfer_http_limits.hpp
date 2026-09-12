@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace device_transfer {
 
@@ -23,6 +24,30 @@ constexpr uint32_t HTTP_INITIAL_REQUEST_IDLE_TIMEOUT_MS = 1000;
 // connect without being starved behind the old socket.
 constexpr uint32_t HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS = 2000;
 constexpr size_t HTTP_MAX_REQUESTS_PER_TLS_CONNECTION = 4096;
+
+// Parse the existing three-token HTTP/1.1 contract without locale-aware
+// iostream machinery. The caller applies the bounded header/line budgets.
+inline bool parseHttpRequestLine(const std::string &line, std::string &method,
+                                 std::string &path) {
+  const std::string_view input(line);
+  constexpr std::string_view whitespace = " \t\r\n\f\v";
+  std::string_view fields[3];
+  size_t cursor = 0;
+  for (auto &field : fields) {
+    const size_t start = input.find_first_not_of(whitespace, cursor);
+    if (start == std::string_view::npos)
+      return false;
+    const size_t end = input.find_first_of(whitespace, start);
+    cursor = end == std::string_view::npos ? input.size() : end;
+    field = input.substr(start, cursor - start);
+  }
+  if (fields[2] != "HTTP/1.1" ||
+      input.find_first_not_of(whitespace, cursor) != std::string_view::npos)
+    return false;
+  method.assign(fields[0]);
+  path.assign(fields[1]);
+  return true;
+}
 
 inline uint32_t httpRequestLineTimeoutMs(size_t requestIndex) {
   return requestIndex == 0 ? HTTP_INITIAL_REQUEST_IDLE_TIMEOUT_MS
