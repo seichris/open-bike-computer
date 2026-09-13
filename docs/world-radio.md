@@ -22,6 +22,11 @@ screen payload. Its type bit is advertised in the screen-configuration TLV
 only by development firmware. Playback follows the acknowledged configuration;
 removing or disabling the last World Radio instance releases the phone player.
 
+The lower controls are icon-only previous station, play/pause, and next station.
+They sit inside the round display's safe area. Active playback omits the redundant
+"Playing on iPhone" status line, including when an older phone build sends that
+message; searching, buffering, connection, and error messages remain visible.
+
 1. The rider opens **World Radio** and drags the wrapped, equirectangular map
    under the fixed reticle.
 2. Releasing the map sends one fixed-size `WRQ1` coordinate request over the
