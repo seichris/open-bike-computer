@@ -33,9 +33,9 @@ public:
     constrain();
   }
 
-  // Reverse both input axes for the device's observed drag orientation.
-  // Keep the camera movement at one pixel per input pixel.
-  void drag(int dx, int dy) { pan(-dx, -dy); }
+  // Touch coordinates now use the actual inverse of the panel flush rotation.
+  // Content follows the corrected pointer one pixel per input pixel.
+  void drag(int dx, int dy) { pan(dx, dy); }
 
   int x() const { return x_; }
   int y() const { return y_; }

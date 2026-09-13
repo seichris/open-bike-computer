@@ -229,7 +229,7 @@ void mapEvent(lv_event_t *event) {
     if (std::abs(point.x - pressX) + std::abs(point.y - pressY) >= 10) {
       dragStarted = true;
     }
-    // Correct the observed input orientation without changing drag speed.
+    // Physical touch is calibrated at the driver; keep direct screen-space motion.
     camera.drag(dx, dy);
     lastX = point.x;
     lastY = point.y;

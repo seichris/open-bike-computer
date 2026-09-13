@@ -94,6 +94,10 @@ int main() {
   TouchContact rotated = rotateTouchContact(active.contacts[0], 1, 465, 465);
   assert(rotated.x == 440);
   assert(rotated.y == 435);
+  const TouchContact shuffleRaw{0, 415, 330, CST9217_STATUS_PRESSED};
+  const auto shuffle = rotateTouchContact(shuffleRaw, cst9217CalibratedRotation(1), 465, 465);
+  assert(shuffle.x == 135 && shuffle.y == 415);
+  assert(shuffle.x < 233 && shuffle.y >= 326);
 
   assert(decodeCst9217Frame(packet, sizeof(packet) - 1, 466, 466, frame) ==
          Cst9217DecodeStatus::InvalidLength);

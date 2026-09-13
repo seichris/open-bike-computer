@@ -40,12 +40,20 @@ closer view. A screen-sized raster cache (about 424 KiB on the 1.75) composes
 the visible map at integer 2x scale, avoiding LVGL image-transform work on each
 drag frame. Adjacent duplicated rows are copied, and the panel's full-frame
 refresh strategy remains unchanged. Drag deltas move the camera in
-screen pixels at 1:1 speed, with both touch-input axes reversed following
-physical-device feedback; longitude wraps and vertical movement stops
+screen pixels at 1:1 speed using calibrated physical touch coordinates;
+longitude wraps and vertical movement stops
 at the map edges so the viewport stays covered. Ordinary playback updates and
 location-search results do not recenter the map. Explicit previous/next/random
 station selection can focus the resulting station, constrained to the same map
 bounds; beginning a drag cancels that pending focus.
+
+The same-country shuffle report was traced to physical input, not directory
+scope: the 1.75 CST9217 sensor needs a half-turn offset before display rotation.
+The captured shuffle tap `(415,330)` previously became `(330,50)` and triggered
+a nearby search; calibrated it becomes `(135,415)` in the bottom-left control.
+Both primary touch and multi-contact snapshots use this calibration. Remote
+panel-pixel input and the 2.06 native mapping are unchanged. The temporary radio
+drag-axis workaround is removed so its physical movement direction is preserved.
 
 The lower controls are black 32px global shuffle and play/pause icons without
 backgrounds or borders, with transparent
