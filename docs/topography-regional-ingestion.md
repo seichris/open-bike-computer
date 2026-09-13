@@ -116,10 +116,59 @@ do not, by themselves, prove geodetic correctness or legal eligibility.
   companion tiles consume the same contour intermediate, retaining the existing
   artifact separation and attribution binding.
 
-This stage processes one selected native asset. It neither chooses between
-overlapping survey editions nor automatically blends regional DTM with global
-DSM. Source-boundary residual QA, water/quality-mask ingestion, and multi-asset
-selection remain explicit follow-ups, not hidden feathering or offsets.
+## Adjacent native tiles
+
+`regional-sample` accepts **1 to 16** explicit native receipts. Repeat
+`--receipt` and `--source-contract` for every selected tile; contracts are matched
+by retained asset SHA-256, not argument order. Repeat the same contracts when
+encoding the sample:
+
+```sh
+.venv-topography/bin/map-topography --cache "$terrain_cache" regional-sample \
+  --receipt /absolute/path/west-receipt.json \
+  --receipt /absolute/path/east-receipt.json \
+  --source-contract /absolute/path/west-contract.json \
+  --source-contract /absolute/path/east-contract.json \
+  --grid-directory /absolute/path/pinned-transformation-grids \
+  --bounds WEST SOUTH EAST NORTH \
+  --output /absolute/path/new-tiled-contours.json
+```
+
+All tile contracts must agree exactly except for their native asset identity and
+individual contract-file hash: source, review digest, native header contract,
+vertical datum, reviewed area, exact operation text/hashes and grid inventory.
+The source review must qualify the chosen collection/editions; matching digests
+are an operator assertion, not independent proof of survey compatibility.
+Native TIFFs must share resolution, integer-aligned pixel origins, registration
+and CRS. Overlapping footprints fail even when their pixels agree: no
+first/last-wins survey selection, blending or seam offsets are implied. Point-
+registered products with duplicated boundary pixels need a separately qualified
+deduplication policy; this implementation rejects those overlaps too.
+
+Native pixels are joined **before** bilinear interpolation, in bounded local
+windows. A sample crossing a tile edge therefore sees its actual neighboring
+pixels, instead of independently clamping to each tile's last row or column.
+Missing tiles and contributing invalid neighbors remain masked; the contour
+extractor cannot bridge them. The operator must select the tiles needed for the
+processing halo and interpolation neighbors. A non-empty sample is not a claim
+that its requested area has complete valid-pixel coverage.
+
+No full collection-sized array or GDAL VRT is created. The collection envelope
+is bounded to one million native pixels per dimension, with four million pixels
+per read and cancellation between reads. Existing target-grid, contour-size,
+per-TIFF download and transformation-grid bounds remain unchanged.
+
+Multi-tile evidence uses `regional-transform-set-v1`: asset-sorted exact
+contracts, their canonical aggregate digest, each native input receipt/audit,
+and the virtual native lattice/offsets. Reordering inputs or subdividing bounded
+read windows does not change evidence. Encoding requires that complete exact
+set again; a missing, additional, duplicate or changed contract fails before
+writing the development pair. Single-tile evidence retains its existing format.
+
+This stage neither chooses between overlapping survey editions nor automatically
+blends regional DTM with global DSM. Cross-source residual QA, water/quality-mask
+ingestion, automatic tile/edition selection and qualified global fallback remain
+explicit follow-ups, not hidden feathering or offsets.
 
 ## Evidence, 2026-09-13
 
@@ -129,11 +178,20 @@ interpolation, projected native sampling, window-budget invariance, cancellation
 and regional contour → device/companion CLI encoding. These are not firmware or
 app builds and do not qualify physical-device rendering.
 
-The broader Python suite completed successfully: 817 backend tests run with two
+The broader Python suite completed successfully after the adjacent-tile extension:
+827 backend tests run with two
 existing macOS-inapplicable skips, plus all 55 deployment tests. Three native
 Swift/C++ cross-reader compilation tests were withheld under the build pause.
-The final focused regional suite contains 14 tests. The earlier real Alps sample
+The original focused regional suite contains 14 tests. The earlier real Alps sample
 remained byte-identical after extracting the shared contour implementation.
+
+The adjacent-tile extension adds 10 Python tests (24 focused regional tests in
+total). Four synthetic tiles produce identical sampled heights, contour lines
+and device contour sections to the same untiled raster. Tests also cover masks
+and missing-tile gaps, order/window invariance, overlapping editions, differing
+review/operations, misaligned geometry, bounds, cancellation and a multi-contract
+CLI development pair. These synthetic checks do not qualify real survey seams
+or approve any regional provider for publication.
 
 A live `swissalti3d_2025_2597-1194` 2 m TIFF was acquired through the new staging
 path and matched its published SHA-256:

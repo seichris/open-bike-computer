@@ -47,15 +47,15 @@ def main(argv: list[str] | None = None) -> int:
     regional_inspect = commands.add_parser("regional-inspect", help="inspect native headers and prepare a disabled transform-contract draft")
     regional_inspect.add_argument("--receipt", type=Path, required=True)
     regional_inspect.add_argument("--output", type=Path, required=True)
-    regional_sample = commands.add_parser("regional-sample", help="normalize a staged native TIFF with explicit pinned operations")
-    regional_sample.add_argument("--receipt", type=Path, required=True)
-    regional_sample.add_argument("--source-contract", type=Path, required=True)
+    regional_sample = commands.add_parser("regional-sample", help="normalize 1 to 16 aligned native TIFFs with explicit pinned operations")
+    regional_sample.add_argument("--receipt", type=Path, action="append", required=True, help="repeat for adjacent tiles")
+    regional_sample.add_argument("--source-contract", type=Path, action="append", required=True, help="one exact contract per receipt")
     regional_sample.add_argument("--grid-directory", type=Path, required=True)
     regional_sample.add_argument("--bounds", nargs=4, type=float, required=True)
     regional_sample.add_argument("--output", type=Path, required=True)
     encode = commands.add_parser("encode", help="compile a development device/companion pair; does not publish or sign")
     encode.add_argument("--sample", type=Path, required=True)
-    encode.add_argument("--source-contract", type=Path, help="required for a regional sample; binds its exact transform contract")
+    encode.add_argument("--source-contract", type=Path, action="append", help="required for a regional sample; repeat for every tile's contract")
     encode.add_argument("--selection", type=Path, required=True, help="WGS-84 Polygon/MultiPolygon or LineString GeoJSON geometry")
     encode.add_argument("--corridor-width-m", type=int, default=0)
     encode.add_argument("--vector-pack", type=Path, required=True, help="existing renderer-3 pack root containing VECTMAP")
@@ -101,11 +101,17 @@ def main(argv: list[str] | None = None) -> int:
             if not path.is_file() or path.stat().st_size > maximum:
                 parser.error("encoding input is missing or exceeds its byte limit")
         sample = json.loads(args.sample.read_bytes())
-        if sample.get("sourceContractKind") == "regional-transform-v1":
+        if sample.get("sourceContractKind") in ("regional-transform-v1", "regional-transform-set-v1"):
             from .topography_transform import load_transform_contract
+            from .topography_regional_tiles import load_transform_set
             if args.source_contract is None:
                 parser.error("regional encoding requires --source-contract")
-            contract = load_transform_contract(args.source_contract)
+            if sample["sourceContractKind"] == "regional-transform-set-v1":
+                contract = load_transform_set(args.source_contract)
+            else:
+                if len(args.source_contract) != 1:
+                    parser.error("single-asset regional encoding requires exactly one source contract")
+                contract = load_transform_contract(args.source_contract[0])
             if sample.get("sourcePolicySha256") != contract["contractSha256"] or sample.get("sourceContract") != contract:
                 parser.error("regional sample belongs to a different source contract")
         else:

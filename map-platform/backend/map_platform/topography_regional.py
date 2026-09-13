@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import platform
+from contextlib import ExitStack
 from pathlib import Path
 
 from .strict_json import loads_strict_json
@@ -141,38 +142,58 @@ def inspect_regional_asset(cache: ElevationCache, receipt_path: Path) -> dict:
                     "warning": "Draft cannot be used until reviewed datum, operations, grids and area of use are supplied."}
 
 
-def regional_contour_sample(cache: ElevationCache, receipt_path: Path, contract_path: Path,
+def regional_contour_sample(cache: ElevationCache, receipt_path: Path | list[Path], contract_path: Path | list[Path],
                             grid_directory: Path, bounds: list[float]) -> dict:
     import contourpy
     import numpy as np
     import pyproj
     import rasterio
+    from .topography_regional_tiles import MAX_REGIONAL_TILES, RegionalRasterCollection, load_transform_set
 
-    receipt = _read_receipt(receipt_path)
-    contract = load_transform_contract(contract_path)
-    if receipt["sourceId"] != contract["sourceId"] or receipt["sha256"] != contract["assetSha256"]:
+    receipt_paths = receipt_path if isinstance(receipt_path, list) else [receipt_path]
+    contract_paths = contract_path if isinstance(contract_path, list) else [contract_path]
+    if not 1 <= len(receipt_paths) <= MAX_REGIONAL_TILES or len(receipt_paths) != len(contract_paths):
+        raise ValueError("regional sampling requires 1 to 16 receipts and exactly one contract per asset")
+    receipts = sorted((_read_receipt(path) for path in receipt_paths), key=lambda value: value["sha256"])
+    multiple = len(receipts) > 1
+    contract = load_transform_set(contract_paths) if multiple else load_transform_contract(contract_paths[0])
+    contracts = contract["contracts"] if multiple else [contract]
+    if (len({receipt["sha256"] for receipt in receipts}) != len(receipts)
+            or any(receipt["sourceId"] != native["sourceId"] or receipt["sha256"] != native["assetSha256"]
+                   for receipt, native in zip(receipts, contracts))):
         raise ValueError("regional raster does not belong to its transformation contract")
-    path = cache.verify(receipt)
+    paths = [cache.verify(receipt) for receipt in receipts]
+    common = contracts[0]
     grid = contour_grid(bounds, 30, MAX_GRID_PIXELS)
+    audits, collection_evidence = [], {}
     with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", GDAL_PAM_ENABLED=False,
                       GDAL_NUM_THREADS="1", GDAL_CACHEMAX=32 * 1024 * 1024, PROJ_NETWORK="OFF"):
-        with rasterio.open(path, driver="GTiff", sharing=False) as dataset, \
-                open_regional_transform(contract, grid_directory, cache.cancel) as operation:
-            audit = _audit(dataset, contract["native"])
-            mosaic = regional_mosaic(dataset, operation, grid, cache.cancel)
+        with ExitStack() as stack:
+            datasets = []
+            for path, receipt, native in zip(paths, receipts, contracts):
+                cache.cancel()
+                dataset = stack.enter_context(rasterio.open(path, driver="GTiff", sharing=False))
+                datasets.append(dataset)
+                audits.append({**_audit(dataset, native["native"]), "sourceId": receipt["sourceId"], "sha256": receipt["sha256"]})
+            source = RegionalRasterCollection(datasets, cache.cancel) if multiple else datasets[0]
+            if multiple:
+                collection_evidence = {"nativeTileCollection": source.evidence()}
+            operation = stack.enter_context(open_regional_transform(common, grid_directory, cache.cancel))
+            mosaic = regional_mosaic(source, operation, grid, cache.cancel)
     records, missing = extract_contours(mosaic, grid, 20, 100, cache.cancel)
     return {"schemaVersion": 1, "kind": "bicino-contour-evidence-v1", "access": "free",
             "productionEligible": False, "sourcePolicySha256": contract["contractSha256"],
-            "sourceContractKind": "regional-transform-v1", "sourceContract": contract,
+            "sourceContractKind": "regional-transform-set-v1" if multiple else "regional-transform-v1", "sourceContract": contract,
             "boundsE7": [round(value * 10_000_000) for value in bounds], "workingCrs": grid.crs,
             "verticalDatum": "EPSG:3855", "surfaceModel": "dtm", "qualityMode": "regional-dtm-20m-v1",
             "processingGrid": grid.evidence(), "gridResolutionM": 30, "gridSize": [grid.width, grid.height],
             "noDataMillionths": round(missing * 1_000_000 / mosaic.size),
             "minorIntervalM": 20, "indexIntervalM": 100,
-            "nativeRasterAudits": [{**audit, "sourceId": receipt["sourceId"], "sha256": receipt["sha256"]}],
-            "sourcePixels": {receipt["sourceId"]: int(mosaic.size - missing)}, "inputs": [receipt],
-            "algorithm": "pinned-regional-windowed-bilinear-height-normalization-v1",
-            "sources": [{"sourceId": receipt["sourceId"], "sourceReviewSha256": contract["sourceReviewSha256"]}],
+            "nativeRasterAudits": audits, **collection_evidence,
+            "sourcePixels": {common["sourceId"]: int(mosaic.size - missing)}, "inputs": receipts,
+            "algorithm": ("pinned-regional-native-tile-mosaic-v1" if multiple
+                          else "pinned-regional-windowed-bilinear-height-normalization-v1"),
+            "sources": [{"sourceId": common["sourceId"], "sourceReviewSha256": common["sourceReviewSha256"]}],
             "runtime": {"rasterio": rasterio.__version__, "gdal": rasterio.__gdal_version__,
                         "rasterioProj": rasterio.__proj_version__, "pyproj": pyproj.__version__,
                         "transformProj": pyproj.proj_version_str, "numpy": np.__version__, "contourpy": contourpy.__version__,

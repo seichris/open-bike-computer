@@ -4,6 +4,10 @@ Follow-on implementation: [regional native ingestion, explicit offline datum
 operations and artifact encoding](../topography-regional-ingestion.md). The
 remaining-work list below records the earlier tranche; the linked document
 distinguishes newly implemented engine behavior from provider qualification.
+The latest extension joins up to 16 explicitly reviewed, aligned native tiles
+before interpolation; gaps remain masked and overlapping editions are rejected.
+Synthetic tiled/untiled equivalence is tested through device contour records;
+real cross-provider seam qualification remains outstanding.
 
 Input: the maintainer-supplied ChatGPT report and
 `bicino-elevation-research-2026-09-13.zip`, SHA-256
