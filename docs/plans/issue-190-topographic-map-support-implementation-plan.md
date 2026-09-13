@@ -37,7 +37,7 @@ This is a durable offline-map capability, not a screenshot or web-tile experimen
 
 ## Current-main baseline
 
-Renderer formats 1, 2, and 3 still cover legacy vectors, street labels, and street labels plus 3D buildings. FMB v3 has extension sections 1-3; FMB v4 requires section 4 for buildings. Current generation policy, promotion, and app readers still support only renderer formats 1-3. Renderer format 4 / FMB v5, the elevation registry, contours, and the iPhone companion remain proposed work.
+Renderer formats 1, 2, and 3 still cover legacy vectors, street labels, and street labels plus 3D buildings. FMB v3 has extension sections 1-3; FMB v4 requires section 4 for buildings. Current production generation, promotion and installation still support only renderer formats 1-3. As of 2026-09-13 the acquisition registry, development contour compiler, FMB5 codec/firmware render pass, `.btopo` writer/Swift reader and independently owned MapKit overlay are implemented. They are not yet wired into the complete public job/catalog/download/settings flow. See [current implementation status](../topography-pipeline.md) for the exact boundary; the sections below describe the full target architecture, not a claim of completion.
 
 The following changes since the original plan affect implementation directly. These are findings from the recorded source revision and checked-in configuration, not fresh deployment or physical-device verification.
 

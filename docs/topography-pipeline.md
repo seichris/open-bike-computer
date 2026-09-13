@@ -1,6 +1,6 @@
-# Free global topography: acquisition and contour evidence
+# Free global topography: acquisition, artifacts and readers
 
-Implementation status, 2026-09-12. Tracks [issue #190](https://github.com/seichris/open-bike-computer/issues/190)
+Implementation status, 2026-09-13. Tracks [issue #190](https://github.com/seichris/open-bike-computer/issues/190)
 and the [end-to-end plan](plans/issue-190-topographic-map-support-implementation-plan.md).
 
 ## What works now
@@ -17,9 +17,31 @@ and the [end-to-end plan](plans/issue-190-topographic-map-support-implementation
   default policy remains v1, with the existing formats 1–3 unchanged.
 - `/healthz.topography` reports `access: free` and `generationEnabled: false`.
 
-This is not an end-to-end topographic release. The CLI emits inspection JSON,
-not an FMB v5 map, signed stream, or `.btopo` companion. There is no new UI,
-user-job type, public download path, firmware capability, or deployment.
+- A bounded compiler clips one map-wide contour intermediate to polygon holes
+  or a metric route corridor, projects to Web Mercator, quantizes once, and
+  splits into FMB5 blocks with half-open boundary ownership. It preserves FMB4
+  labels/buildings and creates terrain-only blocks with the matching font.
+- The same compiled lines generate transparent XYZ PNGs at z9–16, scales 1/2,
+  inside a strict read-only `.btopo` SQLite container. Device files exclude the
+  companion. Output pairs bind source, selection, intermediate and attribution
+  digests; a development completion receipt is published last.
+- Python, C++ and Swift contour readers share a semantic-corruption corpus.
+  Python and Swift companion readers validate identities, schema, tile counts,
+  hashes and PNG dimensions. The Swift actor serializes SQLite reads and bounds
+  its encoded-PNG cache to 4 MiB/128 entries (MapKit owns its rendering cache).
+- Firmware decodes contours into flat PSRAM arrays and draws a bounded,
+  index-first candidate set through the existing accepted-camera projection,
+  below roads and navigation. Semantic cancellation is checked during decoding
+  and drawing. The existing production installer still rejects renderer 4.
+- A local MapKit tile overlay and independently owned map-view layer are
+  implemented. Replacement/removal does not change routes or camera state.
+
+This is **not yet an end-to-end topographic release**. User-job scheduling,
+signed manifest/installer capability, catalog/publication/retention, durable app
+download association, map selection controls, regional alignment policy, source
+approval and hardware qualification remain unfinished. The new local overlay
+has no user-visible saved-companion selector yet. No production generation,
+capability advertisement, deployment, or physical flash has been enabled.
 
 ## Sources and actual global reach
 
@@ -84,6 +106,58 @@ The backend image and backend CI install the `topography` extra. The optional
 libraries are imported only by the operator sample command, not at API startup.
 Running this CLI inside an image is not permission to alter the production
 Compose pins or publish its output.
+
+### Encode a development artifact pair
+
+After generating a sample, prepare a WGS-84 GeoJSON geometry file and the full
+contributing-source notice text. Supply an existing renderer-3 vector pack with
+the same map ID. The compiler preserves the input pack and refuses an existing
+output directory:
+
+```sh
+.venv-topography/bin/map-topography --cache "$terrain_cache" encode \
+  --sample "$terrain_cache/alps-a.json" \
+  --selection /absolute/path/selection.geojson \
+  --vector-pack /absolute/path/vector-pack \
+  --map-id YOUR_MAP_ID \
+  --attribution /absolute/path/complete-source-notices.txt \
+  --output /absolute/path/new-development-pair
+```
+
+For a LineString, also pass `--corridor-width-m` (full width); the sample must
+cover the complete buffered corridor. Polygon holes are retained. Current
+compilation rejects wrapped selections; split antimeridian areas into separate
+jobs. The device/iPhone renderer domain is Web Mercator, unlike the broader
+acquisition catalog's polar coverage.
+
+The output contains `device/VECTMAP/`, a separate `.btopo`, `ATTRIBUTION.txt`,
+and `topography-receipt.json`. That receipt is development evidence, **not** an
+authenticated catalog grant, signed map manifest, or source-license approval.
+
+Current bounds are 256 blocks/400,000 compiled points per pair, 4,096 contour
+records/65,536 points per block, 256 points per record, 512 m maximum encoded
+segment, 16,384 companion tiles (both scales), and 256 MiB per companion.
+Exceeding a bound rejects the result rather than silently truncating terrain.
+
+Repeatability is qualified within the same native runtime. Cross-platform
+SQLite/Pillow/PROJ byte identity has not been qualified; producer environment
+locking must precede production publication.
+
+### Local validation on 2026-09-13
+
+- Python/C++/Swift malformed-section parity and Python/Swift companion tests.
+- Polygon holes, shared block endpoints, coincident edge ownership, zero
+  contours, cancellation, terrain-only blocks and non-overwriting publication.
+- A real Alps sample compiled to 6 contour blocks, 427 records, 25,041 points
+  and 428 companion tiles (3,080,192 bytes). This local sample used a test
+  attribution digest and must not be distributed as a reviewed map.
+- Native MapKit ownership tests verify contour replacement beneath route
+  overlays without camera or tracking side effects.
+- A dirty-tree `WAVESHARE_AMOLED_175` build passed. It is not upload-eligible,
+  exact-commit CI, physical rendering evidence, or 2.06-inch qualification.
+
+Use the [provider research prompt](research/topography-provider-research-prompt.md)
+for the next source-coverage and redistribution review.
 
 ## Acquisition and reproducibility boundary
 

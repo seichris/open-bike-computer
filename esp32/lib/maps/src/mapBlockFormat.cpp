@@ -191,7 +191,7 @@ bool StreamValidator::feedBinary(uint8_t byte) {
       return true;
     if (std::memcmp(small_, "FMB", 3) != 0 ||
         (small_[3] != 1 && small_[3] != 2 && small_[3] != 3 &&
-         small_[3] != 4))
+         small_[3] != 4 && small_[3] != 5))
       return false;
     binaryVersion_ = small_[3];
     smallSize_ = 0;
@@ -375,6 +375,9 @@ bool StreamValidator::beginV3Section(uint8_t sectionIndex) {
     v4DeclaredBuildingPoints_ = 0;
     v4BuildingPointsSeen_ = 0;
     break;
+  case 5:
+    contourValidator_ = map_contour_format::Validator{};
+    break;
   default:
     return false;
   }
@@ -441,6 +444,8 @@ bool StreamValidator::feedV3Utf8(uint8_t byte) {
 }
 
 bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
+  if (v3Sections_[v3CurrentSection_].type == 5)
+    return contourValidator_.feed(byte);
   const auto collect = [&](size_t size) {
     if (size > sizeof(v3Record_) || v3RecordSize_ >= size)
       return false;
@@ -675,6 +680,8 @@ bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
 }
 
 bool StreamValidator::finishV3Section() {
+  if (v3Sections_[v3CurrentSection_].type == 5)
+    return contourValidator_.finish();
   return v3ParseState_ == V3ParseState::Complete && v3RecordSize_ == 0 &&
          v3Utf8Remaining_ == 0 &&
          (v3Sections_[v3CurrentSection_].type != 4 ||

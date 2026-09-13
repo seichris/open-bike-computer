@@ -107,6 +107,11 @@ private final class PreviewRecordingMap: MKMapView {
         items.append(overlay)
         levels.append(level)
     }
+    override func insertOverlay(_ overlay: MKOverlay, at index: Int, level: MKOverlayLevel) {
+        additions += 1
+        items.insert(overlay, at: index)
+        levels.append(level)
+    }
     override func addOverlays(_ overlays: [MKOverlay], level: MKOverlayLevel) {
         for overlay in overlays { addOverlay(overlay, level: level) }
     }
@@ -377,6 +382,25 @@ struct SavedRouteMapPreviewTests {
     }
 
     private static func testOverlayOwnershipAndCamera() throws {
+        let topoMap = PreviewRecordingMap()
+        let initialCameraUpdates = topoMap.cameraUpdates
+        let initialRegionUpdates = topoMap.regionUpdates
+        let topoCoordinator = MapViewContainer.Coordinator()
+        let routeOverlay = MKPolyline()
+        topoMap.addOverlay(routeOverlay, level: .aboveRoads)
+        let firstTopo = MKTileOverlay(urlTemplate: nil)
+        let secondTopo = MKTileOverlay(urlTemplate: nil)
+        topoCoordinator.updateTopographyOverlay(firstTopo, on: topoMap)
+        check(topoMap.overlays.first === firstTopo && topoMap.overlays.last === routeOverlay, "Contours are below an existing route")
+        let additions = topoMap.additions
+        topoCoordinator.updateTopographyOverlay(firstTopo, on: topoMap)
+        check(topoMap.additions == additions, "An unchanged companion does not churn overlays")
+        topoCoordinator.updateTopographyOverlay(secondTopo, on: topoMap)
+        check(topoMap.overlays.first === secondTopo && topoMap.overlays.last === routeOverlay, "Replacing contours preserves route painter order")
+        topoCoordinator.updateTopographyOverlay(nil, on: topoMap)
+        check(topoMap.overlays.count == 1 && topoMap.overlays.first === routeOverlay, "Contour removal owns only the contour layer")
+        check(topoMap.fits.isEmpty && topoMap.cameraUpdates == initialCameraUpdates && topoMap.regionUpdates == initialRegionUpdates, "Contour selection cannot move the route camera")
+        check(topoCoordinator.mapView(topoMap, rendererFor: firstTopo) is MKTileOverlayRenderer, "Contour content never uses the blue route renderer")
         let saved = try archive(route())
         let preview = try SavedRouteMapPreviewFactory.make(selection(saved), now: { timestamp })
         let map = PreviewRecordingMap(frame: CGRect(x: 0, y: 0, width: 390, height: 844))

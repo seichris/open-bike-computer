@@ -954,6 +954,13 @@ Legacy v1 map blocks do not contain feature type IDs, so the renderer also
 combines Local with Service and Paths with Tracks for those blocks. Downloading
 a current v2 map is required for independent road-class visibility.
 
+Visibility bit `13` is reserved for FMB5 topographic contours. The development
+renderer preserves it during feature-mask normalization and ignores it for
+older blocks. It remains absent from default masks and app controls until the
+renderer-format-4 installer/capability and hardware gates are complete. This
+reservation does not allocate a CAP2 bit, raise the client protocol version, or
+advertise production contour support.
+
 ## Device Sound Playback
 
 The authenticated command channel accepts a sound-play frame on either the
