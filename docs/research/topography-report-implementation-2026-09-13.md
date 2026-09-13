@@ -1,5 +1,10 @@
 # Elevation research: implementation and evidence
 
+Follow-on implementation: [regional native ingestion, explicit offline datum
+operations and artifact encoding](../topography-regional-ingestion.md). The
+remaining-work list below records the earlier tranche; the linked document
+distinguishes newly implemented engine behavior from provider qualification.
+
 Input: the maintainer-supplied ChatGPT report and
 `bicino-elevation-research-2026-09-13.zip`, SHA-256
 `9142faa7f5d5acf00327f733d07752cc2eae34869247e999cc336ce3b0f9dcf8`.

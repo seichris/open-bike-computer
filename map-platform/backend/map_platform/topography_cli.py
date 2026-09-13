@@ -40,8 +40,22 @@ def main(argv: list[str] | None = None) -> int:
     discover.add_argument("--source", choices=sorted(REGIONAL_SOURCES), required=True)
     discover.add_argument("--bounds", nargs=4, type=float, required=True, metavar=("W", "S", "E", "N"))
     discover.add_argument("--output", type=Path, required=True)
+    regional_stage = commands.add_parser("regional-stage", help="stage one bounded native TIFF from verified discovery metadata")
+    regional_stage.add_argument("--discovery", type=Path, required=True)
+    regional_stage.add_argument("--item-id", required=True)
+    regional_stage.add_argument("--output", type=Path, required=True, help="new receipt JSON; never overwritten")
+    regional_inspect = commands.add_parser("regional-inspect", help="inspect native headers and prepare a disabled transform-contract draft")
+    regional_inspect.add_argument("--receipt", type=Path, required=True)
+    regional_inspect.add_argument("--output", type=Path, required=True)
+    regional_sample = commands.add_parser("regional-sample", help="normalize a staged native TIFF with explicit pinned operations")
+    regional_sample.add_argument("--receipt", type=Path, required=True)
+    regional_sample.add_argument("--source-contract", type=Path, required=True)
+    regional_sample.add_argument("--grid-directory", type=Path, required=True)
+    regional_sample.add_argument("--bounds", nargs=4, type=float, required=True)
+    regional_sample.add_argument("--output", type=Path, required=True)
     encode = commands.add_parser("encode", help="compile a development device/companion pair; does not publish or sign")
     encode.add_argument("--sample", type=Path, required=True)
+    encode.add_argument("--source-contract", type=Path, help="required for a regional sample; binds its exact transform contract")
     encode.add_argument("--selection", type=Path, required=True, help="WGS-84 Polygon/MultiPolygon or LineString GeoJSON geometry")
     encode.add_argument("--corridor-width-m", type=int, default=0)
     encode.add_argument("--vector-pack", type=Path, required=True, help="existing renderer-3 pack root containing VECTMAP")
@@ -65,6 +79,21 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("output already exists")
         _write_evidence(args.output, discover_regional(args.source, args.bounds))
         return 0
+    if args.command in ("regional-stage", "regional-inspect", "regional-sample"):
+        if args.output.exists() or args.output.is_symlink():
+            parser.error("output already exists")
+        cache = ElevationCache(args.cache)
+        if args.command == "regional-stage":
+            from .topography_regional_cache import stage_regional_asset
+            value = stage_regional_asset(cache, args.discovery, args.item_id)
+        elif args.command == "regional-inspect":
+            from .topography_regional import inspect_regional_asset
+            value = inspect_regional_asset(cache, args.receipt)
+        else:
+            from .topography_regional import regional_contour_sample
+            value = regional_contour_sample(cache, args.receipt, args.source_contract, args.grid_directory, args.bounds)
+        _write_evidence(args.output, value)
+        return 0
     if args.command == "encode":
         from .topography_geometry import compile_contours
         from .topography_pack import assemble_topographic_pack
@@ -72,9 +101,17 @@ def main(argv: list[str] | None = None) -> int:
             if not path.is_file() or path.stat().st_size > maximum:
                 parser.error("encoding input is missing or exceeds its byte limit")
         sample = json.loads(args.sample.read_bytes())
-        policy = load_topography_source_policy(args.repo_root)
-        if sample.get("sourcePolicySha256") != policy.sha256:
-            parser.error("sample belongs to a different source policy")
+        if sample.get("sourceContractKind") == "regional-transform-v1":
+            from .topography_transform import load_transform_contract
+            if args.source_contract is None:
+                parser.error("regional encoding requires --source-contract")
+            contract = load_transform_contract(args.source_contract)
+            if sample.get("sourcePolicySha256") != contract["contractSha256"] or sample.get("sourceContract") != contract:
+                parser.error("regional sample belongs to a different source contract")
+        else:
+            policy = load_topography_source_policy(args.repo_root)
+            if args.source_contract is not None or sample.get("sourcePolicySha256") != policy.sha256:
+                parser.error("sample belongs to a different source policy")
         compiled = compile_contours(sample, json.loads(args.selection.read_bytes()), corridor_width_m=args.corridor_width_m)
         receipt = assemble_topographic_pack(args.vector_pack, args.output, args.map_id, compiled, sample, args.attribution.read_bytes())
         print(json.dumps({"output": str(args.output), "productionEligible": False, "intermediateSha256": receipt["intermediateSha256"],

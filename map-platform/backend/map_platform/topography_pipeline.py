@@ -64,6 +64,44 @@ def canonical_line(points) -> tuple[tuple[int, int], ...]:
     return min(line, tuple(reversed(line)))
 
 
+def extract_contours(mosaic, grid, minor: int, index: int, cancel=lambda: None):
+    """Shared global/regional extraction; no interpolation across masked voids."""
+    import contourpy
+    import numpy as np
+
+    if mosaic.shape != (grid.height, grid.width) or mosaic.size > MAX_GRID_PIXELS:
+        raise ValueError("invalid or oversized contour raster")
+    if (minor, index) not in ((20, 100), (50, 250)):
+        raise ValueError("unsupported contour display profile")
+    valid = np.isfinite(mosaic)
+    missing = int(mosaic.size - np.count_nonzero(valid))
+    if not np.any(valid):
+        raise ValueError("sample has no valid elevation pixels")
+    minimum, maximum = float(mosaic[valid].min()), float(mosaic[valid].max())
+    if minimum < -12000 or maximum > 10000:
+        raise ValueError("sample elevation range exceeds Earth profile bounds")
+    levels = range(math.ceil(minimum / minor) * minor, math.floor(maximum / minor) * minor + 1, minor)
+    if len(levels) > 2000:
+        raise ValueError("sample contour level count exceeds bound")
+    generator = contourpy.contour_generator(
+        x=grid.left + (np.arange(grid.width) + 0.5) * grid.resolution,
+        y=grid.top - (np.arange(grid.height) + 0.5) * grid.resolution,
+        z=np.ma.masked_invalid(mosaic), name="serial", line_type="Separate", corner_mask=False,
+    )
+    records, point_count = [], 0
+    for elevation in levels:
+        cancel()
+        for line in generator.lines(elevation):
+            cancel()
+            point_count += len(line)
+            if point_count > MAX_CONTOUR_POINTS or len(records) >= MAX_CONTOUR_RECORDS:
+                raise ValueError("sample contour complexity exceeds bound")
+            points = canonical_line(line)
+            if points:
+                records.append((elevation, elevation % index == 0, points))
+    return sorted(set(records)), missing
+
+
 def contour_sample(policy: TopographySourcePolicy, cache: ElevationCache,
                    bounds: list[float], *, maximum_tiles: int = 8) -> dict[str, Any]:
     # Import optional native libraries only for this explicit operator command.
@@ -102,35 +140,8 @@ def contour_sample(policy: TopographySourcePolicy, cache: ElevationCache,
                 valid = np.isnan(mosaic) & np.isfinite(tile)
                 mosaic[valid] = tile[valid]
                 source_pixels[receipt["sourceId"]] = source_pixels.get(receipt["sourceId"], 0) + int(np.count_nonzero(valid))
-    valid = np.isfinite(mosaic)
-    missing = int(mosaic.size - np.count_nonzero(valid))
-    if not np.any(valid):
-        raise ValueError("sample has no valid elevation pixels")
-    # Missing pixels are masked, never filled with zero or interpolated across.
-    minimum, maximum = float(mosaic[valid].min()), float(mosaic[valid].max())
-    if minimum < -12000 or maximum > 10000:
-        raise ValueError("sample elevation range exceeds Earth profile bounds")
     minor, index = (50, 250) if resolution == 90 else (20, 100)
-    levels = range(math.ceil(minimum / minor) * minor, math.floor(maximum / minor) * minor + 1, minor)
-    if len(levels) > 2000:
-        raise ValueError("sample contour level count exceeds bound")
-    generator = contourpy.contour_generator(
-        x=left + (np.arange(width) + 0.5) * resolution,
-        y=top - (np.arange(height) + 0.5) * resolution,
-        z=np.ma.masked_invalid(mosaic), name="serial", line_type="Separate", corner_mask=False,
-    )
-    records, point_count = [], 0
-    for elevation in levels:
-        cache.cancel()
-        for line in generator.lines(elevation):
-            cache.cancel()
-            point_count += len(line)
-            if point_count > MAX_CONTOUR_POINTS or len(records) >= MAX_CONTOUR_RECORDS:
-                raise ValueError("sample contour complexity exceeds bound")
-            points = canonical_line(line)
-            if points:
-                records.append((elevation, elevation % index == 0, points))
-    records = sorted(set(records))
+    records, missing = extract_contours(mosaic, grid, minor, index, cache.cancel)
     return {
         "schemaVersion": 1, "kind": "bicino-contour-evidence-v1", "access": "free",
         "productionEligible": False, "sourcePolicySha256": policy.sha256,

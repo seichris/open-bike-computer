@@ -9,6 +9,11 @@ See [report-to-implementation evidence](research/topography-report-implementatio
 for exact changes, limitations and outstanding providers. Firmware/app builds
 and build-triggering pushes are paused pending maintainer confirmation.
 
+The follow-on [regional ingestion and transformation flow](topography-regional-ingestion.md)
+now stages and inspects native TIFFs, applies exact offline operation/grid
+contracts, produces normalized contour samples, and encodes development device/
+companion pairs. No provider has thereby gained production approval.
+
 ## What works now
 
 - A strict, free-access source registry pins the public Copernicus 2021 tile catalogs.
@@ -83,8 +88,9 @@ The acquisition policy declares WGS84 horizontal coordinates and EGM2008 height
 in metres. These are **surface** models, potentially including trees/buildings,
 not a surveyed bare-earth DTM. A 20 m contour interval is not 20 m accuracy.
 
-Swiss, Canadian and LINZ native-asset metadata discovery is implemented; raster
-ingestion and vertical normalization are not yet enabled. US 3DEP and the newer
+Swiss, Canadian and LINZ native-asset metadata discovery is implemented. A bounded
+operator ingestion/normalization engine now exists, but provider-specific
+transformations and production activation remain unqualified. US 3DEP and the newer
 registered Copernicus baseline remain next priorities, followed by the other
 sources in the research. Dataset names do not establish redistribution approval.
 
