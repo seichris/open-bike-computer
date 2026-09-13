@@ -673,7 +673,9 @@ jobs:
           /tmp/test_device_screen_protocol
       - name: World Radio protocol and screen registry host tests
         run: |
-          for test in test_world_radio_protocol test_world_radio_presentation test_world_radio_viewport test_main_screen_registry; do
+          g++ -std=c++17 -Wall -Wextra -Werror tools/tests/test_world_radio_flags.cpp lib/gui/src/worldRadioFlags.cpp -o /tmp/test_world_radio_flags
+          /tmp/test_world_radio_flags
+          for test in test_world_radio_protocol test_world_radio_presentation test_world_radio_viewport test_world_radio_raster test_main_screen_registry; do
             g++ -std=c++17 -Wall -Wextra -Werror \
               "tools/tests/${test}.cpp" \
               -o "/tmp/${test}"

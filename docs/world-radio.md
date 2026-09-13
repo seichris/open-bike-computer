@@ -29,14 +29,17 @@ message; searching, buffering, connection, and error messages remain visible.
 
 The offline world map uses a bundled Natural Earth I shaded-relief texture:
 natural land cover, mountain shading and water, with no artificial grid or
-bright coastline outlines. The 1024x512 map decodes once into a shared 1 MiB
-RGB565 canvas; longitude wrapping and drag-to-tune coordinates use its WGS84
+bright coastline outlines. The 1024x512 map decodes once into a 1 MiB
+RGB565 texture; longitude wrapping and drag-to-tune coordinates use its WGS84
 plate-carree projection. See `esp32/tools/world-radio-map/README.md` for source,
 licensing, memory budget and deterministic regeneration.
 
 The map has no title banner or bottom panel. Its viewport fills the screen,
 with the reticle at the screen center. A 2x display-only zoom provides a
-closer view without another texture allocation. Drag deltas move the camera in
+closer view. A screen-sized raster cache (about 424 KiB on the 1.75) composes
+the visible map at integer 2x scale, avoiding LVGL image-transform work on each
+drag frame. Adjacent duplicated rows are copied, and the panel's full-frame
+refresh strategy remains unchanged. Drag deltas move the camera in
 screen pixels at 1:1 speed, with both touch-input axes reversed following
 physical-device feedback; longitude wraps and vertical movement stops
 at the map edges so the viewport stays covered. Ordinary playback updates and
@@ -47,8 +50,10 @@ bounds; beginning a drag cancels that pending focus.
 The lower controls are black 32px global shuffle and play/pause icons without
 backgrounds or borders, with transparent
 half-width, 140px-high touch areas reaching the left/right bottom edges.
-Station name (black) and place (dark gray) occupy two single-line rows above the dot, without
-coordinates or text backgrounds. The bundled radio font supports Latin accents
+Station name (black, emboldened with a one-pixel overprint) and place (dark gray)
+occupy two closer single-line rows above the dot, without
+coordinates or text backgrounds. A bundled country flag precedes the place;
+the redundant country-code suffix is removed. The bundled radio font supports Latin accents
 and BMP Chinese ideographs; see `esp32/tools/world-radio-font/README.md`.
 Each screen entry requests a new global station once the phone is ready;
 an intervening manual map/control action cancels that pending entry request.

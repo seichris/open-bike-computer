@@ -1,6 +1,8 @@
 #include "worldRadioScr.hpp"
 #include "worldRadioPresentation.hpp"
 #include "worldRadioViewport.hpp"
+#include "worldRadioRaster.hpp"
+#include "worldRadioFlags.hpp"
 
 #include "../../tft/tft.hpp"
 #include "../../world_radio/world_radio_map.hpp"
@@ -25,9 +27,15 @@ constexpr uint32_t ACCENT_COLOR = 0x8CF58A;
 WorldRadioScreenCallbacks screenCallbacks{};
 lv_obj_t *screenRoot = nullptr;
 lv_obj_t *mapViewport = nullptr;
-lv_obj_t *mapCanvases[3]{};
+lv_obj_t *mapCanvas = nullptr;
+uint16_t *viewportBuffer = nullptr;
+uint32_t viewportStridePixels = 0;
 lv_obj_t *stationLabel = nullptr;
+lv_obj_t *stationBoldLabel = nullptr;
 lv_obj_t *placeLabel = nullptr;
+lv_obj_t *placeRow = nullptr;
+lv_obj_t *flagCanvas = nullptr;
+alignas(16) uint16_t flagBuffer[world_radio_flags::WIDTH * world_radio_flags::HEIGHT]{};
 lv_obj_t *playLabel = nullptr;
 lv_obj_t *reticle = nullptr;
 lv_obj_t *reticleDot = nullptr;
@@ -55,12 +63,25 @@ void updateMapPosition() {
   }
   centerLatitudeE7 = camera.latitude();
   centerLongitudeE7 = camera.longitude();
-  for (int index = 0; index < 3; ++index) {
-    if (mapCanvases[index] != nullptr) {
-      lv_obj_set_pos(mapCanvases[index],
-                     camera.x() + (index - 1) * WORLD_WIDTH * MAP_SCALE,
-                     camera.y());
+  if (mapCanvas != nullptr && viewportBuffer != nullptr) {
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    const uint32_t startedUs = micros();
+#endif
+    world_radio_raster::render(worldBuffer, WORLD_WIDTH, worldStridePixels,
+        viewportBuffer, TFT_WIDTH, TFT_HEIGHT, viewportStridePixels,
+        camera.x(), camera.y());
+    lv_obj_invalidate(mapCanvas);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    static uint32_t frames = 0, totalUs = 0, maximumUs = 0;
+    const uint32_t elapsedUs = micros() - startedUs;
+    totalUs += elapsedUs;
+    maximumUs = std::max(maximumUs, elapsedUs);
+    if (++frames == 32) {
+      Serial.printf("World Radio raster frames=32 averageUs=%lu maxUs=%lu\n",
+                    static_cast<unsigned long>(totalUs / frames), static_cast<unsigned long>(maximumUs));
+      frames = totalUs = maximumUs = 0;
     }
+#endif
   }
 }
 
@@ -109,7 +130,9 @@ void renderStatus(bool force = false) {
 
   if (!phoneReady) {
     lv_label_set_text(stationLabel, "Connect iPhone");
+    lv_label_set_text(stationBoldLabel, "Connect iPhone");
     lv_label_set_text(placeLabel, "Open Bicino on your iPhone");
+    lv_obj_add_flag(flagCanvas, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(playLabel, LV_SYMBOL_PLAY);
     return;
   }
@@ -123,19 +146,15 @@ void renderStatus(bool force = false) {
                 static_cast<unsigned>(status.stationCount));
 #endif
   lv_label_set_text(stationLabel, world_radio_presentation::stationText(status));
-  char place[72]{};
-  if (status.hasStation) {
-    if (status.place[0] != '\0' && status.countryCode[0] != '\0') {
-      std::snprintf(place, sizeof(place), "%s  %s", status.place,
-                    status.countryCode);
-    } else if (status.place[0] != '\0') {
-      std::snprintf(place, sizeof(place), "%s", status.place);
-    } else {
-      std::snprintf(place, sizeof(place), "%s", status.countryCode);
-    }
-    lv_label_set_text(placeLabel, place);
+  lv_label_set_text(stationBoldLabel, world_radio_presentation::stationText(status));
+  lv_label_set_text(placeLabel, status.hasStation ? status.place : "");
+  const auto *flag = status.hasStation ? world_radio_flags::find(status.countryCode) : nullptr;
+  if (flag != nullptr) {
+    std::memcpy(flagBuffer, flag, sizeof(flagBuffer));
+    lv_obj_remove_flag(flagCanvas, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_invalidate(flagCanvas);
   } else {
-    lv_label_set_text(placeLabel, "");
+    lv_obj_add_flag(flagCanvas, LV_OBJ_FLAG_HIDDEN);
   }
   lv_label_set_text(playLabel,
                     world_radio_presentation::showPauseIcon(status.state)
@@ -223,6 +242,10 @@ void mapEvent(lv_event_t *event) {
       break;
     }
     dragging = false;
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    Serial.printf("World Radio map release start=%d,%d end=%d,%d dragged=%u\n",
+                  pressX, pressY, point.x, point.y, dragStarted);
+#endif
     if (!dragStarted && screenCallbacks.tapToSwitchScreens != nullptr &&
         screenCallbacks.tapToSwitchScreens() &&
         screenCallbacks.cycleScreen != nullptr) {
@@ -349,15 +372,16 @@ void worldRadioScr(lv_obj_t *screen,
     heap_caps_free(worldBuffer);
     worldBuffer = nullptr;
   }
+  viewportStridePixels = lv_draw_buf_width_to_stride(TFT_WIDTH, LV_COLOR_FORMAT_RGB565) / sizeof(uint16_t);
   if (worldBuffer != nullptr) {
-    for (int index = 0; index < 3; ++index) {
-      mapCanvases[index] = lv_canvas_create(mapViewport);
-      lv_canvas_set_buffer(mapCanvases[index], worldBuffer, WORLD_WIDTH,
-                           WORLD_HEIGHT, LV_COLOR_FORMAT_RGB565);
-      lv_image_set_pivot(mapCanvases[index], 0, 0);
-      lv_image_set_scale(mapCanvases[index], LV_SCALE_NONE * MAP_SCALE);
-      makePassive(mapCanvases[index]);
-    }
+    viewportBuffer = static_cast<uint16_t *>(heap_caps_aligned_alloc(
+        16, viewportStridePixels * TFT_HEIGHT * sizeof(uint16_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
+  if (viewportBuffer != nullptr) {
+    mapCanvas = lv_canvas_create(mapViewport);
+    lv_canvas_set_buffer(mapCanvas, viewportBuffer, TFT_WIDTH, TFT_HEIGHT, LV_COLOR_FORMAT_RGB565);
+    makePassive(mapCanvas);
     updateMapPosition();
   } else {
     lv_obj_t *failure = lv_label_create(mapViewport);
@@ -395,12 +419,31 @@ void worldRadioScr(lv_obj_t *screen,
   stationLabel = lv_label_create(screenRoot);
   styleMapLabel(stationLabel);
   lv_obj_set_style_text_color(stationLabel, lv_color_black(), 0);
-  lv_obj_align(stationLabel, LV_ALIGN_TOP_MID, 0, camera.anchorY() - 108);
+  lv_obj_align(stationLabel, LV_ALIGN_TOP_MID, 0, camera.anchorY() - 94);
+  // One-pixel overprint emboldens the same multilingual glyphs without a
+  // second full CJK font consuming another ~1.8 MiB of flash.
+  stationBoldLabel = lv_label_create(screenRoot);
+  styleMapLabel(stationBoldLabel);
+  lv_obj_set_style_text_color(stationBoldLabel, lv_color_black(), 0);
+  lv_obj_align(stationBoldLabel, LV_ALIGN_TOP_MID, 1, camera.anchorY() - 94);
 
-  placeLabel = lv_label_create(screenRoot);
+  placeRow = lv_obj_create(screenRoot);
+  lv_obj_remove_style_all(placeRow);
+  lv_obj_set_size(placeRow, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(placeRow, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(placeRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(placeRow, 6, 0);
+  lv_obj_align(placeRow, LV_ALIGN_TOP_MID, 0, camera.anchorY() - 66);
+  makePassive(placeRow);
+  flagCanvas = lv_canvas_create(placeRow);
+  lv_canvas_set_buffer(flagCanvas, flagBuffer, world_radio_flags::WIDTH,
+                       world_radio_flags::HEIGHT, LV_COLOR_FORMAT_RGB565);
+  makePassive(flagCanvas);
+  placeLabel = lv_label_create(placeRow);
   styleMapLabel(placeLabel);
+  lv_obj_set_width(placeLabel, LV_SIZE_CONTENT);
+  lv_obj_set_style_max_width(placeLabel, TFT_WIDTH - 100, 0);
   lv_obj_set_style_text_color(placeLabel, lv_color_hex(0x404040), 0);
-  lv_obj_align(placeLabel, LV_ALIGN_TOP_MID, 0, camera.anchorY() - 66);
 
   makeBottomControl(false, LV_SYMBOL_SHUFFLE, randomEvent);
   lv_obj_t *playButton = makeBottomControl(true, LV_SYMBOL_PLAY, playEvent);
