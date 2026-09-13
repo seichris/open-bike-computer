@@ -147,7 +147,8 @@ nonisolated struct WorldRadioStatus: Equatable, Sendable {
     private static func boundedUTF8(_ value: String, maximumBytes: Int) -> Data {
         var result = Data()
         result.reserveCapacity(min(maximumBytes, value.utf8.count))
-        for character in value {
+        // LVGL's bitmap labels expect precomposed accents (e.g. n + tilde -> ñ).
+        for character in value.precomposedStringWithCanonicalMapping {
             let bytes = Data(String(character).utf8)
             guard result.count + bytes.count <= maximumBytes else { break }
             result.append(bytes)

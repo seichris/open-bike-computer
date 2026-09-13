@@ -34,8 +34,8 @@ RGB565 canvas; longitude wrapping and drag-to-tune coordinates use its WGS84
 plate-carree projection. See `esp32/tools/world-radio-map/README.md` for source,
 licensing, memory budget and deterministic regeneration.
 
-The map has no title banner. Its visible viewport ends above the station panel,
-with the reticle centered in that viewport. A 2x display-only zoom provides a
+The map has no title banner or bottom panel. Its viewport fills the screen,
+with the reticle at the screen center. A 2x display-only zoom provides a
 closer view without another texture allocation. Drag deltas move the camera in
 screen pixels, 1:1 with the finger; longitude wraps and vertical movement stops
 at the map edges so the viewport stays covered. Ordinary playback updates and
@@ -43,7 +43,13 @@ location-search results do not recenter the map. Explicit previous/next/random
 station selection can focus the resulting station, constrained to the same map
 bounds; beginning a drag cancels that pending focus.
 
-The lower controls are global `RANDOM` and an icon-only play/pause button.
+The lower controls are global shuffle and play/pause icons, with transparent
+half-width, 140px-high touch areas reaching the left/right bottom edges.
+Station name and place occupy two single-line rows above the dot, without
+coordinates or text backgrounds. The bundled radio font supports Latin accents
+and BMP Chinese ideographs; see `esp32/tools/world-radio-font/README.md`.
+Each screen entry requests a new global station once the phone is ready;
+an intervening manual map/control action cancels that pending entry request.
 There are no previous/next station controls or candidate counter. Random tunes
 worldwide; landing on a map location randomly selects from that area's bounded
 candidate list. Both avoid the current station when alternatives exist and

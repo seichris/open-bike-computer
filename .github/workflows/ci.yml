@@ -421,7 +421,7 @@ jobs:
           python tools/generate_preconnection_assets.py --check
           python -m unittest tools.tests.test_preconnection_assets
           python tools/generate_world_radio_map.py --check
-          python -m unittest tools.tests.test_world_radio_map_assets
+          python -m unittest tools.tests.test_world_radio_map_assets tools.tests.test_world_radio_font
       - name: GUI layout host tests
         run: |
           PYTHONPATH=tools python -m unittest \

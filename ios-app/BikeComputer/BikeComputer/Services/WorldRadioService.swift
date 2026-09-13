@@ -393,12 +393,18 @@ final class WorldRadioService {
         requestID = request.requestID
         switch request.command {
         case .selectLocation:
+#if DEBUG
+            NSLog("World Radio search scope=nearby request=%u", request.requestID)
+#endif
             let latitude = Double(request.latitudeE7) / 10_000_000
             let longitude = Double(request.longitudeE7) / 10_000_000
             startSearch(requestID: request.requestID) { [directory] in
                 try await directory.nearby(latitude, longitude)
             }
         case .randomStation:
+#if DEBUG
+            NSLog("World Radio search scope=global request=%u", request.requestID)
+#endif
             startSearch(requestID: request.requestID) { [directory] in
                 try await directory.random()
             }

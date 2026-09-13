@@ -12,6 +12,8 @@
 #include <cstring>
 #include <esp_heap_caps.h>
 
+LV_FONT_DECLARE(worldRadioFont20);
+
 namespace {
 
 constexpr int16_t WORLD_WIDTH = world_radio_map::WIDTH;
@@ -19,16 +21,13 @@ constexpr int16_t WORLD_HEIGHT = world_radio_map::HEIGHT;
 constexpr int MAP_SCALE = world_radio_viewport::SCALE;
 constexpr uint32_t OCEAN_COLOR = 0x071421;
 constexpr uint32_t ACCENT_COLOR = 0x8CF58A;
-constexpr uint32_t PANEL_COLOR = 0x050708;
 
 WorldRadioScreenCallbacks screenCallbacks{};
 lv_obj_t *screenRoot = nullptr;
 lv_obj_t *mapViewport = nullptr;
 lv_obj_t *mapCanvases[3]{};
-lv_obj_t *coordinateLabel = nullptr;
 lv_obj_t *stationLabel = nullptr;
 lv_obj_t *placeLabel = nullptr;
-lv_obj_t *stateLabel = nullptr;
 lv_obj_t *playLabel = nullptr;
 lv_obj_t *reticle = nullptr;
 lv_obj_t *reticleDot = nullptr;
@@ -43,6 +42,7 @@ world_radio_viewport::Camera camera;
 uint32_t pendingStationFocus = 0;
 uint32_t pendingStationFocusRevision = 0;
 bool dragging = false;
+bool randomOnEntryPending = false;
 bool dragStarted = false;
 int16_t pressX = 0;
 int16_t pressY = 0;
@@ -62,31 +62,6 @@ void updateMapPosition() {
                      camera.y());
     }
   }
-}
-
-void formatCoordinate(char *output, std::size_t capacity) {
-  auto tenths = [](int32_t value) {
-    const int64_t magnitude = value < 0 ? -static_cast<int64_t>(value) : value;
-    return static_cast<int32_t>((magnitude + 500000) / 1000000);
-  };
-  const int32_t latitudeTenths = tenths(centerLatitudeE7);
-  const int32_t longitudeTenths = tenths(centerLongitudeE7);
-  std::snprintf(output, capacity, "%ld.%ld %c  %ld.%ld %c",
-                static_cast<long>(latitudeTenths / 10),
-                static_cast<long>(latitudeTenths % 10),
-                centerLatitudeE7 < 0 ? 'S' : 'N',
-                static_cast<long>(longitudeTenths / 10),
-                static_cast<long>(longitudeTenths % 10),
-                centerLongitudeE7 < 0 ? 'W' : 'E');
-}
-
-void updateCoordinateLabel() {
-  if (coordinateLabel == nullptr) {
-    return;
-  }
-  char coordinate[48];
-  formatCoordinate(coordinate, sizeof(coordinate));
-  lv_label_set_text(coordinateLabel, coordinate);
 }
 
 void pulseReticle(void *object, int32_t opacity) {
@@ -133,9 +108,7 @@ void renderStatus(bool force = false) {
   if (!phoneReady) {
     lv_label_set_text(stationLabel, "Connect iPhone");
     lv_label_set_text(placeLabel, "Open Bicino on your iPhone");
-    lv_label_set_text(stateLabel, "");
     lv_label_set_text(playLabel, LV_SYMBOL_PLAY);
-    updateCoordinateLabel();
     return;
   }
 
@@ -156,11 +129,8 @@ void renderStatus(bool force = false) {
     }
     lv_label_set_text(placeLabel, place);
   } else {
-    char coordinate[48];
-    formatCoordinate(coordinate, sizeof(coordinate));
-    lv_label_set_text(placeLabel, coordinate);
+    lv_label_set_text(placeLabel, "");
   }
-  lv_label_set_text(stateLabel, world_radio_presentation::statusText(status));
   lv_label_set_text(playLabel,
                     world_radio_presentation::showPauseIcon(status.state)
                         ? LV_SYMBOL_PAUSE
@@ -177,11 +147,11 @@ void renderStatus(bool force = false) {
     pendingStationFocus = 0;
     camera.centerOn(status.stationLatitudeE7, status.stationLongitudeE7);
     updateMapPosition();
-    updateCoordinateLabel();
   }
 }
 
 bool sendCommand(world_radio_protocol::Command command) {
+  randomOnEntryPending = false;
   world_radio_protocol::Request request{};
   request.command = command;
   request.requestId = world_radio_runtime::nextRequestId();
@@ -189,6 +159,8 @@ bool sendCommand(world_radio_protocol::Command command) {
   request.longitudeE7 = centerLongitudeE7;
   const bool sent = screenCallbacks.sendRequest != nullptr &&
                     screenCallbacks.sendRequest(request);
+  log_i("World Radio request command=%u id=%lu sent=%u",
+        static_cast<unsigned>(command), static_cast<unsigned long>(request.requestId), sent);
   if (sent) {
     world_radio_runtime::noteRequest(request);
   } else {
@@ -214,6 +186,7 @@ void mapEvent(lv_event_t *event) {
   lv_indev_get_point(indev, &point);
   switch (code) {
   case LV_EVENT_PRESSED:
+    randomOnEntryPending = false;
     pendingStationFocus = 0;
     dragging = true;
     dragStarted = false;
@@ -234,7 +207,6 @@ void mapEvent(lv_event_t *event) {
     lastX = point.x;
     lastY = point.y;
     updateMapPosition();
-    updateCoordinateLabel();
     break;
   }
   case LV_EVENT_RELEASED:
@@ -300,12 +272,29 @@ void makePassive(lv_obj_t *object) {
 }
 
 void styleMapLabel(lv_obj_t *label) {
-  // Readable over pale terrain, deserts and polar ice without dimming the map.
-  lv_obj_set_style_bg_color(label, lv_color_black(), 0);
-  lv_obj_set_style_bg_opa(label, 190, 0);
-  lv_obj_set_style_pad_hor(label, 8, 0);
-  lv_obj_set_style_pad_ver(label, 3, 0);
-  lv_obj_set_style_radius(label, 6, 0);
+  lv_obj_set_style_bg_opa(label, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_text_font(label, &worldRadioFont20, 0);
+  lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_width(label, TFT_WIDTH - 64);
+  lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+  makePassive(label);
+}
+
+lv_obj_t *makeBottomControl(bool right, const char *icon, lv_event_cb_t callback) {
+  using namespace world_radio_presentation;
+  // Transparent hit areas reach the physical bottom/side edges. Only their
+  // inset circular icon is painted, so the map remains visible underneath.
+  lv_obj_t *target = lv_obj_create(screenRoot);
+  lv_obj_remove_style_all(target);
+  lv_obj_set_size(target, TFT_WIDTH / 2, CONTROL_HIT_HEIGHT);
+  lv_obj_align(target, right ? LV_ALIGN_BOTTOM_RIGHT : LV_ALIGN_BOTTOM_LEFT, 0, 0);
+  lv_obj_add_flag(target, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(target, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_event_cb(target, callback, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *button = makeButton(target, CONTROL_ICON_SIZE, CONTROL_ICON_SIZE, icon, callback);
+  lv_obj_align(button, LV_ALIGN_BOTTOM_MID, 0, -CONTROL_ICON_BOTTOM);
+  lv_obj_set_style_text_font(lv_obj_get_child(button, 0), &lv_font_montserrat_24, 0);
+  return button;
 }
 
 } // namespace
@@ -314,7 +303,7 @@ void worldRadioScr(lv_obj_t *screen,
                    const WorldRadioScreenCallbacks &callbacks) {
   screenRoot = screen;
   screenCallbacks = callbacks;
-  const int mapHeight = TFT_HEIGHT - world_radio_presentation::PANEL_HEIGHT;
+  const int mapHeight = TFT_HEIGHT;
   camera.configure(TFT_WIDTH, mapHeight, WORLD_WIDTH * MAP_SCALE,
                     WORLD_HEIGHT * MAP_SCALE);
   pendingStationFocus = 0;
@@ -368,14 +357,6 @@ void worldRadioScr(lv_obj_t *screen,
   lv_obj_t *cycleButton = makeButton(screenRoot, 54, 42, "NEXT", cycleEvent);
   lv_obj_align(cycleButton, LV_ALIGN_TOP_LEFT, 18, 12);
 
-  coordinateLabel = lv_label_create(screenRoot);
-  styleMapLabel(coordinateLabel);
-  lv_obj_set_style_text_color(coordinateLabel, lv_color_hex(0xBDD5CB), 0);
-  lv_obj_set_style_text_font(coordinateLabel, &lv_font_montserrat_14, 0);
-  lv_obj_align(coordinateLabel, LV_ALIGN_TOP_MID, 0, camera.anchorY() - 53);
-  makePassive(coordinateLabel);
-  updateCoordinateLabel();
-
   reticlePulsing = false;
   reticle = lv_obj_create(screenRoot);
   lv_obj_remove_style_all(reticle);
@@ -398,47 +379,18 @@ void worldRadioScr(lv_obj_t *screen,
   lv_obj_center(reticleDot);
   makePassive(reticleDot);
 
-  lv_obj_t *panel = lv_obj_create(screenRoot);
-  lv_obj_remove_style_all(panel);
-  lv_obj_set_size(panel, TFT_WIDTH, world_radio_presentation::PANEL_HEIGHT);
-  lv_obj_align(panel, LV_ALIGN_BOTTOM_MID, 0, 0);
-  lv_obj_set_style_bg_color(panel, lv_color_hex(PANEL_COLOR), 0);
-  lv_obj_set_style_bg_opa(panel, 238, 0);
-  lv_obj_set_style_pad_top(panel, 10, 0);
-  lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
-
-  stationLabel = lv_label_create(panel);
-  lv_obj_set_width(stationLabel, TFT_WIDTH - 56);
+  stationLabel = lv_label_create(screenRoot);
+  styleMapLabel(stationLabel);
   lv_obj_set_style_text_color(stationLabel, lv_color_white(), 0);
-  lv_obj_set_style_text_font(stationLabel, &lv_font_montserrat_24, 0);
-  lv_obj_set_style_text_align(stationLabel, LV_TEXT_ALIGN_CENTER, 0);
-  lv_label_set_long_mode(stationLabel, LV_LABEL_LONG_DOT);
-  lv_obj_align(stationLabel, LV_ALIGN_TOP_MID, 0, 5);
+  lv_obj_align(stationLabel, LV_ALIGN_TOP_MID, 0, camera.anchorY() - 108);
 
-  placeLabel = lv_label_create(panel);
-  lv_obj_set_width(placeLabel, TFT_WIDTH - 60);
+  placeLabel = lv_label_create(screenRoot);
+  styleMapLabel(placeLabel);
   lv_obj_set_style_text_color(placeLabel, lv_color_hex(0xBDD5CB), 0);
-  lv_obj_set_style_text_font(placeLabel, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_align(placeLabel, LV_TEXT_ALIGN_CENTER, 0);
-  lv_label_set_long_mode(placeLabel, LV_LABEL_LONG_DOT);
-  lv_obj_align(placeLabel, LV_ALIGN_TOP_MID, 0, 38);
+  lv_obj_align(placeLabel, LV_ALIGN_TOP_MID, 0, camera.anchorY() - 66);
 
-  stateLabel = lv_label_create(panel);
-  lv_obj_set_width(stateLabel, TFT_WIDTH - 60);
-  lv_obj_set_style_text_color(stateLabel, lv_color_hex(ACCENT_COLOR), 0);
-  lv_obj_set_style_text_font(stateLabel, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_align(stateLabel, LV_TEXT_ALIGN_CENTER, 0);
-  lv_label_set_long_mode(stateLabel, LV_LABEL_LONG_DOT);
-  lv_obj_align(stateLabel, LV_ALIGN_TOP_MID, 0, 59);
-
-  using namespace world_radio_presentation;
-  lv_obj_t *randomButton = makeButton(
-      panel, RANDOM_CONTROL_WIDTH, CONTROL_HEIGHT, "RANDOM", randomEvent);
-  lv_obj_align(randomButton, LV_ALIGN_BOTTOM_MID, -CONTROL_OFFSET,
-               -CONTROL_BOTTOM_INSET);
-  lv_obj_t *playButton = makeButton(
-      panel, PLAY_CONTROL_WIDTH, CONTROL_HEIGHT, LV_SYMBOL_PLAY, playEvent);
-  lv_obj_align(playButton, LV_ALIGN_BOTTOM_MID, CONTROL_OFFSET, -CONTROL_BOTTOM_INSET);
+  makeBottomControl(false, LV_SYMBOL_SHUFFLE, randomEvent);
+  lv_obj_t *playButton = makeBottomControl(true, LV_SYMBOL_PLAY, playEvent);
   playLabel = lv_obj_get_child(playButton, 0);
   lv_obj_set_style_text_font(playLabel, &lv_font_montserrat_24, 0);
 
@@ -446,6 +398,18 @@ void worldRadioScr(lv_obj_t *screen,
   renderStatus(true);
 }
 
-void updateWorldRadioScr() { renderStatus(); }
+void updateWorldRadioScr() {
+  if (randomOnEntryPending && screenCallbacks.phoneReady != nullptr &&
+      screenCallbacks.phoneReady()) {
+    sendCommand(world_radio_protocol::Command::RandomStation);
+  }
+  renderStatus();
+}
 
-void activateWorldRadioScr() { renderStatus(true); }
+void activateWorldRadioScr() {
+  dragging = false;
+  pendingStationFocus = 0;
+  randomOnEntryPending = true;
+  updateWorldRadioScr();
+  renderStatus(true);
+}

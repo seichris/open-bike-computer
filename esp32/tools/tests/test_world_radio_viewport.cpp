@@ -6,9 +6,10 @@
 int main() {
   using namespace world_radio_viewport;
   for (int width : {466, 410}) {
-    const int height = (width == 466 ? 466 : 502) - 190;
+    const int height = width == 466 ? 466 : 502;
     Camera camera;
     camera.configure(width, height, 2048, 1024);
+    assert(camera.anchorX() == width / 2 && camera.anchorY() == height / 2);
     camera.centerOn(0, 0);
     const int x = camera.x();
     const int y = camera.y();
