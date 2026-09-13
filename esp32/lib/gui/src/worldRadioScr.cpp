@@ -116,6 +116,18 @@ void updateReticle(world_radio_protocol::PlaybackState state, bool phoneReady) {
   }
 }
 
+void setPlaceText(const char *text) {
+  // Measure the original metadata, not LVGL's potentially dot-replaced text.
+  // Content-sized DOT labels inside a content-sized flex row can collapse to
+  // the ellipsis width and keep that width for subsequent station updates.
+  lv_point_t measured{};
+  lv_text_get_size(&measured, text, &worldRadioFont20, 0, 0,
+                   LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+  lv_obj_set_width(placeLabel,
+      world_radio_presentation::placeTextWidth(measured.x, TFT_WIDTH - 100));
+  lv_label_set_text(placeLabel, text);
+}
+
 void renderStatus(bool force = false) {
   const bool phoneReady =
       screenCallbacks.phoneReady != nullptr && screenCallbacks.phoneReady();
@@ -131,7 +143,7 @@ void renderStatus(bool force = false) {
   if (!phoneReady) {
     lv_label_set_text(stationLabel, "Connect iPhone");
     lv_label_set_text(stationBoldLabel, "Connect iPhone");
-    lv_label_set_text(placeLabel, "Open Bicino on your iPhone");
+    setPlaceText("Open Bicino on your iPhone");
     lv_obj_add_flag(flagCanvas, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(playLabel, LV_SYMBOL_PLAY);
     return;
@@ -147,7 +159,7 @@ void renderStatus(bool force = false) {
 #endif
   lv_label_set_text(stationLabel, world_radio_presentation::stationText(status));
   lv_label_set_text(stationBoldLabel, world_radio_presentation::stationText(status));
-  lv_label_set_text(placeLabel, status.hasStation ? status.place : "");
+  setPlaceText(status.hasStation ? status.place : "");
   const auto *flag = status.hasStation ? world_radio_flags::find(status.countryCode) : nullptr;
   if (flag != nullptr) {
     std::memcpy(flagBuffer, flag, sizeof(flagBuffer));
@@ -441,8 +453,7 @@ void worldRadioScr(lv_obj_t *screen,
   makePassive(flagCanvas);
   placeLabel = lv_label_create(placeRow);
   styleMapLabel(placeLabel);
-  lv_obj_set_width(placeLabel, LV_SIZE_CONTENT);
-  lv_obj_set_style_max_width(placeLabel, TFT_WIDTH - 100, 0);
+  lv_obj_set_size(placeLabel, 1, worldRadioFont20.line_height);
   lv_obj_set_style_text_color(placeLabel, lv_color_hex(0x404040), 0);
 
   makeBottomControl(false, LV_SYMBOL_SHUFFLE, randomEvent);

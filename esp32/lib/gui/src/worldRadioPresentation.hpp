@@ -36,4 +36,9 @@ inline const char *stationText(const world_radio_protocol::Status &status) {
   return status.hasStation ? status.stationName : "";
 }
 
+constexpr int placeTextWidth(int measuredWidth, int availableWidth) {
+  return measuredWidth < 1 ? 1 :
+      (measuredWidth > availableWidth ? availableWidth : measuredWidth);
+}
+
 } // namespace world_radio_presentation

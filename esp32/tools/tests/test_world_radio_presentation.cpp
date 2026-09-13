@@ -8,6 +8,11 @@ int main() {
   using namespace world_radio_presentation;
   using State = world_radio_protocol::PlaybackState;
   world_radio_protocol::Status status{};
+  assert(placeTextWidth(0, 366) == 1);
+  assert(placeTextWidth(64, 366) == 64);
+  assert(placeTextWidth(500, 366) == 366);
+  // A short name after a truncated long name must regain its measured width.
+  assert(placeTextWidth(45, 366) == 45);
   std::strcpy(status.stationName, "Stale station");
   assert(stationText(status)[0] == '\0');
   status.hasStation = true;
