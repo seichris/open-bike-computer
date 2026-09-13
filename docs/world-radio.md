@@ -27,6 +27,13 @@ They sit inside the round display's safe area. Active playback omits the redunda
 "Playing on iPhone" status line, including when an older phone build sends that
 message; searching, buffering, connection, and error messages remain visible.
 
+The offline world map uses a bundled Natural Earth I shaded-relief texture:
+natural land cover, mountain shading and water, with no artificial grid or
+bright coastline outlines. The 1024x512 map decodes once into a shared 1 MiB
+RGB565 canvas; longitude wrapping and drag-to-tune coordinates use its WGS84
+plate-carree projection. See `esp32/tools/world-radio-map/README.md` for source,
+licensing, memory budget and deterministic regeneration.
+
 1. The rider opens **World Radio** and drags the wrapped, equirectangular map
    under the fixed reticle.
 2. Releasing the map sends one fixed-size `WRQ1` coordinate request over the

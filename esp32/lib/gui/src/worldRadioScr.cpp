@@ -1,12 +1,11 @@
 #include "worldRadioScr.hpp"
 #include "worldRadioPresentation.hpp"
 
-#include "../../bicino_style/bicino_visual_style.hpp"
 #include "../../tft/tft.hpp"
+#include "../../world_radio/world_radio_map.hpp"
 #include "../../world_radio/world_radio_runtime.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -14,27 +13,14 @@
 
 namespace {
 
-constexpr int16_t WORLD_WIDTH = 720;
-constexpr int16_t WORLD_HEIGHT = 360;
+constexpr int16_t WORLD_WIDTH = world_radio_map::WIDTH;
+constexpr int16_t WORLD_HEIGHT = world_radio_map::HEIGHT;
 constexpr int32_t LATITUDE_LIMIT_E7 = 850000000;
 constexpr int32_t LONGITUDE_HALF_E7 = 1800000000;
 constexpr int64_t LONGITUDE_FULL_E7 = 3600000000LL;
 constexpr uint32_t OCEAN_COLOR = 0x071421;
-constexpr uint32_t GRID_COLOR = 0x173049;
-constexpr uint32_t LAND_COLOR = 0x17453B;
-constexpr uint32_t COAST_COLOR = 0x63E6BE;
 constexpr uint32_t ACCENT_COLOR = 0x8CF58A;
 constexpr uint32_t PANEL_COLOR = 0x050708;
-
-struct GeoPoint {
-  int16_t longitude;
-  int16_t latitude;
-};
-
-struct PixelPoint {
-  int16_t x;
-  int16_t y;
-};
 
 WorldRadioScreenCallbacks screenCallbacks{};
 lv_obj_t *screenRoot = nullptr;
@@ -58,177 +44,6 @@ int16_t pressX = 0;
 int16_t pressY = 0;
 int16_t lastX = 0;
 int16_t lastY = 0;
-
-constexpr GeoPoint NORTH_AMERICA[] = {
-    {-168, 66}, {-150, 72}, {-126, 70}, {-105, 78}, {-82, 72},
-    {-60, 55},  {-67, 46},  {-82, 25},  {-97, 17},  {-113, 28},
-    {-125, 44}, {-141, 57}, {-168, 66},
-};
-constexpr GeoPoint SOUTH_AMERICA[] = {
-    {-81, 12}, {-66, 8}, {-50, -2}, {-35, -8}, {-45, -24},
-    {-55, -38}, {-70, -55}, {-77, -34}, {-81, -5}, {-81, 12},
-};
-constexpr GeoPoint GREENLAND[] = {
-    {-72, 60}, {-48, 58}, {-20, 72}, {-32, 83}, {-58, 82}, {-72, 60},
-};
-constexpr GeoPoint AFRICA[] = {
-    {-17, 35}, {10, 37}, {34, 31}, {51, 12}, {41, -12},
-    {28, -34}, {12, -35}, {-2, -20}, {-13, 5}, {-17, 35},
-};
-constexpr GeoPoint EUROPE_ASIA[] = {
-    {-10, 36}, {-10, 58}, {8, 71}, {35, 70}, {58, 76}, {100, 76},
-    {160, 66}, {179, 52}, {151, 43}, {139, 34}, {122, 18}, {105, 8},
-    {77, 8}, {58, 25}, {39, 36}, {25, 41}, {8, 42}, {-10, 36},
-};
-constexpr GeoPoint ARABIA_INDIA[] = {
-    {34, 31}, {55, 28}, {65, 24}, {77, 8}, {90, 21}, {82, 29},
-    {70, 24}, {58, 25}, {51, 12}, {34, 31},
-};
-constexpr GeoPoint SOUTHEAST_ASIA[] = {
-    {94, 22}, {112, 23}, {123, 13}, {119, 2}, {105, -6}, {99, 7},
-    {94, 22},
-};
-constexpr GeoPoint JAPAN[] = {
-    {129, 32}, {136, 34}, {142, 45}, {146, 43}, {140, 35}, {129, 32},
-};
-constexpr GeoPoint AUSTRALIA[] = {
-    {112, -11}, {132, -10}, {153, -24}, {146, -40}, {123, -38},
-    {112, -25}, {112, -11},
-};
-constexpr GeoPoint ANTARCTICA[] = {
-    {-180, -70}, {-140, -74}, {-95, -72}, {-45, -78}, {0, -72},
-    {50, -76}, {105, -71}, {155, -75}, {179, -70}, {179, -88},
-    {-180, -88}, {-180, -70},
-};
-
-uint16_t canvasColor(uint32_t rgb) {
-  return bicino_visual_style::rgb888ToRgb565(rgb);
-}
-
-PixelPoint project(const GeoPoint &point) {
-  return {static_cast<int16_t>((point.longitude + 180) * 2),
-          static_cast<int16_t>((90 - point.latitude) * 2)};
-}
-
-void putPixel(int32_t x, int32_t y, uint16_t color) {
-  if (worldBuffer == nullptr || x < 0 || y < 0 || x >= WORLD_WIDTH ||
-      y >= WORLD_HEIGHT) {
-    return;
-  }
-  worldBuffer[static_cast<uint32_t>(y) * worldStridePixels + x] = color;
-}
-
-void drawLine(PixelPoint from, PixelPoint to, uint16_t color,
-              int16_t thickness = 1) {
-  int32_t x0 = from.x;
-  int32_t y0 = from.y;
-  const int32_t x1 = to.x;
-  const int32_t y1 = to.y;
-  const int32_t dx = std::abs(x1 - x0);
-  const int32_t sx = x0 < x1 ? 1 : -1;
-  const int32_t dy = -std::abs(y1 - y0);
-  const int32_t sy = y0 < y1 ? 1 : -1;
-  int32_t error = dx + dy;
-  while (true) {
-    const int16_t radius = thickness / 2;
-    for (int16_t oy = -radius; oy <= radius; ++oy) {
-      for (int16_t ox = -radius; ox <= radius; ++ox) {
-        putPixel(x0 + ox, y0 + oy, color);
-      }
-    }
-    if (x0 == x1 && y0 == y1) {
-      break;
-    }
-    const int32_t doubled = 2 * error;
-    if (doubled >= dy) {
-      error += dy;
-      x0 += sx;
-    }
-    if (doubled <= dx) {
-      error += dx;
-      y0 += sy;
-    }
-  }
-}
-
-template <std::size_t Count>
-void fillPolygon(const GeoPoint (&points)[Count], uint16_t fill,
-                 uint16_t outline) {
-  static_assert(Count >= 3, "a polygon needs at least three points");
-  std::array<PixelPoint, Count> projected{};
-  int16_t minY = WORLD_HEIGHT - 1;
-  int16_t maxY = 0;
-  for (std::size_t index = 0; index < Count; ++index) {
-    projected[index] = project(points[index]);
-    minY = std::min(minY, projected[index].y);
-    maxY = std::max(maxY, projected[index].y);
-  }
-  minY = std::max<int16_t>(0, minY);
-  maxY = std::min<int16_t>(WORLD_HEIGHT - 1, maxY);
-
-  std::array<int16_t, Count> intersections{};
-  for (int16_t y = minY; y <= maxY; ++y) {
-    std::size_t intersectionCount = 0;
-    for (std::size_t index = 0; index < Count; ++index) {
-      const PixelPoint a = projected[index];
-      const PixelPoint b = projected[(index + 1) % Count];
-      if (!((a.y <= y && b.y > y) || (b.y <= y && a.y > y))) {
-        continue;
-      }
-      const int32_t numerator =
-          static_cast<int32_t>(y - a.y) * (b.x - a.x);
-      const int32_t denominator = b.y - a.y;
-      intersections[intersectionCount++] = static_cast<int16_t>(
-          a.x + (denominator == 0 ? 0 : numerator / denominator));
-    }
-    std::sort(intersections.begin(), intersections.begin() + intersectionCount);
-    for (std::size_t index = 0; index + 1 < intersectionCount; index += 2) {
-      int16_t start = std::max<int16_t>(0, intersections[index]);
-      int16_t end = std::min<int16_t>(WORLD_WIDTH - 1,
-                                      intersections[index + 1]);
-      for (int16_t x = start; x <= end; ++x) {
-        putPixel(x, y, fill);
-      }
-    }
-  }
-
-  for (std::size_t index = 0; index + 1 < Count; ++index) {
-    drawLine(projected[index], projected[index + 1], outline, 2);
-  }
-}
-
-void drawWorld() {
-  if (worldBuffer == nullptr) {
-    return;
-  }
-  const uint16_t ocean = canvasColor(OCEAN_COLOR);
-  const uint16_t grid = canvasColor(GRID_COLOR);
-  const uint16_t land = canvasColor(LAND_COLOR);
-  const uint16_t coast = canvasColor(COAST_COLOR);
-  for (int16_t y = 0; y < WORLD_HEIGHT; ++y) {
-    uint16_t *row = worldBuffer + static_cast<uint32_t>(y) * worldStridePixels;
-    std::fill(row, row + WORLD_WIDTH, ocean);
-  }
-  for (int16_t longitude = -150; longitude <= 150; longitude += 30) {
-    const int16_t x = static_cast<int16_t>((longitude + 180) * 2);
-    drawLine({x, 0}, {x, WORLD_HEIGHT - 1}, grid);
-  }
-  for (int16_t latitude = -60; latitude <= 60; latitude += 30) {
-    const int16_t y = static_cast<int16_t>((90 - latitude) * 2);
-    drawLine({0, y}, {WORLD_WIDTH - 1, y}, grid);
-  }
-
-  fillPolygon(NORTH_AMERICA, land, coast);
-  fillPolygon(SOUTH_AMERICA, land, coast);
-  fillPolygon(GREENLAND, land, coast);
-  fillPolygon(AFRICA, land, coast);
-  fillPolygon(EUROPE_ASIA, land, coast);
-  fillPolygon(ARABIA_INDIA, land, coast);
-  fillPolygon(SOUTHEAST_ASIA, land, coast);
-  fillPolygon(JAPAN, land, coast);
-  fillPolygon(AUSTRALIA, land, coast);
-  fillPolygon(ANTARCTICA, land, coast);
-}
 
 int32_t wrapLongitude(int64_t value) {
   while (value > LONGITUDE_HALF_E7) {
@@ -489,6 +304,15 @@ void makePassive(lv_obj_t *object) {
   lv_obj_clear_flag(object, LV_OBJ_FLAG_SCROLLABLE);
 }
 
+void styleMapLabel(lv_obj_t *label) {
+  // Readable over pale terrain, deserts and polar ice without dimming the map.
+  lv_obj_set_style_bg_color(label, lv_color_black(), 0);
+  lv_obj_set_style_bg_opa(label, 190, 0);
+  lv_obj_set_style_pad_hor(label, 8, 0);
+  lv_obj_set_style_pad_ver(label, 3, 0);
+  lv_obj_set_style_radius(label, 6, 0);
+}
+
 } // namespace
 
 void worldRadioScr(lv_obj_t *screen,
@@ -517,8 +341,13 @@ void worldRadioScr(lv_obj_t *screen,
       sizeof(uint16_t);
   worldBuffer = static_cast<uint16_t *>(heap_caps_aligned_alloc(
       16, worldBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (worldBuffer != nullptr &&
+      !world_radio_map::render(worldBuffer, worldBytes / sizeof(uint16_t),
+                               worldStridePixels)) {
+    heap_caps_free(worldBuffer);
+    worldBuffer = nullptr;
+  }
   if (worldBuffer != nullptr) {
-    drawWorld();
     for (int index = 0; index < 3; ++index) {
       mapCanvases[index] = lv_canvas_create(mapViewport);
       lv_canvas_set_buffer(mapCanvases[index], worldBuffer, WORLD_WIDTH,
@@ -535,6 +364,7 @@ void worldRadioScr(lv_obj_t *screen,
   }
 
   lv_obj_t *title = lv_label_create(screenRoot);
+  styleMapLabel(title);
   lv_obj_set_style_text_color(title, lv_color_hex(ACCENT_COLOR), 0);
   lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
   lv_obj_set_style_text_letter_space(title, 2, 0);
@@ -549,6 +379,7 @@ void worldRadioScr(lv_obj_t *screen,
   lv_obj_align(randomButton, LV_ALIGN_TOP_RIGHT, -18, 12);
 
   coordinateLabel = lv_label_create(screenRoot);
+  styleMapLabel(coordinateLabel);
   lv_obj_set_style_text_color(coordinateLabel, lv_color_hex(0xBDD5CB), 0);
   lv_obj_set_style_text_font(coordinateLabel, &lv_font_montserrat_14, 0);
   lv_obj_align(coordinateLabel, LV_ALIGN_CENTER, 0, -67);
@@ -562,6 +393,9 @@ void worldRadioScr(lv_obj_t *screen,
   lv_obj_set_style_bg_opa(reticle, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(reticle, 3, 0);
   lv_obj_set_style_border_color(reticle, lv_color_hex(ACCENT_COLOR), 0);
+  lv_obj_set_style_shadow_color(reticle, lv_color_black(), 0);
+  lv_obj_set_style_shadow_width(reticle, 5, 0);
+  lv_obj_set_style_shadow_opa(reticle, LV_OPA_COVER, 0);
   lv_obj_align(reticle, LV_ALIGN_CENTER, 0, -24);
   makePassive(reticle);
   lv_obj_t *reticleDot = lv_obj_create(reticle);

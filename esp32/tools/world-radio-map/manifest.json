@@ -1,0 +1,20 @@
+{
+  "decodedBytes": 1048576,
+  "decodedFnv1a32": "6099e8cd",
+  "decodedRgb565Sha256": "910a75eb790de04425a0974f2eceb5c8865811a276da68debe7c08b75c321744",
+  "flashDataBytes": 473127,
+  "generatedSourceSha256": "132c443f23339e150c7d672d96e7c51becba0f2de07c32c0f5a2631a8f19c7d2",
+  "height": 512,
+  "license": "public domain",
+  "licenseUrl": "https://www.naturalearthdata.com/about/terms-of-use/",
+  "packetBytes": 472615,
+  "paletteEntries": 256,
+  "pillowVersion": "11.3.0",
+  "projection": "WGS84 plate carree; west=-180 east=180 north=90 south=-90",
+  "schema": 1,
+  "sourceArchiveSha256": "8e30c15d49bc73223a36eaeffc07fd49998e658e373a5498f276f5d26bfd1d0a",
+  "sourceArchiveVersion": "2.0.0",
+  "sourcePngSha256": "b6dcca3dd9fe06d171dea1c3b407575c610cb43995449ca4a13c32b2e315bbc4",
+  "sourceUrl": "https://naturalearth.s3.amazonaws.com/10m_raster/NE1_LR_LC_SR_W.zip",
+  "width": 1024
+}
