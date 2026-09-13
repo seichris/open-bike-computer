@@ -5549,6 +5549,7 @@ public:
 #endif
       return;
     }
+#endif
 
     if (handleDestinationPickerPayload(value, "destination picker")) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
@@ -5836,7 +5837,6 @@ public:
       }
       return;
     }
-#endif
 #endif
 
     queueMapInput(PendingMapInputType::Gps, (const uint8_t *)value.data(),
