@@ -39,8 +39,8 @@ int main() {
   // with eight pixels of clearance. Check the rectangular 2.06 viewport too.
   for (int width : {466, 410}) {
     const int height = width == 466 ? 466 : 502;
-    for (int offset : {-SIDE_CONTROL_OFFSET, 0, SIDE_CONTROL_OFFSET}) {
-      const int buttonWidth = offset == 0 ? PLAY_CONTROL_WIDTH : SIDE_CONTROL_WIDTH;
+    for (int offset : {-CONTROL_OFFSET, CONTROL_OFFSET}) {
+      const int buttonWidth = offset > 0 ? PLAY_CONTROL_WIDTH : RANDOM_CONTROL_WIDTH;
       const int left = width / 2 + offset - buttonWidth / 2;
       const int bottom = height - CONTROL_BOTTOM_INSET;
       const int top = bottom - CONTROL_HEIGHT;

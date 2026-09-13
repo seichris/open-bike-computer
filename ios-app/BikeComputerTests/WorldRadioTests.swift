@@ -86,6 +86,38 @@ func runWorldRadioTests() async {
         requestID: 0x12345679
     ))
     precondition(player.pauseCount == 1)
+
+    let other = WorldRadioStation(
+        uuid: "other", name: "Other station", place: "Berlin", countryCode: "DE",
+        latitudeE7: 525_200_000, longitudeE7: 134_050_000, bitrateKbps: 96,
+        streamURL: URL(string: "https://example.com/other.mp3")!,
+        clickCount: 1, distanceMeters: 3000
+    )
+    let randomPlayer = WorldRadioTestPlayer()
+    let randomService = WorldRadioService(
+        directory: WorldRadioDirectoryClient(
+            nearby: { _, _ in [station, other] },
+            random: { [other, station] }, recordClick: { _ in }
+        ),
+        player: randomPlayer,
+        chooseIndex: { $0 - 1 },
+        statusSink: { _ in }
+    )
+    randomService.handle(serviceRequest)
+    for _ in 0..<100 where randomPlayer.played.count < 1 { await Task.yield() }
+    // Random selection is not pinned to the first ranked local result.
+    precondition(randomPlayer.played == [other])
+    randomService.handle(WorldRadioRequest.makeForTesting(command: .randomStation, requestID: 20))
+    for _ in 0..<100 where randomPlayer.played.count < 2 { await Task.yield() }
+    precondition(randomPlayer.played == [other, station])
+    randomService.handle(WorldRadioRequest.makeForTesting(command: .selectLocation, requestID: 21))
+    for _ in 0..<100 where randomPlayer.played.count < 3 { await Task.yield() }
+    precondition(randomPlayer.played == [other, station, other])
+    // A failed random choice still falls back through the remaining candidates.
+    randomPlayer.eventHandler?(.failed("unavailable"))
+    precondition(randomPlayer.played.last == station)
+    randomPlayer.eventHandler?(.failed("unavailable"))
+    precondition(randomService.currentStatus?.state == .error)
 }
 
 @main

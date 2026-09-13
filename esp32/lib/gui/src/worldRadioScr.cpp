@@ -29,7 +29,6 @@ lv_obj_t *coordinateLabel = nullptr;
 lv_obj_t *stationLabel = nullptr;
 lv_obj_t *placeLabel = nullptr;
 lv_obj_t *stateLabel = nullptr;
-lv_obj_t *indexLabel = nullptr;
 lv_obj_t *playLabel = nullptr;
 lv_obj_t *reticle = nullptr;
 lv_obj_t *reticleDot = nullptr;
@@ -135,7 +134,6 @@ void renderStatus(bool force = false) {
     lv_label_set_text(stationLabel, "Connect iPhone");
     lv_label_set_text(placeLabel, "Open Bicino on your iPhone");
     lv_label_set_text(stateLabel, "");
-    lv_label_set_text(indexLabel, "");
     lv_label_set_text(playLabel, LV_SYMBOL_PLAY);
     updateCoordinateLabel();
     return;
@@ -163,15 +161,6 @@ void renderStatus(bool force = false) {
     lv_label_set_text(placeLabel, coordinate);
   }
   lv_label_set_text(stateLabel, world_radio_presentation::statusText(status));
-  if (status.stationCount > 0) {
-    char index[20];
-    std::snprintf(index, sizeof(index), "%u / %u",
-                  static_cast<unsigned>(status.stationIndex + 1),
-                  static_cast<unsigned>(status.stationCount));
-    lv_label_set_text(indexLabel, index);
-  } else {
-    lv_label_set_text(indexLabel, "");
-  }
   lv_label_set_text(playLabel,
                     world_radio_presentation::showPauseIcon(status.state)
                         ? LV_SYMBOL_PAUSE
@@ -273,21 +262,9 @@ void randomEvent(lv_event_t *event) {
   }
 }
 
-void previousEvent(lv_event_t *event) {
-  if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
-    sendCommand(world_radio_protocol::Command::PreviousStation);
-  }
-}
-
 void playEvent(lv_event_t *event) {
   if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
     sendCommand(world_radio_protocol::Command::PlayPause);
-  }
-}
-
-void nextEvent(lv_event_t *event) {
-  if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
-    sendCommand(world_radio_protocol::Command::NextStation);
   }
 }
 
@@ -390,9 +367,6 @@ void worldRadioScr(lv_obj_t *screen,
 
   lv_obj_t *cycleButton = makeButton(screenRoot, 54, 42, "NEXT", cycleEvent);
   lv_obj_align(cycleButton, LV_ALIGN_TOP_LEFT, 18, 12);
-  lv_obj_t *randomButton =
-      makeButton(screenRoot, 64, 42, "RANDOM", randomEvent);
-  lv_obj_align(randomButton, LV_ALIGN_TOP_RIGHT, -18, 12);
 
   coordinateLabel = lv_label_create(screenRoot);
   styleMapLabel(coordinateLabel);
@@ -458,28 +432,15 @@ void worldRadioScr(lv_obj_t *screen,
   lv_obj_align(stateLabel, LV_ALIGN_TOP_MID, 0, 59);
 
   using namespace world_radio_presentation;
-  lv_obj_t *previousButton = makeButton(
-      panel, SIDE_CONTROL_WIDTH, CONTROL_HEIGHT, LV_SYMBOL_PREV, previousEvent);
-  lv_obj_align(previousButton, LV_ALIGN_BOTTOM_MID, -SIDE_CONTROL_OFFSET,
+  lv_obj_t *randomButton = makeButton(
+      panel, RANDOM_CONTROL_WIDTH, CONTROL_HEIGHT, "RANDOM", randomEvent);
+  lv_obj_align(randomButton, LV_ALIGN_BOTTOM_MID, -CONTROL_OFFSET,
                -CONTROL_BOTTOM_INSET);
   lv_obj_t *playButton = makeButton(
       panel, PLAY_CONTROL_WIDTH, CONTROL_HEIGHT, LV_SYMBOL_PLAY, playEvent);
-  lv_obj_align(playButton, LV_ALIGN_BOTTOM_MID, 0, -CONTROL_BOTTOM_INSET);
+  lv_obj_align(playButton, LV_ALIGN_BOTTOM_MID, CONTROL_OFFSET, -CONTROL_BOTTOM_INSET);
   playLabel = lv_obj_get_child(playButton, 0);
-  lv_obj_t *nextButton = makeButton(
-      panel, SIDE_CONTROL_WIDTH, CONTROL_HEIGHT, LV_SYMBOL_NEXT, nextEvent);
-  lv_obj_align(nextButton, LV_ALIGN_BOTTOM_MID, SIDE_CONTROL_OFFSET,
-               -CONTROL_BOTTOM_INSET);
-  for (lv_obj_t *button : {previousButton, playButton, nextButton}) {
-    lv_obj_set_style_text_font(lv_obj_get_child(button, 0),
-                               &lv_font_montserrat_24, 0);
-  }
-
-  indexLabel = lv_label_create(panel);
-  lv_obj_set_style_text_color(indexLabel, lv_color_hex(0x7D958B), 0);
-  lv_obj_set_style_text_font(indexLabel, &lv_font_montserrat_14, 0);
-  lv_obj_align(indexLabel, LV_ALIGN_BOTTOM_MID, 0, -19);
-  makePassive(indexLabel);
+  lv_obj_set_style_text_font(playLabel, &lv_font_montserrat_24, 0);
 
   renderedRevision = UINT32_MAX;
   renderStatus(true);

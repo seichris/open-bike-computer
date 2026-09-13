@@ -146,7 +146,7 @@ private actor RadioBrowserDirectory {
             URLQueryItem(name: "hidebroken", value: "true"),
             URLQueryItem(name: "order", value: "random"),
             URLQueryItem(name: "limit", value: "40"),
-        ])
+        ], rankNearby: false)
         guard !stations.isEmpty else { throw WorldRadioDirectoryError.noStations }
         return stations
     }
@@ -166,7 +166,7 @@ private actor RadioBrowserDirectory {
         _ = try? await session.data(for: request)
     }
 
-    private func search(queryItems: [URLQueryItem]) async throws -> [WorldRadioStation] {
+    private func search(queryItems: [URLQueryItem], rankNearby: Bool = true) async throws -> [WorldRadioStation] {
         var components = URLComponents(
             url: baseURL
                 .appendingPathComponent("json")
@@ -193,6 +193,9 @@ private actor RadioBrowserDirectory {
         let stations = decoded.compactMap(\.station).filter { station in
             seen.insert(station.uuid).inserted
         }
+        // Preserve the directory's worldwide random order; popularity sorting
+        // would bias the global sample back toward the same stations.
+        guard rankNearby else { return Array(stations.prefix(12)) }
         return stations.sorted { lhs, rhs in
             let leftDistance = lhs.distanceMeters ?? .greatestFiniteMagnitude
             let rightDistance = rhs.distanceMeters ?? .greatestFiniteMagnitude
@@ -359,6 +362,7 @@ final class WorldRadioService {
     private let directory: WorldRadioDirectoryClient
     private let player: WorldRadioAudioPlaying
     private let statusSink: StatusSink
+    private let chooseIndex: (Int) -> Int
     private var requestTask: Task<Void, Never>?
     private var candidates: [WorldRadioStation] = []
     private var stationIndex = 0
@@ -369,6 +373,7 @@ final class WorldRadioService {
     init(
         directory: WorldRadioDirectoryClient = .live(),
         player: WorldRadioAudioPlaying? = nil,
+        chooseIndex: @escaping (Int) -> Int = { Int.random(in: 0..<$0) },
         statusSink: @escaping StatusSink
     ) {
         self.directory = directory
@@ -378,6 +383,7 @@ final class WorldRadioService {
         self.player = player ?? SilentWorldRadioPlayer()
 #endif
         self.statusSink = statusSink
+        self.chooseIndex = chooseIndex
         self.player.eventHandler = { [weak self] event in
             self?.handleAudioEvent(event)
         }
@@ -447,6 +453,7 @@ final class WorldRadioService {
         operation: @escaping @Sendable () async throws -> [WorldRadioStation]
     ) {
         requestTask?.cancel()
+        let previousUUID = currentStation?.uuid
         player.stop()
         candidates = []
         stationIndex = 0
@@ -459,7 +466,9 @@ final class WorldRadioService {
                       let self,
                       self.requestID == requestID else { return }
                 self.candidates = stations
-                self.stationIndex = 0
+                let alternatives = stations.indices.filter { stations[$0].uuid != previousUUID }
+                let choices = alternatives.isEmpty ? Array(stations.indices) : alternatives
+                self.stationIndex = choices.isEmpty ? 0 : choices[self.chooseIndex(choices.count)]
                 self.failedStationUUIDs = []
                 self.playCurrent()
             } catch is CancellationError {

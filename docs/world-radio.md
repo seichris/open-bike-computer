@@ -43,9 +43,17 @@ location-search results do not recenter the map. Explicit previous/next/random
 station selection can focus the resulting station, constrained to the same map
 bounds; beginning a drag cancels that pending focus.
 
-The lower arrows wrap through the current station results. `1 / 4` means the
-first of four candidate stations, not volume or signal strength. The separate
-top `NEXT` button cycles to another device screen.
+The lower controls are global `RANDOM` and an icon-only play/pause button.
+There are no previous/next station controls or candidate counter. Random tunes
+worldwide; landing on a map location randomly selects from that area's bounded
+candidate list. Both avoid the current station when alternatives exist and
+retain automatic fallback if a stream fails. The separate top `NEXT` button
+cycles to another device screen.
+
+The reticle is solid green while playing, pulses green while searching,
+connecting or buffering, and is gray when idle, paused, disconnected, empty or
+in error. The dot stays steady during the ring's pulse. Playback-state text,
+including legacy phone messages, is not displayed.
 
 1. The rider opens **World Radio** and drags the wrapped, equirectangular map
    under the fixed reticle.

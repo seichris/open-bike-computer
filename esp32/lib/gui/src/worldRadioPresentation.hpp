@@ -7,9 +7,9 @@ namespace world_radio_presentation {
 constexpr int PANEL_HEIGHT = 190;
 constexpr int CONTROL_BOTTOM_INSET = 46;
 constexpr int CONTROL_HEIGHT = 48;
-constexpr int SIDE_CONTROL_WIDTH = 56;
+constexpr int RANDOM_CONTROL_WIDTH = 96;
 constexpr int PLAY_CONTROL_WIDTH = 64;
-constexpr int SIDE_CONTROL_OFFSET = 88;
+constexpr int CONTROL_OFFSET = 54;
 
 constexpr bool showPauseIcon(world_radio_protocol::PlaybackState state) {
   return state == world_radio_protocol::PlaybackState::Playing;
