@@ -16,6 +16,12 @@ option when that bit is absent. Enabling it for production requires physical
 qualification and a firmware size budget that fits the existing 3 MiB OTA
 partition. No partition offsets or sizes change in this PR.
 
+In Device Screens, choose Add Screen → World Radio, then Save to Bicino.
+World Radio uses configurable screen type 5 and the existing version-1 empty
+screen payload. Its type bit is advertised in the screen-configuration TLV
+only by development firmware. Playback follows the acknowledged configuration;
+removing or disabling the last World Radio instance releases the phone player.
+
 1. The rider opens **World Radio** and drags the wrapped, equirectangular map
    under the fixed reticle.
 2. Releasing the map sends one fixed-size `WRQ1` coordinate request over the

@@ -7,6 +7,7 @@ enum ConfiguredDeviceScreenType: UInt8, CaseIterable, Codable, Identifiable, Sen
     case rideStats = 2
     case mapPlusNavigation = 3
     case batteryStatus = 4
+    case worldRadio = 5
 
     var id: UInt8 { rawValue }
     var bit: UInt32 { 1 << UInt32(rawValue) }
@@ -18,6 +19,7 @@ enum ConfiguredDeviceScreenType: UInt8, CaseIterable, Codable, Identifiable, Sen
         case .rideStats: return "Ride Stats"
         case .mapPlusNavigation: return "Map + Navigation"
         case .batteryStatus: return "Battery Status"
+        case .worldRadio: return "World Radio"
         }
     }
 }
@@ -320,7 +322,7 @@ struct DeviceScreenConfigurationDocument: Equatable, Codable, Sendable {
                 guard layout.slots.contains(where: { $0 != .empty }) else {
                     throw DeviceScreenConfigurationValidationError.emptyRideStatsLayout
                 }
-            case .navigation, .batteryStatus:
+            case .navigation, .batteryStatus, .worldRadio:
                 guard instance.mapProfile == nil,
                       instance.rideStatsLayout == nil else {
                     throw DeviceScreenConfigurationValidationError.invalidPayload
@@ -552,7 +554,7 @@ enum DeviceScreenConfigurationCodec {
             payload.append(1)
             payload.append(UInt8(layout.slots.count))
             payload.append(contentsOf: layout.slots.map(\.rawValue))
-        case .navigation, .batteryStatus:
+        case .navigation, .batteryStatus, .worldRadio:
             break
         }
         return payload
@@ -622,7 +624,7 @@ enum DeviceScreenConfigurationCodec {
                 slots.append(widget)
             }
             rideStatsLayout = RideStatsLayout(slots: slots)
-        case .navigation, .batteryStatus:
+        case .navigation, .batteryStatus, .worldRadio:
             guard payload.count == 1 else {
                 throw DeviceScreenConfigurationValidationError.invalidPayload
             }

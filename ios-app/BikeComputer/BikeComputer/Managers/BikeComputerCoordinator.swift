@@ -203,7 +203,7 @@ class BikeComputerCoordinator: ObservableObject {
     private func setupManagerBindings() {
         bleManager.onWorldRadioRequest = { [weak self] request in
             guard let self,
-                  self.bleManager.enabledDeviceScreensMask & DeviceScreen.worldRadio.bit != 0
+                  self.enabledWorldRadioScreen
             else { return }
             self.ensureWorldRadioService().handle(request)
         }
@@ -383,6 +383,15 @@ class BikeComputerCoordinator: ObservableObject {
             }
             .store(in: &cancellables)
 
+        bleManager.deviceScreenConfigurationController.$acknowledgedDocument
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { [weak self] in
+                    self?.reconcileWorldRadioLifecycle()
+                }
+            }
+            .store(in: &cancellables)
+
         Publishers.CombineLatest(
             bleManager.$isNavigationReady,
             bleManager.$supportsWorldRadio
@@ -397,7 +406,7 @@ class BikeComputerCoordinator: ObservableObject {
             // device without issuing a new search or restarting playback.
             DispatchQueue.main.async { [weak self] in
                 guard let self,
-                      self.bleManager.enabledDeviceScreensMask & DeviceScreen.worldRadio.bit != 0
+                      self.enabledWorldRadioScreen
                 else { return }
                 self.worldRadioService?.resendCurrentStatus()
             }
@@ -519,7 +528,10 @@ class BikeComputerCoordinator: ObservableObject {
     }
 
     private var enabledWorldRadioScreen: Bool {
-        bleManager.enabledDeviceScreensMask & DeviceScreen.worldRadio.bit != 0
+        if let document = bleManager.deviceScreenConfigurationController.acknowledgedDocument {
+            return document.instances.contains { $0.type == .worldRadio && $0.enabled }
+        }
+        return bleManager.enabledDeviceScreensMask & DeviceScreen.worldRadio.bit != 0
     }
 
     private func stopWorldRadioServiceIfDisabled() {

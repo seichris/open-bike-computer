@@ -854,7 +854,7 @@ static void prepareNextMapScreenRenderAhead(tileName current) {
       return;
     }
     const auto &targetInstance = document.instances[targetIndex];
-    target = tileForDeviceScreen(static_cast<uint8_t>(targetInstance.type));
+    target = main_screen_registry::tileForDeviceScreen(static_cast<uint8_t>(targetInstance.type));
     targetInstanceID = targetInstance.id;
     applyMapInstanceProfile(targetInstance);
     targetProfileSignature = mapRenderProfileSignature;
@@ -2127,7 +2127,7 @@ static void showScreenInstance(uint8_t index) {
       screen_configuration::screenPayloadSignature(*instance);
   applyMapInstanceProfile(*instance);
   const tileName tile =
-      tileForDeviceScreen(static_cast<uint8_t>(instance->type));
+      main_screen_registry::tileForDeviceScreen(static_cast<uint8_t>(instance->type));
   log_i("UI: switching screen instance=%lu type=%u index=%u",
         static_cast<unsigned long>(instance->id),
         static_cast<unsigned>(instance->type), index);

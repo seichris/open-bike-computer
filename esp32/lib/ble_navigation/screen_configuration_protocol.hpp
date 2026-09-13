@@ -2,6 +2,7 @@
 
 #include "map_profile_protocol.hpp"
 #include "ride_ble_protocol.generated.hpp"
+#include "../world_radio/world_radio_config.hpp"
 
 #include <array>
 #include <cstddef>
@@ -36,6 +37,7 @@ enum class ScreenType : uint8_t {
   RideStats = 2,
   MapNavigation = 3,
   BatteryStatus = 4,
+  WorldRadio = 5,
 };
 
 constexpr uint32_t screenTypeBit(ScreenType type) {
@@ -47,7 +49,8 @@ constexpr uint32_t SUPPORTED_SCREEN_TYPES =
     screenTypeBit(ScreenType::Navigation) |
     screenTypeBit(ScreenType::RideStats) |
     screenTypeBit(ScreenType::MapNavigation) |
-    screenTypeBit(ScreenType::BatteryStatus);
+    screenTypeBit(ScreenType::BatteryStatus) |
+    (world_radio_config::ENABLED ? screenTypeBit(ScreenType::WorldRadio) : 0);
 
 enum class RideStatsWidget : uint8_t {
   Empty = 0,
@@ -245,7 +248,7 @@ inline bool isValidUtf8Name(const char *value, std::size_t length) {
 
 inline bool isSupportedScreenType(ScreenType type) {
   const uint8_t raw = static_cast<uint8_t>(type);
-  return raw <= static_cast<uint8_t>(ScreenType::BatteryStatus) &&
+  return raw <= static_cast<uint8_t>(ScreenType::WorldRadio) &&
          (SUPPORTED_SCREEN_TYPES & (1UL << raw)) != 0;
 }
 
@@ -429,6 +432,7 @@ inline std::size_t payloadSize(ScreenType type) {
     return RIDE_STATS_PAYLOAD_BYTES;
   case ScreenType::Navigation:
   case ScreenType::BatteryStatus:
+  case ScreenType::WorldRadio:
     return EMPTY_PAYLOAD_BYTES;
   }
   return 0;
@@ -474,6 +478,7 @@ inline bool encodePayload(Writer &writer, const ScreenInstance &instance) {
     return true;
   case ScreenType::Navigation:
   case ScreenType::BatteryStatus:
+  case ScreenType::WorldRadio:
     return writer.byte(PAYLOAD_VERSION);
   }
   return false;
@@ -577,7 +582,7 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
         reader.remaining() < static_cast<std::size_t>(nameLength) +
                                  payloadLength)
       return DecodeResult::Malformed;
-    if (rawType > static_cast<uint8_t>(ScreenType::BatteryStatus))
+    if (!isSupportedScreenType(static_cast<ScreenType>(rawType)))
       return DecodeResult::Unsupported;
     instance.type = static_cast<ScreenType>(rawType);
     instance.enabled = (flags & INSTANCE_ENABLED_FLAG) != 0;
@@ -615,7 +620,8 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
       break;
     }
     case ScreenType::Navigation:
-    case ScreenType::BatteryStatus: {
+    case ScreenType::BatteryStatus:
+    case ScreenType::WorldRadio: {
       uint8_t version = 0;
       if (payloadLength != EMPTY_PAYLOAD_BYTES || !reader.byte(version) ||
           version != PAYLOAD_VERSION)

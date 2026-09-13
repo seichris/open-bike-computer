@@ -68,7 +68,7 @@ func testDeviceScreenConfigurationCodecAndValidation() {
     )
     let capabilityValue = Data([
         1, 16, 24, 7,
-        0x1f, 0, 0, 0,
+        0x3f, 0, 0, 0,
         0xff, 0xff, 0x01, 0,
         0x00, 0x10,
     ])
@@ -90,6 +90,20 @@ func testDeviceScreenConfigurationCodecAndValidation() {
         return
     }
     assertEqual(decoded, document, "screen configuration binary round trip")
+    let radioDocument = DeviceScreenConfigurationDocument(
+        defaultInstanceID: 6,
+        instances: [.defaults(id: 6, type: .worldRadio)]
+    )
+    assertEqual(
+        try? DeviceScreenConfigurationCodec.decode(DeviceScreenConfigurationCodec.encode(radioDocument)),
+        radioDocument, "World Radio survives the configurable-screen wire round trip"
+    )
+    var productionCapabilities = DeviceScreenConfigurationCapabilities.v1
+    productionCapabilities.supportedScreenTypes &= ~ConfiguredDeviceScreenType.worldRadio.bit
+    assert(
+        (try? DeviceScreenConfigurationCodec.encode(radioDocument, capabilities: productionCapabilities)) == nil,
+        "production capabilities reject World Radio instances"
+    )
     var navigation = DeviceScreenInstance.defaults(
         id: 1, type: .mapPlusNavigation, name: "Nav"
     )

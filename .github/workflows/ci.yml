@@ -603,6 +603,10 @@ jobs:
             tools/tests/test_screen_configuration_protocol.cpp \
             -o /tmp/test_screen_configuration_protocol
           /tmp/test_screen_configuration_protocol
+          g++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=1 \
+            tools/tests/test_screen_configuration_protocol.cpp \
+            -o /tmp/test_screen_configuration_protocol_development
+          /tmp/test_screen_configuration_protocol_development
           g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_screen_configuration_policy.cpp \
             -o /tmp/test_screen_configuration_policy
