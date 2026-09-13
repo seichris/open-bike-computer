@@ -210,8 +210,8 @@ void mapEvent(lv_event_t *event) {
     if (std::abs(point.x - pressX) + std::abs(point.y - pressY) >= 10) {
       dragStarted = true;
     }
-    // Screen-space deltas move the map in the finger's direction, exactly 1:1.
-    camera.pan(dx, dy);
+    // Correct the observed input orientation without changing drag speed.
+    camera.drag(dx, dy);
     lastX = point.x;
     lastY = point.y;
     updateMapPosition();
@@ -291,7 +291,7 @@ void styleMapLabel(lv_obj_t *label) {
 lv_obj_t *makeBottomControl(bool right, const char *icon, lv_event_cb_t callback) {
   using namespace world_radio_presentation;
   // Transparent hit areas reach the physical bottom/side edges. Only their
-  // inset circular icon is painted, so the map remains visible underneath.
+  // inset icon is painted, so the map remains visible underneath.
   lv_obj_t *target = lv_obj_create(screenRoot);
   lv_obj_remove_style_all(target);
   lv_obj_set_size(target, TFT_WIDTH / 2, CONTROL_HIT_HEIGHT);
@@ -300,8 +300,13 @@ lv_obj_t *makeBottomControl(bool right, const char *icon, lv_event_cb_t callback
   lv_obj_clear_flag(target, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(target, callback, LV_EVENT_CLICKED, nullptr);
   lv_obj_t *button = makeButton(target, CONTROL_ICON_SIZE, CONTROL_ICON_SIZE, icon, callback);
+  lv_obj_remove_style_all(button);
+  lv_obj_set_size(button, CONTROL_ICON_SIZE, CONTROL_ICON_SIZE);
   lv_obj_align(button, LV_ALIGN_BOTTOM_MID, 0, -CONTROL_ICON_BOTTOM);
-  lv_obj_set_style_text_font(lv_obj_get_child(button, 0), &lv_font_montserrat_24, 0);
+  lv_obj_t *label = lv_obj_get_child(button, 0);
+  lv_obj_set_style_text_font(label, &lv_font_montserrat_32, 0);
+  lv_obj_set_style_text_color(label, lv_color_black(), 0);
+  lv_obj_center(label);
   return button;
 }
 
@@ -400,7 +405,6 @@ void worldRadioScr(lv_obj_t *screen,
   makeBottomControl(false, LV_SYMBOL_SHUFFLE, randomEvent);
   lv_obj_t *playButton = makeBottomControl(true, LV_SYMBOL_PLAY, playEvent);
   playLabel = lv_obj_get_child(playButton, 0);
-  lv_obj_set_style_text_font(playLabel, &lv_font_montserrat_24, 0);
 
   renderedRevision = UINT32_MAX;
   renderStatus(true);

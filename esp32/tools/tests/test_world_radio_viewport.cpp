@@ -19,6 +19,10 @@ int main() {
     assert(camera.y() == y + 23);
     camera.pan(-37, -23);
     assert(camera.x() == x && camera.y() == y);
+    camera.drag(37, 23);
+    assert(camera.x() == x - 37 && camera.y() == y - 23);
+    camera.drag(-37, -23);
+    assert(camera.x() == x && camera.y() == y);
     for (int i = 0; i < 40; ++i) camera.pan(1, -1);
     assert(camera.x() == x + 40 && camera.y() == y - 40);
 

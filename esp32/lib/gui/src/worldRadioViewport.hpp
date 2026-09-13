@@ -33,6 +33,10 @@ public:
     constrain();
   }
 
+  // Reverse both input axes for the device's observed drag orientation.
+  // Keep the camera movement at one pixel per input pixel.
+  void drag(int dx, int dy) { pan(-dx, -dy); }
+
   int x() const { return x_; }
   int y() const { return y_; }
   int anchorX() const { return width_ / 2; }

@@ -37,13 +37,15 @@ licensing, memory budget and deterministic regeneration.
 The map has no title banner or bottom panel. Its viewport fills the screen,
 with the reticle at the screen center. A 2x display-only zoom provides a
 closer view without another texture allocation. Drag deltas move the camera in
-screen pixels, 1:1 with the finger; longitude wraps and vertical movement stops
+screen pixels at 1:1 speed, with both touch-input axes reversed following
+physical-device feedback; longitude wraps and vertical movement stops
 at the map edges so the viewport stays covered. Ordinary playback updates and
 location-search results do not recenter the map. Explicit previous/next/random
 station selection can focus the resulting station, constrained to the same map
 bounds; beginning a drag cancels that pending focus.
 
-The lower controls are global shuffle and play/pause icons, with transparent
+The lower controls are black 32px global shuffle and play/pause icons without
+backgrounds or borders, with transparent
 half-width, 140px-high touch areas reaching the left/right bottom edges.
 Station name (black) and place (dark gray) occupy two single-line rows above the dot, without
 coordinates or text backgrounds. The bundled radio font supports Latin accents
