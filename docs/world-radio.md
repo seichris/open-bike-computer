@@ -45,7 +45,7 @@ bounds; beginning a drag cancels that pending focus.
 
 The lower controls are global shuffle and play/pause icons, with transparent
 half-width, 140px-high touch areas reaching the left/right bottom edges.
-Station name and place occupy two single-line rows above the dot, without
+Station name (black) and place (dark gray) occupy two single-line rows above the dot, without
 coordinates or text backgrounds. The bundled radio font supports Latin accents
 and BMP Chinese ideographs; see `esp32/tools/world-radio-font/README.md`.
 Each screen entry requests a new global station once the phone is ready;
@@ -56,9 +56,11 @@ candidate list. Both avoid the current station when alternatives exist and
 retain automatic fallback if a stream fails. The separate top `NEXT` button
 cycles to another device screen.
 
-The reticle is solid green while playing, pulses green while searching,
+The reticle is solid green while playing, shrinks from 42px to 14px over one
+second then immediately resets and repeats while searching,
 connecting or buffering, and is gray when idle, paused, disconnected, empty or
-in error. The dot stays steady during the ring's pulse. Playback-state text,
+in error. The dot stays centered and steady during the ring's animation.
+Without a station, both metadata rows stay empty. Playback-state text,
 including legacy phone messages, is not displayed.
 
 1. The rider opens **World Radio** and drags the wrapped, equirectangular map

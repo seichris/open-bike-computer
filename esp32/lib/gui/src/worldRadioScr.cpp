@@ -64,8 +64,10 @@ void updateMapPosition() {
   }
 }
 
-void pulseReticle(void *object, int32_t opacity) {
-  lv_obj_set_style_border_opa(static_cast<lv_obj_t *>(object), opacity, 0);
+void pulseReticle(void *object, int32_t diameter) {
+  auto *ring = static_cast<lv_obj_t *>(object);
+  lv_obj_set_size(ring, diameter, diameter);
+  lv_obj_align(ring, LV_ALIGN_CENTER, 0, 0);
 }
 
 void updateReticle(world_radio_protocol::PlaybackState state, bool phoneReady) {
@@ -79,14 +81,14 @@ void updateReticle(world_radio_protocol::PlaybackState state, bool phoneReady) {
   reticlePulsing = pulse;
   lv_anim_delete(reticle, pulseReticle);
   lv_obj_set_style_border_opa(reticle, LV_OPA_COVER, 0);
+  pulseReticle(reticle, 42);
   if (pulse) {
     lv_anim_t animation;
     lv_anim_init(&animation);
     lv_anim_set_var(&animation, reticle);
     lv_anim_set_exec_cb(&animation, pulseReticle);
-    lv_anim_set_values(&animation, LV_OPA_COVER, LV_OPA_30);
-    lv_anim_set_duration(&animation, 700);
-    lv_anim_set_playback_duration(&animation, 700);
+    lv_anim_set_values(&animation, 42, 14);
+    lv_anim_set_duration(&animation, 1000);
     lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
     lv_anim_set_path_cb(&animation, lv_anim_path_ease_in_out);
     lv_anim_start(&animation);
@@ -113,10 +115,14 @@ void renderStatus(bool force = false) {
   }
 
   const world_radio_protocol::Status &status = snapshot.status;
-  lv_label_set_text(stationLabel,
-                    status.hasStation && status.stationName[0] != '\0'
-                        ? status.stationName
-                        : "Choose a place");
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+  Serial.printf("World Radio status id=%lu state=%u country=%.2s station=%u/%u\n",
+                static_cast<unsigned long>(status.requestId),
+                static_cast<unsigned>(status.state), status.countryCode,
+                static_cast<unsigned>(status.stationIndex),
+                static_cast<unsigned>(status.stationCount));
+#endif
+  lv_label_set_text(stationLabel, world_radio_presentation::stationText(status));
   char place[72]{};
   if (status.hasStation) {
     if (status.place[0] != '\0' && status.countryCode[0] != '\0') {
@@ -159,8 +165,10 @@ bool sendCommand(world_radio_protocol::Command command) {
   request.longitudeE7 = centerLongitudeE7;
   const bool sent = screenCallbacks.sendRequest != nullptr &&
                     screenCallbacks.sendRequest(request);
-  log_i("World Radio request command=%u id=%lu sent=%u",
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+  Serial.printf("World Radio request command=%u id=%lu sent=%u\n",
         static_cast<unsigned>(command), static_cast<unsigned long>(request.requestId), sent);
+#endif
   if (sent) {
     world_radio_runtime::noteRequest(request);
   } else {
@@ -381,12 +389,12 @@ void worldRadioScr(lv_obj_t *screen,
 
   stationLabel = lv_label_create(screenRoot);
   styleMapLabel(stationLabel);
-  lv_obj_set_style_text_color(stationLabel, lv_color_white(), 0);
+  lv_obj_set_style_text_color(stationLabel, lv_color_black(), 0);
   lv_obj_align(stationLabel, LV_ALIGN_TOP_MID, 0, camera.anchorY() - 108);
 
   placeLabel = lv_label_create(screenRoot);
   styleMapLabel(placeLabel);
-  lv_obj_set_style_text_color(placeLabel, lv_color_hex(0xBDD5CB), 0);
+  lv_obj_set_style_text_color(placeLabel, lv_color_hex(0x404040), 0);
   lv_obj_align(placeLabel, LV_ALIGN_TOP_MID, 0, camera.anchorY() - 66);
 
   makeBottomControl(false, LV_SYMBOL_SHUFFLE, randomEvent);

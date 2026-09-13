@@ -32,4 +32,8 @@ inline const char *statusText(const world_radio_protocol::Status &) {
   return "";
 }
 
+inline const char *stationText(const world_radio_protocol::Status &status) {
+  return status.hasStation ? status.stationName : "";
+}
+
 } // namespace world_radio_presentation

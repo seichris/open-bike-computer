@@ -8,6 +8,11 @@ int main() {
   using namespace world_radio_presentation;
   using State = world_radio_protocol::PlaybackState;
   world_radio_protocol::Status status{};
+  std::strcpy(status.stationName, "Stale station");
+  assert(stationText(status)[0] == '\0');
+  status.hasStation = true;
+  assert(std::strcmp(stationText(status), "Stale station") == 0);
+  status.hasStation = false;
   status.state = State::Playing;
   assert(showPauseIcon(status.state));
   assert(std::strcmp(statusText(status), "") == 0);
