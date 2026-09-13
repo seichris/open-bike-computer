@@ -31,6 +31,9 @@ lv_obj_t *placeLabel = nullptr;
 lv_obj_t *stateLabel = nullptr;
 lv_obj_t *indexLabel = nullptr;
 lv_obj_t *playLabel = nullptr;
+lv_obj_t *reticle = nullptr;
+lv_obj_t *reticleDot = nullptr;
+bool reticlePulsing = false;
 uint16_t *worldBuffer = nullptr;
 uint32_t worldStridePixels = 0;
 uint32_t renderedRevision = UINT32_MAX;
@@ -87,6 +90,35 @@ void updateCoordinateLabel() {
   lv_label_set_text(coordinateLabel, coordinate);
 }
 
+void pulseReticle(void *object, int32_t opacity) {
+  lv_obj_set_style_border_opa(static_cast<lv_obj_t *>(object), opacity, 0);
+}
+
+void updateReticle(world_radio_protocol::PlaybackState state, bool phoneReady) {
+  using Appearance = world_radio_presentation::Reticle;
+  const auto appearance = world_radio_presentation::reticleState(state, phoneReady);
+  const auto color = lv_color_hex(appearance == Appearance::Gray ? 0x8A9298 : ACCENT_COLOR);
+  lv_obj_set_style_border_color(reticle, color, 0);
+  lv_obj_set_style_bg_color(reticleDot, color, 0);
+  const bool pulse = appearance == Appearance::PulsingGreen;
+  if (pulse == reticlePulsing) return;
+  reticlePulsing = pulse;
+  lv_anim_delete(reticle, pulseReticle);
+  lv_obj_set_style_border_opa(reticle, LV_OPA_COVER, 0);
+  if (pulse) {
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, reticle);
+    lv_anim_set_exec_cb(&animation, pulseReticle);
+    lv_anim_set_values(&animation, LV_OPA_COVER, LV_OPA_30);
+    lv_anim_set_duration(&animation, 700);
+    lv_anim_set_playback_duration(&animation, 700);
+    lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&animation, lv_anim_path_ease_in_out);
+    lv_anim_start(&animation);
+  }
+}
+
 void renderStatus(bool force = false) {
   const bool phoneReady =
       screenCallbacks.phoneReady != nullptr && screenCallbacks.phoneReady();
@@ -97,11 +129,12 @@ void renderStatus(bool force = false) {
   }
   renderedRevision = snapshot.revision;
   renderedPhoneReady = phoneReady;
+  updateReticle(snapshot.status.state, phoneReady);
 
   if (!phoneReady) {
     lv_label_set_text(stationLabel, "Connect iPhone");
     lv_label_set_text(placeLabel, "Open Bicino on your iPhone");
-    lv_label_set_text(stateLabel, "Phone not connected");
+    lv_label_set_text(stateLabel, "");
     lv_label_set_text(indexLabel, "");
     lv_label_set_text(playLabel, LV_SYMBOL_PLAY);
     updateCoordinateLabel();
@@ -369,7 +402,8 @@ void worldRadioScr(lv_obj_t *screen,
   makePassive(coordinateLabel);
   updateCoordinateLabel();
 
-  lv_obj_t *reticle = lv_obj_create(screenRoot);
+  reticlePulsing = false;
+  reticle = lv_obj_create(screenRoot);
   lv_obj_remove_style_all(reticle);
   lv_obj_set_size(reticle, 42, 42);
   lv_obj_set_style_radius(reticle, LV_RADIUS_CIRCLE, 0);
@@ -381,7 +415,7 @@ void worldRadioScr(lv_obj_t *screen,
   lv_obj_set_style_shadow_opa(reticle, LV_OPA_COVER, 0);
   lv_obj_align(reticle, LV_ALIGN_TOP_MID, 0, camera.anchorY() - 21);
   makePassive(reticle);
-  lv_obj_t *reticleDot = lv_obj_create(reticle);
+  reticleDot = lv_obj_create(reticle);
   lv_obj_remove_style_all(reticleDot);
   lv_obj_set_size(reticleDot, 8, 8);
   lv_obj_set_style_radius(reticleDot, LV_RADIUS_CIRCLE, 0);

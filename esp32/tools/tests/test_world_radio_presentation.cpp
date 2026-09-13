@@ -15,15 +15,25 @@ int main() {
   assert(std::strcmp(statusText(status), "") == 0);
   status.state = State::Error;
   std::strcpy(status.message, "Stream unavailable");
-  assert(std::strcmp(statusText(status), "Stream unavailable") == 0);
+  assert(std::strcmp(statusText(status), "") == 0);
   status.message[0] = '\0';
   for (State state : {State::Idle, State::Searching, State::Connecting,
                       State::Buffering, State::Paused, State::NoStations,
                       State::Error}) {
     status.state = state;
     assert(!showPauseIcon(state));
-    assert(statusText(status)[0] != '\0');
+    assert(statusText(status)[0] == '\0');
+    std::strcpy(status.message, "No station could be played");
+    assert(statusText(status)[0] == '\0');
+    status.message[0] = '\0';
+    assert(reticleState(state, false) == Reticle::Gray);
+    const bool busy = state == State::Searching || state == State::Connecting ||
+                      state == State::Buffering;
+    assert(reticleState(state, true) ==
+           (busy ? Reticle::PulsingGreen : Reticle::Gray));
   }
+  assert(reticleState(State::Playing, true) == Reticle::Green);
+  assert(reticleState(State::Playing, false) == Reticle::Gray);
 
   // Every corner of every touch target stays inside the 1.75 circular panel,
   // with eight pixels of clearance. Check the rectangular 2.06 viewport too.

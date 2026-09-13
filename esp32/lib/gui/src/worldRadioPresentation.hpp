@@ -15,26 +15,23 @@ constexpr bool showPauseIcon(world_radio_protocol::PlaybackState state) {
   return state == world_radio_protocol::PlaybackState::Playing;
 }
 
-inline const char *statusText(const world_radio_protocol::Status &status) {
+enum class Reticle { Gray, Green, PulsingGreen };
+
+constexpr Reticle reticleState(world_radio_protocol::PlaybackState state,
+                               bool phoneReady) {
   using State = world_radio_protocol::PlaybackState;
-  // Older phone builds send "Playing on iPhone" in the message field too.
-  // Playback is already represented by the pause icon, so suppress both paths.
-  if (status.state == State::Playing) {
-    return "";
+  if (!phoneReady) return Reticle::Gray;
+  switch (state) {
+  case State::Searching:
+  case State::Connecting:
+  case State::Buffering: return Reticle::PulsingGreen;
+  case State::Playing: return Reticle::Green;
+  default: return Reticle::Gray;
   }
-  if (status.message[0] != '\0') {
-    return status.message;
-  }
-  switch (status.state) {
-  case State::Idle: return "Drag the map to tune in";
-  case State::Searching: return "Finding stations...";
-  case State::Connecting: return "Connecting...";
-  case State::Buffering: return "Buffering...";
-  case State::Paused: return "Paused";
-  case State::NoStations: return "No stations nearby";
-  case State::Error: return "Station unavailable";
-  case State::Playing: return "";
-  }
+}
+
+inline const char *statusText(const world_radio_protocol::Status &) {
+  // The reticle represents playback state, including messages from older phones.
   return "";
 }
 
