@@ -3,6 +3,12 @@
 Implementation status, 2026-09-13. Tracks [issue #190](https://github.com/seichris/open-bike-computer/issues/190)
 and the [end-to-end plan](plans/issue-190-topographic-map-support-implementation-plan.md).
 
+The maintainer-supplied 2026-09-13 research is now incorporated in source
+hardening, regional metadata discovery and an executable qualification inventory.
+See [report-to-implementation evidence](research/topography-report-implementation-2026-09-13.md)
+for exact changes, limitations and outstanding providers. Firmware/app builds
+and build-triggering pushes are paused pending maintainer confirmation.
+
 ## What works now
 
 - A strict, free-access source registry pins the public Copernicus 2021 tile catalogs.
@@ -77,9 +83,10 @@ The acquisition policy declares WGS84 horizontal coordinates and EGM2008 height
 in metres. These are **surface** models, potentially including trees/buildings,
 not a surveyed bare-earth DTM. A 20 m contour interval is not 20 m accuracy.
 
-National DTMs remain independent follow-ups, prioritizing US 3DEP, England EA,
-and France IGN, then the other country products in the plan. Their names in the
-shortlist do not enable an adapter or establish redistribution approval.
+Swiss, Canadian and LINZ native-asset metadata discovery is implemented; raster
+ingestion and vertical normalization are not yet enabled. US 3DEP and the newer
+registered Copernicus baseline remain next priorities, followed by the other
+sources in the research. Dataset names do not establish redistribution approval.
 
 ## Operator workflow
 
@@ -101,6 +108,30 @@ cmp "$terrain_cache/alps-a.json" "$terrain_cache/alps-b.json"
 request, or an existing output path. It accepts `--max-tiles` (default 8, maximum
 256), but the independent four-million-pixel limit normally binds first. A
 one-degree 30 m sample exceeds that pixel bound; use a small inspection area.
+
+`sample` additionally checks the four-pixel processing halo and uses a fixed
+region-wide quality profile. Thus `plan` (catalog coverage for the requested
+rectangle) does not establish sampling eligibility or predict its full halo.
+Selections crossing UTM zones, the equator or polar region boundaries currently
+require partitioning. Resolution may be coarser than the requested rectangle's
+best native input when another cell in the fixed processing region needs GLO-90.
+
+### Review sources and discover regional native assets
+
+These commands do not enable production or download regional rasters:
+
+```sh
+.venv-topography/bin/map-topography --cache "$terrain_cache" sources
+.venv-topography/bin/map-topography --cache "$terrain_cache" discover \
+  --source swissalti3d-2m --bounds 7.400 46.900 7.401 46.901 \
+  --output /absolute/path/new-swiss-discovery.json
+```
+
+Other discovery source IDs are `canada-hrdem-lidar` and
+`linz-national-dem-1m`. Snapshots preserve metadata/checksums and report pending
+qualification gates; unknown datums remain unknown. Discovery follows all
+required pages/items within bounded resource limits and fails without a partial
+completion receipt if the provider/metadata contract changes or a limit binds.
 
 The backend image and backend CI install the `topography` extra. The optional
 libraries are imported only by the operator sample command, not at API startup.
@@ -185,13 +216,14 @@ for the next source-coverage and redistribution review.
 ## Contour evidence contract
 
 `bicino-contour-evidence-v1` is sorted-key canonical JSON ending in a newline.
-It uses one local UTM/polar projected grid, bilinear resampling, serial contour
+It uses a fixed UTM/polar projected grid and four-pixel halo, exact inverse
+pixel-centre projection, bilinear resampling, serial contour
 extraction, integer-millimetre points, canonical line/ring orientation, and
 sorted/deduplicated records. No wall-clock timestamp or local cache path enters
 its identity. Required source-review links remain attached to the evidence.
 
-Standard mode uses 30 m pixels and 20 m / 100 m contour intervals; a sample
-containing a GLO-90 fallback uses 90 m pixels and 50 m / 250 m intervals throughout.
+Standard mode uses 30 m pixels and 20 m / 100 m contour intervals; a processing
+region containing a GLO-90 fallback uses 90 m pixels and 50 m / 250 m intervals throughout.
 NaN/no-data is masked, not filled with zero. Partial no-data is measured in
 millionths; an all-no-data raster is rejected. Contour records/points and elevation
 range are bounded independently of input file size.
@@ -201,14 +233,16 @@ Known limitations, intentionally **not** production claims:
 - geocell fallback only; no finer per-pixel 90 m gap filling or regional blending;
 - small rectangular inspection bounds only; wrapped-antimeridian planning works,
   but sampling requires separate jobs on each side;
-- the projected envelope can extend outside the requested rectangle; no final
-  polygon/corridor clipping, seam-safe halo policy, smoothing, or device budget;
+- the projected envelope/halo extends outside the requested rectangle; the
+  compiler performs final polygon/corridor clipping and device budgeting;
+  cross-source and cross-region seam qualification and smoothing remain pending;
 - source metadata assumptions need formal review and mask validation before
   publication; `productionApproved` and `productionEligible` remain false;
-- each native warp/contour call is bounded by the raster/level limits but not
-  interruptible mid-call; production workers still need execution deadlines;
-- no elevation labels, hillshade, route contrast, iPhone tile styling, MapKit
-  coordinate correction, or firmware render qualification yet.
+- exact projection/sampling is chunked with cancellation checks; each native
+  contour call is bounded but not interruptible mid-call, so production workers
+  still need execution deadlines;
+- no elevation labels, hillshade, qualified route contrast, MapKit coordinate
+  correction, or physical firmware render qualification yet.
 
 ## Local evidence
 

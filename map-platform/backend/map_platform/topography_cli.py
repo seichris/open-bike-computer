@@ -13,12 +13,33 @@ from .topography_pipeline import canonical_bytes, contour_sample
 from .topography_sources import load_topography_source_policy, plan_elevation
 
 
+def _write_evidence(output: Path, value: dict) -> None:
+    data = canonical_bytes(value)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="elevation-evidence-", dir=output.parent) as tmp:
+        staged = Path(tmp) / "evidence.json"
+        with staged.open("xb") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.link(staged, output)
+        _sync_directory(output.parent)
+    print(json.dumps({"output": str(output), "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                      "productionEligible": False}))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[3])
     parser.add_argument("--cache", type=Path, required=True)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("coverage", help="verify pinned global catalogs and count geocells")
+    commands.add_parser("sources", help="report source implementation stages and missing qualification evidence; no network")
+    from .topography_discovery import REGIONAL_SOURCES, discover_regional
+    discover = commands.add_parser("discover", help="snapshot regional native-asset metadata; no raster downloads or approval")
+    discover.add_argument("--source", choices=sorted(REGIONAL_SOURCES), required=True)
+    discover.add_argument("--bounds", nargs=4, type=float, required=True, metavar=("W", "S", "E", "N"))
+    discover.add_argument("--output", type=Path, required=True)
     encode = commands.add_parser("encode", help="compile a development device/companion pair; does not publish or sign")
     encode.add_argument("--sample", type=Path, required=True)
     encode.add_argument("--selection", type=Path, required=True, help="WGS-84 Polygon/MultiPolygon or LineString GeoJSON geometry")
@@ -35,6 +56,15 @@ def main(argv: list[str] | None = None) -> int:
         if command == "sample":
             child.add_argument("--output", type=Path, required=True, help="new evidence JSON file; never overwritten")
     args = parser.parse_args(argv)
+    if args.command == "sources":
+        from .topography_qualification import load_qualification_registry, qualification_summary
+        print(json.dumps(qualification_summary(load_qualification_registry(args.repo_root)), indent=2, sort_keys=True))
+        return 0
+    if args.command == "discover":
+        if args.output.exists() or args.output.is_symlink():
+            parser.error("output already exists")
+        _write_evidence(args.output, discover_regional(args.source, args.bounds))
+        return 0
     if args.command == "encode":
         from .topography_geometry import compile_contours
         from .topography_pack import assemble_topographic_pack
@@ -78,19 +108,7 @@ def main(argv: list[str] | None = None) -> int:
         receipts = [cache.stage(sources[tile["sourceId"]], tuple(tile["cell"])) for tile in plan["tiles"]]
         print(json.dumps({"plan": plan, "receipts": receipts}, indent=2, sort_keys=True))
         return 0
-    data = canonical_bytes(contour_sample(policy, cache, args.bounds, maximum_tiles=args.max_tiles))
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    # Same-filesystem staging + link: atomic publication without overwriting.
-    with tempfile.TemporaryDirectory(prefix="contour-evidence-", dir=args.output.parent) as tmp:
-        staged = Path(tmp) / "sample.json"
-        with staged.open("xb") as file:
-            file.write(data)
-            file.flush()
-            os.fsync(file.fileno())
-        os.link(staged, args.output)
-        _sync_directory(args.output.parent)
-    print(json.dumps({"output": str(args.output), "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
-                      "productionEligible": False}))
+    _write_evidence(args.output, contour_sample(policy, cache, args.bounds, maximum_tiles=args.max_tiles))
     return 0
 
 

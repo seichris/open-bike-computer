@@ -20,6 +20,7 @@ WORKER_SOURCE_ROOTS = (
     "map-platform/backend/map_platform",
     "map-platform/backend/config",
     "map-platform/config/topography-source-policy-v1.json",
+    "map-platform/config/topography-qualification-v1.json",
     "map-platform/backend/pyproject.toml",
     "map-platform/backend/Dockerfile",
     "map-platform/backend/tools/generate_map_stream_build_identity.py",

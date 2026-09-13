@@ -18,6 +18,7 @@ from map_platform.topography_sources import (
     parse_tile_index, plan_elevation,
 )
 from map_platform.topography_pipeline import canonical_bytes, canonical_line, contour_sample
+from map_platform.topography_grid import contour_grid, processing_region, region_resolution
 from map_platform.topography_cli import main as cli_main
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -248,6 +249,28 @@ class ContourCanonicalizationTests(unittest.TestCase):
         self.assertEqual(canonical_line([(0, 0), (0, 0)]), ())
 
 
+class ProcessingRegionTests(unittest.TestCase):
+    def test_regions_are_fixed_and_boundary_crossing_is_explicit(self):
+        self.assertEqual(processing_region([6, 0, 12, 1]), "EPSG:32632")
+        self.assertEqual(processing_region([6, -1, 12, 0]), "EPSG:32732")
+        self.assertEqual(processing_region([6, 84, 7, 85]), "EPSG:3413")
+        self.assertEqual(processing_region([6, -81, 7, -80]), "EPSG:3031")
+        self.assertEqual(processing_region([174, 1, 180, 2]), "EPSG:32660")
+        for bounds in ([5.9, 1, 6.1, 2], [6, -.1, 7, .1], [6, 83.9, 7, 84.1],
+                       [6, -80.1, 7, -79.9], [179, 0, -179, 1], [True, 0, 2, 1]):
+            with self.subTest(bounds=bounds), self.assertRaises(ValueError):
+                processing_region(bounds)
+
+    def test_coarse_profile_is_region_wide_not_request_dependent(self):
+        policy = load_topography_source_policy(ROOT)
+        primary, fallback = policy.sources
+        indexes = {primary.id: frozenset({(6, 0)}), fallback.id: frozenset({(6, 0), (9, 60)})}
+        self.assertEqual(region_resolution(policy, indexes, "EPSG:32632"), 90)
+        self.assertEqual(region_resolution(policy, indexes, "EPSG:32631"), 30)
+        indexes[fallback.id] = frozenset({(6, 0)})
+        self.assertEqual(region_resolution(policy, indexes, "EPSG:32632"), 30)
+
+
 class TopographyCLITests(unittest.TestCase):
     def test_coverage_reports_union_and_incremental_fallback(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(ElevationCache, "index") as index:
@@ -319,6 +342,83 @@ class TopographyPipelineTests(unittest.TestCase):
         self.assertFalse(first["productionEligible"])
         self.assertEqual(first["noDataMillionths"], 0)
         self.assertTrue(all(record["elevationM"] % 20 == 0 for record in first["contours"]))
+        self.assertEqual(first["processingGrid"]["haloPixels"], 4)
+        self.assertEqual(first["processingGrid"]["originM"], [0, 0])
+        audit = first["nativeRasterAudits"][0]
+        self.assertEqual(audit["declaredNoData"], -32767)
+        self.assertEqual(audit["dimensions"], [100, 100])
+        self.assertEqual(audit["waterMask"], "unavailable-in-height-only-input")
+
+    def test_overlapping_grids_have_the_same_pixel_lattice(self):
+        a = contour_grid([6.2, .2, 6.25, .25], 30, 4_000_000)
+        b = contour_grid([6.22, .22, 6.27, .27], 30, 4_000_000)
+        self.assertEqual(a.crs, b.crs)
+        self.assertEqual((a.left - b.left) % 30, 0)
+        self.assertEqual((a.top - b.top) % 30, 0)
+        self.assertLess(a.acquisition_bounds[0], 6.2)
+        self.assertGreater(a.acquisition_bounds[2], 6.25)
+
+    def test_overlapping_samples_produce_matching_interior_contours(self):
+        from shapely.geometry import box, mapping
+        from map_platform.topography_geometry import compile_contours
+        from map_platform.topography_artifacts import encode_contour_section
+        a = contour_sample(self.policy, self.cache, [6.20, .20, 6.25, .25])
+        b = contour_sample(self.policy, self.cache, [6.21, .21, 6.26, .26])
+        selection = mapping(box(6.215, .215, 6.245, .245))
+        left, right = (compile_contours(sample, selection) for sample in (a, b))
+        self.assertTrue(left.sections)
+        self.assertEqual({k: encode_contour_section(v) for k, v in left.sections.items()},
+                         {k: encode_contour_section(v) for k, v in right.sections.items()})
+
+    def test_missing_halo_rejected_before_native_download(self):
+        with patch.object(self.cache, "stage", side_effect=AssertionError("must not download")):
+            with self.assertRaisesRegex(ValueError, "halo has uncovered"):
+                contour_sample(self.policy, self.cache, [6.999, .2, 7, .201])
+
+    def test_internal_validity_mask_precedes_interpolation(self):
+        receipt = self.cache.stage(self.policy.sources[0], (6, 0))
+        path = self.cache.verify(receipt)
+        with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=True), rasterio.open(path, "r+") as dataset:
+            data = dataset.read(1)
+            data[:, 25:] = 999999  # Must never bleed into otherwise valid heights.
+            dataset.write(data, 1)
+            mask = np.full((100, 100), 255, dtype="uint8")
+            mask[:, 25:] = 0
+            dataset.write_mask(mask)
+        with patch.object(self.cache, "stage", return_value=receipt), patch.object(self.cache, "verify", return_value=path):
+            sample = contour_sample(self.policy, self.cache, [6.2, .2, 6.3, .3])
+        self.assertGreater(sample["noDataMillionths"], 0)
+        self.assertEqual(sample["nativeRasterAudits"][0]["invalidPixels"], 7500)
+        self.assertTrue(sample["contours"])
+        self.assertTrue(all(record["elevationM"] < 1000 for record in sample["contours"]))
+
+    def test_undeclared_sentinel_and_units_cannot_be_smoothed_away(self):
+        receipt = self.cache.stage(self.policy.sources[0], (6, 0))
+        path = self.cache.verify(receipt)
+        with rasterio.open(path, "r+") as dataset:
+            data = dataset.read(1)
+            data[50, 50] = -32768
+            dataset.write(data, 1)
+        with patch.object(self.cache, "stage", return_value=receipt), patch.object(self.cache, "verify", return_value=path):
+            with self.assertRaisesRegex(ValueError, "native DEM elevations"):
+                contour_sample(self.policy, self.cache, [6.2, .2, 6.25, .25])
+            with rasterio.open(path, "r+") as dataset:
+                dataset.scales = (0.3048,)
+            with self.assertRaisesRegex(ValueError, "scale or offset"):
+                contour_sample(self.policy, self.cache, [6.2, .2, 6.25, .25])
+
+    def test_nan_and_ordinary_negative_heights_are_distinguished(self):
+        receipt = self.cache.stage(self.policy.sources[0], (6, 0))
+        path = self.cache.verify(receipt)
+        with rasterio.open(path, "r+") as dataset:
+            data = dataset.read(1) - 600
+            data[:, 25:] = np.nan
+            dataset.nodata = np.nan
+            dataset.write(data, 1)
+        with patch.object(self.cache, "stage", return_value=receipt), patch.object(self.cache, "verify", return_value=path):
+            sample = contour_sample(self.policy, self.cache, [6.2, .2, 6.3, .3])
+        self.assertEqual(sample["nativeRasterAudits"][0]["declaredNoData"], "nan")
+        self.assertTrue(any(record["elevationM"] < 0 for record in sample["contours"]))
 
     def test_large_grid_rejected_before_tile_download(self):
         with patch.object(self.cache, "stage", side_effect=AssertionError("must not download")):
