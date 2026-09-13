@@ -34,6 +34,19 @@ RGB565 canvas; longitude wrapping and drag-to-tune coordinates use its WGS84
 plate-carree projection. See `esp32/tools/world-radio-map/README.md` for source,
 licensing, memory budget and deterministic regeneration.
 
+The map has no title banner. Its visible viewport ends above the station panel,
+with the reticle centered in that viewport. A 2x display-only zoom provides a
+closer view without another texture allocation. Drag deltas move the camera in
+screen pixels, 1:1 with the finger; longitude wraps and vertical movement stops
+at the map edges so the viewport stays covered. Ordinary playback updates and
+location-search results do not recenter the map. Explicit previous/next/random
+station selection can focus the resulting station, constrained to the same map
+bounds; beginning a drag cancels that pending focus.
+
+The lower arrows wrap through the current station results. `1 / 4` means the
+first of four candidate stations, not volume or signal strength. The separate
+top `NEXT` button cycles to another device screen.
+
 1. The rider opens **World Radio** and drags the wrapped, equirectangular map
    under the fixed reticle.
 2. Releasing the map sends one fixed-size `WRQ1` coordinate request over the
