@@ -3,15 +3,15 @@
 ## Planning snapshot
 
 - Issue: [#190 — Add topographic map support to the device and iOS MapKit](https://github.com/seichris/open-bike-computer/issues/190)
-- Baseline: GitHub `origin/main` at `ce3c5a0cfa1c5bdd428197e71a15d3d3d7973157`, fetched 2026-09-12
+- Baseline: GitHub `origin/main` at `222435161ab220e1e7d696eea1e75c3c63c1e36b`, fetched 2026-09-13
 - Previous baseline: `9ef7f09fce0e0d95e349e6ef9c54da137fcff286` (2026-08-31)
 - Planning branch: `plan/issue-190-topographic-maps`
 - Plan PR: [#374](https://github.com/seichris/open-bike-computer/pull/374)
-- Architecture refresh: 2026-09-12; the branch includes the baseline above
+- Architecture refresh: 2026-09-13; the implementation branch includes the baseline above
 - Provider research date: 2026-08-31; public Copernicus acquisition and catalog coverage rechecked 2026-09-12. Regional source reviews still need renewal before implementation.
 - Product decision, 2026-09-12: **free**, prioritizing the broadest practical global coverage; no purchase or subscription requirement.
 - Implementation branch: `feature/topographic-maps`, following the documentation-only PR above.
-- Status: global source selection, verified acquisition, bounded contour evidence, and disabled-profile policy implemented; app/device artifacts and production enablement remain unfinished. See [implementation status and operator runbook](../topography-pipeline.md).
+- Status: global acquisition, bounded contour compilation, development FMB5/companion artifacts, cross-platform readers, a firmware render pass and local MapKit overlay are implemented. Public job/catalog/download/settings integration and production enablement remain unfinished. See [implementation status and operator runbook](../topography-pipeline.md).
 
 ## Outcome
 
@@ -51,7 +51,8 @@ The following changes since the original plan affect implementation directly. Th
 | Firmware camera | [Stable camera contract](../map-stable-camera.md) and [mapCamera.hpp](../../esp32/lib/maps/src/mapCamera.hpp); #407 | Development profiles use accepted-camera projection and reusable decoded scenes; production still uses the legacy path. Contours must support both without implicitly enabling the new camera in production. |
 | Render/storage ownership | [Render scheduler](../firmware-map-render-scheduler.md), [MapRenderJob](../../esp32/lib/maps/src/mapRenderJob.hpp), and [runtime integration](../reviews/pr-424-integration-2026-09-08.md); #424 | Rendering, map-root probing, and activation share the existing worker. Position updates coalesce; semantic changes cancel. Contours must not introduce starvation or a second SD/cache owner. |
 | Benchmark and release evidence | [Renderer benchmark](../renderer-benchmark.md), [gate file](../../esp32/tools/renderer_benchmark_gates.json), and [factory qualification](../firmware-factory-release.md); #344, #368-#373, #384, #400, #401, #438 | Extend window-scoped diagnostics and existing memory/DMA/crypto gates. Qualify both boards and record the actual profile; production boot acceptance uses authenticated evidence rather than diagnostic serial output. |
-| BLE negotiation | [Generated ride contract](../../protocol/ride-ble-contract-v1.json), [capabilities](../../esp32/lib/ble_navigation/device_capabilities_protocol.hpp), and [visibility normalization](../../esp32/lib/ble_navigation/map_profile_protocol.hpp) | Client version is now 23, with CAP2 feature bits 0-25 allocated. New capability allocation must preserve these and stay distinct from the map-visibility mask. |
+| BLE negotiation | [Generated ride contract](../../protocol/ride-ble-contract-v1.json), [capabilities](../../esp32/lib/ble_navigation/device_capabilities_protocol.hpp), and [visibility normalization](../../esp32/lib/ble_navigation/map_profile_protocol.hpp) | Client version is now 24, with CAP2 feature bits 0-26 allocated. Screen configuration (#391) owns bit 26/version 24. New capability allocation must preserve these and stay distinct from the map-visibility mask. |
+| Configurable screen instances | [Screen configuration](../../esp32/lib/ble_navigation/screen_configuration.hpp) and [app controller](../../ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift); #391 | Contour visibility must round-trip per screen instance, preserve independent Map/Map + Navigation profiles, and participate in the existing profile-override render generation. Do not implement only the legacy global settings path. |
 
 MapKit already offers Standard, Satellite, Hybrid, and realistic elevation presentation. Its delegate still treats `MKPolyline` overlays as route content, including separate saved-route/alternative styling. Add a dedicated tile-overlay renderer while retaining those identities, ordering, hit testing, and camera behavior. The original blanket-overlay-removal finding is resolved by #429 and is no longer implementation work.
 
@@ -478,7 +479,7 @@ Use muted brown minor lines and a darker/thicker index line, with day/night pale
 
 ## BLE capability, status, and settings
 
-Extend `protocol/ride-ble-contract-v1.json`, regenerate Swift/C++ constants, and advance the client capability version from the current 23. At this baseline, CAP2 bit 26 and client version 24 are the next candidates; reserve them only after rechecking the current contract at implementation time. Never overwrite the existing orientation or Watch-motion capabilities, and do not confuse CAP2 bit numbers with visibility-mask bits. The new capability denotes implemented renderer-format-4/topographic-contour support, not firmware text or a successful HTTPS connection.
+Extend `protocol/ride-ble-contract-v1.json`, regenerate Swift/C++ constants, and advance the client capability version from the current 24. After #391, CAP2 bit 27 and client version 25 are the next candidates; reserve them only after rechecking the current contract at implementation time. Bit 26/version 24 belong to configurable screen instances. Never overwrite the existing orientation, screen-configuration or Watch-motion capabilities, and do not confuse CAP2 bit numbers with visibility-mask bits. The new capability denotes implemented renderer-format-4/topographic-contour support, not firmware text or a successful HTTPS connection.
 
 Update the active-map status contract to report at least:
 

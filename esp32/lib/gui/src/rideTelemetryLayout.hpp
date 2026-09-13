@@ -63,6 +63,24 @@ struct Layout {
   std::array<Rect, 6> metrics{};
 };
 
+constexpr std::size_t kConfigurableSlotCount = 7;
+
+// Stable logical positions shared by the firmware renderer and host tests.
+// Slot zero combines the hero title and value area; slots one through six are
+// the compact two-column cells from top-left to bottom-right.
+constexpr Rect configurableSlotRect(const Layout &layout,
+                                    std::size_t index) {
+  if (index == 0) {
+    return {
+        layout.hero.x,
+        layout.hero.y - kMetricValueOffsetY,
+        layout.hero.width,
+        kMetricValueOffsetY + layout.hero.height,
+    };
+  }
+  return index < kConfigurableSlotCount ? layout.metrics[index - 1] : Rect{};
+}
+
 struct MetricPlacement {
   bool showWorkoutOnlyMetrics = true;
   bool showBottomMetrics = true;

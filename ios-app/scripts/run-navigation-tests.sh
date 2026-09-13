@@ -39,6 +39,8 @@ xcrun swiftc \
   -D HOST_TESTING \
   -o "${OUT}" \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift \
+  ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift \
   ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift \
@@ -89,6 +91,8 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
+  ios-app/BikeComputerTests/DeviceScreenConfigurationTests.swift \
+  ios-app/BikeComputerTests/DeviceScreenConfigurationStateTests.swift \
   ios-app/BikeComputerTests/NavigationProtocolTests.swift
 
 "${OUT}"
@@ -176,6 +180,8 @@ xcrun swiftc \
   -L "${IOS_SUPPORT}/usr/lib/swift" \
   -o "${PREVIEW_CATALYST_OUT}" \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift \
+  ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \

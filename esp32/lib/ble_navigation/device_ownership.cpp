@@ -1187,6 +1187,9 @@ bool DeviceOwnership::authorizeRideWrite(AuthenticatedChannel channel,
   if (!sessionAuthenticated_) {
     return false;
   }
+  if (channel == AuthenticatedChannel::ScreenConfiguration) {
+    return sessionRole_ == SessionRole::Owner;
+  }
   if (sessionRole_ == SessionRole::WatchRide &&
       channel == AuthenticatedChannel::Settings) {
     return false;

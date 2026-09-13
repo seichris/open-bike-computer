@@ -26,12 +26,18 @@ def inherited_option(section: str, option: str) -> str:
 
 prebuild_source = (project_dir / "prebuild.py").read_text()
 main_source = (project_dir / "src/main.cpp").read_text()
+lv_conf_source = (project_dir / "lib/lvgl/lv_conf.h").read_text()
 assert "-DBUILD_PROFILE=" in prebuild_source
 assert "OPEN_BIKE_EXPECTED_GIT_SHA" in prebuild_source
 assert "SOURCE_DATE_EPOCH" in prebuild_source
 assert "build_timestamp_from_source_date_epoch" in prebuild_source
 assert 'git_sha = f"unverified-{detected_git_sha}"' in prebuild_source
 assert "Waveshare firmware builds must use tools/build_firmware.py" in prebuild_source
+assert "#define LV_FONT_MONTSERRAT_42 0" in lv_conf_source
+for gui_source_path in (project_dir / "lib/gui/src").glob("*.[ch]pp"):
+    assert "&lv_font_montserrat_42" not in gui_source_path.read_text(), (
+        f"{gui_source_path.name} restores the unused 72 KiB Montserrat 42 asset"
+    )
 assert 'env.subst("$PROJECT_LIBDEPS_DIR")' in prebuild_source
 assert '".pio/libdeps/" + flavor' not in prebuild_source
 assert "def record_link_start(target, source, env):" in prebuild_source

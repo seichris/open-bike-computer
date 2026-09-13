@@ -71,6 +71,26 @@ public:
     return putBytes(key, &value, 1);
   }
 
+  uint32_t getUInt(const char *key, uint32_t fallback) const {
+    uint32_t value = fallback;
+    const auto *stored = find(key);
+    if (stored != nullptr && stored->size() == sizeof(value))
+      std::memcpy(&value, stored->data(), sizeof(value));
+    return value;
+  }
+
+  size_t putUInt(const char *key, uint32_t value) {
+    return putBytes(key, &value, sizeof(value));
+  }
+
+  bool getBool(const char *key, bool fallback) const {
+    return getUChar(key, fallback ? 1 : 0) != 0;
+  }
+
+  size_t putBool(const char *key, bool value) {
+    return putUChar(key, value ? 1 : 0);
+  }
+
   std::string getString(const char *key, const char *fallback) const {
     const auto *value = find(key);
     if (value == nullptr) return fallback == nullptr ? "" : fallback;
