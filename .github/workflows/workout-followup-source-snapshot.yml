@@ -11,16 +11,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 798c0ac7e9d6e5b2cbd5dc542253b4153fc3cc0d
+          repository: lvgl/lvgl
+          ref: 7f07a129e8d77f4984fff8e623fd5be18ff42e74
           persist-credentials: false
-      - name: Archive tracked source only
+      - name: Archive pinned LVGL source for local host rendering
         run: |
-          test "$(git rev-parse HEAD)" = 798c0ac7e9d6e5b2cbd5dc542253b4153fc3cc0d
-          git archive --format=tar.gz HEAD AGENTS.md .github ios-app esp32 tools protocol hardware/README.md docs > "$RUNNER_TEMP/workout-source.tar.gz"
-          sha256sum "$RUNNER_TEMP/workout-source.tar.gz"
+          test "$(git rev-parse HEAD)" = 7f07a129e8d77f4984fff8e623fd5be18ff42e74
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/lvgl-9.2.2-source.tar.gz"
+          sha256sum "$RUNNER_TEMP/lvgl-9.2.2-source.tar.gz"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: workout-followup-source
-          path: ${{ runner.temp }}/workout-source.tar.gz
+          name: lvgl-9.2.2-source
+          path: ${{ runner.temp }}/lvgl-9.2.2-source.tar.gz
           retention-days: 1
           if-no-files-found: error
