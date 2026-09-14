@@ -24,6 +24,7 @@ struct Presentation {
   const char *unit = "";
   PresentationKind kind = PresentationKind::Empty;
   bool available = false;
+  bool isAltitude = false;
   int8_t zoneIndex = -1;
   std::array<char, 24> value{};
 };
@@ -33,6 +34,7 @@ inline Presentation bottomMetric(
     const ride_telemetry_presenter::ViewModel &model) {
   Presentation presentation{};
   presentation.kind = PresentationKind::Scalar;
+  presentation.isAltitude = metric == ride_telemetry_presenter::BottomMetric::Altitude;
   presentation.title = ride_telemetry_presenter::bottomMetricTitle(metric);
   ride_telemetry_presenter::formatBottomMetric(
       metric, model, presentation.value.data(), presentation.value.size());
@@ -105,6 +107,7 @@ inline Presentation make(Widget widget,
     presentation.available = model.wallElapsedSeconds.available;
     return presentation;
   case Widget::Altitude:
+    presentation.isAltitude = true;
     presentation.title = "Altitude m";
     presentation.kind = PresentationKind::Scalar;
     ride_telemetry_presenter::formatInteger(

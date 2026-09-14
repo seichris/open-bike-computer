@@ -247,6 +247,30 @@ int main() {
       assert(label.text=="--"); assertVisible(label);
     }
   }
+  for (const auto &layout : {round,rectangle}) {
+    rideLayout=layout;
+    for (size_t right=2;right<7;right+=2) {
+      auto leftRect=configurableValueRect(layout,right-1);
+      auto rightRect=configurableValueRect(layout,right);
+      for (const char *time : {"2:18:21","2:18:22","9:59:59","10:00:00"}) {
+        for (const char *altitude : {"111","222","-32768","0","32767"}) {
+          const auto *font=fontForPair(
+              {time,leftRect.width-4,leftRect.height},
+              {altitude,rightRect.width-4,rightRect.height},metricFontRole());
+          assert(font);
+          lv_obj_t left{},rightLabel{};
+          setMetricValueIfChanged(&left,time,leftRect,metricFontRole(),font);
+          setMetricValueIfChanged(&rightLabel,altitude,rightRect,metricFontRole(),font);
+          assert(left.font==rightLabel.font);assertVisible(left);assertVisible(rightLabel);
+          assert(left.text==time && rightLabel.text==altitude);
+        }
+      }
+      assert(fontForPair({"2:18:21",leftRect.width-4,leftRect.height},
+                         {"111",rightRect.width-4,rightRect.height},metricFontRole()) ==
+             fontForPair({"2:18:22",leftRect.width-4,leftRect.height},
+                         {"222",rightRect.width-4,rightRect.height},metricFontRole()));
+    }
+  }
   assert(!fontForText("123",1,60,Role::MetricLarge));
   assert(!fontForText("123",200,1,Role::MetricLarge));
   assert(!fontForText(nullptr,200,60,Role::MetricLarge));
