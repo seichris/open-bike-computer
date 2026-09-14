@@ -42,6 +42,9 @@ class BlockMetadata:
     maximum_language_id: int
     building_records: int = 0
     building_provenance: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0)
+    contour_records: int = 0
+    contour_points: int = 0
+    contour_intervals: tuple[int, int] = (0, 0)
 
 
 def _take(data: bytes, offset: int, amount: int, context: str) -> tuple[bytes, int]:
@@ -232,7 +235,7 @@ def _validate_label_text(raw: bytes) -> str:
 
 
 def _validate_fmb_label_block(path: Path, version: int) -> BlockMetadata:
-    if version not in {3, 4}:
+    if version not in {3, 4, 5}:
         raise ValueError("label block version is unsupported")
     data = path.read_bytes()
     expected_header = b"FMB" + bytes((version,))
@@ -353,15 +356,22 @@ def _validate_fmb_label_block(path: Path, version: int) -> BlockMetadata:
         raise ValueError("FMB v3 label table has trailing bytes")
     building_records, building_provenance = (
         _validate_building_section(sections[3])
-        if version == 4
+        if version >= 4
         else (0, (0, 0, 0, 0, 0))
     )
+    contours = None
+    if version == 5:
+        from .topography_artifacts import decode_contour_section
+        contours = decode_contour_section(sections[4])
     return BlockMetadata(
         fingerprint,
         maximum_glyph_id,
         maximum_language_id,
         building_records,
         building_provenance,
+        len(contours.contours) if contours else 0,
+        contours.point_count if contours else 0,
+        (contours.minor_interval_m, contours.index_interval_m) if contours else (0, 0),
     )
 
 
@@ -371,6 +381,10 @@ def validate_fmb3(path: Path) -> BlockMetadata:
 
 def validate_fmb4(path: Path) -> BlockMetadata:
     return _validate_fmb_label_block(path, 4)
+
+
+def validate_fmb5(path: Path) -> BlockMetadata:
+    return _validate_fmb_label_block(path, 5)
 
 
 def _validate_building_section(
@@ -478,15 +492,13 @@ def validate_renderer_artifacts(
     font_relative = f"VECTMAP/{map_id}/assets/street-labels.fma"
     if not fmb_paths:
         raise ValueError("map pack contains no binary map blocks")
-    if format_version in {2, 3}:
+    if format_version in {2, 3, 4}:
         if fmp_paths or paths.count(font_relative) != 1:
             raise ValueError(f"renderer target {format_version} has invalid block/font roles")
         font = validate_fma1(map_root / font_relative)
         for relative in fmb_paths:
             block = (
-                validate_fmb4(map_root / relative)
-                if format_version == 3
-                else validate_fmb3(map_root / relative)
+                {2: validate_fmb3, 3: validate_fmb4, 4: validate_fmb5}[format_version](map_root / relative)
             )
             if block.profile_fingerprint != font.profile_fingerprint:
                 raise ValueError("FMB/FMA1 profile fingerprint mismatch")

@@ -98,6 +98,7 @@ from .source_cache import (
     default_backend_data_root,
 )
 from .sources import SourceIndex
+from .topography_sources import load_topography_source_policy
 from .strava_client import StravaTransport
 from .strava_integrations import (
     StravaIntegrationError,
@@ -362,6 +363,7 @@ def create_app(
         preprocessing_mode=preprocessing_scope_mode,
     )
     generation_profile_policy = load_generation_profile_policy(repo_root)
+    topography_source_policy = load_topography_source_policy(repo_root)
     service = MapJobService(
         SourceIndex.from_json(source_index_path, fallback_provider=source_provider),
         job_store,
@@ -610,6 +612,7 @@ def create_app(
             "status": "ok",
             "deploymentChannel": deployment_channel,
             "generationProfilePolicySha256": generation_profile_policy.sha256,
+            "topography": topography_source_policy.public_summary(),
             "mapStreamRollout": map_stream_rollout.public_summary(),
             "preparationEstimates": estimate_coordinator.mode.value,
             "admissionPolicyVersion": admission_policy.policy_version,

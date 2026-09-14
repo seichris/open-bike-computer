@@ -1688,6 +1688,13 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
       return new MapBlock();
     }
   }
+  if (version >= 5 && !map_contour_block::decode(
+          reinterpret_cast<const uint8_t *>(file), fileSize,
+          mblock->contourData, shouldCancelMapRenderWork)) {
+    Maps::isMapFound = false;
+    delete mblock;
+    return new MapBlock();
+  }
   if (version >= 4) {
     std::string buildingError;
     if (!map_building_block::decode(
@@ -2684,6 +2691,84 @@ bool Maps::readVectorMap(
       }
     }
 
+  }
+
+  // Contours share the accepted camera, raw surface, worker and semantic
+  // cancellation policy. Draw after every area's fill, before any road/route.
+  if ((style.visibilityMask & map_profile_protocol::VISIBILITY_CONTOURS) != 0) {
+    struct Candidate {
+      MapBlock *block = nullptr;
+      uint16_t record = 0;
+      bool index = false;
+      double distance = 0;
+    };
+    std::array<Candidate, 128> admitted{};
+    size_t admittedCount = 0;
+    const auto less = [](const Candidate &a, const Candidate &b) {
+      if (a.index != b.index) return a.index > b.index;
+      if (a.distance != b.distance) return a.distance < b.distance;
+      if (a.block->offset.y != b.block->offset.y) return a.block->offset.y < b.block->offset.y;
+      if (a.block->offset.x != b.block->offset.x) return a.block->offset.x < b.block->offset.x;
+      return a.record < b.record;
+    };
+    uint32_t candidates = 0;
+    for (MapBlock *block : memCache.blocks) {
+      if (!block || !block->inView) continue;
+      const BBox local = viewPort.bbox - block->offset;
+      for (size_t number = 0; number < block->contourData.records.size(); ++number) {
+        if (shouldCancelMapRenderWork()) return false;
+        const auto &record = block->contourData.records[number];
+        const bool isIndex = (record.flags & 1U) != 0;
+        if (zoom > (isIndex ? 6 : 3) || record.maxX < local.min.x || record.minX > local.max.x ||
+            record.maxY < local.min.y || record.minY > local.max.y) continue;
+        ++candidates;
+        const double dx = double(record.minX + record.maxX) - double(local.min.x + local.max.x);
+        const double dy = double(record.minY + record.maxY) - double(local.min.y + local.max.y);
+        Candidate value{block, static_cast<uint16_t>(number), isIndex, dx * dx + dy * dy};
+        size_t position = 0;
+        while (position < admittedCount && !less(value, admitted[position])) ++position;
+        if (position == admitted.size()) continue;
+        if (admittedCount < admitted.size()) ++admittedCount;
+        for (size_t move = admittedCount - 1; move > position; --move) admitted[move] = admitted[move - 1];
+        admitted[position] = value;
+      }
+    }
+    if (diagnostics) {
+      diagnostics->candidateContours = candidates;
+      diagnostics->suppressedContours = candidates - admittedCount;
+    }
+    for (bool indexPass : {false, true}) {
+      for (size_t candidate = 0; candidate < admittedCount; ++candidate) {
+        const auto &value = admitted[candidate];
+        if (value.index != indexPass) continue;
+        const auto &record = value.block->contourData.records[value.record];
+        for (uint16_t point = 1; point < record.pointCount; ++point) {
+          if (shouldCancelMapRenderWork()) return false;
+          const auto &a = value.block->contourData.points[record.pointOffset + point - 1];
+          const auto &b = value.block->contourData.points[record.pointOffset + point];
+          auto start = projection.groundForWorld({double(value.block->offset.x) + a.x, double(value.block->offset.y) + a.y});
+          auto end = projection.groundForWorld({double(value.block->offset.x) + b.x, double(value.block->offset.y) + b.y});
+          if (!projection.clipSegmentToNearPlane(start, end)) continue;
+          const auto first = projection.projectGround(start), last = projection.projectGround(end);
+          if (!first.valid || !last.valid) continue;
+          drawLine(surface, map_transform::quantizePixel(first.x), map_transform::quantizePixel(first.y),
+                   map_transform::quantizePixel(last.x), map_transform::quantizePixel(last.y),
+                   indexPass ? 0x8BCA : 0xBCF0, indexPass ? 2 : 1);
+          if (diagnostics) ++diagnostics->renderedContourSegments;
+        }
+      }
+    }
+  }
+
+  for (MapBlock *block : memCache.blocks) {
+    if (shouldCancelMapRenderWork()) return false;
+    if (!block || !block->inView) continue;
+    ScreenMapRenderSettings blockStyle = style;
+    blockStyle.visibilityMask = map_profile_protocol::visibilityMaskForMapVersion(style.visibilityMask, block->formatVersion);
+    const BBox localViewport = viewPort.bbox - block->offset;
+    const auto worldPoint = [&](Point16 point) -> map_transform::WorldPoint {
+      return {double(point.x) + block->offset.x, double(point.y) + block->offset.y};
+    };
     for (const Polyline &line : block->polylines) {
       if (shouldCancelMapRenderWork())
         return false;

@@ -19,6 +19,7 @@ PINNED_IMAGE_PATTERN = re.compile(r"[^@\s]+@(sha256:[0-9a-f]{64})")
 WORKER_SOURCE_ROOTS = (
     "map-platform/backend/map_platform",
     "map-platform/backend/config",
+    "map-platform/config/topography-source-policy-v1.json",
     "map-platform/backend/pyproject.toml",
     "map-platform/backend/Dockerfile",
     "map-platform/backend/tools/generate_map_stream_build_identity.py",

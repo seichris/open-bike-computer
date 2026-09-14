@@ -76,6 +76,11 @@ int main() {
          0);
 
   const uint32_t allLegacyFeatures = VISIBILITY_LEGACY_FEATURE_MASK;
+  assert(VISIBILITY_CONTOURS == (1U << 13));
+  assert(normalizedFeatureVisibilityMask(VISIBILITY_EXTENDED_MARKER | VISIBILITY_CONTOURS) == VISIBILITY_CONTOURS);
+  assert(visibilityMaskForMapVersion(VISIBILITY_CONTOURS, 4) == 0);
+  assert(visibilityMaskForMapVersion(VISIBILITY_CONTOURS, 5) == VISIBILITY_CONTOURS);
+  assert((VISIBILITY_EXTENDED_FEATURE_MASK & VISIBILITY_CONTOURS) == 0);
   assert(normalizedFeatureVisibilityMask(allLegacyFeatures) ==
          VISIBILITY_EXTENDED_FEATURE_MASK);
   assert(normalizedFeatureVisibilityMask(VISIBILITY_LOCAL_STREETS) ==

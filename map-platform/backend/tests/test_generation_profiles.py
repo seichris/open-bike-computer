@@ -65,6 +65,41 @@ class GenerationProfilePolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "development or production"):
                 configured_deployment_channel()
 
+    def test_v2_disables_topography_even_for_canary_claims(self):
+        policy = GenerationProfilePolicy.load(self.policy_path.with_name("generation-profile-policy-v2.json"))
+        for channel in ("development", "production"):
+            profiles = policy.available_profiles(channel, canary_profile_ids=frozenset({"topographic-contours-v1"}))
+            self.assertEqual([p.renderer_format_version for p in profiles], [3, 2, 1])
+            self.assertEqual(policy.channels[channel].disabled_profile_ids, ("topographic-contours-v1",))
+
+    def test_v2_cannot_enable_an_unimplemented_renderer(self):
+        payload = json.loads(self.policy_path.with_name("generation-profile-policy-v2.json").read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "policy.json"
+            for target in ("globalProfiles", "canaryProfiles"):
+                value = json.loads(json.dumps(payload))
+                channel = value["channels"]["development"]
+                channel["disabledProfiles"] = []
+                channel[target].append("topographic-contours-v1")
+                path.write_text(json.dumps(value))
+                with self.assertRaisesRegex(ValueError, "not implemented"):
+                    GenerationProfilePolicy.load(path)
+
+    def test_v2_rejects_missing_overlapping_and_wrong_feature_contracts(self):
+        payload = json.loads(self.policy_path.with_name("generation-profile-policy-v2.json").read_text())
+        mutations = [lambda p: p.update(schemaVersion=True),
+                     lambda p: p["channels"]["development"].update(disabledProfiles=[]),
+                     lambda p: p["channels"]["development"]["disabledProfiles"].append("legacy-vector-v1"),
+                     lambda p: p["profiles"][-1].update(features=["contours"])]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "policy.json"
+            for mutate in mutations:
+                value = json.loads(json.dumps(payload))
+                mutate(value)
+                path.write_text(json.dumps(value))
+                with self.assertRaises(ValueError):
+                    GenerationProfilePolicy.load(path)
+
     def test_duplicate_json_keys_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "policy.json"

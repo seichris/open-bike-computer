@@ -24,5 +24,8 @@ __all__ = [
     "strict_json",
     "strava_client",
     "strava_integrations",
+    "topography_sources",
+    "topography_cache",
+    "topography_pipeline",
     "worker",
 ]
