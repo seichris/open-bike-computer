@@ -1235,6 +1235,17 @@ orientation (setting ID `37`). Firmware advertises bit `24` only with
 physical qualification. This capability is independent of label orientation.
 Version `23` requests bit `25`, Watch GPS motion evidence.
 Version `24` requests bit `26` plus TLV type `2`, configurable screen instances.
+Version `25` requests bit `27`, World Radio. The iPhone negotiates version
+`25`; direct Watch control stays at version `23`. Bit `23` remains the
+renderer replay capability and must never be interpreted as World Radio.
+World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
+Firmware advertises it only with `FIRMWARE_DIAGNOSTICS=1`; production
+omits both the screen and capability pending physical and OTA-size qualification.
+Its owner-authenticated `WRQ1` requests and `WRS1` status use the existing
+navigation characteristic; stream discovery and playback run on the iPhone.
+See [World Radio](world-radio.md) and the bounded codecs in
+`esp32/lib/world_radio/world_radio_protocol.hpp` and
+`ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift`.
 Production builds keep bit `15` clear until the
 ride-detection physical gates pass. Firmware sets bit `16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
@@ -1302,6 +1313,9 @@ Atomic renderer replay sample, CAP2 schema 1, only feature bit 23:
 
 Watch GPS motion evidence, CAP2 schema 1, only feature bit 25:
 43 41 50 32 01 00 00 00 02
+
+World Radio, CAP2 schema 1, only feature bit 27:
+43 41 50 32 01 00 00 00 08
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -2013,3 +2027,13 @@ The HTTPS service is configured by firmware at boot but remains disabled until
 BLE transfer control binds it to an authenticated owner session. BLE disconnect
 synchronously clears the token, hotspot secret, binding, and request generation,
 stops the listener, and schedules mode-specific cleanup.
+
+### World Radio reuse invariants
+
+The World Radio reuse/lifecycle follow-up does not change WRQ1/WRS1 bytes,
+CAP2 bit 27, client version 25, or screen type 5. Stable screen identifiers now
+come from `screen_types` in `protocol/ride-ble-contract-v1.json`; generated
+Swift/C++ adapters preserve legacy masks and configurable-screen payload IDs.
+The common request/status fixtures in `protocol/fixtures/world-radio-v1.txt`
+are consumed by firmware and phone host tests. See `docs/world-radio.md` for
+playback intent, item/search generation and drag-settlement behavior.

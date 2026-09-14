@@ -1,7 +1,9 @@
 #pragma once
 
 #include "map_profile_protocol.hpp"
+#include "../utils/src/wireBytes.hpp"
 #include "ride_ble_protocol.generated.hpp"
+#include "../world_radio/world_radio_config.hpp"
 
 #include <array>
 #include <cstddef>
@@ -30,13 +32,7 @@ constexpr uint32_t ALLOWED_VISIBILITY_MASK =
     map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK |
     map_profile_protocol::VISIBILITY_OVERLAY_MASK;
 
-enum class ScreenType : uint8_t {
-  Map = 0,
-  Navigation = 1,
-  RideStats = 2,
-  MapNavigation = 3,
-  BatteryStatus = 4,
-};
+using ScreenType = ride_ble_protocol_generated::ScreenType;
 
 constexpr uint32_t screenTypeBit(ScreenType type) {
   return 1UL << static_cast<uint8_t>(type);
@@ -47,7 +43,8 @@ constexpr uint32_t SUPPORTED_SCREEN_TYPES =
     screenTypeBit(ScreenType::Navigation) |
     screenTypeBit(ScreenType::RideStats) |
     screenTypeBit(ScreenType::MapNavigation) |
-    screenTypeBit(ScreenType::BatteryStatus);
+    screenTypeBit(ScreenType::BatteryStatus) |
+    (world_radio_config::ENABLED ? screenTypeBit(ScreenType::WorldRadio) : 0);
 
 enum class RideStatsWidget : uint8_t {
   Empty = 0,
@@ -163,27 +160,13 @@ constexpr std::size_t CHUNK_HEADER_BYTES = 14;
 constexpr std::size_t ACK_BYTES = 17;
 constexpr std::size_t CAPABILITIES_TLV_VALUE_BYTES = 14;
 
-inline uint16_t readUInt16LE(const uint8_t *data) {
-  return static_cast<uint16_t>(data[0]) |
-         (static_cast<uint16_t>(data[1]) << 8U);
-}
+// Compatibility names used by the persisted configuration store. All byte
+// operations delegate to the same alignment-independent wire primitives.
+inline uint16_t readUInt16LE(const uint8_t *data) { return wire_bytes::readU16(data); }
+inline uint32_t readUInt32LE(const uint8_t *data) { return wire_bytes::readU32(data); }
+inline void writeUInt16LE(uint8_t *data, uint16_t value) { wire_bytes::writeU16(data, value); }
+inline void writeUInt32LE(uint8_t *data, uint32_t value) { wire_bytes::writeU32(data, value); }
 
-inline uint32_t readUInt32LE(const uint8_t *data) {
-  return static_cast<uint32_t>(data[0]) |
-         (static_cast<uint32_t>(data[1]) << 8U) |
-         (static_cast<uint32_t>(data[2]) << 16U) |
-         (static_cast<uint32_t>(data[3]) << 24U);
-}
-
-inline void writeUInt16LE(uint8_t *data, uint16_t value) {
-  data[0] = static_cast<uint8_t>(value);
-  data[1] = static_cast<uint8_t>(value >> 8U);
-}
-
-inline void writeUInt32LE(uint8_t *data, uint32_t value) {
-  for (uint8_t index = 0; index < 4; ++index)
-    data[index] = static_cast<uint8_t>(value >> (index * 8U));
-}
 
 inline uint32_t crc32(const uint8_t *data, std::size_t length) {
   uint32_t crc = 0xFFFFFFFFUL;
@@ -245,7 +228,7 @@ inline bool isValidUtf8Name(const char *value, std::size_t length) {
 
 inline bool isSupportedScreenType(ScreenType type) {
   const uint8_t raw = static_cast<uint8_t>(type);
-  return raw <= static_cast<uint8_t>(ScreenType::BatteryStatus) &&
+  return raw <= static_cast<uint8_t>(ScreenType::WorldRadio) &&
          (SUPPORTED_SCREEN_TYPES & (1UL << raw)) != 0;
 }
 
@@ -353,12 +336,12 @@ public:
   bool byte(uint8_t value) { return bytes(&value, 1); }
   bool uint16(uint16_t value) {
     uint8_t encoded[2]{};
-    writeUInt16LE(encoded, value);
+    wire_bytes::writeU16(encoded, value);
     return bytes(encoded, sizeof(encoded));
   }
   bool uint32(uint32_t value) {
     uint8_t encoded[4]{};
-    writeUInt32LE(encoded, value);
+    wire_bytes::writeU32(encoded, value);
     return bytes(encoded, sizeof(encoded));
   }
   bool bytes(const void *value, std::size_t length) {
@@ -386,14 +369,14 @@ public:
     uint8_t encoded[2]{};
     if (!bytes(encoded, sizeof(encoded)))
       return false;
-    value = readUInt16LE(encoded);
+    value = wire_bytes::readU16(encoded);
     return true;
   }
   bool uint32(uint32_t &value) {
     uint8_t encoded[4]{};
     if (!bytes(encoded, sizeof(encoded)))
       return false;
-    value = readUInt32LE(encoded);
+    value = wire_bytes::readU32(encoded);
     return true;
   }
   bool bytes(void *output, std::size_t length) {
@@ -429,6 +412,7 @@ inline std::size_t payloadSize(ScreenType type) {
     return RIDE_STATS_PAYLOAD_BYTES;
   case ScreenType::Navigation:
   case ScreenType::BatteryStatus:
+  case ScreenType::WorldRadio:
     return EMPTY_PAYLOAD_BYTES;
   }
   return 0;
@@ -474,6 +458,7 @@ inline bool encodePayload(Writer &writer, const ScreenInstance &instance) {
     return true;
   case ScreenType::Navigation:
   case ScreenType::BatteryStatus:
+  case ScreenType::WorldRadio:
     return writer.byte(PAYLOAD_VERSION);
   }
   return false;
@@ -547,7 +532,7 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
   if (input == nullptr || length < DOCUMENT_HEADER_BYTES + DOCUMENT_CRC_BYTES ||
       length > MAX_DOCUMENT_BYTES)
     return DecodeResult::Malformed;
-  const uint32_t expectedCRC = readUInt32LE(input + length - DOCUMENT_CRC_BYTES);
+  const uint32_t expectedCRC = wire_bytes::readU32(input + length - DOCUMENT_CRC_BYTES);
   if (crc32(input, length - DOCUMENT_CRC_BYTES) != expectedCRC)
     return DecodeResult::Malformed;
   Reader reader(input, length - DOCUMENT_CRC_BYTES);
@@ -577,7 +562,7 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
         reader.remaining() < static_cast<std::size_t>(nameLength) +
                                  payloadLength)
       return DecodeResult::Malformed;
-    if (rawType > static_cast<uint8_t>(ScreenType::BatteryStatus))
+    if (!isSupportedScreenType(static_cast<ScreenType>(rawType)))
       return DecodeResult::Unsupported;
     instance.type = static_cast<ScreenType>(rawType);
     instance.enabled = (flags & INSTANCE_ENABLED_FLAG) != 0;
@@ -615,7 +600,8 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
       break;
     }
     case ScreenType::Navigation:
-    case ScreenType::BatteryStatus: {
+    case ScreenType::BatteryStatus:
+    case ScreenType::WorldRadio: {
       uint8_t version = 0;
       if (payloadLength != EMPTY_PAYLOAD_BYTES || !reader.byte(version) ||
           version != PAYLOAD_VERSION)
@@ -638,7 +624,7 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
 
 inline uint32_t documentCRC(const uint8_t *document, std::size_t length) {
   return document != nullptr && length >= DOCUMENT_CRC_BYTES
-             ? readUInt32LE(document + length - DOCUMENT_CRC_BYTES)
+             ? wire_bytes::readU32(document + length - DOCUMENT_CRC_BYTES)
              : 0;
 }
 
@@ -652,9 +638,9 @@ inline std::size_t encodeCapabilitiesTLV(uint8_t *output,
   output[3] = static_cast<uint8_t>(MAX_INSTANCES);
   output[4] = static_cast<uint8_t>(MAX_NAME_BYTES);
   output[5] = static_cast<uint8_t>(RIDE_STATS_SLOT_COUNT);
-  writeUInt32LE(output + 6, SUPPORTED_SCREEN_TYPES);
-  writeUInt32LE(output + 10, SUPPORTED_RIDE_STATS_WIDGETS);
-  writeUInt16LE(output + 14, static_cast<uint16_t>(MAX_DOCUMENT_BYTES));
+  wire_bytes::writeU32(output + 6, SUPPORTED_SCREEN_TYPES);
+  wire_bytes::writeU32(output + 10, SUPPORTED_RIDE_STATS_WIDGETS);
+  wire_bytes::writeU16(output + 14, static_cast<uint16_t>(MAX_DOCUMENT_BYTES));
   return 2 + CAPABILITIES_TLV_VALUE_BYTES;
 }
 
@@ -672,9 +658,9 @@ inline bool decodeCapabilitiesTLV(const uint8_t *value, std::size_t length,
   maximumInstances = value[1];
   maximumNameBytes = value[2];
   slotCount = value[3];
-  screenTypes = readUInt32LE(value + 4);
-  widgets = readUInt32LE(value + 8);
-  maximumDocumentBytes = readUInt16LE(value + 12);
+  screenTypes = wire_bytes::readU32(value + 4);
+  widgets = wire_bytes::readU32(value + 8);
+  maximumDocumentBytes = wire_bytes::readU16(value + 12);
   return schemaVersion == SCHEMA_VERSION && maximumInstances > 0 &&
          maximumInstances <= MAX_INSTANCES && maximumNameBytes > 0 &&
          maximumNameBytes <= MAX_NAME_BYTES &&
@@ -696,7 +682,7 @@ inline std::size_t encodeRequest(uint32_t requestID, uint8_t *output,
   std::memcpy(output,
               ride_ble_protocol_generated::SCREEN_CONFIGURATION_REQUEST_MAGIC,
               4);
-  writeUInt32LE(output + 4, requestID);
+  wire_bytes::writeU32(output + 4, requestID);
   return REQUEST_BYTES;
 }
 
@@ -707,7 +693,7 @@ inline bool decodeRequest(const uint8_t *data, std::size_t length,
           data, length,
           ride_ble_protocol_generated::SCREEN_CONFIGURATION_REQUEST_MAGIC))
     return false;
-  requestID = readUInt32LE(data + 4);
+  requestID = wire_bytes::readU32(data + 4);
   return requestID != 0;
 }
 
@@ -721,8 +707,8 @@ inline std::size_t encodeChunk(const char *magic, uint32_t requestID,
       output == nullptr || capacity < CHUNK_HEADER_BYTES + payloadLength)
     return 0;
   std::memcpy(output, magic, 4);
-  writeUInt32LE(output + 4, requestID);
-  writeUInt32LE(output + 8, revision);
+  wire_bytes::writeU32(output + 4, requestID);
+  wire_bytes::writeU32(output + 8, revision);
   output[12] = chunkIndex;
   output[13] = chunkCount;
   std::memcpy(output + CHUNK_HEADER_BYTES, payload, payloadLength);
@@ -738,10 +724,10 @@ inline std::size_t encodeAcknowledgement(
     return 0;
   std::memcpy(output,
               ride_ble_protocol_generated::SCREEN_CONFIGURATION_ACK_MAGIC, 4);
-  writeUInt32LE(output + 4, requestID);
+  wire_bytes::writeU32(output + 4, requestID);
   output[8] = static_cast<uint8_t>(result);
-  writeUInt32LE(output + 9, revision);
-  writeUInt32LE(output + 13, checksum);
+  wire_bytes::writeU32(output + 9, revision);
+  wire_bytes::writeU32(output + 13, checksum);
   return ACK_BYTES;
 }
 
@@ -754,7 +740,7 @@ inline bool decodeAcknowledgement(
           data, length,
           ride_ble_protocol_generated::SCREEN_CONFIGURATION_ACK_MAGIC))
     return false;
-  requestID = readUInt32LE(data + 4);
+  requestID = wire_bytes::readU32(data + 4);
   const uint8_t rawResult = data[8];
   if (requestID == 0 ||
       rawResult > static_cast<uint8_t>(
@@ -763,8 +749,8 @@ inline bool decodeAcknowledgement(
     return false;
   result = static_cast<
       ride_ble_protocol_generated::ScreenConfigurationResult>(rawResult);
-  revision = readUInt32LE(data + 9);
-  checksum = readUInt32LE(data + 13);
+  revision = wire_bytes::readU32(data + 9);
+  checksum = wire_bytes::readU32(data + 13);
   return true;
 }
 
@@ -779,8 +765,8 @@ public:
       reset();
       return ChunkResult::Rejected;
     }
-    const uint32_t requestID = readUInt32LE(frame + 4);
-    const uint32_t baseRevision = readUInt32LE(frame + 8);
+    const uint32_t requestID = wire_bytes::readU32(frame + 4);
+    const uint32_t baseRevision = wire_bytes::readU32(frame + 8);
     const uint8_t chunkIndex = frame[12];
     const uint8_t chunkCount = frame[13];
     const std::size_t payloadLength = length - CHUNK_HEADER_BYTES;
