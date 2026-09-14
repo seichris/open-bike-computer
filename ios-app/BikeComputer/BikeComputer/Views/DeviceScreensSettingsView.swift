@@ -152,6 +152,7 @@ struct ConfigurableDeviceScreensSettingsSection: View {
         case .rideStats: return "figure.outdoor.cycle"
         case .mapPlusNavigation: return "location.north.line"
         case .batteryStatus: return "battery.100percent"
+        case .worldRadio: return "radio"
         }
     }
 }
@@ -255,7 +256,8 @@ private struct DeviceScreenInstanceEditorView: View {
                let capabilities = controller.capabilities {
                 RideStatsLayoutEditorView(
                     layout: rideStatsLayoutBinding,
-                    capabilities: capabilities
+                    capabilities: capabilities,
+                    firmwareTarget: bleManager.firmwareTarget
                 )
             }
 

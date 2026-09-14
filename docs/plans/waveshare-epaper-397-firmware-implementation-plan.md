@@ -21,7 +21,7 @@ hardware validation.
 
 The implementation branch also integrates main's configurable screen instances
 from `22243516`. Physical buttons follow the configured instance order, and
-display metadata uses client version 25, feature bit 27 and TLV type 3 so the
+display metadata uses client version 26, feature bit 28 and TLV type 3 so the
 existing screen configuration contract remains compatible.
 
 | Area | Source implementation | Remaining qualification |

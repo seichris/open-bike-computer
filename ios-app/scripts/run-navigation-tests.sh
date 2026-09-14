@@ -38,6 +38,8 @@ xcrun swiftc -D HOST_TESTING -parse-as-library \
 xcrun swiftc \
   -D HOST_TESTING \
   -o "${OUT}" \
+  ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift \
+  ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift \
   ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift \
@@ -81,6 +83,7 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/NavigationRuntime.swift \
   ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
   ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/WireBytes.swift \
   ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
   ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
@@ -97,6 +100,8 @@ xcrun swiftc \
 
 "${OUT}"
 
+bash "${SCRIPT_DIR}/run-world-radio-tests.sh"
+
 CYCLING_SENSOR_OUT="${TMPDIR:-/tmp}/open-bike-cycling-sensor-tests"
 
 for CYCLING_SENSOR_TEST in CyclingSensorTests CyclingSensorObservationIntegrationTests; do
@@ -105,6 +110,7 @@ xcrun swiftc \
   -default-isolation MainActor \
   -o "${CYCLING_SENSOR_OUT}" \
   ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/WireBytes.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
@@ -183,6 +189,8 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
+  ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift \
+  ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
@@ -220,6 +228,7 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/NavigationRuntime.swift \
   ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
   ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/WireBytes.swift \
   ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
   ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputerTests/SavedMapPreviewCatalystTests.swift

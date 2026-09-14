@@ -12036,7 +12036,7 @@ struct NavigationProtocolTests {
                 deviceSection.contains("case .mapPlusNavigation:") &&
                 deviceSection.contains("? .mapPlusNavigation\n                : .map") &&
                 deviceSection.contains(
-                    "case .navigation, .rideStats, .batteryStatus:\n            return nil"
+                    "case .navigation, .rideStats, .batteryStatus, .worldRadio:\n            return nil"
                 ),
             "only Map rows receive gears and legacy firmware opens the shared map profile"
         )
@@ -16353,10 +16353,12 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.detailedRideDiagnosticsCapabilityMask, 1 << 21, "CAP2 bit 21 advertises detailed ride diagnostics")
         assertEqual(DeviceBLEProtocol.rideDeliveryAcknowledgementCapabilityMask, 1 << 22, "CAP2 bit 22 advertises reliable ride delivery")
         assertEqual(DeviceBLEProtocol.screenConfigurationCapabilityMask, 1 << 26, "CAP2 bit 26 advertises configurable screen instances")
+        assertEqual(DeviceBLEProtocol.worldRadioCapabilityMask, 1 << 27, "CAP2 bit 27 advertises World Radio without colliding with renderer or Watch capabilities")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 25, "capability version negotiates board display metadata alongside configurable screens")
+        assertEqual(RideBLEGeneratedProtocolV1.boardDisplayMetadataFeature, 1 << 28, "CAP2 bit 28 advertises board display metadata without colliding with World Radio")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 26, "capability version negotiates World Radio and board display metadata alongside configurable screens")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationRotationSettingID, 37, "navigation orientation has an independent setting")
         assertEqual(RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature, 1 << 24, "orientation capability has its own bit")
         assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
@@ -16436,12 +16438,15 @@ struct NavigationProtocolTests {
         assertEqual(DeviceScreen.rideStats.rawValue, 2, "Ride Stats screen protocol value stays stable")
         assertEqual(DeviceScreen.mapPlusNavigation.rawValue, 3, "Map + Navigation screen protocol value stays stable")
         assertEqual(DeviceScreen.batteryStatus.rawValue, 4, "Battery Status screen uses protocol value 4")
+        assertEqual(DeviceScreen.worldRadio.rawValue, 5, "World Radio screen uses protocol value 5")
         assertEqual(DeviceScreen.mapPlusNavigation.title, "Map + Navigation", "combined map/navigation screen keeps user-facing label")
         assertEqual(DeviceScreen.batteryStatus.title, "Battery Status", "battery screen has a user-facing label")
+        assertEqual(DeviceScreen.worldRadio.title, "World Radio", "World Radio has a user-facing label")
         assertEqual(DeviceScreen.displayOrder,
-                    [.mapPlusNavigation, .rideStats, .map, .navigation, .batteryStatus],
-                    "Battery Status is the last device screen in settings and cycling order")
-        assertEqual(DeviceScreen.allScreensMask, 0x1F, "all supported device screens use the low five mask bits")
+                    [.mapPlusNavigation, .rideStats, .map, .navigation, .worldRadio, .batteryStatus],
+                    "World Radio precedes Battery Status in settings and cycling order")
+        assertEqual(DeviceScreen.allScreensMask, 0x3F, "all supported device screens use the low six mask bits")
+        assertEqual(DeviceScreen.defaultScreensMask, 0x1F, "World Radio is off by default")
         assertEqual(DeviceScreen.legacyScreensMask, 0x0F, "legacy firmware receives only the original four screen bits")
         assertEqual(DisconnectedSleepTimeout.oneMinute.settingValue, 60, "one-minute sleep timeout sends seconds")
         assertEqual(DisconnectedSleepTimeout.twoMinutes.settingValue, 120, "two-minute sleep timeout sends seconds")
@@ -18380,7 +18385,7 @@ struct NavigationProtocolTests {
         assert(manager.hasReceivedDeviceCapabilities,
                "valid CAP2 completes capability negotiation")
 
-        let epaperHeader = Data("CAP2".utf8) + Data([1, 0, 0, 0, 8])
+        let epaperHeader = Data("CAP2".utf8) + Data([1, 0, 0, 0, 16])
         let epaperMetadata = Data([3, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 0])
         let epaperCapabilities = epaperHeader + epaperMetadata
         assert(manager.handleDeviceCapabilitiesNotification(epaperCapabilities),
@@ -18396,7 +18401,7 @@ struct NavigationProtocolTests {
                "future unknown TLVs are consumed")
         assert(manager.hasReceivedDeviceCapabilities, "unknown TLVs are skipped")
         let screenMetadata = Data([2, 14, 1, 16, 24, 7, 31, 0, 0, 0, 255, 255, 1, 0, 0, 16])
-        let combinedHeader = Data("CAP2".utf8) + Data([1, 0, 0, 0, 12])
+        let combinedHeader = Data("CAP2".utf8) + Data([1, 0, 0, 0, 20])
         for metadata in [screenMetadata + epaperMetadata, epaperMetadata + screenMetadata] {
             assert(manager.handleDeviceCapabilitiesNotification(combinedHeader + metadata),
                    "screen configuration and e-paper metadata coexist in either TLV order")
@@ -18452,6 +18457,25 @@ struct NavigationProtocolTests {
         assert(!manager.supportsRemoteDeviceDebug,
                "CAP2 bit 17 does not collide with remote debugging")
 
+        let cap2WithMainFeatures = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 0x84, 0x03])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithMainFeatures),
+               "renderer, orientation and Watch GPS capabilities are accepted together")
+        assert(manager.supportsRendererBenchmarkSample &&
+               manager.supportsWatchGPSMotionEvidenceV1,
+               "existing renderer and Watch GPS features stay negotiated")
+        assert(!manager.supportsWorldRadio &&
+               !manager.availableDeviceScreens.contains(.worldRadio),
+               "main firmware cannot be mistaken for World Radio firmware")
+
+        let cap2WithWorldRadio = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 0x84, 0x0B])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithWorldRadio),
+               "World Radio is negotiated alongside main features")
+        assert(manager.supportsWorldRadio && manager.supportsRendererBenchmarkSample &&
+               manager.supportsWatchGPSMotionEvidenceV1,
+               "World Radio does not replace renderer or Watch GPS support")
+
         let cap2WithConfig = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, acknowledgedFlags, 0x0F, 0, 0, 1, 3, 1,
                   DeviceSound.rotatingBicycleBell.rawValue, 65])
@@ -18465,6 +18489,11 @@ struct NavigationProtocolTests {
                "CAP2 firmware without bit 14 keeps scoped Watch control disabled")
         assert(!manager.supportsRemoteDeviceDebug,
                "CAP2 firmware without bit 16 keeps remote debugging disabled")
+        assert(!manager.supportsWorldRadio,
+               "reconnecting to older firmware clears World Radio support")
+
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithWorldRadio),
+               "World Radio can be negotiated again before a malformed response")
 
         let duplicateTLV = cap2WithConfig + Data([1, 3, 1, 0, 50])
         assert(manager.handleDeviceCapabilitiesNotification(duplicateTLV),
@@ -18475,6 +18504,8 @@ struct NavigationProtocolTests {
                "malformed capabilities clear explicit invalid-heading support")
         assert(!manager.supportsScopedWatchController,
                "malformed capabilities clear scoped Watch support")
+        assert(!manager.supportsWorldRadio && !manager.supportsWatchGPSMotionEvidenceV1,
+               "malformed capabilities clear both World Radio and Watch GPS support")
 
         UserDefaults.standard.removeObject(forKey: "deviceSettings.selectedSound")
         UserDefaults.standard.removeObject(forKey: "deviceSettings.soundVolumePercent")
@@ -18540,12 +18571,33 @@ struct NavigationProtocolTests {
                "Battery Status remains the last available screen")
         let currentSettings = screenSettings(in: currentPackets())
         assertEqual(currentSettings[DeviceBLEProtocol.enabledScreensSettingID],
-                    Int32(DeviceScreen.allScreensMask) |
+                    Int32(DeviceScreen.allScreensMask & ~DeviceScreen.worldRadio.bit) |
                         DeviceBLEProtocol.currentScreenMaskMarker,
-                    "current firmware receives a marked five-screen mask")
+                    "Battery Status firmware receives a marked five-screen mask")
         assertEqual(currentSettings[DeviceBLEProtocol.defaultScreenSettingID],
                     Int32(DeviceScreen.batteryStatus.rawValue),
                     "current firmware may use Battery Status as its default")
+
+        let (radioManager, radioPackets) = configuredManager()
+        var radioCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8)
+        radioCapabilities.append(1)
+        let radioFlags = UInt32(DeviceBLEProtocol.batteryStatusScreenCapabilityMask) |
+            DeviceBLEProtocol.worldRadioCapabilityMask
+        radioCapabilities.append(UInt8(truncatingIfNeeded: radioFlags))
+        radioCapabilities.append(UInt8(truncatingIfNeeded: radioFlags >> 8))
+        radioCapabilities.append(UInt8(truncatingIfNeeded: radioFlags >> 16))
+        radioCapabilities.append(UInt8(truncatingIfNeeded: radioFlags >> 24))
+        assert(radioManager.handleDeviceCapabilitiesNotification(radioCapabilities),
+               "World Radio capability response should be consumed")
+        assert(radioManager.supportsWorldRadio,
+               "firmware bit 27 exposes World Radio")
+        assert(radioManager.availableDeviceScreens.contains(.worldRadio),
+               "World Radio is available on capable firmware")
+        let radioSettings = screenSettings(in: radioPackets())
+        assertEqual(radioSettings[DeviceBLEProtocol.enabledScreensSettingID],
+                    Int32(DeviceScreen.allScreensMask) |
+                        DeviceBLEProtocol.currentScreenMaskMarker,
+                    "World Radio firmware receives a marked six-screen mask")
 
         let (fallbackManager, fallbackPackets) = configuredManager()
         fallbackManager.useDeviceCapabilitiesFallback()
@@ -20307,6 +20359,21 @@ struct NavigationProtocolTests {
                     "trusted background reconnect owns one physical scan")
         assert(!trustedDriver.starts[0].allowsDuplicates,
                "trusted reconnect does not run an unknown-device scan")
+
+        trustedManager.setApplicationActive(true)
+        trustedManager.installConnectionAttemptForTesting()
+        trustedManager.startDeviceDiscovery()
+        assertEqual(
+            trustedManager.currentScanPurpose,
+            .explicitDiscovery,
+            "an explicit request replaces a stale trusted connection attempt"
+        )
+        assert(trustedManager.isDiscoveringDevices,
+               "stale reconnect cancellation retains explicit search intent")
+        assert(waitForMainLoop(timeout: 1) {
+            trustedDriver.starts.count == 2 &&
+                trustedDriver.starts.last?.allowsDuplicates == true
+        }, "stale reconnect cancellation starts unknown-device discovery")
 
         let deferredManager = BLEManager()
         let deferredDriver = BLEScanDriverForTesting()

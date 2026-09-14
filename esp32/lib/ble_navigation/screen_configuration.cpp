@@ -423,7 +423,7 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
       instance.mapProfile.buildings3DEnabled = after.buildings3DEnabled;
   };
   const uint8_t mask = legacy.enabledScreensMask & DEVICE_SCREEN_SUPPORTED_MASK;
-  bool represented[5]{};
+  bool represented[6]{};
   for (uint8_t index = 0; index < document.instanceCount; ++index) {
     ScreenInstance &instance = document.instances[index];
     const uint8_t rawType = static_cast<uint8_t>(instance.type);
@@ -431,7 +431,7 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
     if (importMask)
       instance.enabled = (mask & (1U << rawType)) != 0;
   }
-  for (uint8_t rawType = 0; rawType < 5 &&
+  for (uint8_t rawType = 0; rawType < 6 &&
                             document.instanceCount <
                                 screen_configuration_protocol::MAX_INSTANCES;
        ++rawType) {
@@ -449,6 +449,7 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
     case ScreenType::RideStats: name = "Ride Stats"; break;
     case ScreenType::MapNavigation: name = "Map + Navigation"; break;
     case ScreenType::BatteryStatus: name = "Battery Status"; break;
+    case ScreenType::WorldRadio: name = "World Radio"; break;
     }
     (void)screen_configuration_protocol::setName(instance, name,
                                                   std::strlen(name));
@@ -465,7 +466,8 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
     importProfile(*navigation, legacy.mapNavigationStyle,
                   previous.mapNavigationStyle);
   }
-  const ScreenType defaultType = legacy.defaultScreen <= 4
+  const ScreenType defaultType = screen_configuration_protocol::isSupportedScreenType(
+                                    static_cast<ScreenType>(legacy.defaultScreen))
                                      ? static_cast<ScreenType>(legacy.defaultScreen)
                                      : ScreenType::MapNavigation;
   const ScreenInstance *newDefault = primaryInstance(document, defaultType);
@@ -508,8 +510,17 @@ Document makeMigratedDocument(const MapRenderSettings &legacy) {
       legacy.mapNavigationStyle, legacy, ScreenType::MapNavigation);
   document.instances[2].mapProfile =
       captureProfile(legacy.mapStyle, legacy, ScreenType::Map);
+  if (world_radio_config::ENABLED &&
+      (legacy.enabledScreensMask & screen_configuration_protocol::screenTypeBit(ScreenType::WorldRadio))) {
+    auto &radio = document.instances[document.instanceCount++];
+    radio.id = 6;
+    radio.type = ScreenType::WorldRadio;
+    radio.enabled = true;
+    (void)screen_configuration_protocol::setName(radio, "World Radio", 11);
+  }
   const ScreenType requestedDefault =
-      legacy.defaultScreen <= 4 ? static_cast<ScreenType>(legacy.defaultScreen)
+      screen_configuration_protocol::isSupportedScreenType(static_cast<ScreenType>(legacy.defaultScreen))
+          ? static_cast<ScreenType>(legacy.defaultScreen)
                                 : ScreenType::MapNavigation;
   const ScreenInstance *selected = primaryInstance(document, requestedDefault);
   if (selected == nullptr || !selected->enabled) {

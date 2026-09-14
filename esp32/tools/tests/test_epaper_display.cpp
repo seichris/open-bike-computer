@@ -167,8 +167,8 @@ int main() {
   assert(encodeCap2(0, nullptr, false, response, 18, nullptr, 0, metadata) == 0);
   const uint8_t screens[SCREEN_CONFIGURATION_TLV_BYTES] = {2, 14, 1};
   static_assert(CAP2_MAX_BYTES == 40);
-  static_assert(ride_ble_protocol_generated::BOARD_DISPLAY_METADATA_FEATURE == (1UL << 27));
-  static_assert(ride_ble_protocol_generated::BOARD_DISPLAY_METADATA_MINIMUM_CLIENT_VERSION == 25);
+  static_assert(ride_ble_protocol_generated::BOARD_DISPLAY_METADATA_FEATURE == (1UL << 28));
+  static_assert(ride_ble_protocol_generated::BOARD_DISPLAY_METADATA_MINIMUM_CLIENT_VERSION == 26);
   assert(encodeCap2(0, power, true, response, sizeof(response), screens, sizeof(screens), metadata) == 40);
   assert(std::memcmp(response + 14, screens, sizeof(screens)) == 0);
   assert(response[30] == 3 && response[31] == 8);

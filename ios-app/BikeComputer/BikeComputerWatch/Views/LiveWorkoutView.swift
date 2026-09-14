@@ -2,14 +2,7 @@ import SwiftUI
 import WatchKit
 
 private enum WorkoutFinishPrompt {
-    case options(sessionID: UUID)
     case discardConfirmation(sessionID: UUID)
-
-    var showsOptions: Bool {
-        if case .options = self { return true }
-        return false
-    }
-
 }
 
 struct LiveWorkoutView: View {
@@ -91,7 +84,7 @@ struct LiveWorkoutView: View {
                     .tint(.orange)
                 }
 
-                if let finishError = manager.finishRequestError {
+                if let finishError = manager.finishRequestError, !manager.isDiscarding {
                     VStack(spacing: 5) {
                         Label(
                             finishErrorMessage(finishError),
@@ -106,7 +99,7 @@ struct LiveWorkoutView: View {
                             || finishError == .identityMetadataFailed
                             || finishError == .segmentConfirmationPending
                             || finishError == .terminalErrorPersistenceFailed {
-                            Button(manager.isDiscarding ? "Retry Recovery" : "Retry Save") {
+                            Button("Retry Save") {
                                 manager.retryFinalization()
                             }
                             .font(.caption2)
@@ -287,16 +280,15 @@ struct LiveWorkoutView: View {
                     .accessibilityLabel(manager.state == .paused ? "Resume ride" : "Pause ride")
 
                     Button(role: .destructive) {
-                        if let sessionID = manager.activeSessionID {
-                            finishPrompt = .options(sessionID: sessionID)
-                        }
+                        manager.endAndSave()
                     } label: {
                         Image(systemName: "stop.fill")
                     }
                     .disabled(
                         manager.state == .ending
                     )
-                    .accessibilityLabel("End ride")
+                    .accessibilityLabel("End and save ride")
+                    .accessibilityIdentifier("workout-stop-and-save")
                 }
 
                 NavigationLink {
@@ -311,40 +303,20 @@ struct LiveWorkoutView: View {
                         .accessibilityLabel("Navigation Settings")
                 }
                 .buttonStyle(.borderless)
+
+                Button("Discard Workout") {
+                    guard let sessionID = manager.activeSessionID else { return }
+                    requestDiscardConfirmation(for: sessionID)
+                }
+                .buttonStyle(.plain)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 6)
+                .disabled(manager.state == .ending)
+                .accessibilityIdentifier("workout-discard")
             }
             .padding(.horizontal, 6)
         }
-        .confirmationDialog(
-            "Finish Ride?",
-            isPresented: finishOptionsPresented
-        ) {
-            if case .options(let sessionID) = finishPrompt {
-                Button("End and Save") {
-                    finishPrompt = nil
-                    guard manager.activeSessionID == sessionID else { return }
-                    manager.endAndSave()
-                }
-                Button("Discard Workout", role: .destructive) {
-                    requestDiscardConfirmation(for: sessionID)
-                }
-                Button("Keep Riding", role: .cancel) {
-                    finishPrompt = nil
-                }
-            }
-        } message: {
-            Text("Saving creates a workout in your Fitness app.")
-        }
-    }
-
-    private var finishOptionsPresented: Binding<Bool> {
-        Binding(
-            get: { finishPrompt?.showsOptions == true },
-            set: { isPresented in
-                if !isPresented, finishPrompt?.showsOptions == true {
-                    finishPrompt = nil
-                }
-            }
-        )
     }
 
     private func discardConfirmationView(sessionID: UUID) -> some View {

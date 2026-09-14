@@ -1110,3 +1110,42 @@ nonisolated struct WorkoutSequenceLease: Equatable, Sendable {
         nextValue == 0 || nextValue > upperBound
     }
 }
+
+
+/// Discard is a terminal control fact, not a saved-workout statistics report.
+/// Do not read a discarded HKLiveWorkoutBuilder or carry transient metrics
+/// into this envelope: moving time can exceed the chosen end timestamp and
+/// stale zone/segment data can make an otherwise completed discard invalid.
+nonisolated enum WorkoutDiscardCompletionPolicy {
+    static func terminalSnapshot(
+        startDate: Date?,
+        errorCode: WorkoutSafeErrorCodeV1?
+    ) -> WorkoutSnapshotV1 {
+        WorkoutSnapshotV1(
+            state: .ended,
+            startDate: startDate,
+            errorCode: errorCode,
+            terminalOutcome: .discarded
+        )
+    }
+}
+
+/// Transient persistence/delivery failures after a confirmed discard are
+/// retried automatically. Keep the durable discard identity/tombstone gate;
+/// retrying must never turn a discard into a save or clear unarchived proof.
+/// Save cleanup retains its existing bounded/manual recovery policy.
+nonisolated enum WorkoutTerminalCleanupRetryPolicy {
+    static func delay(
+        disposition: WorkoutFinishDisposition?,
+        completedAttempts: Int,
+        baseDelay: TimeInterval,
+        saveAttemptLimit: Int
+    ) -> TimeInterval? {
+        guard disposition == .discard || completedAttempts < saveAttemptLimit else {
+            return nil
+        }
+        let base = baseDelay.isFinite ? max(0.001, baseDelay) : 1
+        let exponent = min(15, max(0, completedAttempts))
+        return min(30, base * pow(2, Double(exponent)))
+    }
+}

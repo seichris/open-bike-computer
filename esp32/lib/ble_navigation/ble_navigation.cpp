@@ -39,6 +39,9 @@
 #include "ride_delivery_protocol.hpp"
 #include "screen_configuration.hpp"
 #include "authenticated_workout_telemetry.hpp"
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+#include "../world_radio/world_radio_runtime.hpp"
+#endif
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
 #include "../gui/src/globalGuiDef.h"
@@ -134,6 +137,9 @@ static std::atomic<bool> bleSessionSupportsRendererDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRendererBenchmarkSample{false};
 static std::atomic<bool> bleSessionSupportsRideDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRideDeliveryAck{false};
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+static std::atomic<bool> bleSessionSupportsWorldRadio{false};
+#endif
 // Captured while the ownership mutex is held by the accepted ride write. The
 // application ACK path runs in the same NimBLE callback and must never fall
 // back to lease generation zero merely because another task briefly owns the
@@ -805,7 +811,7 @@ bool BLENavigationServer::requestWorkoutStart() {
 }
 
 static uint8_t deviceScreenBit(uint8_t screen) {
-  return (screen <= DEVICE_SCREEN_BATTERY_STATUS) ? (1 << screen) : 0;
+  return (screen <= DEVICE_SCREEN_WORLD_RADIO) ? (1 << screen) : 0;
 }
 
 static uint8_t normalizedEnabledScreensMask(int32_t rawMask) {
@@ -816,7 +822,7 @@ static uint8_t normalizedEnabledScreensMask(int32_t rawMask) {
 static uint8_t normalizedDefaultScreen(int32_t rawDefault,
                                        uint8_t enabledScreensMask) {
   uint8_t defaultScreen =
-      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_BATTERY_STATUS
+      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_WORLD_RADIO
           ? (uint8_t)rawDefault
           : (uint8_t)DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
   if (enabledScreensMask & deviceScreenBit(defaultScreen)) {
@@ -833,6 +839,9 @@ static uint8_t normalizedDefaultScreen(int32_t rawDefault,
   }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_NAVIGATION)) {
     return DEVICE_SCREEN_NAVIGATION;
+  }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_WORLD_RADIO)) {
+    return DEVICE_SCREEN_WORLD_RADIO;
   }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_BATTERY_STATUS)) {
     return DEVICE_SCREEN_BATTERY_STATUS;
@@ -2294,6 +2303,13 @@ static void handleAuthPayload(const std::string &frame) {
                                             std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    bleSessionSupportsWorldRadio.store(false,
+                                       std::memory_order_release);
+#endif
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    world_radio_runtime::reset();
+#endif
     rideDeliveryLeaseGenerationSnapshot.store(0,
                                                std::memory_order_release);
     advanceRidePayloadGeneration();
@@ -3821,6 +3837,9 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
         uint8_t(board_traits::epaper ? 0 : 29)};
     if (includeDisplay)
       featureFlags |= ride_ble_protocol_generated::BOARD_DISPLAY_METADATA_FEATURE;
+    if (world_radio_config::supportsClient(clientVersion)) {
+      featureFlags |= device_capabilities_protocol::WORLD_RADIO_FEATURE;
+    }
     if (screen_configuration::isReady() &&
         screenConfigurationCharacteristic != nullptr &&
         clientVersion >= device_capabilities_protocol::
@@ -3909,6 +3928,11 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
         clientVersion >=
             device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION,
         std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    bleSessionSupportsWorldRadio.store(
+        world_radio_config::supportsClient(clientVersion),
+        std::memory_order_release);
+#endif
     bleSessionSupportsExplicitInvalidGpsHeading.store(
         clientVersion >=
             device_capabilities_protocol::EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION,
@@ -5329,6 +5353,13 @@ public:
                                             std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    bleSessionSupportsWorldRadio.store(false,
+                                       std::memory_order_release);
+#endif
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    world_radio_runtime::reset();
+#endif
     rideDeliveryLeaseGenerationSnapshot.store(0,
                                                std::memory_order_release);
     advanceRidePayloadGeneration();
@@ -5417,6 +5448,13 @@ public:
                                             std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    bleSessionSupportsWorldRadio.store(false,
+                                       std::memory_order_release);
+#endif
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    world_radio_runtime::reset();
+#endif
     rideDeliveryLeaseGenerationSnapshot.store(0,
                                                std::memory_order_release);
     advanceRidePayloadGeneration();
@@ -5537,6 +5575,28 @@ public:
       }
       return;
     }
+
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    if (value.size() >= 4 &&
+        std::memcmp(value.data(),
+                    ride_ble_protocol_generated::WORLD_RADIO_STATUS_MAGIC,
+                    4) == 0) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
+      if (!requireAuthenticated("world radio status") ||
+          !bleSessionSupportsWorldRadio.load(std::memory_order_acquire)) {
+        return;
+      }
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+      if (!world_radio_runtime::ingestStatus(
+              reinterpret_cast<const uint8_t *>(value.data()), value.size())) {
+        Serial.println("BLE World Radio: rejected malformed or stale status");
+      } else {
+        ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+      }
+#endif
+      return;
+    }
+#endif
 
     if (handleDestinationPickerPayload(value, "destination picker")) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
@@ -6176,7 +6236,7 @@ static void loadSettingsFromNVS() {
     mapRenderSettings.tapToSwitchScreens = 0;
   }
   uint8_t storedScreenMask =
-      prefs.getUChar("screenMask", DEVICE_SCREEN_SUPPORTED_MASK);
+      prefs.getUChar("screenMask", DEVICE_SCREEN_DEFAULT_MASK);
   if (!prefs.getBool("batteryScrV1", false)) {
     storedScreenMask |= deviceScreenBit(DEVICE_SCREEN_BATTERY_STATUS);
     prefs.putUChar("screenMask", storedScreenMask);
@@ -6592,6 +6652,29 @@ void BLENavigationServer::setNavigationActivity(bool active) {
 #else
   (void)active;
 #endif
+}
+
+bool BLENavigationServer::canRequestWorldRadio() const {
+#if !defined(FIRMWARE_DIAGNOSTICS) || !FIRMWARE_DIAGNOSTICS
+  return false;
+#else
+  return world_radio_config::ENABLED && connected && bleSessionAuthenticated &&
+         pNavCharacteristic != nullptr &&
+         bleSessionSupportsWorldRadio.load(std::memory_order_acquire);
+#endif
+}
+
+bool BLENavigationServer::requestWorldRadio(
+    const world_radio_protocol::Request &request) {
+  if (!canRequestWorldRadio()) {
+    return false;
+  }
+  uint8_t payload[world_radio_protocol::REQUEST_BYTES]{};
+  if (!world_radio_protocol::encodeRequest(request, payload, sizeof(payload))) {
+    return false;
+  }
+  return notifyAuthenticatedNavigation(pNavCharacteristic, payload,
+                                       sizeof(payload));
 }
 
 BLEDebugStats BLENavigationServer::getDebugStats() const {

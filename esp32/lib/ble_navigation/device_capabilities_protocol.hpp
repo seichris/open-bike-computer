@@ -33,6 +33,8 @@ constexpr uint8_t DETAILED_RIDE_DIAGNOSTICS_CLIENT_VERSION =
         DETAILED_RIDE_DIAGNOSTICS_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t RIDE_DELIVERY_ACK_CLIENT_VERSION =
     ride_ble_protocol_generated::RIDE_DELIVERY_ACK_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t WORLD_RADIO_CLIENT_VERSION =
+    ride_ble_protocol_generated::WORLD_RADIO_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t SCREEN_CONFIGURATION_CLIENT_VERSION =
     ride_ble_protocol_generated::SCREEN_CONFIGURATION_V1_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t RENDERER_BENCHMARK_SAMPLE_CLIENT_VERSION =
@@ -77,6 +79,8 @@ constexpr uint32_t DETAILED_RIDE_DIAGNOSTICS_FEATURE =
     ride_ble_protocol_generated::DETAILED_RIDE_DIAGNOSTICS_FEATURE;
 constexpr uint32_t RIDE_DELIVERY_ACK_FEATURE =
     ride_ble_protocol_generated::RIDE_DELIVERY_ACK_FEATURE;
+constexpr uint32_t WORLD_RADIO_FEATURE =
+    ride_ble_protocol_generated::WORLD_RADIO_FEATURE;
 constexpr uint32_t SCREEN_CONFIGURATION_FEATURE =
     ride_ble_protocol_generated::SCREEN_CONFIGURATION_V1_FEATURE;
 constexpr uint32_t RENDERER_BENCHMARK_SAMPLE_FEATURE =
