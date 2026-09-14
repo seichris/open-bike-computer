@@ -1,0 +1,25 @@
+name: PR390 temporary review workspace
+on:
+  push:
+    branches: [feature/world-radio-screen]
+    paths: [.github/workflows/pr390-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    if: github.repository == 'seichris/open-bike-computer' && github.ref == 'refs/heads/feature/world-radio-screen'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Export tracked source for the authorized PR390 refactor
+        run: |
+          git archive --format=tar.gz --output=pr390-source.tar.gz HEAD AGENTS.md .github docs esp32/lib esp32/tools ios-app protocol tools/generate_ride_ble_contract.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr390-source
+          path: pr390-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
