@@ -20315,6 +20315,21 @@ struct NavigationProtocolTests {
         assert(!trustedDriver.starts[0].allowsDuplicates,
                "trusted reconnect does not run an unknown-device scan")
 
+        trustedManager.setApplicationActive(true)
+        trustedManager.installConnectionAttemptForTesting()
+        trustedManager.startDeviceDiscovery()
+        assertEqual(
+            trustedManager.currentScanPurpose,
+            .explicitDiscovery,
+            "an explicit request replaces a stale trusted connection attempt"
+        )
+        assert(trustedManager.isDiscoveringDevices,
+               "stale reconnect cancellation retains explicit search intent")
+        assert(waitForMainLoop(timeout: 1) {
+            trustedDriver.starts.count == 2 &&
+                trustedDriver.starts.last?.allowsDuplicates == true
+        }, "stale reconnect cancellation starts unknown-device discovery")
+
         let deferredManager = BLEManager()
         let deferredDriver = BLEScanDriverForTesting()
         deferredDriver.isPoweredOn = false

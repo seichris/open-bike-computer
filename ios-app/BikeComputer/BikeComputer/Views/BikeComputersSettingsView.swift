@@ -78,7 +78,7 @@ struct BikeComputersSettingsView: View {
                     } label: {
                         Label(
                             bleManager.isConnecting
-                                ? "Cancel connection"
+                                ? "Cancel and Search Nearby"
                                 : bleManager.knownDevices.isEmpty
                                 ? "Search Nearby"
                                 : "Connect a new Bike Computer",
