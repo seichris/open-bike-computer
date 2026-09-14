@@ -1,0 +1,26 @@
+name: Workout follow-up source snapshot
+on:
+  push:
+    branches: [codex/workout-followup-source-snapshot]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 798c0ac7e9d6e5b2cbd5dc542253b4153fc3cc0d
+          persist-credentials: false
+      - name: Archive tracked source only
+        run: |
+          test "$(git rev-parse HEAD)" = 798c0ac7e9d6e5b2cbd5dc542253b4153fc3cc0d
+          git archive --format=tar.gz HEAD AGENTS.md .github ios-app esp32 tools protocol hardware/README.md docs > "$RUNNER_TEMP/workout-source.tar.gz"
+          sha256sum "$RUNNER_TEMP/workout-source.tar.gz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: workout-followup-source
+          path: ${{ runner.temp }}/workout-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
