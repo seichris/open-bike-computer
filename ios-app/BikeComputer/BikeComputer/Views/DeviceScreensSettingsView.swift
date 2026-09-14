@@ -255,7 +255,8 @@ private struct DeviceScreenInstanceEditorView: View {
                let capabilities = controller.capabilities {
                 RideStatsLayoutEditorView(
                     layout: rideStatsLayoutBinding,
-                    capabilities: capabilities
+                    capabilities: capabilities,
+                    firmwareTarget: bleManager.firmwareTarget
                 )
             }
 

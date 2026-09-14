@@ -7,19 +7,29 @@ struct WorkoutSummaryView: View {
     let onDone: () -> Void
 
     var body: some View {
+        if summary.outcome == .discarded {
+            ProgressView("Discarding…")
+                .font(.caption)
+                .accessibilityIdentifier("workout-discard-progress")
+        } else {
+            savedSummary
+        }
+    }
+
+    private var savedSummary: some View {
         ScrollView {
             VStack(spacing: 8) {
-                Image(systemName: summary.outcome == .saved ? "checkmark.circle.fill" : "trash.circle.fill")
+                Image(systemName: "checkmark.circle.fill")
                     .font(.title)
-                    .foregroundStyle(summary.outcome == .saved ? .green : .orange)
+                    .foregroundStyle(.green)
 
-                Text(summary.outcome == .saved ? "Ride Saved" : "Ride Discarded")
+                Text("Ride Saved")
                     .font(.headline)
 
                 if summary.terminalErrorCode == .anotherWorkoutActive {
                     Label(
                         WorkoutCrossAppTakeoverCopyV1.summary(
-                            disposition: summary.outcome == .saved ? .save : .discard
+                            disposition: .save
                         ),
                         systemImage: "exclamationmark.triangle.fill"
                     )
@@ -28,25 +38,18 @@ struct WorkoutSummaryView: View {
                     .multilineTextAlignment(.center)
                 }
 
-                if summary.outcome == .saved {
-                    summaryRow("Time", WorkoutValueFormatter.duration(summary.duration))
-                    summaryRow(
-                        "Distance",
-                        "\(WorkoutValueFormatter.distance(summary.distanceMeters)) \(WorkoutValueFormatter.distanceUnit(summary.distanceMeters))"
-                    )
-                    summaryRow("Energy", "\(WorkoutValueFormatter.energy(summary.activeEnergyKilocalories)) KCAL")
-                    summaryRow("Avg Heart", "\(WorkoutValueFormatter.heartRate(summary.averageHeartRate)) BPM")
-                    summaryRow(
-                        "Avg Speed",
-                        "\(WorkoutValueFormatter.averageSpeed(distanceMeters: summary.distanceMeters, elapsedSeconds: summary.duration)) KM/H"
-                    )
-                    summaryRow("Route", routeStatusLabel)
-                } else {
-                    Text("No workout or route was saved to Health.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
+                summaryRow("Time", WorkoutValueFormatter.duration(summary.duration))
+                summaryRow(
+                    "Distance",
+                    "\(WorkoutValueFormatter.distance(summary.distanceMeters)) \(WorkoutValueFormatter.distanceUnit(summary.distanceMeters))"
+                )
+                summaryRow("Energy", "\(WorkoutValueFormatter.energy(summary.activeEnergyKilocalories)) KCAL")
+                summaryRow("Avg Heart", "\(WorkoutValueFormatter.heartRate(summary.averageHeartRate)) BPM")
+                summaryRow(
+                    "Avg Speed",
+                    "\(WorkoutValueFormatter.averageSpeed(distanceMeters: summary.distanceMeters, elapsedSeconds: summary.duration)) KM/H"
+                )
+                summaryRow("Route", routeStatusLabel)
 
                 switch cleanupState {
                 case .delivering:

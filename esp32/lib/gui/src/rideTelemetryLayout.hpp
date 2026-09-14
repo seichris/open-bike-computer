@@ -22,17 +22,17 @@ constexpr int32_t kRoundStartWorkoutIconSize = 34;
 
 constexpr bool usesRoundScreenSafeArea(int32_t screenWidth,
                                        int32_t screenHeight) {
-  return screenWidth == screenHeight;
+  return screenWidth == 466 && screenHeight == 466;
 }
 
 constexpr bool useLargeMetricValueFont(int32_t screenWidth) {
   // The 466 px display fits the compact 64 px values; the 410 px display
-  // needs 42 px values so elapsed times and distances remain unclipped.
+  // needs smaller values so elapsed times and distances remain unclipped.
   return screenWidth >= 440;
 }
 
 constexpr int32_t metricValueLineHeight(int32_t screenWidth) {
-  // LVGL line heights for the compact 64 px font and Montserrat 42.
+  // Maximum value line heights reserved by the two board layouts.
   return useLargeMetricValueFont(screenWidth) ? 60 : 46;
 }
 
@@ -53,6 +53,38 @@ struct Rect {
   constexpr int32_t bottom() const { return y + height; }
 };
 
+// Conservative rectangle-boundary checks include the entire line height,
+// not just the text baseline. Eight pixels are UI clearance, not panel offset.
+constexpr int32_t kRoundContentInset = 8;
+
+constexpr bool cornersFitCircle(const Rect &rect, int32_t diameter,
+                                int32_t inset = kRoundContentInset) {
+  if (rect.width <= 0 || rect.height <= 0 || inset < 0 ||
+      diameter <= 2 * inset)
+    return false;
+  const int64_t center = diameter / 2;
+  const int64_t radius = center - inset;
+  const int64_t left = rect.x - center;
+  const int64_t right = rect.right() - center;
+  const int64_t top = rect.y - center;
+  const int64_t bottom = rect.bottom() - center;
+  return left * left + top * top <= radius * radius &&
+         right * right + top * top <= radius * radius &&
+         left * left + bottom * bottom <= radius * radius &&
+         right * right + bottom * bottom <= radius * radius;
+}
+
+// Largest symmetric integer-pixel band whose four corners clear the circle.
+// Evaluated when constructing the layout, never per telemetry update.
+constexpr Rect roundSafeBand(int32_t diameter, int32_t y, int32_t height) {
+  for (int32_t inset = 0; inset < diameter / 2; ++inset) {
+    const Rect band{inset, y, diameter - 2 * inset, height};
+    if (cornersFitCircle(band, diameter))
+      return band;
+  }
+  return {};
+}
+
 struct Layout {
   int32_t screenWidth = 0;
   int32_t screenHeight = 0;
@@ -66,8 +98,9 @@ struct Layout {
 constexpr std::size_t kConfigurableSlotCount = 7;
 
 // Stable logical positions shared by the firmware renderer and host tests.
-// Slot zero combines the hero title and value area; slots one through six are
-// the compact two-column cells from top-left to bottom-right.
+// Slot zero supplies the metric origin used by heart/zone adapters. Its
+// actual title is below the hero value; it is not an opaque parent rectangle.
+// Slots one through six are the compact cells from top-left to bottom-right.
 constexpr Rect configurableSlotRect(const Layout &layout,
                                     std::size_t index) {
   if (index == 0) {
@@ -79,6 +112,17 @@ constexpr Rect configurableSlotRect(const Layout &layout,
     };
   }
   return index < kConfigurableSlotCount ? layout.metrics[index - 1] : Rect{};
+}
+
+constexpr Rect configurableValueRect(const Layout &layout,
+                                     std::size_t index) {
+  if (index == 0)
+    return layout.hero;
+  if (index >= kConfigurableSlotCount)
+    return {};
+  const Rect &metric = layout.metrics[index - 1];
+  return {metric.x, metric.y + kMetricValueOffsetY, metric.width,
+          metric.height - kMetricValueOffsetY};
 }
 
 struct MetricPlacement {
@@ -312,7 +356,8 @@ constexpr ZonePresentation makeZonePresentation(
 
 constexpr Layout makeLayout(int32_t width, int32_t height) {
   constexpr int32_t columnGap = 12;
-  constexpr int32_t metricFirstY = 136;
+  const bool round = usesRoundScreenSafeArea(width, height);
+  const int32_t metricFirstY = round ? 126 : 136;
   const int32_t metricCellHeight =
       kMetricValueOffsetY + metricValueLineHeight(width);
   const int32_t metricRowSpacing = metricCellHeight + kMetricRowGap;
@@ -339,6 +384,19 @@ constexpr Layout makeLayout(int32_t width, int32_t height) {
       {rightX, metricFirstY + 2 * metricRowSpacing, columnWidth,
        metricCellHeight},
   }};
+  if (round) {
+    layout.status = roundSafeBand(width, 18, 21);
+    layout.hero = roundSafeBand(width, 42, 61);
+    layout.heroUnit = roundSafeBand(width, 104, 22);
+    for (std::size_t row = 0; row < 3; ++row) {
+      const int32_t y = metricFirstY + row * metricRowSpacing;
+      const Rect band = roundSafeBand(width, y, metricCellHeight);
+      const int32_t cellWidth = (band.width - columnGap) / 2;
+      layout.metrics[row * 2] = {band.x, y, cellWidth, metricCellHeight};
+      layout.metrics[row * 2 + 1] = {
+          band.right() - cellWidth, y, cellWidth, metricCellHeight};
+    }
+  }
   return layout;
 }
 
@@ -399,8 +457,21 @@ constexpr bool isValid(const Layout &layout) {
       !fits(layout.heroUnit, layout.screenWidth, layout.screenHeight)) {
     return false;
   }
+  const bool round = usesRoundScreenSafeArea(layout.screenWidth,
+                                               layout.screenHeight);
+  if (round && (!cornersFitCircle(layout.status, layout.screenWidth) ||
+                !cornersFitCircle(layout.hero, layout.screenWidth) ||
+                !cornersFitCircle(layout.heroUnit, layout.screenWidth))) {
+    return false;
+  }
+  if (layout.status.bottom() > layout.hero.y ||
+      layout.hero.bottom() > layout.heroUnit.y ||
+      layout.heroUnit.bottom() > layout.metrics[0].y) {
+    return false;
+  }
   for (const Rect &metric : layout.metrics) {
-    if (!fits(metric, layout.screenWidth, layout.screenHeight)) {
+    if (!fits(metric, layout.screenWidth, layout.screenHeight) ||
+        (round && !cornersFitCircle(metric, layout.screenWidth))) {
       return false;
     }
   }
