@@ -31,6 +31,22 @@ static Document makeDocument() {
 }
 
 int main() {
+  Document radio{};
+  radio.instanceCount = 1;
+  radio.defaultInstanceID = 6;
+  radio.instances[0] = makeInstance(6, ScreenType::WorldRadio, "World Radio");
+  assert(isSupportedScreenType(ScreenType::WorldRadio) == world_radio_config::ENABLED);
+  std::array<uint8_t, MAX_DOCUMENT_BYTES> radioBytes{};
+  const auto radioSize = encodeDocument(radio, radioBytes.data(), radioBytes.size());
+  if (world_radio_config::ENABLED) {
+    assert(radioSize > 0);
+    Document radioDecoded{};
+    assert(decodeDocument(radioBytes.data(), radioSize, radioDecoded) == DecodeResult::Complete);
+    assert(radioDecoded.instances[0].type == ScreenType::WorldRadio);
+  } else {
+    assert(validate(radio) == ValidationError::UnsupportedType);
+    assert(radioSize == 0);
+  }
   // Both new orientations round-trip; old pre-integration payloads retain
   // their historical Course Up navigation behavior.
   for (uint8_t rotation = 0; rotation <= 1; ++rotation) {
