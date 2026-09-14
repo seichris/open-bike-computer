@@ -2101,6 +2101,11 @@ class BLEManager: NSObject, ObservableObject {
         pairingStatusMessage = "Disconnecting before searching nearby…"
     }
 
+    func installConnectionAttemptForTesting() {
+        stopPhysicalScan(reason: "test connection attempt starting")
+        isConnecting = true
+    }
+
     func completeExplicitDisconnectHandoffForTesting() {
         _ = resumeExplicitDiscoveryAfterTransportEnded(
             reason: "test explicit disconnect handoff completed"
@@ -2798,6 +2803,10 @@ class BLEManager: NSObject, ObservableObject {
             pairingError = "Keep Bicino open to search for a Bike Computer."
             return
         }
+        if isConnecting {
+            cancelConnectionAttemptForDiscovery()
+            return
+        }
         guard !hasActiveBLESession else {
             pairingError = "Disconnect the current Bike Computer before searching for another."
             return
@@ -2896,13 +2905,16 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
-    /// Stop a stale or failed transport attempt so Settings can immediately
-    /// hand the radio to explicit nearby discovery. A board reboot during the
-    /// connection handshake can otherwise leave Core Bluetooth reporting
-    /// `isConnecting` until its delayed disconnect callback arrives, which
-    /// used to make the only add-device action permanently inert.
+    /// Replace a stale or failed transport attempt with explicit nearby
+    /// discovery. A board reset can change Core Bluetooth's peripheral
+    /// identity while an unbounded trusted reconnect remains pending for the
+    /// old identifier. Cancelling that attempt without retaining explicit
+    /// intent leaves Settings idle and requires a second user action.
     func cancelConnectionAttemptForDiscovery() {
-        guard isConnecting else { return }
+        guard isConnecting else {
+            startDeviceDiscovery()
+            return
+        }
 
         if pendingPairingSession != nil || pendingPairingMaterial != nil ||
             pairingPrompt != nil || isPairingMode {
@@ -2930,7 +2942,8 @@ class BLEManager: NSObject, ObservableObject {
         clearConnectionState()
         pairingStatusMessage = nil
         pairingError = nil
-        reconcileScanning(reason: "connection attempt cancelled for explicit discovery")
+        log("Connection attempt cancelled for explicit discovery")
+        startDeviceDiscovery()
     }
 
     func pair(with candidate: DiscoveredBikeComputerDevice, name: String) {
