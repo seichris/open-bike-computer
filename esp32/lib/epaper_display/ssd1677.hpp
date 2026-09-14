@@ -19,21 +19,20 @@ public:
     return command(0x18, {0x80}) &&
            command(0x0C, {0xAE, 0xC7, 0xC3, 0xC0, 0x80}) &&
            command(0x01, {0xDF, 0x01, 0x02}) &&
-           command(0x3C, {0x01}) && window({0, 0, width, height});
+           command(0x3C, {0x01}) && fullWindow();
   }
 
   bool present(const uint8_t *image, Window dirty, bool full) {
     if (!image || dirty.empty()) return false;
     if (full) {
       if (!initialize() || !plane(0x24, image, {0, 0, width, height}) ||
-          !window({0, 0, width, height}) ||
           !plane(0x26, image, {0, 0, width, height})) return false;
     } else {
       // Vendor partial mode resets/configures the window without SWRESET,
       // retaining the base plane. Only use it after a successful full/base.
       io_.reset();
       if (!io_.waitReady(busyTimeoutMs) || !command(0x18, {0x80}) ||
-          !command(0x3C, {0x80}) || !window(dirty) ||
+          !command(0x3C, {0x80}) || !partialWindow(dirty) ||
           !plane(0x24, image, dirty)) return false;
     }
     return command(0x22, {static_cast<uint8_t>(full ? 0xF7 : 0xFF)}) &&
@@ -47,16 +46,29 @@ private:
     return io_.write(false, &reg, 1) &&
            (data.size() == 0 || io_.write(true, data.begin(), data.size()));
   }
-  bool window(Window w) {
+  bool fullWindow() {
+    // Match Waveshare's proven SSD1677 full-refresh sequence exactly. The
+    // controller consumes our packed rows in stream order while its Y window
+    // is configured from the last gate line back to zero.
+    return command(0x11, {0x01}) &&
+           command(0x44, {0x00, 0x00, uint8_t((width - 1) & 0xFF),
+                          uint8_t((width - 1) >> 8)}) &&
+           command(0x45, {uint8_t((height - 1) & 0xFF),
+                          uint8_t((height - 1) >> 8), 0x00, 0x00}) &&
+           command(0x4E, {0x00, 0x00}) &&
+           command(0x4F, {0x00, 0x00});
+  }
+  bool partialWindow(Window w) {
     if (w.empty() || w.right > width || w.bottom > height ||
         w.x % 8 || w.right % 8) return false;
-    const uint16_t right = w.right - 1, bottom = w.bottom - 1;
-    // Explicit x/y incrementing scan order for our top-to-bottom packed rows.
-    // Both full and partial use the same order, unlike the demo's implicit
-    // reset defaults. SSD1677 RAM coordinates are pixels, not byte indices.
-    return command(0x11, {0x03}) &&
-           command(0x44, {uint8_t(w.x), uint8_t(w.x >> 8),
-                          uint8_t(right), uint8_t(right >> 8)}) &&
+    const uint16_t lastByteStart = w.right - 8;
+    const uint16_t bottom = w.bottom - 1;
+    // The vendor partial-update endpoint is the first pixel of the last byte,
+    // rather than the last pixel in that byte. Data-entry mode is retained
+    // from the preceding successful full refresh.
+    return command(0x44, {uint8_t(w.x), uint8_t(w.x >> 8),
+                          uint8_t(lastByteStart),
+                          uint8_t(lastByteStart >> 8)}) &&
            command(0x45, {uint8_t(w.y), uint8_t(w.y >> 8),
                           uint8_t(bottom), uint8_t(bottom >> 8)}) &&
            command(0x4E, {uint8_t(w.x), uint8_t(w.x >> 8)}) &&

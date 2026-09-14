@@ -2,10 +2,11 @@
 
 This is an experimental firmware port, pending physical qualification. The
 canonical firmware target is `WAVESHARE_EPAPER_397`. The source supports the
-800 × 480 SSD1677 panel in a 480 × 800 portrait presentation. No physical unit,
-PCB revision, battery, FPC, refresh waveform, or power measurement has been
-verified by this implementation. Production release and factory publishing
-continue to exclude this target.
+800 × 480 SSD1677 panel in a 480 × 800 portrait presentation. One physical unit
+has completed USB identification, flashing, boot, BUSY-waveform observation and
+firmware-ready validation. Visible panel output, PCB revision, battery, FPC and
+power measurements still require qualification. Production release and factory
+publishing continue to exclude this target.
 
 ## Hardware contract
 
@@ -27,19 +28,22 @@ Installers and flash tools are intentionally excluded.
 | SDMMC | CLK 16, CMD 17, D0 15 | One-bit mode; AMOLED SPI migration disabled |
 | Contacts | Up 4, center 5, down 6 | Independent active-low contacts, pull-ups |
 | BOOT | 0 | Existing deliberate recovery gesture; no fake touch |
-| PMIC | AXP2101 candidate at 0x34, ID register 0x03 = 0x4A | Identity/status reads only |
+| PMIC | AXP2101 at 0x34, ID register 0x03 = 0x4A | Verified ALDO3-only 3.3 V panel supply setup |
 | RTC | PCF85063 at 0x51 | Shared RTC path |
 | QMI8658 / SHTC3 | 0x6B / 0x70 in vendor examples | Disabled pending qualification |
 | Audio | MCLK 13, BCLK 14, LRCK 47, DOUT 48, DIN 21, PA 39 | Disabled pending qualification |
 | USB | Native S3 USB | No use of GPIO19/20 for touch/reset |
 
-The product screenshots name the PMIC “TG28”; the schematic/demo identify
-AXP2101. The port probes the latter and never configures its rails, charging,
-PWR events or shutdown. An absent/unrecognized chip means unavailable battery
-telemetry, not permission to apply AMOLED power settings. GPIO39 is both PA
-enable in the schematic and an IMU interrupt in an example: no IMU interrupt or
-audio driver is enabled. Touch and onboard GNSS are absent; navigation/GPS data
-come from the existing authenticated BLE companion connection.
+The product screenshots name the PMIC “TG28”; the schematic, AXP identity read
+and vendor firmware identify AXP2101. The schematic connects ALDO3 through the
+panel-supply switch as `EPD_VCC_AXP`; Waveshare's firmware programs ALDO3 to
+3.3 V and enables it before panel reset. The port performs that same bounded,
+readback-verified operation while preserving every unrelated enable and voltage
+bit. Charging, PWR events, shutdown and all other rails remain unchanged. An
+absent or unrecognized chip cannot authorize any write. GPIO39 is both PA enable
+in the schematic and an IMU interrupt in an example: no IMU interrupt or audio
+driver is enabled. Touch and onboard GNSS are absent; navigation/GPS data come
+from the existing authenticated BLE companion connection.
 
 ## Display and input
 
@@ -50,11 +54,12 @@ pixels. New submissions replace only the pending slot. The worker compares
 against the last successful visible image, aligns partial windows to bytes,
 and records completion only after observing BUSY assert and deassert.
 
-The SSD1677 adapter explicitly uses incrementing X/Y RAM addresses for both
-full and partial transfer, instead of relying on the demo's differing reset
-defaults. Address orientation and differential base retention still require
-the edge-pattern and repeated-partial physical tests below. A failed operation
-retries once with full initialization/base history, then latches a fault.
+The SSD1677 adapter follows Waveshare's full-refresh data-entry, window and RAM
+counter sequence, including its descending full-frame Y window. Partial updates
+retain that mode and use the vendor's byte-start X endpoint. Address orientation
+and differential base retention still require the edge-pattern and
+repeated-partial physical tests below. A failed operation retries once with full
+initialization/base history, then latches a fault.
 Controller waits are individually limited to 10 seconds; the worker yields
 throughout. A permanently low BUSY signal also fails completion. BLE/UI code
 never waits for that worker. A waveform already started cannot be cancelled;
@@ -110,19 +115,21 @@ root. Device identification and exact-image approval requirements in
 All profiles advertise the canonical target; profile identity remains in build
 provenance. No e-paper light-sleep, power-metrics or remote-pointer profile is
 enabled. Automatic disconnected shutdown, automatic light sleep, brightness,
-audio, and PMIC power writes remain disabled. Panel sleep/wake is exposed only
-to the diagnostic controls until physical validation establishes a safe idle
-policy. Wake invalidates differential history and requires a full base frame.
+audio, and PMIC writes beyond the ALDO3 panel supply remain disabled. Panel
+sleep/wake is exposed only to the diagnostic controls until physical validation
+establishes a safe idle policy. Wake invalidates differential history and
+requires a full base frame.
 
-In `DISPLAY_TEST`, up/down clicks select white, black, checkerboard, one-pixel
-edges, or the normal monochrome UI (for text and QR inspection). Hold up to
-sleep; hold down to wake and re-present. Hold center to inject a BUSY timeout;
-click center to clear injection and reinitialize. Serial output identifies the
-pattern and completed generation. This profile never attests pairing and must
-not be used for onboarding or rides. Use ordinary firmware for pairing/BLE
-qualification. Fault injection is not compiled into ordinary or production
-profiles. A fault request needs changed pixels or a due cleaning waveform;
-advance a pattern after requesting it if the current image is unchanged.
+In `DISPLAY_TEST`, boot presents a high-contrast checkerboard. Up/down clicks
+select white, black, checkerboard, one-pixel edges, or the normal monochrome UI
+(for text and QR inspection). Hold up to sleep; hold down to wake and re-present.
+Hold center to inject a BUSY timeout; click center to clear injection and
+reinitialize. Serial output identifies the pattern, BUSY timing and completed
+generation. This profile never attests pairing and must not be used for
+onboarding or rides. Use ordinary firmware for pairing/BLE qualification. Fault
+injection is not compiled into ordinary or production profiles. A fault request
+needs changed pixels or a due cleaning waveform; advance a pattern after
+requesting it if the current image is unchanged.
 
 The LVGL buffer and three packed frames total 912,000 raw bytes in PSRAM.
 The proposed full map/foreground surfaces bring the estimated total to

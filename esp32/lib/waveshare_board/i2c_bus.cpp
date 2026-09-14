@@ -441,6 +441,103 @@ bool ensureAxp2101DisplayEnabled(Axp2101DisplayEnableResult &result,
 }
 #endif
 
+#ifdef WAVESHARE_EPAPER_397
+bool ensureAxp2101EpaperPower(Axp2101EpaperPowerResult &result,
+                             uint8_t attempts) {
+  result = {};
+  bool observedInitialValues = false;
+  return withRetries(
+      axp_policy::DEVICE_ADDRESS, "AXP2101", "epaper-aldo3-only", attempts,
+      [&result, &observedInitialValues]() {
+        const auto readRegister = [](uint8_t reg, uint8_t &value) {
+          Wire.beginTransmission(axp_policy::DEVICE_ADDRESS);
+          Wire.write(reg);
+          if (Wire.endTransmission() != 0 ||
+              Wire.requestFrom(axp_policy::DEVICE_ADDRESS,
+                               static_cast<uint8_t>(1)) != 1) {
+            return false;
+          }
+          value = Wire.read();
+          return true;
+        };
+        const auto writeRegister = [](uint8_t reg, uint8_t value) {
+          Wire.beginTransmission(axp_policy::DEVICE_ADDRESS);
+          Wire.write(reg);
+          Wire.write(value);
+          return Wire.endTransmission() == 0;
+        };
+
+        uint8_t enable = 0, voltage = 0;
+        if (!readRegister(axp_policy::EPAPER_ALDO3_ENABLE_REGISTER, enable) ||
+            !readRegister(axp_policy::EPAPER_ALDO3_VOLTAGE_REGISTER,
+                          voltage)) {
+          return false;
+        }
+        if (!observedInitialValues) {
+          result.enableBefore = enable;
+          result.voltageBefore = voltage;
+          observedInitialValues = true;
+        }
+
+        const uint8_t targetVoltage =
+            axp_policy::withEpaperAldo3At3300mV(voltage);
+        const uint8_t targetEnable =
+            axp_policy::withEpaperAldo3Enabled(enable);
+        if (!axp_policy::isEpaperAldo3VoltageOnlyTransition(
+                voltage, targetVoltage) ||
+            !axp_policy::isEpaperAldo3VoltageOnlyTransition(
+                result.voltageBefore, targetVoltage) ||
+            !axp_policy::isEpaperAldo3EnableOnlyTransition(enable,
+                                                           targetEnable) ||
+            !axp_policy::isEpaperAldo3EnableOnlyTransition(
+                result.enableBefore, targetEnable)) {
+          Serial.printf("AXP_WRITE_BLOCKED schema=1 enable=0x%02X "
+                        "voltage=0x%02X policy=epaper-aldo3-only\n",
+                        targetEnable, targetVoltage);
+          return false;
+        }
+
+        if (voltage != targetVoltage) {
+          if (!writeRegister(axp_policy::EPAPER_ALDO3_VOLTAGE_REGISTER,
+                             targetVoltage)) {
+            return false;
+          }
+          delay(5);
+          if (!readRegister(axp_policy::EPAPER_ALDO3_VOLTAGE_REGISTER,
+                            voltage) || voltage != targetVoltage) {
+            return false;
+          }
+        }
+        if (enable != targetEnable) {
+          if (!writeRegister(axp_policy::EPAPER_ALDO3_ENABLE_REGISTER,
+                             targetEnable)) {
+            return false;
+          }
+          delay(5);
+        }
+
+        if (!readRegister(axp_policy::EPAPER_ALDO3_ENABLE_REGISTER, enable) ||
+            !readRegister(axp_policy::EPAPER_ALDO3_VOLTAGE_REGISTER,
+                          voltage)) {
+          return false;
+        }
+        result.enableAfter = enable;
+        result.voltageAfter = voltage;
+        const bool valid =
+            enable == targetEnable && voltage == targetVoltage &&
+            axp_policy::isEpaperAldo3EnableOnlyTransition(
+                result.enableBefore, enable) &&
+            axp_policy::isEpaperAldo3VoltageOnlyTransition(
+                result.voltageBefore, voltage);
+        if (valid) {
+          result.enableChanged = result.enableBefore != enable;
+          result.voltageChanged = result.voltageBefore != voltage;
+        }
+        return valid;
+      });
+}
+#endif
+
 bool readRegister8(uint8_t address, uint8_t reg, uint8_t &value,
                    const char *label, uint8_t attempts) {
   return withRetries(address, label, "read8", attempts, [address, reg, &value]() {

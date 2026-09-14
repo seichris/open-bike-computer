@@ -11,6 +11,7 @@
 #include "../../lib/gui/src/preConnectionPresentation.hpp"
 #include "../../lib/ble_navigation/screen_configuration.hpp"
 #include <cassert>
+#include <array>
 #include <vector>
 #include <iostream>
 
@@ -18,12 +19,21 @@ struct FakeTransport {
   bool waveform = true;
   unsigned resets = 0, completedWaveforms = 0;
   uint8_t command = 0;
-  std::vector<uint8_t> black, base;
+  std::vector<uint8_t> commands;
+  std::array<std::vector<uint8_t>, 256> dataByCommand;
   bool write(bool data, const uint8_t *bytes, size_t count) {
-    if (!data) command = *bytes;
-    else if (command == 0x24) black.insert(black.end(), bytes, bytes + count);
-    else if (command == 0x26) base.insert(base.end(), bytes, bytes + count);
+    if (!data) {
+      command = *bytes;
+      commands.push_back(command);
+    } else {
+      dataByCommand[command].insert(dataByCommand[command].end(), bytes,
+                                    bytes + count);
+    }
     return true;
+  }
+  void clearWrites() {
+    commands.clear();
+    for (auto &data : dataByCommand) data.clear();
   }
   void reset() { ++resets; }
   void yield() {}
@@ -77,11 +87,29 @@ int main() {
   FakeTransport io;
   Ssd1677<FakeTransport> panel(io);
   assert(panel.present(packed.data(), {0, 0, width, height}, true));
-  assert(io.black == packed && io.base == packed && io.completedWaveforms == 1);
-  io.black.clear(); io.base.clear();
+  assert(io.dataByCommand[0x11] == std::vector<uint8_t>{0x01});
+  assert((io.dataByCommand[0x44] ==
+          std::vector<uint8_t>{0x00, 0x00, 0x1F, 0x03}));
+  assert((io.dataByCommand[0x45] ==
+          std::vector<uint8_t>{0xDF, 0x01, 0x00, 0x00}));
+  assert(io.dataByCommand[0x4E] == std::vector<uint8_t>({0x00, 0x00}));
+  assert(io.dataByCommand[0x4F] == std::vector<uint8_t>({0x00, 0x00}));
+  assert(io.dataByCommand[0x24] == packed && io.dataByCommand[0x26] == packed &&
+         io.completedWaveforms == 1);
+  io.clearWrites();
   assert(panel.present(packed.data(), window, false));
-  assert((io.black == std::vector<uint8_t>{0xFE, 0xFF, 0xFF, 0x7F}));
-  assert(io.base.empty());
+  assert(io.dataByCommand[0x11].empty());
+  assert((io.dataByCommand[0x44] ==
+          std::vector<uint8_t>{0x00, 0x00, 0x08, 0x00}));
+  assert((io.dataByCommand[0x45] ==
+          std::vector<uint8_t>{0x64, 0x00, 0x65, 0x00}));
+  assert((io.dataByCommand[0x4E] ==
+          std::vector<uint8_t>{0x00, 0x00}));
+  assert((io.dataByCommand[0x4F] ==
+          std::vector<uint8_t>{0x64, 0x00}));
+  assert((io.dataByCommand[0x24] ==
+          std::vector<uint8_t>{0xFE, 0xFF, 0xFF, 0x7F}));
+  assert(io.dataByCommand[0x26].empty());
   io.waveform = false;
   assert(!panel.present(packed.data(), window, false));
   assert(io.completedWaveforms == 2);

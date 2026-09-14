@@ -197,10 +197,22 @@ bool readAndClearPowerButtonEvents(PowerButtonEvents &events) {
 bool initializePowerState() {
 #ifdef WAVESHARE_EPAPER_397
   const bool available = begin();
+  i2c::Axp2101EpaperPowerResult panelPower{};
+  const bool powerConfigured =
+      available && i2c::ensureAxp2101EpaperPower(panelPower);
+  if (powerConfigured) delay(10);
   PowerStatus observed{};
   const bool read = available && readPowerStatus(observed);
-  Serial.printf("EPAPER_PMIC available=%d identity=axp2101 statusRead=%d policy=read-only writes=0\n", available, read);
-  return read;
+  Serial.printf(
+      "EPAPER_PMIC available=%d identity=axp2101 statusRead=%d "
+      "aldo3Configured=%d enableBefore=0x%02X enableAfter=0x%02X "
+      "voltageBefore=0x%02X voltageAfter=0x%02X enableChanged=%d "
+      "voltageChanged=%d policy=epaper-aldo3-only\n",
+      available ? 1 : 0, read ? 1 : 0, powerConfigured ? 1 : 0,
+      panelPower.enableBefore, panelPower.enableAfter,
+      panelPower.voltageBefore, panelPower.voltageAfter,
+      panelPower.enableChanged ? 1 : 0, panelPower.voltageChanged ? 1 : 0);
+  return read && powerConfigured;
 #endif
 #if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
   Serial.println("Probing AXP2101 with 2.06 display-enable-only recovery...");

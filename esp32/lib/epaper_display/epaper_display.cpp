@@ -35,7 +35,8 @@ std::atomic<uint32_t> currentPairing{0};
 std::atomic<uint32_t> currentContext{1};
 #ifdef EPAPER_DISPLAY_TEST
 std::atomic<bool> injectBusyFault{false};
-unsigned testPattern = 0;
+// Start with a high-contrast image so boot alone gives useful glass evidence.
+unsigned testPattern = 2;
 #endif
 Status snapshot;
 PresentationPolicy policy;
@@ -88,7 +89,15 @@ public:
       if (uint32_t(millis() - start) >= 500) return false;
       delay(1);
     }
-    return waitReady(timeout);
+    const uint32_t assertedAt = millis();
+    const bool ready = waitReady(timeout);
+#ifdef EPAPER_DISPLAY_TEST
+    Serial.printf("EPAPER_BUSY waveform=%d assertMs=%lu totalMs=%lu\n",
+                  ready ? 1 : 0,
+                  static_cast<unsigned long>(assertedAt - start),
+                  static_cast<unsigned long>(millis() - start));
+#endif
+    return ready;
   }
   bool write(bool data, const uint8_t *bytes, size_t count) {
     digitalWrite(board_traits::epdDc, data ? HIGH : LOW);

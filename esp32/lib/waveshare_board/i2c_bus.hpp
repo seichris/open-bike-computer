@@ -63,6 +63,22 @@ struct Axp2101DisplayEnableResult {
 bool ensureAxp2101DisplayEnabled(Axp2101DisplayEnableResult &result,
                                 uint8_t attempts = 3);
 #endif
+#ifdef WAVESHARE_EPAPER_397
+struct Axp2101EpaperPowerResult {
+  uint8_t enableBefore = 0;
+  uint8_t enableAfter = 0;
+  uint8_t voltageBefore = 0;
+  uint8_t voltageAfter = 0;
+  bool enableChanged = false;
+  bool voltageChanged = false;
+};
+
+// Configure only the schematic-defined e-paper supply: ALDO3 at 3.3 V and
+// its enable bit. Both register updates preserve every unrelated field and
+// are verified by readback; generic AXP2101 rail writes remain blocked.
+bool ensureAxp2101EpaperPower(Axp2101EpaperPowerResult &result,
+                             uint8_t attempts = 3);
+#endif
 bool readRegister8(uint8_t address, uint8_t reg, uint8_t &value,
                    const char *label = nullptr, uint8_t attempts = 3);
 bool readRegisterBlock8(uint8_t address, uint8_t reg, uint8_t *data,

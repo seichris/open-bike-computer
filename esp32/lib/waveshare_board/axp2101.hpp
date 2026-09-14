@@ -45,10 +45,9 @@ bool setPowerButtonOffLevel(PowerButtonOffLevel level);
 bool setPowerButtonEventMonitoring(bool enabled);
 bool readAndClearPowerButtonEvents(PowerButtonEvents &events);
 // Probe and report the PMIC state. The 1.75-inch target leaves every output
-// rail unchanged. The 2.06-inch target has one boot-only compatibility
-// exception: it may set the established display-enable bit while preserving
-// every other bit in that register. No target rewrites rail voltages or turns
-// an output off.
+// rail unchanged. The 2.06-inch target may set its established display-enable
+// bit. The e-paper target programs and enables only its schematic-defined
+// ALDO3 3.3 V panel supply. Each exception preserves every unrelated bit.
 bool initializePowerState();
 
 } // namespace waveshare_board::axp2101
