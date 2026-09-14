@@ -8151,11 +8151,25 @@ private struct WorkoutContractTestSuite {
         expect(
             compactLiveWatchView.contains(
                 "WorkoutCrossAppTakeoverCopyV1.live(disposition:manager.isDiscarding?.discard:.save)"
-            )
+            ),
+            "Watch live takeover copy must follow the active Save/Discard disposition"
+        )
+        // Discard is now a progress-only branch which the root dismisses after
+        // safe cleanup. Only saved rides enter the interactive summary below.
+        // Keep the branch check separate so a save-only copy assertion cannot
+        // accidentally permit the old post-discard recovery screen to return.
+        expect(
+            compactSummaryWatchView.contains(
+                "ifsummary.outcome==.discarded{ProgressView(\"Discarding…\").font(.caption).accessibilityIdentifier(\"workout-discard-progress\")}else{savedSummary}"
+            ),
+            "Watch discarded summary must show only automatic progress, without recovery actions"
+        )
+        expect(
+            compactSummaryWatchView.contains("privatevarsavedSummary:someView{")
                 && compactSummaryWatchView.contains(
-                    "WorkoutCrossAppTakeoverCopyV1.summary(disposition:summary.outcome==.saved?.save:.discard)"
+                    "ifsummary.terminalErrorCode==.anotherWorkoutActive{Label(WorkoutCrossAppTakeoverCopyV1.summary(disposition:.save),"
                 ),
-            "Watch takeover copy must remain bound to the live and terminal Save/Discard dispositions"
+            "Watch saved summary must retain the save-specific cross-app takeover warning"
         )
     }
 
