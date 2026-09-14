@@ -2,12 +2,13 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include "../../utils/src/mapDragPreview.hpp"
 
 namespace world_radio_viewport {
 
 // A modest 2x view keeps useful geographic detail on the small screen. Scaling
-// is display-only: the three wrapped images still share the same 1 MiB buffer.
+// is display-only: wrapped raster samples share the decoded world texture.
 inline constexpr int SCALE = 2;
 
 class Camera {
