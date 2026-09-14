@@ -1,27 +1,89 @@
-name: Workout follow-up source snapshot
+name: Validate Workout follow-up patch
 on:
   push:
     branches: [codex/workout-followup-source-snapshot]
+    paths: [tools/workout-followup-ready.json]
 permissions:
   contents: read
 jobs:
-  source:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 798c0ac7e9d6e5b2cbd5dc542253b4153fc3cc0d
+          path: source
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: lvgl/lvgl
           ref: 7f07a129e8d77f4984fff8e623fd5be18ff42e74
+          path: lvgl-source
           persist-credentials: false
-      - name: Archive pinned LVGL source for local host rendering
+      - name: Verify and apply the exact locally tested text patch
+        working-directory: source
         run: |
-          test "$(git rev-parse HEAD)" = 7f07a129e8d77f4984fff8e623fd5be18ff42e74
-          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/lvgl-9.2.2-source.tar.gz"
-          sha256sum "$RUNNER_TEMP/lvgl-9.2.2-source.tar.gz"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: lvgl-9.2.2-source
-          path: ${{ runner.temp }}/lvgl-9.2.2-source.tar.gz
-          retention-days: 1
-          if-no-files-found: error
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, pathlib, subprocess
+          control = pathlib.Path('../control/tools')
+          meta = json.loads((control/'workout-followup-ready.json').read_text())
+          assert meta['base'] == '798c0ac7e9d6e5b2cbd5dc542253b4153fc3cc0d'
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == meta['base']
+          encoded = ''.join((control/f'workout-followup-patch-{i}.txt').read_text().strip() for i in range(3))
+          patch = lzma.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == meta['patch_sha256']
+          subprocess.run(['git','apply','--index','--unidiff-zero','--whitespace=error'],input=patch,check=True)
+          names = subprocess.check_output(['git','diff','--cached','--name-only'],text=True).splitlines()
+          assert len(names) == 24 and not any(p.startswith('.github/') for p in names)
+          digest = hashlib.sha256()
+          for name in sorted(names):
+              path = pathlib.Path(name)
+              assert not path.is_absolute() and '..' not in path.parts and not path.is_symlink()
+              digest.update(name.encode()+b'\0'+hashlib.sha256(path.read_bytes()).digest())
+          assert digest.hexdigest() == meta['source_digest']
+          PY
+          git diff --cached --check
+      - name: Regenerate and verify actual LVGL preview pixels
+        working-directory: source
+        run: |
+          python3 -m pip install Pillow==11.3.0
+          python3 tools/generate_ride_stats_preview.py --lvgl-source ../lvgl-source --build-dir "$RUNNER_TEMP/ride-preview-build"
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          from PIL import Image
+          meta = json.loads(pathlib.Path('../control/tools/workout-followup-ready.json').read_text())
+          assets = pathlib.Path('ios-app/BikeComputer/BikeComputer/Assets.xcassets')
+          assert hashlib.sha256((assets/'RideStatsPreview.dataset/preview.json').read_bytes()).hexdigest() == meta['preview_json_sha256']
+          image = Image.open(assets/'RideStatsPreviewAtlas.imageset/atlas.png').convert('RGBA')
+          assert list(image.size) == meta['atlas_size']
+          assert hashlib.sha256(image.tobytes()).hexdigest() == meta['atlas_pixel_sha256']
+          PY
+          git add ios-app/BikeComputer/BikeComputer/Assets.xcassets/RideStatsPreview.dataset ios-app/BikeComputer/BikeComputer/Assets.xcassets/RideStatsPreviewAtlas.imageset
+      - name: Run host regression tests
+        working-directory: source
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/tests
+          g++ -std=c++17 -Wall -Wextra -Werror esp32/tools/tests/test_gui_layout.cpp -o "$RUNNER_TEMP/gui175"
+          "$RUNNER_TEMP/gui175"
+          g++ -std=c++17 -Wall -Wextra -Werror -DWAVESHARE_AMOLED_206 esp32/tools/tests/test_gui_layout.cpp -o "$RUNNER_TEMP/gui206"
+          "$RUNNER_TEMP/gui206"
+          g++ -std=c++17 -Wall -Wextra -Werror esp32/tools/tests/test_ride_stats_widget.cpp -o "$RUNNER_TEMP/widget"
+          "$RUNNER_TEMP/widget"
+      - name: Publish tested source only, never main
+        working-directory: source
+        run: |
+          git diff --cached --check
+          test "$(git diff --cached --name-only | wc -l)" -eq 28
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Polish Ride Stats typography and preview; complete Watch discard automatically'
+          test "$(git rev-parse HEAD^)" = 798c0ac7e9d6e5b2cbd5dc542253b4153fc3cc0d
+          git push origin HEAD:refs/heads/codex/workout-followup-validated
+          git log -1 --format='%H %s' >> "$GITHUB_STEP_SUMMARY"
+          git diff HEAD^ --stat >> "$GITHUB_STEP_SUMMARY"
