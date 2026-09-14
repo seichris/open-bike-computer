@@ -3,11 +3,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include "../ble_navigation/ride_ble_protocol.generated.hpp"
+#include "../utils/src/wireBytes.hpp"
 
 namespace world_radio_protocol {
 
-inline constexpr char REQUEST_MAGIC[] = "WRQ1";
-inline constexpr char STATUS_MAGIC[] = "WRS1";
+inline constexpr auto &REQUEST_MAGIC =
+    ride_ble_protocol_generated::WORLD_RADIO_REQUEST_MAGIC;
+inline constexpr auto &STATUS_MAGIC =
+    ride_ble_protocol_generated::WORLD_RADIO_STATUS_MAGIC;
 inline constexpr uint8_t PROTOCOL_VERSION = 1;
 inline constexpr std::size_t REQUEST_BYTES = 20;
 inline constexpr std::size_t STATUS_HEADER_BYTES = 32;
@@ -91,29 +95,10 @@ inline bool isKnownState(PlaybackState state) {
   return false;
 }
 
-inline void writeU16(uint8_t *output, uint16_t value) {
-  output[0] = static_cast<uint8_t>(value);
-  output[1] = static_cast<uint8_t>(value >> 8);
-}
-
-inline void writeU32(uint8_t *output, uint32_t value) {
-  output[0] = static_cast<uint8_t>(value);
-  output[1] = static_cast<uint8_t>(value >> 8);
-  output[2] = static_cast<uint8_t>(value >> 16);
-  output[3] = static_cast<uint8_t>(value >> 24);
-}
-
-inline uint16_t readU16(const uint8_t *input) {
-  return static_cast<uint16_t>(input[0]) |
-         (static_cast<uint16_t>(input[1]) << 8);
-}
-
-inline uint32_t readU32(const uint8_t *input) {
-  return static_cast<uint32_t>(input[0]) |
-         (static_cast<uint32_t>(input[1]) << 8) |
-         (static_cast<uint32_t>(input[2]) << 16) |
-         (static_cast<uint32_t>(input[3]) << 24);
-}
+using wire_bytes::readU16;
+using wire_bytes::readU32;
+using wire_bytes::writeU16;
+using wire_bytes::writeU32;
 
 inline std::size_t boundedLength(const char *text, std::size_t maximum) {
   if (text == nullptr) {

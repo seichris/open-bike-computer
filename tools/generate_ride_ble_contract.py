@@ -69,6 +69,12 @@ def load_contract() -> dict:
         raise SystemExit("application groups must contain between one and eight members")
     if delivery["completed_replay_window"] < 1:
         raise SystemExit("application replay window must retain at least one result")
+    screen_types = contract["screen_types"]
+    values = list(screen_types.values())
+    if (not screen_types or len(values) != len(set(values))
+            or any(type(value) is not int or not 0 <= value < 8 for value in values)
+            or any(not re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in screen_types)):
+        raise SystemExit("screen types must have unique legacy-mask UInt8 bit positions")
     screen_configuration = contract["screen_configuration"]
     if screen_configuration["schema_version"] != 1:
         raise SystemExit("unsupported screen configuration schema")
@@ -194,6 +200,19 @@ def render_swift(contract: dict) -> str:
     for name, value in screen_configuration["results"].items():
         lines.append(f"    case {camel(name)} = {value}")
     lines.extend(["}", ""])
+    # Separate legacy Int and wire UInt8 adapters preserve source compatibility;
+    # both are generated from the same identifiers, never from UI ordering.
+    for enum_name, raw_type in (("RideBLEScreenTypeV1", "UInt8"),
+                                ("RideBLELegacyScreenV1", "Int")):
+        lines.append(f"nonisolated enum {enum_name}: {raw_type}, CaseIterable, Codable, Sendable {{")
+        for name, value in contract["screen_types"].items():
+            lines.append(f"    case {camel(name)} = {value}")
+        if raw_type == "Int":
+            lines.extend(["", "    var wireType: RideBLEScreenTypeV1 {", "        switch self {"])
+            for name in contract["screen_types"]:
+                lines.append(f"        case .{camel(name)}: return .{camel(name)}")
+            lines.extend(["        }", "    }"])
+        lines.extend(["}", ""])
     return "\n".join(lines)
 
 
@@ -278,6 +297,12 @@ def render_cpp(contract: dict) -> str:
     lines.extend(["};", "", "enum class ScreenConfigurationResult : uint8_t {"])
     for name, value in screen_configuration["results"].items():
         lines.append(f"  {pascal(name)} = {value},")
+    lines.extend(["};", "", "enum class ScreenType : uint8_t {"])
+    for name, value in contract["screen_types"].items():
+        lines.append(f"  {pascal(name)} = {value},")
+    # Existing configuration payload code uses this spelling. It is an alias,
+    # not an independently assigned wire value.
+    lines.append("  MapNavigation = MapPlusNavigation,")
     lines.extend(["};", "", "} // namespace ride_ble_protocol_generated", ""])
     return "\n".join(lines)
 

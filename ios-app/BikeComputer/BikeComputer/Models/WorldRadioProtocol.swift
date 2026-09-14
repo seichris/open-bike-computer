@@ -19,7 +19,8 @@ nonisolated struct WorldRadioRequest: Equatable, Sendable {
     let latitudeE7: Int32
     let longitudeE7: Int32
 
-    init?(_ data: Data) {
+    init?(_ bytes: Data) {
+        let data = Data(bytes)
         guard data.count == Self.byteCount,
               data.prefix(4) == Data(RideBLEGeneratedProtocolV1.worldRadioRequestMagic.utf8),
               data[4] == Self.version,
@@ -27,9 +28,9 @@ nonisolated struct WorldRadioRequest: Equatable, Sendable {
               let command = WorldRadioCommand(rawValue: data[5]) else {
             return nil
         }
-        let requestID = data.readUInt32LE(at: 8)
-        let latitudeE7 = Int32(bitPattern: data.readUInt32LE(at: 12))
-        let longitudeE7 = Int32(bitPattern: data.readUInt32LE(at: 16))
+        let requestID = data.wireUInt32LE(at: 8)
+        let latitudeE7 = Int32(bitPattern: data.wireUInt32LE(at: 12))
+        let longitudeE7 = Int32(bitPattern: data.wireUInt32LE(at: 16))
         guard requestID != 0 else { return nil }
         if command == .selectLocation {
             guard Self.isValidCoordinate(
@@ -128,10 +129,10 @@ nonisolated struct WorldRadioStatus: Equatable, Sendable {
         data[6] = statusFlags
         data[7] = stationIndex
         data[8] = stationCount
-        data.writeUInt16LE(bitrateKbps, at: 10)
-        data.writeUInt32LE(requestID, at: 12)
-        data.writeUInt32LE(UInt32(bitPattern: station?.latitudeE7 ?? 0), at: 16)
-        data.writeUInt32LE(UInt32(bitPattern: station?.longitudeE7 ?? 0), at: 20)
+        data.writeWireUInt16LE(bitrateKbps, at: 10)
+        data.writeWireUInt32LE(requestID, at: 12)
+        data.writeWireUInt32LE(UInt32(bitPattern: station?.latitudeE7 ?? 0), at: 16)
+        data.writeWireUInt32LE(UInt32(bitPattern: station?.longitudeE7 ?? 0), at: 20)
         let country = Self.asciiCountryCode(station?.countryCode ?? "")
         data[24] = country[0]
         data[25] = country[1]
@@ -161,26 +162,5 @@ nonisolated struct WorldRadioStatus: Equatable, Sendable {
             (65...90).contains(byte)
         }
         return [ascii.first ?? 0, ascii.dropFirst().first ?? 0]
-    }
-}
-
-private extension Data {
-    nonisolated func readUInt32LE(at offset: Int) -> UInt32 {
-        UInt32(self[offset]) |
-            (UInt32(self[offset + 1]) << 8) |
-            (UInt32(self[offset + 2]) << 16) |
-            (UInt32(self[offset + 3]) << 24)
-    }
-
-    nonisolated mutating func writeUInt16LE(_ value: UInt16, at offset: Int) {
-        self[offset] = UInt8(truncatingIfNeeded: value)
-        self[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
-    }
-
-    nonisolated mutating func writeUInt32LE(_ value: UInt32, at offset: Int) {
-        self[offset] = UInt8(truncatingIfNeeded: value)
-        self[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
-        self[offset + 2] = UInt8(truncatingIfNeeded: value >> 16)
-        self[offset + 3] = UInt8(truncatingIfNeeded: value >> 24)
     }
 }

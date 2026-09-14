@@ -9,13 +9,17 @@ existing screens.
 
 ## Registry
 
-`mainScreenRegistry.hpp` is the source of truth for stable device-screen IDs,
-cycle order, internal tile mapping, and whether a screen is map-backed. It is a
+`protocol/ride-ble-contract-v1.json` is the source of truth for stable screen
+wire IDs; `tools/generate_ride_ble_contract.py` emits the Swift/C++ definitions.
+`mainScreenRegistry.hpp` owns cycle order, internal tile mapping, and whether a
+screen is backed by the navigation renderer. It is a
 pure header with host tests, so settings compatibility and cycle behavior can
 be validated without LVGL or hardware.
 
 Wire IDs remain separate from internal `tileName` values. Static assertions in
-`mainScr.cpp` prevent the registry and BLE contract from drifting.
+`mainScr.cpp` check the legacy adapters against the generated types. UI titles,
+registry order, capability availability and production gates remain separate
+from wire identity.
 
 ## Screen modules
 
@@ -30,8 +34,9 @@ must be a no-op.
 
 ## Adding the next screen
 
-1. Allocate a stable `DeviceScreenSetting` wire ID and capability when the
-   screen depends on a companion-app feature.
+1. Add a stable `screen_types` entry to the BLE JSON contract, preserving all
+   existing values; regenerate Swift/C++ and check legacy UInt8-mask capacity.
+   Allocate a capability when the screen depends on a companion-app feature.
 2. Add one descriptor to `mainScreenRegistry.hpp`.
 3. Implement a self-contained screen module with bounded callbacks.
 4. Add the iOS settings case and migration for existing users.

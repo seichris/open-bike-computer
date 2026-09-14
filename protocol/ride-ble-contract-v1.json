@@ -63,6 +63,14 @@
       "world_radio": {"bit": 27, "minimum_client_version": 25}
     }
   },
+  "screen_types": {
+    "map": 0,
+    "navigation": 1,
+    "ride_stats": 2,
+    "map_plus_navigation": 3,
+    "battery_status": 4,
+    "world_radio": 5
+  },
   "screen_configuration": {
     "schema_version": 1,
     "capability_tlv_type": 2,

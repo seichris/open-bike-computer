@@ -144,4 +144,14 @@ enum class ScreenConfigurationResult : uint8_t {
   Unauthorized = 6,
 };
 
+enum class ScreenType : uint8_t {
+  Map = 0,
+  Navigation = 1,
+  RideStats = 2,
+  MapPlusNavigation = 3,
+  BatteryStatus = 4,
+  WorldRadio = 5,
+  MapNavigation = MapPlusNavigation,
+};
+
 } // namespace ride_ble_protocol_generated

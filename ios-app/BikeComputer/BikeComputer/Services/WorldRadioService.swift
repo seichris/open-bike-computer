@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 #if canImport(AVFoundation) && !HOST_TESTING
 import AVFoundation
 #endif
@@ -212,6 +215,53 @@ private actor RadioBrowserDirectory {
     }
 }
 
+/// Item ownership and user intent have different lifetimes. BLE request IDs are
+/// deliberately not used here: Pause/Resume are new commands for the same item.
+nonisolated struct WorldRadioPlaybackSession {
+    enum Intent { case stopped, playing, paused }
+    private(set) var generation: UInt64 = 0
+    private(set) var intent: Intent = .stopped
+
+    mutating func begin() -> UInt64 {
+        generation &+= 1
+        intent = .playing
+        return generation
+    }
+
+    mutating func pause() {
+        if intent != .stopped { intent = .paused }
+    }
+
+    @discardableResult
+    mutating func resume() -> Bool {
+        guard intent != .stopped else { return false }
+        intent = .playing
+        return true
+    }
+
+    mutating func stop() {
+        // Invalidate already-enqueued KVO work before detaching observations.
+        generation &+= 1
+        intent = .stopped
+    }
+
+    func isCurrent(_ generation: UInt64) -> Bool {
+        generation == self.generation && intent != .stopped
+    }
+
+    func shouldPlay(_ generation: UInt64) -> Bool {
+        isCurrent(generation) && intent == .playing
+    }
+
+    func accepts(_ event: WorldRadioAudioEvent, generation: UInt64) -> Bool {
+        guard isCurrent(generation) else { return false }
+        switch event {
+        case .paused: return intent == .paused
+        case .connecting, .buffering, .playing, .failed: return intent == .playing
+        }
+    }
+}
+
 @MainActor
 protocol WorldRadioAudioPlaying: AnyObject {
     var eventHandler: ((WorldRadioAudioEvent) -> Void)? { get set }
@@ -248,14 +298,20 @@ private final class IPhoneWorldRadioPlayer: WorldRadioAudioPlaying {
     var eventHandler: ((WorldRadioAudioEvent) -> Void)?
 
     private let player = AVPlayer()
+    private var playbackSession = WorldRadioPlaybackSession()
     private var itemObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
     private var currentStation: WorldRadioStation?
 
     func play(_ station: WorldRadioStation) {
-        currentStation = station
+        let generation = playbackSession.begin()
+        // Observers may already have scheduled MainActor work; removing them
+        // alone is insufficient. Every scheduled callback checks generation.
         itemObservation = nil
         timeControlObservation = nil
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        currentStation = station
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default)
@@ -271,14 +327,19 @@ private final class IPhoneWorldRadioPlayer: WorldRadioAudioPlaying {
         itemObservation = item.observe(\.status, options: [.initial, .new]) {
             [weak self] item, _ in
             Task { @MainActor [weak self, item] in
-                guard let self else { return }
+                guard let self,
+                      self.playbackSession.isCurrent(generation),
+                      self.player.currentItem === item else { return }
                 switch item.status {
                 case .readyToPlay:
-                    self.player.play()
+                    if self.playbackSession.shouldPlay(generation) { self.player.play() }
                 case .failed:
-                    self.eventHandler?(.failed(
+                    let event = WorldRadioAudioEvent.failed(
                         item.error?.localizedDescription ?? "Station could not be played"
-                    ))
+                    )
+                    if self.playbackSession.accepts(event, generation: generation) {
+                        self.eventHandler?(event)
+                    }
                 case .unknown:
                     break
                 @unknown default:
@@ -287,14 +348,20 @@ private final class IPhoneWorldRadioPlayer: WorldRadioAudioPlaying {
             }
         }
         timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) {
-            [weak self] player, _ in
-            Task { @MainActor [weak self, player] in
-                guard let self else { return }
-                switch player.timeControlStatus {
+            [weak self, weak item] _, _ in
+            Task { @MainActor [weak self, weak item] in
+                guard let self, let item,
+                      self.playbackSession.isCurrent(generation),
+                      self.player.currentItem === item else { return }
+                // Read the current status after hopping actors. A queued
+                // transition must not replay a superseded playback state.
+                switch self.player.timeControlStatus {
                 case .playing:
+                    guard self.playbackSession.shouldPlay(generation) else { return }
                     self.updateNowPlaying(rate: 1)
                     self.eventHandler?(.playing)
                 case .waitingToPlayAtSpecifiedRate:
+                    guard self.playbackSession.shouldPlay(generation) else { return }
                     self.updateNowPlaying(rate: 0)
                     self.eventHandler?(.buffering)
                 case .paused:
@@ -304,29 +371,37 @@ private final class IPhoneWorldRadioPlayer: WorldRadioAudioPlaying {
                 }
             }
         }
-        player.play()
+        if playbackSession.shouldPlay(generation) { player.play() }
         updateNowPlaying(rate: 0)
     }
 
     func pause() {
+        playbackSession.pause()
         player.pause()
         updateNowPlaying(rate: 0)
         eventHandler?(.paused)
     }
 
     func resume() {
-        guard player.currentItem != nil else {
+        guard let item = player.currentItem, playbackSession.resume() else {
             eventHandler?(.failed("Choose a station first"))
+            return
+        }
+        // Failure while paused does not silently start a different station.
+        // Surface it on explicit resume so the service can apply fallback.
+        if item.status == .failed {
+            eventHandler?(.failed(item.error?.localizedDescription ?? "Station could not be played"))
             return
         }
         player.play()
     }
 
     func stop() {
-        player.pause()
-        player.replaceCurrentItem(with: nil)
+        playbackSession.stop()
         itemObservation = nil
         timeControlObservation = nil
+        player.pause()
+        player.replaceCurrentItem(with: nil)
         currentStation = nil
 #if canImport(MediaPlayer)
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
@@ -368,6 +443,9 @@ final class WorldRadioService {
     private var stationIndex = 0
     private var failedStationUUIDs = Set<String>()
     private var requestID: UInt32 = 0
+    private var searchGeneration: UInt64 = 0
+    private var pausedByUser = false
+    private var hasPlayerItem = false
     private(set) var currentStatus: WorldRadioStatus?
 
     init(
@@ -398,26 +476,34 @@ final class WorldRadioService {
 #endif
             let latitude = Double(request.latitudeE7) / 10_000_000
             let longitude = Double(request.longitudeE7) / 10_000_000
-            startSearch(requestID: request.requestID) { [directory] in
+            startSearch { [directory] in
                 try await directory.nearby(latitude, longitude)
             }
         case .randomStation:
 #if DEBUG
             NSLog("World Radio search scope=global request=%u", request.requestID)
 #endif
-            startSearch(requestID: request.requestID) { [directory] in
+            startSearch { [directory] in
                 try await directory.random()
             }
         case .playPause:
+            if requestTask != nil && candidates.isEmpty {
+                pausedByUser.toggle()
+                emit(state: pausedByUser ? .paused : .searching,
+                     message: pausedByUser ? "Paused" : "Finding stations...")
+                return
+            }
             guard !candidates.isEmpty else {
                 emit(state: .noStations, message: "Choose a place first")
                 return
             }
             if currentStatus?.state == .playing || currentStatus?.state == .buffering ||
                 currentStatus?.state == .connecting {
+                pausedByUser = true
                 player.pause()
-            } else if currentStatus?.state == .paused {
-                player.resume()
+            } else if pausedByUser {
+                pausedByUser = false
+                if hasPlayerItem { player.resume() } else { playCurrent() }
             } else {
                 playCurrent()
             }
@@ -426,8 +512,9 @@ final class WorldRadioService {
         case .nextStation:
             moveStation(by: 1)
         case .stop:
-            requestTask?.cancel()
-            player.stop()
+            cancelSearch()
+            stopPlayer()
+            pausedByUser = false
             emit(state: .idle, message: "Stopped")
         }
     }
@@ -437,9 +524,9 @@ final class WorldRadioService {
     /// a temporary BLE disconnect deliberately does not call it so phone-side
     /// playback can continue.
     func stop() {
-        requestTask?.cancel()
-        requestTask = nil
-        player.stop()
+        cancelSearch()
+        stopPlayer()
+        pausedByUser = false
         candidates = []
         stationIndex = 0
         failedStationUUIDs = []
@@ -454,13 +541,25 @@ final class WorldRadioService {
         statusSink(currentStatus)
     }
 
+    private func cancelSearch() {
+        searchGeneration &+= 1
+        requestTask?.cancel()
+        requestTask = nil
+    }
+
+    private func stopPlayer() {
+        hasPlayerItem = false
+        player.stop()
+    }
+
     private func startSearch(
-        requestID: UInt32,
         operation: @escaping @Sendable () async throws -> [WorldRadioStation]
     ) {
-        requestTask?.cancel()
+        cancelSearch()
+        let generation = searchGeneration
         let previousUUID = currentStation?.uuid
-        player.stop()
+        stopPlayer()
+        pausedByUser = false
         candidates = []
         stationIndex = 0
         failedStationUUIDs = []
@@ -468,23 +567,31 @@ final class WorldRadioService {
         requestTask = Task { [weak self] in
             do {
                 let stations = try await operation()
-                guard !Task.isCancelled,
-                      let self,
-                      self.requestID == requestID else { return }
+                guard !Task.isCancelled, let self,
+                      self.searchGeneration == generation else { return }
+                self.requestTask = nil
                 self.candidates = stations
                 let alternatives = stations.indices.filter { stations[$0].uuid != previousUUID }
                 let choices = alternatives.isEmpty ? Array(stations.indices) : alternatives
                 self.stationIndex = choices.isEmpty ? 0 : choices[self.chooseIndex(choices.count)]
                 self.failedStationUUIDs = []
-                self.playCurrent()
-            } catch is CancellationError {
-                return
-            } catch WorldRadioDirectoryError.noStations {
-                guard let self, self.requestID == requestID else { return }
-                self.emit(state: .noStations, message: "No playable stations nearby")
+                if self.pausedByUser && !stations.isEmpty {
+                    self.emit(state: .paused, message: "Paused")
+                } else {
+                    self.playCurrent()
+                }
             } catch {
-                guard let self, self.requestID == requestID else { return }
-                self.emit(state: .error, message: "Radio directory unavailable")
+                // A cancelled directory can throw a non-CancellationError.
+                // Never let an old failure replace the current search/status.
+                guard !Task.isCancelled, let self,
+                      self.searchGeneration == generation else { return }
+                self.requestTask = nil
+                if error is CancellationError { return }
+                if error as? WorldRadioDirectoryError == .noStations {
+                    self.emit(state: .noStations, message: "No playable stations nearby")
+                } else {
+                    self.emit(state: .error, message: "Radio directory unavailable")
+                }
             }
         }
     }
@@ -494,7 +601,7 @@ final class WorldRadioService {
             emit(state: .noStations, message: "Choose a place first")
             return
         }
-        player.stop()
+        stopPlayer()
         stationIndex = (stationIndex + offset + candidates.count) % candidates.count
         failedStationUUIDs = []
         playCurrent()
@@ -505,11 +612,15 @@ final class WorldRadioService {
             emit(state: .noStations, message: "No playable stations nearby")
             return
         }
+        pausedByUser = false
+        hasPlayerItem = true
         emit(state: .connecting, message: "Connecting...")
         player.play(candidates[stationIndex])
     }
 
     private func handleAudioEvent(_ event: WorldRadioAudioEvent) {
+        guard hasPlayerItem, requestID != 0 else { return }
+        if pausedByUser && event != .paused { return }
         switch event {
         case .connecting:
             emit(state: .connecting, message: "Connecting...")
@@ -537,6 +648,7 @@ final class WorldRadioService {
                     failedStationUUIDs.count < candidates.count
                 playCurrent()
             } else {
+                stopPlayer()
                 emit(state: .error, message: "No station could be played")
             }
         }

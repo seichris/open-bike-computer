@@ -42,11 +42,52 @@ int main() {
         assert(camera.x() <= 0 && camera.x() + 4096 >= width);
       }
     }
+    // Tap jitter and duplicate samples must not pan or recompose the raster.
+    camera.centerOn(0, 0);
+    DragSession gesture;
+    gesture.begin(100, 100);
+    assert(!gesture.sample(103, 102, camera));
+    assert(camera.x() == x && camera.y() == y);
+    assert(!gesture.finish(0));
+    assert(!gesture.selectionReady(1000));
+    gesture.begin(100, 100);
+    assert(gesture.sample(110, 100, camera));
+    assert(!gesture.sample(110, 100, camera));
+    assert(gesture.finish(100));
+    assert(!gesture.selectionReady(279));
+    // A second drag before settlement extends the same lookup window.
+    gesture.begin(100, 100);
+    assert(!gesture.selectionReady(1000));
+    assert(gesture.sample(90, 100, camera));
+    assert(camera.x() == x && camera.y() == y);
+    assert(gesture.finish(200));
+    assert(!gesture.selectionReady(379));
+    assert(gesture.selectionReady(380));
+    gesture.cancel();
+    assert(!gesture.selectionReady(1000));
+    assert(!gesture.sample(200, 200, camera));
+
+    camera.pan(0, 100000); // Vertical clamp must not accumulate dead overscroll.
+    gesture.begin(100, 100);
+    assert(!gesture.sample(100, 140, camera));
+    assert(gesture.sample(100, 139, camera));
+    assert(camera.y() == -1);
+    assert(gesture.finish(UINT32_MAX - 100));
+    assert(!gesture.selectionReady(78));
+    assert(gesture.selectionReady(79)); // uint32 tick rollover
+    gesture.cancel();
+
     camera.centerOn(0, 1790000000);
     const int32_t before = camera.longitude();
     camera.pan(-30, 0);
     assert(before > 0 && camera.longitude() < 0);
     assert(camera.latitude() == 0);
+    gesture.begin(100, 100);
+    const auto longitude = camera.longitude();
+    assert(gesture.sample(130, 100, camera));
+    assert(gesture.sample(100, 100, camera));
+    assert(camera.longitude() == longitude);
+    gesture.cancel();
   }
   assert(!mayFocusStation(true, 10, 5, 10, 6));
   assert(!mayFocusStation(false, 0, 5, 10, 6));

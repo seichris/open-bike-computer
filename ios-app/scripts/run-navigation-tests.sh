@@ -83,6 +83,7 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/NavigationRuntime.swift \
   ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
   ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/WireBytes.swift \
   ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
   ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
@@ -99,17 +100,7 @@ xcrun swiftc \
 
 "${OUT}"
 
-WORLD_RADIO_OUT="${TMPDIR:-/tmp}/open-bike-world-radio-tests"
-
-xcrun swiftc \
-  -D HOST_TESTING \
-  -o "${WORLD_RADIO_OUT}" \
-  ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift \
-  ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift \
-  ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
-  ios-app/BikeComputerTests/WorldRadioTests.swift
-
-"${WORLD_RADIO_OUT}"
+bash "${SCRIPT_DIR}/run-world-radio-tests.sh"
 
 CYCLING_SENSOR_OUT="${TMPDIR:-/tmp}/open-bike-cycling-sensor-tests"
 
@@ -119,6 +110,7 @@ xcrun swiftc \
   -default-isolation MainActor \
   -o "${CYCLING_SENSOR_OUT}" \
   ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/WireBytes.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
@@ -236,6 +228,7 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/NavigationRuntime.swift \
   ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
   ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/WireBytes.swift \
   ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
   ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputerTests/SavedMapPreviewCatalystTests.swift

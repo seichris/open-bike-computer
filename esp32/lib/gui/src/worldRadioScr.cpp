@@ -49,13 +49,11 @@ int32_t centerLongitudeE7 = 0;
 world_radio_viewport::Camera camera;
 uint32_t pendingStationFocus = 0;
 uint32_t pendingStationFocusRevision = 0;
-bool dragging = false;
+world_radio_viewport::DragSession dragSession;
 bool randomOnEntryPending = false;
-bool dragStarted = false;
-int16_t pressX = 0;
-int16_t pressY = 0;
-int16_t lastX = 0;
-int16_t lastY = 0;
+bool hasRenderedCamera = false;
+int renderedCameraX = 0;
+int renderedCameraY = 0;
 
 void updateMapPosition() {
   if (mapViewport == nullptr) {
@@ -64,6 +62,11 @@ void updateMapPosition() {
   centerLatitudeE7 = camera.latitude();
   centerLongitudeE7 = camera.longitude();
   if (mapCanvas != nullptr && viewportBuffer != nullptr) {
+    if (hasRenderedCamera && renderedCameraX == camera.x() &&
+        renderedCameraY == camera.y()) return;
+    hasRenderedCamera = true;
+    renderedCameraX = camera.x();
+    renderedCameraY = camera.y();
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
     const uint32_t startedUs = micros();
 #endif
@@ -174,7 +177,7 @@ void renderStatus(bool force = false) {
                         : LV_SYMBOL_PLAY);
 
   if (world_radio_viewport::mayFocusStation(
-          dragging, pendingStationFocus, pendingStationFocusRevision,
+          dragSession.active(), pendingStationFocus, pendingStationFocusRevision,
           status.requestId, snapshot.revision) && status.hasStation &&
       (status.state == world_radio_protocol::PlaybackState::Connecting ||
        status.state == world_radio_protocol::PlaybackState::Buffering ||
@@ -189,6 +192,7 @@ void renderStatus(bool force = false) {
 
 bool sendCommand(world_radio_protocol::Command command) {
   randomOnEntryPending = false;
+  dragSession.cancel();
   world_radio_protocol::Request request{};
   request.command = command;
   request.requestId = world_radio_runtime::nextRequestId();
@@ -227,44 +231,30 @@ void mapEvent(lv_event_t *event) {
   case LV_EVENT_PRESSED:
     randomOnEntryPending = false;
     pendingStationFocus = 0;
-    dragging = true;
-    dragStarted = false;
-    pressX = lastX = point.x;
-    pressY = lastY = point.y;
+    dragSession.begin(point.x, point.y);
     break;
-  case LV_EVENT_PRESSING: {
-    if (!dragging) {
-      break;
-    }
-    const int16_t dx = point.x - lastX;
-    const int16_t dy = point.y - lastY;
-    if (std::abs(point.x - pressX) + std::abs(point.y - pressY) >= 10) {
-      dragStarted = true;
-    }
-    // Physical touch is calibrated at the driver; keep direct screen-space motion.
-    camera.drag(dx, dy);
-    lastX = point.x;
-    lastY = point.y;
-    updateMapPosition();
+  case LV_EVENT_PRESSING:
+    if (dragSession.sample(point.x, point.y, camera)) updateMapPosition();
     break;
-  }
-  case LV_EVENT_RELEASED:
-  case LV_EVENT_PRESS_LOST:
-    if (!dragging) {
-      break;
-    }
-    dragging = false;
+  case LV_EVENT_RELEASED: {
+    if (!dragSession.active()) break;
+    if (dragSession.sample(point.x, point.y, camera)) updateMapPosition();
+    const bool dragged = dragSession.finish(lv_tick_get());
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
-    Serial.printf("World Radio map release start=%d,%d end=%d,%d dragged=%u\n",
-                  pressX, pressY, point.x, point.y, dragStarted);
+    Serial.printf("World Radio map release dragged=%u\n", dragged);
 #endif
-    if (!dragStarted && screenCallbacks.tapToSwitchScreens != nullptr &&
+    if (dragged) break; // Coalesce nearby lookups until the gesture settles.
+    if (screenCallbacks.tapToSwitchScreens != nullptr &&
         screenCallbacks.tapToSwitchScreens() &&
         screenCallbacks.cycleScreen != nullptr) {
       screenCallbacks.cycleScreen();
       break;
     }
     sendCommand(world_radio_protocol::Command::SelectLocation);
+    break;
+  }
+  case LV_EVENT_PRESS_LOST:
+    dragSession.cancel(); // A cancelled gesture is not a location selection.
     break;
   default:
     break;
@@ -355,6 +345,8 @@ void worldRadioScr(lv_obj_t *screen,
   camera.configure(TFT_WIDTH, mapHeight, WORLD_WIDTH * MAP_SCALE,
                     WORLD_HEIGHT * MAP_SCALE);
   pendingStationFocus = 0;
+  dragSession.cancel();
+  hasRenderedCamera = false;
   lv_obj_set_style_bg_color(screenRoot, lv_color_black(), 0);
   lv_obj_set_style_bg_opa(screenRoot, LV_OPA_COVER, 0);
   lv_obj_clear_flag(screenRoot, LV_OBJ_FLAG_SCROLLABLE);
@@ -465,6 +457,9 @@ void worldRadioScr(lv_obj_t *screen,
 }
 
 void updateWorldRadioScr() {
+  if (dragSession.selectionReady(lv_tick_get())) {
+    sendCommand(world_radio_protocol::Command::SelectLocation);
+  }
   if (randomOnEntryPending && screenCallbacks.phoneReady != nullptr &&
       screenCallbacks.phoneReady()) {
     sendCommand(world_radio_protocol::Command::RandomStation);
@@ -473,7 +468,7 @@ void updateWorldRadioScr() {
 }
 
 void activateWorldRadioScr() {
-  dragging = false;
+  dragSession.cancel();
   pendingStationFocus = 0;
   randomOnEntryPending = true;
   updateWorldRadioScr();

@@ -137,3 +137,32 @@ enum RideBLEScreenConfigurationResultV1: UInt8, Equatable, Sendable {
     case busy = 5
     case unauthorized = 6
 }
+
+nonisolated enum RideBLEScreenTypeV1: UInt8, CaseIterable, Codable, Sendable {
+    case map = 0
+    case navigation = 1
+    case rideStats = 2
+    case mapPlusNavigation = 3
+    case batteryStatus = 4
+    case worldRadio = 5
+}
+
+nonisolated enum RideBLELegacyScreenV1: Int, CaseIterable, Codable, Sendable {
+    case map = 0
+    case navigation = 1
+    case rideStats = 2
+    case mapPlusNavigation = 3
+    case batteryStatus = 4
+    case worldRadio = 5
+
+    var wireType: RideBLEScreenTypeV1 {
+        switch self {
+        case .map: return .map
+        case .navigation: return .navigation
+        case .rideStats: return .rideStats
+        case .mapPlusNavigation: return .mapPlusNavigation
+        case .batteryStatus: return .batteryStatus
+        case .worldRadio: return .worldRadio
+        }
+    }
+}

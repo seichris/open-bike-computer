@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mainScreenTypes.hpp"
+#include "../../ble_navigation/ride_ble_protocol.generated.hpp"
 #include "../../world_radio/world_radio_config.hpp"
 
 #include <array>
@@ -9,14 +10,7 @@
 
 namespace main_screen_registry {
 
-enum class DeviceScreenId : uint8_t {
-  Map = 0,
-  Navigation = 1,
-  RideStats = 2,
-  MapPlusNavigation = 3,
-  BatteryStatus = 4,
-  WorldRadio = 5,
-};
+using DeviceScreenId = ride_ble_protocol_generated::ScreenType;
 
 struct Descriptor {
   tileName tile;

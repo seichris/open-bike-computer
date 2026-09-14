@@ -56,12 +56,18 @@ enum class WorkoutStartRequestPresentation : uint8_t {
  * target.
  */
 enum DeviceScreenSetting : uint8_t {
-  DEVICE_SCREEN_MAP = 0,
-  DEVICE_SCREEN_NAVIGATION = 1,
-  DEVICE_SCREEN_RIDE_STATS = 2,
-  DEVICE_SCREEN_MAP_PLUS_NAVIGATION = 3,
-  DEVICE_SCREEN_BATTERY_STATUS = 4,
-  DEVICE_SCREEN_WORLD_RADIO = 5,
+  DEVICE_SCREEN_MAP =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::Map),
+  DEVICE_SCREEN_NAVIGATION =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::Navigation),
+  DEVICE_SCREEN_RIDE_STATS =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::RideStats),
+  DEVICE_SCREEN_MAP_PLUS_NAVIGATION =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::MapPlusNavigation),
+  DEVICE_SCREEN_BATTERY_STATUS =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::BatteryStatus),
+  DEVICE_SCREEN_WORLD_RADIO =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::WorldRadio),
 };
 
 static constexpr uint8_t DEVICE_SCREEN_SUPPORTED_MASK =

@@ -647,33 +647,13 @@ enum DeviceSound: UInt8, CaseIterable, Identifiable {
     }
 }
 
-enum DeviceScreen: Int, CaseIterable, Identifiable {
-    case map = 0
-    case navigation = 1
-    case rideStats = 2
-    case mapPlusNavigation = 3
-    case batteryStatus = 4
-    case worldRadio = 5
+typealias DeviceScreen = RideBLELegacyScreenV1
 
+extension RideBLELegacyScreenV1: Identifiable {
     var id: Int { rawValue }
     var bit: Int { 1 << rawValue }
 
-    var title: String {
-        switch self {
-        case .map:
-            return "Map"
-        case .navigation:
-            return "Navigation"
-        case .rideStats:
-            return "Ride Stats"
-        case .mapPlusNavigation:
-            return "Map + Navigation"
-        case .batteryStatus:
-            return "Battery Status"
-        case .worldRadio:
-            return "World Radio"
-        }
-    }
+    var title: String { wireType.title }
 
     static var allScreensMask: Int {
         allCases.reduce(0) { $0 | $1.bit }

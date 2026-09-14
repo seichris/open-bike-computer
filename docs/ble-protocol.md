@@ -2027,3 +2027,13 @@ The HTTPS service is configured by firmware at boot but remains disabled until
 BLE transfer control binds it to an authenticated owner session. BLE disconnect
 synchronously clears the token, hotspot secret, binding, and request generation,
 stops the listener, and schedules mode-specific cleanup.
+
+### World Radio reuse invariants
+
+The World Radio reuse/lifecycle follow-up does not change WRQ1/WRS1 bytes,
+CAP2 bit 27, client version 25, or screen type 5. Stable screen identifiers now
+come from `screen_types` in `protocol/ride-ble-contract-v1.json`; generated
+Swift/C++ adapters preserve legacy masks and configurable-screen payload IDs.
+The common request/status fixtures in `protocol/fixtures/world-radio-v1.txt`
+are consumed by firmware and phone host tests. See `docs/world-radio.md` for
+playback intent, item/search generation and drag-settlement behavior.
