@@ -159,24 +159,26 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("request.overscanPixels - MAP_RENDER_SAFETY_PIXELS", request)
         self.assertIn("request.viewportWidth + request.overscanPixels * 2U", request)
 
-    def test_amoled_lvgl_pool_uses_psram_to_preserve_wifi_headroom(self):
-        gate = (
-            "#if defined(BOARD_HAS_PSRAM) && "
-            "(defined(WAVESHARE_AMOLED_175) || "
-            "defined(WAVESHARE_AMOLED_206))"
-        )
+    def test_waveshare_lvgl_pool_uses_psram_to_preserve_wifi_headroom(self):
         allocator = (
             "heap_caps_aligned_alloc(16, (size), "
             "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)"
         )
         for config in (LVGL_CONFIG_SOURCE, LVGL_CONFIG_TEMPLATE_SOURCE):
-            self.assertIn(gate, config)
+            profile_gate = config.index("#if defined(BOARD_HAS_PSRAM)")
+            fallback = config.index("#else", profile_gate)
+            gate = config[profile_gate:fallback]
+            for profile in (
+                "WAVESHARE_AMOLED_175",
+                "WAVESHARE_AMOLED_206",
+                "WAVESHARE_EPAPER_397",
+            ):
+                self.assertIn(f"defined({profile})", gate)
             self.assertIn("#define LV_MEM_SIZE (96 * 1024U)", config)
             self.assertIn(
                 "#define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>", config
             )
             self.assertIn(allocator, config)
-            fallback = config.index("#else", config.index(gate))
             self.assertIn("#undef LV_MEM_POOL_ALLOC", config[fallback:])
 
     def test_publication_rejects_stale_frame_then_swaps_complete_buffers(self):
