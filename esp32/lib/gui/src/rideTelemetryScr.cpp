@@ -129,13 +129,15 @@ void applyMetricText(lv_obj_t *label, const char *text,
 
 void setMetricValueIfChanged(lv_obj_t *label, const char *text,
                              const ride_telemetry_layout::Rect &rect,
-                             ride_metric_typography::Role role) {
+                             ride_metric_typography::Role role,
+                             const lv_font_t *sharedFont = nullptr) {
   if (label == nullptr || text == nullptr)
     return;
   // Use the authoritative slot, not LVGL's previous/tightly measured label
   // width. Geometry changes and heart -> value transitions take effect now.
-  const lv_font_t *font = ride_metric_typography::fontForText(
-      text, rect.width - 4, rect.height, role);
+  const lv_font_t *font = sharedFont != nullptr ? sharedFont :
+      ride_metric_typography::fontForText(
+          text, rect.width - 4, rect.height, role);
   if (font == nullptr) {
     text = "--";
     font = ride_metric_typography::fontForText(
@@ -146,12 +148,13 @@ void setMetricValueIfChanged(lv_obj_t *label, const char *text,
 
 void setHeartValue(lv_obj_t *label, lv_obj_t *heart, const char *text,
                    const ride_telemetry_layout::Rect &metric,
-                   bool available) {
+                   bool available, const lv_font_t *sharedFont = nullptr) {
   const auto presentation = ride_telemetry_layout::makeHeartRatePresentation(
       metric, rideLayout.screenWidth, available);
-  const auto *font = available ? ride_metric_typography::fontForText(
-      text, presentation.fontSelectionWidth,
-      presentation.unavailableValue.height, metricFontRole()) : nullptr;
+  const auto *font = available ? (sharedFont != nullptr ? sharedFont :
+      ride_metric_typography::fontForText(
+          text, presentation.fontSelectionWidth,
+          presentation.unavailableValue.height, metricFontRole())) : nullptr;
   if (font == nullptr) {
     setMetricValueIfChanged(label, available ? "--" : text,
                              presentation.unavailableValue, metricFontRole());
@@ -514,18 +517,47 @@ void updateConfigurableSlots(
     const ride_telemetry_presenter::ViewModel &model) {
   hideLegacyWorkoutMetrics();
   const auto &layout = currentRideStatsLayout();
+  std::array<ride_stats_widget::Presentation,
+             ride_telemetry_layout::kConfigurableSlotCount> widgets{};
+  std::array<const lv_font_t *, ride_telemetry_layout::kConfigurableSlotCount>
+      sharedFonts{};
+  for (std::size_t index = 0; index < widgets.size(); ++index)
+    widgets[index] = ride_stats_widget::make(layout.slots[index], model);
+  for (std::size_t right = 2; right < widgets.size(); right += 2) {
+    const auto &leftWidget = widgets[right - 1];
+    const auto &rightWidget = widgets[right];
+    if (!rightWidget.isAltitude || !rightWidget.available ||
+        !leftWidget.available ||
+        (leftWidget.kind != ride_stats_widget::PresentationKind::Scalar &&
+         leftWidget.kind != ride_stats_widget::PresentationKind::HeartWithValue))
+      continue;
+    const auto leftRect =
+        ride_telemetry_layout::configurableValueRect(rideLayout, right - 1);
+    const auto rightRect =
+        ride_telemetry_layout::configurableValueRect(rideLayout, right);
+    const int32_t heartInset =
+        leftWidget.kind == ride_stats_widget::PresentationKind::HeartWithValue
+            ? ride_telemetry_layout::heartRateHeartSize(rideLayout.screenWidth) +
+                  ride_telemetry_layout::heartRateHeartGap(rideLayout.screenWidth)
+            : 0;
+    const auto *font = ride_metric_typography::fontForPair(
+        {leftWidget.value.data(), leftRect.width - 4 - heartInset, leftRect.height},
+        {rightWidget.value.data(), rightRect.width - 4, rightRect.height},
+        metricFontRole());
+    sharedFonts[right - 1] = sharedFonts[right] = font;
+  }
   for (std::size_t index = 0; index < configurableSlots.size(); ++index) {
     ConfigurableSlotView &slot = configurableSlots[index];
     setConfigurableSlotHidden(slot, true);
     slot.displayedZone = -2;
-    const auto widget = ride_stats_widget::make(layout.slots[index], model);
+    const auto &widget = widgets[index];
     if (widget.kind == ride_stats_widget::PresentationKind::Empty)
       continue;
     const auto rect =
         ride_telemetry_layout::configurableSlotRect(rideLayout, index);
     char title[40]{};
     if (index == 0 && widget.unit[0] != '\0')
-      std::snprintf(title, sizeof(title), "%s · %s", widget.title, widget.unit);
+      std::snprintf(title, sizeof(title), "%s %s", widget.title, widget.unit);
     else
       std::snprintf(title, sizeof(title), "%s", widget.title);
     setMetricTitleIfChanged(slot.labels.title, title,
@@ -539,12 +571,13 @@ void updateConfigurableSlots(
     lv_obj_clear_flag(slot.labels.value, LV_OBJ_FLAG_HIDDEN);
     if (widget.kind == ride_stats_widget::PresentationKind::HeartWithValue) {
       setHeartValue(slot.labels.value, slot.heart, widget.value.data(), rect,
-                     widget.available);
+                     widget.available, sharedFonts[index]);
     } else {
       setMetricValueIfChanged(
           slot.labels.value, widget.value.data(),
           ride_telemetry_layout::configurableValueRect(rideLayout, index),
-          index == 0 ? ride_metric_typography::Role::Hero : metricFontRole());
+          index == 0 ? ride_metric_typography::Role::Hero : metricFontRole(),
+          sharedFonts[index]);
     }
   }
 }
@@ -900,7 +933,8 @@ void updateDetectionWaitingMessage(uint32_t nowMs) {
 void updateBottomMetric(
     MetricLabels labels, ride_telemetry_presenter::BottomMetric metric,
     const ride_telemetry_presenter::ViewModel &model,
-    const ride_telemetry_layout::Rect &rect) {
+    const ride_telemetry_layout::Rect &rect,
+    const lv_font_t *sharedFont = nullptr) {
   setMetricTitleIfChanged(labels.title,
                            ride_telemetry_presenter::bottomMetricTitle(metric),
                            rect);
@@ -908,7 +942,7 @@ void updateBottomMetric(
   ride_telemetry_presenter::formatBottomMetric(metric, model, value,
                                                 sizeof(value));
   setMetricValueIfChanged(labels.value, value, metricValueRect(rect),
-                           metricFontRole());
+                           metricFontRole(), sharedFont);
 }
 
 } // namespace
@@ -1070,9 +1104,25 @@ void updateRideTelemetryEvent(lv_event_t *) {
 
   const ride_telemetry_presenter::BottomMetricSelection bottomMetrics =
       ride_telemetry_presenter::selectBottomMetrics(model);
+  const lv_font_t *bottomPairFont = nullptr;
+  if (bottomMetrics.right == ride_telemetry_presenter::BottomMetric::Altitude &&
+      model.altitudeMeters.available) {
+    char leftText[24];
+    char rightText[24];
+    ride_telemetry_presenter::formatBottomMetric(
+        bottomMetrics.left, model, leftText, sizeof(leftText));
+    ride_telemetry_presenter::formatBottomMetric(
+        bottomMetrics.right, model, rightText, sizeof(rightText));
+    const auto leftRect = metricValueRect(rideMetricPlacement.bottomLeft);
+    const auto rightRect = metricValueRect(rideMetricPlacement.bottomRight);
+    if (std::strcmp(leftText, "--") != 0)
+      bottomPairFont = ride_metric_typography::fontForPair(
+          {leftText, leftRect.width - 4, leftRect.height},
+          {rightText, rightRect.width - 4, rightRect.height}, metricFontRole());
+  }
   updateBottomMetric(rideBottomLeft, bottomMetrics.left, model,
-                      rideMetricPlacement.bottomLeft);
+                       rideMetricPlacement.bottomLeft, bottomPairFont);
   updateBottomMetric(rideBottomRight, bottomMetrics.right, model,
-                      rideMetricPlacement.bottomRight);
+                       rideMetricPlacement.bottomRight, bottomPairFont);
   updateAutomationPanel(millis());
 }

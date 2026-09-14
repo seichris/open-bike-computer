@@ -65,6 +65,7 @@ private struct WorkoutContractTestSuite {
         testLegacyPhoneProjection()
         testSegmentRoundTripValidationAndAccumulation()
         testTerminalOutcomeRoundTripAndValidation()
+        testDiscardCompletionPacketAndAutomaticCleanupPolicy()
         testAllMessageKindsRoundTrip()
         testCompatibleMinorVersionIgnoresUnknownFields()
         testUnsupportedMajorVersionIsRejected()
@@ -1661,6 +1662,52 @@ private struct WorkoutContractTestSuite {
         expectThrows(.invalidEnvelopePayload, "nonterminal outcome") {
             try WorkoutContractCodec.validate(invalidRunningOutcome)
         }
+    }
+
+    private mutating func testDiscardCompletionPacketAndAutomaticCleanupPolicy() {
+        let endedAt = Date(timeIntervalSinceReferenceDate: 800_000_090)
+        let start = endedAt.addingTimeInterval(-30)
+        let rejected = makeEnvelope(
+            sequence: 1, capturedAt: endedAt.addingTimeInterval(1),
+            snapshot: WorkoutSnapshotV1(
+                state: .ended, startDate: start,
+                elapsedTime: metric(31, .seconds, endedAt),
+                availability: [.elapsedTime], terminalOutcome: .discarded,
+                wallElapsedTime: metric(30, .seconds, endedAt)
+            )
+        )
+        expectThrows(.invalidMetric, "discard with stale end-time metrics") {
+            try WorkoutContractCodec.validate(rejected)
+        }
+        let terminal = WorkoutDiscardCompletionPolicy.terminalSnapshot(
+            startDate: start, errorCode: .anotherWorkoutActive
+        )
+        let completed = makeEnvelope(sequence: 2, capturedAt: endedAt, snapshot: terminal)
+        do {
+            let decoded = try roundTripWorkoutEnvelope(completed)
+            expect(decoded.snapshot == terminal, "minimal discard must round trip")
+            expect(terminal.state == .ended && terminal.terminalOutcome == .discarded,
+                   "discard completion must retain its explicit terminal result")
+            expect(terminal.availability.isEmpty && terminal.elapsedTime == nil
+                && terminal.wallElapsedTime == nil && terminal.location == nil,
+                   "discard must not require discarded builder statistics")
+            expect(terminal.errorCode == .anotherWorkoutActive,
+                   "discard must preserve a durable terminal cause")
+        } catch { expect(false, "minimal discard rejected: \(error)") }
+        for attempt in 0...50 {
+            let delay = WorkoutTerminalCleanupRetryPolicy.delay(
+                disposition: .discard, completedAttempts: attempt,
+                baseDelay: 1, saveAttemptLimit: 3
+            )
+            expect(delay != nil && delay! > 0 && delay! <= 30,
+                   "discard retries must remain automatic, rate-limited and finite")
+        }
+        expect(WorkoutTerminalCleanupRetryPolicy.delay(
+            disposition: .save, completedAttempts: 3, baseDelay: 1, saveAttemptLimit: 3
+        ) == nil, "save retains bounded recovery")
+        expect(WorkoutTerminalCleanupRetryPolicy.delay(
+            disposition: .discard, completedAttempts: 0, baseDelay: .nan, saveAttemptLimit: 3
+        ) == 1, "invalid retry delay must not spin or overflow")
     }
 
     private mutating func testAllMessageKindsRoundTrip() {
@@ -7638,23 +7685,10 @@ private struct WorkoutContractTestSuite {
             ("iPhone", iPhoneSource, "store.presentation.sessionID"),
             ("Watch", watchSource, "manager.activeSessionID"),
         ] {
-            let compactSource = source.filter { !$0.isWhitespace }
-            expect(
-                compactSource.contains(
-                    "Button(\"DiscardWorkout\",role:.destructive){requestDiscardConfirmation(for:sessionID)}"
-                ),
-                "\(surface) finish options must request, not execute, discard"
-            )
-            expect(
-                compactSource.contains(
-                    "caseoptions(sessionID:UUID)"
-                )
-                    && compactSource.contains(
-                        "casediscardConfirmation(sessionID:UUID)"
-                    )
-                    && compactSource.contains(".onChange(of:\(sessionSource))"),
-                "\(surface) finish prompts must be scoped to and invalidated with their session"
-            )
+            let compact = source.filter { !$0.isWhitespace }
+            expect(compact.contains("casediscardConfirmation(sessionID:UUID)")
+                && compact.contains(".onChange(of:\(sessionSource))"),
+                   "\(surface) discard confirmation must remain session-scoped")
         }
 
         let compactIPhoneSource = iPhoneSource.filter { !$0.isWhitespace }
@@ -7685,12 +7719,36 @@ private struct WorkoutContractTestSuite {
             "Watch dedicated discard screen must preserve disclosure choices and capture its session before dismissal"
         )
         expect(
-            watchSource.contains("\"Finish Ride?\"")
-                && watchSource.contains(
-                    "\"Saving creates a workout in your Fitness app.\""
-                ),
-            "Watch finish confirmation must use the concise rider-facing copy"
+            compactWatchSource.contains("Button(role:.destructive){manager.endAndSave()}label:")
+                && !watchSource.contains("\"Finish Ride?\"")
+                && !watchSource.contains("case options("),
+            "Watch STOP must directly end and save, without a finish-options menu"
         )
+        let settingsPosition = watchSource.range(of: "WatchSettingsView(")?.lowerBound
+        let discardPosition = watchSource.range(of: "Button(\"Discard Workout\")")?.lowerBound
+        let discardIsBelowSettings = settingsPosition.flatMap { settings in
+            discardPosition.map { settings < $0 }
+        } ?? false
+        expect(
+            compactWatchSource.contains(
+                "Button(\"DiscardWorkout\"){guardletsessionID=manager.activeSessionIDelse{return}requestDiscardConfirmation(for:sessionID)}.buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)"
+            ) && discardIsBelowSettings,
+            "Watch discard must be a gray text action below Settings"
+        )
+        let rootSource = (try? String(
+            contentsOf: iosAppDirectory.appendingPathComponent(
+                "BikeComputerWatch/Views/WatchWorkoutRootView.swift"), encoding: .utf8
+        )) ?? ""
+        let summarySource = (try? String(
+            contentsOf: iosAppDirectory.appendingPathComponent(
+                "BikeComputerWatch/Views/WorkoutSummaryView.swift"), encoding: .utf8
+        )) ?? ""
+        expect(rootSource.contains(".task(id: manager.canDismissDiscardedSummary)")
+            && rootSource.contains("manager.dismissSummary()")
+            && summarySource.contains("if summary.outcome == .discarded {")
+            && summarySource.contains("ProgressView(\"Discarding…\")")
+            && !summarySource.contains("Ride Discarded"),
+               "Watch discard must automatically dismiss after safe cleanup, not request recovery")
     }
 
     private mutating func testWorkoutUICompositionRetainsPhaseThreeExitCriteria() {
@@ -8093,11 +8151,25 @@ private struct WorkoutContractTestSuite {
         expect(
             compactLiveWatchView.contains(
                 "WorkoutCrossAppTakeoverCopyV1.live(disposition:manager.isDiscarding?.discard:.save)"
-            )
+            ),
+            "Watch live takeover copy must follow the active Save/Discard disposition"
+        )
+        // Discard is now a progress-only branch which the root dismisses after
+        // safe cleanup. Only saved rides enter the interactive summary below.
+        // Keep the branch check separate so a save-only copy assertion cannot
+        // accidentally permit the old post-discard recovery screen to return.
+        expect(
+            compactSummaryWatchView.contains(
+                "ifsummary.outcome==.discarded{ProgressView(\"Discarding…\").font(.caption).accessibilityIdentifier(\"workout-discard-progress\")}else{savedSummary}"
+            ),
+            "Watch discarded summary must show only automatic progress, without recovery actions"
+        )
+        expect(
+            compactSummaryWatchView.contains("privatevarsavedSummary:someView{")
                 && compactSummaryWatchView.contains(
-                    "WorkoutCrossAppTakeoverCopyV1.summary(disposition:summary.outcome==.saved?.save:.discard)"
+                    "ifsummary.terminalErrorCode==.anotherWorkoutActive{Label(WorkoutCrossAppTakeoverCopyV1.summary(disposition:.save),"
                 ),
-            "Watch takeover copy must remain bound to the live and terminal Save/Discard dispositions"
+            "Watch saved summary must retain the save-specific cross-app takeover warning"
         )
     }
 

@@ -385,7 +385,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     @Published private(set) var summary: WatchWorkoutSummary?
     @Published private(set) var locationAuthorizationState: WatchRouteRecorder.AuthorizationState
     @Published private(set) var isRecovering = true
-    @Published private(set) var finishRequestError: WatchWorkoutFinishRequestError? = nil
+    @Published private(set) var finishRequestError: WatchWorkoutFinishRequestError? = nil {
+        didSet {
+            if finishRequestError != nil {
+                scheduleDiscardFinalizationRetryIfNeeded()
+            }
+        }
+    }
     @Published private(set) var isTerminalArchivePending = false
     @Published private(set) var isTerminalPublicationPending = false
     @Published private(set) var isTerminalMirrorDeliveryPending = false
@@ -530,6 +536,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var lastProcessedSystemTransitionAt = Date.distantPast
     private var remoteSegmentControlContext: RemoteSegmentControlContext?
     private var terminalCleanupRetryTask: Task<Void, Never>?
+    private var discardFinalizationRetryTask: Task<Void, Never>?
+    private var discardFinalizationRetryAttemptCount = 0
     private var terminalCleanupRetryAttemptCount = 0
     private var shutdownMirrorFailureRetryCount = 0
     private var pendingWorkoutConfiguration: HKWorkoutConfiguration?
@@ -789,6 +797,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         mirrorRetryTask?.cancel()
         mirrorShutdownWatchdogTask?.cancel()
         terminalCleanupRetryTask?.cancel()
+        discardFinalizationRetryTask?.cancel()
         complicationStartTask?.cancel()
         workoutLaunchRequestExpiryTask?.cancel()
         authorizationRefreshTask?.cancel()
@@ -872,6 +881,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     }
     var isDiscarding: Bool {
         lifecycle.state == .ending && lifecycle.finishDisposition == .discard
+    }
+    var canDismissDiscardedSummary: Bool {
+        summary?.outcome == .discarded && lifecycle.state == .ended
+            && session == nil && !isAwaitingDetachedSessionCleanup
     }
     var hasCorruptRecoveryState: Bool {
         recoveryStore.loadState == .corrupt
@@ -1523,16 +1536,14 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         guard hasDurableTerminalCleanupRetry,
               !isTerminalCleanupRetrying,
               terminalCleanupRetryTask == nil,
-              terminalCleanupRetryAttemptCount
-                < Self.maxTerminalCleanupRetryAttempts else {
+              let delay = WorkoutTerminalCleanupRetryPolicy.delay(
+                disposition: recoveryStore.recoveredIdentity?.finishRequest?.disposition,
+                completedAttempts: terminalCleanupRetryAttemptCount,
+                baseDelay: terminalCleanupRetryDelay,
+                saveAttemptLimit: Self.maxTerminalCleanupRetryAttempts
+              ) else {
             return
         }
-        let nextAttempt = terminalCleanupRetryAttemptCount + 1
-        let delay = min(
-            terminalCleanupRetryDelay
-                * pow(2, Double(max(0, nextAttempt - 1))),
-            30
-        )
         isTerminalCleanupRetrying = true
         terminalCleanupRetryTask = Task { @MainActor [weak self] in
             do {
@@ -1555,7 +1566,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             terminalCleanupRetryAttemptCount = 0
             return
         }
-        terminalCleanupRetryAttemptCount += 1
+        terminalCleanupRetryAttemptCount = min(15, terminalCleanupRetryAttemptCount + 1)
         isTerminalCleanupRetrying = true
         performTerminalCleanupRetry()
         isTerminalCleanupRetrying = false
@@ -1563,6 +1574,41 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             scheduleTerminalCleanupRetryIfNeeded()
         } else {
             terminalCleanupRetryAttemptCount = 0
+        }
+    }
+
+    private func scheduleDiscardFinalizationRetryIfNeeded() {
+        guard isDiscarding,
+              let retainedIdentity = recoveryStore.recoveredIdentity,
+              retainedIdentity.finishRequest?.disposition == .discard,
+              discardFinalizationRetryTask == nil else { return }
+        let sessionID = retainedIdentity.sessionID
+        let delay = WorkoutTerminalCleanupRetryPolicy.delay(
+            disposition: .discard,
+            completedAttempts: discardFinalizationRetryAttemptCount,
+            baseDelay: terminalCleanupRetryDelay,
+            saveAttemptLimit: Self.maxTerminalCleanupRetryAttempts
+        ) ?? 30
+        discardFinalizationRetryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch { return }
+            guard let self else { return }
+            self.discardFinalizationRetryTask = nil
+            guard self.isDiscarding,
+                  self.recoveryStore.recoveredIdentity?.sessionID == sessionID,
+                  self.recoveryStore.recoveredIdentity?.finishRequest?.disposition == .discard,
+                  self.finishRequestError != nil else { return }
+            self.discardFinalizationRetryAttemptCount = min(
+                15, self.discardFinalizationRetryAttemptCount + 1
+            )
+            guard self.finalizationTask == nil, !self.isRecovering else {
+                self.scheduleDiscardFinalizationRetryIfNeeded()
+                return
+            }
+            // Uses the existing identity-fenced finalization/recovery path.
+            // No new save call, forced reset, or early readiness is introduced.
+            self.retryFinalization()
         }
     }
 
@@ -3508,6 +3554,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         confirmedTerminalSummarySessionID = (
             recoveryStore.recoveredIdentity ?? identity
         )?.sessionID
+        discardFinalizationRetryTask?.cancel()
+        discardFinalizationRetryTask = nil
+        discardFinalizationRetryAttemptCount = 0
         self.summary = terminalSummary
         _ = lifecycle.apply(.sessionEnded)
         let terminalCapturedAt = max(Date(), terminalSummary.endedAt)
@@ -3536,6 +3585,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         summary: WatchWorkoutSummary,
         capturedAt: Date
     ) -> WorkoutSnapshotV1 {
+        if summary.outcome == .discarded {
+            return WorkoutDiscardCompletionPolicy.terminalSnapshot(
+                startDate: (recoveryStore.recoveredIdentity ?? identity)?.startDate
+                    ?? snapshot.startDate,
+                errorCode: summary.terminalErrorCode
+            )
+        }
         if session == nil,
            !heartRateZoneDurationAccumulator.hasCompleteTerminalDurations(
              elapsedTime: summary.duration
@@ -3743,6 +3799,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 
     private func clearActiveObjects() {
         cancelTerminalCleanupRetry(resetAttemptCount: true)
+        discardFinalizationRetryTask?.cancel()
+        discardFinalizationRetryTask = nil
+        discardFinalizationRetryAttemptCount = 0
         resetMirrorTransport()
         session = nil
         builder = nil
@@ -6748,6 +6807,18 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         routeDistanceMeters: Double?,
         routeStatus: WorkoutRouteSaveStatus
     ) -> WatchWorkoutSummary {
+        if outcome == .discarded {
+            return WatchWorkoutSummary(
+                outcome: .discarded,
+                endedAt: endDate,
+                duration: nil,
+                distanceMeters: nil,
+                activeEnergyKilocalories: nil,
+                averageHeartRate: nil,
+                routeStatus: .unavailable,
+                terminalErrorCode: durableTerminalErrorCode
+            )
+        }
         let routeDistance = routeDistanceMeters.map { value in
             WorkoutMetricCandidate(
                 value: value,

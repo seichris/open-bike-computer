@@ -63,6 +63,12 @@ private:
 
 enum class Role : uint8_t { MetricLarge, MetricCompact, Hero, Zone };
 
+struct TextBounds {
+  const char *text = nullptr;
+  int32_t width = 0;
+  int32_t height = 0;
+};
+
 // Every digit has the same advance, and kerning is disabled. Therefore
 // measuring a value measures its entire format class (e.g. D:DD:DD), not
 // whichever glyphs happen to occur this second. No history/first-value cache.
@@ -80,7 +86,7 @@ inline bool supportsText(const lv_font_t *font, const char *text) {
 template <std::size_t N>
 const lv_font_t *firstFitting(const std::array<const lv_font_t *, N> &fonts,
                              const char *text, int32_t width,
-                             int32_t height) {
+                             int32_t height, const TextBounds *peer = nullptr) {
   if (text == nullptr || width <= 0 || height <= 0)
     return nullptr;
   std::array<ride_metric_font_selection::Candidate, N> candidates{};
@@ -88,7 +94,13 @@ const lv_font_t *firstFitting(const std::array<const lv_font_t *, N> &fonts,
     candidates[i] = {
         lv_text_get_width(text, static_cast<uint32_t>(std::strlen(text)),
                           fonts[i], 0),
-        fonts[i]->line_height <= height && supportsText(fonts[i], text),
+        fonts[i]->line_height <= height && supportsText(fonts[i], text) &&
+            (peer == nullptr ||
+             (peer->text != nullptr && peer->width > 0 &&
+              fonts[i]->line_height <= peer->height &&
+              supportsText(fonts[i], peer->text) &&
+              lv_text_get_width(peer->text, std::strlen(peer->text),
+                                fonts[i], 0) <= peer->width)),
     };
   }
   const auto index =
@@ -98,7 +110,8 @@ const lv_font_t *firstFitting(const std::array<const lv_font_t *, N> &fonts,
 }
 
 inline const lv_font_t *fontForText(const char *text, int32_t width,
-                                    int32_t height, Role role) {
+                                    int32_t height, Role role,
+                                    const TextBounds *peer = nullptr) {
   static const TabularFont value64(ride_value_font_64);
   static const TabularFont value56(ride_value_font_56);
   static const TabularFont value48(lv_font_montserrat_48);
@@ -111,27 +124,35 @@ inline const lv_font_t *fontForText(const char *text, int32_t width,
     return firstFitting(
         std::array<const lv_font_t *, 7>{speed84.get(), value64.get(),
             value56.get(), value48.get(), value38.get(), value24.get(),
-            value18.get()}, text, width, height);
+            value18.get()}, text, width, height, peer);
   }
   case Role::MetricLarge:
     return firstFitting(
         std::array<const lv_font_t *, 6>{value64.get(), value56.get(),
             value48.get(), value38.get(), value24.get(), value18.get()},
-        text, width, height);
+        text, width, height, peer);
   case Role::MetricCompact:
     return firstFitting(
         std::array<const lv_font_t *, 3>{value38.get(), value24.get(),
-            value18.get()}, text, width, height);
+            value18.get()}, text, width, height, peer);
   case Role::Zone: {
     static const TabularFont zone14(lv_font_montserrat_14);
     static const TabularFont zone12(lv_font_montserrat_12);
     static const TabularFont zone10(lv_font_montserrat_10);
     return firstFitting(
         std::array<const lv_font_t *, 3>{zone14.get(), zone12.get(),
-            zone10.get()}, text, width, height);
+            zone10.get()}, text, width, height, peer);
   }
   }
   return nullptr;
+}
+
+// Altitude follows its numeric left neighbour. Select once for both complete
+// strings and both safe bounds, so a long/negative altitude cannot clip and
+// neither label grows/shrinks when a same-width digit changes.
+inline const lv_font_t *fontForPair(const TextBounds &left,
+                                    const TextBounds &right, Role role) {
+  return fontForText(left.text, left.width, left.height, role, &right);
 }
 
 } // namespace ride_metric_typography

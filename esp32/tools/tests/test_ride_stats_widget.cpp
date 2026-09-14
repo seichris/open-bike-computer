@@ -52,6 +52,14 @@ int main() {
   assert(!unavailablePower.available);
   assert(std::strcmp(unavailablePower.value.data(), "--") == 0);
 
+  assert(ride_stats_widget::make(RideStatsWidget::Altitude, model).isAltitude);
+  assert(!ride_stats_widget::make(RideStatsWidget::MovingTime, model).isAltitude);
+  model.cyclingPowerWatts.available = false;
+  model.cyclingCadenceTenthsRpm.available = false;
+  assert(ride_stats_widget::make(RideStatsWidget::SmartMetric2, model).isAltitude);
+  model.cyclingPowerWatts = {true, 245};
+  assert(!ride_stats_widget::make(RideStatsWidget::SmartMetric2, model).isAltitude);
+
   model.sessionState = workout_telemetry_protocol::SessionState::Ended;
   const auto endedSpeed =
       ride_stats_widget::make(RideStatsWidget::Speed, model);
