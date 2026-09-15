@@ -61,6 +61,10 @@ def _run_verified_build(project_dir: Path, environment: str) -> None:
     )
     environment_values = dict(os.environ)
     environment_values.pop("LD_LIBRARY_PATH", None)
+    # The qualification driver may use PYTHONPATH to load its preserved tools
+    # while the source checkout is on the baseline. It is not a firmware build
+    # input and the locked runtime correctly rejects it, so do not inherit it.
+    environment_values.pop("PYTHONPATH", None)
     result = subprocess.run(
         [sys.executable, str(script), environment],
         cwd=project_dir,

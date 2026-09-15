@@ -2,13 +2,37 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from os import environ
 from pathlib import Path
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 from compare_amoled_artifacts import EvidenceError
-from qualify_amoled_equivalence import _preprocess_arguments, _source_for_entry
+from qualify_amoled_equivalence import (
+    _preprocess_arguments,
+    _run_verified_build,
+    _source_for_entry,
+)
 
 
 class QualifyAmoledEquivalenceTests(unittest.TestCase):
+    def test_verified_build_does_not_inherit_driver_pythonpath(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            tools = project / "tools"
+            tools.mkdir()
+            (tools / "build_firmware.py").write_text("", encoding="utf-8")
+            with (
+                patch.dict(environ, {"PYTHONPATH": "/preserved/tools"}),
+                patch(
+                    "qualify_amoled_equivalence.subprocess.run",
+                    return_value=CompletedProcess([], 0),
+                ) as runner,
+            ):
+                _run_verified_build(project, "WAVESHARE_AMOLED_175")
+
+            self.assertNotIn("PYTHONPATH", runner.call_args.kwargs["env"])
+
     def test_preprocess_arguments_preserve_build_inputs_and_replace_outputs(self) -> None:
         output = Path("/evidence/maps.ii")
         result = _preprocess_arguments(
