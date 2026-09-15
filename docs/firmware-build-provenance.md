@@ -132,6 +132,26 @@ lib/gui/src/mainScr.cpp
 lib/maps/src/maps.cpp
 ```
 
+For a complete local or CI capture, the qualification helper performs the
+required wrapper build, creates the compilation database inside that build's
+locked deterministic environment, runs the five recorded compiler commands,
+then rebuilds through the wrapper before capturing the final attested objects
+and linker map:
+
+```sh
+python3 tools/qualify_amoled_equivalence.py \
+  --project-dir . \
+  --environment WAVESHARE_AMOLED_175 \
+  --preprocessing-dir /evidence/baseline-175-preprocessed \
+  --output /evidence/baseline-175.json \
+  --commands-output /evidence/baseline-175-commands.json
+```
+
+The second verified build is mandatory because PlatformIO's compilation-
+database target executes package setup. The helper never treats introspected
+package state as the final attestation. Outputs and preprocessing directories
+are create-only.
+
 Capture each side after its final wrapper build:
 
 ```sh
