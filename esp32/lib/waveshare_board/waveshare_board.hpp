@@ -18,6 +18,7 @@ constexpr uint8_t FT3168_ADDR = 0x38;
 constexpr uint8_t PCF85063_ADDR = 0x51;
 constexpr uint8_t QMI8658_ADDR_PRIMARY = 0x6B;
 constexpr uint8_t QMI8658_ADDR_FALLBACK = 0x6A;
+constexpr uint8_t SHTC3_ADDR = 0x70;
 
 void recoverI2CBus();
 void initializePowerManagement();

@@ -9,13 +9,14 @@ support the existing authenticated transfer and update flows. Its presentation
 must suit a slow, reflective, monochrome display.
 
 This proposal was prepared on 2026-09-12 from freshly fetched GitHub `main` at
-`ce3c5a0cfa1c5bdd428197e71a15d3d3d7973157`. It is now accompanied by an
-experimental implementation on the same baseline. See the
+`ce3c5a0cfa1c5bdd428197e71a15d3d3d7973157`. The implementation branch has
+since integrated GitHub `main` through `85914afc`. See the
 [implementation and qualification record](../../hardware/waveshare-epaper-397.md)
-for the implemented profiles, controls and source tests. Physical exit gates
-below remain pending; optional peripherals, automatic sleep and publication
-remain disabled. This plan's physical outcomes are not claims of completed
-hardware validation.
+for the implemented profiles, controls, source tests and physical evidence.
+Core panel, buttons, BLE, SD maps and screen navigation have been proven on the
+physical board with the ordinary image from `820cd073`. The sensor, power and
+production changes added after that image remain source/build evidence until
+they are flashed and qualified. Publication remains disabled.
 
 ### Implementation progress
 
@@ -26,16 +27,18 @@ existing screen configuration contract remains compatible.
 
 | Area | Source implementation | Remaining qualification |
 | --- | --- | --- |
-| Board target and delivery | Three build profiles, explicit pins/capabilities, locked build/provenance support and CI selection | Final firmware build checks; device identity and boot evidence |
-| Display and input | Asynchronous SSD1677 worker, packed conversion, fault recovery, test patterns, buttons and pairing visibility gate | Panel behavior, refresh limits, real input and pairing tests |
-| Screens and maps | Portrait/monochrome UI, configured screen order, stable map cadence and stale-state text | Readability, every screen control, concurrent memory and ride tests |
-| Storage and peripherals | Native one-bit SDMMC, shared RTC, read-only PMIC identity/status | Actual components, SD removal/recovery, RTC/battery measurements |
-| Companion | Versioned display metadata and unsupported-control filtering, including configurable screen profiles | Full application build and real BLE/update recovery |
+| Board target and delivery | Six build profiles, explicit pins/capabilities, locked build/provenance support and CI selection | Production-slot build, update/rollback and release evidence |
+| Display and input | Asynchronous SSD1677 worker, packed conversion, fault recovery, changed-content wake, idle controller sleep, metrics, test patterns, buttons and pairing visibility gate | Repeated-partial/ghosting limits, BUSY fault injection, measured latency and power |
+| Screens and maps | Portrait/monochrome UI, configured screen order, stable map cadence and stale-state text | Controlled ride, concurrent memory and long-run tests |
+| Storage and peripherals | Native one-bit SDMMC, shared RTC, bounded SHTC3 sampling, opt-in QMI8658 diagnostics and read-only PMIC identity/status | Sensor axes/accuracy, SD removal/recovery, RTC backup and battery measurements |
+| Companion | Versioned display metadata and unsupported-control filtering, including configurable screen profiles | Interrupted transfer/update recovery on the physical target |
 | Publication | New target excluded from factory/release publication | Hardware and production acceptance before enabling publication |
 
-Audio, IMU, SHTC3, charging/rail writes and automatic sleep remain disabled
-pending their hardware gates. No board is available; no flash or physical test
-has been performed.
+IMU and SHTC3 access, waveform/power metrics, and automatic light sleep now have
+separate opt-in diagnostic profiles. They remain excluded from ordinary and
+production firmware until their physical gates pass. Audio, charging changes,
+whole-board shutdown, and PMIC writes beyond the readback-verified ALDO3 panel
+supply remain disabled.
 
 The supplied `IMG_1132.PNG` through `IMG_1135.PNG` identify this product family.
 They show battery, battery-free `-EN`, and kit options; they do not establish
@@ -329,8 +332,10 @@ Before deep sleep, finish or abandon display work through a bounded shutdown,
 persist/close storage work, and clear an active ride/pairing presentation when
 the panel can still update. Configure a verified released GPIO wake source;
 BOOT is the initial candidate. Wake must rebuild controller base history before
-partial updates. Keep whole-board rail shutdown and automatic light sleep
-disabled until separately qualified. Abrupt power loss can retain an old image;
+partial updates. Keep whole-board rail shutdown disabled until separately
+qualified. Exercise automatic tickless light sleep only through its opt-in
+profile, with BOOT and all three released contacts configured as wake sources.
+Abrupt power loss can retain an old image;
 the next boot must replace it before claiming current state.
 
 ## Implementation sequence and exit gates
@@ -349,7 +354,7 @@ limitations are explicit and disabled.
 
 ### Phase 1 — Target identity and build support
 
-Add `WAVESHARE_EPAPER_397` and an opt-in bring-up profile. Generalize explicit
+Add `WAVESHARE_EPAPER_397` and opt-in diagnostic profiles. Generalize explicit
 target allowlists in the locked build wrapper, prebuild identity checks, device
 registry, flash-plan validation, and profile tests. Add the board/backend
 selection seam and host tests before attempting a firmware build.
@@ -443,7 +448,7 @@ hardware gate, production image identity, and recovery path are all recorded.
 | Layer | Required cases and evidence |
 | --- | --- |
 | Host: raster and layout | Native/portrait coordinate round trips; corners and all edges; byte alignment and padded partial stride; polarity; unchanged-frame suppression; readable QR/pairing digits; long/localized text; no round-screen clipping. |
-| Host: worker and priority | Updates arriving during transfer/BUSY; bounded latest-frame queue; timeout/recovery; cancellation on page/route change; cleaning deadline; completion recorded only for the correct generation; no borrowed buffer lifetime violation. |
+| Host: worker and priority | Updates arriving during transfer/BUSY; bounded latest-frame queue; timeout/recovery; cancellation on page/route change; partial-count cleaning threshold; unchanged-frame suppression; idle controller sleep and changed-content wake; completion recorded only for the correct generation; no borrowed buffer lifetime violation. |
 | Host: ownership/input | Press before code presentation, held key through refresh, new code while old frame is in flight, cancellation, timeout, display failure, debounce/repeat, PWR/BOOT/center collisions, and recovery gesture separation. |
 | Host: resources and contract | New/old board pin tables; memory sizing overflow checks; missing optional hardware; SD migration exclusion; capability compatibility; update target/signature/partition checks; build-profile and CI target allowlists. |
 | Build | Locked verified builds for new 397 profiles and affected existing 175/206 profiles. Run existing firmware host suites, generated BLE contract check, and portable Swift navigation/BLE tests for companion changes. |
@@ -462,7 +467,7 @@ measurements, then require them to pass; the advertised partial time alone is
 not a release criterion.
 
 Any later physical work follows the repository's device-identification and
-exact-image flash-confirmation procedure. The user authorized implementation,
-source builds and a pull request. Flashing, PMIC configuration and physical
-qualification remain pending until the board is available and the exact action
-is authorized.
+exact-image flash-confirmation procedure. The core image at `820cd073` was
+physically exercised on the identified 3.97-inch board. Every newer sensor,
+sleep or production image still requires its own exact build identity, flash
+approval and post-flash evidence.

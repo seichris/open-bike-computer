@@ -4,6 +4,7 @@
 #include "../../lib/epaper_display/epaper_policy.hpp"
 #include "../../lib/epaper_display/frame_mailbox.hpp"
 #include "../../lib/epaper_display/ssd1677.hpp"
+#include "../../lib/waveshare_board/shtc3_protocol.hpp"
 #include "../../lib/board_input/button_policy.hpp"
 #include "../../lib/ble_navigation/ownership_button_policy.hpp"
 #include "../../lib/ble_navigation/device_capabilities_protocol.hpp"
@@ -147,11 +148,29 @@ int main() {
   }
   assert(policy.fullRequired(22000));
   policy.complete(30000, true);
-  assert(policy.fullRequired(90000));
+  assert(!policy.fullRequired(90000)); // Static glass does not force cleaning.
+  assert(!policy.shouldSleep(89999));
+  assert(policy.shouldSleep(90000));
+  policy.sleep();
+  assert(policy.sleeping());
+  assert(!policy.ready(90000, true));
+  assert(policy.ready(90000, true, true));
+  policy.wake();
   assert(policy.fail()); assert(!policy.fail() && policy.fault());
   assert(!policy.ready(99999, true));
   policy.wake(); assert(policy.fullRequired(0));
   policy.sleep(); assert(!policy.ready(0, true));
+
+  constexpr uint8_t crcVector[] = {0xBE, 0xEF};
+  static_assert(waveshare_board::shtc3_protocol::crc8(crcVector, 2) == 0x92);
+  constexpr uint8_t validWord[] = {0x08, 0x07, 0x21};
+  static_assert(
+      waveshare_board::shtc3_protocol::responseWordValid(validWord));
+  static_assert(waveshare_board::shtc3_protocol::validId(
+      waveshare_board::shtc3_protocol::responseWord(validWord)));
+  static_assert(waveshare_board::shtc3_protocol::temperatureC(0) == -45.0f);
+  static_assert(
+      waveshare_board::shtc3_protocol::humidityPercent(0xFFFF) == 100.0f);
 
   ownership_button_policy::ComparisonRenderGate gate;
   gate.request(7); gate.request(8);

@@ -268,8 +268,14 @@ class ChangedComponentsTests(unittest.TestCase):
             changed_components.select_firmware_targets("206"),
         )
         self.assertEqual(
-            ("WAVESHARE_EPAPER_397", "WAVESHARE_EPAPER_397_DISPLAY_TEST",
-             "WAVESHARE_EPAPER_397_PRODUCTION"),
+            (
+                "WAVESHARE_EPAPER_397",
+                "WAVESHARE_EPAPER_397_DISPLAY_TEST",
+                "WAVESHARE_EPAPER_397_POWER_METRICS",
+                "WAVESHARE_EPAPER_397_IMU_DIAGNOSTICS",
+                "WAVESHARE_EPAPER_397_LIGHT_SLEEP",
+                "WAVESHARE_EPAPER_397_PRODUCTION",
+            ),
             changed_components.select_firmware_targets("397"),
         )
         self.assertEqual(

@@ -130,14 +130,42 @@ epaper_flags = config.get(epaper_base, "build_flags")
 assert "-DWAVESHARE_EPAPER_397" in epaper_flags
 assert "-DDISABLE_TOUCH=1" in epaper_flags
 assert "-DPERSISTENT_RIDE_DIAGNOSTICS=1" in epaper_flags
-for suffix in ("", "_DISPLAY_TEST", "_PRODUCTION"):
+for suffix in (
+    "",
+    "_DISPLAY_TEST",
+    "_POWER_METRICS",
+    "_IMU_DIAGNOSTICS",
+    "_LIGHT_SLEEP",
+    "_PRODUCTION",
+):
     environment = "env:WAVESHARE_EPAPER_397" + suffix
     assert inherited_option(environment, "custom_firmware_target") == "WAVESHARE_EPAPER_397"
     expected_partition = "partitions.csv" if suffix == "_PRODUCTION" else "partitions_remote_debug.csv"
     assert inherited_option(environment, "board_build.partitions") == expected_partition
     assert "WAVESHARE_AMOLED" not in config.get(environment, "build_flags")
 assert "-DEPAPER_DISPLAY_TEST=1" in config.get("env:WAVESHARE_EPAPER_397_DISPLAY_TEST", "build_flags")
+assert "-DPOWER_METRICS=1" in config.get(
+    "env:WAVESHARE_EPAPER_397_POWER_METRICS", "build_flags"
+)
+epaper_sensor_flags = config.get(
+    "env:WAVESHARE_EPAPER_397_IMU_DIAGNOSTICS", "build_flags"
+)
+assert "-DWAVESHARE_IMU_DIAGNOSTICS=1" in epaper_sensor_flags
+assert "-DWAVESHARE_SHTC3_DIAGNOSTICS=1" in epaper_sensor_flags
+epaper_light_sleep = "env:WAVESHARE_EPAPER_397_LIGHT_SLEEP"
+assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" in config.get(
+    epaper_light_sleep, "build_flags"
+)
+epaper_light_sleep_sdkconfig = config.get(epaper_light_sleep, "custom_sdkconfig")
+assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y" in epaper_light_sleep_sdkconfig
+assert "CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y" in epaper_light_sleep_sdkconfig
 assert "-DEPAPER_DISPLAY_TEST" not in config.get("env:WAVESHARE_EPAPER_397_PRODUCTION", "build_flags")
+assert "-DPOWER_METRICS" not in config.get(
+    "env:WAVESHARE_EPAPER_397_PRODUCTION", "build_flags"
+)
+assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT" not in config.get(
+    "env:WAVESHARE_EPAPER_397_PRODUCTION", "build_flags"
+)
 assert "-DARDUINO_USB_CDC_ON_BOOT=0" in config.get("env:WAVESHARE_EPAPER_397_PRODUCTION", "build_flags")
 for environment, (base, board_define) in diagnostic_profiles.items():
     assert config.get(environment, "extends") == base

@@ -112,6 +112,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "i2c_bus.hpp"
 #include "pcf85063.hpp"
 #include "qmi8658.hpp"
+#include "shtc3.hpp"
 #include "speaker.hpp"
 #include "waveshare_board.hpp"
 #endif
@@ -344,6 +345,14 @@ static bool processWavesharePowerButton() {
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT &&                                      \
     (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397))
 static void notifyAutomaticLightSleepGpioWake(uint64_t gpioMask) {
+#ifdef WAVESHARE_EPAPER_397
+  constexpr uint64_t kButtonWakeMask =
+      (1ULL << BOARD_BOOT_PIN) | (1ULL << board_traits::up) |
+      (1ULL << board_traits::center) | (1ULL << board_traits::down);
+  if ((gpioMask & kButtonWakeMask) != 0) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Boot);
+  }
+#else
   const uint32_t reasons =
       ui_scheduler::gpioWakeReasons(gpioMask, TCH_I2C_INT, BOARD_BOOT_PIN);
   if (ui_scheduler::hasReason(reasons, ui_scheduler::WakeReason::Touch)) {
@@ -352,6 +361,7 @@ static void notifyAutomaticLightSleepGpioWake(uint64_t gpioMask) {
   if (ui_scheduler::hasReason(reasons, ui_scheduler::WakeReason::Boot)) {
     ui_scheduler::notify(ui_scheduler::WakeReason::Boot);
   }
+#endif
 }
 #endif
 
@@ -1088,6 +1098,20 @@ static void logSystemDebugHeartbeat() {
                 imuStatus.moving);
 #endif
 
+#if defined(WAVESHARE_SHTC3_DIAGNOSTICS)
+  const waveshare_board::shtc3::Status &shtc3Status =
+      waveshare_board::shtc3::status();
+  Serial.printf("SHTC3: present=%d identified=%d valid=%d id=0x%04X n=%lu "
+                "fail=%lu crc=%lu tempC=%.2f humidity=%.2f lastMs=%lu\n",
+                shtc3Status.present, shtc3Status.identified,
+                shtc3Status.dataValid, shtc3Status.id,
+                (unsigned long)shtc3Status.sampleCount,
+                (unsigned long)shtc3Status.failedReads,
+                (unsigned long)shtc3Status.crcFailures,
+                shtc3Status.temperatureC, shtc3Status.humidityPercent,
+                (unsigned long)shtc3Status.lastSampleMs);
+#endif
+
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   Serial.printf("SYS: up=%lus heap=%lu heap8=%lu/%lu dma=%lu/%lu psram=%lu "
                 "screen=%s tile=%s "
@@ -1527,6 +1551,14 @@ void setup() {
 #ifdef WAVESHARE_AMOLED_175
   ext1WakeMask |= 1ULL << TCH_I2C_INT;
 #endif
+#ifdef WAVESHARE_EPAPER_397
+  pinMode(board_traits::up, INPUT_PULLUP);
+  pinMode(board_traits::center, INPUT_PULLUP);
+  pinMode(board_traits::down, INPUT_PULLUP);
+  ext1WakeMask |= (1ULL << board_traits::up) |
+                  (1ULL << board_traits::center) |
+                  (1ULL << board_traits::down);
+#endif
   power_management::configureExt1Wakeup(ext1WakeMask);
   configureTouchWakeInterrupt();
 #endif
@@ -1605,12 +1637,15 @@ void setup() {
   Serial.println("Waveshare display probe: skipping RTC and IMU init");
 #else
   waveshare_board::rtc::restoreSystemTimeFromRtc();
-#ifndef WAVESHARE_EPAPER_397
 #if defined(WAVESHARE_IMU_DIAGNOSTICS) || defined(RIDE_AUTOMATION_SHADOW)
   waveshare_board::imu::begin();
 #else
   waveshare_board::imu::disable();
 #endif
+#ifdef WAVESHARE_SHTC3_DIAGNOSTICS
+  waveshare_board::shtc3::begin();
+#endif
+#ifndef WAVESHARE_EPAPER_397
   ride_automation_runtime::beginFirmwareShadow();
 #endif
 #endif
@@ -2501,6 +2536,9 @@ void loop() {
     (defined(WAVESHARE_IMU_DIAGNOSTICS) || defined(RIDE_AUTOMATION_SHADOW))
   waveshare_board::imu::process();
 #endif
+#ifdef WAVESHARE_SHTC3_DIAGNOSTICS
+  waveshare_board::shtc3::process();
+#endif
   ride_automation_runtime::processFirmwareShadow(now);
 
   logSystemDebugHeartbeat();
@@ -2565,8 +2603,15 @@ void loop() {
 #endif
 #ifdef WAVESHARE_EPAPER_397
   // The contacts are polled independently of LVGL and the waveform worker.
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
+  // All four active-low contacts are wake sources in this opt-in profile, so
+  // the regular scheduler deadline can be used without 20 ms polling wakes.
+  pendingUiWakeReasons =
+      ui_scheduler::wait(ui_scheduler::nextWaitMs(deadline));
+#else
   pendingUiWakeReasons = ui_scheduler::wait(
       std::min<uint32_t>(20, ui_scheduler::nextWaitMs(deadline)));
+#endif
 #else
   pendingUiWakeReasons =
       ui_scheduler::wait(ui_scheduler::nextWaitMs(deadline));

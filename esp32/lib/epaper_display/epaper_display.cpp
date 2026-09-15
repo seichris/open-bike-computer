@@ -123,34 +123,39 @@ Transport transport;
 
 void displayWorker(void *) {
   Ssd1677<Transport> panel(transport);
+  // Explicit diagnostic sleep remains asleep until an explicit wake. Ordinary
+  // idle sleep wakes itself when a changed complete frame is available.
+  bool wakeForChangedContent = true;
   if (!transport.begin()) {
     portENTER_CRITICAL(&mux); snapshot.fault = true; portEXIT_CRITICAL(&mux);
     for (;;) ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   }
   for (;;) {
-    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+    // Frame submissions and explicit power requests notify this task, so a
+    // longer idle timeout does not add presentation latency. It does let the
+    // opt-in tickless profile spend useful time in automatic light sleep.
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250));
     portENTER_CRITICAL(&mux);
-    const bool shouldSleep = sleepRequested;
     const bool shouldWake = wakeRequested;
+    // If requests cross in flight, the latest explicit wake wins. This avoids
+    // waking the controller only to put it back to sleep in the same pass.
+    const bool explicitSleep = sleepRequested && !shouldWake;
     sleepRequested = wakeRequested = false;
     portEXIT_CRITICAL(&mux);
-    if (shouldSleep) {
-      panel.sleep();
-      policy.sleep();
-      portENTER_CRITICAL(&mux);
-      snapshot.sleeping = true; snapshot.pairingGeneration = 0;
-      portEXIT_CRITICAL(&mux);
-    }
+    if (explicitSleep) wakeForChangedContent = false;
     if (shouldWake) {
+      const bool wasSleeping = policy.sleeping();
       policy.wake();
+      wakeForChangedContent = true;
       portENTER_CRITICAL(&mux);
       snapshot.sleeping = false; snapshot.fault = false;
+      if (wasSleeping) ++snapshot.wakeCount;
       portEXIT_CRITICAL(&mux);
     }
     uint32_t generation = 0, pairing = 0, context = 0;
     const uint32_t now = millis();
     portENTER_CRITICAL(&mux);
-    if (policy.ready(now, urgent)) {
+    if (!explicitSleep && policy.ready(now, urgent, wakeForChangedContent)) {
       const auto frame = mailbox.claim();
       if (frame.pixels) {
         flight = frame.pixels;
@@ -160,7 +165,31 @@ void displayWorker(void *) {
       }
     }
     portEXIT_CRITICAL(&mux);
-    if (!generation) continue;
+    if (!generation) {
+      const bool idleSleep = policy.shouldSleep(now);
+      if (explicitSleep || idleSleep) {
+        const bool wasSleeping = policy.sleeping();
+        bool ok = true;
+        if (!wasSleeping) {
+          power_management::ScopedLock powerLock(
+              power_management::LockDomain::Display);
+          ok = panel.sleep();
+        }
+        portENTER_CRITICAL(&mux);
+        if (ok) {
+          if (!wasSleeping) ++snapshot.sleepCount;
+          policy.sleep();
+          snapshot.sleeping = true;
+          if (explicitSleep) snapshot.pairingGeneration = 0;
+        } else {
+          ++snapshot.sleepFailures;
+          policy.sleepFailed(millis());
+        }
+        portEXIT_CRITICAL(&mux);
+        ui_scheduler::notify(ui_scheduler::WakeReason::Display);
+      }
+      continue;
+    }
     // Discard a queued old comparison before touching the panel.
     if (pairing != currentPairing.load() || context != currentContext.load()) {
       portENTER_CRITICAL(&mux);
@@ -169,8 +198,20 @@ void displayWorker(void *) {
       continue;
     }
     Window dirty = dirtyWindow(flight, mailbox.shown());
-    bool full = policy.fullRequired(now);
+    const bool wasSleeping = policy.sleeping();
+    if (wasSleeping && !dirty.empty()) {
+      policy.wake();
+      portENTER_CRITICAL(&mux);
+      snapshot.sleeping = false;
+      ++snapshot.wakeCount;
+      portEXIT_CRITICAL(&mux);
+    }
+    // A semantically newer frame with identical pixels is already visible on
+    // sleeping glass. Do not wake merely to rebuild controller RAM. A changed
+    // frame, or the first frame after boot, must establish a full base.
+    bool full = !wasSleeping || !dirty.empty() ? policy.fullRequired(now) : false;
     bool ok = true;
+    uint32_t waveformDurationMs = 0;
     if (full || !dirty.empty()) {
       power_management::ScopedLock powerLock(power_management::LockDomain::Display);
       for (uint8_t attempt = 0; attempt < 2; ++attempt) {
@@ -178,7 +219,9 @@ void displayWorker(void *) {
         portENTER_CRITICAL(&mux);
         snapshot.transmitted = generation;
         portEXIT_CRITICAL(&mux);
+        const uint32_t waveformStartedMs = millis();
         ok = panel.present(flight, full ? Window{0, 0, width, height} : dirty, full);
+        waveformDurationMs = millis() - waveformStartedMs;
         if (ok) break;
         portENTER_CRITICAL(&mux); ++snapshot.failures; portEXIT_CRITICAL(&mux);
         if (!policy.fail()) break;
@@ -196,8 +239,24 @@ void displayWorker(void *) {
       snapshot.context = context;
       snapshot.pairingGeneration = pairing == currentPairing.load() &&
           context == currentContext.load() ? pairing : 0;
-      if (full) ++snapshot.fullCount;
-      else if (!dirty.empty()) ++snapshot.partialCount;
+      snapshot.lastPresentationHadWaveform = full || !dirty.empty();
+      if (snapshot.lastPresentationHadWaveform) {
+        snapshot.lastWaveformFull = full;
+        snapshot.lastWaveformMs = snapshot.completedAtMs;
+        snapshot.lastWaveformDurationMs = waveformDurationMs;
+        if (full) {
+          ++snapshot.fullCount;
+          snapshot.maxFullDurationMs =
+              std::max(snapshot.maxFullDurationMs, waveformDurationMs);
+        } else {
+          ++snapshot.partialCount;
+          snapshot.maxPartialDurationMs =
+              std::max(snapshot.maxPartialDurationMs, waveformDurationMs);
+        }
+      } else {
+        ++snapshot.unchangedCount;
+      }
+      snapshot.partialsSinceFull = policy.partialsSinceFull();
     } else {
       mailbox.finish(false);
       snapshot.pairingGeneration = 0;
@@ -267,14 +326,17 @@ void setPairingGeneration(uint32_t generation) {
 uint32_t pairingGeneration() { return currentPairing.load(); }
 bool pairingPresented() {
   const Status s = status();
-  return currentPairing.load() != 0 && !s.fault && !s.sleeping && !s.busy &&
+  // SSD1677 deep sleep leaves the e-paper image visible. An automatically
+  // sleeping controller therefore does not invalidate an already completed
+  // comparison generation.
+  return currentPairing.load() != 0 && !s.fault && !s.busy &&
          s.pairingGeneration == currentPairing.load() &&
          s.context == currentContext.load();
 }
 void sleep() {
   invalidateContext();
   portENTER_CRITICAL(&mux);
-  sleepRequested = true; snapshot.pairingGeneration = 0; snapshot.sleeping = true;
+  sleepRequested = true; snapshot.pairingGeneration = 0;
   portEXIT_CRITICAL(&mux);
   if (worker) xTaskNotifyGive(worker);
 }
@@ -301,22 +363,66 @@ void diagnosticFault(bool enabled) {
 void poll() {
   static uint32_t delivered = 0;
   static uint32_t failures = 0;
+  static uint32_t observedSleepCount = 0, observedWakeCount = 0;
+#if POWER_METRICS
+  static uint32_t lastMetricsMs = 0;
+#endif
   const Status s = status();
   if (s.failures != failures) {
     failures = s.failures;
     Serial.printf("EPAPER_FAULT failures=%lu latched=%d transmitted=%lu\n",
         (unsigned long)s.failures, s.fault, (unsigned long)s.transmitted);
   }
-  if (s.presented == delivered) return;
-  delivered = s.presented;
-  Serial.printf("EPAPER_PRESENT generation=%lu context=%lu pairing=%lu full=%lu partial=%lu ms=%lu\n",
-      (unsigned long)s.presented, (unsigned long)s.context,
-      (unsigned long)s.pairingGeneration, (unsigned long)s.fullCount,
-      (unsigned long)s.partialCount, (unsigned long)s.completedAtMs);
-  ++displayFlushCount;
-  lastDisplayFlushMs = s.completedAtMs;
-  if (pairingPresented())
-    bleNavServer.noteOwnershipDisplayGenerationCompleted(s.pairingGeneration);
+  if (s.sleepCount != observedSleepCount || s.wakeCount != observedWakeCount) {
+    observedSleepCount = s.sleepCount;
+    observedWakeCount = s.wakeCount;
+    Serial.printf("EPAPER_POWER sleeping=%d sleeps=%lu wakes=%lu sleepFail=%lu "
+                  "lastWaveformMs=%lu\n",
+                  s.sleeping, (unsigned long)s.sleepCount,
+                  (unsigned long)s.wakeCount, (unsigned long)s.sleepFailures,
+                  (unsigned long)s.lastWaveformMs);
+  }
+  if (s.presented != delivered) {
+    delivered = s.presented;
+    const char *waveform = !s.lastPresentationHadWaveform
+                               ? "none"
+                               : (s.lastWaveformFull ? "full" : "partial");
+    Serial.printf("EPAPER_PRESENT generation=%lu context=%lu pairing=%lu "
+                  "waveform=%s durationMs=%lu full=%lu partial=%lu "
+                  "partialsSinceFull=%u unchanged=%lu ms=%lu\n",
+        (unsigned long)s.presented, (unsigned long)s.context,
+        (unsigned long)s.pairingGeneration, waveform,
+        (unsigned long)(s.lastPresentationHadWaveform
+                            ? s.lastWaveformDurationMs
+                            : 0),
+        (unsigned long)s.fullCount,
+        (unsigned long)s.partialCount, (unsigned)s.partialsSinceFull,
+        (unsigned long)s.unchangedCount, (unsigned long)s.completedAtMs);
+    ++displayFlushCount;
+    lastDisplayFlushMs = s.completedAtMs;
+    if (pairingPresented())
+      bleNavServer.noteOwnershipDisplayGenerationCompleted(s.pairingGeneration);
+  }
+#if POWER_METRICS
+  const uint32_t now = millis();
+  if (now - lastMetricsMs >= 10000) {
+    lastMetricsMs = now;
+    Serial.printf("EPAPER_METRIC full=%lu partial=%lu partialsSinceFull=%u "
+                  "unchanged=%lu sleeping=%d sleeps=%lu wakes=%lu "
+                  "fail=%lu sleepFail=%lu durationMs=%lu maxFullMs=%lu "
+                  "maxPartialMs=%lu queued=%lu presented=%lu\n",
+                  (unsigned long)s.fullCount, (unsigned long)s.partialCount,
+                  (unsigned)s.partialsSinceFull,
+                  (unsigned long)s.unchangedCount, s.sleeping,
+                  (unsigned long)s.sleepCount, (unsigned long)s.wakeCount,
+                  (unsigned long)s.failures,
+                  (unsigned long)s.sleepFailures,
+                  (unsigned long)s.lastWaveformDurationMs,
+                  (unsigned long)s.maxFullDurationMs,
+                  (unsigned long)s.maxPartialDurationMs,
+                  (unsigned long)s.queued, (unsigned long)s.presented);
+  }
+#endif
 }
 } // namespace epaper
 

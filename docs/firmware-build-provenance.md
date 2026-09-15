@@ -7,8 +7,9 @@ others.
 
 The experimental `WAVESHARE_EPAPER_397` family uses this same locked runtime,
 source identity, final-link and flash-plan attestation path. Its ordinary,
-`DISPLAY_TEST` and `PRODUCTION` profiles retain the canonical board target.
-Attestation proves artifact identity, not a working physical e-paper panel.
+`DISPLAY_TEST`, `POWER_METRICS`, `IMU_DIAGNOSTICS`, `LIGHT_SLEEP` and
+`PRODUCTION` profiles retain the canonical board target. Attestation proves
+artifact identity, not a working physical e-paper panel.
 See [the board qualification record](../hardware/waveshare-epaper-397.md).
 
 ## Build and upload schema 2

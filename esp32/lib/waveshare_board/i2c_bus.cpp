@@ -1,6 +1,6 @@
 /**
  * @file i2c_bus.cpp
- * @brief Shared I2C helpers for the Waveshare ESP32-S3 Touch AMOLED 1.75.
+ * @brief Shared I2C helpers for the supported Waveshare ESP32-S3 boards.
  */
 
 #include "i2c_bus.hpp"
@@ -279,6 +279,20 @@ bool writeRegister16(uint8_t address, uint16_t reg, uint8_t value,
                        Wire.write(static_cast<uint8_t>(reg >> 8));
                        Wire.write(static_cast<uint8_t>(reg & 0xFF));
                        Wire.write(value);
+                       return Wire.endTransmission() == 0;
+                     });
+}
+
+bool writeCommand16(uint8_t address, uint16_t command, const char *label,
+                    uint8_t attempts) {
+  if (!writeAllowed(address, command, 0, 2, "command16")) {
+    return false;
+  }
+  return withRetries(address, label, "command16", attempts,
+                     [address, command]() {
+                       Wire.beginTransmission(address);
+                       Wire.write(static_cast<uint8_t>(command >> 8));
+                       Wire.write(static_cast<uint8_t>(command & 0xFF));
                        return Wire.endTransmission() == 0;
                      });
 }
@@ -613,6 +627,24 @@ bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
                        }
 
                        for (uint8_t i = 0; i < len; i++) {
+                         data[i] = Wire.read();
+                       }
+                       return true;
+                     });
+}
+
+bool readBytes(uint8_t address, uint8_t *data, uint8_t len,
+               const char *label, uint8_t attempts) {
+  if (data == nullptr || len == 0) {
+    return false;
+  }
+  return withRetries(address, label, "readBytes", attempts,
+                     [address, data, len]() {
+                       if (Wire.requestFrom(address, len,
+                                            static_cast<uint8_t>(true)) != len) {
+                         return false;
+                       }
+                       for (uint8_t i = 0; i < len; ++i) {
                          data[i] = Wire.read();
                        }
                        return true;

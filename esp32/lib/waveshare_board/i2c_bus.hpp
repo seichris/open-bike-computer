@@ -35,6 +35,11 @@ bool writeRegisterBlock8(uint8_t address, uint8_t reg, const uint8_t *data,
                          uint8_t attempts = 2);
 bool writeRegister16(uint8_t address, uint16_t reg, uint8_t value,
                      const char *label = nullptr, uint8_t attempts = 2);
+// Command-oriented sensors such as SHTC3 use a two-byte command followed by a
+// separate response with no register address. AXP2101 command writes remain
+// blocked on the e-paper board by the same write-policy boundary.
+bool writeCommand16(uint8_t address, uint16_t command,
+                    const char *label = nullptr, uint8_t attempts = 2);
 
 struct Axp2101PowerButtonOffLevelResult {
   uint8_t before = 0;
@@ -86,6 +91,8 @@ bool readRegisterBlock8(uint8_t address, uint8_t reg, uint8_t *data,
                         uint8_t attempts = 3);
 bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
                     const char *label = nullptr, uint8_t attempts = 3);
+bool readBytes(uint8_t address, uint8_t *data, uint8_t len,
+               const char *label = nullptr, uint8_t attempts = 3);
 
 } // namespace waveshare_board::i2c
 
