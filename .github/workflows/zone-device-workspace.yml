@@ -21,13 +21,11 @@ jobs:
           set -euo pipefail
           python3 - "$RUNNER_TEMP/zones.patch" <<'PY'
           import base64, hashlib, lzma, pathlib, sys
-          parts = [pathlib.Path(f'tools/zone-workspace/patch-{i}.b64').read_text().strip() for i in range(4)]
-          encoded = ''.join(parts)
+          encoded = ''.join(pathlib.Path(f'tools/zone-workspace/patch-{i}.b64').read_text().strip() for i in range(4))
           if len(encoded) != 42744:
               raise SystemExit('Patch transport length mismatch')
           patch = lzma.decompress(base64.b64decode(encoded, validate=True))
-          expected = '49da835bd1baac3bd8da25001a485544236b5606b952f02935402c5b4ef5f787'
-          if hashlib.sha256(patch).hexdigest() != expected:
+          if hashlib.sha256(patch).hexdigest() != '49da835bd1baac3bd8da25001a485544236b5606b952f02935402c5b4ef5f787':
               raise SystemExit('Patch transport digest mismatch')
           pathlib.Path(sys.argv[1]).write_bytes(patch)
           PY
@@ -36,6 +34,9 @@ jobs:
           git switch --detach FETCH_HEAD
           git apply --check "$RUNNER_TEMP/zones.patch"
           git apply --index "$RUNNER_TEMP/zones.patch"
+          # GITHUB_TOKEN cannot change workflow files. The authorized connector
+          # adds the zone contract CI workflow in a separate commit.
+          git restore --source=HEAD --staged --worktree .github/workflows/ci.yml
           git diff --cached --check
           python3 tools/generate_ride_ble_contract.py --check
       - name: Verify C++ decoder, display and legacy contracts
@@ -53,9 +54,7 @@ jobs:
           "$RUNNER_TEMP/widgets-diagnostic"
       - id: publish
         name: Fast-forward existing PR branch
-        shell: bash
         run: |
-          set -euo pipefail
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Add versioned HR and power zone device telemetry with iOS 26 compatibility'
           git push origin HEAD:refs/heads/feat/native-healthkit-workout-zones
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -68,7 +67,7 @@ jobs:
         with:
           ref: ${{ needs.publish.outputs.sha }}
           persist-credentials: false
-      - name: Record exact source and toolchain
+      - name: Record source and installed toolchains
         run: |
           mkdir -p "$RUNNER_TEMP/zone-validation"
           git rev-parse HEAD > "$RUNNER_TEMP/zone-validation/SHA"
@@ -84,7 +83,7 @@ jobs:
         run: |
           set -o pipefail
           ./ios-app/scripts/run-workout-contract-tests.sh 2>&1 | tee "$RUNNER_TEMP/zone-validation/workout-tests.log"
-      - name: Swift helper and real Watch adapter tests
+      - name: Swift helpers and real Watch adapter
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
