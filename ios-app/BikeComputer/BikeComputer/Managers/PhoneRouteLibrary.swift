@@ -162,8 +162,22 @@ final class PhoneRouteLibrary: ObservableObject {
             return OfflineRouteSaveResult(summary: PlannedRouteSummaryV1(archive: archive), alreadySaved: true)
         }
         let archive = try draft.namedArchive(name)
+        // Repeated clicks on the same selected alternative must keep the first
+        // committed name/hash rather than mutate an existing revision.
+        if let existing = store.records(now: now()).first(where: {
+            $0.archive.routeID == archive.routeID
+        }) {
+            guard existing.archive.revision == archive.revision else {
+                throw NavigationRouteFileStoreError.staleRevision
+            }
+            guard OfflineRouteSaveDraft.sameSavableContent(existing.archive.route, archive.route) else {
+                throw NavigationRouteFileStoreError.revisionConflict
+            }
+            let verified = try offlineArchive(for: existing.summary)
+            return OfflineRouteSaveResult(summary: PlannedRouteSummaryV1(archive: verified), alreadySaved: true)
+        }
         if let duplicate = store.records(now: now()).first(where: {
-            OfflineRouteSaveDraft.sameGPXContent($0.archive.route, archive.route)
+            OfflineRouteSaveDraft.sameSavableContent($0.archive.route, archive.route)
         }) {
             // Re-read the exact identity, also covering expiry/corruption races.
             let verified = try offlineArchive(for: duplicate.summary)
@@ -356,10 +370,15 @@ final class PhoneRouteLibrary: ObservableObject {
         return removed
     }
 
+    func canSendToWatch(_ summary: PlannedRouteSummaryV1) -> Bool {
+        isAvailableOffline(summary) && summary.providerID != RouteProviderPolicyV1.mapKit.providerID
+    }
+
     func sendToWatch(_ summary: PlannedRouteSummaryV1) throws {
         let identity = identity(for: summary)
         try requireUsableIdentity(identity)
         let record = try store.record(matching: identity, now: now())
+        try record.archive.validate(purpose: .watchTransfer, now: now())
         guard connectivity.transferRoute(record) != nil else {
             watchSyncState[identity] = .rejected("watch_unavailable")
             return
@@ -794,7 +813,7 @@ final class PhoneRouteLibrary: ObservableObject {
     private func retryPendingInstallsImmediately() {
         for summary in routes {
             let identity = identity(for: summary)
-            guard !isPendingDeletion(identity),
+            guard canSendToWatch(summary), !isPendingDeletion(identity),
                   pendingInstallKeys.contains(Self.receiptKey(identity)),
                   let record = try? store.record(
                       matching: identity,
@@ -840,7 +859,9 @@ final class PhoneRouteLibrary: ObservableObject {
     }
 
     private func publishRouteDisplayNames() {
-        let entries = routes.compactMap { summary in
+        let entries = routes.filter {
+            $0.providerID != RouteProviderPolicyV1.mapKit.providerID
+        }.compactMap { summary in
             try? WatchRouteDisplayNameV1(
                 identity: identity(for: summary),
                 name: displayName(for: summary)

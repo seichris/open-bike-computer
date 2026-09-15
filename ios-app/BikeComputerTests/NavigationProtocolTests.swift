@@ -807,6 +807,7 @@ struct NavigationProtocolTests {
         testBLEManagerSendsAutomaticDisplayOffAfterCapabilityNegotiation()
         testBLEManagerSendsAutomaticDisplayOffSetting()
         testBLEManagerRetriesAutomaticDisplayOffAfterQueuePressure()
+        testBLEManagerSendsDisplayInactivityTimeouts()
         testBLEManagerSendsDisconnectedSleepTimeoutSetting()
         testBLEManagerSendsDeviceScreenSettings()
         testBLEManagerPersistsNewMapSettings()
@@ -16345,6 +16346,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.gpsPositionQualityV1CapabilityMask, 1 << 17, "CAP2 bit 17 advertises GPS quality v1")
         assertEqual(DeviceBLEProtocol.rendererDiagnosticsCapabilityMask, 1 << 18, "CAP2 bit 18 advertises renderer diagnostics")
         assertEqual(DeviceBLEProtocol.automaticDisplayOffCapabilityMask, 1 << 19, "CAP2 bit 19 advertises automatic display-off")
+        assertEqual(DeviceBLEProtocol.displayInactivityTimeoutsCapabilityMask, 1 << 28, "CAP2 bit 28 advertises configurable display inactivity timeouts")
         assertEqual(DeviceBLEProtocol.rideDiagnosticsCapabilityMask, 1 << 20, "CAP2 bit 20 advertises persistent ride diagnostics")
         assertEqual(DeviceBLEProtocol.detailedRideDiagnosticsCapabilityMask, 1 << 21, "CAP2 bit 21 advertises detailed ride diagnostics")
         assertEqual(DeviceBLEProtocol.rideDeliveryAcknowledgementCapabilityMask, 1 << 22, "CAP2 bit 22 advertises reliable ride delivery")
@@ -16353,7 +16355,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 25, "capability version negotiates World Radio alongside configurable screens, navigation orientation, and Watch GPS motion evidence")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 26, "capability version negotiates configurable display inactivity timeouts")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
@@ -16408,6 +16410,23 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.mapPlusNavigationLabelOrientationSettingID, 34, "Map + Navigation street-label orientation uses setting ID 34")
         assertEqual(DeviceBLEProtocol.mapPlusNavigation3DBuildingsSettingID, 35, "Map + Navigation 3D buildings use setting ID 35")
         assertEqual(DeviceBLEProtocol.automaticDisplayOffSettingID, 36, "automatic display-off uses firmware setting ID 36")
+        assertEqual(DeviceBLEProtocol.displayInactivityTimeoutsSettingID, 38, "display inactivity timeouts use firmware setting ID 38")
+        assertEqual(
+            DeviceBLEProtocol.displayInactivityTimeoutsSettingValue(
+                dimAfterSeconds: 15,
+                displayOffAfterSeconds: 45
+            )!,
+            Int32(0x002D000F),
+            "display inactivity timeouts use one atomic packed value"
+        )
+        assertEqual(
+            DeviceBLEProtocol.displayInactivityTimeoutsSettingValue(
+                dimAfterSeconds: 60,
+                displayOffAfterSeconds: 45
+            ),
+            nil,
+            "display inactivity timeout encoding rejects off-before-dim values"
+        )
         assertEqual(DeviceBLEProtocol.defaultMapStreetLabelsEnabled, true, "Map street labels default to enabled")
         assertEqual(DeviceBLEProtocol.defaultMapPlusNavigationStreetLabelsEnabled, false, "Map + Navigation street labels default to disabled")
         assertEqual(DeviceBLEProtocol.defaultStreetLabelDensity, 2, "street labels default to Balanced density")
@@ -20123,6 +20142,15 @@ struct NavigationProtocolTests {
                 ),
             "an active explicit scan replaces the Connect action with its owned results"
         )
+        assert(
+            !BikeComputerSettingsPresentationPolicy
+                .shouldShowConnectAction(
+                    baseEligibility: true,
+                    scanPurpose: .none,
+                    isExplicitDiscoveryPending: true
+                ),
+            "a Watch-gated explicit request does not expose a duplicate Connect action"
+        )
         var stage = NearbyBicinoSetupStage.offer
         stage.advanceToPairing()
         assertEqual(stage, .pairing,
@@ -20329,6 +20357,66 @@ struct NavigationProtocolTests {
             trustedDriver.starts.count == 2 &&
                 trustedDriver.starts.last?.allowsDuplicates == true
         }, "stale reconnect cancellation starts unknown-device discovery")
+
+        let watchHandoffManager = BLEManager()
+        let watchHandoffDriver = BLEScanDriverForTesting()
+        watchHandoffManager.installScanDriverForTesting(
+            watchHandoffDriver,
+            knownDevices: [known],
+            trustedPeripheralIdentifier: trustedIdentifier,
+            shouldAutoReconnect: true,
+            isExclusiveOperationActive: true
+        )
+        watchHandoffManager.setApplicationActive(true)
+        assert(
+            watchHandoffManager
+                .watchDirectRideReconciliationRequestForTesting != nil,
+            "foregrounding proactively reconciles a persisted Watch handoff"
+        )
+        watchHandoffManager.startDeviceDiscovery()
+        assertEqual(
+            watchHandoffManager.currentScanPurpose,
+            .none,
+            "explicit discovery does not steal BLE from an unresolved Watch ride"
+        )
+        assertEqual(
+            watchHandoffManager.pairingStatusMessage,
+            "Waiting for Apple Watch to release this Bike Computer…",
+            "Settings reports the Watch handoff instead of claiming to scan"
+        )
+        guard let reconciliation = watchHandoffManager
+            .watchDirectRideReconciliationRequestForTesting else {
+            assertionFailure(
+                "explicit discovery queues an exact Watch reconciliation"
+            )
+            return
+        }
+        assertEqual(
+            reconciliation.deviceID,
+            known.deviceID,
+            "Watch reconciliation targets the selected Bike Computer"
+        )
+        let release = try! WatchDirectRidePreparationRequestV1(
+            preparationID: reconciliation.preparationID,
+            operation: .release,
+            deviceID: reconciliation.deviceID
+        )
+        let releaseResponse = watchHandoffManager
+            .handleWatchDirectRidePreparationRequest(
+                release,
+                phoneNavigationActive: false
+            )
+        assert(releaseResponse.accepted,
+               "the matching durable Watch release is accepted")
+        assert(waitForMainLoop(timeout: 1) {
+            watchHandoffManager.currentScanPurpose == .explicitDiscovery &&
+                watchHandoffDriver.starts.count == 1
+        }, "the retained explicit request starts after Watch release")
+        assertEqual(
+            watchHandoffManager.pairingStatusMessage,
+            "Looking for nearby Bike Computers…",
+            "the Watch release replaces waiting guidance with real scan status"
+        )
 
         let deferredManager = BLEManager()
         let deferredDriver = BLEScanDriverForTesting()
@@ -23006,6 +23094,107 @@ struct NavigationProtocolTests {
         assertEqual(readInt32LE(automaticDisplayOffPackets[0], offset: 5), 0,
                     "the retried automatic display-off packet preserves the saved value")
         defaults.removeObject(forKey: key)
+    }
+
+    static func testBLEManagerSendsDisplayInactivityTimeouts() {
+        let defaults = UserDefaults.standard
+        let dimKey = "deviceSettings.displayDimTimeoutSeconds"
+        let offKey = "deviceSettings.displayOffTimeoutSeconds"
+        defaults.removeObject(forKey: dimKey)
+        defaults.removeObject(forKey: offKey)
+
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.supportsDeviceSettings = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        let capableResponse =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 8, 16])
+        assert(manager.handleDeviceCapabilitiesNotification(capableResponse),
+               "display inactivity timeout capability response should be consumed")
+        assert(manager.supportsDisplayInactivityTimeouts,
+               "CAP2 bit 28 enables configurable display inactivity timeouts")
+
+        let negotiatedPackets = sentPackets.filter {
+            $0.count == 9 &&
+            String(data: $0.prefix(4), encoding: .utf8) ==
+                DeviceBLEProtocol.settingsFallbackPrefix &&
+            $0[4] == DeviceBLEProtocol.displayInactivityTimeoutsSettingID
+        }
+        assertEqual(negotiatedPackets.count, 1,
+                    "capability negotiation sends display inactivity timeouts once")
+        assertEqual(
+            readInt32LE(negotiatedPackets[0], offset: 5),
+            DeviceBLEProtocol.displayInactivityTimeoutsSettingValue(
+                dimAfterSeconds: 15,
+                displayOffAfterSeconds: 45
+            )!,
+            "capability negotiation sends the compatibility defaults"
+        )
+
+        manager.displayDimTimeout = .thirtySeconds
+        manager.displayOffTimeout = .twoMinutes
+        manager.sendDisplayInactivityTimeouts()
+        let updatedPackets = sentPackets.filter {
+            $0.count == 9 &&
+            $0[4] == DeviceBLEProtocol.displayInactivityTimeoutsSettingID
+        }
+        assertEqual(updatedPackets.count, 2,
+                    "changing either picker sends one atomic timeout pair")
+        assertEqual(
+            readInt32LE(updatedPackets[1], offset: 5),
+            DeviceBLEProtocol.displayInactivityTimeoutsSettingValue(
+                dimAfterSeconds: 30,
+                displayOffAfterSeconds: 120
+            )!,
+            "the timeout packet preserves both selected stages"
+        )
+
+        let reloaded = BLEManager()
+        assertEqual(reloaded.displayDimTimeout, .thirtySeconds,
+                    "the display dim timeout persists")
+        assertEqual(reloaded.displayOffTimeout, .twoMinutes,
+                    "the display off timeout persists")
+
+        let legacyManager = BLEManager()
+        legacyManager.isConnected = true
+        legacyManager.isNavigationReady = true
+        legacyManager.supportsDeviceSettings = true
+        var legacyPackets: [Data] = []
+        legacyManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { legacyPackets.append($0) }
+        ))
+        assert(legacyManager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+                Data([1, 0, 0, 8, 0])
+        ), "older automatic-display-off capability response should be consumed")
+        assert(!legacyManager.supportsDisplayInactivityTimeouts,
+               "older firmware keeps fixed 15/45-second behavior")
+        let packed = DeviceBLEProtocol.displayInactivityTimeoutsSettingValue(
+            dimAfterSeconds: 30,
+            displayOffAfterSeconds: 120
+        )!
+        assert(!legacyManager.sendSetting(
+            id: DeviceBLEProtocol.displayInactivityTimeoutsSettingID,
+            value: packed
+        ), "older firmware rejects unsupported timeout writes")
+        assert(legacyPackets.allSatisfy {
+            $0.count < 5 ||
+            $0[4] != DeviceBLEProtocol.displayInactivityTimeoutsSettingID
+        }, "older firmware receives no display inactivity timeout packet")
+
+        defaults.removeObject(forKey: dimKey)
+        defaults.removeObject(forKey: offKey)
     }
 
     static func testBLEManagerSendsDeviceScreenSettings() {

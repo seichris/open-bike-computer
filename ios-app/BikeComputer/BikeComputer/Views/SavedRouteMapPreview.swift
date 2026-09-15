@@ -187,6 +187,8 @@ struct SavedRouteMapPreviewCard: View {
                 .font(.subheadline)
             Text(preview.attribution)
                 .font(.caption).foregroundStyle(.secondary)
+            Text(preview.attribution)
+                .font(.caption).foregroundStyle(.secondary)
             if let onStart {
                 Button(action: onStart) {
                     Label("Start Offline Navigation", systemImage: "location.fill")

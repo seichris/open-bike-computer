@@ -12,6 +12,7 @@ import UIKit
 private enum ContentSheetDestination: Identifiable, Equatable {
     case settings
     case offlineRoutes
+    case savePlannedRoute(OfflineRouteSaveDraft)
     case bikeComputerSetup
     case sensorSettings
     case workoutDashboard
@@ -22,6 +23,7 @@ private enum ContentSheetDestination: Identifiable, Equatable {
         switch self {
         case .settings: return "settings"
         case .offlineRoutes: return "offline-routes"
+        case .savePlannedRoute(let draft): return "save-route:\(draft.id.uuidString)"
         case .bikeComputerSetup: return "bike-computer-setup"
         case .sensorSettings: return "sensor-settings"
         case .workoutDashboard: return "workout-dashboard"
@@ -82,6 +84,7 @@ struct ContentView: View {
     @State private var destinationAddress = ""
     @State private var savedRouteMapPreview: SavedRouteMapPreview?
     @State private var savedRoutePreviewBottomHeight: CGFloat?
+    @State private var plannedRouteSaveFeedback: String?
     @State private var presentedSheet: ContentSheetDestination?
     @State private var queuedSheetAfterDismiss:
         ContentSheetDestination?
@@ -392,6 +395,9 @@ struct ContentView: View {
             ) { destination in
                 presentedSheetContent(for: destination)
             }
+        }
+        .onChange(of: coordinator.selectedRouteAlternativeID) { _ in
+            plannedRouteSaveFeedback = nil
         }
         .onPreferenceChange(SavedRoutePreviewLayoutKey.self) { layout in
             Task { @MainActor in updateSavedRoutePreviewLayout(layout) }
@@ -770,6 +776,13 @@ struct ContentView: View {
         for destination: ContentSheetDestination
     ) -> some View {
         switch destination {
+        case .savePlannedRoute(let draft):
+            RouteSaveSheet(library: routeLibrary, draft: draft) { result in
+                plannedRouteSaveFeedback = result.message
+                presentedSheet = nil
+            }
+            .presentationDetents([.medium, .large])
+            .presentationBackgroundInteraction(.disabled)
         case .offlineRoutes:
             SavedRoutesLibraryView(library: routeLibrary,
                 stravaCoordinator: stravaIntegrationCoordinator)
@@ -1026,6 +1039,42 @@ struct ContentView: View {
             isEnabled: !coordinator.isNavigating && !offlineMapManager.isMapAreaSelectionActive,
             start: { summary in try startOfflineRouteFromLibrary(summary) }
         )
+    }
+
+    private func saveSelectedRouteOffline() {
+        do {
+            let draft = try coordinator.selectedRouteOfflineDraft()
+            plannedRouteSaveFeedback = nil
+            let destination = ContentSheetDestination.savePlannedRoute(draft)
+            if presentedSheet != nil || isSheetDismissalInFlight {
+                queuedSheetAfterDismiss = destination
+                presentedSheet = nil
+            } else {
+                presentedSheet = destination
+            }
+        } catch {
+            coordinator.alert.message = error.localizedDescription
+            coordinator.alert.isShowing = true
+        }
+    }
+
+    private var savePlannedRouteButton: some View {
+        Button(action: saveSelectedRouteOffline) {
+            Label("Save Offline", systemImage: "square.and.arrow.down")
+        }
+        .buttonStyle(.bordered)
+        .disabled(!coordinator.selectedRouteCanSaveOffline)
+        .accessibilityIdentifier("saveMapKitRouteOffline")
+        .accessibilityHint("Saves the selected route and its instructions to Saved Routes on this iPhone")
+    }
+
+    @ViewBuilder
+    private var plannedRouteSaveStatus: some View {
+        if let plannedRouteSaveFeedback {
+            Label(plannedRouteSaveFeedback, systemImage: "checkmark.circle")
+                .font(.caption)
+                .accessibilityIdentifier("plannedRouteSaveSuccess")
+        }
     }
 
     private func openOfflineRoutes() {
@@ -1405,8 +1454,12 @@ struct ContentView: View {
 
                 routeAlternativePicker
                 selectedRouteAdvisory
-                Button("Saved Routes") { openOfflineRoutes() }
-                    .accessibilityIdentifier("ridePlanSavedRoutes")
+                HStack {
+                    savePlannedRouteButton
+                    Button("Saved Routes") { openOfflineRoutes() }
+                        .accessibilityIdentifier("ridePlanSavedRoutes")
+                }
+                plannedRouteSaveStatus
 
             }
             .padding(.horizontal, 20)
@@ -1515,15 +1568,7 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(coordinator.selectedRouteAlternativeID == nil)
 
-                Button { } label: {
-                    Label("Save Offline", systemImage: "square.and.arrow.down")
-                }
-                .buttonStyle(.bordered)
-                .disabled(!coordinator.selectedRouteCanSaveOffline)
-                .accessibilityIdentifier("saveMapKitRouteOffline")
-                .accessibilityHint(
-                    "MapKit routes cannot be stored offline until an approved route provider is configured."
-                )
+                savePlannedRouteButton
             }
 
             selectedRouteAdvisory
@@ -1534,7 +1579,9 @@ struct ContentView: View {
             .font(.caption)
             .accessibilityIdentifier("chooseApprovedOfflineRoute")
 
-            Text("Saving this Apple Maps route is not available. Imported GPX and saved Strava routes can be followed offline.")
+            plannedRouteSaveStatus
+
+            Text("Save this route to follow it later on this iPhone. Offline map tiles are separate.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }

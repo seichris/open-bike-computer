@@ -43,21 +43,33 @@ Previewing never starts navigation. Settings preview retains #429's planning
 exclusion. A planner-shortcut preview may replace its plan only after the
 selected archive and display geometry have been validated successfully.
 
-## Policy boundary (unchanged)
+## Selected MapKit route saving — follow-up, 2026-09-15
 
-`RouteProviderPolicyV1` is authoritative. MapKit is active-only; user-owned GPX
-is durable; Strava retains its original validated source reference and original
-expiry, with a maximum seven-day retention period. Unknown providers cannot opt
-in by declaring `.durable`. New Strava imports still use their receipt/bookmark
-transaction. No raw `MKRoute` data or Apple geometry is exported or relabeled.
+The maintainer explicitly requested enabling the existing **Save Offline**
+button for the selected Apple Maps alternative, rather than a GPX redirect.
+This follow-up implements that product-policy change. Ordinary MapKit results
+remain active-only. An explicit selected draft uses the same `apple.mapkit`
+provider and Apple Maps attribution with a new `phoneOnly` storage scope.
+This is **not** an assertion that Apple permits durable Map Data storage:
+[licensing review and release decision](../reviews/mapkit-route-storage-2026-09-15.md).
 
-**Saving the selected MapKit route is NOT implemented.** Its chooser control
-remains disabled. The adjacent Saved Routes shortcut does not save that route.
-Durable online route planning needs a separately approved export-capable source.
+Both route-choice layouts capture a validated immutable canonical route and
+show the shared naming/confirmation sheet. Save commits through the existing
+archive/library store; Cancel has no disk effects. The first save keeps its
+UUID and revision, and repeated saves reuse its identity and original name.
+The plan and selected alternative are not replaced or started by saving.
+Saved copies appear in Saved Routes and use the existing preview and offline
+navigation paths. No second directions request or GPX conversion is made.
+
+Watch transfer is disabled in the row, library, transport and Watch receiver;
+Watch disk reads use a separate archive purpose to reject phone-only files.
+User-owned GPX and Strava retain their current rules, including Strava's
+original deadline and receipt/bookmark flow. Unknown providers still fail.
 
 Offline route following is not offline route calculation or a basemap download.
-The GPX importer supplies geometry/waypoint guidance, not new road-aware Apple
-turn directions. Apple map tile availability offline is not guaranteed.
+Selected Apple routes retain the returned turn instructions. Imported GPX
+continues to supply geometry/waypoint guidance, not newly generated Apple turns.
+Apple map tile availability offline is not guaranteed.
 
 ## Storage and identity
 

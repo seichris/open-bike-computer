@@ -5,6 +5,7 @@ nonisolated enum NavigationRouteArchivePurposeV1: Equatable {
     case activeUse
     case durableStorage
     case offlineNavigation
+    case watchTransfer
 }
 
 nonisolated enum NavigationRouteArchiveError: Error, Equatable, CustomStringConvertible {
@@ -214,6 +215,11 @@ nonisolated struct NavigationRouteArchiveV1: Codable, Equatable {
         ), let deleteAfter,
            deleteAfter.timeIntervalSince(createdAt) > maximumRetention {
             throw NavigationRouteArchiveError.retentionExceeded(
+                providerID: route.provider.providerID
+            )
+        }
+        if purpose == .watchTransfer, route.provider.storageScope == .phoneOnly {
+            throw NavigationRouteArchiveError.durableStorageNotAllowed(
                 providerID: route.provider.providerID
             )
         }

@@ -45,7 +45,7 @@ struct SavedRoutesLibraryView: View {
                 case .strava:
                     StravaRouteImportView(coordinator: stravaCoordinator)
                 case .gpx(let draft):
-                    GPXRouteSaveSheet(library: library, draft: draft) { result in
+                    RouteSaveSheet(library: library, draft: draft) { result in
                         importFeedback = result.message
                         presentedImport = nil
                     }
@@ -55,9 +55,10 @@ struct SavedRoutesLibraryView: View {
     }
 }
 
-/// Only new GPX imports need confirmation. The typed draft/commit interaction
-/// is shared with library integration tests; cancellation never writes bytes.
-struct GPXRouteSaveSheet: View {
+/// One confirmation for newly imported GPX and selected MapKit routes. The
+/// immutable draft is captured before presentation; changing a plan cannot swap
+/// geometry under this sheet. Cancellation never writes bytes.
+struct RouteSaveSheet: View {
     @ObservedObject var library: PhoneRouteLibrary
     let onSaved: (OfflineRouteSaveResult) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -70,6 +71,10 @@ struct GPXRouteSaveSheet: View {
         var interaction = OfflineRouteSaveInteraction()
         interaction.select(draft)
         _interaction = State(initialValue: interaction)
+    }
+
+    private var isPlannedMapKitRoute: Bool {
+        interaction.draft?.archive.route.provider == RouteProviderPolicyV1.mapKitSavedOnPhone
     }
 
     var body: some View {
@@ -93,7 +98,8 @@ struct GPXRouteSaveSheet: View {
                             dismiss()
                         }
                     } label: {
-                        Label("Save Route", systemImage: "square.and.arrow.down")
+                        Label(isPlannedMapKitRoute ? "Save Offline" : "Save Route",
+                              systemImage: "square.and.arrow.down")
                     }
                     .disabled(!interaction.canSave(now: Date()))
                     .accessibilityIdentifier("saveApprovedRouteOffline")
@@ -102,10 +108,12 @@ struct GPXRouteSaveSheet: View {
                             .accessibilityIdentifier("offlineRouteSaveFailure")
                     }
                 } footer: {
-                    Text("Saves route guidance on this iPhone, not offline map tiles. You can send the saved route to Apple Watch separately.")
+                    Text(isPlannedMapKitRoute
+                         ? "Saves this Apple Maps route and its instructions on this iPhone. Offline map tiles and Watch transfer are not included."
+                         : "Saves route guidance on this iPhone, not offline map tiles. You can send the saved route to Apple Watch separately.")
                 }
             }
-            .navigationTitle("Import GPX")
+            .navigationTitle(isPlannedMapKitRoute ? "Save Offline" : "Import GPX")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel", role: .cancel) { interaction.cancel(); dismiss() }

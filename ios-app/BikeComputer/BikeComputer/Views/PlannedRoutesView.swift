@@ -149,11 +149,13 @@ struct SavedRoutesSettingsSection: View {
                     displayName: displayName
                 )
 
-                watchStatusControl(
-                    status,
-                    route: route,
-                    displayName: displayName
-                )
+                if route.providerID != RouteProviderPolicyV1.mapKit.providerID {
+                    watchStatusControl(
+                        status,
+                        route: route,
+                        displayName: displayName
+                    )
+                }
 
                 if route.providerID ==
                     RouteProviderPolicyV1.strava.providerID {
@@ -201,6 +203,11 @@ struct SavedRoutesSettingsSection: View {
                     Text("Available offline")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+            }
+
+            if route.providerID == RouteProviderPolicyV1.mapKit.providerID {
+                Text("Apple Maps · Saved on this iPhone")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             if route.providerID == RouteProviderPolicyV1.strava.providerID {

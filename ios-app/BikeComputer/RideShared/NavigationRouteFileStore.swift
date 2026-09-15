@@ -35,19 +35,27 @@ struct NavigationRouteFileStoreLimitsV1: Equatable {
     let maximumTotalEncodedBytes: Int
 }
 
+nonisolated enum NavigationRouteStoreDestinationV1 {
+    case phone
+    case watch
+}
+
 final class NavigationRouteFileStoreV1 {
     let rootDirectory: URL
     private let fileManager: FileManager
     private let limits: NavigationRouteFileStoreLimitsV1
+    private let archivePurpose: NavigationRouteArchivePurposeV1
 
     init(
         rootDirectory: URL,
         limits: NavigationRouteFileStoreLimitsV1 = .phone,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        destination: NavigationRouteStoreDestinationV1 = .phone
     ) {
         self.rootDirectory = rootDirectory
         self.limits = limits
         self.fileManager = fileManager
+        self.archivePurpose = destination == .watch ? .watchTransfer : .offlineNavigation
     }
 
     @discardableResult
@@ -94,7 +102,7 @@ final class NavigationRouteFileStoreV1 {
     ) throws -> InstalledNavigationRouteV1 {
         let archive = try NavigationRouteArchiveV1.decode(
             data,
-            purpose: .offlineNavigation,
+            purpose: archivePurpose,
             now: now
         )
         _ = pruneInvalidAndExpired(now: now)
@@ -220,7 +228,7 @@ final class NavigationRouteFileStoreV1 {
                   let archive = try? NavigationRouteArchiveV1
                     .decodeForRetentionInspection(
                     data,
-                    purpose: .offlineNavigation
+                    purpose: archivePurpose
                   ),
                   url.standardizedFileURL == fileURL(for: WatchRouteIdentityV1(archive: archive)) else {
                 return nil
@@ -327,7 +335,7 @@ final class NavigationRouteFileStoreV1 {
                 let archive = try NavigationRouteArchiveV1
                     .decodeForRetentionInspection(
                     data,
-                    purpose: .offlineNavigation
+                    purpose: archivePurpose
                 )
                 guard url.standardizedFileURL == fileURL(for: WatchRouteIdentityV1(archive: archive)) else {
                     throw NavigationRouteArchiveError.invalidEncoding
@@ -341,7 +349,7 @@ final class NavigationRouteFileStoreV1 {
                     }
                 } else {
                     try archive.validate(
-                        purpose: .offlineNavigation,
+                        purpose: archivePurpose,
                         now: now
                     )
                 }
@@ -418,7 +426,7 @@ final class NavigationRouteFileStoreV1 {
         let verifiedData = try Data(contentsOf: temporary)
         let verifiedArchive = try NavigationRouteArchiveV1.decode(
             verifiedData,
-            purpose: .offlineNavigation,
+            purpose: archivePurpose,
             now: now
         )
         guard verifiedData == data, verifiedArchive == archive else {

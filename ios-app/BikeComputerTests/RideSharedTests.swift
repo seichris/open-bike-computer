@@ -1561,6 +1561,21 @@ enum RideSharedTests {
             ) == preparationRequest,
             "Watch-direct preparation requests are exact and versioned"
         )
+        let reconciliationRequest = try
+            WatchDirectRideReconciliationRequestV1(
+                requestID: UUID(
+                    uuidString: "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+                )!,
+                preparationID: preparationRequest.preparationID,
+                deviceID: deviceID.uppercased()
+            )
+        try expect(
+            try WatchDirectRideReconciliationRequestV1.decode(
+                reconciliationRequest.encoded()
+            ) == reconciliationRequest &&
+                reconciliationRequest.deviceID == deviceID,
+            "phone reconciliation binds the exact normalized Watch handoff"
+        )
         let preparationIntent = try WatchDirectRidePreparationIntentV1(
             preparationID: preparationRequest.preparationID,
             operation: .prepare,

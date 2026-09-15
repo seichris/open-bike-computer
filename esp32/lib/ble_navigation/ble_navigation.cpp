@@ -3727,6 +3727,11 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::AUTOMATIC_DISPLAY_OFF_FEATURE;
     }
+    if (clientVersion >= device_capabilities_protocol::
+                             DISPLAY_INACTIVITY_TIMEOUTS_CLIENT_VERSION) {
+      featureFlags |=
+          device_capabilities_protocol::DISPLAY_INACTIVITY_TIMEOUTS_FEATURE;
+    }
 #endif
     if (clientVersion >= device_capabilities_protocol::
                              EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION) {
@@ -4774,6 +4779,32 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.println("BLE Settings: automatic display-off unsupported on this target");
 #endif
     return;
+  case display_power::kDisplayInactivityTimeoutsSettingID: {
+#ifdef USE_ARDUINO_GFX
+    display_power::InactivityTimeouts timeouts;
+    if (!display_power::decodeInactivityTimeouts(settingValue, timeouts)) {
+      Serial.printf(
+          "BLE Settings: rejected display inactivity timeouts value %ld from %s\n",
+          (long)settingValue, source == nullptr ? "unknown" : source);
+      return;
+    }
+    if (!displayPowerManager.requestDisplayInactivityTimeouts(
+            timeouts.dimAfterSeconds, timeouts.displayOffAfterSeconds)) {
+      Serial.printf(
+          "BLE Settings: display inactivity timeout persistence failed from %s\n",
+          source == nullptr ? "unknown" : source);
+      return;
+    }
+    Serial.printf(
+        "BLE Settings: display inactivity timeouts dim=%us off=%us (saved)\n",
+        static_cast<unsigned>(timeouts.dimAfterSeconds),
+        static_cast<unsigned>(timeouts.displayOffAfterSeconds));
+#else
+    Serial.println(
+        "BLE Settings: display inactivity timeouts unsupported on this target");
+#endif
+    return;
+  }
   case 13: {
     settingValue = device_screen_protocol::applyCompatibility(
         settingValue, mapRenderSettings.enabledScreensMask);

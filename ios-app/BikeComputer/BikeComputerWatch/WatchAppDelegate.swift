@@ -111,6 +111,10 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
             [weak deviceLink] in
             deviceLink?.directRidePreparationAvailabilityDidChange()
         }
+        connectivityCoordinator.onDirectRideReconciliationRequest = {
+            [weak deviceLink] request in
+            deviceLink?.requestPhonePreparationReconciliation(request)
+        }
         deviceLink.onDirectRidePreparationChange = {
             [weak connectivityCoordinator] operation, deviceID,
                 preparationID in

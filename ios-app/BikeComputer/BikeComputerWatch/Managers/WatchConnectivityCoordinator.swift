@@ -13,6 +13,8 @@ final class WatchConnectivityCoordinator: NSObject {
     var onDirectRidePreparationSubmissionFailure:
         ((WatchDirectRidePreparationRequestV1) -> Void)?
     var onDirectRidePreparationAvailabilityChanged: (() -> Void)?
+    var onDirectRideReconciliationRequest:
+        ((WatchDirectRideReconciliationRequestV1) -> Void)?
 
     private let session: WCSession?
     private let routeLibrary: WatchRouteLibrary
@@ -25,6 +27,9 @@ final class WatchConnectivityCoordinator: NSObject {
         "watchConnectivity.pendingBLETransportDiagnostics.v1"
     private let inFlightTransportDiagnosticsKey =
         "watchConnectivity.inFlightBLETransportDiagnostics.v1"
+    private let inFlightDirectRideReleaseKey =
+        "watchConnectivity.inFlightDirectRideReleases.v1"
+    private var directRideReleaseRetryTask: Task<Void, Never>?
 
     private lazy var cyclingSensorPublisher =
         WatchCyclingSensorObservationPublisher(
@@ -70,6 +75,7 @@ final class WatchConnectivityCoordinator: NSObject {
         guard let session else { return }
         if hasActivated {
             if session.activationState == .activated {
+                flushPendingDirectRideReleases(using: session)
                 flushPendingTransportDiagnostics(using: session)
                 publishDeviceMetadata(using: session)
                 cyclingSensorPublisher.flush()
@@ -210,17 +216,82 @@ final class WatchConnectivityCoordinator: NSObject {
 
     private func flushPendingDirectRideReleases(using session: WCSession) {
         guard session.activationState == .activated else { return }
+        reconcileDirectRideReleasesInFlight(using: session)
+        let inFlight = defaults.array(
+            forKey: inFlightDirectRideReleaseKey
+        ) as? [Data] ?? []
+        guard inFlight.isEmpty else { return }
         let pending = defaults.array(
             forKey: pendingDirectRideReleaseKey
         ) as? [Data] ?? []
         guard !pending.isEmpty else { return }
+        defaults.set(pending, forKey: inFlightDirectRideReleaseKey)
+        defaults.removeObject(forKey: pendingDirectRideReleaseKey)
         for payload in pending {
             session.transferUserInfo([
                 WatchDirectRidePreparationRequestV1.userInfoPayloadKey:
                     payload,
             ])
         }
-        defaults.removeObject(forKey: pendingDirectRideReleaseKey)
+    }
+
+    private func reconcileDirectRideReleasesInFlight(
+        using session: WCSession
+    ) {
+        let outstanding = session.outstandingUserInfoTransfers.compactMap {
+            $0.userInfo[
+                WatchDirectRidePreparationRequestV1.userInfoPayloadKey
+            ] as? Data
+        }.filter {
+            guard let request = try?
+                    WatchDirectRidePreparationRequestV1.decode($0) else {
+                return false
+            }
+            return request.operation == .release
+        }
+        let recorded = defaults.array(
+            forKey: inFlightDirectRideReleaseKey
+        ) as? [Data] ?? []
+        for abandoned in recorded where !outstanding.contains(abandoned) {
+            enqueuePendingDirectRideRelease(abandoned)
+        }
+        if outstanding.isEmpty {
+            defaults.removeObject(forKey: inFlightDirectRideReleaseKey)
+        } else {
+            defaults.set(outstanding, forKey: inFlightDirectRideReleaseKey)
+        }
+    }
+
+    private func directRideReleaseDidFinish(data: Data, error: Error?) {
+        var inFlight = defaults.array(
+            forKey: inFlightDirectRideReleaseKey
+        ) as? [Data] ?? []
+        if let index = inFlight.firstIndex(of: data) {
+            inFlight.remove(at: index)
+        }
+        if inFlight.isEmpty {
+            defaults.removeObject(forKey: inFlightDirectRideReleaseKey)
+        } else {
+            defaults.set(inFlight, forKey: inFlightDirectRideReleaseKey)
+        }
+        if error != nil {
+            enqueuePendingDirectRideRelease(data)
+            scheduleDirectRideReleaseRetry()
+            return
+        }
+        guard inFlight.isEmpty, let session else { return }
+        flushPendingDirectRideReleases(using: session)
+    }
+
+    private func scheduleDirectRideReleaseRetry() {
+        guard directRideReleaseRetryTask == nil else { return }
+        directRideReleaseRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard let self else { return }
+            self.directRideReleaseRetryTask = nil
+            guard let session = self.session else { return }
+            self.flushPendingDirectRideReleases(using: session)
+        }
     }
 
     private func flushPendingTransportDiagnostics(using session: WCSession) {
@@ -404,6 +475,9 @@ final class WatchConnectivityCoordinator: NSObject {
     }
 
     fileprivate func receiveUserInfo(_ userInfo: [String: Any]) {
+        if receiveDirectRideReconciliation(userInfo) {
+            return
+        }
         if let payload = userInfo[
             WatchControllerTransportV1.userInfoPayloadKey
         ] as? Data {
@@ -425,6 +499,21 @@ final class WatchConnectivityCoordinator: NSObject {
             routeLibrary.reportSyncError(code)
             acknowledge(request.identity, status: .rejected, error: code)
         }
+    }
+
+    @discardableResult
+    fileprivate func receiveDirectRideReconciliation(
+        _ message: [String: Any]
+    ) -> Bool {
+        guard let payload = message[
+            WatchDirectRideReconciliationRequestV1.userInfoPayloadKey
+        ] as? Data else { return false }
+        guard let request = try?
+                WatchDirectRideReconciliationRequestV1.decode(payload) else {
+            return false
+        }
+        onDirectRideReconciliationRequest?(request)
+        return true
     }
 
     fileprivate func receiveControllerRequest(_ data: Data) -> Data {
@@ -583,6 +672,17 @@ extension WatchConnectivityCoordinator: WCSessionDelegate {
         didReceiveMessage message: [String: Any],
         replyHandler: @escaping ([String: Any]) -> Void
     ) {
+        if message["watchDirectRideReconciliationRequestV1"] != nil {
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    replyHandler(["accepted": false])
+                    return
+                }
+                let accepted = self.receiveDirectRideReconciliation(message)
+                replyHandler(["accepted": accepted])
+            }
+            return
+        }
         guard let immediate = WatchRouteImmediateTransferV1.decode(
             message
         ) else {
@@ -654,6 +754,14 @@ extension WatchConnectivityCoordinator: WCSessionDelegate {
         didFinish userInfoTransfer: WCSessionUserInfoTransfer,
         error: Error?
     ) {
+        if let data = userInfoTransfer.userInfo[
+            "watchDirectRidePreparationRequestV1"
+        ] as? Data {
+            Task { @MainActor [weak self] in
+                self?.directRideReleaseDidFinish(data: data, error: error)
+            }
+            return
+        }
         guard let data = userInfoTransfer.userInfo[
             WatchBLETransportDiagnosticBatchV1.userInfoPayloadKey
         ] as? Data else { return }

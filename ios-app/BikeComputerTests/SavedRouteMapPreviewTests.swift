@@ -162,6 +162,7 @@ struct SavedRouteMapPreviewTests {
         try testFactoryAndCoordinateBoundary()
         try testOverlayOwnershipAndCamera()
         try testSettingsAction()
+        try testSavedMapKitPreview()
         try testOfflineNavigationOverlayOwnership()
         print("Saved route map integration: \(checks) checks passed")
     }
@@ -480,6 +481,29 @@ struct SavedRouteMapPreviewTests {
             "Stopping offline navigation releases only its owned geometry")
         check(coordinator.displayedSavedRouteOverlay != nil,
             "Ordinary GPX/Strava previews still work after offline navigation stops")
+    }
+
+    private static func testSavedMapKitPreview() throws {
+        let fixture = LibraryFixture()
+        defer { fixture.cleanup() }
+        let saved = try archive(route(provider: RouteProviderPolicyV1.mapKitSavedOnPhone))
+        let summary = try fixture.install(saved)
+        let selection = try fixture.library.mapSelection(for: summary)
+        let preview = try SavedRouteMapPreviewFactory.make(selection, now: { timestamp })
+        check(preview.providerID == "apple.mapkit" && preview.attribution == "Apple Maps",
+            "Saved MapKit previews retain Apple attribution, not GPX branding")
+        check(preview.identity == WatchRouteIdentityV1(archive: saved) &&
+            preview.overlay.polyline.pointCount == saved.route.points.count,
+            "Saved MapKit preview uses the existing exact-identity overlay pipeline")
+        let map = PreviewRecordingMap(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let coordinator = MapViewContainer.Coordinator()
+        update(coordinator, map: map, preview: preview.overlay)
+        update(coordinator, map: map, preview: preview.overlay)
+        check(map.additions == 1 && map.fits.count == 1,
+            "Saved MapKit overlays are reused, not repeatedly rebuilt or refitted")
+        let effects = fixture.connectivity.sideEffects
+        failure { try fixture.library.sendToWatch(summary) }
+        check(fixture.connectivity.sideEffects == effects, "MapKit phone storage does not enable Watch transfer")
     }
 
     private static func testSettingsAction() throws {

@@ -68,15 +68,16 @@ enum NavigationStartOutcome: Equatable {
 struct NavigationRouteAlternativeV1: Identifiable {
     let id: UUID
     let route: MKRoute
+    let canonicalRoute: NavigationRouteV1
+    let calculatedAt: Date
     let title: String
     let distanceMeters: CLLocationDistance
     let expectedTravelTime: TimeInterval
     let advisoryNotices: [String]
 
-    // An MKRoute alternative has Apple provenance, regardless of its title.
-    // There is deliberately no export adapter or mutable provider override.
     var canSaveOffline: Bool {
-        RouteProviderPolicyV1.allowsDurableStorage(RouteProviderPolicyV1.mapKit)
+        canonicalRoute.provider == RouteProviderPolicyV1.mapKit &&
+            RouteProviderPolicyV1.allowsDurableStorage(RouteProviderPolicyV1.mapKitSavedOnPhone)
     }
 }
 
@@ -120,8 +121,21 @@ class BikeComputerCoordinator: ObservableObject {
     @Published private(set) var offlineRoutePolyline: MKPolyline?
 
     var selectedRouteCanSaveOffline: Bool {
-        routeAlternatives.first { $0.id == selectedRouteAlternativeID }?.canSaveOffline ?? false
+        !isNavigating && !routeCalculation.isCalculating && selectedRouteAlternative?.canSaveOffline == true
     }
+
+    private var selectedRouteAlternative: NavigationRouteAlternativeV1? {
+        guard let id = selectedRouteAlternativeID else { return nil }
+        return pendingRoutePlan?.alternatives.first { $0.id == id }
+    }
+
+    func selectedRouteOfflineDraft() throws -> OfflineRouteSaveDraft {
+        guard selectedRouteCanSaveOffline, let selected = selectedRouteAlternative else {
+            throw OfflineRouteSaveError.noSelection
+        }
+        return try .plannedMapKit(selected.canonicalRoute, createdAt: selected.calculatedAt)
+    }
+
     @Published private(set) var routePreview: MKRoute?
     @Published private(set) var routeAlternatives:
         [NavigationRouteAlternativeV1] = []
@@ -1467,13 +1481,14 @@ extension BikeComputerCoordinator {
 
                 if presentsAlternatives {
                     let alternatives = routes.enumerated().compactMap {
-                        index, candidate -> (index: Int, candidate: MKRoute, name: String)? in
+                        index, candidate -> (index: Int, candidate: MKRoute, name: String, canonical: NavigationRouteV1)? in
+                        let canonical: NavigationRouteV1
                         do {
                             let normalizedInitialLocation =
                                 MapKitRouteAdapter.normalizedLocation(
                                     initialLocation
                                 )
-                            _ = try MapKitRouteAdapter.route(
+                            canonical = try MapKitRouteAdapter.route(
                                 from: candidate,
                                 fallbackSource: RouteCoordinateV1(
                                     latitude: normalizedInitialLocation.coordinate.latitude,
@@ -1490,7 +1505,8 @@ extension BikeComputerCoordinator {
                         return (
                             index: index,
                             candidate: candidate,
-                            name: candidate.name
+                            name: candidate.name,
+                            canonical: canonical
                         )
                     }
                     .sorted { lhs, rhs in
@@ -1507,8 +1523,10 @@ extension BikeComputerCoordinator {
                     .enumerated()
                     .map { displayIndex, entry in
                         NavigationRouteAlternativeV1(
-                            id: UUID(),
+                            id: entry.canonical.id,
                             route: entry.candidate,
+                            canonicalRoute: entry.canonical,
+                            calculatedAt: self.now(),
                             title: entry.name.isEmpty
                                 ? "Route \(displayIndex + 1)"
                                 : entry.name,

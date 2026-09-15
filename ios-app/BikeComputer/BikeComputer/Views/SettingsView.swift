@@ -322,7 +322,7 @@ struct SettingsView: View {
                 coordinator: stravaIntegrationCoordinator
             )
         case .gpxRouteImport(let draft):
-            GPXRouteSaveSheet(library: routeLibrary, draft: draft) { result in
+            RouteSaveSheet(library: routeLibrary, draft: draft) { result in
                 routeImportFeedback = result.message
                 presentedSheet = nil
             }
@@ -2514,11 +2514,18 @@ private struct MapStyleSettingsView: View {
 private struct HardwareCustomizationSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
 
+    private var displayInactivityFooter: String {
+        guard bleManager.supportsDisplayInactivityTimeouts else {
+            return "When enabled, the display dims after 15 seconds and turns off after 45 seconds unless navigation, workout, transfer, or attention activity is active."
+        }
+        return "When enabled, the display dims after \(bleManager.displayDimTimeout.title) and turns off after \(bleManager.displayOffTimeout.title) unless navigation, workout, transfer, or attention activity is active."
+    }
+
     var body: some View {
         Form {
             Section(
                 header: Text("Device Brightness"),
-                footer: Text("When enabled, the display dims after 15 seconds and turns off after 45 seconds unless navigation, workout, transfer, or attention activity is active.")
+                footer: Text(displayInactivityFooter)
             ) {
                 VStack(alignment: .leading) {
                     HStack {
@@ -2541,10 +2548,39 @@ private struct HardwareCustomizationSettingsView: View {
                         )
                     }
                     .disabled(!bleManager.supportsAutomaticDisplayOff)
+
+                if bleManager.supportsDisplayInactivityTimeouts {
+                    Picker("Dim After", selection: $bleManager.displayDimTimeout) {
+                        ForEach(DisplayDimTimeout.allCases.filter {
+                            $0.rawValue < bleManager.displayOffTimeout.rawValue
+                        }) { timeout in
+                            Text(timeout.title).tag(timeout)
+                        }
+                    }
+                    .onChange(of: bleManager.displayDimTimeout) { _ in
+                        bleManager.sendDisplayInactivityTimeouts()
+                    }
+                    .disabled(!bleManager.automaticDisplayOffEnabled)
+
+                    Picker("Turn Off After", selection: $bleManager.displayOffTimeout) {
+                        ForEach(DisplayOffTimeout.allCases.filter {
+                            $0.rawValue > bleManager.displayDimTimeout.rawValue
+                        }) { timeout in
+                            Text(timeout.title).tag(timeout)
+                        }
+                    }
+                    .onChange(of: bleManager.displayOffTimeout) { _ in
+                        bleManager.sendDisplayInactivityTimeouts()
+                    }
+                    .disabled(!bleManager.automaticDisplayOffEnabled)
+                }
             }
             .disabled(!bleManager.supportsDeviceSettings)
 
-            Section(header: Text("Power")) {
+            Section(
+                header: Text("Power"),
+                footer: Text("This puts the entire device into deep sleep after its phone connection is lost. It is separate from the connected display timeout above.")
+            ) {
                 Picker("Disconnected Sleep After", selection: $bleManager.disconnectedSleepTimeout) {
                     ForEach(DisconnectedSleepTimeout.allCases) { timeout in
                         Text(timeout.title).tag(timeout)
