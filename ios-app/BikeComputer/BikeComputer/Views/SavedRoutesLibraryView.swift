@@ -1,11 +1,24 @@
 import SwiftUI
 
+private enum SavedRouteImportSheet: Identifiable {
+    case strava
+    case gpx(OfflineRouteSaveDraft)
+
+    var id: String {
+        switch self {
+        case .strava: "strava"
+        case .gpx(let draft): "gpx:\(draft.id.uuidString)"
+        }
+    }
+}
+
 /// A shortcut to the same library used by Settings, not a second save flow.
 struct SavedRoutesLibraryView: View {
     @ObservedObject var library: PhoneRouteLibrary
     @ObservedObject var stravaCoordinator: StravaIntegrationCoordinator
     @Environment(\.dismiss) private var dismiss
-    @State private var isImportingFromStrava = false
+    @State private var presentedImport: SavedRouteImportSheet?
+    @State private var importFeedback: String?
 
     var body: some View {
         NavigationStack {
@@ -13,7 +26,12 @@ struct SavedRoutesLibraryView: View {
                 SavedRoutesSettingsSection(
                     routeLibrary: library,
                     stravaCoordinator: stravaCoordinator,
-                    onImportFromStrava: { isImportingFromStrava = true }
+                    onImportFromStrava: { presentedImport = .strava },
+                    onConfirmGPX: { draft in
+                        importFeedback = nil
+                        presentedImport = .gpx(draft)
+                    },
+                    importFeedback: importFeedback
                 )
             }
             .navigationTitle("Saved Routes")
@@ -22,8 +40,16 @@ struct SavedRoutesLibraryView: View {
                     Button("Done") { dismiss() }
                 }
             }
-            .sheet(isPresented: $isImportingFromStrava) {
-                StravaRouteImportView(coordinator: stravaCoordinator)
+            .sheet(item: $presentedImport) { destination in
+                switch destination {
+                case .strava:
+                    StravaRouteImportView(coordinator: stravaCoordinator)
+                case .gpx(let draft):
+                    GPXRouteSaveSheet(library: library, draft: draft) { result in
+                        importFeedback = result.message
+                        presentedImport = nil
+                    }
+                }
             }
         }
     }

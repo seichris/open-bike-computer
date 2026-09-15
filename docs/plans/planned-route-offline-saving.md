@@ -25,7 +25,10 @@ fastest-first alternatives, explicit selection, and current #429 preview remain.
 
 Settings and the planner's **Saved Routes** shortcut render the same
 `SavedRoutesSettingsSection`. The shortcut is only a container; it does not
-implement its own list, import handler or persistence flow.
+implement its own list, import handler or persistence flow. The section requests
+GPX confirmation from its stable parent presenter; it never owns a transient
+sheet. Settings routes the typed draft through its existing item-driven sheet
+enum, and the library shortcut uses the same stable-parent presentation pattern.
 
 **New GPX:** Import GPX -> memory-only typed draft -> editable meaningful name
 -> Save Route. Cancel and picker cancellation write nothing. The confirmation

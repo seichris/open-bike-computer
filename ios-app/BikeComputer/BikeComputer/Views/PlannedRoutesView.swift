@@ -7,12 +7,12 @@ struct SavedRoutesSettingsSection: View {
     @Environment(\.savedRouteMapAction) private var mapAction
     @Environment(\.savedRouteNavigationAction) private var navigationAction
     let onImportFromStrava: () -> Void
+    let onConfirmGPX: (OfflineRouteSaveDraft) -> Void
+    let importFeedback: String?
     @FocusState private var focusedRouteID: UUID?
     @State private var renameInteraction = SavedRouteRenameInteraction()
     @State private var errorMessage: String?
     @State private var isImportingGPX = false
-    @State private var importDraft: OfflineRouteSaveDraft?
-    @State private var importFeedback: String?
 
     var body: some View {
         Section {
@@ -84,12 +84,6 @@ struct SavedRoutesSettingsSection: View {
         } message: {
             Text(errorMessage ?? "Unknown error")
         }
-        .sheet(item: $importDraft) { draft in
-            GPXRouteSaveSheet(library: routeLibrary, draft: draft) { result in
-                importFeedback = result.message
-                importDraft = nil
-            }
-        }
         .onAppear { routeLibrary.reload() }
         .onChange(of: focusedRouteID) { newValue in
             scheduleRenameCommitIfNeeded(focusedRouteID: newValue)
@@ -122,10 +116,9 @@ struct SavedRoutesSettingsSection: View {
             defer { try? handle.close() }
             let data = try handle.read(upToCount: GPXRouteImporterV1.maximumInputBytes + 1) ?? Data()
             // The parser rechecks the bound even if the file grew after stat.
-            importDraft = try OfflineRouteSaveDraft.gpx(
+            onConfirmGPX(try OfflineRouteSaveDraft.gpx(
                 data: data, fileName: url.lastPathComponent, now: Date()
-            )
-            importFeedback = nil
+            ))
         } catch {
             let cocoa = error as NSError
             if cocoa.domain == NSCocoaErrorDomain && cocoa.code == NSUserCancelledError { return }

@@ -594,8 +594,15 @@ struct OfflineRouteSaveTests {
         check(panel.contains("SavedRoutesSettingsSection(") && settings.contains("SavedRoutesSettingsSection("),
             "Planner shortcut and Settings share the same library/import UI")
         check(!panel.contains("ForEach(library.routes)") && !panel.contains(".fileImporter"), "Shortcut does not duplicate library or importer")
-        check(section.contains("GPXRouteSaveSheet(") && !section.contains("try routeLibrary.importGPX("),
-            "Import GPX requires confirmation before the durable commit")
+        check(section.contains("onConfirmGPX(try OfflineRouteSaveDraft.gpx(") &&
+            !section.contains("try routeLibrary.importGPX("),
+            "Import GPX requests confirmation before the durable commit")
+        check(!section.contains(".sheet(") &&
+            settings.contains("presentedSheet = .gpxRouteImport(draft)") &&
+            settings.contains("GPXRouteSaveSheet(library: routeLibrary, draft: draft)") &&
+            panel.contains(".sheet(item: $presentedImport)") &&
+            panel.contains("GPXRouteSaveSheet(library: library, draft: draft)"),
+            "GPX confirmation is item-driven by stable parent presenters, never a transient Section")
         check(section.contains("navigationAction?.perform(route)") && section.contains("!routeLibrary.isAvailableOffline(route)"),
             "Saved rows navigate directly and enforce deletion/expiry eligibility")
         check(content.contains("routeLibrary.$offlineNavigationRoutes"), "Active navigation and preview observe deletion admission, not just files")
