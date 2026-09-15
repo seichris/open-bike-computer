@@ -97,7 +97,7 @@ After these historical runs, `main` assigned protocol 26 / CAP2 bit 28 to
 configurable display inactivity timeouts. The merge resolution keeps that
 released assignment and moves `workout_zones_v1` to protocol 27 / CAP2 bit 29.
 The runs above predate that reassignment and are not evidence for the merged
-head; use the fresh PR checks triggered by the merge commit.
+head; use the fresh PR checks for the final post-merge head.
 
 Local checks of the same source changes passed all 102 root `tools/tests` tests,
 286 native/transport checks, the two World Radio contract tests and generated
