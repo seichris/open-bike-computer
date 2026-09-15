@@ -22,7 +22,7 @@ class WorldRadioContractReuseTests(unittest.TestCase):
         })
         self.assertEqual(generator.SWIFT_OUTPUT.read_text(), generator.render_swift(contract))
         self.assertEqual(generator.CPP_OUTPUT.read_text(), generator.render_cpp(contract))
-        self.assertEqual(contract["capabilities"]["current_client_version"], 25)
+        self.assertEqual(contract["capabilities"]["current_client_version"], 26)
 
     def test_invalid_screen_assignments_fail_closed(self):
         for values in ({"map": 0, "radio": 0}, {"map": -1}, {"map": 8},

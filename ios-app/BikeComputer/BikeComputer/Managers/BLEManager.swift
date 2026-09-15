@@ -415,6 +415,8 @@ enum DeviceBLEProtocol {
         RideBLEGeneratedProtocolV1.rendererDiagnosticsFeature
     static let automaticDisplayOffCapabilityMask =
         RideBLEGeneratedProtocolV1.automaticDisplayOffFeature
+    static let displayInactivityTimeoutsCapabilityMask =
+        RideBLEGeneratedProtocolV1.displayInactivityTimeoutsFeature
     static let rideDiagnosticsCapabilityMask =
         RideBLEGeneratedProtocolV1.rideDiagnosticsFeature
     static let detailedRideDiagnosticsCapabilityMask =
@@ -444,6 +446,8 @@ enum DeviceBLEProtocol {
     static let gpsPositionCoalescingKey = "gps-position"
     static let automaticDisplayOffSettingCoalescingKey =
         "automatic-display-off-setting"
+    static let displayInactivityTimeoutsSettingCoalescingKey =
+        "display-inactivity-timeouts-setting"
     static let worldRadioStatusCoalescingKey = "world-radio-status"
     // Large enough for the worst schema-v1 three-favorite catalog at the
     // minimum BLE write length, without retaining a long stale GPS backlog.
@@ -480,6 +484,7 @@ enum DeviceBLEProtocol {
     static let mapPlusNavigation3DBuildingsSettingID: UInt8 = 35
     static let mapPlusNavigationRotationSettingID: UInt8 = 37
     static let automaticDisplayOffSettingID: UInt8 = 36
+    static let displayInactivityTimeoutsSettingID: UInt8 = 38
     static let currentScreenMaskMarker: Int32 = 1 << 30
     static let defaultMapStreetLabelsEnabled = true
     static let defaultMapPlusNavigationStreetLabelsEnabled = false
@@ -487,6 +492,37 @@ enum DeviceBLEProtocol {
     static let defaultStreetLabelLanguageMode = 2
     static let defaultStreetLabelTextSize = 0
     static let defaultStreetLabelOrientation = 1
+    static let defaultDisplayDimAfterSeconds = 15
+    static let defaultDisplayOffAfterSeconds = 45
+
+    static func displayInactivityTimeoutsSettingValue(
+        dimAfterSeconds: Int,
+        displayOffAfterSeconds: Int
+    ) -> Int32? {
+        guard (5...600).contains(dimAfterSeconds),
+              (10...3_600).contains(displayOffAfterSeconds),
+              displayOffAfterSeconds >= dimAfterSeconds + 5,
+              let dim = UInt16(exactly: dimAfterSeconds),
+              let off = UInt16(exactly: displayOffAfterSeconds) else {
+            return nil
+        }
+        return Int32(bitPattern: UInt32(dim) | (UInt32(off) << 16))
+    }
+
+    static func displayInactivityTimeouts(
+        fromSettingValue value: Int32
+    ) -> (dimAfterSeconds: Int, displayOffAfterSeconds: Int)? {
+        let packed = UInt32(bitPattern: value)
+        let dim = Int(UInt16(truncatingIfNeeded: packed))
+        let off = Int(UInt16(truncatingIfNeeded: packed >> 16))
+        guard displayInactivityTimeoutsSettingValue(
+            dimAfterSeconds: dim,
+            displayOffAfterSeconds: off
+        ) != nil else {
+            return nil
+        }
+        return (dim, off)
+    }
 
     static var serviceUUID: CBUUID { CBUUID(string: serviceUUIDString) }
     static var navigationCharacteristicUUID: CBUUID { CBUUID(string: navigationCharacteristicUUIDString) }
@@ -731,6 +767,43 @@ enum DisconnectedSleepTimeout: Int, CaseIterable, Identifiable {
     }
 }
 
+enum DisplayDimTimeout: Int, CaseIterable, Identifiable {
+    case fiveSeconds = 5
+    case fifteenSeconds = 15
+    case thirtySeconds = 30
+    case oneMinute = 60
+    case twoMinutes = 120
+
+    var id: Int { rawValue }
+
+    var title: String {
+        rawValue < 60 ? "\(rawValue) sec" : "\(rawValue / 60) min"
+    }
+
+    static func normalized(rawValue: Int) -> DisplayDimTimeout {
+        DisplayDimTimeout(rawValue: rawValue) ?? .fifteenSeconds
+    }
+}
+
+enum DisplayOffTimeout: Int, CaseIterable, Identifiable {
+    case thirtySeconds = 30
+    case fortyFiveSeconds = 45
+    case oneMinute = 60
+    case twoMinutes = 120
+    case fiveMinutes = 300
+    case tenMinutes = 600
+
+    var id: Int { rawValue }
+
+    var title: String {
+        rawValue < 60 ? "\(rawValue) sec" : "\(rawValue / 60) min"
+    }
+
+    static func normalized(rawValue: Int) -> DisplayOffTimeout {
+        DisplayOffTimeout(rawValue: rawValue) ?? .fortyFiveSeconds
+    }
+}
+
 enum BLEPairingAuthenticator {
     private static let key = SymmetricKey(data: Data("BikeComputer BLE v1 local pairing key".utf8))
 
@@ -917,6 +990,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var isNavigationReady: Bool = false
     @Published var supportsDeviceSettings: Bool = false
     @Published private(set) var supportsAutomaticDisplayOff: Bool = false
+    @Published private(set) var supportsDisplayInactivityTimeouts: Bool = false
     @Published var supportsDeviceSounds: Bool = false
     @Published var supportsPowerButtonHonk: Bool = false
     @Published var supportsPowerButtonHonkAcknowledgement: Bool = false
@@ -1082,6 +1156,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
     @Published var deviceBrightnessPercent: Double = 100
     @Published var automaticDisplayOffEnabled: Bool = true
+    @Published var displayDimTimeout: DisplayDimTimeout = .fifteenSeconds
+    @Published var displayOffTimeout: DisplayOffTimeout = .fortyFiveSeconds
     @Published var disconnectedSleepTimeout: DisconnectedSleepTimeout = .twoMinutes
     @Published var deviceSoundsEnabled: Bool = false
     @Published var selectedDeviceSound: DeviceSound = .defaultSelection
@@ -1357,6 +1433,7 @@ class BLEManager: NSObject, ObservableObject {
     private var hasSentMapNavigationProfileForConnection = false
     private var hasSentScreenSettingsForConnection = false
     private var hasSentAutomaticDisplayOffForConnection = false
+    private var hasSentDisplayInactivityTimeoutsForConnection = false
     private var isSendingNegotiatedMapProfiles = false
     private var lastSentPhoneBatteryPercent: Int32?
     private var lastSentPhoneBatteryCharging: Bool?
@@ -1428,6 +1505,10 @@ class BLEManager: NSObject, ObservableObject {
         static let batteryStatusScreenMigrated = "deviceSettings.enabledScreensMask.batteryStatus.v1"
         static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
         static let automaticDisplayOffEnabled = "deviceSettings.automaticDisplayOffEnabled"
+        static let displayDimTimeoutSeconds =
+            "deviceSettings.displayDimTimeoutSeconds"
+        static let displayOffTimeoutSeconds =
+            "deviceSettings.displayOffTimeoutSeconds"
         static let disconnectedSleepTimeoutSeconds = "deviceSettings.disconnectedSleepTimeoutSeconds"
         static let deviceSoundsEnabled = "deviceSettings.deviceSoundsEnabled"
         static let watchControllerIDsByDevice =
@@ -1662,6 +1743,20 @@ class BLEManager: NSObject, ObservableObject {
         automaticDisplayOffEnabled = defaults.object(
             forKey: SettingsKeys.automaticDisplayOffEnabled
         ) as? Bool ?? true
+        displayDimTimeout = DisplayDimTimeout.normalized(
+            rawValue: defaults.object(
+                forKey: SettingsKeys.displayDimTimeoutSeconds
+            ) as? Int ?? DeviceBLEProtocol.defaultDisplayDimAfterSeconds
+        )
+        displayOffTimeout = DisplayOffTimeout.normalized(
+            rawValue: defaults.object(
+                forKey: SettingsKeys.displayOffTimeoutSeconds
+            ) as? Int ?? DeviceBLEProtocol.defaultDisplayOffAfterSeconds
+        )
+        if displayOffTimeout.rawValue < displayDimTimeout.rawValue + 5 {
+            displayDimTimeout = .fifteenSeconds
+            displayOffTimeout = .fortyFiveSeconds
+        }
         disconnectedSleepTimeout = DisconnectedSleepTimeout.normalized(
             rawValue: defaults.object(forKey: SettingsKeys.disconnectedSleepTimeoutSeconds) as? Int ?? DisconnectedSleepTimeout.twoMinutes.rawValue
         )
@@ -1953,6 +2048,10 @@ class BLEManager: NSObject, ObservableObject {
         )
         defaults.set(deviceBrightnessPercent, forKey: SettingsKeys.deviceBrightnessPercent)
         defaults.set(automaticDisplayOffEnabled, forKey: SettingsKeys.automaticDisplayOffEnabled)
+        defaults.set(displayDimTimeout.rawValue,
+                     forKey: SettingsKeys.displayDimTimeoutSeconds)
+        defaults.set(displayOffTimeout.rawValue,
+                     forKey: SettingsKeys.displayOffTimeoutSeconds)
         defaults.set(disconnectedSleepTimeout.rawValue, forKey: SettingsKeys.disconnectedSleepTimeoutSeconds)
         defaults.set(deviceSoundsEnabled, forKey: SettingsKeys.deviceSoundsEnabled)
         defaults.set(Int(selectedDeviceSound.rawValue), forKey: SettingsKeys.selectedDeviceSound)
@@ -4863,6 +4962,17 @@ class BLEManager: NSObject, ObservableObject {
             )
         } else if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
             automaticDisplayOffEnabled = value != 0
+        } else if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID {
+            guard let timeouts = DeviceBLEProtocol.displayInactivityTimeouts(
+                    fromSettingValue: value
+                  ),
+                  let dim = DisplayDimTimeout(rawValue: timeouts.dimAfterSeconds),
+                  let off = DisplayOffTimeout(rawValue: timeouts.displayOffAfterSeconds) else {
+                log("Invalid display inactivity timeout setting value \(value)")
+                return false
+            }
+            displayDimTimeout = dim
+            displayOffTimeout = off
         } else if id == DeviceBLEProtocol.mapPlusNavigationRotationSettingID {
             mapPlusNavigationRotationMode = value == 0 ? 0 : 1
         }
@@ -4881,6 +4991,12 @@ class BLEManager: NSObject, ObservableObject {
         if id == DeviceBLEProtocol.automaticDisplayOffSettingID,
            (!hasReceivedDeviceCapabilities || !supportsAutomaticDisplayOff) {
             log("Automatic display-off setting not sent: connected firmware does not advertise support")
+            return false
+        }
+        if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID,
+           (!hasReceivedDeviceCapabilities ||
+            !supportsDisplayInactivityTimeouts) {
+            log("Display inactivity timeouts not sent: connected firmware does not advertise support")
             return false
         }
         if Self.isIndependentMapProfileSetting(id),
@@ -4933,6 +5049,8 @@ class BLEManager: NSObject, ObservableObject {
         }
         if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
             hasSentAutomaticDisplayOffForConnection = true
+        } else if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID {
+            hasSentDisplayInactivityTimeoutsForConnection = true
         }
         return true
     }
@@ -4973,16 +5091,32 @@ class BLEManager: NSObject, ObservableObject {
         var fallback = Data(DeviceBLEProtocol.settingsFallbackPrefix.utf8)
         fallback.append(data)
 
-        let coalescingKey = id == DeviceBLEProtocol.automaticDisplayOffSettingID
-            ? DeviceBLEProtocol.automaticDisplayOffSettingCoalescingKey
-            : nil
-        let onDrop: (() -> Void)? = id == DeviceBLEProtocol.automaticDisplayOffSettingID
-            ? { [weak self] in
+        let coalescingKey: String?
+        if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
+            coalescingKey = DeviceBLEProtocol
+                .automaticDisplayOffSettingCoalescingKey
+        } else if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID {
+            coalescingKey = DeviceBLEProtocol
+                .displayInactivityTimeoutsSettingCoalescingKey
+        } else {
+            coalescingKey = nil
+        }
+        let onDrop: (() -> Void)?
+        if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
+            onDrop = { [weak self] in
                 guard let self else { return }
                 self.hasSentAutomaticDisplayOffForConnection = false
                 self.log("Automatic display-off setting was dropped before transmission")
             }
-            : nil
+        } else if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID {
+            onDrop = { [weak self] in
+                guard let self else { return }
+                self.hasSentDisplayInactivityTimeoutsForConnection = false
+                self.log("Display inactivity timeouts were dropped before transmission")
+            }
+        } else {
+            onDrop = nil
+        }
 
         return DevicePacketRouting.sendPreferredThenFallback(
             preferred: {
@@ -5192,6 +5326,7 @@ class BLEManager: NSObject, ObservableObject {
     func useDeviceCapabilitiesFallback() {
         guard isConnected, isNavigationReady, !hasReceivedDeviceCapabilities else { return }
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         supportsIndependentMapProfiles = false
         supportsExtendedMapVisibility = false
         supportsBirdsEyeMapNavigation = false
@@ -5385,6 +5520,7 @@ class BLEManager: NSObject, ObservableObject {
 
     private func sendScreenSettingsAfterCapabilityNegotiation() {
         sendAutomaticDisplayOffSettingAfterCapabilityNegotiation()
+        sendDisplayInactivityTimeoutsAfterCapabilityNegotiation()
         guard supportsDeviceSettings,
               hasReceivedDeviceCapabilities,
               !hasSentScreenSettingsForConnection else {
@@ -5413,6 +5549,36 @@ class BLEManager: NSObject, ObservableObject {
         _ = sendSetting(
             id: DeviceBLEProtocol.automaticDisplayOffSettingID,
             value: automaticDisplayOffEnabled ? 1 : 0
+        )
+    }
+
+    private func sendDisplayInactivityTimeoutsAfterCapabilityNegotiation() {
+        guard supportsDeviceSettings,
+              hasReceivedDeviceCapabilities,
+              supportsDisplayInactivityTimeouts,
+              !hasSentDisplayInactivityTimeoutsForConnection,
+              let value = DeviceBLEProtocol.displayInactivityTimeoutsSettingValue(
+                  dimAfterSeconds: displayDimTimeout.rawValue,
+                  displayOffAfterSeconds: displayOffTimeout.rawValue
+              ) else {
+            return
+        }
+        _ = sendSetting(
+            id: DeviceBLEProtocol.displayInactivityTimeoutsSettingID,
+            value: value
+        )
+    }
+
+    func sendDisplayInactivityTimeouts() {
+        guard let value = DeviceBLEProtocol.displayInactivityTimeoutsSettingValue(
+            dimAfterSeconds: displayDimTimeout.rawValue,
+            displayOffAfterSeconds: displayOffTimeout.rawValue
+        ) else {
+            return
+        }
+        _ = sendSetting(
+            id: DeviceBLEProtocol.displayInactivityTimeoutsSettingID,
+            value: value
         )
     }
 
@@ -6276,6 +6442,7 @@ class BLEManager: NSObject, ObservableObject {
         isConnecting = false
         supportsDeviceSettings = false
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         connectedPeripheral = nil
         connectedDeviceID = nil
         navigationCharacteristic = nil
@@ -6386,6 +6553,7 @@ class BLEManager: NSObject, ObservableObject {
         firmwareUpdateLastError = nil
         supportsDeviceSounds = false
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         supportsPowerButtonHonk = false
         supportsPowerButtonHonkAcknowledgement = false
         supportsIndependentMapProfiles = false
@@ -6430,6 +6598,7 @@ class BLEManager: NSObject, ObservableObject {
         hasSentMapNavigationProfileForConnection = false
         hasSentScreenSettingsForConnection = false
         hasSentAutomaticDisplayOffForConnection = false
+        hasSentDisplayInactivityTimeoutsForConnection = false
         isSendingNegotiatedMapProfiles = false
         clearPendingPowerButtonHonkConfiguration()
     }
@@ -7685,6 +7854,7 @@ class BLEManager: NSObject, ObservableObject {
             value: Int32(deviceBrightnessPercent)
         )
         sendAutomaticDisplayOffSettingAfterCapabilityNegotiation()
+        sendDisplayInactivityTimeoutsAfterCapabilityNegotiation()
         sendSetting(
             id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
             value: disconnectedSleepTimeout.settingValue
@@ -8109,10 +8279,13 @@ class BLEManager: NSObject, ObservableObject {
         if madeProgress,
            hasReceivedDeviceCapabilities,
            supportsDeviceSettings,
-           supportsAutomaticDisplayOff,
-           !hasSentAutomaticDisplayOffForConnection {
+           (supportsAutomaticDisplayOff &&
+                !hasSentAutomaticDisplayOffForConnection ||
+            supportsDisplayInactivityTimeouts &&
+                !hasSentDisplayInactivityTimeoutsForConnection) {
             DispatchQueue.main.async { [weak self] in
                 self?.sendAutomaticDisplayOffSettingAfterCapabilityNegotiation()
+                self?.sendDisplayInactivityTimeoutsAfterCapabilityNegotiation()
             }
         }
     }
@@ -9149,6 +9322,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         isConnecting = false
         supportsDeviceSettings = false
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         hardwareLabel = ""
         deviceInformation.removeAll()
         connectedPeripheral = nil
@@ -9672,6 +9846,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
     private func rejectDeviceCapabilities(_ message: String) {
         supportsDeviceSounds = false
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         supportsPowerButtonHonk = false
         supportsPowerButtonHonkAcknowledgement = false
         supportsIndependentMapProfiles = false
@@ -9709,6 +9884,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
         hasSentAutomaticDisplayOffForConnection = false
+        hasSentDisplayInactivityTimeoutsForConnection = false
         hasSentMapProfileForConnection = false
         hasSentMapNavigationProfileForConnection = false
         clearPendingPowerButtonHonkConfiguration()
@@ -9846,6 +10022,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             flags & DeviceBLEProtocol.rendererDiagnosticsCapabilityMask != 0
         let hasAutomaticDisplayOff =
             flags & DeviceBLEProtocol.automaticDisplayOffCapabilityMask != 0
+        let hasDisplayInactivityTimeouts = hasAutomaticDisplayOff &&
+            flags & DeviceBLEProtocol
+                .displayInactivityTimeoutsCapabilityMask != 0
         let hasRideDiagnostics =
             flags & DeviceBLEProtocol.rideDiagnosticsCapabilityMask != 0
         let hasDetailedRideDiagnostics = hasRideDiagnostics &&
@@ -9940,8 +10119,14 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             supportsAutomaticDisplayOff != hasAutomaticDisplayOff {
             hasSentAutomaticDisplayOffForConnection = false
         }
+        if hasReceivedDeviceCapabilities &&
+            supportsDisplayInactivityTimeouts !=
+                hasDisplayInactivityTimeouts {
+            hasSentDisplayInactivityTimeoutsForConnection = false
+        }
         supportsDeviceSounds = hasDeviceSounds
         supportsAutomaticDisplayOff = hasAutomaticDisplayOff
+        supportsDisplayInactivityTimeouts = hasDisplayInactivityTimeouts
         supportsPowerButtonHonk = hasPowerButtonHonk
         supportsPowerButtonHonkAcknowledgement = hasPowerButtonHonkAcknowledgement
         supportsIndependentMapProfiles = hasIndependentMapProfiles

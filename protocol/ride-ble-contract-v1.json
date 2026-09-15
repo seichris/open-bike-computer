@@ -31,7 +31,7 @@
     "request_magic": "CAPS",
     "response_magic": "CAP2",
     "response_schema_version": 1,
-    "current_client_version": 25,
+    "current_client_version": 26,
     "features": {
       "device_sounds": {"bit": 0, "minimum_client_version": 1},
       "power_button_honk": {"bit": 1, "minimum_client_version": 1},
@@ -60,7 +60,8 @@
       "map_navigation_orientation": {"bit": 24, "minimum_client_version": 22},
       "watch_gps_motion_evidence_v1": {"bit": 25, "minimum_client_version": 23},
       "screen_configuration_v1": {"bit": 26, "minimum_client_version": 24},
-      "world_radio": {"bit": 27, "minimum_client_version": 25}
+      "world_radio": {"bit": 27, "minimum_client_version": 25},
+      "display_inactivity_timeouts": {"bit": 28, "minimum_client_version": 26}
     }
   },
   "screen_types": {

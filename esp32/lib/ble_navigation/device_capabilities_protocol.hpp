@@ -26,6 +26,9 @@ constexpr uint8_t RENDERER_DIAGNOSTICS_CLIENT_VERSION =
     ride_ble_protocol_generated::RENDERER_DIAGNOSTICS_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t AUTOMATIC_DISPLAY_OFF_CLIENT_VERSION =
     ride_ble_protocol_generated::AUTOMATIC_DISPLAY_OFF_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t DISPLAY_INACTIVITY_TIMEOUTS_CLIENT_VERSION =
+    ride_ble_protocol_generated::
+        DISPLAY_INACTIVITY_TIMEOUTS_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t RIDE_DIAGNOSTICS_CLIENT_VERSION =
     ride_ble_protocol_generated::RIDE_DIAGNOSTICS_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t DETAILED_RIDE_DIAGNOSTICS_CLIENT_VERSION =
@@ -73,6 +76,8 @@ constexpr uint32_t RENDERER_DIAGNOSTICS_FEATURE =
 // Connected-display inactivity control (setting ID 36).
 constexpr uint32_t AUTOMATIC_DISPLAY_OFF_FEATURE =
     ride_ble_protocol_generated::AUTOMATIC_DISPLAY_OFF_FEATURE;
+constexpr uint32_t DISPLAY_INACTIVITY_TIMEOUTS_FEATURE =
+    ride_ble_protocol_generated::DISPLAY_INACTIVITY_TIMEOUTS_FEATURE;
 constexpr uint32_t RIDE_DIAGNOSTICS_FEATURE =
     ride_ble_protocol_generated::RIDE_DIAGNOSTICS_FEATURE;
 constexpr uint32_t DETAILED_RIDE_DIAGNOSTICS_FEATURE =
