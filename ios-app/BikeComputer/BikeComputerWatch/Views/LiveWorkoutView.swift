@@ -166,7 +166,7 @@ struct LiveWorkoutView: View {
                         color: .red
                     )
                     metric(
-                        title: manager.snapshot.nativeZones?.heartRate == nil ? "Bicino HR Zone" : "Health HR Zone",
+                        title: "HR Zone",
                         value: heartRateZoneValue,
                         unit: heartRateZoneUnit,
                         icon: "heart.circle.fill",
@@ -209,15 +209,6 @@ struct LiveWorkoutView: View {
                         icon: "bolt.fill",
                         color: .yellow
                     )
-                    if let native = manager.snapshot.nativeZones?.cyclingPower {
-                        metric(
-                            title: "Health Power Zone",
-                            value: native.currentZone.map { "Z\($0)" } ?? "--",
-                            unit: "OF \(native.configuration.ranges.count)",
-                            icon: "bolt.circle.fill",
-                            color: .yellow
-                        )
-                    }
                     metric(
                         title: "Cadence",
                         value: WorkoutValueFormatter.whole(
@@ -234,6 +225,17 @@ struct LiveWorkoutView: View {
                         icon: "mountain.2.fill",
                         color: .indigo
                     )
+                }
+
+                Text(
+                    manager.snapshot.nativeZones?.heartRate?.configuration.source.label
+                        ?? "Bicino zones · configured maximum heart rate"
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+                if let native = manager.snapshot.nativeZones?.cyclingPower {
+                    WorkoutNativeZoneCard(group: native)
                 }
 
                 HStack(spacing: 12) {
