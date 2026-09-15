@@ -67,7 +67,7 @@ inline bool decode(const uint8_t *data, std::size_t size, Packet &out) {
   static_assert(sizeof(double) == 8 && std::numeric_limits<double>::is_iec559,
                 "zone thresholds require IEEE-754 binary64");
   if (!data || size < HEADER_BYTES || size > MAXIMUM_FRAME_BYTES ||
-      data[0] != FRAME_KIND || data[1] != VERSION ||
+      data[0] != FRAME_KIND || data[1] != ZONE_WIRE_VERSION ||
       (data[2] != METRIC_HEART_RATE && data[2] != METRIC_CYCLING_POWER) ||
       data[3] > SOURCE_HEALTHKIT_UNKNOWN || (data[4] & ~uint8_t(7)) != 0 ||
       (data[7] & 0x3F) == 0 || (data[7] & 0x3F) > 6) return false;

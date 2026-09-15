@@ -1,3 +1,9 @@
+// Match the real firmware's build-identity macro so generated wire identifiers
+// cannot accidentally collide with VERSION again.
+#ifndef VERSION
+#define VERSION "host-firmware-identity"
+#endif
+
 #include "../../lib/ble_navigation/workout_zone_protocol.hpp"
 #include "../../lib/ble_navigation/workout_telemetry_state.hpp"
 #include "../../lib/gui/src/ride_stats_widget.hpp"

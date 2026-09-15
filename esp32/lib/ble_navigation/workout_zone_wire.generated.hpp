@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 namespace workout_zone_wire {
-inline constexpr uint32_t VERSION = 1;
+inline constexpr uint32_t ZONE_WIRE_VERSION = 1;
 inline constexpr uint32_t FRAME_KIND = 5;
 inline constexpr uint32_t HEADER_BYTES = 32;
 inline constexpr uint32_t MAXIMUM_ZONES = 9;
