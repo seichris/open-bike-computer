@@ -342,6 +342,10 @@ jobs:
           if test -d esp32/.pio/open-bike-build/downloads; then
             mv esp32/.pio/open-bike-build/downloads "${downloads}"
           fi
+          # The verified host runtime is intentionally read-only. This is an
+          # ephemeral runner path with an exact target, so restore owner-write
+          # before reclaiming only this job's generated PlatformIO state.
+          chmod -R u+w -- esp32/.pio
           rm -rf -- esp32/.pio
           rm -f -- \
             esp32/compile_commands.json \
