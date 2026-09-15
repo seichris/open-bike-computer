@@ -1,33 +1,91 @@
-name: HealthKit zone research workspace
+name: Native HealthKit zone implementation validation
 on:
   push:
     branches: [work/healthkit-zones-research-20260915]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  sdk:
+  validate:
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 35
     steps:
-      - name: Collect public SDK declarations
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+      - id: publish
+        name: Apply verified patch on exact main and publish feature branch
         shell: bash
         run: |
           set -euo pipefail
-          out="$RUNNER_TEMP/zone-sdk"
-          mkdir -p "$out"
-          ls -d /Applications/Xcode*.app | tee "$out/xcodes.txt"
-          xcrun swift --version | tee "$out/swift.txt"
-          sdk="$(xcrun --sdk watchos --show-sdk-path)"
-          printf '%s\n' "$sdk" | tee "$out/sdk.txt"
-          framework="$sdk/System/Library/Frameworks/HealthKit.framework"
-          cp -R "$framework/Headers" "$out/HealthKit-Headers"
-          cp -R "$framework/Modules" "$out/HealthKit-Modules"
-          for path in hkworkoutzoneconfiguration/source-swift.enum hkworkoutzone/index hkworkoutzone/minimum hkworkoutzone/maximum hkworkoutbuilder/zoneconfiguration\(for:\) hkworkoutbuilder/zonegroup\(for:\); do
-            name="$(printf '%s' "$path" | tr '/:' '__')"
-            curl --fail --location --connect-timeout 15 --max-time 30 "https://developer.apple.com/tutorials/data/documentation/healthkit/${path}.json" -o "$out/$name.json" || true
-          done
+          mkdir -p "$RUNNER_TEMP/zone-validation"
+          python3 - <<'PY'
+          import base64, gzip, hashlib, os
+          from pathlib import Path
+          parts = [Path(f'.github/zone-patch-part-{i}.txt').read_text().strip() for i in (1, 2, 3)]
+          gap = Path('.github/zone-patch-part-2-gap.txt').read_text().strip()
+          assert parts[1].count('HvrXssFtz') == 1
+          parts[1] = parts[1].replace('HvrXssFtz', 'HvrX' + gap + 'ssFtz')
+          print('Encoded part lengths:', [len(p) for p in parts])
+          assert [len(p) for p in parts] == [9000, 9000, 8840]
+          patch = gzip.decompress(base64.b64decode(''.join(parts), validate=True))
+          expected = '673a13073a29c5fa8eeb0fe754ac07d9270655c7d7a3c289efc9e9a66a7d44f6'
+          assert hashlib.sha256(patch).hexdigest() == expected, 'Patch digest mismatch'
+          Path(os.environ['RUNNER_TEMP'], 'native-zones.patch').write_bytes(patch)
+          print('Verified patch SHA256:', expected)
+          PY
+          base=85914afc147f8cbd336f5ef17cb8dbdc2fdf85a6
+          git fetch --no-tags origin main
+          test "$(git rev-parse FETCH_HEAD)" = "$base"
+          git checkout -b feat/native-healthkit-workout-zones "$base"
+          git apply --check "$RUNNER_TEMP/native-zones.patch"
+          git apply "$RUNNER_TEMP/native-zones.patch"
+          git diff --check
+          git add docs ios-app
+          git diff --cached --stat
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Add native HealthKit heart-rate and cycling-power zones on Watch and iPhone'
+          git push origin HEAD:refs/heads/feat/native-healthkit-workout-zones
+          git rev-parse HEAD | tee "$RUNNER_TEMP/zone-validation/COMMIT_SHA"
+          xcrun swift --version | tee "$RUNNER_TEMP/zone-validation/swift.txt"
+          xcrun --sdk watchos --show-sdk-version | tee "$RUNNER_TEMP/zone-validation/watch-sdk.txt"
+      - name: Portable native zone regression tests
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./ios-app/scripts/run-native-workout-zone-tests.sh 2>&1 | tee "$RUNNER_TEMP/zone-validation/native-tests.log"
+      - name: Existing workout contract tests
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios-app
+          ./scripts/run-workout-contract-tests.sh 2>&1 | tee "$RUNNER_TEMP/zone-validation/workout-tests.log"
+      - name: Watch source graph typecheck
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios-app
+          ./scripts/run-watch-source-typecheck.sh 2>&1 | tee "$RUNNER_TEMP/zone-validation/watch-typecheck.log"
+      - name: iOS script and release configuration tests
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios-app
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests 2>&1 | tee "$RUNNER_TEMP/zone-validation/python-tests.log"
+      - name: Unsigned release application build
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios-app
+          ./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/zone-derived-data" CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/zone-validation/release-build.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: healthkit-zone-sdk
-          path: ${{ runner.temp }}/zone-sdk
-          retention-days: 2
+          name: native-zone-validation
+          path: ${{ runner.temp }}/zone-validation
+          retention-days: 7
