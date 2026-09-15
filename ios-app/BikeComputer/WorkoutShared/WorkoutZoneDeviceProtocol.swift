@@ -163,7 +163,7 @@ nonisolated enum WorkoutZoneDeviceCodecV1 {
 }
 
 private extension Data {
-    mutating func zoneAppend<T: FixedWidthInteger>(_ value: T, bytes: Int) {
+    nonisolated mutating func zoneAppend<T: FixedWidthInteger>(_ value: T, bytes: Int) {
         for index in 0..<bytes { append(UInt8(truncatingIfNeeded: value >> (index * 8))) }
     }
 }
