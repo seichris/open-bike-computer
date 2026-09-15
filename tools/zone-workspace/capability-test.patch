@@ -1,0 +1,9 @@
+diff --git a/ios-app/BikeComputerTests/NavigationProtocolTests.swift b/ios-app/BikeComputerTests/NavigationProtocolTests.swift
+--- a/ios-app/BikeComputerTests/NavigationProtocolTests.swift
++++ b/ios-app/BikeComputerTests/NavigationProtocolTests.swift
+@@ -16356,1 +16356,4 @@
+-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 25, "capability version negotiates World Radio alongside configurable screens, navigation orientation, and Watch GPS motion evidence")
++        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 26, "capability version negotiates workout zones alongside existing World Radio, configurable screens, navigation orientation, and Watch GPS motion evidence")
++        assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1Feature, 1 << 28, "CAP2 bit 28 advertises versioned workout zones without reusing a legacy capability")
++        assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1MinimumClientVersion, 26, "zone negotiation requires protocol 26, independent of the iOS version")
++        assertEqual(RideBLEGeneratedProtocolV1.workoutZoneMaximumFrameBytes, 132, "bounded zone frames fit the documented protected ATT write budget")
