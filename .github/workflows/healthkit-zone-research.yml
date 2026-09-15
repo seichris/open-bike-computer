@@ -1,116 +1,26 @@
-name: Native HealthKit zone final validation
+name: Zone protocol research inputs
 on:
   push:
     branches: [work/healthkit-zones-research-20260915]
 permissions:
   contents: read
 jobs:
-  prepare:
+  inputs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
-    outputs:
-      sha: ${{ steps.commit.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: feat/native-healthkit-workout-zones
-      - id: commit
-        name: Preserve Watch metric pairs and reuse the native power card
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = b28cb0725b35d9d271e6d58183910a04a072c999
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('ios-app/BikeComputer/BikeComputerWatch/Views/LiveWorkoutView.swift');s=p.read_text()
-          old='title: manager.snapshot.nativeZones?.heartRate == nil ? "Bicino HR Zone" : "Health HR Zone",'
-          assert s.count(old)==1;s=s.replace(old,'title: "HR Zone",')
-          start=s.index('                    if let native = manager.snapshot.nativeZones?.cyclingPower {')
-          end=s.index('                    metric(\n                        title: "Cadence",',start)
-          block=s[start:end]
-          assert 'title: "Health Power Zone"' in block and block.count('metric(')==1
-          s=s[:start]+s[end:]
-          anchor='                HStack(spacing: 12) {\n                    workoutTime('
-          new='''                Text(
-                              manager.snapshot.nativeZones?.heartRate?.configuration.source.label
-                                  ?? "Bicino zones · configured maximum heart rate"
-                          )
-                          .font(.caption2)
-                          .foregroundStyle(.secondary)
-          
-                          if let native = manager.snapshot.nativeZones?.cyclingPower {
-                              WorkoutNativeZoneCard(group: native)
-                          }
-          
-                          HStack(spacing: 12) {
-                              workoutTime('''
-          assert s.count(anchor)==1;s=s.replace(anchor,new);p.write_text(s)
-          PY
-          git diff --check
-          git add ios-app/BikeComputer/BikeComputerWatch/Views/LiveWorkoutView.swift
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'Preserve paired Watch metrics and share native power-zone presentation'
-          git push origin HEAD:refs/heads/feat/native-healthkit-workout-zones
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-  tests:
-    needs: prepare
-    runs-on: macos-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ needs.prepare.outputs.sha }}
+          ref: 5a6c83a0729c5ef99168631b5999fac2e786919d
           persist-credentials: false
-      - name: Native and existing workout contracts
-        shell: bash
+      - name: Archive exact PR source
         run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/zone-validation"
-          git rev-parse HEAD > "$RUNNER_TEMP/zone-validation/COMMIT_SHA"
-          ./ios-app/scripts/run-native-workout-zone-tests.sh 2>&1 | tee "$RUNNER_TEMP/zone-validation/native-tests.log"
-          ./ios-app/scripts/run-workout-contract-tests.sh 2>&1 | tee "$RUNNER_TEMP/zone-validation/workout-tests.log"
-      - name: Watch source graph
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./ios-app/scripts/run-watch-source-typecheck.sh 2>&1 | tee "$RUNNER_TEMP/zone-validation/watch-typecheck.log"
-      - name: Script and configuration tests
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ios-app
-          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests 2>&1 | tee "$RUNNER_TEMP/zone-validation/python-tests.log"
+          mkdir -p "$RUNNER_TEMP/zone-protocol-inputs"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/zone-protocol-inputs/source.tar.gz" HEAD
+          git rev-parse HEAD > "$RUNNER_TEMP/zone-protocol-inputs/HEAD_SHA"
+          git ls-remote origin refs/heads/main > "$RUNNER_TEMP/zone-protocol-inputs/MAIN_SHA"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
         with:
-          name: native-zone-final-tests
-          path: ${{ runner.temp }}/zone-validation
-          retention-days: 7
-  build:
-    needs: prepare
-    runs-on: macos-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ needs.prepare.outputs.sha }}
-          persist-credentials: false
-      - name: Unsigned Release build
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/zone-validation"
-          git rev-parse HEAD > "$RUNNER_TEMP/zone-validation/COMMIT_SHA"
-          cd ios-app
-          ./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/zone-derived-data" CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/zone-validation/release-build.log"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: native-zone-final-build
-          path: ${{ runner.temp }}/zone-validation
-          retention-days: 7
+          name: zone-protocol-inputs
+          path: ${{ runner.temp }}/zone-protocol-inputs
+          retention-days: 2
