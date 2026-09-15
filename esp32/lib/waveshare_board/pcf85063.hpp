@@ -5,7 +5,7 @@
 
 #pragma once
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 
 #include <Arduino.h>
 #include <time.h>

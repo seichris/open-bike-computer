@@ -164,19 +164,21 @@ uint32_t legacyDigest(const MapRenderSettings &settings) {
 
 void projectDocument(const Document &document, MapRenderSettings &settings) {
   if (const ScreenInstance *map = primaryInstance(document, ScreenType::Map)) {
-    applyProfile(map->mapProfile, settings.mapStyle);
-    settings.mapRotationMode = map->mapProfile.rotationMode;
+    const auto profile = effectiveMapProfile(map->mapProfile);
+    applyProfile(profile, settings.mapStyle);
+    settings.mapRotationMode = profile.rotationMode;
   }
   if (const ScreenInstance *navigation =
           primaryInstance(document, ScreenType::MapNavigation)) {
-    applyProfile(navigation->mapProfile, settings.mapNavigationStyle);
-    settings.mapNavigationRotationMode = navigation->mapProfile.rotationMode;
+    const auto profile = effectiveMapProfile(navigation->mapProfile);
+    applyProfile(profile, settings.mapNavigationStyle);
+    settings.mapNavigationRotationMode = profile.rotationMode;
     settings.mapNavigationBirdsEyeEnabled =
-        navigation->mapProfile.birdsEyeEnabled;
+        profile.birdsEyeEnabled;
     settings.mapNavigationBirdsEyePerspective =
-        navigation->mapProfile.birdsEyePerspective;
+        profile.birdsEyePerspective;
     settings.mapNavigation3DBuildingsEnabled =
-        navigation->mapProfile.buildings3DEnabled;
+        profile.buildings3DEnabled;
   }
   settings.enabledScreensMask = screenMask(document);
   const uint8_t defaultIndex = defaultInstanceIndex(document);

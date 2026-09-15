@@ -67,8 +67,13 @@ constexpr Content content(Phase phase) {
     return {Group::Welcome, Artwork::None, "Welcome",
             "Download the Bicino app\nand add your new device!"};
   case Phase::PairingComparison:
+#ifdef WAVESHARE_EPAPER_397
+    return {Group::Pairing, Artwork::None, "Confirm this code",
+            "If it matches your iPhone,\nclick the center key."};
+#else
     return {Group::Pairing, Artwork::None, "Confirm this code",
             "If it matches your iPhone,\npress either device button."};
+#endif
   case Phase::PairingConfirmed:
     return {Group::Status, Artwork::PairingConfirmed, "Confirmed here",
             "Tap Codes Match\non your iPhone."};

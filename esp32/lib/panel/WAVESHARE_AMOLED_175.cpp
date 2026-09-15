@@ -1,3 +1,4 @@
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "full_frame_allocation.hpp"
 #include <cstdlib>
 /**
@@ -1204,3 +1205,5 @@ void setupLVGLforArduinoGFX() {
 }
 
 #endif // USE_ARDUINO_GFX
+
+#endif

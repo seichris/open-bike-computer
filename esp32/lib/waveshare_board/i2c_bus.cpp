@@ -1,11 +1,11 @@
 /**
  * @file i2c_bus.cpp
- * @brief Shared I2C helpers for the Waveshare ESP32-S3 Touch AMOLED 1.75.
+ * @brief Shared I2C helpers for the supported Waveshare ESP32-S3 boards.
  */
 
 #include "i2c_bus.hpp"
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 
 #include "axp2101_register_policy.hpp"
 #include "waveshare_board.hpp"
@@ -33,6 +33,9 @@ SemaphoreHandle_t busMutex = nullptr;
 bool writeAllowed(uint8_t address, uint16_t reg,
                   std::size_t registerAddressBytes,
                   std::size_t payloadBytes, const char *shape) {
+#ifdef WAVESHARE_EPAPER_397
+  if (address == AXP2101_ADDR) return false;
+#endif
   if (axp_policy::isTransactionWriteAllowed(
           address, reg, registerAddressBytes, payloadBytes)) {
     return true;
@@ -280,10 +283,27 @@ bool writeRegister16(uint8_t address, uint16_t reg, uint8_t value,
                      });
 }
 
+bool writeCommand16(uint8_t address, uint16_t command, const char *label,
+                    uint8_t attempts) {
+  if (!writeAllowed(address, command, 0, 2, "command16")) {
+    return false;
+  }
+  return withRetries(address, label, "command16", attempts,
+                     [address, command]() {
+                       Wire.beginTransmission(address);
+                       Wire.write(static_cast<uint8_t>(command >> 8));
+                       Wire.write(static_cast<uint8_t>(command & 0xFF));
+                       return Wire.endTransmission() == 0;
+                     });
+}
+
 bool ensureAxp2101PowerButtonOffLevel(
     uint8_t level, Axp2101PowerButtonOffLevelResult &result,
     uint8_t attempts) {
   result = {};
+#ifdef WAVESHARE_EPAPER_397
+  return false;
+#endif
   if (level >= axp_policy::POWER_BUTTON_OFF_LEVEL_COUNT) {
     Serial.printf("AXP_WRITE_BLOCKED schema=1 reg=0x%02X level=%u "
                   "policy=power-button-off-level\n",
@@ -435,6 +455,103 @@ bool ensureAxp2101DisplayEnabled(Axp2101DisplayEnableResult &result,
 }
 #endif
 
+#ifdef WAVESHARE_EPAPER_397
+bool ensureAxp2101EpaperPower(Axp2101EpaperPowerResult &result,
+                             uint8_t attempts) {
+  result = {};
+  bool observedInitialValues = false;
+  return withRetries(
+      axp_policy::DEVICE_ADDRESS, "AXP2101", "epaper-aldo3-only", attempts,
+      [&result, &observedInitialValues]() {
+        const auto readRegister = [](uint8_t reg, uint8_t &value) {
+          Wire.beginTransmission(axp_policy::DEVICE_ADDRESS);
+          Wire.write(reg);
+          if (Wire.endTransmission() != 0 ||
+              Wire.requestFrom(axp_policy::DEVICE_ADDRESS,
+                               static_cast<uint8_t>(1)) != 1) {
+            return false;
+          }
+          value = Wire.read();
+          return true;
+        };
+        const auto writeRegister = [](uint8_t reg, uint8_t value) {
+          Wire.beginTransmission(axp_policy::DEVICE_ADDRESS);
+          Wire.write(reg);
+          Wire.write(value);
+          return Wire.endTransmission() == 0;
+        };
+
+        uint8_t enable = 0, voltage = 0;
+        if (!readRegister(axp_policy::EPAPER_ALDO3_ENABLE_REGISTER, enable) ||
+            !readRegister(axp_policy::EPAPER_ALDO3_VOLTAGE_REGISTER,
+                          voltage)) {
+          return false;
+        }
+        if (!observedInitialValues) {
+          result.enableBefore = enable;
+          result.voltageBefore = voltage;
+          observedInitialValues = true;
+        }
+
+        const uint8_t targetVoltage =
+            axp_policy::withEpaperAldo3At3300mV(voltage);
+        const uint8_t targetEnable =
+            axp_policy::withEpaperAldo3Enabled(enable);
+        if (!axp_policy::isEpaperAldo3VoltageOnlyTransition(
+                voltage, targetVoltage) ||
+            !axp_policy::isEpaperAldo3VoltageOnlyTransition(
+                result.voltageBefore, targetVoltage) ||
+            !axp_policy::isEpaperAldo3EnableOnlyTransition(enable,
+                                                           targetEnable) ||
+            !axp_policy::isEpaperAldo3EnableOnlyTransition(
+                result.enableBefore, targetEnable)) {
+          Serial.printf("AXP_WRITE_BLOCKED schema=1 enable=0x%02X "
+                        "voltage=0x%02X policy=epaper-aldo3-only\n",
+                        targetEnable, targetVoltage);
+          return false;
+        }
+
+        if (voltage != targetVoltage) {
+          if (!writeRegister(axp_policy::EPAPER_ALDO3_VOLTAGE_REGISTER,
+                             targetVoltage)) {
+            return false;
+          }
+          delay(5);
+          if (!readRegister(axp_policy::EPAPER_ALDO3_VOLTAGE_REGISTER,
+                            voltage) || voltage != targetVoltage) {
+            return false;
+          }
+        }
+        if (enable != targetEnable) {
+          if (!writeRegister(axp_policy::EPAPER_ALDO3_ENABLE_REGISTER,
+                             targetEnable)) {
+            return false;
+          }
+          delay(5);
+        }
+
+        if (!readRegister(axp_policy::EPAPER_ALDO3_ENABLE_REGISTER, enable) ||
+            !readRegister(axp_policy::EPAPER_ALDO3_VOLTAGE_REGISTER,
+                          voltage)) {
+          return false;
+        }
+        result.enableAfter = enable;
+        result.voltageAfter = voltage;
+        const bool valid =
+            enable == targetEnable && voltage == targetVoltage &&
+            axp_policy::isEpaperAldo3EnableOnlyTransition(
+                result.enableBefore, enable) &&
+            axp_policy::isEpaperAldo3VoltageOnlyTransition(
+                result.voltageBefore, voltage);
+        if (valid) {
+          result.enableChanged = result.enableBefore != enable;
+          result.voltageChanged = result.voltageBefore != voltage;
+        }
+        return valid;
+      });
+}
+#endif
+
 bool readRegister8(uint8_t address, uint8_t reg, uint8_t &value,
                    const char *label, uint8_t attempts) {
   return withRetries(address, label, "read8", attempts, [address, reg, &value]() {
@@ -510,6 +627,24 @@ bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
                        }
 
                        for (uint8_t i = 0; i < len; i++) {
+                         data[i] = Wire.read();
+                       }
+                       return true;
+                     });
+}
+
+bool readBytes(uint8_t address, uint8_t *data, uint8_t len,
+               const char *label, uint8_t attempts) {
+  if (data == nullptr || len == 0) {
+    return false;
+  }
+  return withRetries(address, label, "readBytes", attempts,
+                     [address, data, len]() {
+                       if (Wire.requestFrom(address, len,
+                                            static_cast<uint8_t>(true)) != len) {
+                         return false;
+                       }
+                       for (uint8_t i = 0; i < len; ++i) {
                          data[i] = Wire.read();
                        }
                        return true;

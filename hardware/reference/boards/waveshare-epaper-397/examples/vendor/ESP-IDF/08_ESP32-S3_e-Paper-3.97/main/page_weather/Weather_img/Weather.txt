@@ -1,0 +1,9 @@
+大雨,dayu
+多云,duoyun
+雷雨,leiyu
+晴,qin
+小雨,xiaoyu
+下雪,xiaxue
+中雨,zhongyu
+阴,yin
+扬沙,yangsha

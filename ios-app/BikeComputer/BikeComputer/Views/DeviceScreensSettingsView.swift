@@ -246,7 +246,8 @@ private struct DeviceScreenInstanceEditorView: View {
                 DeviceScreenMapProfileEditor(
                     profile: mapProfileBinding,
                     type: instance.type,
-                    supportsNavigationOrientation: bleManager.supportsMapNavigationOrientation
+                    supportsNavigationOrientation: bleManager.supportsMapNavigationOrientation,
+                    supportsContinuousCamera: bleManager.supportsContinuousCamera
                 )
             }
 
@@ -330,6 +331,7 @@ private struct DeviceScreenMapProfileEditor: View {
     @Binding var profile: DeviceScreenMapProfile
     let type: ConfiguredDeviceScreenType
     let supportsNavigationOrientation: Bool
+    let supportsContinuousCamera: Bool
 
     private let visibilityOptions: [(String, UInt32)] = [
         ("Buildings", 1 << 0), ("Green Space", 1 << 1),
@@ -380,7 +382,7 @@ private struct DeviceScreenMapProfileEditor: View {
             }
         }
 
-        if type == .map || supportsNavigationOrientation {
+        if supportsContinuousCamera && (type == .map || supportsNavigationOrientation) {
             Section("Orientation") {
                 Picker("Rotation", selection: $profile.rotationMode) {
                     Text("North Up").tag(UInt8(0))
@@ -388,7 +390,7 @@ private struct DeviceScreenMapProfileEditor: View {
                 }
             }
         }
-        if type == .mapPlusNavigation {
+        if supportsContinuousCamera && type == .mapPlusNavigation {
             Section("Navigation View") {
                 Toggle("Bird’s-Eye View", isOn: $profile.birdsEyeEnabled)
                 Picker("Perspective", selection: $profile.birdsEyePerspective) {

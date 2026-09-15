@@ -207,7 +207,7 @@ version = config.get("common", "version")
 project_dir = Path(env.get("PROJECT_DIR")).resolve()
 allowed_generated_paths = ()
 deterministic_build = os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD") == "1"
-if firmware_target.startswith("WAVESHARE_AMOLED_") and not deterministic_build:
+if firmware_target.startswith(("WAVESHARE_AMOLED_", "WAVESHARE_EPAPER_397")) and not deterministic_build:
     raise RuntimeError(
         "Waveshare firmware builds must use tools/build_firmware.py so generated "
         "inputs and the flashed source identity are verified"
@@ -304,7 +304,7 @@ def record_link_finish(target, source, env):
                 pass
 
 
-if deterministic_build and firmware_target.startswith("WAVESHARE_AMOLED_"):
+if deterministic_build and firmware_target.startswith(("WAVESHARE_AMOLED_", "WAVESHARE_EPAPER_397")):
     link_target = "$BUILD_DIR/${PROGNAME}.elf"
     env.AddPreAction(link_target, record_link_start)
     env.AddPostAction(link_target, record_link_finish)

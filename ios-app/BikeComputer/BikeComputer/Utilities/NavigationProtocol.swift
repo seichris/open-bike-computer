@@ -1052,3 +1052,36 @@ struct NavigationSendTracker {
         return abs(snapshot.distance - lastSentSnapshot.distance) >= distanceThreshold
     }
 }
+
+
+/// CAP2 TLV 2. Absent metadata preserves old firmware behavior; an advertised
+/// but malformed record is rejected by the capability transaction as a whole.
+struct DeviceDisplayMetadata: Equatable {
+    let displayKind: UInt8
+    let inputFlags: UInt8
+    let width: UInt16
+    let height: UInt16
+    let supportedSettings: UInt8
+
+    init?(payload: Data) {
+        let bytes = Array(payload)
+        guard bytes.count == Int(RideBLEGeneratedProtocolV1.boardDisplayPayloadBytes),
+              bytes[0] == RideBLEGeneratedProtocolV1.boardDisplayVersion,
+              bytes[1] == 1 || bytes[1] == 2,
+              bytes[2] & ~3 == 0, bytes[2] != 0,
+              bytes[7] & ~31 == 0 else { return nil }
+        displayKind = bytes[1]
+        inputFlags = bytes[2]
+        width = UInt16(bytes[3]) | UInt16(bytes[4]) << 8
+        height = UInt16(bytes[5]) | UInt16(bytes[6]) << 8
+        supportedSettings = bytes[7]
+        guard width > 0, height > 0, width <= 2048, height <= 2048 else { return nil }
+        if displayKind == 2 && supportedSettings & 1 != 0 { return nil }
+    }
+
+    var isEPaper: Bool { displayKind == 2 }
+    var supportsBrightness: Bool { supportedSettings & 1 != 0 }
+    var supportsTapToCycle: Bool { inputFlags & 2 != 0 && supportedSettings & 4 != 0 }
+    var supportsContinuousCamera: Bool { supportedSettings & 8 != 0 }
+    var supportsDisconnectedSleep: Bool { supportedSettings & 16 != 0 }
+}

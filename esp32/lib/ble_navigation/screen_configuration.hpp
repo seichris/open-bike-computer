@@ -116,6 +116,32 @@ inline uint8_t nextEnabledInstanceIndex(const Document &document,
   return defaultInstanceIndex(document);
 }
 
+inline uint8_t previousEnabledInstanceIndex(const Document &document,
+                                            uint8_t currentIndex) {
+  if (document.instanceCount == 0)
+    return kInvalidInstanceIndex;
+  const uint8_t start = currentIndex < document.instanceCount ? currentIndex : 0;
+  for (uint8_t offset = 1; offset <= document.instanceCount; ++offset) {
+    const uint8_t candidate = static_cast<uint8_t>(
+        (start + document.instanceCount - offset) % document.instanceCount);
+    if (document.instances[candidate].enabled)
+      return candidate;
+  }
+  return defaultInstanceIndex(document);
+}
+
+inline screen_configuration_protocol::MapProfile effectiveMapProfile(
+    screen_configuration_protocol::MapProfile profile) {
+#ifdef WAVESHARE_EPAPER_397
+  // Apply to both stored documents and new writes, including older clients.
+  profile.rotationMode = 0;
+  profile.birdsEyeEnabled = false;
+  profile.birdsEyePerspective = 0;
+  profile.buildings3DEnabled = false;
+#endif
+  return profile;
+}
+
 inline uint8_t nextEnabledInstanceOfType(const Document &document,
                                          uint8_t currentIndex,
                                          ScreenType first,

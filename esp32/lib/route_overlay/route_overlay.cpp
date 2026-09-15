@@ -255,6 +255,17 @@ void RouteOverlay::drawSnapshot(
     const RoutePresentationTransform *presentation) {
   if (!surface.valid())
     return;
+#ifdef WAVESHARE_EPAPER_397
+  // Lay down every halo first, so the next segment cannot erase a route join.
+  drawRouteSnapshotImpl(
+      snapshot, projection, baseLineWidth, presentedWorld, presentation,
+      [&](int16_t x1, int16_t y1, int16_t x2, int16_t y2, uint8_t lineWidth) {
+        line_rasterizer::drawFilledLine(
+            surface.pixels, surface.width, surface.height,
+            static_cast<uint32_t>(surface.stridePixels), x1, y1, x2, y2,
+            uint16_t{0xFFFF}, static_cast<uint8_t>(lineWidth + 6));
+      });
+#endif
   drawRouteSnapshotImpl(
       snapshot, projection, baseLineWidth, presentedWorld, presentation,
       [&](int16_t x1, int16_t y1, int16_t x2, int16_t y2,
@@ -273,6 +284,20 @@ void RouteOverlay::drawSnapshot(
     const RoutePresentationTransform *presentation) {
   if (!surface.valid())
     return;
+#ifdef WAVESHARE_EPAPER_397
+  drawRouteSnapshotImpl(
+      snapshot, projection, baseLineWidth, presentedWorld, presentation,
+      [&](int16_t x1, int16_t y1, int16_t x2, int16_t y2, uint8_t lineWidth) {
+        line_rasterizer::drawFilledLine(
+            surface.pixels, surface.width, surface.height,
+            static_cast<uint32_t>(surface.colorStridePixels), x1, y1, x2, y2,
+            uint16_t{0xFFFF}, static_cast<uint8_t>(lineWidth + 6));
+        line_rasterizer::drawFilledLine(
+            surface.alpha, surface.width, surface.height,
+            static_cast<uint32_t>(surface.alphaStrideBytes), x1, y1, x2, y2,
+            uint8_t{255}, static_cast<uint8_t>(lineWidth + 6));
+      });
+#endif
   drawRouteSnapshotImpl(
       snapshot, projection, baseLineWidth, presentedWorld, presentation,
       [&](int16_t x1, int16_t y1, int16_t x2, int16_t y2,

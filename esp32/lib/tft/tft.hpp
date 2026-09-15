@@ -14,7 +14,7 @@
 
 #ifdef USE_ARDUINO_GFX
 // Use Arduino_GFX for CO5300 AMOLED
-#include "../panel/WAVESHARE_AMOLED_175.hpp"
+#include "../panel/panelSelect.hpp"
 #else
 // Use LovyanGFX for other displays
 #include <LGFX_TFT_eSPI.hpp>

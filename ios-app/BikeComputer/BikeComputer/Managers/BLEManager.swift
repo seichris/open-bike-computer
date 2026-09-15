@@ -959,6 +959,12 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
+    @Published private(set) var displayMetadata: DeviceDisplayMetadata?
+    var isEPaperDevice: Bool { displayMetadata?.isEPaper == true || firmwareTarget == "WAVESHARE_EPAPER_397" }
+    var supportsDisplayBrightness: Bool { displayMetadata?.supportsBrightness ?? !isEPaperDevice }
+    var supportsTapToCycle: Bool { displayMetadata?.supportsTapToCycle ?? !isEPaperDevice }
+    var supportsContinuousCamera: Bool { displayMetadata?.supportsContinuousCamera ?? !isEPaperDevice }
+    var supportsDisconnectedSleep: Bool { displayMetadata?.supportsDisconnectedSleep ?? !isEPaperDevice }
     @Published var hardwareLabel: String = ""
     @Published var signalStrength: Int = 0
     @Published var centralStateDescription: String = "unknown"
@@ -4764,6 +4770,13 @@ class BLEManager: NSObject, ObservableObject {
     @discardableResult
     func sendSetting(id: UInt8, value: Int32,
                      synchronizeLegacyProfile: Bool = true) -> Bool {
+        if (id == 12 && !supportsDisplayBrightness) ||
+           (id == 11 && !supportsTapToCycle) ||
+           ((id == 6 || id == 37) && !supportsContinuousCamera) ||
+           (id == 15 && !supportsDisconnectedSleep) {
+            return false
+        }
+
         if id == DeviceBLEProtocol.brightnessSettingID {
             deviceBrightnessPercent = DeviceBLEProtocol.normalizedBrightnessPercent(
                 Double(value)
@@ -6332,6 +6345,7 @@ class BLEManager: NSObject, ObservableObject {
         powerButtonHonkConfigurationError = nil
         nextDestinationCatalogTransferID = 1
         destinationStatusSequence &+= 1
+        displayMetadata = nil
         hasReceivedDeviceCapabilities = false
         hasSentMapProfileForConnection = false
         hasSentMapNavigationProfileForConnection = false
@@ -9613,6 +9627,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         rendererDiagnosticsSnapshotJSON = nil
         rendererDiagnosticsStatus = "invalid capabilities"
         updateWorkoutTelemetryCapability(false)
+        displayMetadata = nil
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
         hasSentAutomaticDisplayOffForConnection = false
@@ -9638,6 +9653,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let flags: UInt32
         let legacyExtendedFlags: UInt8
         let powerButtonConfig: Data?
+        var parsedDisplay: DeviceDisplayMetadata?
         var screenConfigurationCapabilities:
             DeviceScreenConfigurationCapabilities? = nil
         if prefix == DeviceBLEProtocol.deviceCapabilitiesPrefix {
@@ -9685,6 +9701,13 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                         break
                     }
                     parsedPowerConfig = data.subdata(in: offset..<(offset + length))
+                } else if type == RideBLEGeneratedProtocolV1.boardDisplayTlvType {
+                    guard let metadata = DeviceDisplayMetadata(payload:
+                        data.subdata(in: offset..<(offset + length))) else {
+                        valid = false
+                        break
+                    }
+                    parsedDisplay = metadata
                 } else if type == RideBLEGeneratedProtocolV1
                     .screenConfigurationCapabilityTLVType {
                     guard let parsed = DeviceScreenConfigurationCapabilities(
@@ -9705,6 +9728,13 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             powerButtonConfig = parsedPowerConfig
         }
 
+        let advertisesDisplay = flags & RideBLEGeneratedProtocolV1.boardDisplayMetadataFeature != 0
+        guard advertisesDisplay == (parsedDisplay != nil) else {
+            rejectDeviceCapabilities("Received inconsistent display capabilities")
+            return true
+        }
+        displayMetadata = parsedDisplay
+        if parsedDisplay?.isEPaper == true { hardwareLabel = "Waveshare ePaper 3.97" }
         let legacyFlags = UInt8(truncatingIfNeeded: flags)
         let hasDeviceSounds = legacyFlags & DeviceBLEProtocol.deviceSoundsCapabilityMask != 0
         let hasPowerButtonHonk = hasDeviceSounds &&

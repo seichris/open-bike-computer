@@ -1,7 +1,7 @@
 # Firmware build profiles
 
-The Waveshare firmware has five intentional profile classes for each display
-target:
+The AMOLED firmware has five intentional profile classes for each display
+target. The experimental e-paper profiles are described below.
 
 - `WAVESHARE_AMOLED_175` and `WAVESHARE_AMOLED_206` are developer/diagnostic
   builds. They keep USB CDC active, emit low-rate diagnostics, and pause for up
@@ -67,3 +67,24 @@ currently tested firmware is required. Build and flash the profile matching the
 physical panel through `esp32/tools/build_firmware.py`; the debug service is
 compiled into that complete firmware image rather than installed alongside an
 unmodified image.
+
+## Experimental e-paper 3.97
+
+`WAVESHARE_EPAPER_397`, `WAVESHARE_EPAPER_397_DISPLAY_TEST`,
+`WAVESHARE_EPAPER_397_POWER_METRICS`,
+`WAVESHARE_EPAPER_397_IMU_DIAGNOSTICS`,
+`WAVESHARE_EPAPER_397_LIGHT_SLEEP`, and
+`WAVESHARE_EPAPER_397_PRODUCTION` share the locked S3 runtime and retain
+`WAVESHARE_EPAPER_397` as their canonical target. All diagnostic profiles use
+the 6 MiB layout; production uses the existing two 3 MiB OTA slots and disables
+USB logging. `POWER_METRICS` records waveform/sleep and system metrics,
+`IMU_DIAGNOSTICS` adds bounded QMI8658/SHTC3 sampling, and `LIGHT_SLEEP` enables
+tickless automatic light sleep with BOOT and all three contacts as wake sources.
+These opt-in features are excluded from ordinary and production firmware.
+Production is a compile/size qualification profile, not a publishable release.
+Factory/release allowlists deliberately exclude this board.
+
+Use manual CI hardware selector `397` for these six builds. Automatic CI and
+`all` retain their existing AMOLED selection. See
+[e-paper board notes](../hardware/waveshare-epaper-397.md) for diagnostic
+controls, disabled peripherals, candidate refresh limits and physical gates.

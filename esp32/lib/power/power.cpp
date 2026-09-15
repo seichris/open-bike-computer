@@ -16,7 +16,7 @@
 #include <Arduino_GFX_Library.h>
 #endif
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include "hal.hpp"
 #else
 extern const uint8_t BOARD_BOOT_PIN;

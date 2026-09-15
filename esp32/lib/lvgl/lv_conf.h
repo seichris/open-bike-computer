@@ -68,9 +68,10 @@
     #if LV_MEM_ADR == 0
         // Map and firmware transfers start a Wi-Fi AP after the complete UI
         // and BLE stack are live. Keep LVGL's fixed TLSF semantics, but put
-        // its 96 KiB backing pool in the PSRAM available on both AMOLED boards
-        // so the Wi-Fi driver retains enough contiguous internal memory.
-        #if defined(BOARD_HAS_PSRAM) && (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+        // its 96 KiB backing pool in the PSRAM available on the Waveshare
+        // boards so the Wi-Fi driver retains enough contiguous internal memory.
+        #if defined(BOARD_HAS_PSRAM) &&                                                                        \
+            (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397))
             #define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>
             #define LV_MEM_POOL_ALLOC(size) heap_caps_aligned_alloc(16, (size), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
         #else
