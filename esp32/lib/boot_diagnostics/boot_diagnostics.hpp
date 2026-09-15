@@ -12,6 +12,12 @@ constexpr std::size_t kStructuredSerialTxBufferSize =
 // in RTC no-init memory and reports the previous unfinished stage.
 void begin();
 
+// Optional bounded observer, registered from setup before board initialization.
+// Called on the setup task only after a successful stage completion (including
+// Ready). It must not mutate boot policy. Null preserves standalone/probe paths.
+using StageCompletionObserver = void (*)(Stage);
+void setStageCompletionObserver(StageCompletionObserver observer);
+
 struct Snapshot {
   uint32_t bootSequence;
   uint32_t firmwareFingerprint;
