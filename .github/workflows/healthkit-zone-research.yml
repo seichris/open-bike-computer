@@ -5,26 +5,29 @@ on:
 permissions:
   contents: read
 jobs:
-  inputs:
-    runs-on: ubuntu-latest
+  sdk:
+    runs-on: macos-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: 85914afc147f8cbd336f5ef17cb8dbdc2fdf85a6
-          persist-credentials: false
-      - name: Archive exact source and public Apple documentation
+      - name: Collect public SDK declarations
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/zone-inputs/apple"
-          git archive --format=tar.gz -o "$RUNNER_TEMP/zone-inputs/source.tar.gz" HEAD ios-app docs .github AGENTS.md tools esp32/lib
-          for page in hkworkoutzoneconfiguration hkworkoutzonegroup hkworkoutzone hkliveworkoutzoneupdate hkworkoutzoneduration accessing-workout-zone-data tracking-heart-rate-zones-for-workouts; do
-            curl --fail --location --connect-timeout 15 --max-time 30 "https://developer.apple.com/tutorials/data/documentation/healthkit/${page}.json" -o "$RUNNER_TEMP/zone-inputs/apple/${page}.json" || true
+          out="$RUNNER_TEMP/zone-sdk"
+          mkdir -p "$out"
+          ls -d /Applications/Xcode*.app > "$out/xcodes.txt"
+          xcrun swift --version > "$out/swift.txt"
+          sdk="$(xcrun --sdk watchos --show-sdk-path)"
+          printf '%s\n' "$sdk" > "$out/sdk.txt"
+          framework="$sdk/System/Library/Frameworks/HealthKit.framework"
+          cp -R "$framework/Headers" "$out/HealthKit-Headers"
+          cp -R "$framework/Modules" "$out/HealthKit-Modules"
+          for path in hkworkoutzoneconfiguration/source-swift.enum hkworkoutzone/index hkworkoutzone/minimum hkworkoutzone/maximum hkworkoutbuilder/zoneconfiguration\(for:\) hkworkoutbuilder/zonegroup\(for:\); do
+            name="${path//\//_}"
+            curl --fail --location --connect-timeout 15 --max-time 30 "https://developer.apple.com/tutorials/data/documentation/healthkit/${path}.json" -o "$out/$name.json" || true
           done
-          printf '%s\n' 85914afc147f8cbd336f5ef17cb8dbdc2fdf85a6 > "$RUNNER_TEMP/zone-inputs/BASE_SHA"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: healthkit-zone-inputs
-          path: ${{ runner.temp }}/zone-inputs
+          name: healthkit-zone-sdk
+          path: ${{ runner.temp }}/zone-sdk
           retention-days: 2
