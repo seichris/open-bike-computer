@@ -311,6 +311,27 @@ def _preprocess_shared_sources(
     return outputs, commands
 
 
+def _objcopy_for_commands(commands: dict[str, object]) -> Path:
+    candidates: set[Path] = set()
+    for source, record in commands.items():
+        if not isinstance(record, dict):
+            raise EvidenceError(f"invalid command record for {source}")
+        arguments = record.get("arguments")
+        if not isinstance(arguments, list) or not arguments or not isinstance(
+            arguments[0], str
+        ):
+            raise EvidenceError(f"command record lacks compiler for {source}")
+        compiler = Path(arguments[0])
+        if not compiler.name.endswith("-g++"):
+            raise EvidenceError(f"unsupported target compiler for {source}: {compiler}")
+        candidates.add(compiler.with_name(compiler.name[:-4] + "-objcopy"))
+    if len(candidates) != 1:
+        raise EvidenceError("shared sources do not use one target objcopy")
+    return _require_regular(
+        next(iter(candidates)), "locked target objcopy", executable=True
+    )
+
+
 def qualify(
     *,
     project_dir: Path,
@@ -325,6 +346,7 @@ def qualify(
     preprocessed, commands = _preprocess_shared_sources(
         project_dir, compilation_database, preprocessing_dir.resolve()
     )
+    objcopy = _objcopy_for_commands(commands)
     compilation_database.unlink()
 
     # The compilation-database target runs PlatformIO's package setup. Rebuild
@@ -335,11 +357,13 @@ def qualify(
         project_dir=project_dir,
         environment=environment,
         preprocessed=preprocessed,
+        objcopy=objcopy,
     )
     command_record: dict[str, object] = {
         "schema": SCHEMA,
         "environment": environment,
         "sourceIdentity": evidence["sourceIdentity"],
+        "objectNormalizer": [str(objcopy), "--strip-debug"],
         "commands": commands,
     }
     return evidence, command_record

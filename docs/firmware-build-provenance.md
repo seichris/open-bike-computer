@@ -158,6 +158,7 @@ Capture each side after its final wrapper build:
 python3 tools/compare_amoled_artifacts.py capture \
   --project-dir . \
   --environment WAVESHARE_AMOLED_175 \
+  --objcopy .pio/open-bike-build/platformio/WAVESHARE_AMOLED_175/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp32s3-elf-objcopy \
   --preprocessed lib/ble_navigation/ble_navigation.cpp=/evidence/ble.ii \
   --preprocessed lib/epaper_display/epaper_display.cpp=/evidence/display.ii \
   --preprocessed lib/gui/src/epaper_ui.cpp=/evidence/epaper-ui.ii \
@@ -175,12 +176,25 @@ python3 tools/compare_amoled_artifacts.py compare \
   --output /evidence/report-175.json
 ```
 
-The gate requires identical locked runtime/core/dependency identities,
-line-marker-free preprocessed outputs, every application object except the
-firmware-metadata object, and the linker map after replacing only the absolute
-project-root prefix. The sole object exclusion is
-`*/firmware_metadata/firmware_metadata.cpp.o`. Whole binaries are deliberately
-not compared because they embed the exact Git identity and source timestamp;
-the tool performs no binary-byte normalization. Record both source identities,
-the preprocessing commands, evidence JSON files, exclusions, object counts,
-and all four results in the pull request.
+The gate requires identical source-independent locked runtime/core/dependency
+identities and equivalent compiler output. Preprocessed outputs have compiler
+line markers and blank lines removed, but no nonblank source text is rewritten.
+Every application object except the firmware-metadata object is compared after
+the locked target `objcopy --strip-debug` removes source-location-only DWARF;
+exact Git-identity and deterministic source-timestamp literals are replaced by
+same-length sentinels. The linker-map hash retains only the non-zero-address
+allocated section blocks, including their code/data symbols, after replacing
+the absolute project-root prefix and those same provenance literals. These
+normalizations remove evidence that must differ between commits without
+discarding linked program bytes, relocations, symbols, sizes, or addresses.
+
+The source-derived `libraryDependenciesSha256` and mutable installed-tree hashes
+inside `coreAttestation` are validated by each build wrapper invocation but are
+not compared across commits. Cross-commit evidence instead compares the
+source-independent `coreInputKey`, immutable tool/package/config attestation
+fields, runtime lock, managed-component identity, partitions, and bootstrap
+images. The sole whole-object exclusion remains
+`*/firmware_metadata/firmware_metadata.cpp.o`. Whole firmware images are not
+compared because they embed the exact Git identity and source timestamp. Record
+both source identities, preprocessing and normalization commands, evidence JSON
+files, exclusions, object counts, and all four results in the pull request.

@@ -141,14 +141,19 @@ compatibility gate must therefore use all of the following:
 1. Build the 1.75-inch and 2.06-inch ordinary and production profiles at the
    baseline and implementation heads with `esp32/tools/build_firmware.py`.
 2. Compare preprocessed output for every modified shared translation unit under
-   each AMOLED macro, with line markers removed. It must be identical.
-3. Compare hashes of non-metadata object files. Every object affected by this
-   change must be identical for the corresponding baseline and implementation
-   AMOLED profile.
+   each AMOLED macro, with line markers and blank lines removed. The remaining
+   nonblank preprocessed source must be identical.
+3. Compare hashes of non-metadata object files after the locked target
+   `objcopy --strip-debug` removes source-location-only DWARF and exact
+   Git/timestamp literals are replaced by same-length sentinels. Every retained
+   program byte, relocation, and symbol affected by this change must be
+   identical for the corresponding baseline and implementation AMOLED profile.
 4. If full binaries are compared, normalize only the known embedded Git SHA and
    timestamp fields first. Any other byte difference fails the gate.
-5. Compare final linker maps for code/data symbol sizes and addresses, excluding
-   only the documented metadata bytes. Any other difference fails the gate.
+5. Compare the allocated, non-zero-address section blocks from final linker maps
+   for code/data symbol sizes and addresses, normalizing only the absolute
+   project root and exact Git/timestamp literals. Any other difference fails
+   the gate.
 6. Run the existing AMOLED host tests, profile-contract tests, and required CI
    jobs. A successful build alone is insufficient evidence of isolation.
 

@@ -3,10 +3,11 @@
 
 Whole verified firmware images intentionally embed the Git identity and source
 timestamp.  This tool instead records the compiler outputs that must remain
-identical for an e-paper-only change: line-marker-free preprocessed shared
-translation units, every non-metadata application object, and the final linker
-map after replacing only the absolute project root.  It also requires the
-locked runtime, core, dependency, partition, and toolchain identities to agree.
+program-equivalent for an e-paper-only change: line-marker-free preprocessed
+shared translation units, every non-metadata application object after removing
+debug-only sections, and the allocated code/data portion of the final linker
+map.  It also requires the source-independent locked runtime, core, dependency,
+partition, and toolchain identities to agree.
 """
 
 from __future__ import annotations
@@ -14,13 +15,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCHEMA = 1
+SCHEMA = 2
 ALLOWED_ENVIRONMENTS = {
     "WAVESHARE_AMOLED_175",
     "WAVESHARE_AMOLED_175_PRODUCTION",
@@ -39,13 +44,34 @@ MANIFEST_IDENTITY_FIELDS = (
     "coreInputKey",
     "platformArchiveSha256",
     "platformPackagesSha256",
-    "libraryDependenciesSha256",
     "managedComponentsSha256",
     "bootloaderBinSha256",
     "partitionTableBinSha256",
     "bootApp0Sha256",
 )
+CORE_ATTESTATION_IDENTITY_FIELDS = (
+    "environment",
+    "mcu",
+    "memoryType",
+    "arduinoBuilderSha256",
+    "boardManifestSha256",
+    "bootApp0Sha256",
+    "espidfBuilderSha256",
+    "esptoolUploaderSha256",
+    "frameworkLibsPackageSha256",
+    "frameworkPackageSha256",
+    "frameworkSdkconfigSha256",
+    "platformArchiveSha256",
+    "platformManifestSha256",
+    "platformPackageSha256",
+    "platformPackagesSha256",
+    "platformTreeSha256",
+    "toolsTreeSha256",
+)
 LINE_MARKER = re.compile(rb"^[ \t]*#[ \t]*(?:line[ \t]+)?[0-9]+(?:[ \t].*)?\r?$")
+OUTPUT_SECTION = re.compile(
+    rb"^(\.[^ \t]+)[ \t]+0x([0-9a-fA-F]+)[ \t]+0x([0-9a-fA-F]+)(?:[ \t].*)?$"
+)
 
 
 class EvidenceError(ValueError):
@@ -78,16 +104,70 @@ def _load_object(path: Path, label: str) -> dict[str, object]:
 
 def _normalized_preprocessed(path: Path) -> bytes:
     raw = _read_regular(path, "preprocessed translation unit")
-    lines = [line for line in raw.splitlines() if not LINE_MARKER.match(line)]
+    lines = [
+        line
+        for line in raw.splitlines()
+        if not LINE_MARKER.match(line) and line.strip()
+    ]
     return b"\n".join(lines) + (b"\n" if lines else b"")
 
 
-def _normalized_map(path: Path, project_dir: Path) -> bytes:
+def _provenance_literals(manifest: dict[str, object]) -> tuple[bytes, ...]:
+    literals: list[bytes] = []
+    for field in ("sourceIdentity", "buildTimestamp", "sourceDateEpoch"):
+        value = manifest.get(field)
+        if isinstance(value, (str, int)) and str(value):
+            literals.append(str(value).encode())
+    timestamp = manifest.get("buildTimestamp")
+    if isinstance(timestamp, str):
+        try:
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            parsed = parsed.astimezone(timezone.utc)
+            literals.extend(
+                (
+                    f"{parsed:%b} {parsed.day:2d} {parsed.year:04d}".encode(),
+                    f"{parsed:%H:%M:%S}".encode(),
+                )
+            )
+        except ValueError as error:
+            raise EvidenceError("build manifest has an invalid buildTimestamp") from error
+    return tuple(dict.fromkeys(literals))
+
+
+def _normalize_provenance_literals(
+    data: bytes, manifest: dict[str, object]
+) -> bytes:
+    for literal in _provenance_literals(manifest):
+        data = data.replace(literal, b"@" * len(literal))
+    return data
+
+
+def _normalized_map(
+    path: Path, project_dir: Path, manifest: dict[str, object]
+) -> bytes:
     raw = _read_regular(path, "linker map")
     root = str(project_dir.resolve()).encode()
     if not root:
         raise EvidenceError("project root normalization is empty")
-    return raw.replace(root, b"<PROJECT_ROOT>")
+    raw = _normalize_provenance_literals(raw.replace(root, b"<PROJECT_ROOT>"), manifest)
+    in_memory_map = False
+    capture_section = False
+    lines: list[bytes] = []
+    for line in raw.splitlines():
+        if not in_memory_map:
+            if line == b"Linker script and memory map":
+                in_memory_map = True
+            continue
+        match = OUTPUT_SECTION.match(line)
+        if match:
+            section = match.group(1)
+            address = int(match.group(2), 16)
+            capture_section = address != 0 and not section.startswith(b".debug")
+        if capture_section:
+            lines.append(line)
+    if not lines:
+        raise EvidenceError("linker map lacks allocated code/data sections")
+    return b"\n".join(lines) + b"\n"
 
 
 def _relative_source(value: str) -> str:
@@ -121,19 +201,43 @@ def _parse_preprocessed(values: Sequence[str]) -> dict[str, Path]:
     return parsed
 
 
-def _application_objects(build_dir: Path) -> dict[str, str]:
+def _application_objects(
+    build_dir: Path, objcopy: Path, manifest: dict[str, object]
+) -> dict[str, str]:
     if build_dir.is_symlink() or not build_dir.is_dir():
         raise EvidenceError(f"build directory is missing or unsafe: {build_dir}")
+    if (
+        objcopy.is_symlink()
+        or not objcopy.is_file()
+        or not os.access(objcopy, os.X_OK)
+    ):
+        raise EvidenceError(f"locked objcopy is missing or unsafe: {objcopy}")
     objects: dict[str, str] = {}
-    for path in sorted(build_dir.rglob("*.o")):
-        if path.is_symlink() or not path.is_file():
-            raise EvidenceError(f"object file is unsafe: {path}")
-        relative = path.relative_to(build_dir).as_posix()
-        # This is the sole object exclusion. It owns the intentionally
-        # different embedded Git SHA and source timestamp.
-        if relative.endswith("/firmware_metadata/firmware_metadata.cpp.o"):
-            continue
-        objects[relative] = _sha256(_read_regular(path, "object file"))
+    with tempfile.TemporaryDirectory(prefix="amoled-object-normalization-") as temporary:
+        normalized_root = Path(temporary)
+        for index, path in enumerate(sorted(build_dir.rglob("*.o"))):
+            if path.is_symlink() or not path.is_file():
+                raise EvidenceError(f"object file is unsafe: {path}")
+            relative = path.relative_to(build_dir).as_posix()
+            # This is the sole object exclusion. It owns the intentionally
+            # different embedded Git SHA and source timestamp.
+            if relative.endswith("/firmware_metadata/firmware_metadata.cpp.o"):
+                continue
+            normalized = normalized_root / f"{index}.o"
+            result = subprocess.run(
+                [str(objcopy), "--strip-debug", str(path), str(normalized)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.decode(errors="replace").strip()
+                raise EvidenceError(
+                    f"locked objcopy could not normalize {relative}: {detail}"
+                )
+            data = _read_regular(normalized, "debug-stripped object file")
+            objects[relative] = _sha256(
+                _normalize_provenance_literals(data, manifest)
+            )
     if not objects:
         raise EvidenceError(f"no non-metadata object files found below {build_dir}")
     return objects
@@ -144,10 +248,18 @@ def _manifest_identity(manifest: dict[str, object]) -> dict[str, object]:
     core = manifest.get("coreAttestation")
     if not isinstance(core, dict) or not core:
         raise EvidenceError("build manifest is missing coreAttestation")
-    # Core paths are worktree-local. Compare every semantic/hash field while
-    # replacing only the absolute directory locations.
+    missing = [field for field in CORE_ATTESTATION_IDENTITY_FIELDS if field not in core]
+    if missing:
+        raise EvidenceError(
+            "coreAttestation is missing immutable identity fields: "
+            + ", ".join(missing)
+        )
+    # Generated core/runtime trees can contain timestamp-keyed Python bytecode
+    # and other source-build state. Their complete hashes are validated by the
+    # wrapper for each build, while cross-commit isolation compares only the
+    # immutable tool/package/config identities and the source-independent key.
     identity["coreAttestation"] = {
-        key: value for key, value in core.items() if not key.endswith("Dir")
+        field: core[field] for field in CORE_ATTESTATION_IDENTITY_FIELDS
     }
     return identity
 
@@ -157,6 +269,7 @@ def capture(
     project_dir: Path,
     environment: str,
     preprocessed: dict[str, Path],
+    objcopy: Path,
 ) -> dict[str, object]:
     if environment not in ALLOWED_ENVIRONMENTS:
         raise EvidenceError(f"unsupported AMOLED equivalence environment: {environment}")
@@ -182,7 +295,9 @@ def capture(
             raise EvidenceError(f"build manifest is missing {field}")
 
     build_dir = project_dir / ".pio/build" / environment
-    map_bytes = _normalized_map(build_dir / "firmware.map", project_dir)
+    map_bytes = _normalized_map(
+        build_dir / "firmware.map", project_dir, manifest
+    )
     preprocessed_hashes = {
         source: _sha256(_normalized_preprocessed(path))
         for source, path in sorted(preprocessed.items())
@@ -193,11 +308,23 @@ def capture(
         "sourceIdentity": source_identity,
         "manifestIdentity": _manifest_identity(manifest),
         "preprocessedSha256": preprocessed_hashes,
-        "objectsSha256": _application_objects(build_dir),
+        "objectsSha256": _application_objects(build_dir, objcopy, manifest),
         "linkerMapSha256": _sha256(map_bytes),
         "exclusions": {
             "object": ["*/firmware_metadata/firmware_metadata.cpp.o"],
-            "linkerMapNormalization": ["absolute project root -> <PROJECT_ROOT>"],
+            "objectNormalization": [
+                "debug-only sections removed by locked objcopy --strip-debug",
+                "exact source identity and source timestamp literals -> same-length @ bytes",
+            ],
+            "preprocessedNormalization": [
+                "compiler line markers removed",
+                "blank lines removed",
+            ],
+            "linkerMapNormalization": [
+                "absolute project root -> <PROJECT_ROOT>",
+                "exact source identity and source timestamp literals -> same-length @ bytes",
+                "only non-zero-address allocated section blocks retained",
+            ],
             "wholeFirmware": (
                 "not compared because verified images embed sourceIdentity and "
                 "buildTimestamp; no binary bytes were normalized"
@@ -304,6 +431,12 @@ def _parser() -> argparse.ArgumentParser:
         "--environment", choices=sorted(ALLOWED_ENVIRONMENTS), required=True
     )
     capture_parser.add_argument(
+        "--objcopy",
+        type=Path,
+        required=True,
+        help="locked target objcopy used to remove debug-only object sections",
+    )
+    capture_parser.add_argument(
         "--preprocessed",
         action="append",
         default=[],
@@ -327,6 +460,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 project_dir=args.project_dir,
                 environment=args.environment,
                 preprocessed=_parse_preprocessed(args.preprocessed),
+                objcopy=args.objcopy,
             )
             _write_json(args.output, evidence)
             print(
