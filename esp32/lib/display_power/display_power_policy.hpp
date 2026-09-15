@@ -5,11 +5,22 @@
 namespace display_power {
 
 constexpr uint8_t kAutomaticDisplayOffSettingID = 36;
+constexpr uint8_t kDisplayInactivityTimeoutsSettingID = 38;
 constexpr bool kDefaultAutomaticDisplayOffEnabled = true;
+constexpr uint16_t kDefaultDimAfterSeconds = 15;
+constexpr uint16_t kDefaultDisplayOffAfterSeconds = 45;
+constexpr uint16_t kMinimumDimAfterSeconds = 5;
+constexpr uint16_t kMaximumDimAfterSeconds = 600;
+constexpr uint16_t kMinimumDisplayOffAfterSeconds = 10;
+constexpr uint16_t kMaximumDisplayOffAfterSeconds = 3'600;
+constexpr uint16_t kMinimumInactivityStageGapSeconds = 5;
 // ESP32 NVS keys are limited to 15 characters (excluding the terminator).
 constexpr char kAutomaticDisplayOffPreferencesKey[] = "autoDisplayOff";
+constexpr char kDisplayInactivityTimeoutsPreferencesKey[] = "idleTimeouts";
 static_assert(sizeof(kAutomaticDisplayOffPreferencesKey) - 1 <= 15,
               "automatic display-off NVS key exceeds the ESP32 limit");
+static_assert(sizeof(kDisplayInactivityTimeoutsPreferencesKey) - 1 <= 15,
+              "display inactivity timeouts NVS key exceeds the ESP32 limit");
 constexpr uint8_t kMinimumBrightnessPercent = 5;
 constexpr uint8_t kMaximumBrightnessPercent = 100;
 constexpr uint8_t kDefaultBrightnessPercent = 100;
@@ -23,6 +34,49 @@ template <typename Manager>
 bool applyAutomaticDisplayOffSetting(Manager &manager, int32_t value) {
   return isBooleanSettingValue(value) &&
          manager.requestAutomaticDisplayOff(value == 1);
+}
+
+struct InactivityTimeouts {
+  uint16_t dimAfterSeconds = kDefaultDimAfterSeconds;
+  uint16_t displayOffAfterSeconds = kDefaultDisplayOffAfterSeconds;
+};
+
+constexpr bool areInactivityTimeoutsValid(uint16_t dimAfterSeconds,
+                                          uint16_t displayOffAfterSeconds) {
+  return dimAfterSeconds >= kMinimumDimAfterSeconds &&
+         dimAfterSeconds <= kMaximumDimAfterSeconds &&
+         displayOffAfterSeconds >= kMinimumDisplayOffAfterSeconds &&
+         displayOffAfterSeconds <= kMaximumDisplayOffAfterSeconds &&
+         displayOffAfterSeconds >=
+             dimAfterSeconds + kMinimumInactivityStageGapSeconds;
+}
+
+constexpr uint32_t encodeInactivityTimeouts(uint16_t dimAfterSeconds,
+                                            uint16_t displayOffAfterSeconds) {
+  return static_cast<uint32_t>(dimAfterSeconds) |
+         (static_cast<uint32_t>(displayOffAfterSeconds) << 16);
+}
+
+constexpr bool decodeInactivityTimeouts(int32_t packedValue,
+                                        InactivityTimeouts &timeouts) {
+  const uint32_t packed = static_cast<uint32_t>(packedValue);
+  const uint16_t dimAfterSeconds = static_cast<uint16_t>(packed & 0xFFFFU);
+  const uint16_t displayOffAfterSeconds =
+      static_cast<uint16_t>((packed >> 16) & 0xFFFFU);
+  if (!areInactivityTimeoutsValid(dimAfterSeconds, displayOffAfterSeconds)) {
+    return false;
+  }
+  timeouts.dimAfterSeconds = dimAfterSeconds;
+  timeouts.displayOffAfterSeconds = displayOffAfterSeconds;
+  return true;
+}
+
+template <typename Manager>
+bool applyInactivityTimeoutsSetting(Manager &manager, int32_t packedValue) {
+  InactivityTimeouts timeouts;
+  return decodeInactivityTimeouts(packedValue, timeouts) &&
+         manager.requestDisplayInactivityTimeouts(
+             timeouts.dimAfterSeconds, timeouts.displayOffAfterSeconds);
 }
 
 constexpr bool isBrightnessPercentInRange(int32_t value) {

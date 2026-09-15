@@ -162,6 +162,8 @@ struct SavedRouteMapPreviewTests {
         try testFactoryAndCoordinateBoundary()
         try testOverlayOwnershipAndCamera()
         try testSettingsAction()
+        try testSavedMapKitPreview()
+        try testOfflineNavigationOverlayOwnership()
         print("Saved route map integration: \(checks) checks passed")
     }
 
@@ -448,6 +450,62 @@ struct SavedRouteMapPreviewTests {
         check(map.overlays.contains(where: { $0 === unrelated }), "All transitions preserve unrelated overlays")
     }
 
+    private static func testOfflineNavigationOverlayOwnership() throws {
+        let saved = try archive(route())
+        let preview = try SavedRouteMapPreviewFactory.make(selection(saved), now: { timestamp })
+        let map = PreviewRecordingMap(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let coordinator = MapViewContainer.Coordinator()
+        let foreign = MKPolyline(coordinates: [CLLocationCoordinate2D(latitude: 1, longitude: 1),
+            CLLocationCoordinate2D(latitude: 1.001, longitude: 1.001)], count: 2)
+        map.addOverlay(foreign, level: .aboveLabels)
+        update(coordinator, map: map, preview: preview.overlay)
+        func navigate(_ polyline: MKPolyline?, active: Bool) {
+            coordinator.updateRouteOverlays(on: map, route: nil, alternatives: [],
+                selectedAlternativeID: nil, routePlanningBottomPadding: 300,
+                location: nil, simulatedPosition: nil, isSimulationMode: false,
+                isNavigating: active, isUserLocationAuthorized: true, isFreePanActive: false,
+                savedRoutePreview: preview.overlay, offlineNavigationPolyline: polyline)
+        }
+        navigate(preview.overlay.polyline, active: true)
+        check(coordinator.displayedSavedRouteOverlay == nil && coordinator.displayedSavedRouteFinishAnnotation == nil,
+            "Offline navigation removes the display-only saved layer")
+        check(coordinator.lastOfflineNavigationPolyline === preview.overlay.polyline && map.overlays.count == 2,
+            "Offline navigation installs only its active polyline and preserves foreign overlays")
+        let additions = map.additions
+        navigate(preview.overlay.polyline, active: true)
+        check(map.additions == additions, "GPS/UI updates reuse the active offline polyline")
+        let renderer = coordinator.mapView(map, rendererFor: preview.overlay.polyline) as! MKPolylineRenderer
+        check(renderer.lineWidth == 6, "Offline navigation is styled as active navigation, not a saved preview")
+        navigate(nil, active: false)
+        check(coordinator.lastOfflineNavigationPolyline == nil && map.overlays.contains { $0 === foreign },
+            "Stopping offline navigation releases only its owned geometry")
+        check(coordinator.displayedSavedRouteOverlay != nil,
+            "Ordinary GPX/Strava previews still work after offline navigation stops")
+    }
+
+    private static func testSavedMapKitPreview() throws {
+        let fixture = LibraryFixture()
+        defer { fixture.cleanup() }
+        let saved = try archive(route(provider: RouteProviderPolicyV1.mapKitSavedOnPhone))
+        let summary = try fixture.install(saved)
+        let selection = try fixture.library.mapSelection(for: summary)
+        let preview = try SavedRouteMapPreviewFactory.make(selection, now: { timestamp })
+        check(preview.providerID == "apple.mapkit" && preview.attribution == "Apple Maps",
+            "Saved MapKit previews retain Apple attribution, not GPX branding")
+        check(preview.identity == WatchRouteIdentityV1(archive: saved) &&
+            preview.overlay.polyline.pointCount == saved.route.points.count,
+            "Saved MapKit preview uses the existing exact-identity overlay pipeline")
+        let map = PreviewRecordingMap(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let coordinator = MapViewContainer.Coordinator()
+        update(coordinator, map: map, preview: preview.overlay)
+        update(coordinator, map: map, preview: preview.overlay)
+        check(map.additions == 1 && map.fits.count == 1,
+            "Saved MapKit overlays are reused, not repeatedly rebuilt or refitted")
+        let effects = fixture.connectivity.sideEffects
+        failure { try fixture.library.sendToWatch(summary) }
+        check(fixture.connectivity.sideEffects == effects, "MapKit phone storage does not enable Watch transfer")
+    }
+
     private static func testSettingsAction() throws {
         let fixture = LibraryFixture()
         defer { fixture.cleanup() }
@@ -479,5 +537,24 @@ struct SavedRouteMapPreviewTests {
         check(!loadedWhileNavigating && settingsPresented, "Disabled navigation action cannot even load a route")
         try action.perform { try fixture.library.mapSelection(for: summary) }
         check(!settingsPresented && accepted?.identity == WatchRouteIdentityV1(archive: saved), "Validated success accepts the exact preview before dismissing Settings")
+
+        settingsPresented = true
+        var started: WatchRouteIdentityV1?
+        let navigate = SavedRouteNavigationAction(isEnabled: true, start: { selected in
+            let archive = try fixture.library.offlineArchive(for: selected)
+            started = WatchRouteIdentityV1(archive: archive)
+            settingsPresented = false
+        })
+        let blockedStart = SavedRouteNavigationAction(isEnabled: false, start: navigate.start)
+        failure { try blockedStart.perform(summary) }
+        check(settingsPresented && started == nil, "Disabled navigation leaves the library presented")
+        try navigate.perform(summary)
+        check(!settingsPresented && started == WatchRouteIdentityV1(archive: saved),
+            "Saved row starts the exact archive without another save")
+        settingsPresented = true
+        started = nil
+        try fixture.library.delete(summary)
+        failure { try navigate.perform(summary) }
+        check(settingsPresented && started == nil, "Stale saved row reports failure without dismissing the library")
     }
 }

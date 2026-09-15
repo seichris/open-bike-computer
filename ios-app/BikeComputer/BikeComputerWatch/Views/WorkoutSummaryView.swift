@@ -51,6 +51,13 @@ struct WorkoutSummaryView: View {
                 )
                 summaryRow("Route", routeStatusLabel)
 
+                if let native = summary.nativeZones?.heartRate {
+                    WorkoutNativeZoneCard(group: native, showCurrent: false)
+                }
+                if let native = summary.nativeZones?.cyclingPower {
+                    WorkoutNativeZoneCard(group: native, showCurrent: false)
+                }
+
                 switch cleanupState {
                 case .delivering:
                     ProgressView()

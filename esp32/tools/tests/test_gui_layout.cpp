@@ -378,8 +378,8 @@ int main() {
                                      ride_telemetry_layout::kMetricValueOffsetY);
     assert(zoneStrip.bounds.bottom() <= rideLayout.metrics[1].bottom());
     assert(zoneStrip.segments.front().x == zoneStrip.bounds.x);
-    assert(zoneStrip.segments.back().right() == zoneStrip.bounds.right());
-    for (std::size_t index = 0; index < zoneStrip.segments.size(); ++index) {
+    assert(zoneStrip.segments[ride_telemetry_layout::kHeartRateZoneCount - 1].right() == zoneStrip.bounds.right());
+    for (std::size_t index = 0; index < ride_telemetry_layout::kHeartRateZoneCount; ++index) {
       const auto &segment = zoneStrip.segments[index];
       assert(segment.y == zoneStrip.bounds.y);
       assert(segment.height == zoneStrip.bounds.height);
@@ -387,13 +387,13 @@ int main() {
       if (index == activeIndex) {
         assert(segment.width >
                zoneStrip.segments[(index + 1) %
-                                  zoneStrip.segments.size()]
+                                  ride_telemetry_layout::kHeartRateZoneCount]
                    .width);
         assert(zoneStrip.heart.x >= segment.x);
         assert(zoneStrip.label.right() <= segment.right());
         assert(zoneStrip.label.width >= 58);
       }
-      if (index + 1 < zoneStrip.segments.size()) {
+      if (index + 1 < ride_telemetry_layout::kHeartRateZoneCount) {
         assert(segment.right() + ride_telemetry_layout::kZoneStripGap ==
                zoneStrip.segments[index + 1].x);
       }

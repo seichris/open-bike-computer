@@ -657,7 +657,8 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     func transferRoute(
         _ record: InstalledNavigationRouteV1
     ) -> WCSessionFileTransfer? {
-        guard let session,
+        guard (try? record.archive.validate(purpose: .watchTransfer)) != nil,
+              let session,
               session.activationState == .activated,
               session.isPaired,
               session.isWatchAppInstalled else {
@@ -702,7 +703,8 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     func sendRouteImmediately(
         _ record: InstalledNavigationRouteV1
     ) -> Bool {
-        guard let session,
+        guard (try? record.archive.validate(purpose: .watchTransfer)) != nil,
+              let session,
               session.activationState == .activated,
               session.isPaired,
               session.isWatchAppInstalled,

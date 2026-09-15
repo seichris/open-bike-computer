@@ -10,11 +10,10 @@ enum WatchDirectBLEProtocolV1 {
     static let workoutUUID = RideBLEGeneratedProtocolV1.workoutUUID
     static let rideAutomationUUID = RideBLEGeneratedProtocolV1
         .rideAutomationUUID
-    // Watch direct BLE does not implement the iPhone-hosted World Radio
-    // feature, so keep its negotiated client version at the last capability
-    // it actually understands.
+    // Version 27 understands zone sidecars. Unrelated owner-only capabilities
+    // remain ignored; scoped authentication still authorizes only ride traffic.
     static let capabilityClientVersion = RideBLEGeneratedProtocolV1
-        .watchGpsMotionEvidenceV1MinimumClientVersion
+        .workoutZonesV1MinimumClientVersion
     static let scopedControllerFeature = RideBLEGeneratedProtocolV1
         .scopedWatchControllerFeature
     static let workoutTelemetryFeature = RideBLEGeneratedProtocolV1
@@ -317,6 +316,11 @@ struct WatchDeviceCapabilitiesV1: Equatable {
     var supportsRideDeliveryAcknowledgement: Bool {
         featureFlags &
             WatchDirectBLEProtocolV1.rideDeliveryAcknowledgementFeature != 0
+    }
+
+    var supportsWorkoutZonesV1: Bool {
+        supportsWorkoutTelemetry && supportsRideAutomation && supportsRideDeliveryAcknowledgement
+            && featureFlags & RideBLEGeneratedProtocolV1.workoutZonesV1Feature != 0
     }
 
     var supportsWatchGPSMotionEvidenceV1: Bool {
@@ -687,25 +691,65 @@ struct RideBLEMotionDispatch: Equatable, Sendable {
     }
 }
 
+/// Age the immutable admitted packet with a monotonic clock immediately before
+/// encryption (also on ACK retries). Expiry clears only the live highlight;
+/// definitions and accumulated durations remain valid. No clock/queue delay can
+/// rejuvenate a sample. Header offsets are fixed by workout_zones v1.
+struct RideBLEZoneDispatch: Equatable, Sendable {
+    let frame: Data
+    let enqueuedUptime: TimeInterval
+
+    init(frame: Data, enqueuedUptime: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        self.frame = frame
+        self.enqueuedUptime = enqueuedUptime
+    }
+
+    func payload(at uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Data {
+        typealias Wire = RideBLEGeneratedProtocolV1
+        guard frame.count >= Wire.workoutZoneHeaderBytes,
+              frame.first == UInt8(Wire.workoutZoneFrameKind),
+              frame[Wire.workoutZoneOffsetVersion] == UInt8(Wire.workoutZoneVersion) else { return frame }
+        var result = frame
+        guard result[6] != 0 else { return result }
+        let delay = (uptime - enqueuedUptime) * 1000
+        let originalAge = UInt16(frame[10]) | UInt16(frame[11]) << 8
+        let age = Double(originalAge) + delay.rounded(.up)
+        let limit = Double(frame[Wire.workoutZoneOffsetMetric] == 1
+            ? Wire.workoutZoneHeartRateMaximumAgeMs : Wire.workoutZonePowerMaximumAgeMs)
+        if !delay.isFinite || delay < 0 || age >= limit || delay >= Double(Wire.workoutZoneStreamMaximumAgeMs) {
+            result[6] = 0
+            result[10] = 255
+            result[11] = 255
+        } else {
+            result[10] = UInt8(UInt16(age) & 255)
+            result[11] = UInt8(UInt16(age) >> 8)
+        }
+        return result
+    }
+}
+
 struct WatchBLEOutboundWriteV1: Equatable, Sendable {
     let target: WatchBLEOutboundTargetV1
     let payload: Data
     let gpsSampleTimestamp: Date?
     let protection: WatchBLEOutboundProtectionV1
     let motionDispatch: RideBLEMotionDispatch?
+    let zoneDispatch: RideBLEZoneDispatch?
 
     init(
         target: WatchBLEOutboundTargetV1,
         payload: Data,
         gpsSampleTimestamp: Date? = nil,
         protection: WatchBLEOutboundProtectionV1 = .protected,
-        motionDispatch: RideBLEMotionDispatch? = nil
+        motionDispatch: RideBLEMotionDispatch? = nil,
+        zoneDispatch: RideBLEZoneDispatch? = nil
     ) {
         self.target = target
         self.payload = payload
         self.gpsSampleTimestamp = gpsSampleTimestamp
         self.protection = protection
         self.motionDispatch = motionDispatch
+        self.zoneDispatch = zoneDispatch
     }
 }
 

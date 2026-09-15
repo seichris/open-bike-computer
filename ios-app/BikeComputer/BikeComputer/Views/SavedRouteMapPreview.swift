@@ -147,6 +147,7 @@ struct SavedRouteMapPreviewCard: View {
     let preview: SavedRouteMapPreview
     let maximumHeight: CGFloat
     let onHide: () -> Void
+    var onStart: (() -> Void)? = nil
 
     var body: some View {
         ViewThatFits(in: .vertical) {
@@ -184,6 +185,20 @@ struct SavedRouteMapPreviewCard: View {
             }
             Text(distance)
                 .font(.subheadline)
+            Text(preview.attribution)
+                .font(.caption).foregroundStyle(.secondary)
+            Text(preview.attribution)
+                .font(.caption).foregroundStyle(.secondary)
+            if let onStart {
+                Button(action: onStart) {
+                    Label("Start Offline Navigation", systemImage: "location.fill")
+                        .frame(minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("startSavedRoutePreviewOffline")
+                Text("Follows the saved route; no online rerouting or offline map tiles are downloaded.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             if preview.providerID == RouteProviderPolicyV1.strava.providerID,
                let url = preview.sourceURL {
                 Link("View on Strava", destination: url)
@@ -201,5 +216,29 @@ struct SavedRouteMapPreviewCard: View {
     private var distance: String {
         let formatter = MKDistanceFormatter()
         return formatter.string(fromDistance: preview.distanceMeters)
+    }
+}
+
+/// Saved rows start by identity through the owning ContentView/library callback.
+/// A missing environment action is disabled rather than silently succeeding.
+nonisolated struct SavedRouteNavigationAction: Sendable {
+    let isEnabled: Bool
+    let start: @MainActor @Sendable (PlannedRouteSummaryV1) throws -> Void
+
+    @MainActor
+    func perform(_ summary: PlannedRouteSummaryV1) throws {
+        guard isEnabled else { throw SavedRouteMapError.navigationActive }
+        try start(summary)
+    }
+}
+
+private nonisolated struct SavedRouteNavigationActionKey: EnvironmentKey {
+    static let defaultValue: SavedRouteNavigationAction? = nil
+}
+
+extension EnvironmentValues {
+    var savedRouteNavigationAction: SavedRouteNavigationAction? {
+        get { self[SavedRouteNavigationActionKey.self] }
+        set { self[SavedRouteNavigationActionKey.self] = newValue }
     }
 }

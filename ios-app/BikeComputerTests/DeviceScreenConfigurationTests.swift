@@ -72,11 +72,72 @@ func testDeviceScreenConfigurationCodecAndValidation() {
         0xff, 0xff, 0x01, 0,
         0x00, 0x10,
     ])
+    // Freeze the original device's mask instead of comparing it to the
+    // app's expanding set of known widgets. iOS 26 is an OS version, not
+    // proof that a connected device has native-zone firmware.
+    let legacyCapabilities = DeviceScreenConfigurationCapabilities(
+        schemaVersion: 1,
+        maximumInstances: 16,
+        maximumNameBytes: 24,
+        rideStatsSlotCount: 7,
+        supportedScreenTypes: 0x3f,
+        supportedRideStatsWidgets: 0x0001_ffff,
+        maximumDocumentBytes: 4096
+    )
     assertEqual(
         DeviceScreenConfigurationCapabilities(tlvValue: capabilityValue),
-        .v1,
-        "screen capability TLV decodes exact limits and masks"
+        legacyCapabilities,
+        "legacy screen capability TLV retains its exact limits and mask"
     )
+    let zoneCapabilityValue = Data([
+        1, 16, 24, 7,
+        0x3f, 0, 0, 0,
+        0xff, 0xff, 0x3f, 0,
+        0x00, 0x10,
+    ])
+    guard let zoneCapabilities = DeviceScreenConfigurationCapabilities(
+        tlvValue: zoneCapabilityValue
+    ) else {
+        assert(false, "native-zone screen capability TLV must decode")
+        return
+    }
+    assertEqual(
+        zoneCapabilities,
+        .v1,
+        "native-zone screen capability TLV decodes exact limits and mask"
+    )
+    for widget in RideStatsWidget.allCases {
+        assertEqual(
+            legacyCapabilities.supports(widget),
+            widget.rawValue <= 16,
+            "legacy firmware advertises only the original append-only widget IDs"
+        )
+        assert(zoneCapabilities.supports(widget),
+               "native-zone firmware advertises every current widget ID")
+    }
+    for widget in [RideStatsWidget.powerZone, .heartRateZoneTime,
+                   .powerZoneTime, .heartRateZoneRange, .powerZoneRange] {
+        var zoneScreen = DeviceScreenInstance.defaults(id: 1, type: .rideStats)
+        var slots = Array(repeating: RideStatsWidget.empty,
+                          count: RideStatsLayout.slotCount)
+        slots[0] = widget
+        zoneScreen.rideStatsLayout = RideStatsLayout(slots: slots)
+        let zoneDocument = DeviceScreenConfigurationDocument(
+            defaultInstanceID: 1, instances: [zoneScreen]
+        )
+        assert(
+            (try? DeviceScreenConfigurationCodec.encode(
+                zoneDocument, capabilities: legacyCapabilities
+            )) == nil,
+            "new zone widgets are rejected for older or production firmware"
+        )
+        assert(
+            (try? DeviceScreenConfigurationCodec.encode(
+                zoneDocument, capabilities: zoneCapabilities
+            )) != nil,
+            "updated app can configure negotiated zone widgets without an OS-27 dependency"
+        )
+    }
     assert(
         DeviceScreenConfigurationCapabilities(
             tlvValue: capabilityValue.dropLast()

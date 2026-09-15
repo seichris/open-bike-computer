@@ -51,7 +51,8 @@ enum class WorkoutStartRequestPresentation : uint8_t {
  * state. IDs 25-26 control the Map + Navigation bird's-eye projection and
  * perspective. IDs 27-34 configure street labels for Map and Map + Navigation,
  * and ID 35 controls OSM 3D buildings in bird's-eye navigation. ID 36
- * controls automatic connected-display inactivity.
+ * controls automatic connected-display inactivity, and ID 38 configures its
+ * dim and panel-off delays as one atomic value.
  * Legacy ID 4 is ignored because display rotation is selected by the hardware
  * target.
  */

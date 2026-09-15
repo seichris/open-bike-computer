@@ -14,6 +14,7 @@ import WebKit
 private enum SettingsSheetDestination: Identifiable, Equatable {
     case addDeviceScreen
     case stravaRouteImport
+    case gpxRouteImport(OfflineRouteSaveDraft)
     case savedMapShare(URL)
 
     var id: String {
@@ -22,6 +23,8 @@ private enum SettingsSheetDestination: Identifiable, Equatable {
             return "add-device-screen"
         case .stravaRouteImport:
             return "strava-route-import"
+        case .gpxRouteImport(let draft):
+            return "gpx-route-import:\(draft.id.uuidString)"
         case .savedMapShare(let url):
             return "saved-map-share:\(url.absoluteString)"
         }
@@ -49,6 +52,7 @@ struct SettingsView: View {
         RideDiagnosticsRecorder
     @FocusState private var focusedSavedMapFilename: String?
     @State private var presentedSheet: SettingsSheetDestination?
+    @State private var routeImportFeedback: String?
     let locationAuthorizationStatus: CLAuthorizationStatus
     let locationAccuracyAuthorization: CLAccuracyAuthorization
     let currentLocation: CLLocation?
@@ -178,7 +182,12 @@ struct SettingsView: View {
                     stravaCoordinator: stravaIntegrationCoordinator,
                     onImportFromStrava: {
                         presentedSheet = .stravaRouteImport
-                    }
+                    },
+                    onConfirmGPX: { draft in
+                        routeImportFeedback = nil
+                        presentedSheet = .gpxRouteImport(draft)
+                    },
+                    importFeedback: routeImportFeedback
                 )
 
                 Section {
@@ -312,6 +321,11 @@ struct SettingsView: View {
             StravaRouteImportView(
                 coordinator: stravaIntegrationCoordinator
             )
+        case .gpxRouteImport(let draft):
+            RouteSaveSheet(library: routeLibrary, draft: draft) { result in
+                routeImportFeedback = result.message
+                presentedSheet = nil
+            }
         case .savedMapShare(let url):
             SavedMapShareSheet(url: url)
                 .presentationDetents([.medium])
@@ -2500,11 +2514,18 @@ private struct MapStyleSettingsView: View {
 private struct HardwareCustomizationSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
 
+    private var displayInactivityFooter: String {
+        guard bleManager.supportsDisplayInactivityTimeouts else {
+            return "When enabled, the display dims after 15 seconds and turns off after 45 seconds unless navigation, workout, transfer, or attention activity is active."
+        }
+        return "When enabled, the display dims after \(bleManager.displayDimTimeout.title) and turns off after \(bleManager.displayOffTimeout.title) unless navigation, workout, transfer, or attention activity is active."
+    }
+
     var body: some View {
         Form {
             Section(
                 header: Text("Device Brightness"),
-                footer: Text("When enabled, the display dims after 15 seconds and turns off after 45 seconds unless navigation, workout, transfer, or attention activity is active.")
+                footer: Text(displayInactivityFooter)
             ) {
                 VStack(alignment: .leading) {
                     HStack {
@@ -2527,10 +2548,39 @@ private struct HardwareCustomizationSettingsView: View {
                         )
                     }
                     .disabled(!bleManager.supportsAutomaticDisplayOff)
+
+                if bleManager.supportsDisplayInactivityTimeouts {
+                    Picker("Dim After", selection: $bleManager.displayDimTimeout) {
+                        ForEach(DisplayDimTimeout.allCases.filter {
+                            $0.rawValue < bleManager.displayOffTimeout.rawValue
+                        }) { timeout in
+                            Text(timeout.title).tag(timeout)
+                        }
+                    }
+                    .onChange(of: bleManager.displayDimTimeout) { _ in
+                        bleManager.sendDisplayInactivityTimeouts()
+                    }
+                    .disabled(!bleManager.automaticDisplayOffEnabled)
+
+                    Picker("Turn Off After", selection: $bleManager.displayOffTimeout) {
+                        ForEach(DisplayOffTimeout.allCases.filter {
+                            $0.rawValue > bleManager.displayDimTimeout.rawValue
+                        }) { timeout in
+                            Text(timeout.title).tag(timeout)
+                        }
+                    }
+                    .onChange(of: bleManager.displayOffTimeout) { _ in
+                        bleManager.sendDisplayInactivityTimeouts()
+                    }
+                    .disabled(!bleManager.automaticDisplayOffEnabled)
+                }
             }
             .disabled(!bleManager.supportsDeviceSettings)
 
-            Section(header: Text("Power")) {
+            Section(
+                header: Text("Power"),
+                footer: Text("This puts the entire device into deep sleep after its phone connection is lost. It is separate from the connected display timeout above.")
+            ) {
                 Picker("Disconnected Sleep After", selection: $bleManager.disconnectedSleepTimeout) {
                     ForEach(DisconnectedSleepTimeout.allCases) { timeout in
                         Text(timeout.title).tag(timeout)
@@ -3555,7 +3605,7 @@ private struct DeveloperSettingsView: View {
                 Text("Workout Heart Zones")
             } footer: {
                 Text(
-                    "Bicino calculates five heart zones from this value and syncs it to the paired Watch. The default is 190 BPM."
+                    "Bicino calculates five fallback heart-rate zones from this value and syncs it to Watch. The default is 190 BPM. Apple Health zones, when available, use their own thresholds; this setting does not change them. Compatible bike firmware uses Apple Health zones when available, and these labelled Bicino fallback zones on older Watch systems. Older bike firmware retains its five-zone display."
                 )
             }
 

@@ -903,7 +903,9 @@ Current setting IDs:
 | `33` | Map + Navigation street-label size | Same values as ID `29` |
 | `34` | Map + Navigation street-label orientation | Same values as ID `30` |
 | `35` | Map + Navigation 3D buildings | `0` flat footprints, `1` LoD1 walls and roofs in the bird's-eye Map + Navigation view; defaults to enabled and is persisted as `nav3DBuild` |
-| `36` | Automatic display off | `0` disabled, `1` enabled; defaults to enabled and is persisted as `autoDisplayOff`. When enabled, the connected display dims after 15 seconds and turns off after 45 seconds without meaningful activity, except for navigation, workout, transfer, or attention holds. |
+| `36` | Automatic display off | `0` disabled, `1` enabled; defaults to enabled and is persisted as `autoDisplayOff`. When enabled, the connected display uses the configured inactivity timeouts (15 seconds before dimming and 45 seconds before panel off by default), except for navigation, workout, transfer, or attention holds. |
+| `37` | Map + Navigation rotation | `0` North Up, `1` Course Up; defaults to Course Up and is persisted as `navRotation`. |
+| `38` | Display inactivity timeouts | Atomic `Int32LE` pair: low 16 bits are seconds before dimming and high 16 bits are seconds before panel off. Defaults are `15` and `45`. Firmware accepts dim `5...600`, off `10...3600`, and requires off to be at least five seconds later than dim. The pair is persisted as one NVS value. |
 
 In a dense scene, firmware reserves its bounded extrusion workspace from the
 nearest eligible buildings outward, preserves global back-to-front drawing,
@@ -1085,8 +1087,9 @@ after an AXP2101 short-press event, so the button works without an active app
 connection. Firmware configures the AXP2101's hard power-off threshold to four
 seconds; this remains independent of the short-press honk behavior.
 
-Independently of hard power-off, connected firmware dims after 15 seconds and
-turns the panel off after 45 seconds without meaningful activity when no
+Independently of hard power-off, connected firmware dims after the selected
+delay (15 seconds by default) and turns the panel off after the selected later
+delay (45 seconds by default) without meaningful activity when no
 navigation is active. GPS and workout telemetry alone do not keep the panel
 awake. A
 changed maneuver instruction/icon, a closer maneuver-distance threshold,
@@ -1221,7 +1224,8 @@ renderer replay sample described below. Bit `24` reports independent map navigat
 orientation. Bit `25` reports the Watch GPS
 motion-evidence frame and is advertised only with internal ride control. Bit `26`
 reports the complete configurable-screen store, characteristic, codec, and runtime
-path described above. Client version `11` requests
+path described above. Bit `27` reports World Radio. Bit `28` reports the
+atomic configurable display-inactivity timeout pair (setting ID `38`). Client version `11` requests
 bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
@@ -1235,8 +1239,10 @@ orientation (setting ID `37`). Firmware advertises bit `24` only with
 physical qualification. This capability is independent of label orientation.
 Version `23` requests bit `25`, Watch GPS motion evidence.
 Version `24` requests bit `26` plus TLV type `2`, configurable screen instances.
-Version `25` requests bit `27`, World Radio. The iPhone negotiates version
-`25`; direct Watch control stays at version `23`. Bit `23` remains the
+Version `25` requests bit `27`, World Radio. Version `26` requests bit `28`,
+configurable display inactivity timeouts. Version `27` requests bit `29`,
+versioned workout zones. The current iPhone and direct Watch clients negotiate
+version `27`; older direct Watch clients remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
 Firmware advertises it only with `FIRMWARE_DIAGNOSTICS=1`; production
@@ -1254,6 +1260,8 @@ therefore expose neither the snapshot nor experimental profile control. GFX
 firmware advertises bit `19` for client version `16` and newer; iOS enables the
 toggle and sends ID `36` only after this bit is received, so legacy firmware
 with the generic settings characteristic never receives an unsupported setting.
+GFX firmware advertises bit `28` for client version `26` and newer. iOS shows
+the two timeout pickers and sends ID `38` only after this bit is received.
 The bounded persistent recorder may advertise bit `20` in ordinary and
 production profiles; it never enables USB serial diagnostics or the
 remote-debug service.
@@ -1316,6 +1324,9 @@ Watch GPS motion evidence, CAP2 schema 1, only feature bit 25:
 
 World Radio, CAP2 schema 1, only feature bit 27:
 43 41 50 32 01 00 00 00 08
+
+Display inactivity timeouts, CAP2 schema 1, only feature bit 28:
+43 41 50 32 01 00 00 00 10
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -1475,6 +1486,11 @@ ID `36` is sent only after a valid `CAP2` response advertises bit `19`.
 Firmware without that bit is never offered the Automatic Display Off toggle;
 the setting remains app-local until a compatible connected display is
 negotiated.
+
+ID `38` is sent only after a valid `CAP2` response advertises bit `28`. The app
+presents separate Dim After and Turn Off After pickers but sends both values in
+one atomic setting. Older firmware retains the fixed 15/45-second policy and is
+not offered the timeout pickers.
 
 ### Independent navigation orientation setting
 
@@ -2037,3 +2053,40 @@ Swift/C++ adapters preserve legacy masks and configurable-screen payload IDs.
 The common request/status fixtures in `protocol/fixtures/world-radio-v1.txt`
 are consumed by firmware and phone host tests. See `docs/world-radio.md` for
 playback intent, item/search generation and drag-settlement behavior.
+
+### Native HealthKit zones and legacy workout frames
+
+Workout mirror schema 1.7 adds optional `snapshot.nativeZones` for iPhone/Watch. It carries separate heart-rate and cycling-power groups, exact thresholds,
+configuration provenance, native durations, observation timestamps and an
+explicit final/saved distinction. The property-list addition is distinct from the versioned device sidecar below. Unknown legacy phone projection strips
+this optional payload; known schema-1.6 peers may ignore its unknown key.
+
+`WEXT` and its five-band Bicino heart-rate model remain byte-for-byte unchanged.
+Never copy a native ordinal (including a five-zone native ordinal with different
+thresholds) into that legacy field. Native power zones do not replace watts.
+Native zones on the ESP32 use the separately versioned kind-5 sidecar; they do
+not change WEXT, watts, cadence, or the old source-flag meanings.
+
+### Versioned workout zone device sidecars
+
+Client version 27 requests CAP2 bit 29 (`workout_zones_v1`). Updated iOS 26 and
+older supported Watch systems retain the explicitly labelled Bicino HR fallback.
+Native HealthKit groups require the SDK/runtime-gated Watch API; power zones are
+unavailable rather than estimated without it. Firmware advertises this feature
+and new widget IDs 17–21 only in diagnostic/development profiles pending physical
+qualification. Older peers, production firmware and insufficient-MTU connections
+continue the original legacy telemetry path.
+
+Kind 5 uses a 32-byte header, exact binary64 thresholds, a full workout UUID,
+ordered sequence, per-metric source age and bounded millisecond durations, for
+3–9 zones and at most 132 bytes. HR and power packets are self-contained rather
+than referring to an unacknowledged configuration cache. Capability-negotiated
+critical workout ACK groups have exactly five members (core, extended, origin,
+HR zones, power zones); existing 1–3-member groups remain valid. Both relays use
+the shared encoder and age queued samples immediately before encryption/retry.
+
+See [Workout zone device protocol](workout-zone-device-protocol.md) for the
+normative offsets, validation, replay/expiry and compatibility matrix. The JSON
+contract generates Swift/C++ constants and append-only widget IDs. Golden
+packets are in `protocol/fixtures/workout-zones-v1.json` and tested independently
+by both languages.

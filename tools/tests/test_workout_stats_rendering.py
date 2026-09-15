@@ -233,7 +233,12 @@ int main() {
       assert(fresh.font==label.font && label.align==LV_TEXT_ALIGN_CENTER);
       for (size_t active=0;active<5;++active) {
         const auto zone=makeZoneStripLayout(metric,layout.screenWidth,active);
-        for (const auto r : zone.segments) {
+        for (size_t index=0;index<zone.segments.size();++index) {
+          const auto r=zone.segments[index];
+          if (index>=kHeartRateZoneCount) {
+            assert(r.x==0 && r.y==0 && r.width==0 && r.height==0);
+            continue; // Spare capacity is intentionally not a visible segment.
+          }
           assert(fits(r,layout.screenWidth,layout.screenHeight));
           if (layout.screenWidth==466) assert(cornersFitCircle(r,466));
         }
@@ -242,6 +247,34 @@ int main() {
         }
         setMetricValueIfChanged(&label,"ZONE 5",zone.label,Role::Zone);
         assert(label.text=="ZONE 5"); assertVisible(label);
+      }
+      // Every supported configuration and active ordinal on every slot and
+      // both boards. Preserve the original five-zone checks above as well.
+      for (size_t count=3;count<=kMaximumZoneCount;++count) {
+        for (size_t active=0;active<count;++active) {
+          for (bool showHeart : {false,true}) {
+            const auto zone=makeZonePresentation(
+                metric,layout.screenWidth,-2,static_cast<int8_t>(active),count,showHeart);
+            assert(zone.labelVisible);
+            assert(zone.heartVisible==(showHeart && count==5));
+            for (size_t index=0;index<zone.segments.size();++index) {
+              assert(zone.segmentVisible[index]==(index<count));
+              const auto r=zone.segments[index];
+              if (index>=count) {
+                assert(r.x==0 && r.y==0 && r.width==0 && r.height==0);
+                continue;
+              }
+              assert(fits(r,layout.screenWidth,layout.screenHeight));
+              if (layout.screenWidth==466) assert(cornersFitCircle(r,466));
+            }
+            if (zone.heartVisible) {
+              assert(fits(zone.heart,layout.screenWidth,layout.screenHeight));
+              if (layout.screenWidth==466) assert(cornersFitCircle(zone.heart,466));
+            }
+            setMetricValueIfChanged(&label,zone.labelText.data(),zone.label,Role::Zone);
+            assert(label.text==zone.labelText.data()); assertVisible(label);
+          }
+        }
       }
       setMetricValueIfChanged(&label,"unrepresentable value longer than any slot",value,role);
       assert(label.text=="--"); assertVisible(label);
