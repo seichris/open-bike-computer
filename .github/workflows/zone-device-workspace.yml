@@ -1,4 +1,4 @@
-name: Zone backward compatibility validation
+name: Zone macro-safe firmware validation
 on:
   push:
     branches: [work/zone-device-transport-20260915]
@@ -16,85 +16,50 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - id: publish
-        name: Apply exact legacy boundary correction
+        name: Apply generated macro-safe identifier fix
         shell: bash
         run: |
           set -euo pipefail
-          python3 - "$RUNNER_TEMP/relay.patch" <<'PY'
-          import hashlib, pathlib, sys
-          text = pathlib.Path('tools/zone-workspace/legacy-relay.patch').read_text().replace('\n diff --git', '\ndiff --git')
-          if hashlib.sha256(text.encode()).hexdigest() != 'ee3fcd7a02653f1d0fcf17e8de8c7d6384507053445556ba5378ce33cae468c2':
-              raise SystemExit('Patch integrity mismatch')
-          pathlib.Path(sys.argv[1]).write_text(text)
-          PY
+          cp tools/zone-workspace/firmware-version.patch "$RUNNER_TEMP/version.patch"
           git fetch origin feat/native-healthkit-workout-zones
-          test "$(git rev-parse FETCH_HEAD)" = 7a75d1948d9819ade7d966d3abc72a62fcc1942e
+          test "$(git rev-parse FETCH_HEAD)" = 8b77ab9d455c93460d7c8c0d358a93fbce5f6345
           git switch --detach FETCH_HEAD
-          git apply --check "$RUNNER_TEMP/relay.patch"
-          git apply --index "$RUNNER_TEMP/relay.patch"
+          git apply --check "$RUNNER_TEMP/version.patch"
+          git apply --index "$RUNNER_TEMP/version.patch"
           git diff --cached --check
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Preserve legacy queue admission on initial zone capability observation'
+          python3 tools/generate_ride_ble_contract.py --check
+          for board in WAVESHARE_AMOLED_175 WAVESHARE_AMOLED_206; do
+            g++ -std=c++17 -Wall -Wextra -Werror -O1 -D"$board" esp32/tools/tests/test_workout_zone_protocol.cpp -o "$RUNNER_TEMP/zone-test"
+            "$RUNNER_TEMP/zone-test"
+          done
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Avoid firmware VERSION macro in generated zone protocol and add compile regression'
           git push origin HEAD:refs/heads/feat/native-healthkit-workout-zones
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-  tests:
+  firmware:
     needs: publish
-    runs-on: macos-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ needs.publish.outputs.sha }}
-          persist-credentials: false
-      - name: Full Swift helper suite including unchanged legacy queue assertions
-        run: |
-          set -o pipefail
-          mkdir -p "$RUNNER_TEMP/zone-final-tests"
-          git rev-parse HEAD > "$RUNNER_TEMP/zone-final-tests/SHA"
-          ./ios-app/scripts/run-navigation-tests.sh 2>&1 | tee "$RUNNER_TEMP/zone-final-tests/navigation.log"
-      - name: Actual Watch adapter lifecycle
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          python3 ios-app/tests/watch-link-host/run.py 2>&1 | tee "$RUNNER_TEMP/zone-final-tests/watch-adapter.log"
-      - name: Workout contracts and Watch source graph
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          ./ios-app/scripts/run-workout-contract-tests.sh 2>&1 | tee "$RUNNER_TEMP/zone-final-tests/workout.log"
-          ./ios-app/scripts/run-watch-source-typecheck.sh 2>&1 | tee "$RUNNER_TEMP/zone-final-tests/watch-source.log"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: zone-compatible-final-tests
-          path: ${{ runner.temp }}/zone-final-tests
-          retention-days: 7
-  build:
-    needs: publish
-    runs-on: macos-latest
-    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        configuration: [Debug, Release]
+        target: [WAVESHARE_AMOLED_175, WAVESHARE_AMOLED_206]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.publish.outputs.sha }}
           persist-credentials: false
-      - name: Unsigned app and embedded Watch
+      - name: Full build through repository-owned runtime, no upload
         env:
-          CONFIGURATION: ${{ matrix.configuration }}
+          TARGET: ${{ matrix.target }}
         run: |
           set -o pipefail
-          mkdir -p "$RUNNER_TEMP/zone-build"
-          git rev-parse HEAD > "$RUNNER_TEMP/zone-build/SHA"
-          xcrun swift --version > "$RUNNER_TEMP/zone-build/swift.txt"
-          xcrun --sdk iphoneos --show-sdk-version > "$RUNNER_TEMP/zone-build/ios-sdk.txt"
-          cd ios-app
-          ./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -configuration "$CONFIGURATION" -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/zone-derived" CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/zone-build/build.log"
+          mkdir -p "$RUNNER_TEMP/zone-firmware"
+          git rev-parse HEAD > "$RUNNER_TEMP/zone-firmware/SHA"
+          cd esp32
+          env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "$TARGET" 2>&1 | tee "$RUNNER_TEMP/zone-firmware/build.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: zone-compatible-build-${{ matrix.configuration }}
-          path: ${{ runner.temp }}/zone-build
+          name: zone-macro-safe-${{ matrix.target }}
+          path: ${{ runner.temp }}/zone-firmware
           retention-days: 7
