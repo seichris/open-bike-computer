@@ -783,11 +783,12 @@ struct WorkoutDashboardView: View {
                     )
                 }
 
-                if store.presentation.connectionState == .ended,
-                   snapshot.nativeZones?.heartRate == nil {
-                    HeartRateZoneBreakdown(
-                        durations: snapshot.heartRateZoneDurations
-                    )
+                if store.presentation.connectionState == .ended {
+                    if snapshot.nativeZones?.heartRate == nil {
+                        HeartRateZoneBreakdown(
+                            durations: snapshot.heartRateZoneDurations
+                        )
+                    }
                 }
 
                 controls

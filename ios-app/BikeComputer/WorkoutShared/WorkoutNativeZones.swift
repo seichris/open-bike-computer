@@ -101,6 +101,13 @@ nonisolated struct WorkoutNativeZoneSnapshotV1: Codable, Equatable, Sendable {
         return true
     }
 
+    /// Cumulative native time in the currently reported zone, not time since
+    /// the last transition. Never synthesize a timer between builder reads.
+    var currentZoneDuration: TimeInterval? {
+        guard isValid, !isFinal, let currentZone else { return nil }
+        return secondsByZone[Int(currentZone) - 1]
+    }
+
     func clearingCurrentZone() -> Self {
         Self(configuration: configuration, secondsByZone: secondsByZone,
              observedAt: observedAt, currentZone: nil, currentZoneSampleAt: nil,

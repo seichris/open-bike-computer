@@ -220,6 +220,19 @@ private enum WorkoutNativeZoneTests {
         let decodedSource = try PropertyListDecoder().decode(SourceContainer.self, from: source)
         check(decodedSource.source == .unknown, "unknown source is not relabelled automatic")
 
+        let durationGroup = WorkoutNativeZoneSnapshotV1(
+            configuration: configuration(), secondsByZone: [10, 20, 30, 0, 0],
+            observedAt: now, currentZone: 2, currentZoneSampleAt: now,
+            isFinal: false
+        )
+        check(durationGroup.currentZoneDuration == 20, "native current time uses the reported zone total")
+        check(durationGroup.clearingCurrentZone().currentZoneDuration == nil, "unavailable current zone has no current duration")
+        let finalDurationGroup = WorkoutNativeZoneSnapshotV1(
+            configuration: configuration(), secondsByZone: [10, 20, 30, 0, 0],
+            observedAt: now, currentZone: nil, currentZoneSampleAt: nil, isFinal: true
+        )
+        check(finalDurationGroup.currentZoneDuration == nil, "a saved summary has no current-zone timer")
+
         print("Native workout zone tests passed (\(checks) checks)")
     }
 }
