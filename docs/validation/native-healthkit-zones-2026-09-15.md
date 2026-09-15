@@ -82,8 +82,8 @@ fixed without dropping the old behavioural assertions:
    seven slots on both displays.
 3. The World Radio test freezes its own minimum client protocol version (25),
    rather than forbidding unrelated later capabilities from increasing the
-   global client version. The new zone capability still requires protocol 26;
-   this number is not an iOS requirement.
+   global client version. At the exact heads validated below, the new zone
+   capability required protocol 26; this number is not an iOS requirement.
 
 The [final preview and compatibility validation run](https://github.com/seichris/open-bike-computer/actions/runs/34954720694)
 applied the SHA-256-verified reviewed patch on exact head `73b5d5e`, regenerated
@@ -92,6 +92,12 @@ zone checks, and published `ab2426a688f8732d65d062ca1795cb9ad29c65fd`.
 Its separate Debug/Release jobs rebuild that exact implementation commit; use
 those job results for the final app-build status, not a preceding commit's build.
 The documentation-only record commit also triggers the normal PR CI.
+
+After these historical runs, `main` assigned protocol 26 / CAP2 bit 28 to
+configurable display inactivity timeouts. The merge resolution keeps that
+released assignment and moves `workout_zones_v1` to protocol 27 / CAP2 bit 29.
+The runs above predate that reassignment and are not evidence for the merged
+head; use the fresh PR checks triggered by the merge commit.
 
 Local checks of the same source changes passed all 102 root `tools/tests` tests,
 286 native/transport checks, the two World Radio contract tests and generated

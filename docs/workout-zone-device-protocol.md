@@ -13,7 +13,7 @@ replacement power thresholds are fabricated on older systems.
 capability bit and append-only Ride Stats widget IDs. Generate both languages
 with `python3 tools/generate_ride_ble_contract.py`; CI checks generated output.
 
-Client protocol version 26 requests CAP2 bit 28 (`workout_zones_v1`). This
+Client protocol version 27 requests CAP2 bit 29 (`workout_zones_v1`). This
 **protocol number is unrelated to iOS 26**. A sender requires that bit, the
 native workout characteristic, origin/automation support, application ACK
 support and capacity for the largest protected acknowledged member (182

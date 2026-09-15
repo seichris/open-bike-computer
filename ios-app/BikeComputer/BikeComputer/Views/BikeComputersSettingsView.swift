@@ -249,7 +249,9 @@ struct BikeComputersSettingsView: View {
                     isExplicitBikeComputerSetup:
                         startsBikeComputerDiscoveryOnAppear
                 ),
-            scanPurpose: bleManager.currentScanPurpose
+            scanPurpose: bleManager.currentScanPurpose,
+            isExplicitDiscoveryPending:
+                bleManager.isExplicitDiscoveryPending
         )
     }
 
