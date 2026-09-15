@@ -1,4 +1,4 @@
-name: Zone final Apple validation
+name: Zone backward compatibility validation
 on:
   push:
     branches: [work/zone-device-transport-20260915]
@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 jobs:
-  publish-test:
+  publish:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -16,41 +16,47 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - id: publish
-        name: Update explicit capability contract assertion
+        name: Apply exact legacy boundary correction
         shell: bash
         run: |
           set -euo pipefail
-          cp tools/zone-workspace/capability-test.patch "$RUNNER_TEMP/test.patch"
+          python3 - "$RUNNER_TEMP/relay.patch" <<'PY'
+          import hashlib, pathlib, sys
+          text = pathlib.Path('tools/zone-workspace/legacy-relay.patch').read_text().replace('\n diff --git', '\ndiff --git')
+          if hashlib.sha256(text.encode()).hexdigest() != 'ee3fcd7a02653f1d0fcf17e8de8c7d6384507053445556ba5378ce33cae468c2':
+              raise SystemExit('Patch integrity mismatch')
+          pathlib.Path(sys.argv[1]).write_text(text)
+          PY
           git fetch origin feat/native-healthkit-workout-zones
-          test "$(git rev-parse FETCH_HEAD)" = af452a2249d9f33cbd5c7cbaa007d76812fc3fd3
+          test "$(git rev-parse FETCH_HEAD)" = 7a75d1948d9819ade7d966d3abc72a62fcc1942e
           git switch --detach FETCH_HEAD
-          git apply --unidiff-zero --check "$RUNNER_TEMP/test.patch"
-          git apply --unidiff-zero --index "$RUNNER_TEMP/test.patch"
+          git apply --check "$RUNNER_TEMP/relay.patch"
+          git apply --index "$RUNNER_TEMP/relay.patch"
           git diff --cached --check
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Test negotiated workout zone protocol and preserve all prior capability assertions'
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Preserve legacy queue admission on initial zone capability observation'
           git push origin HEAD:refs/heads/feat/native-healthkit-workout-zones
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-  swift-tests:
-    needs: publish-test
+  tests:
+    needs: publish
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ needs.publish-test.outputs.sha }}
+          ref: ${{ needs.publish.outputs.sha }}
           persist-credentials: false
-      - name: Complete Swift helper suite
+      - name: Full Swift helper suite including unchanged legacy queue assertions
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/zone-final-tests"
           git rev-parse HEAD > "$RUNNER_TEMP/zone-final-tests/SHA"
           ./ios-app/scripts/run-navigation-tests.sh 2>&1 | tee "$RUNNER_TEMP/zone-final-tests/navigation.log"
-      - name: Actual Watch BLE adapter lifecycle tests
+      - name: Actual Watch adapter lifecycle
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
           python3 ios-app/tests/watch-link-host/run.py 2>&1 | tee "$RUNNER_TEMP/zone-final-tests/watch-adapter.log"
-      - name: Workout contracts and source graph
+      - name: Workout contracts and Watch source graph
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
@@ -59,11 +65,11 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: zone-final-swift-tests
+          name: zone-compatible-final-tests
           path: ${{ runner.temp }}/zone-final-tests
           retention-days: 7
   build:
-    needs: publish-test
+    needs: publish
     runs-on: macos-latest
     timeout-minutes: 25
     strategy:
@@ -73,22 +79,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ needs.publish-test.outputs.sha }}
+          ref: ${{ needs.publish.outputs.sha }}
           persist-credentials: false
-      - name: Unsigned final app and Watch build
+      - name: Unsigned app and embedded Watch
         env:
           CONFIGURATION: ${{ matrix.configuration }}
         run: |
           set -o pipefail
-          mkdir -p "$RUNNER_TEMP/zone-final-build"
-          git rev-parse HEAD > "$RUNNER_TEMP/zone-final-build/SHA"
-          xcrun swift --version > "$RUNNER_TEMP/zone-final-build/swift.txt"
-          xcrun --sdk iphoneos --show-sdk-version > "$RUNNER_TEMP/zone-final-build/ios-sdk.txt"
+          mkdir -p "$RUNNER_TEMP/zone-build"
+          git rev-parse HEAD > "$RUNNER_TEMP/zone-build/SHA"
+          xcrun swift --version > "$RUNNER_TEMP/zone-build/swift.txt"
+          xcrun --sdk iphoneos --show-sdk-version > "$RUNNER_TEMP/zone-build/ios-sdk.txt"
           cd ios-app
-          ./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -configuration "$CONFIGURATION" -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/zone-final-derived" CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/zone-final-build/build.log"
+          ./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -configuration "$CONFIGURATION" -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/zone-derived" CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/zone-build/build.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: zone-final-build-${{ matrix.configuration }}
-          path: ${{ runner.temp }}/zone-final-build
+          name: zone-compatible-build-${{ matrix.configuration }}
+          path: ${{ runner.temp }}/zone-build
           retention-days: 7
