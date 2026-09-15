@@ -66,6 +66,10 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapCatalog.swift \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift \
   ios-app/BikeComputer/BikeComputer/Models/SavedRouteNaming.swift \
+  ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift \
+  ios-app/BikeComputer/RideShared/GPXRouteImporter.swift \
+  ios-app/BikeComputer/RideShared/StravaRouteURL.swift \
+  ios-app/BikeComputer/RideShared/StravaAthleteRoutes.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
