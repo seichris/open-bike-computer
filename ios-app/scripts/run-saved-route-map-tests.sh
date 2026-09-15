@@ -45,6 +45,7 @@ xcrun swiftc -D HOST_TESTING -parse-as-library \
   ios-app/BikeComputer/RideShared/WatchRouteSyncContract.swift \
   ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
   ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/WireBytes.swift \
   ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
   ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputer/RideShared/NavigationRouteFileStore.swift \
@@ -56,6 +57,7 @@ xcrun swiftc -D HOST_TESTING -parse-as-library \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift \
+  ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift \
   ios-app/BikeComputer/BikeComputer/Managers/PhoneRouteLibrary.swift \
   ios-app/BikeComputer/BikeComputer/Views/MapView.swift \
   ios-app/BikeComputer/BikeComputer/Views/SavedRouteMapPreview.swift \
