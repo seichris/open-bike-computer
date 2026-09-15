@@ -288,6 +288,24 @@ class WorkflowPolicyTests(unittest.TestCase):
                 self.assertIn(f'"{target}"', router)
         self.assertEqual(DIAGNOSTIC_FIRMWARE_TARGETS, diagnostic_targets)
 
+    def test_epaper_stack_requires_amoled_equivalence_gate(self) -> None:
+        general_ci = workflow_source("ci.yml")
+
+        self.assertIn("amoled-equivalence:", general_ci)
+        self.assertIn(
+            "target: ${{ fromJSON(needs.changes.outputs.amoled_equivalence_targets) }}",
+            general_ci,
+        )
+        self.assertIn(
+            "github.event.pull_request.base.ref == 'feature/waveshare-epaper-397'",
+            general_ci,
+        )
+        self.assertIn("- amoled-equivalence", general_ci)
+        self.assertIn(
+            'require_result "AMOLED isolation" "$AMOLED_EQUIVALENCE_RESULT" success',
+            general_ci,
+        )
+
     def test_pull_request_remote_debug_builds_verify_metrics_routes(self) -> None:
         general_ci = workflow_source("ci.yml")
 

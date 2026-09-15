@@ -6,6 +6,7 @@
 #include "ble_navigation.hpp"
 #include "gps.hpp"
 #include "route_overlay.hpp"
+#include "epaperNavigationPolicy.hpp"
 #include "../../images/src/bicino_app_qr.h"
 #include <cstring>
 
@@ -166,7 +167,9 @@ void process() {
   static uint8_t lastTile = UINT8_MAX;
   static uint32_t lastInstance = 0;
   static NavigationData lastNavigation{};
-  static uint32_t lastRoute = 0;
+  static bool lastNavigationActive = false;
+  static bool lastRouteActive = false;
+  static bool dataStateInitialized = false;
   const uint32_t now = millis();
   lv_obj_t *screen = lv_screen_active();
   if (!screen) return;
@@ -177,12 +180,28 @@ void process() {
     lastStyleMs = 0;
   }
   const NavigationData nav = getCurrentNavigationData();
-  const uint32_t route = routeOverlay.revision();
-  if (std::strcmp(nav.instruction, lastNavigation.instruction) != 0 || route != lastRoute) {
-    lastNavigation = nav;
-    lastRoute = route;
+  const bool navigationActive = hasCurrentNavigationData();
+  const bool routeActive = routeOverlay.hasRoute();
+  if (dataStateInitialized && routeActive != lastRouteActive) {
+    // Entering or leaving a route session changes the meaning of every queued
+    // physical frame. Ordinary sliding route-window revisions stay soft and
+    // are drawn against the accepted base projection.
     epaper::invalidateContext();
   }
+  const bool maneuverChanged =
+      dataStateInitialized &&
+      (navigationActive != lastNavigationActive ||
+       nav.iconID != lastNavigation.iconID ||
+       std::strcmp(nav.instruction, lastNavigation.instruction) != 0);
+  if (maneuverChanged) {
+    // New maneuver/icon/text and navigation clear are urgent content changes,
+    // but they do not invalidate a compatible map or in-flight waveform.
+    epaper::prioritize();
+  }
+  lastNavigation = nav;
+  lastNavigationActive = navigationActive;
+  lastRouteActive = routeActive;
+  dataStateInitialized = true;
   if (!statusLabel) {
     statusLabel = lv_label_create(lv_layer_top());
     lv_obj_set_width(statusLabel, 460);
@@ -194,12 +213,32 @@ void process() {
   const BLEDebugStats ble = bleNavServer.getDebugStats();
   const epaper::Status panel = epaper::status();
   const bool stale = !ble.lastGpsPacketMs || now - ble.lastGpsPacketMs > 10000;
+  const Maps::EpaperCameraState camera = mapView.captureEpaperCameraState();
+  const bool mapActive = isMapScreenActive() || isMapGuidanceScreenActive();
+  const bool noCoverage =
+      mapActive && camera.hasBase && !camera.mapCoverageAvailable;
+  const bool recentering =
+      mapActive && camera.hasBase && camera.baseCompatible &&
+      camera.mapCoverageAvailable && camera.riderProjected &&
+      camera.riderInsideViewport &&
+      (camera.riderOffsetPixels >=
+           epaper_navigation_policy::kMarkerDeadbandPixels ||
+       camera.headingDeltaDegrees >=
+           epaper_navigation_policy::kHeadingThresholdDegrees / 2.0);
+  const bool incompatible =
+      mapActive && camera.hasBase &&
+      (!camera.baseCompatible || !camera.riderProjected ||
+       !camera.riderInsideViewport);
   const char *message = panel.fault ? "Display fault - reconnect power" :
       bleNavServer.hasOwnershipPairingCode() ? "Center: confirm   Hold up/down: cancel" :
       !ble.connected ? "Disconnected - image may be old" :
       !ble.authenticated ? "Waiting for phone registration" :
       inControls ? "Up/down: focus   Center: select   Hold: back" :
       stale ? "GPS stale - waiting for current position" :
+      camera.recoveryPending ? "Map update failed - retrying" :
+      noCoverage ? "No map here - install coverage for this area" :
+      incompatible ? "Map unavailable - recentering" :
+      recentering ? "Recentering - current map remains visible" :
       "Up/down: screen   Center: actions";
   if (std::strcmp(lv_label_get_text(statusLabel), message) != 0) {
     lv_label_set_text(statusLabel, message); epaper::prioritize();

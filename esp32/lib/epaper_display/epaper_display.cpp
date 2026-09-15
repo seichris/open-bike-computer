@@ -33,6 +33,9 @@ bool urgent = true;
 bool sleepRequested = false, wakeRequested = false;
 std::atomic<uint32_t> currentPairing{0};
 std::atomic<uint32_t> currentContext{1};
+std::atomic<uint32_t> currentAcceptedGpsSequence{0};
+std::atomic<uint32_t> currentBaseCameraSequence{0};
+std::atomic<bool> contextCompositionPending{false};
 #ifdef EPAPER_DISPLAY_TEST
 std::atomic<bool> injectBusyFault{false};
 // Start with a high-contrast image so boot alone gives useful glass evidence.
@@ -153,6 +156,7 @@ void displayWorker(void *) {
       portEXIT_CRITICAL(&mux);
     }
     uint32_t generation = 0, pairing = 0, context = 0;
+    FrameMailbox::Provenance provenance{0, 0, 0};
     const uint32_t now = millis();
     portENTER_CRITICAL(&mux);
     if (!explicitSleep && policy.ready(now, urgent, wakeForChangedContent)) {
@@ -161,6 +165,7 @@ void displayWorker(void *) {
         flight = frame.pixels;
         generation = frame.generation; pairing = frame.pairing;
         context = frame.context;
+        provenance = frame.provenance;
         urgent = false; snapshot.busy = true;
       }
     }
@@ -237,6 +242,9 @@ void displayWorker(void *) {
       snapshot.presented = generation;
       snapshot.completedAtMs = millis();
       snapshot.context = context;
+      snapshot.compositionGeneration = provenance.composition;
+      snapshot.acceptedGpsSequence = provenance.acceptedGps;
+      snapshot.baseCameraSequence = provenance.baseCamera;
       snapshot.pairingGeneration = pairing == currentPairing.load() &&
           context == currentContext.load() ? pairing : 0;
       snapshot.lastPresentationHadWaveform = full || !dirty.empty();
@@ -302,11 +310,28 @@ bool submit(const uint16_t *rgb) {
       }
   }
 #endif
+  static uint32_t compositionGeneration = 0;
+  if (++compositionGeneration == 0)
+    ++compositionGeneration;
+  const FrameMailbox::Provenance provenance{
+      compositionGeneration,
+      currentAcceptedGpsSequence.load(std::memory_order_acquire),
+      currentBaseCameraSequence.load(std::memory_order_acquire),
+  };
   portENTER_CRITICAL(&mux);
-  snapshot.queued = mailbox.publish(pairing, currentContext.load());
+  snapshot.queued =
+      mailbox.publish(pairing, currentContext.load(), provenance);
   portEXIT_CRITICAL(&mux);
   xTaskNotifyGive(worker);
   return true;
+}
+
+void setFrameProvenance(uint32_t acceptedGpsSequence,
+                        uint32_t baseCameraSequence) {
+  currentAcceptedGpsSequence.store(acceptedGpsSequence,
+                                   std::memory_order_release);
+  currentBaseCameraSequence.store(baseCameraSequence,
+                                  std::memory_order_release);
 }
 
 Status status() {
@@ -319,6 +344,12 @@ void prioritize() {
 void invalidateContext() {
   ++currentContext;
   prioritize();
+  // Every hard semantic invalidation requests its successor composition. The
+  // mailbox will reject an old queued context, while an in-flight physical
+  // waveform still owns completion and cannot be relabelled as the new one.
+  // The caller may not own LVGL, so poll() performs the actual invalidation.
+  contextCompositionPending.store(true, std::memory_order_release);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Display);
 }
 void setPairingGeneration(uint32_t generation) {
   if (currentPairing.exchange(generation) != generation) invalidateContext();
@@ -361,6 +392,11 @@ void diagnosticFault(bool enabled) {
 }
 #endif
 void poll() {
+  if (contextCompositionPending.exchange(false, std::memory_order_acq_rel)) {
+    lv_obj_t *screen = lv_screen_active();
+    if (screen != nullptr)
+      lv_obj_invalidate(screen);
+  }
   static uint32_t delivered = 0;
   static uint32_t failures = 0;
   static uint32_t observedSleepCount = 0, observedWakeCount = 0;
@@ -387,10 +423,15 @@ void poll() {
     const char *waveform = !s.lastPresentationHadWaveform
                                ? "none"
                                : (s.lastWaveformFull ? "full" : "partial");
-    Serial.printf("EPAPER_PRESENT generation=%lu context=%lu pairing=%lu "
+    Serial.printf("EPAPER_PRESENT generation=%lu composition=%lu gps=%lu "
+                  "camera=%lu context=%lu pairing=%lu "
                   "waveform=%s durationMs=%lu full=%lu partial=%lu "
                   "partialsSinceFull=%u unchanged=%lu ms=%lu\n",
-        (unsigned long)s.presented, (unsigned long)s.context,
+        (unsigned long)s.presented,
+        (unsigned long)s.compositionGeneration,
+        (unsigned long)s.acceptedGpsSequence,
+        (unsigned long)s.baseCameraSequence,
+        (unsigned long)s.context,
         (unsigned long)s.pairingGeneration, waveform,
         (unsigned long)(s.lastPresentationHadWaveform
                             ? s.lastWaveformDurationMs

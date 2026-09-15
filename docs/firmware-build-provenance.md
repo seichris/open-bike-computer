@@ -106,3 +106,95 @@ developer build latency.
 The JSON build-manifest schema, runtime-lock schema, core-cache schema,
 flash-plan schema, factory-bundle schema, and factory-release schema remain the
 authoritative structured contracts for their respective boundaries.
+
+## AMOLED equivalence evidence
+
+An e-paper-only change must not infer AMOLED isolation from successful builds
+or from whole-image hashes. Build the baseline and candidate Git identities
+through `tools/build_firmware.py` for these four environments:
+
+```text
+WAVESHARE_AMOLED_175
+WAVESHARE_AMOLED_175_PRODUCTION
+WAVESHARE_AMOLED_206
+WAVESHARE_AMOLED_206_PRODUCTION
+```
+
+For each build, use the exact recorded compiler command to preprocess these
+shared translation units with `-E -P` (or remove compiler line markers before
+capture):
+
+```text
+lib/ble_navigation/ble_navigation.cpp
+lib/epaper_display/epaper_display.cpp
+lib/gui/src/epaper_ui.cpp
+lib/gui/src/mainScr.cpp
+lib/maps/src/maps.cpp
+```
+
+For a complete local or CI capture, the qualification helper performs the
+required wrapper build, creates the compilation database inside that build's
+locked deterministic environment, runs the five recorded compiler commands,
+then rebuilds through the wrapper before capturing the final attested objects
+and linker map:
+
+```sh
+python3 tools/qualify_amoled_equivalence.py \
+  --project-dir . \
+  --environment WAVESHARE_AMOLED_175 \
+  --preprocessing-dir /evidence/baseline-175-preprocessed \
+  --output /evidence/baseline-175.json \
+  --commands-output /evidence/baseline-175-commands.json
+```
+
+The second verified build is mandatory because PlatformIO's compilation-
+database target executes package setup. The helper never treats introspected
+package state as the final attestation. Outputs and preprocessing directories
+are create-only.
+
+Capture each side after its final wrapper build:
+
+```sh
+python3 tools/compare_amoled_artifacts.py capture \
+  --project-dir . \
+  --environment WAVESHARE_AMOLED_175 \
+  --objcopy .pio/open-bike-build/platformio/WAVESHARE_AMOLED_175/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp32s3-elf-objcopy \
+  --preprocessed lib/ble_navigation/ble_navigation.cpp=/evidence/ble.ii \
+  --preprocessed lib/epaper_display/epaper_display.cpp=/evidence/display.ii \
+  --preprocessed lib/gui/src/epaper_ui.cpp=/evidence/epaper-ui.ii \
+  --preprocessed lib/gui/src/mainScr.cpp=/evidence/main.ii \
+  --preprocessed lib/maps/src/maps.cpp=/evidence/maps.ii \
+  --output /evidence/baseline-175.json
+```
+
+Repeat for the candidate and compare the create-only evidence files:
+
+```sh
+python3 tools/compare_amoled_artifacts.py compare \
+  --baseline /evidence/baseline-175.json \
+  --candidate /evidence/candidate-175.json \
+  --output /evidence/report-175.json
+```
+
+The gate requires identical source-independent locked runtime/core/dependency
+identities and equivalent compiler output. Preprocessed outputs have compiler
+line markers and blank lines removed, but no nonblank source text is rewritten.
+Every application object except the firmware-metadata object is compared after
+the locked target `objcopy --strip-debug` removes source-location-only DWARF;
+exact Git-identity and deterministic source-timestamp literals are replaced by
+same-length sentinels. The linker-map hash retains only the non-zero-address
+allocated section blocks, including their code/data symbols, after replacing
+the absolute project-root prefix and those same provenance literals. These
+normalizations remove evidence that must differ between commits without
+discarding linked program bytes, relocations, symbols, sizes, or addresses.
+
+The source-derived `libraryDependenciesSha256` and mutable installed-tree hashes
+inside `coreAttestation` are validated by each build wrapper invocation but are
+not compared across commits. Cross-commit evidence instead compares the
+source-independent `coreInputKey`, immutable tool/package/config attestation
+fields, runtime lock, managed-component identity, partitions, and bootstrap
+images. The sole whole-object exclusion remains
+`*/firmware_metadata/firmware_metadata.cpp.o`. Whole firmware images are not
+compared because they embed the exact Git identity and source timestamp. Record
+both source identities, preprocessing and normalization commands, evidence JSON
+files, exclusions, object counts, and all four results in the pull request.
