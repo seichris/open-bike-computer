@@ -318,6 +318,70 @@ enum Tests {
             f.link.directRidePreparationDidRespond(request: try! .init(preparationID: f.id, operation: .prepare, deviceID: "00112233445566778899aabbccddeeff"), response: .init(requestID: UUID(), accepted: true))
             expect(f.link.testPreparationID == successor && !f.link.testPreparationAccepted, "delayed prepare reply ignored")
         }
+        await run("phone reconciliation waits for restored demand") {
+            let suite = "WatchLinkReconciliation-\(UUID())"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let preparationID = UUID()
+            WatchDeviceLink.testInstallRestoredPreparation(
+                defaults: defaults,
+                preparationID: preparationID
+            )
+            let link = WatchDeviceLink(
+                credentialStore: WatchControllerCredentialStore(),
+                defaults: defaults,
+                sleep: { _ in }
+            )
+            defer { link.testDispose() }
+            var releases: [UUID] = []
+            link.onDirectRidePreparationChange = { operation, _, identity in
+                if operation == .release { releases.append(identity) }
+                return .submitted
+            }
+            let request = try! WatchDirectRideReconciliationRequestV1(
+                preparationID: preparationID,
+                deviceID: "00112233445566778899aabbccddeeff"
+            )
+            link.requestPhonePreparationReconciliation(request)
+            expect(releases.isEmpty,
+                   "reconciliation cannot release before ride restoration completes")
+            expect(link.testPendingReconciliation == request,
+                   "a pre-restoration reconciliation is persisted")
+            link.completeInitialDemandRestoration()
+            expect(releases == [preparationID],
+                   "idle restoration durably releases the exact phone handoff")
+            expect(link.testPendingReconciliation == nil && link.testIntent == nil,
+                   "successful reconciliation clears both persisted intents")
+        }
+        await run("phone reconciliation cannot steal an active Watch ride") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            let request = try! WatchDirectRideReconciliationRequestV1(
+                preparationID: f.id,
+                deviceID: "00112233445566778899aabbccddeeff"
+            )
+            f.link.requestPhonePreparationReconciliation(request)
+            expect(f.releases.isEmpty && f.link.testPreparationID == f.id,
+                   "active demand retains the current handoff")
+            f.stop()
+            f.link.testDrop(f.peer)
+            expect(f.releases == [f.id],
+                   "the pending request completes after the active ride ends")
+        }
+        await run("old reconciliation cannot release a successor ride") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            let oldID = UUID()
+            let request = try! WatchDirectRideReconciliationRequestV1(
+                preparationID: oldID,
+                deviceID: "00112233445566778899aabbccddeeff"
+            )
+            f.link.requestPhonePreparationReconciliation(request)
+            expect(f.releases == [oldID],
+                   "the Watch releases only the stale requested identity")
+            expect(f.link.testPreparationID == f.id && f.link.testIntent?.operation == .prepare,
+                   "the active successor preparation remains intact")
+        }
         #endif
         #if FIXED_LIFECYCLE
         await run("reducer role/phase/generation regression matrix") {

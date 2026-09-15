@@ -29,6 +29,9 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     private var intentionallyCancelledRouteTransferIDs =
         Set<ObjectIdentifier>()
     private var pendingControllerRevocations: [WatchControllerRequestV1] = []
+    private var pendingDirectRideReconciliations:
+        [WatchDirectRideReconciliationRequestV1] = []
+    private var directRideReconciliationRetryTask: Task<Void, Never>?
     private var coordinateFavoritesEnvelope: CoordinateFavoritesEnvelopeV1?
     private var routeDisplayNamesEnvelope:
         WatchRouteDisplayNamesEnvelopeV1?
@@ -36,6 +39,10 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         WatchSelectedBikeComputerV1?
     private static let pendingControllerRevocationsDefaultsKey =
         "watchController.pendingRevocations.v1"
+    private static let pendingDirectRideReconciliationsDefaultsKey =
+        "watchDirectRide.pendingReconciliations.v1"
+    private static let inFlightDirectRideReconciliationsDefaultsKey =
+        "watchDirectRide.inFlightReconciliations.v1"
     private static let coordinateFavoritesDefaultsKey =
         "watchNavigation.coordinateFavoritesEnvelope.v1"
     private static let routeDisplayNamesDefaultsKey =
@@ -90,6 +97,7 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         )
         super.init()
         loadPendingControllerRevocations()
+        loadPendingDirectRideReconciliations()
         if let data = defaults.data(
             forKey: Self.coordinateFavoritesDefaultsKey
         ) {
@@ -374,6 +382,26 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         }
     }
 
+    nonisolated func queueWatchDirectRideReconciliation(
+        _ request: WatchDirectRideReconciliationRequestV1
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self, (try? request.validated()) != nil else { return }
+            self.pendingDirectRideReconciliations.removeAll {
+                $0.deviceID == request.deviceID &&
+                    $0.preparationID == request.preparationID
+            }
+            self.pendingDirectRideReconciliations.append(request)
+            if self.pendingDirectRideReconciliations.count > 16 {
+                self.pendingDirectRideReconciliations.removeFirst(
+                    self.pendingDirectRideReconciliations.count - 16
+                )
+            }
+            self.persistPendingDirectRideReconciliations()
+            self.flushPendingDirectRideReconciliations()
+        }
+    }
+
     private func loadPendingControllerRevocations() {
         guard let data = defaults.data(
             forKey: Self.pendingControllerRevocationsDefaultsKey
@@ -404,6 +432,34 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         )
     }
 
+    private func loadPendingDirectRideReconciliations() {
+        guard let data = defaults.data(
+            forKey: Self.pendingDirectRideReconciliationsDefaultsKey
+        ), let requests = try? PropertyListDecoder().decode(
+            [WatchDirectRideReconciliationRequestV1].self,
+            from: data
+        ) else { return }
+        pendingDirectRideReconciliations = requests.filter {
+            (try? $0.validated()) != nil
+        }
+    }
+
+    private func persistPendingDirectRideReconciliations() {
+        if pendingDirectRideReconciliations.isEmpty {
+            defaults.removeObject(
+                forKey: Self.pendingDirectRideReconciliationsDefaultsKey
+            )
+            return
+        }
+        guard let data = try? PropertyListEncoder().encode(
+            pendingDirectRideReconciliations
+        ) else { return }
+        defaults.set(
+            data,
+            forKey: Self.pendingDirectRideReconciliationsDefaultsKey
+        )
+    }
+
     private func flushPendingControllerRevocations() {
         guard let session,
               session.activationState == .activated,
@@ -421,6 +477,126 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             queuedRequestIDs.contains($0.requestID)
         }
         persistPendingControllerRevocations()
+    }
+
+    private func flushPendingDirectRideReconciliations() {
+        guard let session,
+              session.activationState == .activated,
+              session.isPaired,
+              session.isWatchAppInstalled else { return }
+        reconcileDirectRideReconciliationsInFlight(using: session)
+        let inFlight = defaults.array(
+            forKey: Self.inFlightDirectRideReconciliationsDefaultsKey
+        ) as? [Data] ?? []
+        guard inFlight.isEmpty else { return }
+        let queued = pendingDirectRideReconciliations.compactMap { request in
+            (try? request.encoded()).map { (request, $0) }
+        }
+        guard !queued.isEmpty else { return }
+        let queuedRequestIDs = Set(queued.map { $0.0.requestID })
+        let queuedPayloads = queued.map { $0.1 }
+        defaults.set(
+            queuedPayloads,
+            forKey: Self.inFlightDirectRideReconciliationsDefaultsKey
+        )
+        pendingDirectRideReconciliations.removeAll {
+            queuedRequestIDs.contains($0.requestID)
+        }
+        persistPendingDirectRideReconciliations()
+        for (_, payload) in queued {
+            let message = [
+                WatchDirectRideReconciliationRequestV1.userInfoPayloadKey:
+                    payload,
+            ]
+            session.transferUserInfo(message)
+            if session.isReachable {
+                session.sendMessage(
+                    message,
+                    replyHandler: nil,
+                    errorHandler: nil
+                )
+            }
+        }
+    }
+
+    private func reconcileDirectRideReconciliationsInFlight(
+        using session: WCSession
+    ) {
+        let outstanding = session.outstandingUserInfoTransfers.compactMap {
+            $0.userInfo[
+                WatchDirectRideReconciliationRequestV1.userInfoPayloadKey
+            ] as? Data
+        }.filter {
+            (try? WatchDirectRideReconciliationRequestV1.decode($0)) != nil
+        }
+        let recorded = defaults.array(
+            forKey: Self.inFlightDirectRideReconciliationsDefaultsKey
+        ) as? [Data] ?? []
+        for abandoned in recorded where !outstanding.contains(abandoned) {
+            requeueDirectRideReconciliation(abandoned)
+        }
+        if outstanding.isEmpty {
+            defaults.removeObject(
+                forKey: Self.inFlightDirectRideReconciliationsDefaultsKey
+            )
+        } else {
+            defaults.set(
+                outstanding,
+                forKey: Self.inFlightDirectRideReconciliationsDefaultsKey
+            )
+        }
+    }
+
+    private func directRideReconciliationDidFinish(
+        data: Data,
+        error: Error?
+    ) {
+        var inFlight = defaults.array(
+            forKey: Self.inFlightDirectRideReconciliationsDefaultsKey
+        ) as? [Data] ?? []
+        if let index = inFlight.firstIndex(of: data) {
+            inFlight.remove(at: index)
+        }
+        if inFlight.isEmpty {
+            defaults.removeObject(
+                forKey: Self.inFlightDirectRideReconciliationsDefaultsKey
+            )
+        } else {
+            defaults.set(
+                inFlight,
+                forKey: Self.inFlightDirectRideReconciliationsDefaultsKey
+            )
+        }
+        if error != nil {
+            requeueDirectRideReconciliation(data)
+            scheduleDirectRideReconciliationRetry()
+            return
+        }
+        guard inFlight.isEmpty else { return }
+        flushPendingDirectRideReconciliations()
+    }
+
+    private func requeueDirectRideReconciliation(_ data: Data) {
+        guard let request = try?
+                WatchDirectRideReconciliationRequestV1.decode(data) else {
+            return
+        }
+        pendingDirectRideReconciliations.removeAll {
+            $0.deviceID == request.deviceID &&
+                $0.preparationID == request.preparationID
+        }
+        pendingDirectRideReconciliations.append(request)
+        persistPendingDirectRideReconciliations()
+    }
+
+    private func scheduleDirectRideReconciliationRetry() {
+        guard directRideReconciliationRetryTask == nil else { return }
+        directRideReconciliationRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard let self else { return }
+            self.directRideReconciliationRetryTask = nil
+            self.flushPendingDirectRideReconciliations()
+        }
     }
 
     private func sendWatchControllerRequestOnMain(
@@ -624,6 +800,7 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         )
         if activated {
             flushPendingControllerRevocations()
+            flushPendingDirectRideReconciliations()
             if let coordinateFavoritesEnvelope {
                 try? publishCoordinateFavorites(coordinateFavoritesEnvelope)
             }
@@ -782,6 +959,22 @@ extension PhoneWatchConnectivityCoordinator: WCSessionDelegate {
     ) {
         Task { @MainActor [weak self] in
             self?.finishFileTransfer(fileTransfer, error: error)
+        }
+    }
+
+    nonisolated func session(
+        _ session: WCSession,
+        didFinish userInfoTransfer: WCSessionUserInfoTransfer,
+        error: Error?
+    ) {
+        guard let data = userInfoTransfer.userInfo[
+            "watchDirectRideReconciliationRequestV1"
+        ] as? Data else { return }
+        Task { @MainActor [weak self] in
+            self?.directRideReconciliationDidFinish(
+                data: data,
+                error: error
+            )
         }
     }
 }
