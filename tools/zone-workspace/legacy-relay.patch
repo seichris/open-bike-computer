@@ -1,0 +1,35 @@
+diff --git a/ios-app/BikeComputer/BikeComputer/Managers/WorkoutDeviceRelay.swift b/ios-app/BikeComputer/BikeComputer/Managers/WorkoutDeviceRelay.swift
+index b486daf..a936673 100644
+--- a/ios-app/BikeComputer/BikeComputer/Managers/WorkoutDeviceRelay.swift
++++ b/ios-app/BikeComputer/BikeComputer/Managers/WorkoutDeviceRelay.swift
+@@ -522,6 +522,10 @@ final class WorkoutDeviceRelay {
+ 
+         bleManager.$supportsWorkoutZonesV1
+             .removeDuplicates()
++            // The initial capability value is not a transport transition.
++            // In particular, initial false must not reprioritize legacy data
++            // or erase an already primed scheduler under queue backpressure.
++            .dropFirst()
+             .sink { [weak self] _ in
+                 self?.scheduler.transportDidBecomeUnavailable()
+                 self?.requestEvaluation()
+ diff --git a/ios-app/scripts/run-navigation-tests.sh b/ios-app/scripts/run-navigation-tests.sh
+index 5bdf461..bb1dd96 100755
+--- a/ios-app/scripts/run-navigation-tests.sh
++++ b/ios-app/scripts/run-navigation-tests.sh
+@@ -121,6 +121,7 @@ xcrun swiftc \
+   ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift \
+   ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift \
+   ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift \
++  ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift \
+   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
+   ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
+   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
+@@ -225,6 +226,7 @@ xcrun swiftc \
+   ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift \
+   ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift \
+   ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift \
++  ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift \
+   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
+   ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
+   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
