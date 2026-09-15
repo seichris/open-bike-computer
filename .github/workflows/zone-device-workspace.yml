@@ -1,0 +1,26 @@
+name: Zone device workspace
+on:
+  push:
+    branches: [work/zone-device-transport-20260915]
+    paths: [.github/workflows/zone-device-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 5a6c83a0729c5ef99168631b5999fac2e786919d
+          persist-credentials: false
+      - name: Archive source
+        run: |
+          mkdir -p "$RUNNER_TEMP/zone-source"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/zone-source/source.tar.gz" HEAD
+          git rev-parse HEAD > "$RUNNER_TEMP/zone-source/SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: zone-pr-source
+          path: ${{ runner.temp }}/zone-source
+          retention-days: 2
