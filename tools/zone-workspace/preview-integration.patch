@@ -1,0 +1,228 @@
+diff --git a/esp32/tools/tests/test_world_radio_contract_reuse.py b/esp32/tools/tests/test_world_radio_contract_reuse.py
+index 2cbc5de..587c9e0 100644
+--- a/esp32/tools/tests/test_world_radio_contract_reuse.py
++++ b/esp32/tools/tests/test_world_radio_contract_reuse.py
+@@ -22,7 +22,12 @@ class WorldRadioContractReuseTests(unittest.TestCase):
+         })
+         self.assertEqual(generator.SWIFT_OUTPUT.read_text(), generator.render_swift(contract))
+         self.assertEqual(generator.CPP_OUTPUT.read_text(), generator.render_cpp(contract))
+-        self.assertEqual(contract["capabilities"]["current_client_version"], 25)
++        # Freeze this feature's wire requirement, not the latest client version:
++        # adding an unrelated capability must not invalidate World Radio.
++        radio = contract["capabilities"]["features"]["world_radio"]
++        self.assertEqual(radio, {"bit": 27, "minimum_client_version": 25})
++        self.assertGreaterEqual(contract["capabilities"]["current_client_version"],
++                                radio["minimum_client_version"])
+ 
+     def test_invalid_screen_assignments_fail_closed(self):
+         for values in ({"map": 0, "radio": 0}, {"map": -1}, {"map": 8},
+diff --git a/ios-app/BikeComputer/BikeComputer/Models/RideStatsPreviewSpec.swift b/ios-app/BikeComputer/BikeComputer/Models/RideStatsPreviewSpec.swift
+index c6740d5..63a939b 100644
+--- a/ios-app/BikeComputer/BikeComputer/Models/RideStatsPreviewSpec.swift
++++ b/ios-app/BikeComputer/BikeComputer/Models/RideStatsPreviewSpec.swift
+@@ -47,7 +47,14 @@ nonisolated struct RideStatsPreviewSpec: Decodable {
+             ? firmwareTarget : "WAVESHARE_AMOLED_175"
+         // Keep the whole example coherent: choosing a sensor widget enables
+         // that sensor's sample data in all Smart fields, not only its own row.
+-        let sensors = (widgets.contains(9) ? 1 : 0) | (widgets.contains(10) ? 2 : 0)
++        let selected = widgets.compactMap(RideBLERideStatsWidgetV1.init(rawValue:))
++        let hasPower = selected.contains {
++            switch $0 {
++            case .power, .powerZone, .powerZoneTime, .powerZoneRange: return true
++            default: return false
++            }
++        }
++        let sensors = (hasPower ? 1 : 0) | (selected.contains(.cadence) ? 2 : 0)
+         return boards["\(target):\(sensors)"]
+     }
+ }
+diff --git a/tools/generate_ride_stats_preview.py b/tools/generate_ride_stats_preview.py
+index 7a5f600..7af6540 100644
+--- a/tools/generate_ride_stats_preview.py
++++ b/tools/generate_ride_stats_preview.py
+@@ -27,6 +27,11 @@ FUNCTIONS = (
+     'updateConfigurableZone', 'updateConfigurableSlots',
+ )
+ INPUTS = (
++    'protocol/ride-ble-contract-v1.json',
++    'esp32/lib/ble_navigation/ride_ble_protocol.generated.hpp',
++    'esp32/lib/ble_navigation/screen_configuration_protocol.hpp',
++    'esp32/lib/ble_navigation/workout_zone_wire.generated.hpp',
++    'esp32/lib/ble_navigation/workout_zone_protocol.hpp',
+     'esp32/lib/gui/src/rideMetricTypography.hpp',
+     'esp32/lib/gui/src/rideMetricFontSelection.hpp',
+     'esp32/lib/gui/src/rideTelemetryLayout.hpp',
+diff --git a/tools/ride_stats_preview/emit_preview.cpp b/tools/ride_stats_preview/emit_preview.cpp
+index 5911e78..3674cbb 100644
+--- a/tools/ride_stats_preview/emit_preview.cpp
++++ b/tools/ride_stats_preview/emit_preview.cpp
+@@ -53,7 +53,28 @@ static ride_telemetry_presenter::ViewModel sampleModel() {
+   model.activeEnergyTenthsKilocalorie = {true,4120};
+   // The default smart fields resolve to elapsed/altitude, as in the report.
+   // Optional power/cadence values are enabled for their explicit previews.
+-  if (previewSensorMask & 1) model.cyclingPowerWatts = {true,245};
++  // Synthetic display examples only, never a user profile or workout. The
++  // ordinary heart strip keeps its existing five-band sample. Native power
++  // demonstrates six zones without borrowing the heart-rate definition.
++  auto &heartZones = model.zones.heartRate;
++  heartZones.received = true;
++  heartZones.source = workout_zone_wire::SOURCE_BICINO;
++  heartZones.count = 5;
++  heartZones.current = 2;
++  heartZones.flags = workout_zone_wire::FLAG_DURATIONS;
++  heartZones.boundaries = {114,133,152,171};
++  heartZones.milliseconds = {600000,1080000,1200000,300000,60000};
++  if (previewSensorMask & 1) {
++    model.cyclingPowerWatts = {true,245};
++    auto &powerZones = model.zones.power;
++    powerZones.received = true;
++    powerZones.source = workout_zone_wire::SOURCE_HEALTHKIT_SYSTEM;
++    powerZones.count = 6;
++    powerZones.current = 3;
++    powerZones.flags = workout_zone_wire::FLAG_DURATIONS;
++    powerZones.boundaries = {150,200,250,300,350};
++    powerZones.milliseconds = {900000,1200000,480000,300000,90000,30000};
++  }
+   if (previewSensorMask & 2) model.cyclingCadenceTenthsRpm = {true,875};
+   return model;
+ }
+@@ -167,7 +188,7 @@ int main(int argc,char **argv) {
+         << ",\"round\":" << (board ? "false" : "true") << ",\"normal\":{";
+     bool first=true;
+     for (int slot=0;slot<7;++slot) {
+-      for (int widget=0;widget<=16;++widget) {
++      for (int widget=0;widget<=static_cast<int>(Widget::PowerZoneRange);++widget) {
+         if(!first) out << ',';
+         first=false;
+         previewLayout.slots.fill(Widget::Empty);
+@@ -179,7 +200,7 @@ int main(int argc,char **argv) {
+     // Include every right widget whose *resolved* semantics can be altitude.
+     // Rendering the entire row also reproduces font changes to a left heart.
+     for (int row=0;row<3;++row) {
+-      for (int left=0;left<=16;++left) {
++      for (int left=0;left<=static_cast<int>(Widget::PowerZoneRange);++left) {
+         for (int right : {7,16}) {
+           if(!first) out << ',';
+         first=false;
+diff --git a/tools/ride_stats_preview/spec_contract.swift b/tools/ride_stats_preview/spec_contract.swift
+index 04f723a..a4d36f4 100644
+--- a/tools/ride_stats_preview/spec_contract.swift
++++ b/tools/ride_stats_preview/spec_contract.swift
+@@ -16,8 +16,8 @@ struct PreviewSpecContract {
+         precondition(round.tiles(for: defaults).last?.fonts[5] == 38)
+         precondition(round.tiles(for: defaults).last?.fonts[6] == 38)
+         for target in ["WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"] {
+-            for widget: UInt8 in 0...16 {
+-                let widgets = Array(repeating: widget, count: 7)
++            for widget in RideBLERideStatsWidgetV1.allCases {
++                let widgets = Array(repeating: widget.rawValue, count: 7)
+                 let board = spec.board(firmwareTarget: target, widgets: widgets)!
+                 let tiles = board.tiles(for: widgets)
+                 precondition(!tiles.isEmpty)
+@@ -42,6 +42,19 @@ struct PreviewSpecContract {
+         let smartWithoutPower = round.pairs["2:15:16"]!.sprite
+         let power = spec.board(firmwareTarget: "WAVESHARE_AMOLED_175", widgets: withPower)!
+         precondition(power.pairs["2:15:16"]!.sprite != smartWithoutPower)
++        for target in ["WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"] {
++            for widget in [RideBLERideStatsWidgetV1.powerZone, .powerZoneTime, .powerZoneRange] {
++                var widgets = defaults
++                widgets[0] = widget.rawValue
++                let selected = spec.board(firmwareTarget: target, widgets: widgets)!
++                precondition(selected.normal["0:9"]!.sprite == spec.boards["\(target):1"]!.normal["0:9"]!.sprite)
++                precondition(selected.normal["0:\(widget.rawValue)"]!.sprite != nil)
++                precondition(selected.normal["0:\(widget.rawValue)"]!.sprite != spec.boards["\(target):0"]!.normal["0:\(widget.rawValue)"]!.sprite)
++                widgets[1] = RideBLERideStatsWidgetV1.cadence.rawValue
++                let combined = spec.board(firmwareTarget: target, widgets: widgets)!
++                precondition(combined.normal["0:10"]!.sprite == spec.boards["\(target):3"]!.normal["0:10"]!.sprite)
++            }
++        }
+         print("Ride Stats Swift preview composition passed")
+     }
+ }
+diff --git a/tools/tests/test_ride_stats_preview.py b/tools/tests/test_ride_stats_preview.py
+index 0866b3a..8d4ed50 100644
+--- a/tools/tests/test_ride_stats_preview.py
++++ b/tools/tests/test_ride_stats_preview.py
+@@ -23,6 +23,8 @@ class RideStatsPreviewTests(unittest.TestCase):
+     @classmethod
+     def setUpClass(cls):
+         cls.spec = json.loads(SPEC_PATH.read_text())
++        contract = json.loads((ROOT / 'protocol/ride-ble-contract-v1.json').read_text())
++        cls.widget_ids = set(contract['ride_stats_widgets'].values())
+ 
+     def test_generated_renderer_inputs_are_current(self):
+         module_spec = importlib.util.spec_from_file_location(
+@@ -44,10 +46,10 @@ class RideStatsPreviewTests(unittest.TestCase):
+                 self.assertEqual((board['width'], board['height'], board['round']),
+                                  (width, height, round_screen))
+                 self.assertEqual(set(board['normal']),
+-                                 {f'{slot}:{widget}' for slot in range(7) for widget in range(17)})
++                                 {f'{slot}:{widget}' for slot in range(7) for widget in self.widget_ids})
+                 self.assertEqual(set(board['pairs']),
+                                  {f'{row}:{left}:{right}' for row in range(3)
+-                                  for left in range(17) for right in (7, 16)})
++                                  for left in self.widget_ids for right in (7, 16)})
+                 for row in range(3):
+                     for left in (1, 2, 4, 5, 6, 8, 11, 12, 13, 14, 15):
+                         pair = board['pairs'][f'{row}:{left}:7']
+@@ -90,6 +92,7 @@ class RideStatsPreviewTests(unittest.TestCase):
+             binary = str(Path(directory) / 'spec')
+             subprocess.run([
+                 compiler, '-parse-as-library', '-o', binary,
++                str(ROOT / 'ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift'),
+                 str(ROOT / 'ios-app/BikeComputer/BikeComputer/Models/RideStatsPreviewSpec.swift'),
+                 str(ROOT / 'tools/ride_stats_preview/spec_contract.swift')
+             ], check=True, timeout=90)
+diff --git a/tools/tests/test_workout_stats_rendering.py b/tools/tests/test_workout_stats_rendering.py
+index 0ce4aa3..9a75079 100644
+--- a/tools/tests/test_workout_stats_rendering.py
++++ b/tools/tests/test_workout_stats_rendering.py
+@@ -233,7 +233,12 @@ int main() {
+       assert(fresh.font==label.font && label.align==LV_TEXT_ALIGN_CENTER);
+       for (size_t active=0;active<5;++active) {
+         const auto zone=makeZoneStripLayout(metric,layout.screenWidth,active);
+-        for (const auto r : zone.segments) {
++        for (size_t index=0;index<zone.segments.size();++index) {
++          const auto r=zone.segments[index];
++          if (index>=kHeartRateZoneCount) {
++            assert(r.x==0 && r.y==0 && r.width==0 && r.height==0);
++            continue; // Spare capacity is intentionally not a visible segment.
++          }
+           assert(fits(r,layout.screenWidth,layout.screenHeight));
+           if (layout.screenWidth==466) assert(cornersFitCircle(r,466));
+         }
+@@ -243,6 +248,34 @@ int main() {
+         setMetricValueIfChanged(&label,"ZONE 5",zone.label,Role::Zone);
+         assert(label.text=="ZONE 5"); assertVisible(label);
+       }
++      // Every supported configuration and active ordinal on every slot and
++      // both boards. Preserve the original five-zone checks above as well.
++      for (size_t count=3;count<=kMaximumZoneCount;++count) {
++        for (size_t active=0;active<count;++active) {
++          for (bool showHeart : {false,true}) {
++            const auto zone=makeZonePresentation(
++                metric,layout.screenWidth,-2,static_cast<int8_t>(active),count,showHeart);
++            assert(zone.labelVisible);
++            assert(zone.heartVisible==(showHeart && count==5));
++            for (size_t index=0;index<zone.segments.size();++index) {
++              assert(zone.segmentVisible[index]==(index<count));
++              const auto r=zone.segments[index];
++              if (index>=count) {
++                assert(r.x==0 && r.y==0 && r.width==0 && r.height==0);
++                continue;
++              }
++              assert(fits(r,layout.screenWidth,layout.screenHeight));
++              if (layout.screenWidth==466) assert(cornersFitCircle(r,466));
++            }
++            if (zone.heartVisible) {
++              assert(fits(zone.heart,layout.screenWidth,layout.screenHeight));
++              if (layout.screenWidth==466) assert(cornersFitCircle(zone.heart,466));
++            }
++            setMetricValueIfChanged(&label,zone.labelText.data(),zone.label,Role::Zone);
++            assert(label.text==zone.labelText.data()); assertVisible(label);
++          }
++        }
++      }
+       setMetricValueIfChanged(&label,"unrepresentable value longer than any slot",value,role);
+       assert(label.text=="--"); assertVisible(label);
+     }
