@@ -47,6 +47,34 @@ public:
     uint32_t blockLoadMs = 0;
   };
 
+#ifdef WAVESHARE_EPAPER_397
+  struct EpaperCameraState {
+    bool hasBase = false;
+    bool baseCompatible = false;
+    bool mapCoverageAvailable = false;
+    bool riderProjected = false;
+    bool riderInsideViewport = false;
+    double riderOffsetPixels = 0.0;
+    double headingDeltaDegrees = 0.0;
+    uint32_t baseAcceptedAtMs = 0;
+    uint32_t baseFixSequence = 0;
+    uint32_t baseCameraSequence = 0;
+    bool renderRunning = false;
+    bool successorPending = false;
+    uint32_t latestRequestedFixSequence = 0;
+    bool recoveryPending = false;
+  };
+
+  struct EpaperFramePublication {
+    uint32_t cameraSequence = 0;
+    uint32_t capturedFixSequence = 0;
+    uint32_t capturedFixAtMs = 0;
+    double capturedSpeedKmh = 0.0;
+    double capturedHeadingDegrees = 0.0;
+    bool capturedHeadingValid = false;
+  };
+#endif
+
 private:
   // Render Map
   struct MapTile // Tile Map structure
@@ -217,6 +245,13 @@ private:
     double rotationRad = 0.0;
     uint32_t cancellationGeneration = 0;
     bool birdsEye = false;
+#ifdef WAVESHARE_EPAPER_397
+    uint32_t capturedFixSequence = 0;
+    uint32_t capturedFixAtMs = 0;
+    double capturedSpeedKmh = 0.0;
+    double capturedHeadingDegrees = 0.0;
+    bool capturedHeadingValid = false;
+#endif
   };
 
   struct RenderResult {
@@ -251,6 +286,13 @@ private:
     bool mapFound = false;
     bool followPosition = true;
     RasterDiagnostics raster{};
+#ifdef WAVESHARE_EPAPER_397
+    uint32_t capturedFixSequence = 0;
+    uint32_t capturedFixAtMs = 0;
+    double capturedSpeedKmh = 0.0;
+    double capturedHeadingDegrees = 0.0;
+    bool capturedHeadingValid = false;
+#endif
   };
 
   MemCache memCache;               // Worker-owned memory cache
@@ -484,6 +526,13 @@ private:
   bool stableCameraHidden = false;
   lv_obj_t *cameraStatusLabel = nullptr;
   renderer_diagnostics::CameraSample cameraEvidence{};
+#ifdef WAVESHARE_EPAPER_397
+  double epaperCameraHeadingDegrees_ = 0.0;
+  bool epaperCameraHeadingValid_ = false;
+  uint32_t visibleFrameAcceptedAtMs_ = 0;
+  EpaperFramePublication framePublication_{};
+  bool epaperRecoveryPending_ = false;
+#endif
   std::atomic<bool> renderWorkerShutdown{false};
   std::atomic<bool> renderWorkerExited{true};
   std::atomic<bool> renderWorkerRestartAfterExit{false};
@@ -657,6 +706,14 @@ public:
   bool serviceRenderPipeline(uint32_t nowMs);
   bool hasPendingRenderForCurrentScreen() const;
   bool takeFramePublication();
+#ifdef WAVESHARE_EPAPER_397
+  bool takeFramePublication(EpaperFramePublication &publication);
+  EpaperCameraState captureEpaperCameraState() const;
+  void setEpaperCameraHeading(double degrees, bool valid);
+  uint32_t epaperVisibleCameraSequence() const {
+    return publishedMapFrame ? visibleRenderResult.version.sequence : 0;
+  }
+#endif
   bool takeRenderFailure();
   bool takeMapAvailabilityTransition(MapAvailabilityTransition &transition);
   bool hasPublishedMapFrame() const { return publishedMapFrame; }

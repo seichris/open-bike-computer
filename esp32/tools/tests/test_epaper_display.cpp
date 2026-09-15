@@ -121,18 +121,24 @@ int main() {
   mailbox.bind(a, b, c);
   assert(mailbox.beginWrite() == a);
   assert(!mailbox.claim().pixels); // Cannot observe incomplete conversion.
-  assert(mailbox.publish(7, 1) == 1);
+  assert(mailbox.publish(7, 1, {11, 21, 31}) == 1);
   const auto first = mailbox.claim();
-  assert(first.pixels == a && first.pairing == 7 && first.context == 1);
+  assert(first.pixels == a && first.pairing == 7 && first.context == 1 &&
+         first.provenance.composition == 11 &&
+         first.provenance.acceptedGps == 21 &&
+         first.provenance.baseCamera == 31);
   assert(mailbox.beginWrite() == b);
   assert(mailbox.publish(8) == 2);
   assert(mailbox.beginWrite() == b); // Latest frame replaces the pending one.
-  assert(mailbox.publish(9, 2) == 3);
+  assert(mailbox.publish(9, 2, {12, 22, 32}) == 3);
   assert(!mailbox.claim().pixels); // Only one immutable flight.
   mailbox.finish(true);
   assert(mailbox.shown() == a);
   const auto latest = mailbox.claim();
-  assert(latest.pixels == b && latest.generation == 3 && latest.pairing == 9 && latest.context == 2);
+  assert(latest.pixels == b && latest.generation == 3 && latest.pairing == 9 &&
+         latest.context == 2 && latest.provenance.composition == 12 &&
+         latest.provenance.acceptedGps == 22 &&
+         latest.provenance.baseCamera == 32);
   mailbox.finish(false);
   assert(mailbox.shown() == a); // Timeout never advances visible history.
 
