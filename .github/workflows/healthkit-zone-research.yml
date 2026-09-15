@@ -1,4 +1,4 @@
-name: Native HealthKit zone follow-up validation
+name: Native HealthKit zone final validation
 on:
   push:
     branches: [work/healthkit-zones-research-20260915]
@@ -17,91 +17,48 @@ jobs:
         with:
           ref: feat/native-healthkit-workout-zones
       - id: commit
-        name: Complete primary ride panel integration
+        name: Preserve Watch metric pairs and reuse the native power card
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = ec0d0bfd06b099884b5478197227a40dbc069b26
+          test "$(git rev-parse HEAD)" = b28cb0725b35d9d271e6d58183910a04a072c999
           python3 - <<'PY'
           from pathlib import Path
-          def edit(rel, old, new, count=1):
-              p=Path(rel);s=p.read_text();assert s.count(old)==count,(rel,s.count(old));p.write_text(s.replace(old,new))
-          edit('ios-app/BikeComputer/BikeComputer/Views/WorkoutViews.swift', '''                if store.presentation.connectionState == .ended,
-                             snapshot.nativeZones?.heartRate == nil {
-                              HeartRateZoneBreakdown(
-                                  durations: snapshot.heartRateZoneDurations
-                              )
-                          }'''.replace('          ', '', 1), 'UNUSED') if False else None
-          p=Path('ios-app/BikeComputer/BikeComputer/Views/WorkoutViews.swift')
-          s=p.read_text()
-          old='                if store.presentation.connectionState == .ended,\n                   snapshot.nativeZones?.heartRate == nil {\n                    HeartRateZoneBreakdown(\n                        durations: snapshot.heartRateZoneDurations\n                    )\n                }'
-          new='                if store.presentation.connectionState == .ended {\n                    if snapshot.nativeZones?.heartRate == nil {\n                        HeartRateZoneBreakdown(\n                            durations: snapshot.heartRateZoneDurations\n                        )\n                    }\n                }'
-          assert s.count(old)==1;p.write_text(s.replace(old,new))
-          edit('ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift', '    func clearingCurrentZone() -> Self {', '''    /// Cumulative native time in the currently reported zone, not time since
-              /// the last transition. Never synthesize a timer between builder reads.
-              var currentZoneDuration: TimeInterval? {
-                  guard isValid, !isFinal, let currentZone else { return nil }
-                  return secondsByZone[Int(currentZone) - 1]
-              }
+          p=Path('ios-app/BikeComputer/BikeComputerWatch/Views/LiveWorkoutView.swift');s=p.read_text()
+          old='title: manager.snapshot.nativeZones?.heartRate == nil ? "Bicino HR Zone" : "Health HR Zone",'
+          assert s.count(old)==1;s=s.replace(old,'title: "HR Zone",')
+          start=s.index('                    if let native = manager.snapshot.nativeZones?.cyclingPower {')
+          end=s.index('                    metric(\n                        title: "Cadence",',start)
+          block=s[start:end]
+          assert 'title: "Health Power Zone"' in block and block.count('metric(')==1
+          s=s[:start]+s[end:]
+          anchor='                HStack(spacing: 12) {\n                    workoutTime('
+          new='''                Text(
+                              manager.snapshot.nativeZones?.heartRate?.configuration.source.label
+                                  ?? "Bicino zones · configured maximum heart rate"
+                          )
+                          .font(.caption2)
+                          .foregroundStyle(.secondary)
           
-              func clearingCurrentZone() -> Self {''')
-          p=Path('ios-app/BikeComputer/BikeComputer/Views/NavigationDetailsView.swift')
-          s=p.read_text();assert s.count('            HeartRateZoneStrip(currentZone: displayedHeartRateZone)')==2
-          s=s.replace('            HeartRateZoneStrip(currentZone: displayedHeartRateZone)','            workoutZoneViews')
-          old='    private var workoutMetrics: some View {'
-          new='''    @ViewBuilder
-              private var workoutZoneViews: some View {
-                  let native = workoutStore.presentation.snapshot.nativeZones
-                  if let heartRate = native?.heartRate {
-                      WorkoutNativeZoneCard(
-                          group: heartRate, showCurrent: !suppressInstantaneousMetrics
-                      )
-                  } else {
-                      VStack(spacing: 4) {
-                          HeartRateZoneStrip(currentZone: displayedHeartRateZone)
-                          Text("Bicino zones · configured maximum heart rate")
-                              .font(.caption2)
-                              .foregroundStyle(.secondary)
-                      }
-                  }
-                  if let power = native?.cyclingPower {
-                      WorkoutNativeZoneCard(
-                          group: power, showCurrent: !suppressInstantaneousMetrics
-                      )
-                  }
-              }
+                          if let native = manager.snapshot.nativeZones?.cyclingPower {
+                              WorkoutNativeZoneCard(group: native)
+                          }
           
-              private var workoutMetrics: some View {'''
-          assert s.count(old)==1;s=s.replace(old,new)
-          old='    private var displayedHeartRateZoneElapsedTime: TimeInterval? {\n        suppressInstantaneousMetrics\n            ? nil\n            : workoutStore.currentHeartRateZoneElapsedTime\n    }'
-          new='    private var displayedHeartRateZoneElapsedTime: TimeInterval? {\n        guard !suppressInstantaneousMetrics else { return nil }\n        if let native = workoutStore.presentation.snapshot.nativeZones?.heartRate {\n            return native.currentZoneDuration\n        }\n        return workoutStore.currentHeartRateZoneElapsedTime\n    }'
-          assert s.count(old)==1;s=s.replace(old,new);p.write_text(s)
-          edit('ios-app/BikeComputerTests/WorkoutNativeZoneTests.swift', '        print("Native workout zone tests passed (\\(checks) checks)")', '''        let durationGroup = WorkoutNativeZoneSnapshotV1(
-                      configuration: configuration(), secondsByZone: [10, 20, 30, 0, 0],
-                      observedAt: now, currentZone: 2, currentZoneSampleAt: now,
-                      isFinal: false
-                  )
-                  check(durationGroup.currentZoneDuration == 20, "native current time uses the reported zone total")
-                  check(durationGroup.clearingCurrentZone().currentZoneDuration == nil, "unavailable current zone has no current duration")
-                  let finalDurationGroup = WorkoutNativeZoneSnapshotV1(
-                      configuration: configuration(), secondsByZone: [10, 20, 30, 0, 0],
-                      observedAt: now, currentZone: nil, currentZoneSampleAt: nil, isFinal: true
-                  )
-                  check(finalDurationGroup.currentZoneDuration == nil, "a saved summary has no current-zone timer")
-          
-                  print("Native workout zone tests passed (\\(checks) checks)")''')
+                          HStack(spacing: 12) {
+                              workoutTime('''
+          assert s.count(anchor)==1;s=s.replace(anchor,new);p.write_text(s)
           PY
           git diff --check
-          git add ios-app
+          git add ios-app/BikeComputer/BikeComputerWatch/Views/LiveWorkoutView.swift
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'Use native zones and native time-in-zone on the primary ride panel'
+          git commit -m 'Preserve paired Watch metrics and share native power-zone presentation'
           git push origin HEAD:refs/heads/feat/native-healthkit-workout-zones
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   tests:
     needs: prepare
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -131,7 +88,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: native-zone-followup-tests
+          name: native-zone-final-tests
           path: ${{ runner.temp }}/zone-validation
           retention-days: 7
   build:
@@ -154,6 +111,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: native-zone-followup-build
+          name: native-zone-final-build
           path: ${{ runner.temp }}/zone-validation
           retention-days: 7
