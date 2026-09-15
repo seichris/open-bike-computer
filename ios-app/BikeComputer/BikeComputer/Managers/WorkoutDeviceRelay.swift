@@ -522,6 +522,10 @@ final class WorkoutDeviceRelay {
 
         bleManager.$supportsWorkoutZonesV1
             .removeDuplicates()
+            // The initial capability value is not a transport transition.
+            // In particular, initial false must not reprioritize legacy data
+            // or erase an already primed scheduler under queue backpressure.
+            .dropFirst()
             .sink { [weak self] _ in
                 self?.scheduler.transportDidBecomeUnavailable()
                 self?.requestEvaluation()
