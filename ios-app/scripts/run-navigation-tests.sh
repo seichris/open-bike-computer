@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+"$(dirname "${BASH_SOURCE[0]}")/run-native-workout-zone-tests.sh"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_DIR="$(cd "${IOS_DIR}/.." && pwd)"
@@ -87,6 +89,7 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
   ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
@@ -113,6 +116,7 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/WireBytes.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
@@ -214,6 +218,7 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \

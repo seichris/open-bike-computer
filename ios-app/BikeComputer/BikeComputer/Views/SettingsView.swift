@@ -3555,7 +3555,7 @@ private struct DeveloperSettingsView: View {
                 Text("Workout Heart Zones")
             } footer: {
                 Text(
-                    "Bicino calculates five heart zones from this value and syncs it to the paired Watch. The default is 190 BPM."
+                    "Bicino calculates five fallback heart-rate zones from this value and syncs it to Watch. The default is 190 BPM. Apple Health zones, when available, use their own thresholds; this setting does not change them. The bike display continues to use these five Bicino zones."
                 )
             }
 

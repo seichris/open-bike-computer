@@ -684,23 +684,32 @@ struct WorkoutDashboardView: View {
                     .foregroundStyle(.secondary)
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    HeartRateZoneStrip(
-                        currentZone: snapshot.currentHeartRateZone
+                if let native = snapshot.nativeZones?.heartRate {
+                    WorkoutNativeZoneCard(
+                        group: native,
+                        showCurrent: store.presentation.connectionState == .connected
                     )
-                    Text(
-                        snapshot.currentHeartRateZone == nil
-                            ? "Waiting for heart rate"
-                            : "Configured max HR"
-                    )
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HeartRateZoneStrip(currentZone: snapshot.currentHeartRateZone)
+                        Text("Bicino zones · configured maximum heart rate")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                    .background(.background, in: RoundedRectangle(cornerRadius: 14))
                 }
-                .padding(12)
-                .background(
-                    .background,
-                    in: RoundedRectangle(cornerRadius: 14)
-                )
+                if let native = snapshot.nativeZones?.cyclingPower {
+                    WorkoutNativeZoneCard(
+                        group: native,
+                        showCurrent: store.presentation.connectionState == .connected
+                    )
+                }
+                if snapshot.nativeZones != nil {
+                    Text("The bike display still uses Bicino’s five heart-rate zones, not these Apple Health zones.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
 
                 LazyVGrid(columns: columns, spacing: 12) {
                     metric(
@@ -774,7 +783,8 @@ struct WorkoutDashboardView: View {
                     )
                 }
 
-                if store.presentation.connectionState == .ended {
+                if store.presentation.connectionState == .ended,
+                   snapshot.nativeZones?.heartRate == nil {
                     HeartRateZoneBreakdown(
                         durations: snapshot.heartRateZoneDurations
                     )

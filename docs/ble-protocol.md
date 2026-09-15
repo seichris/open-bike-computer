@@ -2037,3 +2037,18 @@ Swift/C++ adapters preserve legacy masks and configurable-screen payload IDs.
 The common request/status fixtures in `protocol/fixtures/world-radio-v1.txt`
 are consumed by firmware and phone host tests. See `docs/world-radio.md` for
 playback intent, item/search generation and drag-settlement behavior.
+
+### Native HealthKit zones and legacy workout frames
+
+Workout mirror schema 1.7 adds optional `snapshot.nativeZones` for iPhone/Watch
+only. It carries separate heart-rate and cycling-power groups, exact thresholds,
+configuration provenance, native durations, observation timestamps and an
+explicit final/saved distinction. It does not allocate a new device capability,
+characteristic, source bit or command. Unknown legacy phone projection strips
+this optional payload; known schema-1.6 peers may ignore its unknown key.
+
+`WEXT` and its five-band Bicino heart-rate model remain byte-for-byte unchanged.
+Never copy a native ordinal (including a five-zone native ordinal with different
+thresholds) into that legacy field. Native power zones do not replace watts.
+Native zones on the ESP32 require a separately negotiated, jointly implemented
+firmware contract; this change intentionally does not advertise such support.
