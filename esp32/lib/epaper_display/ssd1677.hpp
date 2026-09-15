@@ -63,14 +63,15 @@ private:
         w.x % 8 || w.right % 8) return false;
     const uint16_t lastByteStart = w.right - 8;
     const uint16_t bottom = w.bottom - 1;
-    // The vendor partial-update endpoint is the first pixel of the last byte,
-    // rather than the last pixel in that byte. Data-entry mode is retained
-    // from the preceding successful full refresh.
+    // Match the vendor partial window exactly: X ends at the first pixel of
+    // the last byte, while Y is programmed from the last row back to the
+    // first. Data-entry mode is retained from the preceding successful full
+    // refresh.
     return command(0x44, {uint8_t(w.x), uint8_t(w.x >> 8),
                           uint8_t(lastByteStart),
                           uint8_t(lastByteStart >> 8)}) &&
-           command(0x45, {uint8_t(w.y), uint8_t(w.y >> 8),
-                          uint8_t(bottom), uint8_t(bottom >> 8)}) &&
+           command(0x45, {uint8_t(bottom), uint8_t(bottom >> 8),
+                          uint8_t(w.y), uint8_t(w.y >> 8)}) &&
            command(0x4E, {uint8_t(w.x), uint8_t(w.x >> 8)}) &&
            command(0x4F, {uint8_t(w.y), uint8_t(w.y >> 8)});
   }

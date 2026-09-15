@@ -102,7 +102,7 @@ int main() {
   assert((io.dataByCommand[0x44] ==
           std::vector<uint8_t>{0x00, 0x00, 0x08, 0x00}));
   assert((io.dataByCommand[0x45] ==
-          std::vector<uint8_t>{0x64, 0x00, 0x65, 0x00}));
+          std::vector<uint8_t>{0x65, 0x00, 0x64, 0x00}));
   assert((io.dataByCommand[0x4E] ==
           std::vector<uint8_t>{0x00, 0x00}));
   assert((io.dataByCommand[0x4F] ==
