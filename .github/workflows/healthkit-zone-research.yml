@@ -1,26 +1,13 @@
-name: Zone protocol research inputs
+name: Zone protocol staging
 on:
   push:
     branches: [work/healthkit-zones-research-20260915]
+    paths: [.github/workflows/healthkit-zone-research.yml]
 permissions:
   contents: read
 jobs:
-  inputs:
+  stage:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 1
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: 5a6c83a0729c5ef99168631b5999fac2e786919d
-          persist-credentials: false
-      - name: Archive exact PR source
-        run: |
-          mkdir -p "$RUNNER_TEMP/zone-protocol-inputs"
-          git archive --format=tar.gz -o "$RUNNER_TEMP/zone-protocol-inputs/source.tar.gz" HEAD
-          git rev-parse HEAD > "$RUNNER_TEMP/zone-protocol-inputs/HEAD_SHA"
-          git ls-remote origin refs/heads/main > "$RUNNER_TEMP/zone-protocol-inputs/MAIN_SHA"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: zone-protocol-inputs
-          path: ${{ runner.temp }}/zone-protocol-inputs
-          retention-days: 2
+      - run: echo 'Versioned zone validation inputs are being staged.'
