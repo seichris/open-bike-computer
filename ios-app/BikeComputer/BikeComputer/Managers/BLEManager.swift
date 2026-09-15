@@ -981,6 +981,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceOperationDeviceID: String?
     @Published private(set) var deviceFeedbackDeviceID: String?
     @Published var debugEvents: [String] = []
+    var isExplicitDiscoveryPending: Bool {
+        explicitDiscoveryRequested && currentScanPurpose != .explicitDiscovery
+    }
     weak var diagnosticsRecorder: RideDiagnosticsRecorder? {
         didSet {
             DispatchQueue.main.async { [weak self] in
@@ -1226,6 +1229,8 @@ class BLEManager: NSObject, ObservableObject {
         BLEUnknownScanObservationGate()
 #if HOST_TESTING
     private var scanDriverForTesting: BLEScanDriverForTesting?
+    private(set) var watchDirectRideReconciliationRequestForTesting:
+        WatchDirectRideReconciliationRequestV1?
 #endif
     private var opportunisticSelectionTimer: Timer?
     private var opportunisticCandidateExpiryTimer: Timer?
@@ -1245,6 +1250,7 @@ class BLEManager: NSObject, ObservableObject {
     private var watchDirectRidePreparationID: UUID?
     private var watchDirectRidePreviousAutoReconnect: Bool?
     private var watchDirectRidePreparationExpiryTimer: Timer?
+    private var watchDirectRideReconciliationTimeoutTimer: Timer?
     private var watchDirectRideReleaseTombstones:
         [WatchDirectRideReleaseTombstone] = []
     private var lastConnectedPeripheralIdentifier: UUID?
@@ -2049,6 +2055,9 @@ class BLEManager: NSObject, ObservableObject {
         watchDirectRidePreparedDeviceID = isExclusiveOperationActive
             ? knownDevices.first?.deviceID ?? "host-test-device"
             : nil
+        watchDirectRidePreparationID = isExclusiveOperationActive
+            ? UUID(uuidString: "DDDDDDDD-EEEE-FFFF-AAAA-BBBBBBBBBBBB")
+            : nil
         isApplicationActive = false
         isOpportunisticDiscoverySuppressed = false
         explicitDiscoveryRequested = false
@@ -2150,6 +2159,11 @@ class BLEManager: NSObject, ObservableObject {
             if isPureExplicitDiscoveryPhase {
                 autoReconnect = false
                 refreshPureExplicitDiscoveryPresentation()
+            }
+            if watchDirectRidePreparedDeviceID != nil {
+                _ = requestWatchDirectRideReconciliation(
+                    forExplicitDiscovery: false
+                )
             }
         } else {
             let isSuspendingExplicitDiscovery =
@@ -2301,6 +2315,10 @@ class BLEManager: NSObject, ObservableObject {
         pairingStatusMessage = nil
         if !isApplicationActive || isUnknownDeviceDiscoverySuspended {
             pairingError = nil
+        } else if watchDirectRidePreparedDeviceID != nil {
+            pairingError = nil
+            pairingStatusMessage =
+                "Waiting for Apple Watch to release this Bike Computer…"
         } else if !isScanDriverPoweredOn {
             pairingError = "Turn on Bluetooth to add a Bike Computer."
         } else {
@@ -2549,6 +2567,8 @@ class BLEManager: NSObject, ObservableObject {
         }
         watchDirectRidePreparedDeviceID = deviceID
         watchDirectRidePreparationID = preparationID
+        watchDirectRideReconciliationTimeoutTimer?.invalidate()
+        watchDirectRideReconciliationTimeoutTimer = nil
         autoReconnect = false
         resetReconnectionState()
         pendingConnectionAfterDisconnect = nil
@@ -2577,10 +2597,18 @@ class BLEManager: NSObject, ObservableObject {
               watchDirectRidePreparationID == preparationID else { return }
         let shouldReconnect = watchDirectRidePreviousAutoReconnect ?? true
         clearWatchDirectRidePreparationPersistence()
+        watchDirectRideReconciliationTimeoutTimer?.invalidate()
+        watchDirectRideReconciliationTimeoutTimer = nil
         watchDirectRidePreparedDeviceID = nil
         watchDirectRidePreparationID = nil
         watchDirectRidePreviousAutoReconnect = nil
         autoReconnect = shouldReconnect
+        refreshPureExplicitDiscoveryPresentation()
+        if explicitDiscoveryRequested {
+            resetReconnectionState()
+            reconcileScanning(reason: "Apple Watch direct ride released")
+            return
+        }
         guard shouldReconnect else { return }
         resetReconnectionState()
         reconcileScanning(reason: "Apple Watch direct ride released")
@@ -2681,6 +2709,61 @@ class BLEManager: NSObject, ObservableObject {
         defaults.removeObject(
             forKey: SettingsKeys.watchDirectRidePreparationExpiresAt
         )
+    }
+
+    @discardableResult
+    private func requestWatchDirectRideReconciliation(
+        forExplicitDiscovery: Bool
+    ) -> Bool {
+        guard let deviceID = watchDirectRidePreparedDeviceID,
+              let preparationID = watchDirectRidePreparationID else {
+            return false
+        }
+        guard let request = try?
+                WatchDirectRideReconciliationRequestV1(
+                    preparationID: preparationID,
+                    deviceID: deviceID
+                ) else {
+            pairingStatusMessage = nil
+            pairingError =
+                "Apple Watch handoff state is invalid. Open Bicino on Apple Watch, then try again."
+            return true
+        }
+#if HOST_TESTING
+        watchDirectRideReconciliationRequestForTesting = request
+#endif
+        watchConnectivityCoordinator?
+            .queueWatchDirectRideReconciliation(request)
+        if forExplicitDiscovery {
+            watchDirectRideReconciliationTimeoutTimer?.invalidate()
+            watchDirectRideReconciliationTimeoutTimer =
+                Timer.scheduledOnMainActor(
+                    withTimeInterval:
+                        WatchDirectRideReconciliationPolicyV1
+                            .phoneWaitTimeoutSeconds,
+                    repeats: false
+                ) { [weak self] _ in
+                    guard let self,
+                          self.explicitDiscoveryRequested,
+                          self.watchDirectRidePreparedDeviceID ==
+                            request.deviceID,
+                          self.watchDirectRidePreparationID ==
+                            request.preparationID else { return }
+                    self.watchDirectRideReconciliationTimeoutTimer = nil
+                    self.pairingStatusMessage = nil
+                    self.pairingError =
+                        "Apple Watch still owns this Bike Computer. End any active ride, or open Bicino on Apple Watch, then try again."
+                    self.log(
+                        "Explicit discovery is waiting for Apple Watch direct ride release"
+                    )
+                }
+        }
+        log(
+            forExplicitDiscovery
+                ? "Requested Apple Watch direct ride reconciliation for discovery"
+                : "Requested Apple Watch direct ride reconciliation on foreground"
+        )
+        return true
     }
 
     private func rememberReleasedWatchDirectRidePreparation(
@@ -2822,6 +2905,14 @@ class BLEManager: NSObject, ObservableObject {
         clearUnknownDiscoveryState()
         isPairingMode = true
         refreshPureExplicitDiscoveryPresentation()
+        if requestWatchDirectRideReconciliation(
+            forExplicitDiscovery: true
+        ) {
+            reconcileScanning(
+                reason: "explicit discovery waiting for Apple Watch release"
+            )
+            return
+        }
         guard !isUnknownDeviceDiscoverySuspended else {
             reconcileScanning(
                 reason: "explicit discovery remains yielded to another enrollment"
@@ -2897,6 +2988,8 @@ class BLEManager: NSObject, ObservableObject {
         clearUnknownDiscoveryState()
         pairingStatusMessage = nil
         pairingError = nil
+        watchDirectRideReconciliationTimeoutTimer?.invalidate()
+        watchDirectRideReconciliationTimeoutTimer = nil
         if shouldResumeAutoReconnect {
             autoReconnect = true
             resumeAutoReconnectIfNeeded()

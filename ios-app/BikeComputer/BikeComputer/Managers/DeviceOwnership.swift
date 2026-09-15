@@ -618,9 +618,11 @@ enum BikeComputerSettingsPresentationPolicy {
 
     static func shouldShowConnectAction(
         baseEligibility: Bool,
-        scanPurpose: BLEScanPurpose
+        scanPurpose: BLEScanPurpose,
+        isExplicitDiscoveryPending: Bool = false
     ) -> Bool {
-        baseEligibility && scanPurpose != .explicitDiscovery
+        baseEligibility && scanPurpose != .explicitDiscovery &&
+            !isExplicitDiscoveryPending
     }
 }
 

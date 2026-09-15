@@ -20123,6 +20123,15 @@ struct NavigationProtocolTests {
                 ),
             "an active explicit scan replaces the Connect action with its owned results"
         )
+        assert(
+            !BikeComputerSettingsPresentationPolicy
+                .shouldShowConnectAction(
+                    baseEligibility: true,
+                    scanPurpose: .none,
+                    isExplicitDiscoveryPending: true
+                ),
+            "a Watch-gated explicit request does not expose a duplicate Connect action"
+        )
         var stage = NearbyBicinoSetupStage.offer
         stage.advanceToPairing()
         assertEqual(stage, .pairing,
@@ -20329,6 +20338,66 @@ struct NavigationProtocolTests {
             trustedDriver.starts.count == 2 &&
                 trustedDriver.starts.last?.allowsDuplicates == true
         }, "stale reconnect cancellation starts unknown-device discovery")
+
+        let watchHandoffManager = BLEManager()
+        let watchHandoffDriver = BLEScanDriverForTesting()
+        watchHandoffManager.installScanDriverForTesting(
+            watchHandoffDriver,
+            knownDevices: [known],
+            trustedPeripheralIdentifier: trustedIdentifier,
+            shouldAutoReconnect: true,
+            isExclusiveOperationActive: true
+        )
+        watchHandoffManager.setApplicationActive(true)
+        assert(
+            watchHandoffManager
+                .watchDirectRideReconciliationRequestForTesting != nil,
+            "foregrounding proactively reconciles a persisted Watch handoff"
+        )
+        watchHandoffManager.startDeviceDiscovery()
+        assertEqual(
+            watchHandoffManager.currentScanPurpose,
+            .none,
+            "explicit discovery does not steal BLE from an unresolved Watch ride"
+        )
+        assertEqual(
+            watchHandoffManager.pairingStatusMessage,
+            "Waiting for Apple Watch to release this Bike Computer…",
+            "Settings reports the Watch handoff instead of claiming to scan"
+        )
+        guard let reconciliation = watchHandoffManager
+            .watchDirectRideReconciliationRequestForTesting else {
+            assertionFailure(
+                "explicit discovery queues an exact Watch reconciliation"
+            )
+            return
+        }
+        assertEqual(
+            reconciliation.deviceID,
+            known.deviceID,
+            "Watch reconciliation targets the selected Bike Computer"
+        )
+        let release = try! WatchDirectRidePreparationRequestV1(
+            preparationID: reconciliation.preparationID,
+            operation: .release,
+            deviceID: reconciliation.deviceID
+        )
+        let releaseResponse = watchHandoffManager
+            .handleWatchDirectRidePreparationRequest(
+                release,
+                phoneNavigationActive: false
+            )
+        assert(releaseResponse.accepted,
+               "the matching durable Watch release is accepted")
+        assert(waitForMainLoop(timeout: 1) {
+            watchHandoffManager.currentScanPurpose == .explicitDiscovery &&
+                watchHandoffDriver.starts.count == 1
+        }, "the retained explicit request starts after Watch release")
+        assertEqual(
+            watchHandoffManager.pairingStatusMessage,
+            "Looking for nearby Bike Computers…",
+            "the Watch release replaces waiting guidance with real scan status"
+        )
 
         let deferredManager = BLEManager()
         let deferredDriver = BLEScanDriverForTesting()
