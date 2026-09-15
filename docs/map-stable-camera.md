@@ -37,11 +37,12 @@ pass, or explicit recorded maintainer acceptance of the residual risk.
   its relationship to the displayed roads.
 - The worker is asked for a replacement at most every 100 ms when displacement
   exceeds one projected pixel or bearing differs by at least 0.5 degrees.
-  Outstanding lag over 500 ms, incompatible semantics, or lost rider coverage
-  hides the camera/route/marker and displays “Updating map...”. Static views
-  do not expire merely because time passes. Gesture ownership retains its
-  existing preview/settlement path and is explicitly excluded from camera
-  screenshot evidence.
+  Outstanding lag remains measured, but the last complete camera, live route,
+  and any in-bounds position marker remain visible until a replacement frame is
+  accepted. Navigation never replaces an available map with a loading label.
+  Static views do not expire merely because time passes. Gesture ownership
+  retains its existing preview/settlement path and is explicitly excluded from
+  camera screenshot evidence.
 
 ## Ownership and memory
 
@@ -120,8 +121,8 @@ remain readable; malformed present headers fail closed.
    only input, invalid course, stops/prediction exhaustion, reroutes, changed
    settings/windows, pan/pinch settlement, map activation and screen teardown.
    Require horizontal Keep Upright text, vertical extrusion, footprint/road and
-   marker/route agreement in every accepted frame; expired views must show the
-   refresh state. Verify latest requests do not starve publication.
+   marker/route agreement in every accepted frame; delayed views must retain the
+   last complete map. Verify latest requests do not starve publication.
 5. Measure moving-camera lag p95 <=250 ms and maximum <=500 ms, plus existing
    memory, UI/flush, SD, watchdog, transport and benchmark gates unchanged.
    Prepared-scene reuse avoids block preparation but does not eliminate raster

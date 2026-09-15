@@ -226,10 +226,10 @@ While waiting, hold the complete prior camera image without rotating it.
 Project the current live marker and route through that accepted camera so they
 remain geographically attached; the marker may move away from the follow anchor
 or show a bearing residual until recentering. Never independently freeze a
-building layer over a moving ground layer. After coverage or age is no longer
-usable, conceal the stale scene with a neutral/loading state and retain valid
-turn instructions. Do not silently switch the selected orientation or display
-a heading unsupported by the visible camera.
+building layer over a moving ground layer. If the marker leaves the accepted
+camera, hide only that marker until the replacement arrives; retain the map and
+valid turn instructions. Do not silently switch the selected orientation or
+display a heading unsupported by the visible camera.
 
 Proposed normal-operation targets for the prepared-scene path are camera age
 p95 <= 250 ms and maximum <= 500 ms under the acceptance fixture. These are
