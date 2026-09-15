@@ -106,3 +106,61 @@ developer build latency.
 The JSON build-manifest schema, runtime-lock schema, core-cache schema,
 flash-plan schema, factory-bundle schema, and factory-release schema remain the
 authoritative structured contracts for their respective boundaries.
+
+## AMOLED equivalence evidence
+
+An e-paper-only change must not infer AMOLED isolation from successful builds
+or from whole-image hashes. Build the baseline and candidate Git identities
+through `tools/build_firmware.py` for these four environments:
+
+```text
+WAVESHARE_AMOLED_175
+WAVESHARE_AMOLED_175_PRODUCTION
+WAVESHARE_AMOLED_206
+WAVESHARE_AMOLED_206_PRODUCTION
+```
+
+For each build, use the exact recorded compiler command to preprocess these
+shared translation units with `-E -P` (or remove compiler line markers before
+capture):
+
+```text
+lib/ble_navigation/ble_navigation.cpp
+lib/epaper_display/epaper_display.cpp
+lib/gui/src/epaper_ui.cpp
+lib/gui/src/mainScr.cpp
+lib/maps/src/maps.cpp
+```
+
+Capture each side after its final wrapper build:
+
+```sh
+python3 tools/compare_amoled_artifacts.py capture \
+  --project-dir . \
+  --environment WAVESHARE_AMOLED_175 \
+  --preprocessed lib/ble_navigation/ble_navigation.cpp=/evidence/ble.ii \
+  --preprocessed lib/epaper_display/epaper_display.cpp=/evidence/display.ii \
+  --preprocessed lib/gui/src/epaper_ui.cpp=/evidence/epaper-ui.ii \
+  --preprocessed lib/gui/src/mainScr.cpp=/evidence/main.ii \
+  --preprocessed lib/maps/src/maps.cpp=/evidence/maps.ii \
+  --output /evidence/baseline-175.json
+```
+
+Repeat for the candidate and compare the create-only evidence files:
+
+```sh
+python3 tools/compare_amoled_artifacts.py compare \
+  --baseline /evidence/baseline-175.json \
+  --candidate /evidence/candidate-175.json \
+  --output /evidence/report-175.json
+```
+
+The gate requires identical locked runtime/core/dependency identities,
+line-marker-free preprocessed outputs, every application object except the
+firmware-metadata object, and the linker map after replacing only the absolute
+project-root prefix. The sole object exclusion is
+`*/firmware_metadata/firmware_metadata.cpp.o`. Whole binaries are deliberately
+not compared because they embed the exact Git identity and source timestamp;
+the tool performs no binary-byte normalization. Record both source identities,
+the preprocessing commands, evidence JSON files, exclusions, object counts,
+and all four results in the pull request.

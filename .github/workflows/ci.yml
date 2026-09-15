@@ -430,6 +430,7 @@ jobs:
         run: |
           PYTHONPATH=tools python -m unittest \
             tools.tests.test_build_firmware \
+            tools.tests.test_compare_amoled_artifacts \
             tools.tests.test_package_factory_firmware \
             tools.tests.test_firmware_build_identity \
             tools.tests.test_generated_sdkconfig \
