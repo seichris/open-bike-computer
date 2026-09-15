@@ -11,6 +11,7 @@
 #include "waveshare_board.hpp"
 #include "../power_management/power_management.hpp"
 #include <Wire.h>
+#include <cstring>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <hal.hpp>
@@ -482,6 +483,37 @@ bool readRegisterBlock8(uint8_t address, uint8_t reg, uint8_t *data,
                        }
                        return true;
                      });
+}
+
+bool readRegisterBlock8Once(uint8_t address, uint8_t reg, uint8_t *data,
+                            uint8_t len) {
+  if (!busConfigured || data == nullptr || len == 0 || len > 16 ||
+      static_cast<unsigned>(reg) + len > 256)
+    return false;
+
+  power_management::ScopedLock powerLock(power_management::LockDomain::I2c);
+  BusLock lock;
+  if (!lock.ok()) return false;
+  // Intentionally not withRetries(): on 2.06 even its final failed attempt
+  // resets/reconfigures the bus. Observation must not do that.
+  Wire.beginTransmission(address);
+  Wire.write(reg); // address pointer only, not a register-value write
+#ifdef WAVESHARE_AMOLED_175
+  if (Wire.endTransmission() != 0) return false;
+#else
+  if (Wire.endTransmission(false) != 0) return false;
+#endif
+  delay(2); // retain the existing board read transaction timing
+  if (Wire.requestFrom(address, len, static_cast<uint8_t>(true)) != len)
+    return false;
+  uint8_t result[16] = {};
+  for (uint8_t i = 0; i < len; ++i) {
+    const int value = Wire.read();
+    if (value < 0) return false;
+    result[i] = static_cast<uint8_t>(value);
+  }
+  std::memcpy(data, result, len);
+  return true;
 }
 
 bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
