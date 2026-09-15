@@ -92,6 +92,8 @@ Storage *storage = nullptr;
 QueueHandle_t normalQueue = nullptr;
 QueueHandle_t criticalQueue = nullptr;
 TaskHandle_t writerTaskHandle = nullptr;
+std::atomic<bool> recorderResourcesReady{false};
+std::atomic<bool> recorderWriterReady{false};
 SemaphoreHandle_t producerMutex = nullptr;
 SemaphoreHandle_t queueMutationMutex = nullptr;
 SemaphoreHandle_t sealComplete = nullptr;
@@ -1051,14 +1053,20 @@ void writerTask(void *) {
 
 void startWriterTask() {
 #if PERSISTENT_RIDE_DIAGNOSTICS
-  if (normalQueue != nullptr && criticalQueue != nullptr &&
+  if (recorderResourcesReady.load(std::memory_order_acquire) &&
       writerTaskHandle == nullptr) {
     // Arduino's SPI FatFs backend can busy-wait for up to its card-response
     // timeout inside fopen()/fflush(). Keep that lowest-priority I/O task off
     // CPU0, whose idle task is covered by the production task watchdog, and
     // let the UI/setup task preempt it on CPU1 while a card is recovering.
-    xTaskCreatePinnedToCore(writerTask, "ride_diag_writer", 6144, nullptr, 0,
-                            &writerTaskHandle, 1);
+    const BaseType_t created = xTaskCreatePinnedToCore(
+        writerTask, "ride_diag_writer", 6144, nullptr, 0, &writerTaskHandle, 1);
+    recorderWriterReady.store(created == pdPASS, std::memory_order_release);
+    if (created != pdPASS) {
+      writerTaskHandle = nullptr;
+      Serial.println("RIDE_DIAGNOSTICS: recorder_ready=0 reason=writer_task");
+      updateFaultCapsule(Level::Error, "logger", "writer_unavailable", false);
+    }
   }
 #endif
 }
@@ -1222,6 +1230,16 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
     sealComplete = xSemaphoreCreateBinary();
   if (retentionMutex == nullptr)
     retentionMutex = xSemaphoreCreateMutex();
+  const bool resourcesReady = normalQueue != nullptr && criticalQueue != nullptr &&
+      producerMutex != nullptr && queueMutationMutex != nullptr &&
+      faultCapsuleFlushMutex != nullptr && sealComplete != nullptr &&
+      retentionMutex != nullptr;
+  recorderResourcesReady.store(resourcesReady, std::memory_order_release);
+  if (!resourcesReady) {
+    Serial.println("RIDE_DIAGNOSTICS: recorder_ready=0 reason=resources");
+    updateFaultCapsule(Level::Error, "logger", "resources_unavailable", false);
+    return;
+  }
   char fields[320] = {};
   snprintf(fields, sizeof(fields),
            "{\"runtimeBootSequence\":%lu,\"firmwareTarget\":\"%s\",\"firmwareBuild\":%lu}",
@@ -1241,6 +1259,11 @@ void startWriter() {
 #if PERSISTENT_RIDE_DIAGNOSTICS
   startWriterTask();
 #endif
+}
+
+bool recorderReady() {
+  return recorderResourcesReady.load(std::memory_order_acquire) &&
+         recorderWriterReady.load(std::memory_order_acquire);
 }
 
 void setStorageRecoveryAllowedProbe(StorageRecoveryAllowedProbe probe) {
@@ -1381,19 +1404,20 @@ bool recordHealth(const char *reason) {
   if (reason == nullptr || !validToken(reason, 32))
     return false;
   const Stats snapshot = stats();
-  char fields[256] = {};
+  char fields[288] = {};
   snprintf(fields, sizeof(fields),
            "{\"reason\":\"%s\",\"enqueuedCount\":%lu,"
            "\"writtenCount\":%lu,\"droppedCount\":%lu,"
            "\"storageErrorCount\":%lu,\"queueDepth\":%u,"
-           "\"maxQueueDepth\":%u,\"available\":%s}",
+           "\"maxQueueDepth\":%u,\"available\":%s,\"recorderReady\":%s}",
            reason, static_cast<unsigned long>(snapshot.enqueued),
            static_cast<unsigned long>(snapshot.written),
            static_cast<unsigned long>(snapshot.dropped),
            static_cast<unsigned long>(snapshot.storageErrors),
            static_cast<unsigned>(snapshot.queueDepth),
            static_cast<unsigned>(snapshot.maxQueueDepth),
-           snapshot.storageAvailable ? "true" : "false");
+           snapshot.storageAvailable ? "true" : "false",
+           snapshot.recorderReady ? "true" : "false");
   return record(Level::Info, "logger", "health", fields);
 }
 
@@ -1725,6 +1749,7 @@ Stats stats() {
       queuedDepth(),
       maxQueueDepth.load(),
       storage != nullptr && storage->getDiagnosticsSdLoaded(),
+      recorderReady(),
   };
 }
 

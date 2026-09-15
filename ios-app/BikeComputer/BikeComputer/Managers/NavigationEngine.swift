@@ -29,6 +29,7 @@ class NavigationEngine: NSObject, ObservableObject {
     private var currentRoute: NavigationRouteV1?
     private var navigationRuntime = NavigationRuntimeV1()
     private var offlineDeleteAfter: Date?
+    private var usesOfflineArchive = false
 
     #if HOST_TESTING
     var offlineSnapshotForTesting: NavigationSnapshotV1? { navigationRuntime.snapshot }
@@ -242,6 +243,7 @@ class NavigationEngine: NSObject, ObservableObject {
         stopRideTelemetryTimer()
         navigationRuntime = runtime
         offlineDeleteAfter = deleteAfter
+        usesOfflineArchive = mode == .offline
         currentRoute = sharedRoute
         cacheRouteCoordinates(from: sharedRoute)
         currentStepIndex = 0
@@ -299,7 +301,7 @@ class NavigationEngine: NSObject, ObservableObject {
         with route: MKRoute,
         currentLocation: CLLocation
     ) {
-        guard isNavigating, !isSimulationMode else { return }
+        guard isNavigating, !isSimulationMode, !usesOfflineArchive else { return }
 
         let normalizedCurrentLocation = MapKitRouteAdapter.normalizedLocation(
             currentLocation
@@ -388,6 +390,7 @@ class NavigationEngine: NSObject, ObservableObject {
         isNavigating = false
         navigationRuntime.stop()
         offlineDeleteAfter = nil
+        usesOfflineArchive = false
         navigationEpoch &+= 1
         courseResolver.reset(epoch: navigationEpoch)
         currentRoute = nil

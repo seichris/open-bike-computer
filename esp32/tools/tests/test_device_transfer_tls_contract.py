@@ -328,7 +328,8 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
         ]
         self.assertIn("interruptActiveClientLocked();", clear_ble)
         self.assertIn("interruptActiveClientLocked();", disable)
-        self.assertIn("::shutdown(socket_, SHUT_RDWR);", TLS_SOURCE)
+        self.assertIn("interruptLease_.interrupt(", TLS_SOURCE)
+        self.assertIn("::shutdown(fd, SHUT_RDWR);", TLS_SOURCE)
         self.assertIn("activeClient_->interruptSocket();", HTTP_SOURCE)
 
     def test_all_hotspots_are_protected_and_status_advertises_https(self):

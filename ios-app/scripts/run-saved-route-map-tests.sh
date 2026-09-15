@@ -45,6 +45,7 @@ xcrun swiftc -D HOST_TESTING -parse-as-library \
   ios-app/BikeComputer/RideShared/WatchRouteSyncContract.swift \
   ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
   ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/WireBytes.swift \
   ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
   ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputer/RideShared/NavigationRouteFileStore.swift \

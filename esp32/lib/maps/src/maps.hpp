@@ -204,6 +204,9 @@ private:
     uint64_t styleSignature = 0;
     uint64_t navigationSignature = 0;
     uint64_t projectionSignature = 0;
+    uint32_t screenInstanceID = 0;
+    uint32_t screenProfileSignature = 0;
+    uint8_t screenType = 0;
     uint8_t zoom = map_transform::kMinimumRuntimeZoom;
     uint16_t viewportWidth = 0;
     uint16_t viewportHeight = 0;
@@ -230,6 +233,9 @@ private:
     uint64_t styleSignature = 0;
     uint64_t navigationSignature = 0;
     uint64_t projectionSignature = 0;
+    uint32_t screenInstanceID = 0;
+    uint32_t screenProfileSignature = 0;
+    uint8_t screenType = 0;
     uint16_t viewportWidth = 0;
     uint16_t viewportHeight = 0;
     uint16_t renderWidth = 0;
@@ -388,6 +394,9 @@ private:
   };
   bool takeVectorMapActivationRequest(VectorMapActivationRequest &request);
   bool processPendingVectorMapActivation();
+  bool processPendingStorageControl();
+  void (*pendingStorageControl_)(void *) = nullptr;
+  void *pendingStorageControlContext_ = nullptr;
   map_probe_diagnostics::Result
   probeVectorMapFolderOnStorageOwner(const std::string &folder);
   bool switchVectorMapFolderOnStorageOwner(const std::string &folder);
@@ -635,6 +644,9 @@ public:
   map_probe_diagnostics::Result
   probeVectorMapFolderDetailed(const std::string &folder);
   bool requestVectorMapFolderActivation(const std::string &folder);
+  // Bounded command admission; callback/context must live through completion.
+  // Runs between jobs on the sole map storage owner, never on the UI task.
+  bool requestStorageControl(void (*work)(void *), void *context);
   bool takeVectorMapFolderActivationResult(VectorMapActivationResult &result);
   void deleteMapScrSprites();
   void createMapScrSprites();

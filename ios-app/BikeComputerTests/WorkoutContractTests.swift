@@ -1,6 +1,7 @@
 import Foundation
 #if WORKOUT_CONTRACT_HOST
 import Darwin
+extension ControllableRecoveryPersistence: RideDecisionPersistence {}
 #endif
 #if WORKOUT_CONTRACT_XCTEST
 import XCTest
@@ -64,6 +65,7 @@ private struct WorkoutContractTestSuite {
         testLegacyPhoneProjection()
         testSegmentRoundTripValidationAndAccumulation()
         testTerminalOutcomeRoundTripAndValidation()
+        testDiscardCompletionPacketAndAutomaticCleanupPolicy()
         testAllMessageKindsRoundTrip()
         testCompatibleMinorVersionIgnoresUnknownFields()
         testUnsupportedMajorVersionIsRejected()
@@ -400,7 +402,8 @@ private struct WorkoutContractTestSuite {
         }
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let store = RideDetectionSettingsStore(defaults: defaults)
+        let decisionPersistence = ControllableRecoveryPersistence()
+        let store = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
         expect(store.generation == 1, "ride settings begin at generation one")
 
         store.adoptDeviceSettings(
@@ -452,7 +455,7 @@ private struct WorkoutContractTestSuite {
         )
 #endif
 
-        let restored = RideDetectionSettingsStore(defaults: defaults)
+        let restored = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
         expect(
             restored.generation == store.generation
                 && restored.settings == store.settings,
@@ -461,7 +464,7 @@ private struct WorkoutContractTestSuite {
 
         defaults.set(-1, forKey: "rideDetection.settingsGeneration.v1")
         let corruptGenerationReload = RideDetectionSettingsStore(
-            defaults: defaults
+            defaults: defaults, decisionPersistence: decisionPersistence
         )
         expect(
             corruptGenerationReload.generation == 1,
@@ -516,7 +519,7 @@ private struct WorkoutContractTestSuite {
                 ),
             "pending automation may recover only after exact device boot and sequence proof"
         )
-        store.savePendingDecision(pendingStart)
+        try! store.saveDecisionState(watermarks: ["bike-a:7": 11], pending: pendingStart)
         expect(
             store.loadPendingDecision() == pendingStart,
             "a valid unresolved prompt must survive relaunch"
@@ -535,11 +538,61 @@ private struct WorkoutContractTestSuite {
             !mismatchedIdentity.isValidForPersistence,
             "a recovery cache cannot relabel a detector decision identity"
         )
-        store.savePendingDecision(mismatchedIdentity)
+        do {
+            try store.saveDecisionState(watermarks: ["bike-a:7": 12], pending: mismatchedIdentity)
+            expect(false, "invalid pending identity must reject the transaction")
+        } catch {}
         expect(
-            store.loadPendingDecision() == nil,
-            "invalid pending automation must be removed rather than replayed"
+            store.loadPendingDecision() == pendingStart,
+            "invalid transaction must retain the earlier durable operation"
         )
+        decisionPersistence.failsSave = true
+        do {
+            try store.saveDecisionState(watermarks: ["bike-a:7": 12], pending: nil)
+            expect(false, "failed save must not report success")
+        } catch {}
+        let afterFailure = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
+        expect(afterFailure.loadDecisionWatermarks() == ["bike-a:7": 11] &&
+            afterFailure.loadPendingDecision() == pendingStart,
+            "relaunch after failed commit must retain watermark and outbox together")
+        decisionPersistence.failsSave = false
+        try! store.saveDecisionState(watermarks: ["bike-a:7": 12], pending: nil)
+        let afterCommit = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
+        expect(afterCommit.loadDecisionWatermarks() == ["bike-a:7": 12] &&
+            afterCommit.loadPendingDecision() == nil, "committed state restores atomically")
+
+        let legacyName = "RideDecisionMigration.\(UUID().uuidString)"
+        let legacyDefaults = UserDefaults(suiteName: legacyName)!
+        defer { legacyDefaults.removePersistentDomain(forName: legacyName) }
+        legacyDefaults.set(["bike-a:7": 10], forKey: "rideDetection.decisionWatermarks.v1")
+        legacyDefaults.set(try! PropertyListEncoder().encode(pendingStart),
+            forKey: "rideDetection.pendingDecision.v1")
+        let migrationPersistence = ControllableRecoveryPersistence()
+        migrationPersistence.failsSave = true
+        let blockedMigration = RideDetectionSettingsStore(
+            defaults: legacyDefaults, decisionPersistence: migrationPersistence)
+        expect(blockedMigration.loadPendingDecision() == nil,
+            "failed migration must not replay the legacy outbox")
+        expect(legacyDefaults.data(forKey: "rideDetection.pendingDecision.v1") != nil,
+            "failed migration must retain legacy bytes for the next launch")
+        migrationPersistence.failsSave = false
+        let migrated = RideDetectionSettingsStore(
+            defaults: legacyDefaults, decisionPersistence: migrationPersistence)
+        expect(migrated.loadPendingDecision() == pendingStart &&
+            migrated.loadDecisionWatermarks()["bike-a:7"] == 11,
+            "migration must commit the pending identity and matching watermark together")
+        expect(legacyDefaults.object(forKey: "rideDetection.pendingDecision.v1") == nil,
+            "legacy bytes are removed only after the new journal commits")
+        let corruptPersistence = ControllableRecoveryPersistence()
+        corruptPersistence.data = Data("not a journal".utf8)
+        let corruptStore = RideDetectionSettingsStore(
+            defaults: legacyDefaults, decisionPersistence: corruptPersistence)
+        do {
+            try corruptStore.saveDecisionState(watermarks: [:], pending: nil)
+            expect(false, "corrupt durable state must fail closed, not reset watermarks")
+        } catch {}
+        expect(corruptPersistence.data == Data("not a journal".utf8),
+            "corrupt journal evidence must not be silently overwritten")
 
         let pauseFrame = RideAutomationFrame(
             kind: .decision,
@@ -1609,6 +1662,52 @@ private struct WorkoutContractTestSuite {
         expectThrows(.invalidEnvelopePayload, "nonterminal outcome") {
             try WorkoutContractCodec.validate(invalidRunningOutcome)
         }
+    }
+
+    private mutating func testDiscardCompletionPacketAndAutomaticCleanupPolicy() {
+        let endedAt = Date(timeIntervalSinceReferenceDate: 800_000_090)
+        let start = endedAt.addingTimeInterval(-30)
+        let rejected = makeEnvelope(
+            sequence: 1, capturedAt: endedAt.addingTimeInterval(1),
+            snapshot: WorkoutSnapshotV1(
+                state: .ended, startDate: start,
+                elapsedTime: metric(31, .seconds, endedAt),
+                availability: [.elapsedTime], terminalOutcome: .discarded,
+                wallElapsedTime: metric(30, .seconds, endedAt)
+            )
+        )
+        expectThrows(.invalidMetric, "discard with stale end-time metrics") {
+            try WorkoutContractCodec.validate(rejected)
+        }
+        let terminal = WorkoutDiscardCompletionPolicy.terminalSnapshot(
+            startDate: start, errorCode: .anotherWorkoutActive
+        )
+        let completed = makeEnvelope(sequence: 2, capturedAt: endedAt, snapshot: terminal)
+        do {
+            let decoded = try roundTripWorkoutEnvelope(completed)
+            expect(decoded.snapshot == terminal, "minimal discard must round trip")
+            expect(terminal.state == .ended && terminal.terminalOutcome == .discarded,
+                   "discard completion must retain its explicit terminal result")
+            expect(terminal.availability.isEmpty && terminal.elapsedTime == nil
+                && terminal.wallElapsedTime == nil && terminal.location == nil,
+                   "discard must not require discarded builder statistics")
+            expect(terminal.errorCode == .anotherWorkoutActive,
+                   "discard must preserve a durable terminal cause")
+        } catch { expect(false, "minimal discard rejected: \(error)") }
+        for attempt in 0...50 {
+            let delay = WorkoutTerminalCleanupRetryPolicy.delay(
+                disposition: .discard, completedAttempts: attempt,
+                baseDelay: 1, saveAttemptLimit: 3
+            )
+            expect(delay != nil && delay! > 0 && delay! <= 30,
+                   "discard retries must remain automatic, rate-limited and finite")
+        }
+        expect(WorkoutTerminalCleanupRetryPolicy.delay(
+            disposition: .save, completedAttempts: 3, baseDelay: 1, saveAttemptLimit: 3
+        ) == nil, "save retains bounded recovery")
+        expect(WorkoutTerminalCleanupRetryPolicy.delay(
+            disposition: .discard, completedAttempts: 0, baseDelay: .nan, saveAttemptLimit: 3
+        ) == 1, "invalid retry delay must not spin or overflow")
     }
 
     private mutating func testAllMessageKindsRoundTrip() {
@@ -5291,6 +5390,11 @@ private struct WorkoutContractTestSuite {
         }
 
         do {
+            let journalWrite = try runChild(mode: "decision-write-and-crash")
+            expect(journalWrite.0 == 0, "decision journal writer must commit before abrupt exit")
+            let journalRead = try runChild(mode: "decision-read-after-crash")
+            expect(journalRead.0 == 0 && journalRead.1 == "11|11",
+                "a separate process must recover watermark and pending operation together")
             let writeResult = try runChild(mode: "write-and-crash")
             expect(
                 writeResult.0 == 0,
@@ -7581,23 +7685,10 @@ private struct WorkoutContractTestSuite {
             ("iPhone", iPhoneSource, "store.presentation.sessionID"),
             ("Watch", watchSource, "manager.activeSessionID"),
         ] {
-            let compactSource = source.filter { !$0.isWhitespace }
-            expect(
-                compactSource.contains(
-                    "Button(\"DiscardWorkout\",role:.destructive){requestDiscardConfirmation(for:sessionID)}"
-                ),
-                "\(surface) finish options must request, not execute, discard"
-            )
-            expect(
-                compactSource.contains(
-                    "caseoptions(sessionID:UUID)"
-                )
-                    && compactSource.contains(
-                        "casediscardConfirmation(sessionID:UUID)"
-                    )
-                    && compactSource.contains(".onChange(of:\(sessionSource))"),
-                "\(surface) finish prompts must be scoped to and invalidated with their session"
-            )
+            let compact = source.filter { !$0.isWhitespace }
+            expect(compact.contains("casediscardConfirmation(sessionID:UUID)")
+                && compact.contains(".onChange(of:\(sessionSource))"),
+                   "\(surface) discard confirmation must remain session-scoped")
         }
 
         let compactIPhoneSource = iPhoneSource.filter { !$0.isWhitespace }
@@ -7628,12 +7719,36 @@ private struct WorkoutContractTestSuite {
             "Watch dedicated discard screen must preserve disclosure choices and capture its session before dismissal"
         )
         expect(
-            watchSource.contains("\"Finish Ride?\"")
-                && watchSource.contains(
-                    "\"Saving creates a workout in your Fitness app.\""
-                ),
-            "Watch finish confirmation must use the concise rider-facing copy"
+            compactWatchSource.contains("Button(role:.destructive){manager.endAndSave()}label:")
+                && !watchSource.contains("\"Finish Ride?\"")
+                && !watchSource.contains("case options("),
+            "Watch STOP must directly end and save, without a finish-options menu"
         )
+        let settingsPosition = watchSource.range(of: "WatchSettingsView(")?.lowerBound
+        let discardPosition = watchSource.range(of: "Button(\"Discard Workout\")")?.lowerBound
+        let discardIsBelowSettings = settingsPosition.flatMap { settings in
+            discardPosition.map { settings < $0 }
+        } ?? false
+        expect(
+            compactWatchSource.contains(
+                "Button(\"DiscardWorkout\"){guardletsessionID=manager.activeSessionIDelse{return}requestDiscardConfirmation(for:sessionID)}.buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)"
+            ) && discardIsBelowSettings,
+            "Watch discard must be a gray text action below Settings"
+        )
+        let rootSource = (try? String(
+            contentsOf: iosAppDirectory.appendingPathComponent(
+                "BikeComputerWatch/Views/WatchWorkoutRootView.swift"), encoding: .utf8
+        )) ?? ""
+        let summarySource = (try? String(
+            contentsOf: iosAppDirectory.appendingPathComponent(
+                "BikeComputerWatch/Views/WorkoutSummaryView.swift"), encoding: .utf8
+        )) ?? ""
+        expect(rootSource.contains(".task(id: manager.canDismissDiscardedSummary)")
+            && rootSource.contains("manager.dismissSummary()")
+            && summarySource.contains("if summary.outcome == .discarded {")
+            && summarySource.contains("ProgressView(\"Discarding…\")")
+            && !summarySource.contains("Ride Discarded"),
+               "Watch discard must automatically dismiss after safe cleanup, not request recovery")
     }
 
     private mutating func testWorkoutUICompositionRetainsPhaseThreeExitCriteria() {
@@ -8036,11 +8151,25 @@ private struct WorkoutContractTestSuite {
         expect(
             compactLiveWatchView.contains(
                 "WorkoutCrossAppTakeoverCopyV1.live(disposition:manager.isDiscarding?.discard:.save)"
-            )
+            ),
+            "Watch live takeover copy must follow the active Save/Discard disposition"
+        )
+        // Discard is now a progress-only branch which the root dismisses after
+        // safe cleanup. Only saved rides enter the interactive summary below.
+        // Keep the branch check separate so a save-only copy assertion cannot
+        // accidentally permit the old post-discard recovery screen to return.
+        expect(
+            compactSummaryWatchView.contains(
+                "ifsummary.outcome==.discarded{ProgressView(\"Discarding…\").font(.caption).accessibilityIdentifier(\"workout-discard-progress\")}else{savedSummary}"
+            ),
+            "Watch discarded summary must show only automatic progress, without recovery actions"
+        )
+        expect(
+            compactSummaryWatchView.contains("privatevarsavedSummary:someView{")
                 && compactSummaryWatchView.contains(
-                    "WorkoutCrossAppTakeoverCopyV1.summary(disposition:summary.outcome==.saved?.save:.discard)"
+                    "ifsummary.terminalErrorCode==.anotherWorkoutActive{Label(WorkoutCrossAppTakeoverCopyV1.summary(disposition:.save),"
                 ),
-            "Watch takeover copy must remain bound to the live and terminal Save/Discard dispositions"
+            "Watch saved summary must retain the save-specific cross-app takeover warning"
         )
     }
 
@@ -8646,6 +8775,35 @@ private enum WorkoutContractTestRunner {
                 fileURL: URL(fileURLWithPath: path)
             )
             switch mode {
+            case "decision-write-and-crash", "decision-read-after-crash":
+                let name = "DecisionJournalChild.\(UUID().uuidString)"
+                let defaults = UserDefaults(suiteName: name)!
+                let store = RideDetectionSettingsStore(
+                    defaults: defaults,
+                    decisionPersistence: RideDecisionFilePersistence(
+                        url: URL(fileURLWithPath: path).appendingPathExtension("decisions")
+                    )
+                )
+                if mode == "decision-write-and-crash" {
+                    let frame = RideAutomationFrame(
+                        kind: .decision, transition: .start, origin: .automatic,
+                        rideGeneration: 7, decisionSequence: 11, startMode: .ask
+                    )
+                    let pending = RideAutomationPendingDecision(
+                        identity: RideAutomationDecisionIdentity(
+                            deviceID: "bike-a", rideGeneration: 7, decisionSequence: 11
+                        ),
+                        frame: frame, expectedState: nil
+                    )
+                    do {
+                        try store.saveDecisionState(watermarks: ["bike-a:7": 11], pending: pending)
+                        defaults.removePersistentDomain(forName: name)
+                        Darwin._exit(0)
+                    } catch { Darwin._exit(5) }
+                }
+                print("\(store.loadDecisionWatermarks()["bike-a:7"] ?? 0)|\(store.loadPendingDecision()?.identity.decisionSequence ?? 0)")
+                defaults.removePersistentDomain(forName: name)
+                return
             case "write-and-crash":
                 let store = WatchWorkoutRecoveryStore(persistence: persistence)
                 guard (try? store.begin(

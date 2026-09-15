@@ -2,7 +2,8 @@ import Foundation
 
 /// A staged import is memory-only. Only the GPX importer or an exact library
 /// read can construct a draft; MapKit alternatives have no conversion here.
-struct OfflineRouteSaveDraft {
+struct OfflineRouteSaveDraft: Identifiable {
+    var id: UUID { archive.routeID }
     let archive: NavigationRouteArchiveV1
     let requiresExistingArchive: Bool
 

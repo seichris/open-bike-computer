@@ -311,9 +311,15 @@ Offline mode is the default:
 1. On iPhone, open **Settings** and find **Saved Routes**. Choose **Import GPX**
    for a durable user-owned GPX route or track, or use the optional Strava flow
    above for a seven-day provider-backed copy. The longest usable route/track
-   segment is validated and saved. MapKit alternatives remain active-navigation
-   only; **Save Offline** stays disabled until an approved export-capable
+   segment is validated as a draft. Confirm its name and choose **Save Route**;
+   cancelling writes nothing. MapKit alternatives remain active-navigation only;
+   their **Save Offline** control stays disabled until an approved export-capable
    provider is configured.
+   To follow a saved route on **iPhone**, choose **Navigate on iPhone** directly
+   from its saved row or use the map preview's navigation action. The planner's
+   **Saved Routes** shortcut opens this same library. Route following needs no
+   network request; offline basemap coverage is separate. Watch transfer is
+   optional and independent of iPhone navigation.
 2. Send the route to Watch and wait for its green Watch status icon. **Queued**
    does not prove the route is installed.
 3. On Watch, open **Offline Navigation**, select the installed route, and

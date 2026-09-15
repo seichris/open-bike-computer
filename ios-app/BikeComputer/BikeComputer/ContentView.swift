@@ -396,7 +396,7 @@ struct ContentView: View {
         .onPreferenceChange(SavedRoutePreviewLayoutKey.self) { layout in
             Task { @MainActor in updateSavedRoutePreviewLayout(layout) }
         }
-        .onReceive(routeLibrary.$routes) { routes in
+        .onReceive(routeLibrary.$offlineNavigationRoutes) { routes in
             reconcileSavedRoutePreview(with: routes)
             coordinator.reconcileOfflineNavigation(with: routes)
         }
@@ -619,10 +619,9 @@ struct ContentView: View {
         presentedSheet = nil
     }
 
-    private func showOfflineRouteFromLibrary(_ summary: PlannedRouteSummaryV1) throws {
+    private func showOfflineRouteFromLibrary(_ selection: SavedRouteMapSelection) throws {
         guard !coordinator.isNavigating else { throw SavedRouteMapError.navigationActive }
         guard !offlineMapManager.isMapAreaSelectionActive else { throw SavedRouteMapError.planningActive }
-        let selection = try routeLibrary.mapSelection(for: summary)
         let preview = try SavedRouteMapPreviewFactory.make(selection)
         // User explicitly selected an offline route. Do not cancel their online
         // plan until the exact archive and its display geometry were verified.
@@ -630,6 +629,7 @@ struct ContentView: View {
         savedRoutePreviewBottomHeight = nil
         savedRouteMapPreview = preview
         isSearchPanelExpanded = false
+        presentedSheet = nil
     }
 
     private func startOfflineRouteFromLibrary(_ summary: PlannedRouteSummaryV1) throws {
@@ -638,6 +638,7 @@ struct ContentView: View {
         try coordinator.startOfflineNavigation(archive)
         clearSavedRoutePreview()
         isSearchPanelExpanded = false
+        presentedSheet = nil
     }
 
     private func startPreviewedOfflineRoute(_ preview: SavedRouteMapPreview) {
@@ -770,9 +771,13 @@ struct ContentView: View {
     ) -> some View {
         switch destination {
         case .offlineRoutes:
-            OfflineRoutesView(library: routeLibrary,
-                onShow: showOfflineRouteFromLibrary,
-                onStart: startOfflineRouteFromLibrary)
+            SavedRoutesLibraryView(library: routeLibrary,
+                stravaCoordinator: stravaIntegrationCoordinator)
+                .environment(\.savedRouteMapAction, SavedRouteMapAction(
+                    isNavigationActive: coordinator.isNavigating,
+                    show: { selection in try showOfflineRouteFromLibrary(selection) }
+                ))
+                .environment(\.savedRouteNavigationAction, savedRouteNavigationAction)
                 .presentationDetents([.large])
                 .presentationBackgroundInteraction(.disabled)
         case .settings:
@@ -812,6 +817,7 @@ struct ContentView: View {
                 isNavigationActive: coordinator.isNavigating,
                 show: { selection in try showSavedRouteMapPreview(selection) }
             ))
+            .environment(\.savedRouteNavigationAction, savedRouteNavigationAction)
             .environmentObject(coordinator.bleManager)
             .presentationDetents([.large])
             .presentationBackgroundInteraction(.disabled)
@@ -1013,6 +1019,13 @@ struct ContentView: View {
         )
         activeSheetDestination = destination
         presentedSheet = destination
+    }
+
+    private var savedRouteNavigationAction: SavedRouteNavigationAction {
+        SavedRouteNavigationAction(
+            isEnabled: !coordinator.isNavigating && !offlineMapManager.isMapAreaSelectionActive,
+            start: { summary in try startOfflineRouteFromLibrary(summary) }
+        )
     }
 
     private func openOfflineRoutes() {
@@ -1392,6 +1405,8 @@ struct ContentView: View {
 
                 routeAlternativePicker
                 selectedRouteAdvisory
+                Button("Saved Routes") { openOfflineRoutes() }
+                    .accessibilityIdentifier("ridePlanSavedRoutes")
 
             }
             .padding(.horizontal, 20)
@@ -1513,13 +1528,13 @@ struct ContentView: View {
 
             selectedRouteAdvisory
 
-            Button("Import GPX or choose a saved route") {
+            Button("Saved Routes") {
                 openOfflineRoutes()
             }
             .font(.caption)
             .accessibilityIdentifier("chooseApprovedOfflineRoute")
 
-            Text("Apple Maps routes are online-only. GPX imports and valid saved routes can be used offline.")
+            Text("Saving this Apple Maps route is not available. Imported GPX and saved Strava routes can be followed offline.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }

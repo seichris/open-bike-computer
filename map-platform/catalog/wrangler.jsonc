@@ -78,6 +78,7 @@
     },
   ],
   "vars": {
+    "MAP_DELIVERY_ENABLED": "1",
     "ENVIRONMENT": "staging",
     "PUBLIC_BASE_URL": "https://maps-share-staging.8o.vc",
     "R2_ACCOUNT_ID": "5834cd65d5f197557149dbc10074d37f",
@@ -172,6 +173,7 @@
         },
       ],
       "vars": {
+        "MAP_DELIVERY_ENABLED": "1",
         "ENVIRONMENT": "production",
         "PUBLIC_BASE_URL": "https://maps-share.8o.vc",
         "R2_ACCOUNT_ID": "5834cd65d5f197557149dbc10074d37f",

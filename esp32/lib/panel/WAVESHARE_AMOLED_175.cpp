@@ -1,3 +1,5 @@
+#include "full_frame_allocation.hpp"
+#include <cstdlib>
 /**
  * @file WAVESHARE_AMOLED_175.cpp
  * @brief Waveshare AMOLED (CO5300) implementation for IceNav using Arduino_GFX.
@@ -84,6 +86,13 @@ static lv_color_t *disp_draw_buf = NULL;
 static lv_color_t *disp_rotation_buf = NULL;
 static bool full_screen_rgb565_buffer_ready = false;
 static uint8_t displayRotation = waveshare_board::display::DEFAULT_ROTATION;
+static uint8_t touchCoordinateRotation() {
+#ifdef WAVESHARE_AMOLED_175
+  return waveshare_board::touch::cst9217CalibratedRotation(displayRotation);
+#else
+  return displayRotation;
+#endif
+}
 volatile uint32_t displayFlushCount = 0;
 volatile uint32_t lastDisplayFlushMs = 0;
 volatile uint32_t lastDisplayFlushDurationUs = 0;
@@ -355,7 +364,7 @@ static void publishTouchFrame(
   for (uint8_t index = 0; index < latestTouchFrame.count; ++index) {
     latestTouchFrame.contacts[index] =
         waveshare_board::touch::rotateTouchContact(
-            rawFrame.contacts[index], displayRotation,
+            rawFrame.contacts[index], touchCoordinateRotation(),
             waveshare_board::touch::MAX_X, waveshare_board::touch::MAX_Y);
   }
   if (latestTouchFrame.count >= 2 && multiTouchSuppressionPolicy != nullptr &&
@@ -1058,7 +1067,7 @@ void my_touchpad_read(lv_indev_t *indev_driver, lv_indev_data_t *data) {
     data->state = LV_INDEV_STATE_PRESSED;
     const device_debug::TargetGeometry physicalGeometry{
         waveshare_board::display::ACTIVE_WIDTH,
-        waveshare_board::display::ACTIVE_HEIGHT, displayRotation};
+        waveshare_board::display::ACTIVE_HEIGHT, touchCoordinateRotation()};
     const device_debug::Point rotated =
         device_debug::panelToLvgl(physicalGeometry, {touchX, touchY});
     data->point.x = rotated.x;
@@ -1131,6 +1140,13 @@ void setupDisplay() {
   Serial.println("Arduino_GFX display ready");
 }
 
+[[noreturn]] static void failDisplayInitialization(const char *reason) {
+  Serial.printf("DISPLAY_INIT_FAILED reason=%s recovery=restart\n", reason);
+  // Panic/reset preserves the unfinished boot stage. The existing retained
+  // early-failure policy enters safe mode after repeated failed boots.
+  std::abort();
+}
+
 void setupLVGLforArduinoGFX() {
   Serial.println("Initializing LVGL 9 with Arduino_GFX...");
 
@@ -1142,65 +1158,22 @@ void setupLVGLforArduinoGFX() {
   display = lv_display_create(SCREEN_WIDTH, SCREEN_HEIGHT);
   if (display == NULL) {
     Serial.println("ERROR: LVGL display creation failed!");
-    while (1)
-      delay(1000);
+    failDisplayInitialization("display_object");
   }
 
   // Set flush callback
   lv_display_set_flush_cb(display, my_disp_flush);
 
-  // Allocate FULL SCREEN buffer to avoid stripe artifacts at partial flush
-  // boundaries With PSRAM available, we can afford the full 466x466x2 = 434312
-  // bytes
-  size_t bufSize = SCREEN_WIDTH * SCREEN_HEIGHT; // Full screen
-#ifdef BOARD_HAS_PSRAM
-  Serial.printf("DEBUG: LV_COLOR_DEPTH=%d, sizeof(lv_color_t)=%d (Using "
-                "RGB565=2 bytes)\n",
-                LV_COLOR_DEPTH, sizeof(lv_color_t));
-  Serial.printf("Allocating FULL SCREEN LVGL buffer: %d bytes (using PSRAM)\n",
-                bufSize * sizeof(uint16_t)); // Use 2 bytes for RGB565!
-  // Allocate full screen buffer from PSRAM
-  disp_draw_buf = (lv_color_t *)heap_caps_aligned_alloc(
-      16, bufSize * sizeof(uint16_t), MALLOC_CAP_SPIRAM); // RGB565 = 2 bytes
-  if (!disp_draw_buf) {
-    Serial.println("PSRAM allocation failed, trying internal RAM...");
-    bufSize =
-        SCREEN_WIDTH * SCREEN_HEIGHT / 10; // Smaller buffer for internal RAM
-    disp_draw_buf = (lv_color_t *)heap_caps_aligned_alloc(
-        16, bufSize * sizeof(uint16_t), // RGB565 = 2 bytes
-        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  }
-#else
-  bufSize = SCREEN_WIDTH * SCREEN_HEIGHT / 10;
-  Serial.printf("Allocating LVGL buffer: %d bytes (internal RAM)\n",
-                bufSize * sizeof(uint16_t)); // RGB565 = 2 bytes
-  disp_draw_buf = (lv_color_t *)heap_caps_aligned_alloc(
-      16, bufSize * sizeof(uint16_t),
-      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); // RGB565 = 2 bytes
-#endif
-
-  if (!disp_draw_buf) {
-    Serial.println("ERROR: LVGL buffer allocation failed!");
-    while (1)
-      delay(1000); // Halt - this is fatal
-  }
-
-  Serial.printf("✓ LVGL buffer allocated: %d bytes\n",
-                bufSize * sizeof(uint16_t)); // RGB565 = 2 bytes
-
-  if (displayRotation == waveshare_board::display::ROTATION_90) {
-    const size_t rotationBufSize =
-        SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(uint16_t);
-    disp_rotation_buf = (lv_color_t *)heap_caps_aligned_alloc(
-        16, rotationBufSize, MALLOC_CAP_SPIRAM);
-    if (!disp_rotation_buf) {
-      Serial.println("ERROR: LVGL software-rotation buffer allocation failed!");
-      while (1)
-        delay(1000); // A native framebuffer would have the wrong orientation.
-    }
-    Serial.printf("✓ LVGL software-rotation buffer allocated: %u bytes\n",
-                  static_cast<unsigned>(rotationBufSize));
-  }
+  const size_t bufSize = static_cast<size_t>(SCREEN_WIDTH) * SCREEN_HEIGHT;
+  const auto buffers = full_frame_allocation::reserve(
+      bufSize, displayRotation == waveshare_board::display::ROTATION_90,
+      [](size_t bytes) { return heap_caps_aligned_alloc(
+          16, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); },
+      [](void *buffer) { heap_caps_free(buffer); });
+  if (!buffers.ready())
+    failDisplayInitialization("full_frame_buffers");
+  disp_draw_buf = static_cast<lv_color_t *>(buffers.draw);
+  disp_rotation_buf = static_cast<lv_color_t *>(buffers.rotation);
 
   // FORCE Display Color Format to RGB565
   lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);

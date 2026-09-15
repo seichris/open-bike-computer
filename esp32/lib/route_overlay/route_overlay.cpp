@@ -27,7 +27,7 @@
 // Global instance
 RouteOverlay routeOverlay;
 
-void RouteOverlay::parseRouteData(const uint8_t *data, size_t len) {
+bool RouteOverlay::parseRouteData(const uint8_t *data, size_t len) try {
   std::vector<GeoPoint, PsramAllocator<GeoPoint>> parsed;
   if (data != nullptr && len >= 8) {
     parsed.reserve(1U + (len - 8U) / 4U);
@@ -59,11 +59,15 @@ void RouteOverlay::parseRouteData(const uint8_t *data, size_t len) {
   if (data == nullptr || len < 8) {
     Serial.println(
         "Route data too short (need at least 8 bytes for start point)");
-    return;
+    return true;
   }
   Serial.printf("Route parsed: %u points from %u bytes\n",
                 static_cast<unsigned>(parsedCount),
                 static_cast<unsigned>(len));
+  return true;
+} catch (const std::bad_alloc &) {
+  Serial.println("ROUTE_RESOURCE_REJECTED: preserving prior route");
+  return false;
 }
 
 void RouteOverlay::clear() {

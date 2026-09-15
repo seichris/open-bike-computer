@@ -692,6 +692,8 @@ void HttpTransferServer::runWorker() {
         continue;
       }
       unlockState();
+      for (size_t index = 0; index < handlerCount_; ++index)
+        handlers_[index].handler->workerWillStop();
       stopNetwork();
       lockState();
       workerTask_ = nullptr;
@@ -1154,8 +1156,8 @@ void HttpTransferServer::unlockTlsIdentity() const {
 }
 
 void HttpTransferServer::interruptActiveClientLocked() const {
-  // The worker clears this pointer under the same mutex before destroying the
-  // stack-owned client, so a BLE/session revocation cannot target a reused fd.
+  // The server mutex protects object lifetime. The client's interrupt lease
+  // separately fences every early close against descriptor reuse.
   if (activeClient_ != nullptr)
     activeClient_->interruptSocket();
 }

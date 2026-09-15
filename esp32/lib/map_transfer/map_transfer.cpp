@@ -866,19 +866,17 @@ void MapActivationState::updateProgress(const ActivationProgress &progress) {
   }
 }
 
-void MapActivationState::finish(const std::string &status,
-                                const std::string &mapId,
-                                const std::string &errorCode,
-                                const std::string &errorMessage) {
+void MapActivationState::finish(std::string status, std::string mapId,
+              std::string errorCode, std::string errorMessage) {
   state_.running = false;
-  state_.status = status;
-  state_.mapId = mapId;
-  if (status == "installed") {
+  state_.status = std::move(status);
+  state_.mapId = std::move(mapId);
+  if (state_.status == "installed") {
     state_.step = state_.totalSteps;
     state_.progress = 100;
   }
-  state_.errorCode = errorCode;
-  state_.errorMessage = errorMessage;
+  state_.errorCode = std::move(errorCode);
+  state_.errorMessage = std::move(errorMessage);
 }
 
 bool MapActivationState::acceptsUploads() const { return !state_.running; }
@@ -2839,8 +2837,13 @@ MapTransferInstaller::stagedArchivePath(const std::string &sessionId) const {
   return joinPath(stagingRoot(sessionId), "pack.zip");
 }
 
-InstallStatus MapTransferInstaller::fail(const std::string &code,
-                                         const std::string &message) const {
+InstallStatus MapTransferInstaller::fail(const char *code,
+                                         std::string message) const {
+  return {false, code, std::move(message)};
+}
+
+InstallStatus MapTransferInstaller::fail(const char *code,
+                                         const char *message) const {
   return {false, code, message};
 }
 
@@ -3087,7 +3090,7 @@ MapTransferInstaller::readInstalledManifest(const std::string &root,
 
 InstallStatus MapTransferInstaller::validateLabelContracts(
     const std::string &root, const MapManifest &manifest,
-    bool useManifestPaths) const {
+    bool useManifestPaths) const try {
   if (manifest.formatVersion != 2 && manifest.formatVersion != 3)
     return {true, "ok", ""};
   const auto resolvedPath = [&](const ManifestFile &file) {
@@ -3151,6 +3154,9 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
     }
   }
   return {true, "ok", ""};
+}
+catch (const std::bad_alloc &) {
+  return {false, "out_of_memory", ""};
 }
 
 bool MapTransferInstaller::installedMapReceiptMatches(

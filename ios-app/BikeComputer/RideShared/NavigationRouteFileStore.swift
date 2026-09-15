@@ -216,12 +216,13 @@ final class NavigationRouteFileStoreV1 {
         let decoded: [InstalledNavigationRouteV1] = urls.compactMap {
             url -> InstalledNavigationRouteV1? in
             guard url.pathExtension == "routev1",
-                  let data = try? Data(contentsOf: url),
+                  let data = try? readArchiveData(at: url),
                   let archive = try? NavigationRouteArchiveV1
                     .decodeForRetentionInspection(
                     data,
                     purpose: .offlineNavigation
-                  ) else {
+                  ),
+                  url.standardizedFileURL == fileURL(for: WatchRouteIdentityV1(archive: archive)) else {
                 return nil
             }
             return InstalledNavigationRouteV1(
@@ -291,6 +292,11 @@ final class NavigationRouteFileStoreV1 {
     func deleteDeferred(matching identity: WatchRouteIdentityV1) throws {
         let url = fileURL(for: identity)
         guard fileManager.fileExists(atPath: url.path) else {
+            // Retrying an unlink whose directory fsync failed still needs to
+            // complete that durability boundary before its tombstone is retired.
+            if fileManager.fileExists(atPath: rootDirectory.path) {
+                try synchronizeRootDirectory()
+            }
             throw NavigationRouteFileStoreError.notFound
         }
         do {
@@ -313,7 +319,7 @@ final class NavigationRouteFileStoreV1 {
         ) else { return 0 }
         var removed = 0
         for url in urls where url.pathExtension == "routev1" {
-            guard let data = try? Data(contentsOf: url) else {
+            guard let data = try? readArchiveData(at: url) else {
                 if quarantineOrRemove(url) { removed += 1 }
                 continue
             }
@@ -323,6 +329,9 @@ final class NavigationRouteFileStoreV1 {
                     data,
                     purpose: .offlineNavigation
                 )
+                guard url.standardizedFileURL == fileURL(for: WatchRouteIdentityV1(archive: archive)) else {
+                    throw NavigationRouteArchiveError.invalidEncoding
+                }
                 if let deleteAfter = archive.deleteAfter,
                    now >= deleteAfter {
                     let identity = WatchRouteIdentityV1(archive: archive)
@@ -341,6 +350,38 @@ final class NavigationRouteFileStoreV1 {
             }
         }
         return removed
+    }
+
+    /// Bound reads before allocating or decoding. On Apple platforms inspect
+    /// the opened descriptor, not a pathname that could be swapped after stat.
+    /// O_NONBLOCK also prevents a corrupt FIFO from hanging library reload.
+    private func readArchiveData(at url: URL) throws -> Data {
+        let maximum = NavigationRouteLimitsV1.production.maximumEncodedBytes
+#if canImport(Darwin)
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { throw NavigationRouteFileStoreError.ioFailure }
+        var info = stat()
+        guard Darwin.fstat(descriptor, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_size > 0, info.st_size <= maximum else {
+            _ = Darwin.close(descriptor)
+            throw NavigationRouteArchiveError.encodedSizeExceeded
+        }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+#else
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true,
+              let size = values.fileSize, size > 0, size <= maximum else {
+            throw NavigationRouteArchiveError.encodedSizeExceeded
+        }
+        let handle = try FileHandle(forReadingFrom: url)
+#endif
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: maximum + 1) ?? Data()
+        guard !data.isEmpty, data.count <= maximum else {
+            throw NavigationRouteArchiveError.encodedSizeExceeded
+        }
+        return data
     }
 
     private func prepareDirectory() throws {

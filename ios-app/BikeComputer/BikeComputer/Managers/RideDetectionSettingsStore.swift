@@ -30,7 +30,7 @@ nonisolated struct RideAutomationPendingDecision: Codable, Equatable, Sendable {
         self.resolvedSessionID = resolvedSessionID
     }
 
-    /// UserDefaults is only a recovery cache, not an authority boundary. A
+    /// The journal is recovery state, not a Watch authority boundary. A
     /// partially written, corrupted, or older payload must never be able to
     /// synthesize a Watch lifecycle control after relaunch.
     var isValidForPersistence: Bool {
@@ -86,8 +86,50 @@ nonisolated struct RideAutomationPendingDecision: Codable, Equatable, Sendable {
     }
 }
 
+nonisolated protocol RideDecisionPersistence {
+    func load() throws -> Data?
+    func save(_ data: Data) throws
+}
+
+nonisolated struct RideDecisionFilePersistence: RideDecisionPersistence {
+    let url: URL
+
+    static var applicationDefault: Self {
+        Self(url: URL.applicationSupportDirectory
+            .appendingPathComponent("ride-automation-decisions-v2.plist"))
+    }
+
+    func load() throws -> Data? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try Data(contentsOf: url)
+    }
+
+    func save(_ data: Data) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try data.write(to: url, options: .atomic)
+        let file = try FileHandle(forUpdating: url)
+        defer { try? file.close() }
+        try file.synchronize()
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var destination = url
+        try destination.setResourceValues(values)
+    }
+}
+
 @MainActor
 final class RideDetectionSettingsStore: ObservableObject {
+    private struct DecisionState: Codable {
+        let version: Int
+        let watermarks: [String: UInt32]
+        let pending: RideAutomationPendingDecision?
+    }
+    private enum DecisionPersistenceError: Error { case invalidState }
+    private let decisionPersistence: any RideDecisionPersistence
+    private var decisionState: DecisionState?
+    private var decisionLoadFailed = false
     private enum Key {
         static let payload = "rideDetection.settings.v1"
         static let generation = "rideDetection.settingsGeneration.v1"
@@ -103,8 +145,35 @@ final class RideDetectionSettingsStore: ObservableObject {
 
     private let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        decisionPersistence: any RideDecisionPersistence =
+            RideDecisionFilePersistence.applicationDefault
+    ) {
         self.defaults = defaults
+        self.decisionPersistence = decisionPersistence
+        do {
+            if let data = try decisionPersistence.load() {
+                let state = try PropertyListDecoder().decode(DecisionState.self, from: data)
+                guard state.version == 2,
+                      state.watermarks.count <= 16,
+                      state.watermarks.keys.allSatisfy({ !$0.isEmpty }),
+                      state.pending?.isValidForPersistence != false else {
+                    throw DecisionPersistenceError.invalidState
+                }
+                if let pending = state.pending {
+                    let key = "\(pending.identity.deviceID):\(pending.identity.rideGeneration)"
+                    guard let watermark = state.watermarks[key],
+                          watermark == pending.identity.decisionSequence ||
+                            RideAutomationSerialNumber.isNewer(watermark, than: pending.identity.decisionSequence) else {
+                        throw DecisionPersistenceError.invalidState
+                    }
+                }
+                decisionState = state
+            }
+        } catch {
+            decisionLoadFailed = true
+        }
         hasAcknowledgedLocationUse = defaults.bool(
             forKey: Key.locationUseAcknowledged
         )
@@ -127,6 +196,32 @@ final class RideDetectionSettingsStore: ObservableObject {
         ).flatMap(Self.exactUInt32)
         generation = max(1, storedGeneration ?? 1)
         persist()
+        if decisionState == nil, !decisionLoadFailed,
+           defaults.object(forKey: Key.watermarks) != nil ||
+            defaults.object(forKey: Key.pendingDecision) != nil {
+            let pending = loadPendingDecision()
+            var watermarks = loadDecisionWatermarks()
+            let pendingKey = pending.map {
+                "\($0.identity.deviceID):\($0.identity.rideGeneration)"
+            }
+            if let pending, let pendingKey,
+               watermarks[pendingKey] == nil ||
+                RideAutomationSerialNumber.isNewer(
+                    pending.identity.decisionSequence, than: watermarks[pendingKey]!
+                ) {
+                watermarks[pendingKey] = pending.identity.decisionSequence
+            }
+            for key in watermarks.keys.sorted() where watermarks.count > 16 && key != pendingKey {
+                watermarks[key] = nil
+            }
+            do {
+                try saveDecisionState(watermarks: watermarks, pending: pending)
+            } catch {
+                // Never replay a legacy outbox until its replacement has
+                // committed. Keep the original bytes for a later launch.
+                decisionLoadFailed = true
+            }
+        }
     }
 
     func setStartMode(_ value: RideStartMode) {
@@ -197,6 +292,8 @@ final class RideDetectionSettingsStore: ObservableObject {
     }
 
     func loadDecisionWatermarks() -> [String: UInt32] {
+        if let decisionState { return decisionState.watermarks }
+        guard !decisionLoadFailed else { return [:] }
         guard let values = defaults.dictionary(forKey: Key.watermarks) else {
             return [:]
         }
@@ -210,19 +307,36 @@ final class RideDetectionSettingsStore: ObservableObject {
         return result
     }
 
-    func saveDecisionWatermarks(_ values: [String: UInt32]) {
-        let bounded = Dictionary(
-            uniqueKeysWithValues: values.sorted { lhs, rhs in
-                lhs.key < rhs.key
-            }.suffix(16)
-        )
-        defaults.set(
-            bounded.mapValues { NSNumber(value: $0) },
-            forKey: Key.watermarks
-        )
+    /// The entire operation record commits before any ACK or Watch request.
+    /// The caller retains its old in-memory state if persistence fails.
+    func saveDecisionState(
+        watermarks: [String: UInt32],
+        pending: RideAutomationPendingDecision?
+    ) throws {
+        guard !decisionLoadFailed, watermarks.count <= 16,
+              watermarks.keys.allSatisfy({ !$0.isEmpty }),
+              pending?.isValidForPersistence != false else {
+            throw DecisionPersistenceError.invalidState
+        }
+        if let pending {
+            let key = "\(pending.identity.deviceID):\(pending.identity.rideGeneration)"
+            guard let watermark = watermarks[key],
+                  watermark == pending.identity.decisionSequence ||
+                    RideAutomationSerialNumber.isNewer(watermark, than: pending.identity.decisionSequence) else {
+                throw DecisionPersistenceError.invalidState
+            }
+        }
+        let next = DecisionState(version: 2, watermarks: watermarks, pending: pending)
+        try decisionPersistence.save(PropertyListEncoder().encode(next))
+        decisionState = next
+        // Only remove the legacy cache after the replacement is durable.
+        defaults.removeObject(forKey: Key.watermarks)
+        defaults.removeObject(forKey: Key.pendingDecision)
     }
 
     func loadPendingDecision() -> RideAutomationPendingDecision? {
+        if let decisionState { return decisionState.pending }
+        guard !decisionLoadFailed else { return nil }
         guard let data = defaults.data(forKey: Key.pendingDecision) else {
             return nil
         }
@@ -234,21 +348,6 @@ final class RideDetectionSettingsStore: ObservableObject {
             return nil
         }
         return value
-    }
-
-    func savePendingDecision(_ value: RideAutomationPendingDecision?) {
-        guard let value else {
-            defaults.removeObject(forKey: Key.pendingDecision)
-            return
-        }
-        guard value.isValidForPersistence else {
-            defaults.removeObject(forKey: Key.pendingDecision)
-            return
-        }
-        guard let data = try? PropertyListEncoder().encode(value) else {
-            return
-        }
-        defaults.set(data, forKey: Key.pendingDecision)
     }
 
     private func update(

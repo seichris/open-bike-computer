@@ -775,6 +775,12 @@ struct NavigationProtocolTests {
         testDeviceCapabilitySynchronizesPowerButtonHonkOnce()
         testDeviceCapabilityRetryPolicy()
         testDeviceScreenValidation()
+        testDeviceScreenConfigurationCodecAndValidation()
+        testDeviceScreenConfigurationController()
+        testScreenCleanReconnect()
+        testScreenEditsDuringReload()
+        testScreenEditsDuringSave()
+        testScreenPendingConflictResolution()
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
         testBLEScanLifecyclePolicy()
@@ -891,6 +897,7 @@ struct NavigationProtocolTests {
         testOfflineMapJobRecoverySelection()
         testOfflineMapDownloadResponseValidation()
         await testOfflineMapPackDownloaderRejectsHTTPError()
+        await testDurableMapDownloads()
         testPendingOfflineMapJobBlocksEveryCreationIngress()
         await testOfflineMapJobCreatorReconcilesAmbiguousResponse()
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
@@ -902,6 +909,7 @@ struct NavigationProtocolTests {
         testOfflineMapInventoryMutationURLRequests()
         testOfflineMapManagerMigratesProductionConfig()
         testSavedMapDefaultNamePolicy()
+        testSavedMapReplacementCrashRecovery()
         testOfflineMapManagerRepairsGeneratedPackDefaults()
         testOfflineMapManagerRenamesCachedPack()
         testSavedMapRenameViewWiring()
@@ -9169,6 +9177,36 @@ struct NavigationProtocolTests {
         }
     }
 
+    @MainActor
+    static func testDurableMapDownloads() async {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root); OfflineMapTestURLProtocol.reset() }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let payload = Data("durable".utf8)
+        let constraints = OfflineMapDownloadConstraints(exactBytes: Int64(payload.count), maximumBytes: 1024,
+            allowedDownloadHosts: ["maps.example"], artifactSHA256: SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined())
+        OfflineMapTestURLProtocol.configure { _ in (200, payload) }
+        do {
+            let first = DurableMapDownloadCoordinator(configuration: configuration, directory: root)
+            let downloaded = try await first.download(from: URL(string: "https://maps.example/first-grant")!,
+                constraints: constraints, onProgress: { _ in }, onByteProgress: { _ in })
+            assertEqual(try Data(contentsOf: downloaded), payload, "durable download retains completed bytes")
+            let second = DurableMapDownloadCoordinator(configuration: configuration, directory: root)
+            OfflineMapTestURLProtocol.configure { _ in (403, Data()) }
+            let restored = try await second.download(from: URL(string: "https://maps.example/renewed-grant")!,
+                constraints: constraints, onProgress: { _ in }, onByteProgress: { _ in })
+            assertEqual(restored, downloaded, "fresh coordinator reuses immutable completion across grant URLs")
+            assertEqual(OfflineMapTestURLProtocol.requests().count, 0, "restored completion needs no second GET")
+            try FileManager.default.removeItem(at: downloaded)
+            do {
+                _ = try await second.download(from: URL(string: "https://maps.example/expired")!,
+                    constraints: constraints, onProgress: { _ in }, onByteProgress: { _ in })
+                assert(false, "HTTP rejection cannot publish a durable download")
+            } catch { /* Expected HTTP/size rejection. */ }
+        } catch { assert(false, "durable download test failed: \(error)") }
+    }
+
     static func testOfflineMapProgressPresentation() {
         let legacy = offlineMapJob(status: "converting_features")
         let progressPayload = Data(
@@ -11117,6 +11155,64 @@ struct NavigationProtocolTests {
         )
     }
 
+    static func testSavedMapReplacementCrashRecovery() {
+        let migrationRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: migrationRoot) }
+        do {
+            let legacy = migrationRoot.appendingPathComponent("Caches")
+            let saved = migrationRoot.appendingPathComponent("Saved")
+            try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+            try Data("saved".utf8).write(to: legacy.appendingPathComponent("one.zip"))
+            _ = try SavedMapStorageDirectory.prepare(directory: saved, legacy: legacy)
+            assert(FileManager.default.fileExists(atPath: saved.appendingPathComponent("one.zip").path), "legacy artifact moves outside caches")
+            try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+            try Data("older".utf8).write(to: legacy.appendingPathComponent("one.zip"))
+            try Data("other".utf8).write(to: legacy.appendingPathComponent("two.zip"))
+            _ = try SavedMapStorageDirectory.prepare(directory: saved, legacy: legacy)
+            assertEqual(try Data(contentsOf: saved.appendingPathComponent("one.zip")), Data("saved".utf8), "downgrade migration preserves current map")
+            assert(FileManager.default.fileExists(atPath: saved.appendingPathComponent("two.zip").path), "downgrade migration merges missing map")
+            assert(FileManager.default.fileExists(atPath: migrationRoot.appendingPathComponent("OfflineMapLegacyRecovery").path), "conflicting legacy bytes retained outside caches")
+        } catch { assert(false, "saved map directory migration failed: \(error)") }
+        for boundary in 0...4 {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            do {
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                let artifact = root.appendingPathComponent("map.zip")
+                let metadata = SavedMapArtifactMetadataStore.metadataURL(for: artifact)
+                try Data("old".utf8).write(to: artifact)
+                try Data("old-meta".utf8).write(to: metadata)
+                var journal = try SavedMapReplacementJournal.begin(at: artifact)
+                let backup = journal.backup(in: root)
+                if boundary >= 1 { try FileManager.default.moveItem(at: artifact, to: backup) }
+                if boundary >= 2 {
+                    try FileManager.default.moveItem(at: metadata, to: SavedMapArtifactMetadataStore.metadataURL(for: backup))
+                    try Data("new".utf8).write(to: artifact)
+                }
+                if boundary >= 3 { try Data("new-meta".utf8).write(to: metadata) }
+                if boundary == 4 { journal.committed = true; try journal.save(in: root) }
+                // New process-equivalent state: no in-memory rollback flags.
+                try SavedMapReplacementJournal.recover(in: root)
+                try SavedMapReplacementJournal.recover(in: root)
+                let actual = try String(contentsOf: artifact, encoding: .utf8)
+                let actualMetadata = try String(contentsOf: metadata, encoding: .utf8)
+                assertEqual(actual, boundary == 4 ? "new" : "old", "crash artifact decision")
+                assertEqual(actualMetadata, boundary == 4 ? "new-meta" : "old-meta", "crash metadata decision")
+                assert(!FileManager.default.fileExists(atPath: journal.url(in: root).path), "completed recovery removes journal")
+            } catch {
+                assert(false, "replacement crash recovery failed: \(error)")
+            }
+        }
+        let constraints = OfflineMapDownloadConstraints(
+            exactBytes: 100, maximumBytes: 1024,
+            allowedDownloadHosts: ["download.example"], artifactSHA256: String(repeating: "a", count: 64)
+        )
+        let descriptor = DurableMapDownloadCoordinator.Descriptor(constraints: constraints)
+        assertEqual(descriptor.key, String(repeating: "a", count: 64) + "-100", "download identity pins digest and bytes")
+        assert(descriptor.allows(URL(string: "https://download.example/map")), "approved download host")
+        assert(!descriptor.allows(URL(string: "https://127.0.0.1/map")), "download redirects reject other origins")
+    }
+
     static func testSavedMapDefaultNamePolicy() {
         assertEqual(
             SavedMapDisplayNamePolicy.resolve(
@@ -11627,6 +11723,10 @@ struct NavigationProtocolTests {
     }
 
     static func testSettingsSheetPresentationWiring() {
+        let screensSource = try! String(contentsOfFile:
+            "ios-app/BikeComputer/BikeComputer/Views/DeviceScreensSettingsView.swift",
+            encoding: .utf8
+        )
         let settingsURL = URL(fileURLWithPath:
             "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift"
         )
@@ -11670,6 +11770,42 @@ struct NavigationProtocolTests {
                 !routesSource.contains("isImportingStrava") &&
                 !routesSource.contains(".sheet("),
             "Saved Routes requests presentation without owning a transient sheet"
+        )
+        assert(
+            settingsSource.contains("presentedSheet = .addDeviceScreen") &&
+                settingsSource.contains("case .addDeviceScreen:") &&
+                settingsSource.contains("AddDeviceScreenSheet(") &&
+                screensSource.contains("let onAddScreen: () -> Void") &&
+                screensSource.contains("onAddScreen()") &&
+                !screensSource.contains(".sheet(") &&
+                screensSource.contains("Button(\"Cancel\") { dismiss() }"),
+            "Add Screen is routed from the stable Settings presenter and dismisses only its own sheet"
+        )
+        assert(
+            !screensSource.contains("Reorder Screens") &&
+                !screensSource.contains("Done Reordering") &&
+                screensSource.contains(".onMove(perform: controller.move)") &&
+                screensSource.contains("if controller.canSave") &&
+                screensSource.contains("Button(\"Save to Bicino\")") &&
+                screensSource.contains("if controller.canDiscardChanges") &&
+                screensSource.contains("Text(\"Drag screens to reorder, add new screens or hide screens\")") &&
+                !screensSource.contains("Button(\"Save to Bike Computer\")") &&
+                !screensSource.contains(".disabled(!controller.canSave)") &&
+                !screensSource.contains(".disabled(!controller.canDiscardChanges)"),
+            "device screen actions use long-press reordering, conditional save/cancel visibility, and Bicino copy"
+        )
+        assert(
+            screensSource.contains("Text(\"Preferred\").tag(UInt8(1))") &&
+                screensSource.contains("Text(\"Local + Preferred\").tag(UInt8(2))") &&
+                screensSource.contains("Text(\"Follow Roads\").tag(UInt8(0))") &&
+                screensSource.contains("Text(\"Keep Upright\").tag(UInt8(1))"),
+            "per-instance label controls preserve the established wire semantics"
+        )
+        assert(
+            screensSource.contains("TextField(\"Name\", text: instanceBinding.name)") &&
+                screensSource.contains("controller.draft?.instances.first(where:") &&
+                !screensSource.contains("@State private var instance:"),
+            "screen editors bind to current controller state after snapshot refresh"
         )
         guard let remoteStart = settingsSource.range(
             of: "private struct RemoteDeviceDebugSettingsSection"
@@ -11900,7 +12036,7 @@ struct NavigationProtocolTests {
                 deviceSection.contains("case .mapPlusNavigation:") &&
                 deviceSection.contains("? .mapPlusNavigation\n                : .map") &&
                 deviceSection.contains(
-                    "case .navigation, .rideStats, .batteryStatus:\n            return nil"
+                    "case .navigation, .rideStats, .batteryStatus, .worldRadio:\n            return nil"
                 ),
             "only Map rows receive gears and legacy firmware opens the shared map profile"
         )
@@ -12082,7 +12218,7 @@ struct NavigationProtocolTests {
         assert(
             source.contains("Text(\"Saved Routes\")") &&
                 source.contains(
-                    "Preview saved routes on the map, or send them to Apple Watch for offline navigation."
+                    "Preview saved routes, navigate offline on this iPhone, or send them to Apple Watch. Offline map tiles are separate."
                 ),
             "Saved Routes uses the requested title and explanatory copy"
         )
@@ -14496,6 +14632,11 @@ struct NavigationProtocolTests {
             for: DeviceBLEProtocol.navigationCharacteristicUUID,
             authenticatedWriteSession: writeSession
         )
+        let protectedScreenConfiguration = channelManager.devicePayloadForTesting(
+            gpsPayload,
+            for: DeviceBLEProtocol.screenConfigurationCharacteristicUUID,
+            authenticatedWriteSession: writeSession
+        )
         assertEqual(
             protectedGPS?.count,
             gpsPayload.count + AuthenticatedBLEWriteSession.frameOverhead,
@@ -14503,6 +14644,13 @@ struct NavigationProtocolTests {
         )
         assert(protectedGPS != protectedNavigation,
                "native GPS uses its characteristic-bound authenticated channel")
+        assertEqual(
+            protectedScreenConfiguration?.count,
+            gpsPayload.count + AuthenticatedBLEWriteSession.frameOverhead,
+            "screen configuration uses the protected owner transport"
+        )
+        assert(protectedScreenConfiguration != protectedNavigation,
+               "screen configuration has an independent replay sequence")
 
         var transportReady = false
         var queue = NavigationWriteQueue(maxCount: 4, priorityMaxCount: 2)
@@ -16200,10 +16348,15 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rideDiagnosticsCapabilityMask, 1 << 20, "CAP2 bit 20 advertises persistent ride diagnostics")
         assertEqual(DeviceBLEProtocol.detailedRideDiagnosticsCapabilityMask, 1 << 21, "CAP2 bit 21 advertises detailed ride diagnostics")
         assertEqual(DeviceBLEProtocol.rideDeliveryAcknowledgementCapabilityMask, 1 << 22, "CAP2 bit 22 advertises reliable ride delivery")
+        assertEqual(DeviceBLEProtocol.screenConfigurationCapabilityMask, 1 << 26, "CAP2 bit 26 advertises configurable screen instances")
+        assertEqual(DeviceBLEProtocol.worldRadioCapabilityMask, 1 << 27, "CAP2 bit 27 advertises World Radio without colliding with renderer or Watch capabilities")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 23, "capability version negotiates independent navigation orientation and Watch GPS motion evidence")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 25, "capability version negotiates World Radio alongside configurable screens, navigation orientation, and Watch GPS motion evidence")
+        assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
+        assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
+        assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
         assertEqual(DeviceBLEProtocol.mapPlusNavigationRotationSettingID, 37, "navigation orientation has an independent setting")
         assertEqual(RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature, 1 << 24, "orientation capability has its own bit")
         assertEqual(DeviceBLEProtocol.rendererMetricsRequestPrefix, "RDMS", "renderer metrics requests use RDMS")
@@ -16213,6 +16366,9 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.workoutTelemetryCharacteristicUUIDString,
                     "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
                     "workout telemetry uses the dedicated 128-bit characteristic")
+        assertEqual(DeviceBLEProtocol.screenConfigurationCharacteristicUUIDString,
+                    "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005",
+                    "screen configuration uses the dedicated owner-only characteristic")
         assertEqual(DeviceBLEProtocol.workoutTelemetryFallbackPrefix, "WTLM",
                     "workout telemetry fallback remains explicitly framed")
         assertEqual(DeviceBLEProtocol.serviceRoadsVisibilityMask, 0x400, "service roads use visibility bit 10")
@@ -16280,12 +16436,15 @@ struct NavigationProtocolTests {
         assertEqual(DeviceScreen.rideStats.rawValue, 2, "Ride Stats screen protocol value stays stable")
         assertEqual(DeviceScreen.mapPlusNavigation.rawValue, 3, "Map + Navigation screen protocol value stays stable")
         assertEqual(DeviceScreen.batteryStatus.rawValue, 4, "Battery Status screen uses protocol value 4")
+        assertEqual(DeviceScreen.worldRadio.rawValue, 5, "World Radio screen uses protocol value 5")
         assertEqual(DeviceScreen.mapPlusNavigation.title, "Map + Navigation", "combined map/navigation screen keeps user-facing label")
         assertEqual(DeviceScreen.batteryStatus.title, "Battery Status", "battery screen has a user-facing label")
+        assertEqual(DeviceScreen.worldRadio.title, "World Radio", "World Radio has a user-facing label")
         assertEqual(DeviceScreen.displayOrder,
-                    [.mapPlusNavigation, .rideStats, .map, .navigation, .batteryStatus],
-                    "Battery Status is the last device screen in settings and cycling order")
-        assertEqual(DeviceScreen.allScreensMask, 0x1F, "all supported device screens use the low five mask bits")
+                    [.mapPlusNavigation, .rideStats, .map, .navigation, .worldRadio, .batteryStatus],
+                    "World Radio precedes Battery Status in settings and cycling order")
+        assertEqual(DeviceScreen.allScreensMask, 0x3F, "all supported device screens use the low six mask bits")
+        assertEqual(DeviceScreen.defaultScreensMask, 0x1F, "World Radio is off by default")
         assertEqual(DeviceScreen.legacyScreensMask, 0x0F, "legacy firmware receives only the original four screen bits")
         assertEqual(DisconnectedSleepTimeout.oneMinute.settingValue, 60, "one-minute sleep timeout sends seconds")
         assertEqual(DisconnectedSleepTimeout.twoMinutes.settingValue, 120, "two-minute sleep timeout sends seconds")
@@ -18253,6 +18412,25 @@ struct NavigationProtocolTests {
         assert(!manager.supportsRemoteDeviceDebug,
                "CAP2 bit 17 does not collide with remote debugging")
 
+        let cap2WithMainFeatures = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 0x84, 0x03])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithMainFeatures),
+               "renderer, orientation and Watch GPS capabilities are accepted together")
+        assert(manager.supportsRendererBenchmarkSample &&
+               manager.supportsWatchGPSMotionEvidenceV1,
+               "existing renderer and Watch GPS features stay negotiated")
+        assert(!manager.supportsWorldRadio &&
+               !manager.availableDeviceScreens.contains(.worldRadio),
+               "main firmware cannot be mistaken for World Radio firmware")
+
+        let cap2WithWorldRadio = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 0x84, 0x0B])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithWorldRadio),
+               "World Radio is negotiated alongside main features")
+        assert(manager.supportsWorldRadio && manager.supportsRendererBenchmarkSample &&
+               manager.supportsWatchGPSMotionEvidenceV1,
+               "World Radio does not replace renderer or Watch GPS support")
+
         let cap2WithConfig = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, acknowledgedFlags, 0x0F, 0, 0, 1, 3, 1,
                   DeviceSound.rotatingBicycleBell.rawValue, 65])
@@ -18266,6 +18444,11 @@ struct NavigationProtocolTests {
                "CAP2 firmware without bit 14 keeps scoped Watch control disabled")
         assert(!manager.supportsRemoteDeviceDebug,
                "CAP2 firmware without bit 16 keeps remote debugging disabled")
+        assert(!manager.supportsWorldRadio,
+               "reconnecting to older firmware clears World Radio support")
+
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithWorldRadio),
+               "World Radio can be negotiated again before a malformed response")
 
         let duplicateTLV = cap2WithConfig + Data([1, 3, 1, 0, 50])
         assert(manager.handleDeviceCapabilitiesNotification(duplicateTLV),
@@ -18276,6 +18459,8 @@ struct NavigationProtocolTests {
                "malformed capabilities clear explicit invalid-heading support")
         assert(!manager.supportsScopedWatchController,
                "malformed capabilities clear scoped Watch support")
+        assert(!manager.supportsWorldRadio && !manager.supportsWatchGPSMotionEvidenceV1,
+               "malformed capabilities clear both World Radio and Watch GPS support")
 
         UserDefaults.standard.removeObject(forKey: "deviceSettings.selectedSound")
         UserDefaults.standard.removeObject(forKey: "deviceSettings.soundVolumePercent")
@@ -18341,12 +18526,33 @@ struct NavigationProtocolTests {
                "Battery Status remains the last available screen")
         let currentSettings = screenSettings(in: currentPackets())
         assertEqual(currentSettings[DeviceBLEProtocol.enabledScreensSettingID],
-                    Int32(DeviceScreen.allScreensMask) |
+                    Int32(DeviceScreen.allScreensMask & ~DeviceScreen.worldRadio.bit) |
                         DeviceBLEProtocol.currentScreenMaskMarker,
-                    "current firmware receives a marked five-screen mask")
+                    "Battery Status firmware receives a marked five-screen mask")
         assertEqual(currentSettings[DeviceBLEProtocol.defaultScreenSettingID],
                     Int32(DeviceScreen.batteryStatus.rawValue),
                     "current firmware may use Battery Status as its default")
+
+        let (radioManager, radioPackets) = configuredManager()
+        var radioCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8)
+        radioCapabilities.append(1)
+        let radioFlags = UInt32(DeviceBLEProtocol.batteryStatusScreenCapabilityMask) |
+            DeviceBLEProtocol.worldRadioCapabilityMask
+        radioCapabilities.append(UInt8(truncatingIfNeeded: radioFlags))
+        radioCapabilities.append(UInt8(truncatingIfNeeded: radioFlags >> 8))
+        radioCapabilities.append(UInt8(truncatingIfNeeded: radioFlags >> 16))
+        radioCapabilities.append(UInt8(truncatingIfNeeded: radioFlags >> 24))
+        assert(radioManager.handleDeviceCapabilitiesNotification(radioCapabilities),
+               "World Radio capability response should be consumed")
+        assert(radioManager.supportsWorldRadio,
+               "firmware bit 27 exposes World Radio")
+        assert(radioManager.availableDeviceScreens.contains(.worldRadio),
+               "World Radio is available on capable firmware")
+        let radioSettings = screenSettings(in: radioPackets())
+        assertEqual(radioSettings[DeviceBLEProtocol.enabledScreensSettingID],
+                    Int32(DeviceScreen.allScreensMask) |
+                        DeviceBLEProtocol.currentScreenMaskMarker,
+                    "World Radio firmware receives a marked six-screen mask")
 
         let (fallbackManager, fallbackPackets) = configuredManager()
         fallbackManager.useDeviceCapabilitiesFallback()
@@ -18398,7 +18604,7 @@ struct NavigationProtocolTests {
         assert(independentManager.handleDeviceCapabilitiesNotification(independentFlags),
                "independent profile capability response should be consumed")
         assertEqual(independentPackets().map { $0[4] },
-                    [20, 16, 17, 18, 21, 22, 19, 8, 1, 2, 3, 9, 10, 7],
+                    [20, 16, 17, 18, 21, 22, 19, 6, 8, 1, 2, 3, 9, 10, 7],
                     "new firmware receives the independent profile before legacy Map IDs")
         let independentDetail = independentPackets().first { $0[4] == 17 }
         assertEqual(readInt32LE(independentDetail!, offset: 5), 0,
@@ -18441,7 +18647,7 @@ struct NavigationProtocolTests {
         assert(birdsEyeManager.supportsBirdsEyeMapNavigation,
                "bird's-eye capability enables the setting")
         assertEqual(birdsEyePackets().map { $0[4] },
-                    [20, 16, 17, 18, 21, 22, 19, 25, 8, 1, 2, 3, 9, 10, 7],
+                    [20, 16, 17, 18, 21, 22, 19, 25, 6, 8, 1, 2, 3, 9, 10, 7],
                     "supported firmware receives the bird's-eye preference with the Map + Navigation profile")
         let birdsEyeSetting = birdsEyePackets().first { $0[4] == 25 }
         assertEqual(readInt32LE(birdsEyeSetting!, offset: 5), 0,
@@ -18461,7 +18667,7 @@ struct NavigationProtocolTests {
             perspectiveCapabilities
         ), "bird's-eye perspective capability response should be consumed")
         assertEqual(perspectivePackets().map { $0[4] },
-                    [20, 16, 17, 18, 21, 22, 19, 25, 26, 8, 1, 2, 3, 9, 10, 7],
+                    [20, 16, 17, 18, 21, 22, 19, 25, 26, 6, 8, 1, 2, 3, 9, 10, 7],
                     "adjustable firmware receives both bird's-eye settings")
         let perspectiveSetting = perspectivePackets().first { $0[4] == 26 }
         assertEqual(readInt32LE(perspectiveSetting!, offset: 5), 2,
@@ -18490,7 +18696,7 @@ struct NavigationProtocolTests {
         let baselineCapabilities = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) + Data([0])
         assert(legacyManager.handleDeviceCapabilitiesNotification(baselineCapabilities),
                "baseline capability response should be consumed")
-        assertEqual(legacyPackets().map { $0[4] }, [8, 1, 2, 3, 9, 10, 7],
+        assertEqual(legacyPackets().map { $0[4] }, [6, 8, 1, 2, 3, 9, 10, 7],
                     "legacy firmware receives only its shared Map profile IDs")
         assertEqual(legacyManager.mapPlusNavigationZoomLevel, 1,
                     "negotiation preserves the hidden independent local profile")
@@ -18511,15 +18717,15 @@ struct NavigationProtocolTests {
 
         let (lateManager, latePackets) = configuredManager()
         lateManager.useDeviceCapabilitiesFallback()
-        assertEqual(latePackets().map { $0[4] }, [8, 1, 2, 3, 9, 10, 7],
+        assertEqual(latePackets().map { $0[4] }, [6, 8, 1, 2, 3, 9, 10, 7],
                     "timeout fallback sends only the legacy shared profile")
         let lateExtendedFlags = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
             Data([DeviceBLEProtocol.independentMapProfilesCapabilityMask |
                   DeviceBLEProtocol.extendedMapVisibilityCapabilityMask])
         assert(lateManager.handleDeviceCapabilitiesNotification(lateExtendedFlags),
                "late independent profile response should still be consumed")
-        assertEqual(Array(latePackets().map { $0[4] }.suffix(14)),
-                    [20, 16, 17, 18, 21, 22, 19, 8, 1, 2, 3, 9, 10, 7],
+        assertEqual(Array(latePackets().map { $0[4] }.suffix(15)),
+                    [20, 16, 17, 18, 21, 22, 19, 6, 8, 1, 2, 3, 9, 10, 7],
                     "late extended response resends both profiles with new semantics")
         let resentMapVisibility = latePackets().last { $0[4] == 8 }
         assert(readInt32LE(resentMapVisibility!, offset: 5) &
@@ -20108,6 +20314,21 @@ struct NavigationProtocolTests {
                     "trusted background reconnect owns one physical scan")
         assert(!trustedDriver.starts[0].allowsDuplicates,
                "trusted reconnect does not run an unknown-device scan")
+
+        trustedManager.setApplicationActive(true)
+        trustedManager.installConnectionAttemptForTesting()
+        trustedManager.startDeviceDiscovery()
+        assertEqual(
+            trustedManager.currentScanPurpose,
+            .explicitDiscovery,
+            "an explicit request replaces a stale trusted connection attempt"
+        )
+        assert(trustedManager.isDiscoveringDevices,
+               "stale reconnect cancellation retains explicit search intent")
+        assert(waitForMainLoop(timeout: 1) {
+            trustedDriver.starts.count == 2 &&
+                trustedDriver.starts.last?.allowsDuplicates == true
+        }, "stale reconnect cancellation starts unknown-device discovery")
 
         let deferredManager = BLEManager()
         let deferredDriver = BLEScanDriverForTesting()

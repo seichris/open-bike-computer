@@ -24,6 +24,9 @@ enum PhoneRouteLibraryError: Error, Equatable {
 @MainActor
 final class PhoneRouteLibrary: ObservableObject {
     @Published private(set) var routes: [PlannedRouteSummaryV1] = []
+    /// Excludes pending deletion even while its row remains visible for Watch
+    /// status. Preview/navigation observers consume this admission list.
+    @Published private(set) var offlineNavigationRoutes: [PlannedRouteSummaryV1] = []
     @Published private(set) var stravaReloadBookmarks:
         [StravaRouteReloadBookmarkV1] = []
     @Published private(set) var stravaBookmarkStoreAvailable = true
@@ -44,6 +47,8 @@ final class PhoneRouteLibrary: ObservableObject {
     private var readyReceiptKeys: Set<String>
     private var pendingDeletionKeys: Set<String>
     private var pendingInstallKeys: Set<String>
+    private let localDeletionTombstonesKey = "phoneRouteLocalDeletionTombstones.v1"
+    private var localDeletionTombstones: Set<WatchRouteIdentityV1>
     private var providerDeletionTombstones: Set<WatchRouteIdentityV1>
     private var queuedProviderDeletions: Set<WatchRouteIdentityV1> = []
     private var cancellables = Set<AnyCancellable>()
@@ -105,6 +110,11 @@ final class PhoneRouteLibrary: ObservableObject {
         providerDeletionTombstones = Self.decodeProviderDeletionTombstones(
             defaults.data(forKey: providerDeletionTombstonesKey)
         )
+        // Older builds tracked only the Watch half of a provider deletion.
+        // Retry its local half too; never forget it just because Watch replies.
+        localDeletionTombstones = Self.decodeProviderDeletionTombstones(
+            defaults.data(forKey: localDeletionTombstonesKey)
+        ).union(providerDeletionTombstones)
         connectivity.onRouteAcknowledgement = { [weak self] message in
             self?.receive(message)
         }
@@ -125,6 +135,10 @@ final class PhoneRouteLibrary: ObservableObject {
 
     @discardableResult
     func importArchive(_ data: Data) throws -> PlannedRouteSummaryV1 {
+        let archive = try NavigationRouteArchiveV1.decode(
+            data, purpose: .offlineNavigation, now: now()
+        )
+        try requireUsableIdentity(WatchRouteIdentityV1(archive: archive))
         let record = try store.install(data, now: now())
         reload()
         return record.summary
@@ -169,7 +183,9 @@ final class PhoneRouteLibrary: ObservableObject {
     /// cached geometry or silently substitute a newer revision.
     func offlineArchive(for summary: PlannedRouteSummaryV1) throws -> NavigationRouteArchiveV1 {
         do {
-            let record = try store.record(matching: identity(for: summary), now: now())
+            let selectedIdentity = identity(for: summary)
+            try requireUsableIdentity(selectedIdentity)
+            let record = try store.record(matching: selectedIdentity, now: now())
             try record.archive.validate(purpose: .offlineNavigation, now: now())
             return record.archive
         } catch {
@@ -178,6 +194,25 @@ final class PhoneRouteLibrary: ObservableObject {
                 throw SavedRouteMapError.expired(displayName(for: summary))
             }
             throw SavedRouteMapError.unavailable(displayName(for: summary))
+        }
+    }
+
+    func isAvailableOffline(_ summary: PlannedRouteSummaryV1) -> Bool {
+        let selected = identity(for: summary)
+        return !isPendingDeletion(selected) &&
+            (summary.deleteAfter.map { now() < $0 } ?? true) &&
+            offlineNavigationRoutes.contains { identity(for: $0) == selected }
+    }
+
+    private func isPendingDeletion(_ identity: WatchRouteIdentityV1) -> Bool {
+        pendingDeletionKeys.contains(Self.receiptKey(identity)) ||
+            localDeletionTombstones.contains(identity) ||
+            providerDeletionTombstones.contains(identity)
+    }
+
+    private func requireUsableIdentity(_ identity: WatchRouteIdentityV1) throws {
+        guard !isPendingDeletion(identity) else {
+            throw NavigationRouteFileStoreError.notFound
         }
     }
 
@@ -310,17 +345,20 @@ final class PhoneRouteLibrary: ObservableObject {
         }
         let routeIDs = Set(records.map { $0.archive.routeID })
             .union(stravaReloadBookmarks.map(\.routeID))
+        var removedLocally = true
         for record in records {
-            removeArchiveAndQueueWatchDeletion(record)
+            if !removeArchiveAndQueueWatchDeletion(record) { removedLocally = false }
         }
         let removed = try stravaBookmarkStore.purge()
         for routeID in routeIDs { removeDisplayName(routeID: routeID) }
         reload()
+        guard removedLocally else { throw NavigationRouteFileStoreError.ioFailure }
         return removed
     }
 
     func sendToWatch(_ summary: PlannedRouteSummaryV1) throws {
         let identity = identity(for: summary)
+        try requireUsableIdentity(identity)
         let record = try store.record(matching: identity, now: now())
         guard connectivity.transferRoute(record) != nil else {
             watchSyncState[identity] = .rejected("watch_unavailable")
@@ -363,6 +401,7 @@ final class PhoneRouteLibrary: ObservableObject {
     ) throws -> SavedRouteMapSelection {
         let name = displayName(for: summary)
         do {
+            try requireUsableIdentity(identity(for: summary))
             let record = try store.record(
                 matching: identity(for: summary),
                 now: now()
@@ -421,14 +460,16 @@ final class PhoneRouteLibrary: ObservableObject {
         let key = Self.receiptKey(identity)
         if summary.providerID == RouteProviderPolicyV1.strava.providerID {
             _ = try stravaBookmarkStore.delete(routeID: summary.id)
+            var removedLocally = true
             for record in store.recordsIncludingExpired().filter({
                 $0.archive.routeID == summary.id
             }) {
-                removeArchiveAndQueueWatchDeletion(record)
+                if !removeArchiveAndQueueWatchDeletion(record) { removedLocally = false }
             }
             removeDisplayName(routeID: summary.id)
             watchSyncState.removeValue(forKey: identity)
             reload()
+            guard removedLocally else { throw NavigationRouteFileStoreError.ioFailure }
             return
         }
         guard !pendingInstallKeys.contains(key) else {
@@ -448,16 +489,24 @@ final class PhoneRouteLibrary: ObservableObject {
         pendingDeletionKeys.insert(key)
         persistPendingDeletions()
         watchSyncState[identity] = .deleting
+        reload()
     }
 
     func reload() {
         let timestamp = now()
+        loadStravaBookmarks()
+        for identity in localDeletionTombstones {
+            _ = finishLocalDeletion(identity)
+        }
         for record in store.expiredRecords(now: timestamp) {
             removeArchiveAndQueueWatchDeletion(record)
         }
         _ = store.pruneInvalidAndExpired(now: timestamp)
-        routes = store.records(now: timestamp).map(\.summary)
-        loadStravaBookmarks()
+        routes = store.records(now: timestamp).filter {
+            let identity = WatchRouteIdentityV1(archive: $0.archive)
+            return !localDeletionTombstones.contains(identity) &&
+                !providerDeletionTombstones.contains(identity)
+        }.map(\.summary)
         let installedIdentities = Set(routes.map { identity(for: $0) })
         let installedKeys = Set(installedIdentities.map(Self.receiptKey))
         readyReceiptKeys.formIntersection(installedKeys)
@@ -474,6 +523,7 @@ final class PhoneRouteLibrary: ObservableObject {
                 )
             }
         )
+        offlineNavigationRoutes = routes.filter { !isPendingDeletion(identity(for: $0)) }
         publishRouteDisplayNames()
         retryProviderDeletions()
         scheduleNextExpiry()
@@ -482,7 +532,8 @@ final class PhoneRouteLibrary: ObservableObject {
     private func receive(_ message: WatchRouteSyncMessageV1) {
         switch message.status {
         case .ready:
-            if providerDeletionTombstones.contains(message.identity) {
+            if providerDeletionTombstones.contains(message.identity) ||
+                localDeletionTombstones.contains(message.identity) {
                 queuedProviderDeletions.remove(message.identity)
                 retryProviderDeletions()
                 return
@@ -499,27 +550,20 @@ final class PhoneRouteLibrary: ObservableObject {
             persistReadyReceipts()
             persistPendingInstalls()
             watchSyncState[message.identity] = .ready
-        case .deleted:
-            if (try? store.deleteDeferred(
-                matching: message.identity
-            )) != nil,
-               stravaBookmark(routeID: message.identity.routeID) == nil {
-                removeDisplayName(routeID: message.identity.routeID)
+        case .deleted, .evicted:
+            let identity = message.identity
+            let key = Self.receiptKey(identity)
+            let deletionRequested = isPendingDeletion(identity)
+            // An ordinary eviction changes Watch availability, not phone
+            // ownership. Ignore unsolicited deletion acknowledgements.
+            if message.status == .deleted && !deletionRequested { return }
+            if deletionRequested {
+                localDeletionTombstones.insert(identity)
+                persistLocalDeletionTombstones()
+                _ = finishLocalDeletion(identity)
             }
-            providerDeletionTombstones.remove(message.identity)
-            queuedProviderDeletions.remove(message.identity)
-            persistProviderDeletionTombstones()
-            readyReceiptKeys.remove(Self.receiptKey(message.identity))
-            pendingDeletionKeys.remove(Self.receiptKey(message.identity))
-            pendingInstallKeys.remove(Self.receiptKey(message.identity))
-            persistReadyReceipts()
-            persistPendingDeletions()
-            persistPendingInstalls()
-            reload()
-        case .evicted:
-            let key = Self.receiptKey(message.identity)
-            providerDeletionTombstones.remove(message.identity)
-            queuedProviderDeletions.remove(message.identity)
+            providerDeletionTombstones.remove(identity)
+            queuedProviderDeletions.remove(identity)
             persistProviderDeletionTombstones()
             readyReceiptKeys.remove(key)
             pendingDeletionKeys.remove(key)
@@ -527,11 +571,10 @@ final class PhoneRouteLibrary: ObservableObject {
             persistReadyReceipts()
             persistPendingDeletions()
             persistPendingInstalls()
-            if watchSyncState[message.identity] != nil {
-                watchSyncState[message.identity] = .localOnly
-            }
+            reload()
         case .rejected:
-            if providerDeletionTombstones.contains(message.identity) {
+            if providerDeletionTombstones.contains(message.identity) ||
+                localDeletionTombstones.contains(message.identity) {
                 queuedProviderDeletions.remove(message.identity)
                 persistProviderDeletionTombstones()
                 return
@@ -559,6 +602,7 @@ final class PhoneRouteLibrary: ObservableObject {
             persistReadyReceipts()
             persistPendingDeletions()
             persistPendingInstalls()
+            reload()
             watchSyncState[message.identity] = .rejected(
                 message.errorCode ?? "watch_rejected"
             )
@@ -640,11 +684,14 @@ final class PhoneRouteLibrary: ObservableObject {
         }
     }
 
+    @discardableResult
     private func removeArchiveAndQueueWatchDeletion(
         _ record: InstalledNavigationRouteV1
-    ) {
+    ) -> Bool {
         let identity = WatchRouteIdentityV1(archive: record.archive)
         providerDeletionTombstones.insert(identity)
+        localDeletionTombstones.insert(identity)
+        persistLocalDeletionTombstones()
         queuedProviderDeletions.remove(identity)
         readyReceiptKeys.remove(Self.receiptKey(identity))
         pendingDeletionKeys.remove(Self.receiptKey(identity))
@@ -653,8 +700,34 @@ final class PhoneRouteLibrary: ObservableObject {
         persistPendingDeletions()
         persistPendingInstalls()
         persistProviderDeletionTombstones()
-        try? store.deleteDeferred(matching: identity)
+        let removed = finishLocalDeletion(identity)
         retryProviderDeletions()
+        return removed
+    }
+
+    /// Local cleanup and Watch acknowledgement have independent durable state.
+    /// A failed unlink must remain retryable after either Watch reply or restart.
+    @discardableResult
+    private func finishLocalDeletion(_ identity: WatchRouteIdentityV1) -> Bool {
+        do {
+            try store.deleteDeferred(matching: identity)
+        } catch NavigationRouteFileStoreError.notFound {
+            // deleteDeferred synchronizes an existing directory even on retry.
+        } catch {
+            return false
+        }
+        localDeletionTombstones.remove(identity)
+        persistLocalDeletionTombstones()
+        if stravaBookmark(routeID: identity.routeID) == nil &&
+            !store.recordsIncludingExpired().contains(where: { $0.archive.routeID == identity.routeID }) {
+            removeDisplayName(routeID: identity.routeID)
+        }
+        return true
+    }
+
+    private func persistLocalDeletionTombstones() {
+        defaults.set(try? PropertyListEncoder().encode(Array(localDeletionTombstones)),
+                     forKey: localDeletionTombstonesKey)
     }
 
     private func retryProviderDeletions() {
@@ -721,7 +794,8 @@ final class PhoneRouteLibrary: ObservableObject {
     private func retryPendingInstallsImmediately() {
         for summary in routes {
             let identity = identity(for: summary)
-            guard pendingInstallKeys.contains(Self.receiptKey(identity)),
+            guard !isPendingDeletion(identity),
+                  pendingInstallKeys.contains(Self.receiptKey(identity)),
                   let record = try? store.record(
                       matching: identity,
                       now: now()

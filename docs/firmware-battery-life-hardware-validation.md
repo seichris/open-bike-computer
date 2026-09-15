@@ -294,8 +294,9 @@ automatic light sleep can be considered for production enablement.
 ## BLE, PMU, and SD characterization harness
 
 Production defaults remain unchanged: BLE TX power is P9, NimBLE owns its
-default advertising and connection policy, the SD bus remains at 4 MHz,
-runtime power paths do not switch PMU outputs, and the AXP2101 button status
+default advertising and connection policy. Native one-bit SDMMC defaults to
+20 MHz; only legacy SPI recovery uses 4 MHz. Record the effective backend and
+`freqKHz` from the `SDIO` boot marker for each run. Runtime power paths do not switch PMU outputs, and the AXP2101 button status
 remains on the 250 ms housekeeping deadline. No lower-power radio, rail, or SD
 setting is selected without physical evidence. The 2.06-inch boot-only
 display-enable compatibility operation is not a power-saving setting.

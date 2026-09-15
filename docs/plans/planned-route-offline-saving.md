@@ -1,114 +1,137 @@
-# Planned-route offline saving: approved sources only
+# Saved-route following on iPhone (#437)
 
-Baseline: `origin/main` at `b082746ef0d8e53ab08d3755206536ef2b0fa00c`.
-PR #429 is already merged and its GPX/Strava preview remains the presentation boundary.
+## Consolidation, 2026-09-15
 
-## Policy and scope
+Refreshed #437 (`c877f449ad49b2786520c86c351a65d3926e2b9f`) against freshly
+fetched `origin/main` at `85914afc147f8cbd336f5ef17cb8dbdc2fdf85a6` in an
+isolated worktree. Selected improvements were reviewed from #432 at
+`e2e99a94818329b689798923a8545f8d6ebca709`; that PR is superseded by this one,
+not a prerequisite to merge. #429 is already in main.
 
-`RouteProviderPolicyV1` remains the authority. `apple.mapkit` is active-only;
-`user.imported-gpx` is durable; `strava.route` is allowed only with its original
-validated source reference and a maximum seven-day retention period. Unknown
-providers cannot opt in by declaring `.durable`. This change grants no new
-rights, exports no MKRoute geometry, and does not reclassify MapKit routes.
+Kept from #437: typed GPX/installed drafts, the existing archive codec/store,
+semantic duplicate handling, exact-identity reads, direct iPhone offline
+navigation, online request invalidation, shared runtime and preview ownership.
 
-The MapKit alternative chooser still cannot save its selected Apple route.
-It now offers **Import GPX or choose a saved route**. In that approved-source
-panel, selecting a valid GPX draft or a valid library-backed route enables
-**Save Offline**. New GPX imports have an editable, bounded name. The Settings
-GPX importer derives a name from GPX metadata or the filename and shares the
-same duplicate-safe commit path. Existing saved-route aliases remain editable
-through Settings; saving an existing route does not rename or clone it.
+Ported/adapted from #432: GPX confirmation in the existing library, direct saved
+row navigation, bounded regular-file archive reads, canonical filename checks,
+pending-deletion admission checks, local deletion retries and an engine-level
+prohibition on replacing offline navigation with an online reroute.
 
-This is not implementation of policy-gated MapKit Save Offline. The approved
-GPX/library path and offline navigation are the implemented scope.
+Did NOT port #432's earlier preview implementation, old route sorting/start
+logic or competing save-session class. Main's single-result immediate start,
+fastest-first alternatives, explicit selection, and current #429 preview remain.
+
+## One library, one import flow
+
+Settings and the planner's **Saved Routes** shortcut render the same
+`SavedRoutesSettingsSection`. The shortcut is only a container; it does not
+implement its own list, import handler or persistence flow.
+
+**New GPX:** Import GPX -> memory-only typed draft -> editable meaningful name
+-> Save Route. Cancel and picker cancellation write nothing. The confirmation
+sheet uses `OfflineRouteSaveInteraction`; failed saves retain the original draft
+and identity for retry. Successful saves dismiss confirmation and show feedback
+in the library, including an explicit already-saved result for duplicates.
+
+**Already installed GPX/Strava:** Preview or Navigate on iPhone directly. There
+is no redundant Save Offline step. Availability, provider attribution/Strava
+expiry, rename, deletion and separate Watch sync controls remain in that row.
+Previewing never starts navigation. Settings preview retains #429's planning
+exclusion. A planner-shortcut preview may replace its plan only after the
+selected archive and display geometry have been validated successfully.
+
+## Policy boundary (unchanged)
+
+`RouteProviderPolicyV1` is authoritative. MapKit is active-only; user-owned GPX
+is durable; Strava retains its original validated source reference and original
+expiry, with a maximum seven-day retention period. Unknown providers cannot opt
+in by declaring `.durable`. New Strava imports still use their receipt/bookmark
+transaction. No raw `MKRoute` data or Apple geometry is exported or relabeled.
+
+**Saving the selected MapKit route is NOT implemented.** Its chooser control
+remains disabled. The adjacent Saved Routes shortcut does not save that route.
+Durable online route planning needs a separately approved export-capable source.
+
+Offline route following is not offline route calculation or a basemap download.
+The GPX importer supplies geometry/waypoint guidance, not new road-aware Apple
+turn directions. Apple map tile availability offline is not guaranteed.
 
 ## Storage and identity
 
-`OfflineRouteSaveDraft` can be constructed only by the GPX importer or a
-validated installed archive. Drafts live in memory. Cancellation before Save
-has no storage effects. Synchronous commits cannot be interrupted midway by
-sheet dismissal; failure retains the same draft UUID for retry.
+`PhoneRouteLibrary`, `NavigationRouteArchiveV1`, `NavigationRouteContract` and
+`NavigationRouteFileStoreV1` remain the storage and validation authorities. No
+second database, persistent coordinate cache or archive format is introduced.
+Application Support is the durable root; existing quotas, atomic verification,
+SHA-256, schema/normalization versions and file protection are reused.
 
-`PhoneRouteLibrary.saveOffline` reuses `NavigationRouteArchiveV1` and the
-verified atomic `NavigationRouteFileStoreV1` write, file protection, capacity
-limits, hashing, validation and quarantine. There is no second route database,
-index, or coordinate cache. The fallback storage location is Application Support,
-not a purgeable temporary directory.
+New GPX imports keep their staged UUID/revision; naming happens before the final
+hash. Semantic duplicates compare provenance, canonical ordered geometry and
+guidance, ignoring the new UUID/timestamp/name. They reuse the installed identity
+and alias. Library-backed reads never clone or renew a Strava lease.
 
-New GPX imports keep their staged UUID/revision. Exact semantic duplicates compare
-source, normalization, ordered geometry, endpoints and guidance; they reuse the
-installed UUID/revision/hash, ignoring import timestamps and the proposed name.
-Reversed routes and changed guidance are not duplicates. Existing route saves
-re-read the exact identity, never rewrite bytes, replace a newer revision, or
-renew Strava expiry. Disk failures/capacity limits never evict phone routes
-silently. Deletion synchronizes the containing directory.
+Archive discovery/reload bounds reads before decoding, validates the canonical
+identity-derived filename, and rejects nonregular files and symbolic links. On
+Apple platforms it uses `O_NOFOLLOW | O_NONBLOCK` plus `fstat` on the opened
+descriptor to avoid pathname-check races and blocking FIFO reads. Quarantine
+retains its existing bound. Deletion synchronizes the containing directory;
+retrying an already-removed file also completes that synchronization boundary.
 
-## Offline navigation and preview
+## Deletion and navigation lifecycle
 
-Saved routes remain in the existing Settings library and PR #429 map preview.
-The preview and approved-source panel offer an explicit **Start Offline
-Navigation** action. Starting always re-reads the exact persisted identity,
-revalidates policy/hash/geometry/retention, then enters `NavigationRuntimeV1` in
-`.offline` mode with the archive's content hash. No directions, geocoding,
-Strava request or GPX reparsing is required to start. Live GPS remains canonical
-WGS-84; the active map polyline converts once at the MapKit display boundary.
+A pending Watch deletion can keep a visible status row, but it is immediately
+excluded from `offlineNavigationRoutes`. Preview and active navigation observe
+that admission list, not mere file existence. Read/save/re-export paths also
+check deletion state at the operation boundary.
 
-An offline start invalidates pending online request generations and cancels
-those tasks. Its active polyline belongs to the navigation layer, not the
-saved-preview layer. Offline off-route guidance asks the rider to return to the
-saved route; it never silently enables online rerouting. Deletion, replacement,
-corruption detected by normal library reload, and retention expiry stop the
-active offline route. The engine also enforces expiry on GPS and heartbeat
-updates. A launch reloads saved routes but does not silently resume navigation.
+Local cleanup and Watch acknowledgement now have independent persisted
+identity sets. Local unlink failure remains blocked and retryable after either
+Watch `deleted` or `evicted` acknowledgement and after app restart. Provider
+removal failures are reported, not declared successful. Existing provider
+Watch tombstones seed local cleanup on migration. Ordinary Watch eviction or an
+unsolicited deletion acknowledgement does not delete the iPhone-owned copy.
+A Watch-rejected GPX deletion retains the route under the existing semantics.
 
-One MapKit result still starts immediately; multiple results remain selectable
-and fastest-first. PR #429 overlay ownership, identity reconciliation, China
-coordinate conversion, and read-only preview behavior are preserved.
-
-Route guidance is separate from basemap tiles. This feature downloads no map
-areas and cannot guarantee that Apple map tiles are available offline. GPX
-provides its own geometry/waypoint guidance, not new turn directions from Apple.
+Navigation re-reads the exact UUID/revision/hash archive before starting the
+shared runtime in offline mode. No directions/geocoding/Strava fetch or GPX
+reparse is needed. No fix is fabricated: loading works without GPS, but progress
+requires a valid fix. Canonical geometry stays WGS-84; display conversion is
+owned by the MapKit boundary. Pending online requests are invalidated only after
+an offline start has validated successfully. Offline rerouting is blocked at
+both coordinator and engine boundaries. Off-route guidance asks the rider to
+return to the saved route. Expiry is enforced on location/heartbeat and resend
+paths; deletion/replacement/corruption discovered by reload stops navigation.
+Restart restores the library, not an unrequested active navigation session.
 
 ## Verification
 
-Focused suite: `ios-app/scripts/run-offline-route-tests.sh`; it is also included
-in `run-navigation-tests.sh`. It compiles the actual library, store, importer,
-interaction state, engine and coordinator, with Watch/directions boundaries
-doubled. It covers allowlists, invalid geometry/names, schema/hash rejection,
-archive round trips, UUID/revision/hash identity, retries/duplicates, filesystem
-and capacity failures, cancellation, restart/deletion/corruption, stale revisions,
-Strava expiry, offline startup without directions, off-route behavior, late
-online completion, button/feedback wiring, and one/multiple-result regressions.
-PR #429's native suite adds offline active-overlay ownership/reuse transitions.
-
-Native verification passed on code commit
-`302df26bf3ae5fa61f19e70d8cacdfc12753bd5b`, using Xcode 26.6 on a macOS
-GitHub Actions runner. Run: [34174921680](https://github.com/seichris/open-bike-computer/actions/runs/34174921680).
-Commands run from `ios-app`:
+Run from `ios-app`:
 
 ```sh
 ./scripts/run-offline-route-tests.sh
 ./scripts/run-navigation-tests.sh
 ./scripts/run-saved-route-map-tests.sh
-./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
+./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj \
+  -scheme BikeComputer -destination 'generic/platform=iOS' \
+  CODE_SIGNING_ALLOWED=NO build
 ```
 
-All four commands exited successfully. The focused suite passed 86 checks;
-the saved-map suite passed 178 policy checks and 86 native integration checks.
-The full navigation suite, including its existing renderer, protocol, runtime,
-layout and preview regressions, passed. The unsigned iOS build succeeded.
-No physical-device or UI-automation run is implied by these results. The UI
-coverage consists of interaction-state/coordinator tests, source-wiring checks,
-native MapKit integration tests and the real SwiftUI application build.
+Standalone runners include main's World Radio, device-screen and WireBytes
+dependencies. Focused tests compile production importer/library/store/coordinator/
+engine with Watch/directions boundaries doubled. Added coverage includes pending
+Watch deletion, rejected deletion, failed local deletion followed by either
+Watch acknowledgement, restart/retry, unsolicited acknowledgements, symbolic
+links, wrong filenames, oversized archives, and shared UI confirmation wiring.
+Native map tests cover enabled/disabled/failed direct navigation actions in
+addition to the existing preview and active-overlay checks.
 
-Local Linux attempts ran the portable cycling observation and 178 saved-map
-policy checks successfully; native tests/build were blocked by missing `xcrun`.
-Swift parser checks and `git diff --check` passed locally. The first native
-focused/navigation attempt found two test-helper access-control compile errors;
-those were corrected before the fully passing run above. The first native
-saved-map suite and iOS build also passed. Subsequent changes to this document
-only record these results; they do not change the tested application or tests.
+Fresh verification results belong to the exact refreshed commit and are
+recorded in the PR. The September 8 results on commit `302df26b...` are historical,
+not evidence that this refreshed source graph passes. Linux parser and portable
+policy tests are not substitutes for Apple-platform compilation or UI automation.
 
-Not performed: installation or flashing; airplane-mode iPhone/Watch/Bicino ride;
-GPS/background/lock-screen retention behavior; map alignment or screenshots;
-VoiceOver/Dynamic Type/landscape; disk-full/protected-storage behavior on a phone.
+Physical checks still required: airplane-mode route following, force-quit and
+relaunch, GPS acquisition and background/lock-screen delivery, Strava expiry over
+suspension/reconnect, BLE and Watch handover, China/non-China map alignment,
+VoiceOver/Dynamic Type/landscape, disk-full and protected-storage behavior. No
+physical installation, ride, firmware flashing or automatic merge is authorized
+by this change.

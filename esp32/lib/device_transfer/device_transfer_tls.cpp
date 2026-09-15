@@ -595,6 +595,7 @@ bool TransferClient::begin(WiFiClient &accepted,
     return false;
   }
   connected_ = true;
+  interruptLease_.publish(socket_);
   return true;
 }
 
@@ -689,8 +690,7 @@ void TransferClient::requestHttpResponseKeepAlive() {
 }
 
 void TransferClient::interruptSocket() const {
-  if (socket_ >= 0)
-    ::shutdown(socket_, SHUT_RDWR);
+  interruptLease_.interrupt([](int fd) { ::shutdown(fd, SHUT_RDWR); });
 }
 
 bool TransferClient::finishResponse(uint32_t timeoutMs) {
@@ -749,6 +749,9 @@ bool TransferClient::finishResponse(uint32_t timeoutMs) {
 }
 
 void TransferClient::stop() {
+  // Fence cancellation before TLS teardown or socketOwner_ can close the fd.
+  // This also covers early closes inside handlers, while activeClient_ exists.
+  interruptLease_.withdraw();
   connected_ = false;
   responsePersistenceAllowed_ = false;
   responseKeepAlive_ = false;

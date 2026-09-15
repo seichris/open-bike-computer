@@ -1,10 +1,12 @@
 import subprocess
 import importlib.util
 import os
+import sys
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 source = Path(os.environ.get("PROMOTION_SCHEDULER_SOURCE", Path(__file__).resolve().parents[1] / "map_platform" / "automatic_promotion.py"))
 spec = importlib.util.spec_from_file_location("automatic_promotion", source)
@@ -15,6 +17,9 @@ JOB_TIMEOUT, PromotionQueue, run_promotion = promotion.JOB_TIMEOUT, promotion.Pr
 
 class AutomaticPromotionTests(unittest.TestCase):
     def setUp(self):
+        capacity = patch.object(promotion.shutil, "disk_usage", return_value=SimpleNamespace(free=4 * 1024**3))
+        capacity.start()
+        self.addCleanup(capacity.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / "queue.db"
@@ -29,7 +34,7 @@ class AutomaticPromotionTests(unittest.TestCase):
         self.queue.discover()
         self.assertTrue(self.queue.process_one(100))
         self.runner.assert_called_once_with(self.ids[0])
-        with patch.object(promotion.subprocess, "run") as run:
+        with patch.dict(os.environ, {"MAP_PLATFORM_DATA_ROOT": self.temp.name}), patch.object(promotion.subprocess, "run") as run:
             run_promotion(self.ids[1])
         self.assertEqual(run.call_args.args[0], ["map-platform", "promote-catalog-map", self.ids[1]])
         self.assertEqual(run.call_args.kwargs["timeout"], JOB_TIMEOUT)
@@ -53,6 +58,53 @@ class AutomaticPromotionTests(unittest.TestCase):
         self.assertEqual(self.runner.call_args.args, (self.ids[1],))
         self.assertFalse(self.queue.process_one(102))
         self.assertTrue(self.queue.process_one(161))
+
+    def test_timeout_removes_child_owned_scratch(self):
+        execute = subprocess.run
+        def timeout(*args, **kwargs):
+            script = """
+import fcntl, os, time
+from pathlib import Path
+root = Path(os.environ["MAP_PLATFORM_DATA_ROOT"])
+with (root / "lease").open("r+") as lock:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        (root / "partial.zip").write_bytes(b"partial")
+        time.sleep(60)
+    else:
+        raise RuntimeError("parent lease was not inherited")
+"""
+            return execute([sys.executable, "-c", script], env=kwargs["env"],
+                           pass_fds=kwargs["pass_fds"], check=True, timeout=0.5)
+        with patch.dict(os.environ, {"MAP_PLATFORM_DATA_ROOT": self.temp.name}), patch.object(
+            promotion.subprocess, "run", side_effect=timeout
+        ), self.assertRaises(subprocess.TimeoutExpired):
+            run_promotion(self.ids[0])
+        self.assertFalse(list((Path(self.temp.name) / "automatic-promotion" / "attempts").iterdir()))
+
+    def test_capacity_failure_never_starts_child(self):
+        with patch.dict(os.environ, {"MAP_PLATFORM_DATA_ROOT": self.temp.name}), patch.object(
+            promotion.shutil, "disk_usage", return_value=SimpleNamespace(free=1)
+        ), patch.object(promotion.subprocess, "run") as run, self.assertRaises(RuntimeError):
+            run_promotion(self.ids[0])
+        run.assert_not_called()
+
+    def test_recovery_preserves_live_attempt_and_unowned_directories(self):
+        import fcntl
+        attempts = Path(self.temp.name) / "attempts"
+        attempts.mkdir()
+        live = attempts / "attempt-abcdefgh"
+        live.mkdir()
+        unrelated = attempts / "manual"
+        unrelated.mkdir()
+        with (live / "lease").open("w") as lease:
+            fcntl.flock(lease, fcntl.LOCK_EX)
+            promotion.recover_attempts(attempts)
+            self.assertTrue(live.exists())
+        promotion.recover_attempts(attempts)
+        self.assertFalse(live.exists())
+        self.assertTrue(unrelated.exists())
 
     def test_invalid_pages_do_not_change_queue_or_cursor(self):
         for page in (

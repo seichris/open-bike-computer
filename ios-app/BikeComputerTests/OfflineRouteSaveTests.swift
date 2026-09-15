@@ -8,6 +8,7 @@ final class PhoneWatchConnectivityCoordinator: ObservableObject {
     struct State { var isReachable = false }
     @Published var state = State()
     var onRouteAcknowledgement: ((WatchRouteSyncMessageV1) -> Void)?
+    var acceptsDeletion = true
     private(set) var sideEffects = 0
     func transferRoute(_ record: InstalledNavigationRouteV1) -> UUID? {
         sideEffects += 1
@@ -22,7 +23,7 @@ final class PhoneWatchConnectivityCoordinator: ObservableObject {
     }
     func requestRouteDeletion(_ identity: WatchRouteIdentityV1) -> UUID? {
         sideEffects += 1
-        return UUID()
+        return acceptsDeletion ? UUID() : nil
     }
     func updateRouteDisplayNames(_ entries: [WatchRouteDisplayNameV1]) throws {
         sideEffects += 1
@@ -147,13 +148,24 @@ final class TestRoute: MKRoute {
     }
 }
 
+private final class DeletionFailingFileManager: FileManager, @unchecked Sendable {
+    var failsRouteDeletion = false
+    override func removeItem(at url: URL) throws {
+        if failsRouteDeletion && url.pathExtension == "routev1" {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        try super.removeItem(at: url)
+    }
+}
+
 @MainActor
 private final class Fixture {
     var now = Date(timeIntervalSince1970: 1_800_000_000)
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("offline-save-\(UUID())")
     let suite = "offline-save.\(UUID())"
     lazy var defaults = UserDefaults(suiteName: suite)!
-    lazy var store = NavigationRouteFileStoreV1(rootDirectory: root)
+    let fileManager = DeletionFailingFileManager()
+    lazy var store = NavigationRouteFileStoreV1(rootDirectory: root, fileManager: fileManager)
     let watch = PhoneWatchConnectivityCoordinator()
     lazy var library = makeLibrary()
 
@@ -208,6 +220,9 @@ struct OfflineRouteSaveTests {
         try interactionCancellationAndStorageFailure()
         try corruptionDeletionAndReplacement()
         try stravaRetention()
+        try boundedArchiveReads()
+        try pendingDeletionAdmission()
+        try independentDeletionRetries()
         try offlineNavigationAndLateDirections()
         try mapKitPlanningRegression()
         try uiWiring()
@@ -455,13 +470,134 @@ struct OfflineRouteSaveTests {
             "Exactly one online result still starts immediately")
     }
 
+    static func boundedArchiveReads() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        let summary = try f.library.importGPX(gpx(), fileName: "Canonical.gpx")
+        let archive = try f.library.offlineArchive(for: summary)
+        let record = try f.store.record(matching: WatchRouteIdentityV1(archive: archive), now: f.now)
+        let bytes = try Data(contentsOf: record.fileURL)
+        let renamed = f.root.appendingPathComponent("wrong-identity.routev1")
+        try FileManager.default.moveItem(at: record.fileURL, to: renamed)
+        check(f.store.records(now: f.now).isEmpty, "A valid archive under the wrong filename is rejected")
+        f.library.reload()
+        check(!FileManager.default.fileExists(atPath: renamed.path), "Wrong filenames are quarantined")
+
+        let outside = f.root.appendingPathComponent("outside.bin")
+        try bytes.write(to: outside)
+        try FileManager.default.createSymbolicLink(at: record.fileURL, withDestinationURL: outside)
+        check(f.store.records(now: f.now).isEmpty, "A symlink to valid archive bytes is not admitted")
+        f.library.reload()
+        check(try Data(contentsOf: outside) == bytes, "Quarantining a link never mutates its target")
+
+        // Sparse oversized file: reject before allocating its content.
+        FileManager.default.createFile(atPath: record.fileURL.path, contents: Data([1]))
+        let handle = try FileHandle(forWritingTo: record.fileURL)
+        try handle.truncate(atOffset: UInt64(NavigationRouteLimitsV1.production.maximumEncodedBytes + 1))
+        try handle.close()
+        check(f.store.records(now: f.now).isEmpty, "Oversized archives cannot enter the library")
+        f.library.reload()
+        check(f.makeLibrary().offlineNavigationRoutes.isEmpty, "Rejected archive shapes stay unavailable after restart")
+    }
+
+    static func pendingDeletionAdmission() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        let saved = try f.library.saveOffline(draft(f), name: "Pending deletion")
+        let archive = try f.library.offlineArchive(for: saved.summary)
+        let identity = WatchRouteIdentityV1(archive: archive)
+        let selected = try f.library.offlineDraft(for: saved.summary)
+        try f.library.sendToWatch(saved.summary)
+        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+            operation: .acknowledge, identity: identity, status: .ready, errorCode: nil))
+        let factory = TestNavigationDirectionsFactory()
+        let coordinator = BikeComputerCoordinator(destinationStore: SavedDestinationStore(defaults: f.defaults),
+            directionsFactory: factory.makeTask, startServices: false, now: { f.now })
+        defer { coordinator.stopNavigation() }
+        try coordinator.startOfflineNavigation(archive)
+        try f.library.delete(saved.summary)
+        check(f.library.routes == [saved.summary] && f.library.watchSyncState[identity] == .deleting,
+            "Watch deletion keeps a visible status row")
+        check(!f.library.isAvailableOffline(saved.summary) && f.library.offlineNavigationRoutes.isEmpty,
+            "Pending deletion immediately revokes offline admission")
+        coordinator.reconcileOfflineNavigation(with: f.library.offlineNavigationRoutes)
+        check(!coordinator.isNavigating && factory.tasks.isEmpty, "Pending deletion stops navigation without an online fallback")
+        failure { _ = try f.library.offlineArchive(for: saved.summary) }
+        failure { _ = try f.library.mapSelection(for: saved.summary) }
+        failure { _ = try f.library.saveOffline(selected, name: "Do not resurrect") }
+        failure { try f.library.sendToWatch(saved.summary) }
+        let restarted = f.makeLibrary()
+        check(!restarted.isAvailableOffline(saved.summary), "Pending deletion survives restart")
+        failure { _ = try restarted.offlineArchive(for: saved.summary) }
+        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+            operation: .acknowledge, identity: identity, status: .rejected, errorCode: "in_use"))
+        check(restarted.isAvailableOffline(saved.summary), "An explicitly rejected Watch deletion keeps the original route")
+        try restarted.delete(saved.summary)
+        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+            operation: .acknowledge, identity: identity, status: .deleted, errorCode: nil))
+        check(restarted.routes.isEmpty && f.makeLibrary().routes.isEmpty, "Acknowledged deletion is durable")
+    }
+
+    static func independentDeletionRetries() throws {
+        for status in [WatchRouteSyncStatusV1.deleted, .evicted] {
+            for provider in [RouteProviderPolicyV1.importedGPX, RouteProviderPolicyV1.strava] {
+                let f = Fixture(); defer { f.cleanup() }
+                let route = changedProvider(try draft(f).archive.route, provider)
+                let archive = try NavigationRouteArchiveV1.create(route: route, createdAt: f.now,
+                    deleteAfter: provider == RouteProviderPolicyV1.strava ? f.now.addingTimeInterval(600) : nil,
+                    purpose: .offlineNavigation)
+                let summary = try f.library.importArchive(archive.encoded(purpose: .offlineNavigation, now: f.now))
+                let identity = WatchRouteIdentityV1(archive: archive)
+                try f.library.sendToWatch(summary)
+                f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+                    operation: .acknowledge, identity: identity, status: .ready, errorCode: nil))
+                f.fileManager.failsRouteDeletion = true
+                if provider == RouteProviderPolicyV1.strava {
+                    failure { try f.library.delete(summary) }
+                    check(f.library.routes.isEmpty, "Failed provider removal stays hidden, not available again")
+                } else {
+                    try f.library.delete(summary)
+                }
+                f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+                    operation: .acknowledge, identity: identity, status: status, errorCode: nil))
+                check(!f.store.records(now: f.now).isEmpty, "Injected local unlink failure really leaves archive bytes")
+                check(f.library.offlineNavigationRoutes.isEmpty, "Watch acknowledgement cannot clear failed local cleanup")
+                failure { _ = try f.library.offlineArchive(for: summary) }
+                let restarted = f.makeLibrary()
+                check(restarted.routes.isEmpty, "Local tombstone survives restart after Watch acknowledgement")
+                failure { _ = try restarted.mapSelection(for: summary) }
+                failure { _ = try restarted.importArchive(archive.encoded(purpose: .offlineNavigation, now: f.now)) }
+                f.fileManager.failsRouteDeletion = false
+                restarted.reload()
+                check(f.store.records(now: f.now).isEmpty, "Recovered storage retries the exact failed deletion")
+                check(f.makeLibrary().routes.isEmpty, "Cleanup remains complete on the next restart")
+            }
+        }
+        let f = Fixture(); defer { f.cleanup() }
+        let summary = try f.library.importGPX(gpx(), fileName: "Keep.gpx")
+        let identity = WatchRouteIdentityV1(archive: try f.library.offlineArchive(for: summary))
+        for status in [WatchRouteSyncStatusV1.evicted, .deleted] {
+            f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+                operation: .acknowledge, identity: identity, status: status, errorCode: nil))
+            check(f.library.isAvailableOffline(summary), "Unrequested Watch removal does not delete the iPhone copy")
+        }
+    }
+
     static func uiWiring() throws {
         let content = try String(contentsOfFile: "ios-app/BikeComputer/BikeComputer/ContentView.swift", encoding: .utf8)
-        let panel = try String(contentsOfFile: "ios-app/BikeComputer/BikeComputer/Views/OfflineRoutesView.swift", encoding: .utf8)
-        check(content.contains(".disabled(!coordinator.selectedRouteCanSaveOffline)"), "Chooser uses coordinator source eligibility")
-        check(content.contains("startPreviewedOfflineRoute(preview)"), "PR429 preview has explicit offline start action")
+        let panel = try String(contentsOfFile: "ios-app/BikeComputer/BikeComputer/Views/SavedRoutesLibraryView.swift", encoding: .utf8)
+        let section = try String(contentsOfFile: "ios-app/BikeComputer/BikeComputer/Views/PlannedRoutesView.swift", encoding: .utf8)
+        let settings = try String(contentsOfFile: "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift", encoding: .utf8)
+        check(content.contains(".disabled(!coordinator.selectedRouteCanSaveOffline)"), "Chooser keeps MapKit source gate")
+        check(content.contains("startPreviewedOfflineRoute(preview)"), "Preview still has an explicit navigation action")
         check(content.contains("routeLibrary.offlineArchive(for: summary)"), "UI re-reads exact archive before navigation")
-        check(panel.contains(".disabled(!interaction.canSave(now: context.date))"), "Approved Save button uses tested interaction state and clock")
-        check(panel.contains("offlineRouteSaveSuccess") && panel.contains("offlineRouteSaveFailure"), "UI exposes both success and failure feedback")
+        check(panel.contains(".disabled(!interaction.canSave(now: Date()))"), "Import confirmation uses tested save state")
+        check(section.contains("offlineRouteSaveSuccess") && panel.contains("offlineRouteSaveFailure"), "UI exposes success and failure feedback")
+        check(panel.contains("SavedRoutesSettingsSection(") && settings.contains("SavedRoutesSettingsSection("),
+            "Planner shortcut and Settings share the same library/import UI")
+        check(!panel.contains("ForEach(library.routes)") && !panel.contains(".fileImporter"), "Shortcut does not duplicate library or importer")
+        check(section.contains("GPXRouteSaveSheet(") && !section.contains("try routeLibrary.importGPX("),
+            "Import GPX requires confirmation before the durable commit")
+        check(section.contains("navigationAction?.perform(route)") && section.contains("!routeLibrary.isAvailableOffline(route)"),
+            "Saved rows navigate directly and enforce deletion/expiry eligibility")
+        check(content.contains("routeLibrary.$offlineNavigationRoutes"), "Active navigation and preview observe deletion admission, not just files")
     }
 }

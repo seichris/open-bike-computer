@@ -5,11 +5,14 @@ struct SavedRoutesSettingsSection: View {
     @ObservedObject var routeLibrary: PhoneRouteLibrary
     @ObservedObject var stravaCoordinator: StravaIntegrationCoordinator
     @Environment(\.savedRouteMapAction) private var mapAction
+    @Environment(\.savedRouteNavigationAction) private var navigationAction
     let onImportFromStrava: () -> Void
     @FocusState private var focusedRouteID: UUID?
     @State private var renameInteraction = SavedRouteRenameInteraction()
     @State private var errorMessage: String?
     @State private var isImportingGPX = false
+    @State private var importDraft: OfflineRouteSaveDraft?
+    @State private var importFeedback: String?
 
     var body: some View {
         Section {
@@ -52,6 +55,12 @@ struct SavedRoutesSettingsSection: View {
                 }
             }
 
+            if let importFeedback {
+                Label(importFeedback, systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .accessibilityIdentifier("offlineRouteSaveSuccess")
+            }
+
             if let error = stravaCoordinator.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
@@ -61,7 +70,7 @@ struct SavedRoutesSettingsSection: View {
             Text("Saved Routes")
         } footer: {
             Text(
-                "Preview saved routes on the map, or send them to Apple Watch for offline navigation."
+                "Preview saved routes, navigate offline on this iPhone, or send them to Apple Watch. Offline map tiles are separate."
             )
         }
         .alert(
@@ -74,6 +83,12 @@ struct SavedRoutesSettingsSection: View {
             Button("OK", role: .cancel) { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "Unknown error")
+        }
+        .sheet(item: $importDraft) { draft in
+            GPXRouteSaveSheet(library: routeLibrary, draft: draft) { result in
+                importFeedback = result.message
+                importDraft = nil
+            }
         }
         .onAppear { routeLibrary.reload() }
         .onChange(of: focusedRouteID) { newValue in
@@ -103,11 +118,17 @@ struct SavedRoutesSettingsSection: View {
                   byteCount <= GPXRouteImporterV1.maximumInputBytes else {
                 throw GPXRouteImporterError.fileTooLarge
             }
-            _ = try routeLibrary.importGPX(
-                Data(contentsOf: url, options: .mappedIfSafe),
-                fileName: url.lastPathComponent
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let data = try handle.read(upToCount: GPXRouteImporterV1.maximumInputBytes + 1) ?? Data()
+            // The parser rechecks the bound even if the file grew after stat.
+            importDraft = try OfflineRouteSaveDraft.gpx(
+                data: data, fileName: url.lastPathComponent, now: Date()
             )
+            importFeedback = nil
         } catch {
+            let cocoa = error as NSError
+            if cocoa.domain == NSCocoaErrorDomain && cocoa.code == NSUserCancelledError { return }
             errorMessage = (error as? LocalizedError)?.errorDescription ??
                 "The GPX route could not be imported."
         }
@@ -158,7 +179,7 @@ struct SavedRoutesSettingsSection: View {
                         try routeLibrary.delete(route)
                     } catch {
                         errorMessage =
-                            "The route was kept because deletion could not be completed safely."
+                            "Deletion could not be completed safely. Reopen Saved Routes to retry cleanup."
                     }
                 } label: {
                     Image(systemName: "trash")
@@ -167,6 +188,26 @@ struct SavedRoutesSettingsSection: View {
                 .buttonStyle(.borderless)
                 .disabled(status == .transferring || status == .deleting)
                 .accessibilityLabel("Delete \(displayName)")
+            }
+
+            HStack {
+                Button {
+                    finishRenaming()
+                    focusedRouteID = nil
+                    do { try navigationAction?.perform(route) }
+                    catch { errorMessage = error.localizedDescription }
+                } label: {
+                    Label("Navigate on iPhone", systemImage: "location.fill")
+                }
+                .buttonStyle(.borderless)
+                .disabled(navigationAction?.isEnabled != true || !routeLibrary.isAvailableOffline(route))
+                .accessibilityLabel("Navigate \(displayName) offline on iPhone")
+                .accessibilityIdentifier("navigateSavedRoute-\(route.id.uuidString)")
+                Spacer()
+                if routeLibrary.isAvailableOffline(route) {
+                    Text("Available offline")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
 
             if route.providerID == RouteProviderPolicyV1.strava.providerID {
@@ -207,7 +248,7 @@ struct SavedRoutesSettingsSection: View {
                 .frame(width: 32, height: 32)
         }
         .buttonStyle(.borderless)
-        .disabled(mapAction == nil || mapAction?.isNavigationActive == true)
+        .disabled(mapAction == nil || mapAction?.isNavigationActive == true || !routeLibrary.isAvailableOffline(route))
         .accessibilityLabel("Show \(displayName) on map")
         .accessibilityHint(
             mapAction?.isNavigationActive == true

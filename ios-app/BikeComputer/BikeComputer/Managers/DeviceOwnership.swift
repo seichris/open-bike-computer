@@ -1042,6 +1042,7 @@ enum AuthenticatedBLEChannel: UInt8 {
     case settings = 5
     case workout = 6
     case rideAutomation = 7
+    case screenConfiguration = 8
 }
 
 final class AuthenticatedBLEWriteSession {
