@@ -133,6 +133,7 @@ static std::atomic<bool> bleSessionSupportsRendererDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRendererBenchmarkSample{false};
 static std::atomic<bool> bleSessionSupportsRideDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRideDeliveryAck{false};
+static std::atomic<bool> bleSessionSupportsWorkoutZones{false};
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
 static std::atomic<bool> bleSessionSupportsWorldRadio{false};
 #endif
@@ -2291,6 +2292,7 @@ static void handleAuthPayload(const std::string &frame) {
         false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
+    bleSessionSupportsWorkoutZones.store(false, std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
@@ -3809,6 +3811,10 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
             device_capabilities_protocol::SCREEN_CONFIGURATION_FEATURE;
       }
     }
+    if (workout_zones::ENABLED && clientVersion >=
+        ride_ble_protocol_generated::WORKOUT_ZONES_V1_MINIMUM_CLIENT_VERSION) {
+      featureFlags |= ride_ble_protocol_generated::WORKOUT_ZONES_V1_FEATURE;
+    }
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
@@ -3881,6 +3887,9 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
     bleSessionSupportsMapNavigationOrientation =
         device_capabilities_protocol::supportsMapNavigationOrientation(
             clientVersion, map_profile_protocol::STABLE_CAMERA_ENABLED);
+    const bool supportsZones = workout_zones::ENABLED && clientVersion >=
+        ride_ble_protocol_generated::WORKOUT_ZONES_V1_MINIMUM_CLIENT_VERSION;
+    bleSessionSupportsWorkoutZones.store(supportsZones, std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(
         clientVersion >=
             device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION,
@@ -4601,6 +4610,10 @@ handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
   if (!requireAuthenticated("workout telemetry")) {
     return workout_telemetry::ApplyResult::RejectedUnauthenticated;
   }
+  if (data && len && data[0] == workout_zone_wire::FRAME_KIND &&
+      (!workout_zones::ENABLED || !bleSessionSupportsWorkoutZones.load(std::memory_order_acquire))) {
+    return workout_telemetry::ApplyResult::RejectedKind;
+  }
   const workout_telemetry::ApplyResult result =
       workout_telemetry_runtime::ingestFrame(data, len, millis(), true);
   static int lastDiagnosticWorkoutResult = -1;
@@ -5304,6 +5317,7 @@ public:
         false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
+    bleSessionSupportsWorkoutZones.store(false, std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
@@ -5399,6 +5413,7 @@ public:
         false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
+    bleSessionSupportsWorkoutZones.store(false, std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
@@ -5876,12 +5891,17 @@ public:
             return;
           }
           if (hasDeliveryMember) {
-            const bool canonicalMember =
-                deliveryMember.payloadLength > 0 &&
-                deliveryMember.memberCount <= 3 &&
-                deliveryMember.memberIndex < deliveryMember.memberCount &&
-                deliveryMember.payload[0] ==
+            const bool zonesNegotiated = bleSessionSupportsWorkoutZones.load(std::memory_order_acquire);
+            const bool legacyMember = deliveryMember.memberIndex < 3 &&
+                deliveryMember.payloadLength > 0 && deliveryMember.payload[0] ==
                     static_cast<uint8_t>(deliveryMember.memberIndex + 1);
+            const bool zoneMember = zonesNegotiated && deliveryMember.memberCount == 5 &&
+                deliveryMember.memberIndex >= 3 && deliveryMember.payloadLength >= workout_zone_wire::HEADER_BYTES &&
+                deliveryMember.payload[0] == workout_zone_wire::FRAME_KIND &&
+                deliveryMember.payload[2] == deliveryMember.memberIndex - 2;
+            const bool canonicalMember =
+                (deliveryMember.memberCount <= 3 || (zonesNegotiated && deliveryMember.memberCount == 5)) &&
+                deliveryMember.memberIndex < deliveryMember.memberCount && (legacyMember || zoneMember);
             if (!canonicalMember) {
               noteRideDeliveryMember(
                   deliveryMember, ride_delivery_protocol::Result::Malformed,
@@ -5909,6 +5929,7 @@ public:
           case ApplyResult::IgnoredMotionEpoch:
           case ApplyResult::IgnoredMotionSequence:
           case ApplyResult::IgnoredLifecyclePhase:
+          case ApplyResult::IgnoredZoneSequence:
             deliveryResult = ride_delivery_protocol::Result::Stale;
             break;
           case ApplyResult::RejectedUnauthenticated:

@@ -90,6 +90,8 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
@@ -117,6 +119,8 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
@@ -219,6 +223,8 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/RideAutomationRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \

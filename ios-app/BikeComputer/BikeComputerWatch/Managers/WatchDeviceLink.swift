@@ -131,6 +131,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
     private var leaseReleaseAckTask: Task<Void, Never>?
     private var latestWorkoutFrames: WorkoutDeviceFrames?
+    private var workoutZoneSequence: UInt32 = 0
     private var latestWorkoutGPS: WorkoutDeviceGPSUpdate?
     private var latestWorkoutMotion: WorkoutDeviceMotionUpdate?
     private var workoutPairGeneration: UInt8 = 0
@@ -935,6 +936,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         challenge = nil
         protectedSession = nil
         capabilities = nil
+        workoutZoneSequence = 0
         authCharacteristic = nil
         navigationCharacteristic = nil
         routeCharacteristic = nil
@@ -1314,10 +1316,21 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         workoutPairGeneration = workoutPairGeneration == 3
             ? 1
             : workoutPairGeneration + 1
+        let zonesSupported = capabilities?.supportsWorkoutZonesV1 == true
+            && (peripheral?.maximumWriteValueLength(for: .withResponse) ?? 0) >=
+                RideBLEGeneratedProtocolV1.workoutZoneMaximumFrameBytes +
+                RideBLEGeneratedProtocolV1.protectedFrameOverhead +
+                RideBLEGeneratedProtocolV1.applicationCommandHeaderBytes
+        var zoneSequence: UInt32 = 0
+        if zonesSupported && workoutZoneSequence < UInt32.max {
+            workoutZoneSequence += 1
+            zoneSequence = workoutZoneSequence
+        }
         let payloads = WorkoutDeviceFrameBuilder.transportFrames(
             for: frames,
             generation: workoutPairGeneration,
-            includeOrigin: capabilities?.supportsRideAutomation == true
+            includeOrigin: capabilities?.supportsRideAutomation == true,
+            zoneSequence: zoneSequence
         )
         let isCritical = [
             WorkoutDeviceSessionState.ending,
@@ -1331,7 +1344,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             applicationCommandType: isCritical ? .workoutState : nil,
             coalescingKey: "workout",
             writes: payloads.map {
-                .init(target: .workout, payload: $0)
+                .init(target: .workout, payload: $0,
+                      zoneDispatch: $0.first == 5 ? RideBLEZoneDispatch(frame: $0) : nil)
             }
         )
     }
@@ -1483,6 +1497,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 }
                 payload = freshPayload
             }
+            if let zone = write.zoneDispatch { payload = zone.payload() }
             if shouldUseApplicationAcknowledgement(for: group) {
                 guard let commandType = group.applicationCommandType,
                       let wrapped = RideBLEApplicationCommandEnvelopeV1(

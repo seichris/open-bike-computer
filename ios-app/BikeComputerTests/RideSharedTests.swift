@@ -906,7 +906,7 @@ enum RideSharedTests {
         var cap2 = Data("CAP2".utf8)
         cap2.append(1)
         expect(
-            WatchDirectBLEProtocolV1.capabilityClientVersion == 23 &&
+            WatchDirectBLEProtocolV1.capabilityClientVersion == 26 &&
                 WatchDirectBLEProtocolV1.scopedControllerFeature == 1 << 14 &&
                 WatchDirectBLEProtocolV1.rideAutomationFeature == 1 << 15 &&
                 WatchDirectBLEProtocolV1.gpsPositionQualityV1Feature == 1 << 17 &&
@@ -914,7 +914,7 @@ enum RideSharedTests {
                     1 << 22 &&
                 WatchDirectBLEProtocolV1.watchGPSMotionEvidenceV1Feature ==
                     1 << 25,
-            "Watch requests reliable ride delivery and Watch GPS motion evidence without moving existing capabilities"
+            "Watch requests native-zone transport without moving existing capabilities"
         )
         let flags = WatchDirectBLEProtocolV1.scopedControllerFeature |
             WatchDirectBLEProtocolV1.workoutTelemetryFeature |

@@ -949,6 +949,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsWorldRadio: Bool = false
     @Published private(set) var supportsScreenConfiguration: Bool = false
     @Published private(set) var supportsWatchGPSMotionEvidenceV1: Bool = false
+    @Published private(set) var supportsWorkoutZonesV1: Bool = false
+    private var workoutZoneSequence: UInt32 = 0
     @Published private(set) var rideTransportPhase:
         RideBLETransportPhaseV1 = .idle
     @Published private(set) var rideTransportFailureReason:
@@ -4172,6 +4174,7 @@ class BLEManager: NSObject, ObservableObject {
         core: Data,
         extended: Data,
         origin: Data? = nil,
+        zoneContext: WorkoutZoneDeviceContextV1? = nil,
         prioritized: Bool,
         onWrite: @escaping (Data) -> Void,
         onDrop: @escaping (Data) -> Void,
@@ -4189,11 +4192,17 @@ class BLEManager: NSObject, ObservableObject {
             return false
         }
 
+        var zones: [Data] = []
+        if supportsWorkoutZonesV1, origin != nil, workoutZoneSequence < UInt32.max {
+            workoutZoneSequence += 1
+            zones = WorkoutZoneDeviceCodecV1.packets(for: zoneContext,
+                sequence: workoutZoneSequence, pairGeneration: core[1] >> 6, at: Date())
+        }
         if prioritized,
            supportsRideDeliveryAcknowledgement,
            workoutTelemetryCharacteristic != nil {
             return sendAcknowledgedWorkoutTelemetryGroup(
-                frames: [core, extended] + (origin.map { [$0] } ?? []),
+                frames: [core, extended] + (origin.map { [$0] } ?? []) + zones,
                 onWrite: onWrite,
                 onDrop: onDrop,
                 onWriteFailure: onWriteFailure
@@ -4242,6 +4251,14 @@ class BLEManager: NSObject, ObservableObject {
             }
             writes.append(originWrite)
         }
+        for zone in zones {
+            guard let write = workoutTelemetryWrite(zone,
+                navigationEndpoint: navigationEndpoint,
+                coalescingKey: "workout-zone-\(zone[2])",
+                onWrite: { onWrite(zone) }, onDrop: { onDrop(zone) },
+                onWriteFailure: { onWriteFailure(zone) }) else { return false }
+            writes.append(write)
+        }
         let didEnqueue = prioritized
             ? navigationWriteQueue.enqueuePrioritizedAtomically(writes)
             : navigationWriteQueue.enqueueAtomically(writes)
@@ -4286,9 +4303,14 @@ class BLEManager: NSObject, ObservableObject {
                     peripheral.maximumWriteValueLength(for: writeType) else {
                 return nil
             }
+            let zone = frames[index].first == WorkoutZoneDeviceCodecV1.frameKind
+                ? RideBLEZoneDispatch(frame: frames[index]) : nil
             return NavigationWrite(
                 data: payload,
                 label: "acknowledged workout telemetry \(index + 1)/\(frames.count)",
+                prepareData: zone.map { zone in {
+                    Data(payload.prefix(RideBLEGeneratedProtocolV1.applicationCommandHeaderBytes)) + zone.payload()
+                } },
                 transportWrite: { [weak self, weak peripheral, weak characteristic] data in
                     guard let self, let peripheral, let characteristic else {
                         return
@@ -4633,6 +4655,10 @@ class BLEManager: NSObject, ObservableObject {
         onDrop: (() -> Void)?,
         onWriteFailure: (() -> Void)?
     ) -> NavigationWrite? {
+        if frame.first == WorkoutZoneDeviceCodecV1.frameKind {
+            guard supportsWorkoutZonesV1, WorkoutZoneDeviceCodecV1.hasValidShape(frame),
+                  workoutTelemetryCharacteristic != nil else { return nil }
+        }
         let payload: Data
         let label: String
         let transportWrite: ((Data) -> Void)?
@@ -4735,18 +4761,18 @@ class BLEManager: NSObject, ObservableObject {
         let motionClock = workoutMotionUptime
         let motion = frame.first == 4
             ? RideBLEMotionDispatch(frame: frame, enqueuedUptime: motionClock()) : nil
+        let zone = frame.first == WorkoutZoneDeviceCodecV1.frameKind
+            ? RideBLEZoneDispatch(frame: frame, enqueuedUptime: motionClock()) : nil
         let isFallback = route == .navigationFallback
+        let prepare: (() -> Data?)? = zone.map { zone in { zone.payload(at: motionClock()) } }
+            ?? motion.map { motion in {
+                guard let frame = motion.payload(at: motionClock()) else { return nil }
+                return isFallback ? Data(DeviceBLEProtocol.workoutTelemetryFallbackPrefix.utf8) + frame : frame
+            } }
         return NavigationWrite(
             data: payload,
             label: label,
-            prepareData: motion.map { motion in
-                {
-                    guard let frame = motion.payload(at: motionClock()) else { return nil }
-                    return isFallback
-                        ? Data(DeviceBLEProtocol.workoutTelemetryFallbackPrefix.utf8) + frame
-                        : frame
-                }
-            },
+            prepareData: prepare,
             transportWrite: transportWrite,
             onWrite: onWrite,
             onDrop: onDrop,
@@ -5126,6 +5152,8 @@ class BLEManager: NSObject, ObservableObject {
         supportsScreenConfiguration = false
         deviceScreenConfigurationController.markLegacyUnsupported()
         supportsWatchGPSMotionEvidenceV1 = false
+        supportsWorkoutZonesV1 = false
+        workoutZoneSequence = 0
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -6323,6 +6351,8 @@ class BLEManager: NSObject, ObservableObject {
         supportsWorldRadio = false
         supportsScreenConfiguration = false
         supportsWatchGPSMotionEvidenceV1 = false
+        supportsWorkoutZonesV1 = false
+        workoutZoneSequence = 0
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -9608,6 +9638,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsScreenConfiguration = false
         deviceScreenConfigurationController.markLegacyUnsupported()
         supportsWatchGPSMotionEvidenceV1 = false
+        supportsWorkoutZonesV1 = false
+        workoutZoneSequence = 0
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -9911,6 +9943,12 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             deviceScreenConfigurationController.markLegacyUnsupported()
         }
         supportsWatchGPSMotionEvidenceV1 = hasWatchGPSMotionEvidenceV1
+        supportsWorkoutZonesV1 = hasWorkoutTelemetry && hasRideAutomation && hasRideDeliveryAcknowledgement
+            && flags & RideBLEGeneratedProtocolV1.workoutZonesV1Feature != 0
+            && workoutTelemetryCharacteristic != nil
+            && (connectedPeripheral?.maximumWriteValueLength(for: .withResponse) ?? 0) >=
+                WorkoutZoneDeviceCodecV1.maximumFrameBytes + AuthenticatedBLEWriteSession.frameOverhead
+                    + RideBLEGeneratedProtocolV1.applicationCommandHeaderBytes
         if hasRideDiagnostics {
             sendDiagnosticsCaptureBindingIfNeeded()
         }

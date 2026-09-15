@@ -158,7 +158,12 @@ int main() {
           if (round)
             assert(ride_telemetry_layout::cornersFitCircle(rect, dimensions.first));
         }
-        for (const auto &segment : strip.segments) {
+        for (std::size_t zone = 0; zone < strip.segments.size(); ++zone) {
+          const auto &segment = strip.segments[zone];
+          if (zone >= ride_telemetry_layout::kHeartRateZoneCount) {
+            assert(segment.width == 0 && segment.height == 0);
+            continue;
+          }
           assert(segment.x >= strip.bounds.x &&
                  segment.right() <= strip.bounds.right());
           assert(segment.y == strip.bounds.y &&

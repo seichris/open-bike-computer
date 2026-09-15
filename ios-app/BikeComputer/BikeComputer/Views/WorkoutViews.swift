@@ -706,7 +706,7 @@ struct WorkoutDashboardView: View {
                     )
                 }
                 if snapshot.nativeZones != nil {
-                    Text("The bike display still uses Bicino’s five heart-rate zones, not these Apple Health zones.")
+                    Text("Compatible bike firmware shows these HealthKit zones. Older firmware continues to use Bicino’s five-zone fallback.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }

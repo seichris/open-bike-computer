@@ -83,10 +83,13 @@ for HealthKit's next valid transition. This is intentionally unavailable rather
 than inferred from ambiguous boundary semantics or restored from stale state.
 
 The existing five-band fallback/checkpoint implementation continues in parallel
-for legacy clients and the ESP32. Native values are **not** put into `WEXT` even
+for legacy clients and firmware. Native values are **not** put into `WEXT` even
 when the native configuration also contains five zones: its boundaries may be
-different. The app explicitly explains this difference. Device-native zone
-support is a separate capability-negotiated firmware change, not part of this PR.
+different. A new capability-negotiated, versioned sidecar now carries both zone metrics to
+compatible firmware, with an explicit Bicino fallback on iOS/watchOS 26.
+The renderer supports 3–9 zones plus optional power-zone, range and time widgets.
+See [the device protocol](workout-zone-device-protocol.md) for the exact wire,
+old-peer compatibility, source labels and production qualification gate.
 
 ## Toolchains
 

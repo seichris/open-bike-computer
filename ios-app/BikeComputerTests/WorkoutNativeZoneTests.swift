@@ -211,7 +211,12 @@ private enum WorkoutNativeZoneTests {
         let legacyFrames = deviceFrames(native: nil)
         let nativeFrames = deviceFrames(native: native)
         check(legacyFrames != nil, "legacy frame fixture exists")
-        check(legacyFrames == nativeFrames, "native payload does not change any legacy BLE byte")
+        check(legacyFrames?.core == nativeFrames?.core &&
+              legacyFrames?.extended == nativeFrames?.extended &&
+              legacyFrames?.origin == nativeFrames?.origin &&
+              legacyFrames?.originAvailable == nativeFrames?.originAvailable &&
+              legacyFrames?.identity == nativeFrames?.identity,
+              "native payload does not change any legacy BLE byte or identity")
         check(nativeFrames?.extended[12] == 4, "WEXT still carries legacy zone 4, not native zone 2")
 
         // Decoder retains safe provenance for a future HealthKit source case.
@@ -233,7 +238,117 @@ private enum WorkoutNativeZoneTests {
         )
         check(finalDurationGroup.currentZoneDuration == nil, "a saved summary has no current-zone timer")
 
+        try deviceWireTests()
         print("Native workout zone tests passed (\(checks) checks)")
     }
 }
+private extension WorkoutNativeZoneTests {
+    struct WireFixtures: Decodable { let fixtures: [WireFixture] }
+    struct WireFixture: Decodable {
+        let metric: Int
+        let count: Int
+        let boundaries: [Double]
+        let seconds: [Double]
+        let hex: String
+    }
+
+    static func deviceWireTests() throws {
+        let uuid = UUID(uuidString: "00112233-4455-6677-8899-AABBCCDDEEFF")!
+        let fixtures = try JSONDecoder().decode(WireFixtures.self,
+            from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))).fixtures
+        for fixture in fixtures {
+            let kind: WorkoutNativeZoneMetricV1 = fixture.metric == 1 ? .heartRate : .cyclingPower
+            let ranges = (0..<fixture.count).map { index in
+                WorkoutNativeZoneRangeV1(minimum: index == 0 ? nil : fixture.boundaries[index - 1],
+                    maximum: index == fixture.count - 1 ? nil : fixture.boundaries[index])
+            }
+            let configuration = WorkoutNativeZoneConfigurationV1(metric: kind, source: .user, ranges: ranges)
+            let native = group(configuration, current: 2, durations: fixture.seconds)
+            let raw = metric(75, at: now.addingTimeInterval(-1.25), unit: kind.unit)
+            let snapshot = WorkoutSnapshotV1(state: .running, startDate: start,
+                elapsedTime: metric(100, unit: .seconds),
+                currentHeartRate: kind == .heartRate ? raw : nil,
+                cyclingPower: kind == .cyclingPower ? raw : nil,
+                nativeZones: .init(heartRate: kind == .heartRate ? native : nil,
+                                  cyclingPower: kind == .cyclingPower ? native : nil),
+                availability: [.elapsedTime, kind == .heartRate ? .currentHeartRate : .cyclingPower])
+            let context = WorkoutZoneDeviceContextV1(snapshot: snapshot, sessionID: uuid,
+                sessionToken: 0x1234, state: .running, isCurrent: true)
+            let packets = WorkoutZoneDeviceCodecV1.packets(for: context, sequence: 42, pairGeneration: 1, at: now)
+            let packet = packets[fixture.metric - 1]
+            check(packet.map { String(format: "%02x", $0) }.joined() == fixture.hex,
+                  "independent golden bytes metric \(fixture.metric), \(fixture.count) zones")
+            check(WorkoutZoneDeviceCodecV1.hasValidShape(packet), "valid bounded packet shape")
+            check(packet.count <= 132, "bounded BLE packet")
+            let legacy = WorkoutDeviceFrameBuilder.frames(for:
+                WorkoutDeviceTelemetrySampleMapperV1.directWatchSample(snapshot: snapshot,
+                    sessionToken: 0x1234, sessionID: uuid)!)!
+            let withoutZones = WorkoutDeviceFrameBuilder.transportFrames(for: legacy, generation: 1, includeOrigin: true)
+            let withZones = WorkoutDeviceFrameBuilder.transportFrames(for: legacy, generation: 1,
+                includeOrigin: true, zoneSequence: 42, at: now)
+            check(withoutZones.count == 3 && withZones.count == 5, "capability selects 3 or 5 members")
+            check(Array(withZones.prefix(3)) == withoutZones, "legacy prefix is byte-identical")
+            check(Array(withZones.suffix(2)) == packets, "both relays reuse the canonical encoder")
+            let noOrigin = WorkoutDeviceFrameBuilder.transportFrames(for: legacy, generation: 1,
+                includeOrigin: false, zoneSequence: 42, at: now)
+            check(noOrigin.count == 2, "never send sidecars without full workout identity")
+            for current in [false, true] {
+                let expired = WorkoutZoneDeviceCodecV1.packets(for: .init(snapshot: snapshot,
+                    sessionID: uuid, sessionToken: 0x1234, state: .running, isCurrent: current),
+                    sequence: 43, pairGeneration: 2, at: now.addingTimeInterval(31))[fixture.metric - 1]
+                check(expired[6] == 0 && expired[10] == 255 && expired[11] == 255,
+                      "old measurements cannot create a fresh highlight")
+            }
+            let dispatch = RideBLEZoneDispatch(frame: packet, enqueuedUptime: 100)
+            let fresh = dispatch.payload(at: 101)
+            check(Int(fresh[10]) + Int(fresh[11]) * 256 == 2250, "monotonic dispatch accounts for queued age")
+            for uptime in [99.0, Double.nan, Double.infinity, 111.0] {
+                let stale = dispatch.payload(at: uptime)
+                check(stale[6] == 0 && stale[10] == 255 && stale[11] == 255,
+                      "expired or invalid dispatch clears live highlight")
+                check(stale.suffix(from: 32) == packet.suffix(from: 32), "expiry preserves immutable configuration and totals")
+            }
+            check(dispatch.payload(at: 100) == packet, "immutable retry source is not cumulatively aged")
+        }
+
+        func packets(_ snapshot: WorkoutSnapshotV1, current: Bool = true, sequence: UInt32 = 1) -> [Data] {
+            WorkoutZoneDeviceCodecV1.packets(for: .init(snapshot: snapshot, sessionID: uuid,
+                sessionToken: 0x1234, state: WorkoutDeviceSessionState(snapshot.state), isCurrent: current),
+                sequence: sequence, pairGeneration: 1, at: now)
+        }
+        func fallback(state: WorkoutSessionStateV1 = .running, outcome: WorkoutTerminalOutcomeV1? = nil,
+                      rate: Double = 150) -> WorkoutSnapshotV1 {
+            WorkoutSnapshotV1(state: state, startDate: start, elapsedTime: metric(100, unit: .seconds),
+                currentHeartRate: metric(rate), currentHeartRateZone: 3, heartRateZoneCount: 5,
+                heartRateZoneDurations: .init(capturedAt: now, secondsByZone: [1, 2, 3, 4, 5], maximumHeartRateBPM: 190),
+                availability: [.elapsedTime, .currentHeartRate, .heartRateZone], terminalOutcome: outcome)
+        }
+        let ios26 = packets(fallback())
+        check(ios26[0][3] == 0 && ios26[0][5] == 5 && ios26[0][6] == 3, "iOS 26 explicit Bicino fallback")
+        check(ios26[1][5] == 0 && ios26[1].count == 32, "iOS 26 does not invent native power zones")
+        let boundaries = stride(from: 32, to: 64, by: 8).map { offset in
+            Double(bitPattern: (0..<8).reduce(UInt64(0)) { $0 | UInt64(ios26[0][offset + $1]) << ($1 * 8) })
+        }
+        check(boundaries == [114, 133, 152, 171], "fallback preserves exact established thresholds")
+        check(packets(fallback(rate: 0))[0][6] == 0, "zero BPM is unavailable")
+        check(packets(fallback(), current: false).allSatisfy { $0[5] == 0 }, "disconnected replacement clears both metrics")
+        check(packets(fallback(state: .paused))[0][6] == 0, "pause removes highlight but retains configuration")
+        check(packets(fallback(state: .paused))[0][5] == 5, "paused definition retained")
+        check(packets(fallback(state: .ending)).allSatisfy { $0[5] == 0 }, "ending cannot publish a final group")
+        check(packets(fallback(state: .ended, outcome: .discarded)).allSatisfy { $0[5] == 0 }, "discard clears sidecars")
+        check(packets(fallback(state: .ended)).allSatisfy { $0[5] == 0 }, "unconfirmed end cannot invent saved totals")
+        check(packets(fallback(state: .ended, outcome: .saved))[0][4] & 1 == 1, "saved fallback is labelled final")
+        check(packets(fallback(), sequence: 0).isEmpty, "sequence zero rejected")
+        check(WorkoutZoneDeviceCodecV1.packets(for: nil, sequence: 1, at: now).isEmpty, "missing identity cannot send")
+        check(!WorkoutZoneDeviceCodecV1.hasValidShape(Data()), "empty packet rejected")
+        for index in [0, 1, 2, 3, 4, 5, 6] {
+            var corrupt = ios26[0]; corrupt[index] = 255
+            check(!WorkoutZoneDeviceCodecV1.hasValidShape(corrupt), "invalid header rejects \(index)")
+        }
+        for length in [0, 1, 16, 31, 33, ios26[0].count - 1] {
+            check(!WorkoutZoneDeviceCodecV1.hasValidShape(Data(ios26[0].prefix(length))), "truncated length \(length)")
+        }
+    }
+}
+
 #endif
