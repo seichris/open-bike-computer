@@ -10,7 +10,7 @@ enum WatchDirectBLEProtocolV1 {
     static let workoutUUID = RideBLEGeneratedProtocolV1.workoutUUID
     static let rideAutomationUUID = RideBLEGeneratedProtocolV1
         .rideAutomationUUID
-    // Version 26 understands zone sidecars. Unrelated owner-only capabilities
+    // Version 27 understands zone sidecars. Unrelated owner-only capabilities
     // remain ignored; scoped authentication still authorizes only ride traffic.
     static let capabilityClientVersion = RideBLEGeneratedProtocolV1
         .workoutZonesV1MinimumClientVersion

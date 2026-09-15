@@ -1239,9 +1239,10 @@ orientation (setting ID `37`). Firmware advertises bit `24` only with
 physical qualification. This capability is independent of label orientation.
 Version `23` requests bit `25`, Watch GPS motion evidence.
 Version `24` requests bit `26` plus TLV type `2`, configurable screen instances.
-Version `25` requests bit `27`, World Radio. The iPhone negotiates version
-`26` and requests bit `28`, configurable display inactivity timeouts; direct
-Watch control stays at version `23`. Bit `23` remains the
+Version `25` requests bit `27`, World Radio. Version `26` requests bit `28`,
+configurable display inactivity timeouts. Version `27` requests bit `29`,
+versioned workout zones. The current iPhone and direct Watch clients negotiate
+version `27`; older direct Watch clients remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
 Firmware advertises it only with `FIRMWARE_DIAGNOSTICS=1`; production
