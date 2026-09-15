@@ -218,7 +218,7 @@ int main() {
                              ApplyResult::RejectedLength);
 
   std::memcpy(malformed, core, sizeof(core));
-  malformed[0] = 5;
+  malformed[0] = 0xFF; // kind 5 is now the versioned zone sidecar
   assertResultPreservesState(reducer, malformed, sizeof(malformed), 310, true,
                              ApplyResult::RejectedKind);
   std::memcpy(malformed, core, sizeof(core));

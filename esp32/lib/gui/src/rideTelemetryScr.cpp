@@ -32,7 +32,7 @@ struct MetricLabels {
 struct ConfigurableSlotView {
   MetricLabels labels{};
   lv_obj_t *heart = nullptr;
-  std::array<lv_obj_t *, ride_telemetry_layout::kHeartRateZoneCount>
+  std::array<lv_obj_t *, ride_telemetry_layout::kMaximumZoneCount>
       zoneSegments{};
   lv_obj_t *zoneHeart = nullptr;
   lv_obj_t *zoneLabel = nullptr;
@@ -48,11 +48,12 @@ lv_obj_t *rideHeartRateHeart = nullptr;
 lv_obj_t *rideZoneTitle = nullptr;
 MetricLabels rideDistance{};
 MetricLabels rideMoving{};
-std::array<lv_obj_t *, ride_telemetry_layout::kHeartRateZoneCount>
+std::array<lv_obj_t *, ride_telemetry_layout::kMaximumZoneCount>
     rideZoneSegments{};
 lv_obj_t *rideZoneHeart = nullptr;
 lv_obj_t *rideZoneLabel = nullptr;
 int8_t displayedZoneIndex = -2;
+uint8_t displayedZoneCount = 0;
 MetricLabels rideBottomLeft{};
 MetricLabels rideBottomRight{};
 lv_obj_t *rideStartWorkoutButton = nullptr;
@@ -305,11 +306,16 @@ void createZoneMetric(lv_obj_t *page,
 }
 
 void updateZoneMetric(const ride_telemetry_presenter::ViewModel &model) {
+  const uint8_t count = ride_telemetry_presenter::zoneCount(model);
+  if (displayedZoneCount != count) displayedZoneIndex = -2;
+  displayedZoneCount = count;
+  setMetricTitleIfChanged(rideZoneTitle, ride_telemetry_presenter::zoneTitle(model),
+                           rideMetricPlacement.heartRateZone);
   const ride_telemetry_layout::ZonePresentation presentation =
       ride_telemetry_layout::makeZonePresentation(
           rideMetricPlacement.heartRateZone, rideLayout.screenWidth,
           displayedZoneIndex,
-          ride_telemetry_presenter::fiveZoneIndex(model));
+          ride_telemetry_presenter::zoneIndex(model), count);
   if (presentation.update.action ==
       ride_telemetry_layout::ZoneUpdateAction::None) {
     return;
@@ -327,6 +333,10 @@ void updateZoneMetric(const ride_telemetry_presenter::ViewModel &model) {
   }
 
   for (std::size_t index = 0; index < rideZoneSegments.size(); ++index) {
+    if (!presentation.segmentVisible[index]) {
+      lv_obj_add_flag(rideZoneSegments[index], LV_OBJ_FLAG_HIDDEN);
+      continue;
+    }
     const ride_telemetry_layout::Rect &segmentRect =
         presentation.segments[index];
     lv_obj_set_pos(rideZoneSegments[index], segmentRect.x, segmentRect.y);
@@ -349,6 +359,8 @@ void updateZoneMetric(const ride_telemetry_presenter::ViewModel &model) {
   lv_obj_set_style_text_color(rideZoneHeart, foreground, 0);
   if (presentation.heartVisible) {
     lv_obj_clear_flag(rideZoneHeart, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(rideZoneHeart, LV_OBJ_FLAG_HIDDEN);
   }
 
   lv_obj_set_pos(rideZoneLabel, presentation.label.x,
@@ -475,7 +487,8 @@ void updateConfigurableZone(
     ConfigurableSlotView &slot, const ride_telemetry_layout::Rect &rect,
     const ride_stats_widget::Presentation &widget) {
   const auto presentation = ride_telemetry_layout::makeZonePresentation(
-      rect, rideLayout.screenWidth, slot.displayedZone, widget.zoneIndex);
+      rect, rideLayout.screenWidth, slot.displayedZone, widget.zoneIndex,
+      widget.zoneCount, widget.zoneShowsHeart);
   slot.displayedZone = widget.zoneIndex;
   if (presentation.update.action ==
       ride_telemetry_layout::ZoneUpdateAction::Hide) {
@@ -489,6 +502,10 @@ void updateConfigurableZone(
       ride_telemetry_layout::ZoneUpdateAction::None)
     return;
   for (std::size_t index = 0; index < slot.zoneSegments.size(); ++index) {
+    if (!presentation.segmentVisible[index]) {
+      lv_obj_add_flag(slot.zoneSegments[index], LV_OBJ_FLAG_HIDDEN);
+      continue;
+    }
     const auto &segment = presentation.segments[index];
     lv_obj_set_pos(slot.zoneSegments[index], segment.x, segment.y);
     lv_obj_set_size(slot.zoneSegments[index], segment.width, segment.height);
@@ -502,7 +519,10 @@ void updateConfigurableZone(
   lv_obj_set_size(slot.zoneHeart, presentation.heart.width,
                   presentation.heart.height);
   lv_obj_set_style_text_color(slot.zoneHeart, foreground, 0);
-  lv_obj_clear_flag(slot.zoneHeart, LV_OBJ_FLAG_HIDDEN);
+  if (presentation.heartVisible)
+    lv_obj_clear_flag(slot.zoneHeart, LV_OBJ_FLAG_HIDDEN);
+  else
+    lv_obj_add_flag(slot.zoneHeart, LV_OBJ_FLAG_HIDDEN);
   lv_obj_set_pos(slot.zoneLabel, presentation.label.x, presentation.label.y);
   lv_obj_set_size(slot.zoneLabel, presentation.label.width,
                   presentation.label.height);

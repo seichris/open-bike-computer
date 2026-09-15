@@ -1,5 +1,7 @@
 #pragma once
 
+#include "workout_zone_protocol.hpp"
+
 #include "map_profile_protocol.hpp"
 #include "../utils/src/wireBytes.hpp"
 #include "ride_ble_protocol.generated.hpp"
@@ -46,32 +48,15 @@ constexpr uint32_t SUPPORTED_SCREEN_TYPES =
     screenTypeBit(ScreenType::BatteryStatus) |
     (world_radio_config::ENABLED ? screenTypeBit(ScreenType::WorldRadio) : 0);
 
-enum class RideStatsWidget : uint8_t {
-  Empty = 0,
-  Speed = 1,
-  HeartRate = 2,
-  HeartRateZone = 3,
-  Distance = 4,
-  MovingTime = 5,
-  ElapsedTime = 6,
-  Altitude = 7,
-  RouteRemaining = 8,
-  Power = 9,
-  Cadence = 10,
-  AverageSpeed = 11,
-  MaximumSpeed = 12,
-  Calories = 13,
-  AverageHeartRate = 14,
-  SmartMetric1 = 15,
-  SmartMetric2 = 16,
-};
+using RideStatsWidget = ride_ble_protocol_generated::RideStatsWidget;
 
 constexpr uint32_t rideStatsWidgetBit(RideStatsWidget widget) {
   return 1UL << static_cast<uint8_t>(widget);
 }
 
 constexpr uint32_t SUPPORTED_RIDE_STATS_WIDGETS =
-    (1UL << (static_cast<uint8_t>(RideStatsWidget::SmartMetric2) + 1U)) - 1U;
+    (1UL << (static_cast<uint8_t>(workout_zones::ENABLED
+        ? RideStatsWidget::PowerZoneRange : RideStatsWidget::SmartMetric2) + 1U)) - 1U;
 
 struct MapProfile {
   uint8_t minPolygonSize = 0;
@@ -234,7 +219,7 @@ inline bool isSupportedScreenType(ScreenType type) {
 
 inline bool isSupportedWidget(RideStatsWidget widget) {
   const uint8_t raw = static_cast<uint8_t>(widget);
-  return raw <= static_cast<uint8_t>(RideStatsWidget::SmartMetric2) &&
+  return raw <= static_cast<uint8_t>(RideStatsWidget::PowerZoneRange) &&
          (SUPPORTED_RIDE_STATS_WIDGETS & (1UL << raw)) != 0;
 }
 
@@ -592,7 +577,7 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
       for (std::size_t slot = 0; slot < RIDE_STATS_SLOT_COUNT; ++slot) {
         uint8_t rawWidget = 0;
         if (!reader.byte(rawWidget) ||
-            rawWidget > static_cast<uint8_t>(RideStatsWidget::SmartMetric2))
+            rawWidget > static_cast<uint8_t>(RideStatsWidget::PowerZoneRange))
           return DecodeResult::Unsupported;
         instance.rideStatsLayout.slots[slot] =
             static_cast<RideStatsWidget>(rawWidget);

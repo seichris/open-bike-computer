@@ -1239,9 +1239,10 @@ orientation (setting ID `37`). Firmware advertises bit `24` only with
 physical qualification. This capability is independent of label orientation.
 Version `23` requests bit `25`, Watch GPS motion evidence.
 Version `24` requests bit `26` plus TLV type `2`, configurable screen instances.
-Version `25` requests bit `27`, World Radio. The iPhone negotiates version
-`26` and requests bit `28`, configurable display inactivity timeouts; direct
-Watch control stays at version `23`. Bit `23` remains the
+Version `25` requests bit `27`, World Radio. Version `26` requests bit `28`,
+configurable display inactivity timeouts. Version `27` requests bit `29`,
+versioned workout zones. The current iPhone and direct Watch clients negotiate
+version `27`; older direct Watch clients remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
 Firmware advertises it only with `FIRMWARE_DIAGNOSTICS=1`; production
@@ -2052,3 +2053,40 @@ Swift/C++ adapters preserve legacy masks and configurable-screen payload IDs.
 The common request/status fixtures in `protocol/fixtures/world-radio-v1.txt`
 are consumed by firmware and phone host tests. See `docs/world-radio.md` for
 playback intent, item/search generation and drag-settlement behavior.
+
+### Native HealthKit zones and legacy workout frames
+
+Workout mirror schema 1.7 adds optional `snapshot.nativeZones` for iPhone/Watch. It carries separate heart-rate and cycling-power groups, exact thresholds,
+configuration provenance, native durations, observation timestamps and an
+explicit final/saved distinction. The property-list addition is distinct from the versioned device sidecar below. Unknown legacy phone projection strips
+this optional payload; known schema-1.6 peers may ignore its unknown key.
+
+`WEXT` and its five-band Bicino heart-rate model remain byte-for-byte unchanged.
+Never copy a native ordinal (including a five-zone native ordinal with different
+thresholds) into that legacy field. Native power zones do not replace watts.
+Native zones on the ESP32 use the separately versioned kind-5 sidecar; they do
+not change WEXT, watts, cadence, or the old source-flag meanings.
+
+### Versioned workout zone device sidecars
+
+Client version 27 requests CAP2 bit 29 (`workout_zones_v1`). Updated iOS 26 and
+older supported Watch systems retain the explicitly labelled Bicino HR fallback.
+Native HealthKit groups require the SDK/runtime-gated Watch API; power zones are
+unavailable rather than estimated without it. Firmware advertises this feature
+and new widget IDs 17–21 only in diagnostic/development profiles pending physical
+qualification. Older peers, production firmware and insufficient-MTU connections
+continue the original legacy telemetry path.
+
+Kind 5 uses a 32-byte header, exact binary64 thresholds, a full workout UUID,
+ordered sequence, per-metric source age and bounded millisecond durations, for
+3–9 zones and at most 132 bytes. HR and power packets are self-contained rather
+than referring to an unacknowledged configuration cache. Capability-negotiated
+critical workout ACK groups have exactly five members (core, extended, origin,
+HR zones, power zones); existing 1–3-member groups remain valid. Both relays use
+the shared encoder and age queued samples immediately before encryption/retry.
+
+See [Workout zone device protocol](workout-zone-device-protocol.md) for the
+normative offsets, validation, replay/expiry and compatibility matrix. The JSON
+contract generates Swift/C++ constants and append-only widget IDs. Golden
+packets are in `protocol/fixtures/workout-zones-v1.json` and tested independently
+by both languages.

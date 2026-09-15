@@ -16,7 +16,7 @@ inline constexpr char RIDE_AUTOMATION_UUID[] = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B
 inline constexpr char SCREEN_CONFIGURATION_UUID[] = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005";
 inline constexpr std::size_t PROTECTED_FRAME_OVERHEAD = 22;
 inline constexpr uint8_t CAPABILITY_SCHEMA_VERSION = 1;
-inline constexpr uint8_t CURRENT_CLIENT_VERSION = 26;
+inline constexpr uint8_t CURRENT_CLIENT_VERSION = 27;
 inline constexpr uint32_t DEVICE_SOUNDS_FEATURE = 1UL << 0;
 inline constexpr uint8_t DEVICE_SOUNDS_MINIMUM_CLIENT_VERSION = 1;
 inline constexpr uint32_t POWER_BUTTON_HONK_FEATURE = 1UL << 1;
@@ -75,6 +75,8 @@ inline constexpr uint32_t WORLD_RADIO_FEATURE = 1UL << 27;
 inline constexpr uint8_t WORLD_RADIO_MINIMUM_CLIENT_VERSION = 25;
 inline constexpr uint32_t DISPLAY_INACTIVITY_TIMEOUTS_FEATURE = 1UL << 28;
 inline constexpr uint8_t DISPLAY_INACTIVITY_TIMEOUTS_MINIMUM_CLIENT_VERSION = 26;
+inline constexpr uint32_t WORKOUT_ZONES_V1_FEATURE = 1UL << 29;
+inline constexpr uint8_t WORKOUT_ZONES_V1_MINIMUM_CLIENT_VERSION = 27;
 inline constexpr char WORKOUT_START_REQUEST_MAGIC[] = "WREQ";
 inline constexpr char DESTINATION_REQUEST_MAGIC[] = "DREQ";
 inline constexpr char WORLD_RADIO_REQUEST_MAGIC[] = "WRQ1";
@@ -154,6 +156,31 @@ enum class ScreenType : uint8_t {
   BatteryStatus = 4,
   WorldRadio = 5,
   MapNavigation = MapPlusNavigation,
+};
+
+enum class RideStatsWidget : uint8_t {
+  Empty = 0,
+  Speed = 1,
+  HeartRate = 2,
+  HeartRateZone = 3,
+  Distance = 4,
+  MovingTime = 5,
+  ElapsedTime = 6,
+  Altitude = 7,
+  RouteRemaining = 8,
+  Power = 9,
+  Cadence = 10,
+  AverageSpeed = 11,
+  MaximumSpeed = 12,
+  Calories = 13,
+  AverageHeartRate = 14,
+  SmartMetric1 = 15,
+  SmartMetric2 = 16,
+  PowerZone = 17,
+  HeartRateZoneTime = 18,
+  PowerZoneTime = 19,
+  HeartRateZoneRange = 20,
+  PowerZoneRange = 21,
 };
 
 } // namespace ride_ble_protocol_generated

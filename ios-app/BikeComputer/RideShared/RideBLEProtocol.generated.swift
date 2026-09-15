@@ -15,7 +15,7 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let capabilityRequestMagic = "CAPS"
     static let capabilityResponseMagic = "CAP2"
     static let capabilitySchemaVersion: UInt8 = 1
-    static let currentClientVersion: UInt8 = 26
+    static let currentClientVersion: UInt8 = 27
     static let deviceSoundsFeature: UInt32 = 1 << 0
     static let deviceSoundsMinimumClientVersion: UInt8 = 1
     static let powerButtonHonkFeature: UInt32 = 1 << 1
@@ -74,6 +74,8 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let worldRadioMinimumClientVersion: UInt8 = 25
     static let displayInactivityTimeoutsFeature: UInt32 = 1 << 28
     static let displayInactivityTimeoutsMinimumClientVersion: UInt8 = 26
+    static let workoutZonesV1Feature: UInt32 = 1 << 29
+    static let workoutZonesV1MinimumClientVersion: UInt8 = 27
     static let screenConfigurationSchemaVersion: UInt8 = 1
     static let screenConfigurationCapabilityTLVType: UInt8 = 2
     static let maximumScreenConfigurationInstances = 16
@@ -167,4 +169,55 @@ nonisolated enum RideBLELegacyScreenV1: Int, CaseIterable, Codable, Sendable {
         case .worldRadio: return .worldRadio
         }
     }
+}
+
+
+extension RideBLEGeneratedProtocolV1 {
+    static let workoutZoneVersion = 1
+    static let workoutZoneFrameKind = 5
+    static let workoutZoneHeaderBytes = 32
+    static let workoutZoneMaximumZones = 9
+    static let workoutZoneMinimumZones = 3
+    static let workoutZoneMaximumFrameBytes = 132
+    static let workoutZoneHeartRateMaximumAgeMs = 30000
+    static let workoutZonePowerMaximumAgeMs = 5000
+    static let workoutZoneStreamMaximumAgeMs = 10000
+    static let workoutZoneOffsetKind = 0
+    static let workoutZoneOffsetVersion = 1
+    static let workoutZoneOffsetMetric = 2
+    static let workoutZoneOffsetSource = 3
+    static let workoutZoneOffsetFlags = 4
+    static let workoutZoneOffsetCount = 5
+    static let workoutZoneOffsetCurrentZone = 6
+    static let workoutZoneOffsetState = 7
+    static let workoutZoneOffsetSessionToken = 8
+    static let workoutZoneOffsetSampleAgeMs = 10
+    static let workoutZoneOffsetSequence = 12
+    static let workoutZoneOffsetSessionUuid = 16
+    static let workoutZoneOffsetBoundaries = 32
+}
+
+nonisolated enum RideBLERideStatsWidgetV1: UInt8, CaseIterable, Codable, Sendable {
+    case empty = 0
+    case speed = 1
+    case heartRate = 2
+    case heartRateZone = 3
+    case distance = 4
+    case movingTime = 5
+    case elapsedTime = 6
+    case altitude = 7
+    case routeRemaining = 8
+    case power = 9
+    case cadence = 10
+    case averageSpeed = 11
+    case maximumSpeed = 12
+    case calories = 13
+    case averageHeartRate = 14
+    case smartMetric1 = 15
+    case smartMetric2 = 16
+    case powerZone = 17
+    case heartRateZoneTime = 18
+    case powerZoneTime = 19
+    case heartRateZoneRange = 20
+    case powerZoneRange = 21
 }

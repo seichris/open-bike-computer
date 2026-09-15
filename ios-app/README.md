@@ -188,6 +188,15 @@ BikeComputer heart zones use a maximum heart rate configured in iPhone
 **Settings > Developer Settings > Workout Heart Zones**. The default is 190 BPM;
 changes are persisted on iPhone and synced to the paired Watch.
 
+When built with the watchOS 27 SDK and running on watchOS 27, Bicino also reads
+native HealthKit heart-rate and cycling-power zones. iPhone and Watch prefer
+these per-workout configurations and show their source; missing native heart
+zones retain the labelled Bicino fallback. Power zones are never fabricated.
+The bike display keeps the existing five-band Bicino heart zones; its BLE
+protocol has not been changed. See
+[`../docs/native-healthkit-zones.md`](../docs/native-healthkit-zones.md) for the
+SDK and physical-validation gates and recovery behavior.
+
 If the iPhone or bike computer disconnects, the Watch workout continues. The
 iPhone and ESP32 show delayed, disconnected, or stale state instead of treating
 old data as current. Reconnection requests the newest coherent snapshot.

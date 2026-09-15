@@ -53,7 +53,28 @@ static ride_telemetry_presenter::ViewModel sampleModel() {
   model.activeEnergyTenthsKilocalorie = {true,4120};
   // The default smart fields resolve to elapsed/altitude, as in the report.
   // Optional power/cadence values are enabled for their explicit previews.
-  if (previewSensorMask & 1) model.cyclingPowerWatts = {true,245};
+  // Synthetic display examples only, never a user profile or workout. The
+  // ordinary heart strip keeps its existing five-band sample. Native power
+  // demonstrates six zones without borrowing the heart-rate definition.
+  auto &heartZones = model.zones.heartRate;
+  heartZones.received = true;
+  heartZones.source = workout_zone_wire::SOURCE_BICINO;
+  heartZones.count = 5;
+  heartZones.current = 2;
+  heartZones.flags = workout_zone_wire::FLAG_DURATIONS;
+  heartZones.boundaries = {114,133,152,171};
+  heartZones.milliseconds = {600000,1080000,1200000,300000,60000};
+  if (previewSensorMask & 1) {
+    model.cyclingPowerWatts = {true,245};
+    auto &powerZones = model.zones.power;
+    powerZones.received = true;
+    powerZones.source = workout_zone_wire::SOURCE_HEALTHKIT_SYSTEM;
+    powerZones.count = 6;
+    powerZones.current = 3;
+    powerZones.flags = workout_zone_wire::FLAG_DURATIONS;
+    powerZones.boundaries = {150,200,250,300,350};
+    powerZones.milliseconds = {900000,1200000,480000,300000,90000,30000};
+  }
   if (previewSensorMask & 2) model.cyclingCadenceTenthsRpm = {true,875};
   return model;
 }
@@ -167,7 +188,7 @@ int main(int argc,char **argv) {
         << ",\"round\":" << (board ? "false" : "true") << ",\"normal\":{";
     bool first=true;
     for (int slot=0;slot<7;++slot) {
-      for (int widget=0;widget<=16;++widget) {
+      for (int widget=0;widget<=static_cast<int>(Widget::PowerZoneRange);++widget) {
         if(!first) out << ',';
         first=false;
         previewLayout.slots.fill(Widget::Empty);
@@ -179,7 +200,7 @@ int main(int argc,char **argv) {
     // Include every right widget whose *resolved* semantics can be altitude.
     // Rendering the entire row also reproduces font changes to a left heart.
     for (int row=0;row<3;++row) {
-      for (int left=0;left<=16;++left) {
+      for (int left=0;left<=static_cast<int>(Widget::PowerZoneRange);++left) {
         for (int right : {7,16}) {
           if(!first) out << ',';
         first=false;

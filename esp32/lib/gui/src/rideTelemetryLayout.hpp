@@ -36,7 +36,8 @@ constexpr int32_t metricValueLineHeight(int32_t screenWidth) {
   return useLargeMetricValueFont(screenWidth) ? 60 : 46;
 }
 
-constexpr std::size_t kHeartRateZoneCount = 5;
+constexpr std::size_t kHeartRateZoneCount = 5; // legacy palette
+constexpr std::size_t kMaximumZoneCount = 9;
 constexpr int32_t kZoneStripGap = 4;
 
 constexpr int32_t zoneStripHeight(int32_t screenWidth) {
@@ -147,7 +148,7 @@ enum class MetricLayoutMode : uint8_t {
 
 struct ZoneStripLayout {
   Rect bounds{};
-  std::array<Rect, kHeartRateZoneCount> segments{};
+  std::array<Rect, kMaximumZoneCount> segments{};
   Rect heart{};
   Rect label{};
 };
@@ -184,9 +185,9 @@ struct ZoneUpdate {
 
 struct ZonePresentation {
   ZoneUpdate update{};
-  std::array<bool, kHeartRateZoneCount> segmentVisible{};
-  std::array<Rect, kHeartRateZoneCount> segments{};
-  std::array<uint32_t, kHeartRateZoneCount> segmentColors{};
+  std::array<bool, kMaximumZoneCount> segmentVisible{};
+  std::array<Rect, kMaximumZoneCount> segments{};
+  std::array<uint32_t, kMaximumZoneCount> segmentColors{};
   bool heartVisible = false;
   bool labelVisible = false;
   Rect heart{};
@@ -207,17 +208,33 @@ constexpr ZoneUpdate makeZoneUpdate(int8_t displayedZoneIndex,
   };
 }
 
-constexpr uint32_t zoneColorHex(std::size_t index, bool active) {
+constexpr uint32_t zoneColorHex(std::size_t index, bool active, std::size_t count = 5) {
   constexpr std::array<uint32_t, kHeartRateZoneCount> activeColors = {
       0x145C99, 0x0D7A70, 0xADF208, 0xE0730F, 0xB80852};
   // Active colors composited at 62% opacity over the black background.
   constexpr std::array<uint32_t, kHeartRateZoneCount> inactiveColors = {
       0x0C395F, 0x084C45, 0x6B9605, 0x8B4709, 0x720533};
-  return active ? activeColors[index] : inactiveColors[index];
+  if (count < 3 || count > kMaximumZoneCount || index >= count) return 0;
+  const auto &colors = active ? activeColors : inactiveColors;
+  const std::size_t position = index * (kHeartRateZoneCount - 1);
+  const std::size_t lower = position / (count - 1);
+  const std::size_t fraction = position % (count - 1);
+  if (fraction == 0) return colors[lower];
+  uint32_t color = 0;
+  for (unsigned shift : {0U, 8U, 16U}) {
+    const auto a = (colors[lower] >> shift) & 255U;
+    const auto b = (colors[lower + 1] >> shift) & 255U;
+    color |= static_cast<uint32_t>((a * (count - 1 - fraction) + b * fraction) / (count - 1)) << shift;
+  }
+  return color;
 }
 
-constexpr uint32_t zoneForegroundColorHex(std::size_t index) {
-  return index == 2 || index == 3 ? 0x000000 : 0xFFFFFF;
+constexpr uint32_t zoneForegroundColorHex(std::size_t index, std::size_t count = 5) {
+  if (count == 5) return index == 2 || index == 3 ? 0x000000 : 0xFFFFFF;
+  const auto background = zoneColorHex(index, true, count);
+  const auto brightness = ((background >> 16) & 255) * 299 +
+      ((background >> 8) & 255) * 587 + (background & 255) * 114;
+  return brightness > 128000 ? 0x000000 : 0xFFFFFF;
 }
 
 constexpr int32_t heartRateHeartSize(int32_t screenWidth) {
@@ -278,8 +295,11 @@ constexpr ValueWithHeartLayout makeHeartRateValueLayout(
 
 constexpr ZoneStripLayout makeZoneStripLayout(const Rect &metric,
                                                int32_t screenWidth,
-                                               std::size_t activeIndex) {
+                                               std::size_t activeIndex,
+                                               std::size_t zoneCount = 5) {
   ZoneStripLayout layout{};
+  if (zoneCount < 3 || zoneCount > kMaximumZoneCount || activeIndex >= zoneCount)
+    return layout;
   const int32_t height = zoneStripHeight(screenWidth);
   layout.bounds = {
       metric.x,
@@ -291,13 +311,13 @@ constexpr ZoneStripLayout makeZoneStripLayout(const Rect &metric,
 
   const int32_t availableWidth =
       layout.bounds.width -
-      kZoneStripGap * static_cast<int32_t>(kHeartRateZoneCount - 1);
-  const int32_t inactiveWidth = availableWidth / 8;
+      kZoneStripGap * static_cast<int32_t>(zoneCount - 1);
+  const int32_t inactiveWidth = availableWidth / (2 * static_cast<int32_t>(zoneCount - 1));
   const int32_t activeWidth =
       availableWidth -
-      inactiveWidth * static_cast<int32_t>(kHeartRateZoneCount - 1);
+      inactiveWidth * static_cast<int32_t>(zoneCount - 1);
   int32_t x = layout.bounds.x;
-  for (std::size_t index = 0; index < kHeartRateZoneCount; ++index) {
+  for (std::size_t index = 0; index < zoneCount; ++index) {
     const int32_t width = index == activeIndex ? activeWidth : inactiveWidth;
     layout.segments[index] = {x, layout.bounds.y, width, height};
     x += width + kZoneStripGap;
@@ -326,8 +346,10 @@ constexpr ZoneStripLayout makeZoneStripLayout(const Rect &metric,
 
 constexpr ZonePresentation makeZonePresentation(
     const Rect &metric, int32_t screenWidth, int8_t displayedZoneIndex,
-    int8_t nextZoneIndex) {
+    int8_t nextZoneIndex, std::size_t zoneCount = 5, bool showHeart = true) {
   ZonePresentation presentation{};
+  if (zoneCount < 3 || zoneCount > kMaximumZoneCount || nextZoneIndex >= static_cast<int8_t>(zoneCount))
+    nextZoneIndex = -1;
   presentation.update = makeZoneUpdate(displayedZoneIndex, nextZoneIndex);
   if (presentation.update.action != ZoneUpdateAction::Show) {
     return presentation;
@@ -336,21 +358,26 @@ constexpr ZonePresentation makeZonePresentation(
   const std::size_t activeIndex =
       static_cast<std::size_t>(presentation.update.zoneIndex);
   const ZoneStripLayout strip =
-      makeZoneStripLayout(metric, screenWidth, activeIndex);
-  for (std::size_t index = 0; index < kHeartRateZoneCount; ++index) {
+      makeZoneStripLayout(metric, screenWidth, activeIndex, zoneCount);
+  for (std::size_t index = 0; index < zoneCount; ++index) {
     presentation.segmentVisible[index] = true;
     presentation.segments[index] = strip.segments[index];
     presentation.segmentColors[index] =
-        zoneColorHex(index, index == activeIndex);
+        zoneColorHex(index, index == activeIndex, zoneCount);
   }
-  presentation.heartVisible = true;
+  presentation.heartVisible = showHeart && zoneCount == 5;
   presentation.labelVisible = true;
   presentation.heart = strip.heart;
   presentation.label = strip.label;
-  presentation.foregroundColor = zoneForegroundColorHex(activeIndex);
+  presentation.foregroundColor = zoneForegroundColorHex(activeIndex, zoneCount);
   presentation.labelZoneNumber = static_cast<uint8_t>(activeIndex + 1);
   presentation.labelText = {'Z', 'O', 'N', 'E', ' ',
                             static_cast<char>('1' + activeIndex), '\0'};
+  if (!presentation.heartVisible) {
+    const Rect &active = strip.segments[activeIndex];
+    presentation.label = {active.x + 2, strip.label.y, active.width - 4, strip.label.height};
+    presentation.labelText = {'Z', static_cast<char>('1' + activeIndex), '\0'};
+  }
   return presentation;
 }
 
