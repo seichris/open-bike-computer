@@ -956,6 +956,12 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
       workout_telemetry_runtime::isWorkoutActive();
   context.automaticDisplayOffEnabled =
       displayPowerManager.automaticDisplayOffEnabled();
+  const display_power::InactivityTimeouts displayTimeouts =
+      displayPowerManager.displayInactivityTimeouts();
+  context.dimAfterMs =
+      static_cast<uint32_t>(displayTimeouts.dimAfterSeconds) * 1'000U;
+  context.displayOffAfterMs =
+      static_cast<uint32_t>(displayTimeouts.displayOffAfterSeconds) * 1'000U;
   context.transferActive =
       (signals.transferEnabled && signals.transferMode != "debug") ||
       signals.activationRunning;
