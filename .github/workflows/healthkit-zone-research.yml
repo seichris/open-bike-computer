@@ -15,15 +15,15 @@ jobs:
           set -euo pipefail
           out="$RUNNER_TEMP/zone-sdk"
           mkdir -p "$out"
-          ls -d /Applications/Xcode*.app > "$out/xcodes.txt"
-          xcrun swift --version > "$out/swift.txt"
+          ls -d /Applications/Xcode*.app | tee "$out/xcodes.txt"
+          xcrun swift --version | tee "$out/swift.txt"
           sdk="$(xcrun --sdk watchos --show-sdk-path)"
-          printf '%s\n' "$sdk" > "$out/sdk.txt"
+          printf '%s\n' "$sdk" | tee "$out/sdk.txt"
           framework="$sdk/System/Library/Frameworks/HealthKit.framework"
           cp -R "$framework/Headers" "$out/HealthKit-Headers"
           cp -R "$framework/Modules" "$out/HealthKit-Modules"
           for path in hkworkoutzoneconfiguration/source-swift.enum hkworkoutzone/index hkworkoutzone/minimum hkworkoutzone/maximum hkworkoutbuilder/zoneconfiguration\(for:\) hkworkoutbuilder/zonegroup\(for:\); do
-            name="${path//\//_}"
+            name="$(printf '%s' "$path" | tr '/:' '__')"
             curl --fail --location --connect-timeout 15 --max-time 30 "https://developer.apple.com/tutorials/data/documentation/healthkit/${path}.json" -o "$out/$name.json" || true
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
