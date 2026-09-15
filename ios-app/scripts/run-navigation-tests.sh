@@ -12,6 +12,7 @@ python3 "${SCRIPT_DIR}/run-durable-map-attempt-tests.py"
 
 "${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"
 bash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"
+bash "${SCRIPT_DIR}/run-offline-route-tests.sh"
 
 RENDERER_SCHEDULER_OUT="${TMPDIR:-/tmp}/open-bike-renderer-scheduler-tests"
 xcrun swiftc -D HOST_TESTING -parse-as-library \
@@ -65,6 +66,10 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapCatalog.swift \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift \
   ios-app/BikeComputer/BikeComputer/Models/SavedRouteNaming.swift \
+  ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift \
+  ios-app/BikeComputer/RideShared/GPXRouteImporter.swift \
+  ios-app/BikeComputer/RideShared/StravaRouteURL.swift \
+  ios-app/BikeComputer/RideShared/StravaAthleteRoutes.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \

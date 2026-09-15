@@ -14,6 +14,7 @@ import WebKit
 private enum SettingsSheetDestination: Identifiable, Equatable {
     case addDeviceScreen
     case stravaRouteImport
+    case gpxRouteImport(OfflineRouteSaveDraft)
     case savedMapShare(URL)
 
     var id: String {
@@ -22,6 +23,8 @@ private enum SettingsSheetDestination: Identifiable, Equatable {
             return "add-device-screen"
         case .stravaRouteImport:
             return "strava-route-import"
+        case .gpxRouteImport(let draft):
+            return "gpx-route-import:\(draft.id.uuidString)"
         case .savedMapShare(let url):
             return "saved-map-share:\(url.absoluteString)"
         }
@@ -49,6 +52,7 @@ struct SettingsView: View {
         RideDiagnosticsRecorder
     @FocusState private var focusedSavedMapFilename: String?
     @State private var presentedSheet: SettingsSheetDestination?
+    @State private var routeImportFeedback: String?
     let locationAuthorizationStatus: CLAuthorizationStatus
     let locationAccuracyAuthorization: CLAccuracyAuthorization
     let currentLocation: CLLocation?
@@ -178,7 +182,12 @@ struct SettingsView: View {
                     stravaCoordinator: stravaIntegrationCoordinator,
                     onImportFromStrava: {
                         presentedSheet = .stravaRouteImport
-                    }
+                    },
+                    onConfirmGPX: { draft in
+                        routeImportFeedback = nil
+                        presentedSheet = .gpxRouteImport(draft)
+                    },
+                    importFeedback: routeImportFeedback
                 )
 
                 Section {
@@ -312,6 +321,11 @@ struct SettingsView: View {
             StravaRouteImportView(
                 coordinator: stravaIntegrationCoordinator
             )
+        case .gpxRouteImport(let draft):
+            RouteSaveSheet(library: routeLibrary, draft: draft) { result in
+                routeImportFeedback = result.message
+                presentedSheet = nil
+            }
         case .savedMapShare(let url):
             SavedMapShareSheet(url: url)
                 .presentationDetents([.medium])
