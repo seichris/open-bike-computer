@@ -1,4 +1,4 @@
-name: Zone preview integration inputs
+name: Final zone preview and backward-compatibility validation
 on:
   push:
     branches: [work/zone-device-transport-20260915]
@@ -6,25 +6,94 @@ on:
 permissions:
   contents: read
 jobs:
-  inputs:
+  publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 73b5d5eed16f5cf46e749fa034d4c47298da5134
           persist-credentials: false
-      - name: Archive exact source and pinned renderer
+      - name: Preserve reviewed patch outside checkout
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/zone-preview-inputs"
-          git rev-parse HEAD > "$RUNNER_TEMP/zone-preview-inputs/SHA"
-          git archive --format=tar.gz -o "$RUNNER_TEMP/zone-preview-inputs/source.tar.gz" HEAD
+          cp tools/zone-workspace/preview-integration.patch "$RUNNER_TEMP/zone-preview.patch"
+          echo "9f06d5912c2853047986719352ee9bb563ce94fd1bf139c64e4eba632a9f9add  $RUNNER_TEMP/zone-preview.patch" | sha256sum -c -
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: feat/native-healthkit-workout-zones
+          persist-credentials: true
+      - name: Apply reviewed patch to exact PR head
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 73b5d5eed16f5cf46e749fa034d4c47298da5134
+          git apply --check "$RUNNER_TEMP/zone-preview.patch"
+          git apply "$RUNNER_TEMP/zone-preview.patch"
+          git diff --check
+          python3 tools/generate_ride_ble_contract.py --check
+      - name: Render every widget using the pinned production LVGL implementation
+        run: |
+          set -euo pipefail
           git clone --filter=blob:none --no-checkout https://github.com/lvgl/lvgl.git "$RUNNER_TEMP/lvgl"
           git -C "$RUNNER_TEMP/lvgl" checkout --detach 7f07a129e8d77f4984fff8e623fd5be18ff42e74
-          git -C "$RUNNER_TEMP/lvgl" archive --format=tar.gz -o "$RUNNER_TEMP/zone-preview-inputs/lvgl.tar.gz" HEAD
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          python3 -m venv "$RUNNER_TEMP/preview-python"
+          "$RUNNER_TEMP/preview-python/bin/pip" install --disable-pip-version-check Pillow==11.3.0
+          "$RUNNER_TEMP/preview-python/bin/python" tools/generate_ride_stats_preview.py --lvgl-source "$RUNNER_TEMP/lvgl" --build-dir "$RUNNER_TEMP/preview-build"
+          "$RUNNER_TEMP/preview-python/bin/python" tools/generate_ride_stats_preview.py --lvgl-source "$RUNNER_TEMP/lvgl" --build-dir "$RUNNER_TEMP/preview-build" --check
+      - name: Check exhaustive zone geometry, preview composition and unchanged feature minima
+        run: |
+          set -euo pipefail
+          python3 -m unittest tools.tests.test_workout_stats_rendering tools.tests.test_ride_stats_preview esp32.tools.tests.test_world_radio_contract_reuse
+          ./ios-app/scripts/run-native-workout-zone-tests.sh
+          git diff --check
+      - id: publish
+        name: Commit only reviewed source and generated pixels to the existing PR
+        run: |
+          set -euo pipefail
+          git add esp32/tools/tests/test_world_radio_contract_reuse.py \
+            ios-app/BikeComputer/BikeComputer/Models/RideStatsPreviewSpec.swift \
+            tools/generate_ride_stats_preview.py tools/ride_stats_preview/emit_preview.cpp \
+            tools/ride_stats_preview/spec_contract.swift tools/tests/test_ride_stats_preview.py \
+            tools/tests/test_workout_stats_rendering.py \
+            ios-app/BikeComputer/BikeComputer/Assets.xcassets/RideStatsPreview.dataset \
+            ios-app/BikeComputer/BikeComputer/Assets.xcassets/RideStatsPreviewAtlas.imageset
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Render all zone widgets and preserve legacy capability regression coverage'
+          git push origin HEAD:refs/heads/feat/native-healthkit-workout-zones
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  apple:
+    needs: publish
+    runs-on: macos-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          name: zone-preview-inputs
-          path: ${{ runner.temp }}/zone-preview-inputs
-          retention-days: 2
+          ref: ${{ needs.publish.outputs.sha }}
+          persist-credentials: false
+      - name: Record toolchain and exact source
+        run: |
+          mkdir -p "$RUNNER_TEMP/zone-final"
+          git rev-parse HEAD > "$RUNNER_TEMP/zone-final/SHA"
+          xcodebuild -version > "$RUNNER_TEMP/zone-final/toolchain.txt"
+          xcrun --sdk watchos --show-sdk-version >> "$RUNNER_TEMP/zone-final/toolchain.txt"
+      - name: Complete iPhone and embedded Watch application build
+        env:
+          CONFIGURATION: ${{ matrix.configuration }}
+        run: |
+          set -euo pipefail
+          ./ios-app/scripts/xcodebuild-cli.sh -project ios-app/BikeComputer/BikeComputer.xcodeproj \
+            -scheme BikeComputer -configuration "$CONFIGURATION" \
+            -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/zone-derived" \
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/zone-final/build.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: zone-preview-final-${{ matrix.configuration }}
+          path: ${{ runner.temp }}/zone-final
+          retention-days: 7
