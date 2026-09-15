@@ -482,6 +482,10 @@ static bool ensureMapBuffer(void *&buffer, size_t &capacity,
   const size_t previousCapacity = capacity;
   void *replacement = heap_caps_malloc(requiredSize, MALLOC_CAP_SPIRAM);
   if (replacement == nullptr) {
+#ifndef WAVESHARE_EPAPER_397
+// Preserve baseline AMOLED log identities across e-paper-only insertions.
+#line 481
+#endif
     ESP_LOGE(TAG, "MapBuff: %s allocation failed size=%u", name,
              (unsigned)requiredSize);
     return false;
@@ -4167,6 +4171,9 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
       // the branch below still refuses to invent north from a missing course.
       request.rotationRad = 0.0;
     } else {
+#ifndef WAVESHARE_EPAPER_397
+#line 4152
+#endif
       ESP_LOGW(TAG,
                "Course-up frame deferred: neither measured course nor route "
                "bearing is valid");
@@ -4576,6 +4583,9 @@ void Maps::renderWorkerLoop() {
               }
             }
           } else {
+#ifndef WAVESHARE_EPAPER_397
+#line 4554
+#endif
             ESP_LOGE(TAG,
                      "Map render back buffer invariant failed required=%u "
                      "capacity=%u",
@@ -4853,6 +4863,9 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
     readyRenderResultValid = false;
     renderFailurePending = true;
     const TaskHandle_t worker = renderWorkerTaskHandle;
+#ifndef WAVESHARE_EPAPER_397
+#line 4802
+#endif
     ESP_LOGE(TAG,
              "Map render publication invariant failed required=%u front=%u "
              "back=%u dimensions=%ux%u stride=%u",
@@ -5846,6 +5859,9 @@ bool Maps::setVectorMapFolder(const std::string &folder) {
 
   const bool restartWorker = renderWorkerTaskHandle != nullptr;
   if (restartWorker && !stopRenderWorker()) {
+#ifndef WAVESHARE_EPAPER_397
+#line 5618
+#endif
     ESP_LOGE(TAG, "Vector map root switch deferred: render worker is busy");
     return false;
   }
@@ -6332,6 +6348,9 @@ void Maps::createMapScrSprites() {
   if (frameStorageMustMove && workerCanOwnFrameStorage &&
       renderWorkerTaskHandle != nullptr &&
       !stopRenderWorker()) {
+#ifndef WAVESHARE_EPAPER_397
+#line 6099
+#endif
     ESP_LOGE(TAG, "Map screen creation deferred: render worker owns storage");
     return;
   }
@@ -6410,6 +6429,9 @@ void Maps::createMapScrSprites() {
   }
 
   if (!startRenderWorker()) {
+#ifndef WAVESHARE_EPAPER_397
+#line 6167
+#endif
     ESP_LOGE(TAG, "Map render worker unavailable");
     deleteMapScrSprites();
     return;

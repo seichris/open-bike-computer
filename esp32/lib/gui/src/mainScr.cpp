@@ -1892,6 +1892,10 @@ void scrollMapEvent(lv_event_t *event) {
 
       // Filter out phantom touches at corner (touch driver error value)
       if (p.x >= 460 && p.y >= 460) {
+#ifndef WAVESHARE_EPAPER_397
+// Preserve the baseline AMOLED __LINE__ value across e-paper-only insertions.
+#line 1632
+#endif
         log_w("PHANTOM TOUCH IGNORED: x=%d y=%d (corner)", p.x, p.y);
         break;
       }
