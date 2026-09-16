@@ -2,6 +2,30 @@ import Foundation
 import WatchConnectivity
 import WatchKit
 
+private final class WatchConnectivityBackgroundWorkTracker:
+    @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var hasWork: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return count > 0
+    }
+
+    func begin() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    func finish() {
+        lock.lock()
+        count = max(count - 1, 0)
+        lock.unlock()
+    }
+}
+
 /// The sole production owner of `WCSession.default` on Apple Watch.
 @MainActor
 final class WatchConnectivityCoordinator: NSObject {
@@ -15,6 +39,7 @@ final class WatchConnectivityCoordinator: NSObject {
     var onDirectRidePreparationAvailabilityChanged: (() -> Void)?
     var onDirectRideReconciliationRequest:
         ((WatchDirectRideReconciliationRequestV1) -> Void)?
+    var onBackgroundContentStateChanged: (() -> Void)?
 
     private let session: WCSession?
     private let routeLibrary: WatchRouteLibrary
@@ -30,6 +55,21 @@ final class WatchConnectivityCoordinator: NSObject {
     private let inFlightDirectRideReleaseKey =
         "watchConnectivity.inFlightDirectRideReleases.v1"
     private var directRideReleaseRetryTask: Task<Void, Never>?
+    private var activationFailed = false
+    private nonisolated let backgroundWorkTracker =
+        WatchConnectivityBackgroundWorkTracker()
+
+    /// A WatchConnectivity refresh task must stay alive until the session has
+    /// activated and every queued background payload has reached its delegate.
+    /// An activation failure is terminal for this wake and should release the
+    /// task instead of making watchOS expire it.
+    var canCompleteBackgroundDelivery: Bool {
+        guard let session else { return true }
+        if activationFailed { return true }
+        return session.activationState == .activated &&
+            !session.hasContentPending &&
+            !backgroundWorkTracker.hasWork
+    }
 
     private lazy var cyclingSensorPublisher =
         WatchCyclingSensorObservationPublisher(
@@ -83,6 +123,7 @@ final class WatchConnectivityCoordinator: NSObject {
             return
         }
         hasActivated = true
+        activationFailed = false
         session.delegate = self
         session.activate()
     }
@@ -172,13 +213,18 @@ final class WatchConnectivityCoordinator: NSObject {
         _ state: WCSessionActivationState,
         error: Error?
     ) {
+        activationFailed = error != nil || state != .activated
         onDirectRidePreparationAvailabilityChanged?()
-        guard error == nil, state == .activated, let session else { return }
+        guard error == nil, state == .activated, let session else {
+            onBackgroundContentStateChanged?()
+            return
+        }
         flushPendingDirectRideReleases(using: session)
         flushPendingTransportDiagnostics(using: session)
         publishDeviceMetadata(using: session)
         cyclingSensorPublisher.flush()
         onApplicationContext?(session.receivedApplicationContext)
+        onBackgroundContentStateChanged?()
     }
 
     fileprivate func reachabilityDidChange() {
@@ -399,6 +445,7 @@ final class WatchConnectivityCoordinator: NSObject {
     ) {
         let response = routeInstallResponse(data: data, request: request)
         acknowledge(response)
+        onBackgroundContentStateChanged?()
     }
 
     fileprivate func routeInstallResponse(
@@ -499,6 +546,11 @@ final class WatchConnectivityCoordinator: NSObject {
             routeLibrary.reportSyncError(code)
             acknowledge(request.identity, status: .rejected, error: code)
         }
+    }
+
+    fileprivate func backgroundContentWorkDidFinish() {
+        backgroundWorkTracker.finish()
+        onBackgroundContentStateChanged?()
     }
 
     @discardableResult
@@ -705,8 +757,11 @@ extension WatchConnectivityCoordinator: WCSessionDelegate {
         _ session: WCSession,
         didReceiveApplicationContext applicationContext: [String: Any]
     ) {
+        backgroundWorkTracker.begin()
         Task { @MainActor [weak self] in
-            self?.onApplicationContext?(applicationContext)
+            guard let self else { return }
+            self.onApplicationContext?(applicationContext)
+            self.backgroundContentWorkDidFinish()
         }
     }
 
@@ -715,10 +770,16 @@ extension WatchConnectivityCoordinator: WCSessionDelegate {
         didReceive file: WCSessionFile
     ) {
         // WCSession owns this temporary URL only for the callback duration.
+        backgroundWorkTracker.begin()
         guard let metadata = file.metadata,
               let request = WatchRouteSyncMessageV1(
                 propertyList: metadata
-              ), request.operation == .install else { return }
+              ), request.operation == .install else {
+            Task { @MainActor [weak self] in
+                self?.backgroundContentWorkDidFinish()
+            }
+            return
+        }
         let resourceBytes = try? file.fileURL.resourceValues(
             forKeys: [.fileSizeKey]
         ).fileSize
@@ -737,6 +798,7 @@ extension WatchConnectivityCoordinator: WCSessionDelegate {
                 data: data,
                 request: request
             ))
+            self.backgroundContentWorkDidFinish()
         }
     }
 
@@ -744,8 +806,11 @@ extension WatchConnectivityCoordinator: WCSessionDelegate {
         _ session: WCSession,
         didReceiveUserInfo userInfo: [String: Any]
     ) {
+        backgroundWorkTracker.begin()
         Task { @MainActor [weak self] in
-            self?.receiveUserInfo(userInfo)
+            guard let self else { return }
+            self.receiveUserInfo(userInfo)
+            self.backgroundContentWorkDidFinish()
         }
     }
 

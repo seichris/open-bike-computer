@@ -333,7 +333,11 @@ Offline mode is the default:
    network request; offline basemap coverage is separate. Watch transfer is
    optional and independent of iPhone navigation.
 2. For GPX/Strava routes, send the route to Watch and wait for its green Watch status icon. **Queued**
-   does not prove the route is installed.
+   does not prove the route is installed. WatchConnectivity may deliver the file
+   while the Watch app is inactive; watchOS chooses the exact background timing.
+   The cancel button also clears an orphaned local attempt when the system no
+   longer reports its transfer. Unacknowledged attempts expire after seven days
+   and can then be sent again.
 3. On Watch, open **Offline Navigation**, select the installed route, and
    confirm navigation. Leaving the route shows an off-route warning; it never
    causes an online request or invents a connector route.

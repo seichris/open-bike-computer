@@ -144,6 +144,7 @@ private struct WorkoutContractTestSuite {
         testWorkoutDiscardDisclosureRequiresFinalConfirmation()
         testIPhoneStartsUseWatchAvailabilityAndWatchStartsDirectly()
         testWatchOfflineNavigationUIFlow()
+        testWatchConnectivityBackgroundDeliveryLifecycle()
         testHeartRateZoneConfigurationLivesInIPhoneDeveloperSettings()
         testEveryDiscardSurfaceRequiresFinalConfirmation()
         testWorkoutUICompositionRetainsPhaseThreeExitCriteria()
@@ -7607,6 +7608,52 @@ private struct WorkoutContractTestSuite {
                 && root.contains("favoriteStore: favoriteStore")
                 && live.contains("WatchSettingsView("),
             "synced online destinations and the policy toggle must remain reachable before and during a ride"
+        )
+    }
+
+    private mutating func testWatchConnectivityBackgroundDeliveryLifecycle() {
+        let watchDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer/BikeComputerWatch")
+        let delegateURL = watchDirectory.appendingPathComponent(
+            "WatchAppDelegate.swift"
+        )
+        let coordinatorURL = watchDirectory.appendingPathComponent(
+            "Managers/WatchConnectivityCoordinator.swift"
+        )
+        guard let delegateSource = try? String(
+            contentsOf: delegateURL,
+            encoding: .utf8
+        ), let coordinatorSource = try? String(
+            contentsOf: coordinatorURL,
+            encoding: .utf8
+        ) else {
+            expect(false, "WatchConnectivity background sources must exist")
+            return
+        }
+        expect(
+            delegateSource.contains(
+                "func handle(_ backgroundTasks: Set<WKRefreshBackgroundTask>)"
+            )
+                && delegateSource.contains(
+                    "WKWatchConnectivityRefreshBackgroundTask"
+                )
+                && delegateSource.contains(
+                    "completeWatchConnectivityBackgroundTasksIfPossible()"
+                )
+                && delegateSource.contains(
+                    "task.setTaskCompletedWithSnapshot(false)"
+                ),
+            "WatchConnectivity wakes must retain and complete their WatchKit background tasks"
+        )
+        expect(
+            coordinatorSource.contains("session.hasContentPending")
+                && coordinatorSource.contains("backgroundWorkTracker.hasWork")
+                && coordinatorSource.contains(
+                    "onBackgroundContentStateChanged?()"
+                ),
+            "Watch background completion must wait until WCSession drains its pending content"
         )
     }
 
