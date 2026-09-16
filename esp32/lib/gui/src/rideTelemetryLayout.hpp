@@ -12,8 +12,7 @@ constexpr int32_t kMetricValueOffsetY =
     kMetricTitleLineHeight + kMetricTitleValueGap;
 constexpr int32_t kMetricRowGap = 8;
 constexpr int32_t kStartWorkoutButtonGap = 16;
-constexpr int32_t kStartWorkoutButtonHeight = 52;
-constexpr int32_t kRideDetectionMessageGap = 8;
+constexpr int32_t kStartWorkoutButtonHeight = 68;
 constexpr int32_t kStartWorkoutButtonHorizontalInset = 42;
 constexpr int32_t kRoundStartWorkoutButtonHorizontalInset = 76;
 constexpr int32_t kRoundStartWorkoutButtonBottomInset = 104;
@@ -136,8 +135,8 @@ struct MetricPlacement {
   Rect elapsed{};
   Rect bottomLeft{};
   Rect bottomRight{};
+  Rect startWorkoutHitTarget{};
   Rect startWorkoutButton{};
-  Rect rideDetectionMessage{};
 };
 
 enum class MetricLayoutMode : uint8_t {
@@ -463,11 +462,33 @@ constexpr MetricPlacement makeMetricPlacement(const Layout &layout,
       layout.screenWidth - 2 * horizontalInset,
       kStartWorkoutButtonHeight,
   };
-  placement.rideDetectionMessage = {
-      placement.startWorkoutButton.x,
-      placement.startWorkoutButton.bottom() + kRideDetectionMessageGap,
-      placement.startWorkoutButton.width,
-      placement.startWorkoutButton.height,
+  // Keep the painted control inside the round-screen safe area while making
+  // its touch target twice as wide and tall, clipped to the display edges.
+  const int32_t targetWidth =
+      placement.startWorkoutButton.width * 2 < layout.screenWidth
+          ? placement.startWorkoutButton.width * 2
+          : layout.screenWidth;
+  const int32_t targetHeight =
+      placement.startWorkoutButton.height * 2 < layout.screenHeight
+          ? placement.startWorkoutButton.height * 2
+          : layout.screenHeight;
+  int32_t targetX = placement.startWorkoutButton.x +
+                    (placement.startWorkoutButton.width - targetWidth) / 2;
+  int32_t targetY = placement.startWorkoutButton.y +
+                    (placement.startWorkoutButton.height - targetHeight) / 2;
+  if (targetX < 0)
+    targetX = 0;
+  if (targetY < 0)
+    targetY = 0;
+  if (targetX + targetWidth > layout.screenWidth)
+    targetX = layout.screenWidth - targetWidth;
+  if (targetY + targetHeight > layout.screenHeight)
+    targetY = layout.screenHeight - targetHeight;
+  placement.startWorkoutHitTarget = {
+      targetX,
+      targetY,
+      targetWidth,
+      targetHeight,
   };
   return placement;
 }
