@@ -23,6 +23,7 @@
 
 | Plan | Status |
 | --- | --- |
+| [Topographic map support](plans/issue-190-topographic-map-support-implementation-plan.md) | Planned; refreshed against main on 2026-09-12; tracks [issue #190](https://github.com/seichris/open-bike-computer/issues/190) |
 | [Bluetooth reliability implementation and bundle review](plans/bluetooth-reliability-implementation-2026-09-07.md) | Merged in [#423](https://github.com/seichris/open-bike-computer/pull/423); software fixes for R1–R3 are on main; physical qualification remains separate |
 | [Bluetooth reliability reassessment — 2026-09-06](plans/bluetooth-reliability-reassessment-2026-09-06.md) | Historical analysis at `fe73e434`; its R1–R3 findings were implemented by [#423](https://github.com/seichris/open-bike-computer/pull/423). Preserve the original baseline evidence; broader follow-ups and physical acceptance remain open |
 | [iPhone MapKit appearance switcher](plans/iphone-mapkit-appearance-switcher-implementation-plan.md) | Implemented in software; redesigned control rail pending physical validation |
