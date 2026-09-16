@@ -42,17 +42,28 @@ final class PhoneRouteLibrary: ObservableObject {
     private let readyReceiptKey = "watchRouteReadyReceipts.v1"
     private let pendingDeletionKey = "watchRoutePendingDeletions.v1"
     private let pendingInstallKey = "watchRoutePendingInstalls.v1"
+    private let attemptedInstallKey = "watchRouteAttemptedInstalls.v1"
+    private let rejectedInstallReasonsKey =
+        "watchRouteRejectedInstallReasons.v1"
+    private let pendingInstallStartedAtKey =
+        "watchRoutePendingInstallStartedAt.v1"
+    private let pendingInstallMaximumAge: TimeInterval = 7 * 24 * 60 * 60
     private let providerDeletionTombstonesKey =
         "watchRouteProviderDeletionTombstones.v1"
     private var readyReceiptKeys: Set<String>
     private var pendingDeletionKeys: Set<String>
     private var pendingInstallKeys: Set<String>
+    private var attemptedInstallKeys: Set<String>
+    private var rejectedInstallReasons: [String: String]
+    private var pendingInstallStartedAt: [String: Date]
     private let localDeletionTombstonesKey = "phoneRouteLocalDeletionTombstones.v1"
     private var localDeletionTombstones: Set<WatchRouteIdentityV1>
     private var providerDeletionTombstones: Set<WatchRouteIdentityV1>
     private var queuedProviderDeletions: Set<WatchRouteIdentityV1> = []
+    private var immediateInstallKeys: Set<String> = []
     private var cancellables = Set<AnyCancellable>()
     private var expiryTask: Task<Void, Never>?
+    private var pendingInstallExpiryTask: Task<Void, Never>?
 
     convenience init(connectivity: PhoneWatchConnectivityCoordinator) {
         let base = FileManager.default.urls(
@@ -107,6 +118,15 @@ final class PhoneRouteLibrary: ObservableObject {
         pendingInstallKeys = Set(
             defaults.stringArray(forKey: pendingInstallKey) ?? []
         )
+        attemptedInstallKeys = Set(
+            defaults.stringArray(forKey: attemptedInstallKey) ?? []
+        )
+        rejectedInstallReasons = defaults.dictionary(
+            forKey: rejectedInstallReasonsKey
+        ) as? [String: String] ?? [:]
+        pendingInstallStartedAt = defaults.dictionary(
+            forKey: pendingInstallStartedAtKey
+        )?.compactMapValues { $0 as? Date } ?? [:]
         providerDeletionTombstones = Self.decodeProviderDeletionTombstones(
             defaults.data(forKey: providerDeletionTombstonesKey)
         )
@@ -119,14 +139,30 @@ final class PhoneRouteLibrary: ObservableObject {
             self?.receive(message)
         }
         connectivity.$state
+            .map {
+                $0.isActivated && $0.isPaired && $0.isWatchAppInstalled
+            }
+            .removeDuplicates()
+            .sink { [weak self] isWatchAvailable in
+                guard isWatchAvailable else { return }
+                Task { @MainActor [weak self] in
+                    self?.autoQueueEligibleRoutes()
+                }
+            }
+            .store(in: &cancellables)
+        connectivity.$state
             .map(\.isReachable)
             .removeDuplicates()
             .sink { [weak self] isReachable in
-                guard isReachable else { return }
                 Task { @MainActor [weak self] in
-                    self?.retryPendingInstallsImmediately()
-                    self?.queuedProviderDeletions.removeAll()
-                    self?.retryProviderDeletions()
+                    guard let self else { return }
+                    guard isReachable else {
+                        self.immediateInstallKeys.removeAll()
+                        return
+                    }
+                    self.retryPendingInstallsImmediately()
+                    self.queuedProviderDeletions.removeAll()
+                    self.retryProviderDeletions()
                 }
             }
             .store(in: &cancellables)
@@ -379,13 +415,24 @@ final class PhoneRouteLibrary: ObservableObject {
         try requireUsableIdentity(identity)
         let record = try store.record(matching: identity, now: now())
         try record.archive.validate(purpose: .watchTransfer, now: now())
+        let key = Self.receiptKey(identity)
+        attemptedInstallKeys.insert(key)
         guard connectivity.transferRoute(record) != nil else {
+            rejectedInstallReasons[key] = "watch_unavailable"
+            persistInstallAttempts()
             watchSyncState[identity] = .rejected("watch_unavailable")
             return
         }
-        pendingInstallKeys.insert(Self.receiptKey(identity))
+        rejectedInstallReasons.removeValue(forKey: key)
+        pendingInstallKeys.insert(key)
+        pendingInstallStartedAt[key] = now()
         persistPendingInstalls()
+        persistInstallAttempts()
         watchSyncState[identity] = .transferring
+        if connectivity.state.isReachable {
+            immediateInstallKeys.insert(key)
+        }
+        scheduleNextPendingInstallExpiry()
         connectivity.sendRouteImmediately(record)
     }
 
@@ -394,14 +441,24 @@ final class PhoneRouteLibrary: ObservableObject {
         let identity = identity(for: summary)
         let key = Self.receiptKey(identity)
         guard pendingInstallKeys.contains(key) else { return true }
-        guard connectivity.cancelRouteTransfers(identity) > 0 else {
-            return false
-        }
-        pendingInstallKeys.remove(key)
+        // A transfer can disappear from WCSession's outstanding queue without
+        // the acknowledgement reaching iPhone. Clear the durable local attempt
+        // even when there is no longer a system transfer to cancel. A late
+        // ready acknowledgement remains authoritative and restores `.ready`.
+        _ = connectivity.cancelRouteTransfers(identity)
+        clearPendingInstall(key)
         persistPendingInstalls()
-        watchSyncState[identity] = readyReceiptKeys.contains(key)
-            ? .ready
-            : .localOnly
+        if readyReceiptKeys.contains(key) {
+            attemptedInstallKeys.remove(key)
+            rejectedInstallReasons.removeValue(forKey: key)
+            watchSyncState[identity] = .ready
+        } else {
+            attemptedInstallKeys.insert(key)
+            rejectedInstallReasons[key] = "transfer_cancelled"
+            watchSyncState[identity] = .rejected("transfer_cancelled")
+        }
+        persistInstallAttempts()
+        scheduleNextPendingInstallExpiry()
         return true
     }
 
@@ -528,12 +585,28 @@ final class PhoneRouteLibrary: ObservableObject {
         }.map(\.summary)
         let installedIdentities = Set(routes.map { identity(for: $0) })
         let installedKeys = Set(installedIdentities.map(Self.receiptKey))
+        // Migrate attempts queued by older builds so the one-week expiry does
+        // not immediately auto-create the same transfer again.
+        attemptedInstallKeys.formUnion(pendingInstallKeys)
         readyReceiptKeys.formIntersection(installedKeys)
         pendingDeletionKeys.formIntersection(installedKeys)
         pendingInstallKeys.formIntersection(installedKeys)
+        attemptedInstallKeys.formIntersection(installedKeys)
+        immediateInstallKeys.formIntersection(installedKeys)
+        rejectedInstallReasons = rejectedInstallReasons.filter {
+            installedKeys.contains($0.key)
+        }
+        pendingInstallStartedAt = pendingInstallStartedAt.filter {
+            pendingInstallKeys.contains($0.key)
+        }
+        expireStalePendingInstalls(
+            installedIdentities: installedIdentities,
+            at: timestamp
+        )
         persistReadyReceipts()
         persistPendingDeletions()
         persistPendingInstalls()
+        persistInstallAttempts()
         watchSyncState = Dictionary(uniqueKeysWithValues:
             installedIdentities.map { identity in
                 (
@@ -544,8 +617,10 @@ final class PhoneRouteLibrary: ObservableObject {
         )
         offlineNavigationRoutes = routes.filter { !isPendingDeletion(identity(for: $0)) }
         publishRouteDisplayNames()
+        autoQueueEligibleRoutes()
         retryProviderDeletions()
         scheduleNextExpiry()
+        scheduleNextPendingInstallExpiry()
     }
 
     private func receive(_ message: WatchRouteSyncMessageV1) {
@@ -564,11 +639,16 @@ final class PhoneRouteLibrary: ObservableObject {
             guard !pendingDeletionKeys.contains(
                 Self.receiptKey(message.identity)
             ) else { return }
-            readyReceiptKeys.insert(Self.receiptKey(message.identity))
-            pendingInstallKeys.remove(Self.receiptKey(message.identity))
+            let key = Self.receiptKey(message.identity)
+            readyReceiptKeys.insert(key)
+            clearPendingInstall(key)
+            attemptedInstallKeys.remove(key)
+            rejectedInstallReasons.removeValue(forKey: key)
             persistReadyReceipts()
             persistPendingInstalls()
+            persistInstallAttempts()
             watchSyncState[message.identity] = .ready
+            scheduleNextPendingInstallExpiry()
         case .deleted, .evicted:
             let identity = message.identity
             let key = Self.receiptKey(identity)
@@ -586,10 +666,13 @@ final class PhoneRouteLibrary: ObservableObject {
             persistProviderDeletionTombstones()
             readyReceiptKeys.remove(key)
             pendingDeletionKeys.remove(key)
-            pendingInstallKeys.remove(key)
+            clearPendingInstall(key)
+            attemptedInstallKeys.remove(key)
+            rejectedInstallReasons.removeValue(forKey: key)
             persistReadyReceipts()
             persistPendingDeletions()
             persistPendingInstalls()
+            persistInstallAttempts()
             reload()
         case .rejected:
             if providerDeletionTombstones.contains(message.identity) ||
@@ -600,15 +683,23 @@ final class PhoneRouteLibrary: ObservableObject {
             }
             guard watchSyncState[message.identity] != nil else { return }
             let key = Self.receiptKey(message.identity)
+            attemptedInstallKeys.insert(key)
+            immediateInstallKeys.remove(key)
+            rejectedInstallReasons[key] =
+                message.errorCode ?? "watch_rejected"
             let wasDeleting = pendingDeletionKeys.contains(key)
             if WatchRouteAcknowledgementReconciliationV1
                 .preservesReadyReceipt(
                     hasReadyReceipt: readyReceiptKeys.contains(key),
                     isPendingDeletion: wasDeleting
                 ) {
-                pendingInstallKeys.remove(key)
+                clearPendingInstall(key)
+                attemptedInstallKeys.remove(key)
+                rejectedInstallReasons.removeValue(forKey: key)
                 persistPendingInstalls()
+                persistInstallAttempts()
                 watchSyncState[message.identity] = .ready
+                scheduleNextPendingInstallExpiry()
                 return
             }
             if wasDeleting {
@@ -617,10 +708,11 @@ final class PhoneRouteLibrary: ObservableObject {
             if !wasDeleting {
                 readyReceiptKeys.remove(key)
             }
-            pendingInstallKeys.remove(key)
+            clearPendingInstall(key)
             persistReadyReceipts()
             persistPendingDeletions()
             persistPendingInstalls()
+            persistInstallAttempts()
             reload()
             watchSyncState[message.identity] = .rejected(
                 message.errorCode ?? "watch_rejected"
@@ -712,12 +804,16 @@ final class PhoneRouteLibrary: ObservableObject {
         localDeletionTombstones.insert(identity)
         persistLocalDeletionTombstones()
         queuedProviderDeletions.remove(identity)
-        readyReceiptKeys.remove(Self.receiptKey(identity))
-        pendingDeletionKeys.remove(Self.receiptKey(identity))
-        pendingInstallKeys.remove(Self.receiptKey(identity))
+        let key = Self.receiptKey(identity)
+        readyReceiptKeys.remove(key)
+        pendingDeletionKeys.remove(key)
+        clearPendingInstall(key)
+        attemptedInstallKeys.remove(key)
+        rejectedInstallReasons.removeValue(forKey: key)
         persistReadyReceipts()
         persistPendingDeletions()
         persistPendingInstalls()
+        persistInstallAttempts()
         persistProviderDeletionTombstones()
         let removed = finishLocalDeletion(identity)
         retryProviderDeletions()
@@ -810,16 +906,96 @@ final class PhoneRouteLibrary: ObservableObject {
         }
     }
 
+    private func expireStalePendingInstalls(
+        installedIdentities: Set<WatchRouteIdentityV1>,
+        at timestamp: Date
+    ) {
+        let identitiesByKey = Dictionary(
+            uniqueKeysWithValues: installedIdentities.map {
+                (Self.receiptKey($0), $0)
+            }
+        )
+        for key in pendingInstallKeys {
+            guard isPendingInstallStale(key, at: timestamp) else { continue }
+            if let identity = identitiesByKey[key] {
+                _ = connectivity.cancelRouteTransfers(identity)
+            }
+            clearPendingInstall(key)
+        }
+    }
+
+    /// Untimestamped attempts came from the legacy queue and cannot prove
+    /// freshness. Expire them once on upgrade instead of leaving an immortal
+    /// "Queued" row. Retrying is safe because Watch installs are idempotent by
+    /// immutable route identity.
+    private func isPendingInstallStale(
+        _ key: String,
+        at timestamp: Date
+    ) -> Bool {
+        guard let startedAt = pendingInstallStartedAt[key],
+              startedAt <= timestamp else { return true }
+        return timestamp.timeIntervalSince(startedAt) >=
+            pendingInstallMaximumAge
+    }
+
+    private func scheduleNextPendingInstallExpiry() {
+        pendingInstallExpiryTask?.cancel()
+        let timestamp = now()
+        let deadline = pendingInstallKeys.compactMap { key -> Date? in
+            guard let startedAt = pendingInstallStartedAt[key],
+                  startedAt <= timestamp else { return timestamp }
+            return startedAt.addingTimeInterval(pendingInstallMaximumAge)
+        }.min()
+        guard let deadline else {
+            pendingInstallExpiryTask = nil
+            return
+        }
+        let delay = max(deadline.timeIntervalSince(timestamp), 0)
+        let nanoseconds = UInt64(min(
+            delay * 1_000_000_000,
+            Double(UInt64.max)
+        ))
+        pendingInstallExpiryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            self?.reload()
+        }
+    }
+
     private func retryPendingInstallsImmediately() {
+        guard connectivity.state.isReachable else { return }
         for summary in routes {
             let identity = identity(for: summary)
+            let key = Self.receiptKey(identity)
             guard canSendToWatch(summary), !isPendingDeletion(identity),
-                  pendingInstallKeys.contains(Self.receiptKey(identity)),
+                  pendingInstallKeys.contains(key),
+                  !immediateInstallKeys.contains(key),
                   let record = try? store.record(
                       matching: identity,
                       now: now()
                   ) else { continue }
+            immediateInstallKeys.insert(key)
             connectivity.sendRouteImmediately(record)
+        }
+    }
+
+    /// Watch-supported routes are mirrored automatically once the paired Watch
+    /// app is available. Pending, ready and explicitly rejected identities are
+    /// left alone so reloads cannot duplicate work or hide a failed transfer.
+    private func autoQueueEligibleRoutes() {
+        let state = connectivity.state
+        guard state.isActivated, state.isPaired, state.isWatchAppInstalled else {
+            return
+        }
+        for summary in routes {
+            let identity = identity(for: summary)
+            guard canSendToWatch(summary),
+                  syncState(for: identity) == .localOnly else { continue }
+            try? sendToWatch(summary)
         }
     }
 
@@ -849,6 +1025,27 @@ final class PhoneRouteLibrary: ObservableObject {
             pendingInstallKeys.sorted(),
             forKey: pendingInstallKey
         )
+        defaults.set(
+            pendingInstallStartedAt,
+            forKey: pendingInstallStartedAtKey
+        )
+    }
+
+    private func clearPendingInstall(_ key: String) {
+        pendingInstallKeys.remove(key)
+        pendingInstallStartedAt.removeValue(forKey: key)
+        immediateInstallKeys.remove(key)
+    }
+
+    private func persistInstallAttempts() {
+        defaults.set(
+            attemptedInstallKeys.sorted(),
+            forKey: attemptedInstallKey
+        )
+        defaults.set(
+            rejectedInstallReasons,
+            forKey: rejectedInstallReasonsKey
+        )
     }
 
     private func removeDisplayName(routeID: UUID) {
@@ -877,6 +1074,12 @@ final class PhoneRouteLibrary: ObservableObject {
         if pendingDeletionKeys.contains(key) { return .deleting }
         if pendingInstallKeys.contains(key) { return .transferring }
         if readyReceiptKeys.contains(key) { return .ready }
+        if let reason = rejectedInstallReasons[key] {
+            return .rejected(reason)
+        }
+        if attemptedInstallKeys.contains(key) {
+            return .rejected("transfer_expired")
+        }
         return .localOnly
     }
 

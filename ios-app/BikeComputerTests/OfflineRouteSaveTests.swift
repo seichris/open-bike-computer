@@ -5,21 +5,33 @@ import MapKit
 
 @MainActor
 final class PhoneWatchConnectivityCoordinator: ObservableObject {
-    struct State { var isReachable = false }
+    struct State {
+        var isActivated = false
+        var isPaired = false
+        var isWatchAppInstalled = false
+        var isReachable = false
+    }
     @Published var state = State()
     var onRouteAcknowledgement: ((WatchRouteSyncMessageV1) -> Void)?
     var acceptsDeletion = true
+    var cancelledTransferCount = 1
     private(set) var sideEffects = 0
+    private(set) var transferredRouteIDs: [UUID] = []
+    private(set) var immediateRouteIDs: [UUID] = []
+    private(set) var cancelledRouteIdentities: [WatchRouteIdentityV1] = []
     func transferRoute(_ record: InstalledNavigationRouteV1) -> UUID? {
         sideEffects += 1
+        transferredRouteIDs.append(record.archive.routeID)
         return UUID()
     }
     func sendRouteImmediately(_ record: InstalledNavigationRouteV1) {
         sideEffects += 1
+        immediateRouteIDs.append(record.archive.routeID)
     }
     func cancelRouteTransfers(_ identity: WatchRouteIdentityV1) -> Int {
         sideEffects += 1
-        return 1
+        cancelledRouteIdentities.append(identity)
+        return cancelledTransferCount
     }
     func requestRouteDeletion(_ identity: WatchRouteIdentityV1) -> UUID? {
         sideEffects += 1
@@ -221,6 +233,8 @@ struct OfflineRouteSaveTests {
         try corruptionDeletionAndReplacement()
         try stravaRetention()
         try boundedArchiveReads()
+        try automaticWatchTransfer()
+        try watchTransferExpiryRecovery()
         try pendingDeletionAdmission()
         try independentDeletionRetries()
         try offlineNavigationAndLateDirections()
@@ -467,8 +481,9 @@ struct OfflineRouteSaveTests {
         coordinator.stopNavigation()
         coordinator.planNavigation(from: .mapItem(start), to: .mapItem(finish), transportType: RouteTransportTypes.cycling, isTestMode: true)
         factory.tasks[1].succeed(with: [fast])
-        check(coordinator.isNavigating && coordinator.currentRoute === fast && coordinator.routeAlternatives.isEmpty,
-            "Exactly one online result still starts immediately")
+        check(!coordinator.isNavigating && coordinator.routeAlternatives.count == 1 &&
+            coordinator.selectedRouteAlternativeID == nil,
+            "Exactly one online result still waits for route confirmation")
     }
 
     static func selectedMapKitSaving() throws {
@@ -618,6 +633,118 @@ struct OfflineRouteSaveTests {
         check(f.makeLibrary().offlineNavigationRoutes.isEmpty, "Rejected archive shapes stay unavailable after restart")
     }
 
+    static func automaticWatchTransfer() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        f.watch.state = .init(
+            isActivated: true,
+            isPaired: true,
+            isWatchAppInstalled: true,
+            isReachable: false
+        )
+
+        let first = try f.library.saveOffline(
+            draft(f),
+            name: "Automatic transfer"
+        ).summary
+        let firstIdentity = WatchRouteIdentityV1(
+            archive: try f.library.offlineArchive(for: first)
+        )
+        check(
+            f.watch.transferredRouteIDs == [first.id] &&
+                f.watch.immediateRouteIDs == [first.id] &&
+                f.library.watchSyncState[firstIdentity] == .transferring,
+            "A Watch-supported offline route is queued automatically"
+        )
+        f.library.reload()
+        check(
+            f.watch.transferredRouteIDs == [first.id],
+            "Reload does not duplicate a pending automatic Watch transfer"
+        )
+        f.watch.state = .init(
+            isActivated: true,
+            isPaired: true,
+            isWatchAppInstalled: true,
+            isReachable: true
+        )
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        check(
+            f.watch.immediateRouteIDs == [first.id, first.id],
+            "Becoming reachable retries a transfer queued while unreachable"
+        )
+        f.watch.state = .init(
+            isActivated: true,
+            isPaired: true,
+            isWatchAppInstalled: true,
+            isReachable: true
+        )
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        check(
+            f.watch.immediateRouteIDs == [first.id, first.id],
+            "Repeated reachable-state refreshes do not duplicate live sends"
+        )
+        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+            operation: .acknowledge,
+            identity: firstIdentity,
+            status: .ready,
+            errorCode: nil
+        ))
+        f.library.reload()
+        check(
+            f.watch.transferredRouteIDs == [first.id] &&
+                f.library.watchSyncState[firstIdentity] == .ready,
+            "A ready Watch receipt prevents automatic retransmission"
+        )
+
+        let second = try f.library.saveOffline(
+            draft(f, offset: 0.02),
+            name: "Rejected transfer"
+        ).summary
+        let secondIdentity = WatchRouteIdentityV1(
+            archive: try f.library.offlineArchive(for: second)
+        )
+        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+            operation: .acknowledge,
+            identity: secondIdentity,
+            status: .rejected,
+            errorCode: "watch_storage_full"
+        ))
+        f.library.reload()
+        check(
+            f.watch.transferredRouteIDs == [first.id, second.id] &&
+                f.library.watchSyncState[secondIdentity] ==
+                    .rejected("watch_storage_full"),
+            "A rejected automatic transfer stays failed until explicit retry"
+        )
+        let restarted = f.makeLibrary()
+        check(
+            f.watch.transferredRouteIDs == [first.id, second.id] &&
+                restarted.watchSyncState[secondIdentity] ==
+                    .rejected("watch_storage_full"),
+            "A failed automatic transfer remains retryable after restart"
+        )
+        try restarted.sendToWatch(second)
+        check(
+            f.watch.transferredRouteIDs == [first.id, second.id, second.id] &&
+                restarted.watchSyncState[secondIdentity] == .transferring,
+            "The failed-transfer action retries the exact route"
+        )
+        f.defaults.removeObject(forKey: "watchRouteAttemptedInstalls.v1")
+        let migrated = f.makeLibrary()
+        check(
+            f.watch.transferredRouteIDs == [first.id, second.id, second.id] &&
+                migrated.watchSyncState[secondIdentity] == .transferring,
+            "A legacy pending transfer is adopted without duplicate queuing"
+        )
+        f.defaults.set([], forKey: "watchRoutePendingInstalls.v1")
+        let expired = f.makeLibrary()
+        check(
+            f.watch.transferredRouteIDs == [first.id, second.id, second.id] &&
+                expired.watchSyncState[secondIdentity] ==
+                    .rejected("transfer_expired"),
+            "An expired pending attempt becomes failed instead of auto-queuing forever"
+        )
+    }
+
     static func pendingDeletionAdmission() throws {
         let f = Fixture(); defer { f.cleanup() }
         let saved = try f.library.saveOffline(draft(f), name: "Pending deletion")
@@ -653,6 +780,58 @@ struct OfflineRouteSaveTests {
         f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
             operation: .acknowledge, identity: identity, status: .deleted, errorCode: nil))
         check(restarted.routes.isEmpty && f.makeLibrary().routes.isEmpty, "Acknowledged deletion is durable")
+    }
+
+    static func watchTransferExpiryRecovery() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        let summary = try f.library.importGPX(
+            gpx(),
+            fileName: "Watch route.gpx"
+        )
+        let identity = WatchRouteIdentityV1(
+            archive: try f.library.offlineArchive(for: summary)
+        )
+        try f.library.sendToWatch(summary)
+        check(
+            f.library.watchSyncState[identity] == .transferring,
+            "A new Watch route attempt is queued"
+        )
+
+        f.now.addTimeInterval((7 * 24 * 60 * 60) - 1)
+        let beforeDeadline = f.makeLibrary()
+        check(
+            beforeDeadline.watchSyncState[identity] == .transferring,
+            "A pending Watch route remains queued until its full lifetime"
+        )
+
+        f.now.addTimeInterval(2)
+        beforeDeadline.reload()
+        check(
+            beforeDeadline.watchSyncState[identity] ==
+                .rejected("transfer_expired") &&
+                f.watch.cancelledRouteIdentities.last == identity,
+            "A week-old Watch route attempt is cancelled and exposes retry"
+        )
+
+        try beforeDeadline.sendToWatch(summary)
+        f.watch.cancelledTransferCount = 0
+        check(
+            beforeDeadline.cancelSendToWatch(summary) &&
+                beforeDeadline.watchSyncState[identity] ==
+                    .rejected("transfer_cancelled"),
+            "Cancel clears an orphaned attempt and exposes retry"
+        )
+
+        try beforeDeadline.sendToWatch(summary)
+        f.defaults.removeObject(
+            forKey: "watchRoutePendingInstallStartedAt.v1"
+        )
+        let migrated = f.makeLibrary()
+        check(
+            migrated.watchSyncState[identity] ==
+                .rejected("transfer_expired"),
+            "A legacy untimestamped queue is cleared into retry on upgrade"
+        )
     }
 
     static func independentDeletionRetries() throws {
@@ -731,8 +910,22 @@ struct OfflineRouteSaveTests {
             panel.contains(".sheet(item: $presentedImport)") &&
             panel.contains("RouteSaveSheet(library: library, draft: draft)"),
             "GPX confirmation is item-driven by stable parent presenters, never a transient Section")
-        check(section.contains("navigationAction?.perform(route)") && section.contains("!routeLibrary.isAvailableOffline(route)"),
-            "Saved rows navigate directly and enforce deletion/expiry eligibility")
+        check(section.contains("favoriteButton(for: route") &&
+            section.contains("Label(\"Save an Online Route\"") &&
+            !section.contains("Navigate on iPhone") &&
+            !section.contains("Available offline") &&
+            !section.contains("Apple Maps · Saved on this iPhone"),
+            "Saved routes merge favorite stars and online saving without obsolete row copy")
+        check(section.contains("Watch-supported routes are queued automatically") &&
+            section.contains("retrySendButton(route") &&
+            !section.contains("arrow.up.circle") &&
+            !section.contains("cancelSendButton("),
+            "Watch-supported routes auto-queue with only failed-transfer retry UI")
+        check(content.contains("if routePlanningPurpose == .navigate") &&
+            content.contains("if routePlanningPurpose == .saveOffline") &&
+            !content.contains("Save this route to follow it later") &&
+            !content.contains("chooseApprovedOfflineRoute"),
+            "Route choice keeps navigation and save-only actions in separate modes")
         check(content.contains("routeLibrary.$offlineNavigationRoutes"), "Active navigation and preview observe deletion admission, not just files")
     }
 }

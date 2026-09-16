@@ -1543,29 +1543,6 @@ extension BikeComputerCoordinator {
                         return
                     }
 
-                    if alternatives.count == 1 {
-                        print("Route calculated successfully!")
-                        print("Distance: \(selected.distanceMeters)m, ETA: \(selected.expectedTravelTime)s")
-                        print("Steps: \(selected.route.steps.count)")
-
-                        self.routeCalculation.status = "Starting navigation..."
-                        self.beginNavigation(
-                            with: selected.route,
-                            destination: destinationItem,
-                            transportType: requestedTransportType,
-                            isTestMode: isTestMode,
-                            initialLocation: initialLocation
-                        )
-                        self.completeNavigationStart(.started, generation: generation)
-
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                            guard self.routeCalculationGeneration == generation else { return }
-                            self.routeCalculation.isCalculating = false
-                            self.routeCalculation.status = ""
-                        }
-                        return
-                    }
-
                     self.pendingRoutePlan = PendingRoutePlan(
                         alternatives: alternatives,
                         destination: destinationItem,

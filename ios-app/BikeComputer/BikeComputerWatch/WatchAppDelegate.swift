@@ -18,6 +18,8 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
     private let workoutDeviceBridge: WatchWorkoutDeviceBridge
     private let rideAutomationCoordinator: WatchRideAutomationCoordinator
     private var cancellables = Set<AnyCancellable>()
+    private var watchConnectivityBackgroundTasks:
+        [WKWatchConnectivityRefreshBackgroundTask] = []
 
     override init() {
         let locationService = WatchLocationService()
@@ -115,6 +117,10 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
             [weak deviceLink] request in
             deviceLink?.requestPhonePreparationReconciliation(request)
         }
+        connectivityCoordinator.onBackgroundContentStateChanged = {
+            [weak self] in
+            self?.completeWatchConnectivityBackgroundTasksIfPossible()
+        }
         deviceLink.onDirectRidePreparationChange = {
             [weak connectivityCoordinator] operation, deviceID,
                 preparationID in
@@ -188,6 +194,50 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
 
     func handle(_ workoutConfiguration: HKWorkoutConfiguration) {
         workoutManager.handleWorkoutConfiguration(workoutConfiguration)
+    }
+
+    func handle(_ backgroundTasks: Set<WKRefreshBackgroundTask>) {
+        for task in backgroundTasks {
+            guard let connectivityTask = task as?
+                    WKWatchConnectivityRefreshBackgroundTask else {
+                task.setTaskCompletedWithSnapshot(false)
+                continue
+            }
+            watchConnectivityBackgroundTasks.append(connectivityTask)
+            connectivityTask.expirationHandler = { [weak self, weak connectivityTask] in
+                Task { @MainActor [weak self, weak connectivityTask] in
+                    guard let self, let connectivityTask else { return }
+                    self.completeWatchConnectivityBackgroundTask(
+                        connectivityTask
+                    )
+                }
+            }
+        }
+        connectivityCoordinator.activate()
+        completeWatchConnectivityBackgroundTasksIfPossible()
+    }
+
+    private func completeWatchConnectivityBackgroundTasksIfPossible() {
+        guard connectivityCoordinator.canCompleteBackgroundDelivery else {
+            return
+        }
+        let tasks = watchConnectivityBackgroundTasks
+        watchConnectivityBackgroundTasks.removeAll()
+        for task in tasks {
+            task.expirationHandler = nil
+            task.setTaskCompletedWithSnapshot(false)
+        }
+    }
+
+    private func completeWatchConnectivityBackgroundTask(
+        _ task: WKWatchConnectivityRefreshBackgroundTask
+    ) {
+        guard let index = watchConnectivityBackgroundTasks.firstIndex(
+            where: { $0 === task }
+        ) else { return }
+        watchConnectivityBackgroundTasks.remove(at: index)
+        task.expirationHandler = nil
+        task.setTaskCompletedWithSnapshot(false)
     }
 }
 

@@ -36,6 +36,11 @@ private enum ContentSheetDestination: Identifiable, Equatable {
     }
 }
 
+private enum RoutePlanningPurpose {
+    case navigate
+    case saveOffline
+}
+
 private struct RideMetricsCompactDetent: CustomPresentationDetent {
     static func height(in context: Context) -> CGFloat? {
         RideSheetLayoutPolicy.compactHeight(
@@ -94,6 +99,10 @@ struct ContentView: View {
     @State private var workoutSegmentToast: WorkoutCompletedSegmentV1?
     @State private var observedWorkoutSegmentIndex: UInt32?
     @State private var isSearchPanelExpanded = false
+    @State private var routePlanningPurpose: RoutePlanningPurpose = .navigate
+    @State private var pendingFavoriteDestination: SavedDestination?
+    @State private var pendingRouteSearchAfterSheetDismissal: SavedDestination?
+    @State private var hasPendingRouteSearchAfterSheetDismissal = false
     @State private var dismissedOfflineMapOnboarding = false
     @State private var confirmedDeviceMapMissing = false
     @State private var isOfflineMapOnboardingStatePrepared = false
@@ -779,18 +788,28 @@ struct ContentView: View {
         case .savePlannedRoute(let draft):
             RouteSaveSheet(library: routeLibrary, draft: draft) { result in
                 plannedRouteSaveFeedback = result.message
+                if routePlanningPurpose == .saveOffline {
+                    if let favorite = pendingFavoriteDestination {
+                        coordinator.destinationStore.addFavorite(
+                            favorite,
+                            savedRouteID: result.summary.id
+                        )
+                    }
+                    cancelRoutePlan()
+                }
                 presentedSheet = nil
             }
             .presentationDetents([.medium, .large])
             .presentationBackgroundInteraction(.disabled)
         case .offlineRoutes:
             SavedRoutesLibraryView(library: routeLibrary,
-                stravaCoordinator: stravaIntegrationCoordinator)
+                stravaCoordinator: stravaIntegrationCoordinator,
+                destinationStore: coordinator.destinationStore,
+                onSaveOnlineRoute: openOfflineRouteSearch)
                 .environment(\.savedRouteMapAction, SavedRouteMapAction(
                     isNavigationActive: coordinator.isNavigating,
                     show: { selection in try showOfflineRouteFromLibrary(selection) }
                 ))
-                .environment(\.savedRouteNavigationAction, savedRouteNavigationAction)
                 .presentationDetents([.large])
                 .presentationBackgroundInteraction(.disabled)
         case .settings:
@@ -813,9 +832,11 @@ struct ContentView: View {
                 rideDetectionSettingsStore:
                     rideDetectionSettingsStore,
                 rideDiagnosticsRecorder: rideDiagnosticsRecorder,
+                destinationStore: coordinator.destinationStore,
                 onRequestLocationAuthorization: {
                     coordinator.requestLocationAuthorization()
                 },
+                onSaveOnlineRoute: openOfflineRouteSearch,
                 onStartTestNavigation: { destination in
                     clearSavedRoutePreview()
                     coordinator.startNavigation(
@@ -830,7 +851,6 @@ struct ContentView: View {
                 isNavigationActive: coordinator.isNavigating,
                 show: { selection in try showSavedRouteMapPreview(selection) }
             ))
-            .environment(\.savedRouteNavigationAction, savedRouteNavigationAction)
             .environmentObject(coordinator.bleManager)
             .presentationDetents([.large])
             .presentationBackgroundInteraction(.disabled)
@@ -969,6 +989,15 @@ struct ContentView: View {
         isSheetDismissalInFlight = true
         let dismissedDestination = activeSheetDestination
         activeSheetDestination = nil
+        if hasPendingRouteSearchAfterSheetDismissal {
+            let destination = pendingRouteSearchAfterSheetDismissal
+            pendingRouteSearchAfterSheetDismissal = nil
+            hasPendingRouteSearchAfterSheetDismissal = false
+            queuedSheetAfterDismiss = nil
+            isSheetDismissalInFlight = false
+            beginOfflineRouteSearch(destination: destination)
+            return
+        }
         if case .nearbyBicino(let peripheralIdentifier) =
             dismissedDestination {
             coordinator.bleManager.dismissNearbyBicinoCandidate(
@@ -1034,13 +1063,6 @@ struct ContentView: View {
         presentedSheet = destination
     }
 
-    private var savedRouteNavigationAction: SavedRouteNavigationAction {
-        SavedRouteNavigationAction(
-            isEnabled: !coordinator.isNavigating && !offlineMapManager.isMapAreaSelectionActive,
-            start: { summary in try startOfflineRouteFromLibrary(summary) }
-        )
-    }
-
     private func saveSelectedRouteOffline() {
         do {
             let draft = try coordinator.selectedRouteOfflineDraft()
@@ -1052,6 +1074,54 @@ struct ContentView: View {
             } else {
                 presentedSheet = destination
             }
+        } catch {
+            coordinator.alert.message = error.localizedDescription
+            coordinator.alert.isShowing = true
+        }
+    }
+
+    private func beginOfflineRouteSearch(destination: SavedDestination? = nil) {
+        clearSavedRoutePreview()
+        coordinator.cancelRoutePlan()
+        pendingFavoriteDestination = destination
+        routePlanningPurpose = .saveOffline
+        sourceAddress = ""
+        destinationAddress = destination?.name ?? ""
+        isSearchPanelExpanded = true
+    }
+
+    private func openOfflineRouteSearch(
+        destination: SavedDestination? = nil
+    ) {
+        pendingRouteSearchAfterSheetDismissal = destination
+        hasPendingRouteSearchAfterSheetDismissal = true
+        presentedSheet = nil
+    }
+
+    private func cancelRoutePlan() {
+        coordinator.cancelRoutePlan()
+        pendingFavoriteDestination = nil
+        routePlanningPurpose = .navigate
+    }
+
+    private func startSelectedRoute() {
+        do {
+            if let favorite = pendingFavoriteDestination {
+                let draft = try coordinator.selectedRouteOfflineDraft()
+                let result = try routeLibrary.saveOffline(
+                    draft,
+                    name: favorite.name
+                )
+                guard coordinator.destinationStore.addFavorite(
+                    favorite,
+                    savedRouteID: result.summary.id
+                ) != nil else {
+                    throw OfflineRouteSaveError.storageFailure
+                }
+            }
+            coordinator.startSelectedRoute()
+            pendingFavoriteDestination = nil
+            routePlanningPurpose = .navigate
         } catch {
             coordinator.alert.message = error.localizedDescription
             coordinator.alert.isShowing = true
@@ -1447,17 +1517,16 @@ struct ContentView: View {
                         .font(.headline)
                     Spacer()
                     Button("Cancel", role: .cancel) {
-                        coordinator.cancelRoutePlan()
+                        cancelRoutePlan()
                     }
                     .font(.subheadline)
                 }
 
                 routeAlternativePicker
                 selectedRouteAdvisory
-                HStack {
+                if routePlanningPurpose == .saveOffline {
                     savePlannedRouteButton
-                    Button("Saved Routes") { openOfflineRoutes() }
-                        .accessibilityIdentifier("ridePlanSavedRoutes")
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 plannedRouteSaveStatus
 
@@ -1467,19 +1536,21 @@ struct ContentView: View {
             .padding(.bottom, 12)
 
             Spacer(minLength: 0)
-            Divider()
 
-            Button {
-                coordinator.startSelectedRoute()
-            } label: {
-                Label("Start navigation", systemImage: "location.fill")
-                    .frame(maxWidth: .infinity)
+            if routePlanningPurpose == .navigate {
+                Divider()
+                Button {
+                    startSelectedRoute()
+                } label: {
+                    Label("Start navigation", systemImage: "location.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(coordinator.selectedRouteAlternativeID == nil)
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 4)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(coordinator.selectedRouteAlternativeID == nil)
-            .padding(.horizontal, 20)
-            .padding(.top, 12)
-            .padding(.bottom, 4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityIdentifier("rideRoutePlanSheet")
@@ -1503,9 +1574,21 @@ struct ContentView: View {
                 onStartNavigation: { source, destination, transport in
                     clearSavedRoutePreview()
                     isSearchPanelExpanded = false
+                    pendingFavoriteDestination = nil
                     coordinator.planNavigation(
                         from: source,
                         to: destination,
+                        transportType: transport
+                    )
+                },
+                onSaveToFavorites: { favorite, source, transport in
+                    clearSavedRoutePreview()
+                    isSearchPanelExpanded = false
+                    pendingFavoriteDestination = favorite
+                    routePlanningPurpose = .navigate
+                    coordinator.planNavigation(
+                        from: source,
+                        to: favorite.routeEndpoint,
                         transportType: transport
                     )
                 }
@@ -1551,39 +1634,30 @@ struct ContentView: View {
                     .font(.headline)
                 Spacer()
                 Button("Cancel", role: .cancel) {
-                    coordinator.cancelRoutePlan()
+                    cancelRoutePlan()
                 }
                 .font(.subheadline)
             }
 
             routeAlternativePicker
 
-            HStack(spacing: 8) {
+            if routePlanningPurpose == .navigate {
                 Button {
-                    coordinator.startSelectedRoute()
+                    startSelectedRoute()
                 } label: {
                     Label("Start", systemImage: "location.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(coordinator.selectedRouteAlternativeID == nil)
-
+            } else {
                 savePlannedRouteButton
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             selectedRouteAdvisory
 
-            Button("Saved Routes") {
-                openOfflineRoutes()
-            }
-            .font(.caption)
-            .accessibilityIdentifier("chooseApprovedOfflineRoute")
-
             plannedRouteSaveStatus
-
-            Text("Save this route to follow it later on this iPhone. Offline map tiles are separate.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
         }
         .padding(14)
         .background(
