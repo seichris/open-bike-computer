@@ -218,27 +218,3 @@ struct SavedRouteMapPreviewCard: View {
         return formatter.string(fromDistance: preview.distanceMeters)
     }
 }
-
-/// Saved rows start by identity through the owning ContentView/library callback.
-/// A missing environment action is disabled rather than silently succeeding.
-nonisolated struct SavedRouteNavigationAction: Sendable {
-    let isEnabled: Bool
-    let start: @MainActor @Sendable (PlannedRouteSummaryV1) throws -> Void
-
-    @MainActor
-    func perform(_ summary: PlannedRouteSummaryV1) throws {
-        guard isEnabled else { throw SavedRouteMapError.navigationActive }
-        try start(summary)
-    }
-}
-
-private nonisolated struct SavedRouteNavigationActionKey: EnvironmentKey {
-    static let defaultValue: SavedRouteNavigationAction? = nil
-}
-
-extension EnvironmentValues {
-    var savedRouteNavigationAction: SavedRouteNavigationAction? {
-        get { self[SavedRouteNavigationActionKey.self] }
-        set { self[SavedRouteNavigationActionKey.self] = newValue }
-    }
-}

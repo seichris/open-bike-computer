@@ -16,6 +16,8 @@ private enum SavedRouteImportSheet: Identifiable {
 struct SavedRoutesLibraryView: View {
     @ObservedObject var library: PhoneRouteLibrary
     @ObservedObject var stravaCoordinator: StravaIntegrationCoordinator
+    @ObservedObject var destinationStore: SavedDestinationStore
+    let onSaveOnlineRoute: (SavedDestination?) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var presentedImport: SavedRouteImportSheet?
     @State private var importFeedback: String?
@@ -26,6 +28,8 @@ struct SavedRoutesLibraryView: View {
                 SavedRoutesSettingsSection(
                     routeLibrary: library,
                     stravaCoordinator: stravaCoordinator,
+                    destinationStore: destinationStore,
+                    onSaveOnlineRoute: onSaveOnlineRoute,
                     onImportFromStrava: { presentedImport = .strava },
                     onConfirmGPX: { draft in
                         importFeedback = nil

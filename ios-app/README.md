@@ -321,19 +321,21 @@ Offline mode is the default:
    for a durable user-owned GPX route or track, or use the optional Strava flow
    above for a seven-day provider-backed copy. The longest usable route/track
    segment is validated as a draft. Confirm its name and choose **Save Route**;
-   cancelling writes nothing. In **Choose a route**, select an Apple Maps
-   alternative and tap **Save Offline**. Confirm its name to save that exact
-   route and its turn instructions into **Saved Routes** on this iPhone.
+   cancelling writes nothing. To save an Apple Maps route without starting it,
+   choose **Save an Online Route**, select a destination and route alternative,
+   then tap **Save Offline**. Confirm its name to save that exact route and its
+   turn instructions into **Saved Routes** on this iPhone.
    Apple Maps saves are iPhone-only: Watch transfer and offline map tiles are
    not included. See the [MapKit storage licensing review](../docs/reviews/mapkit-route-storage-2026-09-15.md)
    before distributing this feature; implementation is not Apple permission.
-   To follow a saved route on **iPhone**, choose **Navigate on iPhone** directly
-   from its saved row or use the map preview's navigation action. The planner's
-   **Saved Routes** shortcut opens this same library. Route following needs no
-   network request; offline basemap coverage is separate. Watch transfer is
-   optional and independent of iPhone navigation.
-2. For GPX/Strava routes, send the route to Watch and wait for its green Watch status icon. **Queued**
-   does not prove the route is installed.
+   To follow a saved route on **iPhone**, open its map preview and start
+   navigation there. Route following needs no network request; offline basemap
+   coverage is separate. Watch transfer is independent of iPhone navigation.
+2. GPX/Strava routes are queued for Watch automatically once a paired Watch app
+   is available. Wait for the green Watch status icon; **Queued** does not prove
+   the route is installed. WatchConnectivity may deliver the file while the
+   Watch app is inactive, but watchOS chooses the exact background timing.
+   Unacknowledged attempts expire after seven days and show a red retry action.
 3. On Watch, open **Offline Navigation**, select the installed route, and
    confirm navigation. Leaving the route shows an off-route warning; it never
    causes an online request or invents a connector route.
