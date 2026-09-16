@@ -56,6 +56,7 @@ final class PhoneRouteLibrary: ObservableObject {
     private var localDeletionTombstones: Set<WatchRouteIdentityV1>
     private var providerDeletionTombstones: Set<WatchRouteIdentityV1>
     private var queuedProviderDeletions: Set<WatchRouteIdentityV1> = []
+    private var immediateInstallKeys: Set<String> = []
     private var cancellables = Set<AnyCancellable>()
     private var expiryTask: Task<Void, Never>?
 
@@ -130,18 +131,30 @@ final class PhoneRouteLibrary: ObservableObject {
             self?.receive(message)
         }
         connectivity.$state
-            .sink { [weak self] state in
+            .map {
+                $0.isActivated && $0.isPaired && $0.isWatchAppInstalled
+            }
+            .removeDuplicates()
+            .sink { [weak self] isWatchAvailable in
+                guard isWatchAvailable else { return }
+                Task { @MainActor [weak self] in
+                    self?.autoQueueEligibleRoutes()
+                }
+            }
+            .store(in: &cancellables)
+        connectivity.$state
+            .map(\.isReachable)
+            .removeDuplicates()
+            .sink { [weak self] isReachable in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    if state.isActivated && state.isPaired &&
-                        state.isWatchAppInstalled {
-                        self.autoQueueEligibleRoutes()
+                    guard isReachable else {
+                        self.immediateInstallKeys.removeAll()
+                        return
                     }
-                    if state.isReachable {
-                        self.retryPendingInstallsImmediately()
-                        self.queuedProviderDeletions.removeAll()
-                        self.retryProviderDeletions()
-                    }
+                    self.retryPendingInstallsImmediately()
+                    self.queuedProviderDeletions.removeAll()
+                    self.retryProviderDeletions()
                 }
             }
             .store(in: &cancellables)
@@ -407,6 +420,9 @@ final class PhoneRouteLibrary: ObservableObject {
         persistPendingInstalls()
         persistInstallAttempts()
         watchSyncState[identity] = .transferring
+        if connectivity.state.isReachable {
+            immediateInstallKeys.insert(key)
+        }
         connectivity.sendRouteImmediately(record)
     }
 
@@ -419,6 +435,7 @@ final class PhoneRouteLibrary: ObservableObject {
             return false
         }
         pendingInstallKeys.remove(key)
+        immediateInstallKeys.remove(key)
         persistPendingInstalls()
         if readyReceiptKeys.contains(key) {
             attemptedInstallKeys.remove(key)
@@ -563,6 +580,7 @@ final class PhoneRouteLibrary: ObservableObject {
         pendingDeletionKeys.formIntersection(installedKeys)
         pendingInstallKeys.formIntersection(installedKeys)
         attemptedInstallKeys.formIntersection(installedKeys)
+        immediateInstallKeys.formIntersection(installedKeys)
         rejectedInstallReasons = rejectedInstallReasons.filter {
             installedKeys.contains($0.key)
         }
@@ -605,6 +623,7 @@ final class PhoneRouteLibrary: ObservableObject {
             readyReceiptKeys.insert(key)
             pendingInstallKeys.remove(key)
             attemptedInstallKeys.remove(key)
+            immediateInstallKeys.remove(key)
             rejectedInstallReasons.removeValue(forKey: key)
             persistReadyReceipts()
             persistPendingInstalls()
@@ -629,6 +648,7 @@ final class PhoneRouteLibrary: ObservableObject {
             pendingDeletionKeys.remove(key)
             pendingInstallKeys.remove(key)
             attemptedInstallKeys.remove(key)
+            immediateInstallKeys.remove(key)
             rejectedInstallReasons.removeValue(forKey: key)
             persistReadyReceipts()
             persistPendingDeletions()
@@ -645,6 +665,7 @@ final class PhoneRouteLibrary: ObservableObject {
             guard watchSyncState[message.identity] != nil else { return }
             let key = Self.receiptKey(message.identity)
             attemptedInstallKeys.insert(key)
+            immediateInstallKeys.remove(key)
             rejectedInstallReasons[key] =
                 message.errorCode ?? "watch_rejected"
             let wasDeleting = pendingDeletionKeys.contains(key)
@@ -768,6 +789,7 @@ final class PhoneRouteLibrary: ObservableObject {
         pendingDeletionKeys.remove(key)
         pendingInstallKeys.remove(key)
         attemptedInstallKeys.remove(key)
+        immediateInstallKeys.remove(key)
         rejectedInstallReasons.removeValue(forKey: key)
         persistReadyReceipts()
         persistPendingDeletions()
@@ -866,14 +888,18 @@ final class PhoneRouteLibrary: ObservableObject {
     }
 
     private func retryPendingInstallsImmediately() {
+        guard connectivity.state.isReachable else { return }
         for summary in routes {
             let identity = identity(for: summary)
+            let key = Self.receiptKey(identity)
             guard canSendToWatch(summary), !isPendingDeletion(identity),
-                  pendingInstallKeys.contains(Self.receiptKey(identity)),
+                  pendingInstallKeys.contains(key),
+                  !immediateInstallKeys.contains(key),
                   let record = try? store.record(
                       matching: identity,
                       now: now()
                   ) else { continue }
+            immediateInstallKeys.insert(key)
             connectivity.sendRouteImmediately(record)
         }
     }

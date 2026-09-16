@@ -656,6 +656,28 @@ struct OfflineRouteSaveTests {
             f.watch.transferredRouteIDs == [first.id],
             "Reload does not duplicate a pending automatic Watch transfer"
         )
+        f.watch.state = .init(
+            isActivated: true,
+            isPaired: true,
+            isWatchAppInstalled: true,
+            isReachable: true
+        )
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        check(
+            f.watch.immediateRouteIDs == [first.id, first.id],
+            "Becoming reachable retries a transfer queued while unreachable"
+        )
+        f.watch.state = .init(
+            isActivated: true,
+            isPaired: true,
+            isWatchAppInstalled: true,
+            isReachable: true
+        )
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        check(
+            f.watch.immediateRouteIDs == [first.id, first.id],
+            "Repeated reachable-state refreshes do not duplicate live sends"
+        )
         f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
             operation: .acknowledge,
             identity: firstIdentity,
