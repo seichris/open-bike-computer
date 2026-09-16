@@ -43,6 +43,7 @@ private final class FakeWatch: WorkoutWatchRecording {
     var startAdmission: (() -> Void)?
     var sequence: UInt64 = 0
     let date = Date().addingTimeInterval(-60)
+    var startDates: [UUID: Date] = [:]
     var rideAutomationPresentation: WorkoutMirrorPresentationV1 { store.presentation }
     var rideAutomationPresentationPublisher: AnyPublisher<WorkoutMirrorPresentationV1, Never> { store.$presentation.eraseToAnyPublisher() }
     func startOutdoorCyclingOnWatch() -> Bool {
@@ -63,14 +64,18 @@ private final class FakeWatch: WorkoutWatchRecording {
 
     func emit(id: UUID, state: WorkoutSessionStateV1, outcome: WorkoutTerminalOutcomeV1? = nil) {
         sequence += 1
+        if startDates[id] == nil {
+            startDates[id] = date.addingTimeInterval(Double(startDates.count))
+        }
         if state.isActive { store.attachMirroredSession(at: Date()) }
         let result = store.ingestBatch([WorkoutEnvelopeV1(
             kind: .snapshot, sessionID: id, sessionToken: 19,
             sequence: sequence, capturedAt: Date(),
-            snapshot: WorkoutSnapshotV1(state: state, startDate: date,
+            snapshot: WorkoutSnapshotV1(state: state, startDate: startDates[id],
                 availability: [], terminalOutcome: outcome)
         )], receivedAt: Date())
-        precondition(result.rejections.isEmpty, "Fixture must pass real contract validation")
+        precondition(result.rejections.isEmpty && result.acceptedEnvelopes.count == 1,
+                     "Fixture must pass real contract and chronological session validation")
     }
 }
 
