@@ -150,7 +150,6 @@ nonisolated enum RideDetectionLocationStatusResolver {
 
     static func resolve(
         startMode: RideStartMode,
-        locationUseAcknowledged: Bool,
         isNavigationReady: Bool,
         supportsRideAutomation: Bool,
         supportsGPSPositionQualityV1: Bool,
@@ -159,7 +158,7 @@ nonisolated enum RideDetectionLocationStatusResolver {
         location: CLLocation?,
         now: Date = Date()
     ) -> RideDetectionLocationStatus {
-        guard startMode != .off, locationUseAcknowledged else {
+        guard startMode != .off else {
             return .disabled
         }
         guard isNavigationReady, supportsRideAutomation,
@@ -358,6 +357,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     private var isRefreshingDeviceDestinationLocation = false
     private var hasRequestedAlwaysAuthorizationForDeviceDestinations = false
     private var hasRequestedAlwaysAuthorizationForRideActivity = false
+    private var hasRequestedWhenInUseAuthorizationForRideDetection = false
     private var lastDiagnosticsLocationRecordAt = Date.distantPast
 #if DEBUG
     private let developerLocationOverride = DeveloperLocationOverride.coordinate(
@@ -393,8 +393,9 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             )
         }
 #endif
-        // User-initiated feature flows own the permission request so the native
-        // prompt appears in context and the user's response remains authoritative.
+        // The Ride Start setting is the app-level switch. If it becomes armed
+        // before location permission exists, request the native permission from
+        // the location lifecycle rather than adding a second app-level consent.
     }
     
     func requestLocation() {
@@ -505,6 +506,14 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
                     isRefreshingDeviceDestinationLocation,
                 isRideDetectionArmed: isRideDetectionArmed
             )
+
+        if isApplicationActive && isRideDetectionArmed &&
+            locationManager.authorizationLevel == .denied &&
+            locationManager.authorizationStatus == .notDetermined &&
+            !hasRequestedWhenInUseAuthorizationForRideDetection {
+            hasRequestedWhenInUseAuthorizationForRideDetection = true
+            locationManager.requestWhenInUseAuthorization()
+        }
 
         if shouldTrackInBackground &&
             locationManager.authorizationLevel == .whenInUse &&

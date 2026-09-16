@@ -300,15 +300,11 @@ class BikeComputerCoordinator: ObservableObject {
                 bleManager.$supportsGPSPositionQualityV1,
                 rideDetectionSettingsStore.$settings
             )
-            .combineLatest(
-                rideDetectionSettingsStore.$hasAcknowledgedLocationUse
-            )
-            .map { runtime, locationUseAcknowledged in
+            .map { runtime in
                 let (navigationReady, supportsRideAutomation,
                      supportsGPSQuality, settings) = runtime
                 return navigationReady && supportsRideAutomation &&
-                    supportsGPSQuality && settings.startMode != .off &&
-                    locationUseAcknowledged
+                    supportsGPSQuality && settings.startMode != .off
             }
             .removeDuplicates()
             .sink { [weak self] armed in

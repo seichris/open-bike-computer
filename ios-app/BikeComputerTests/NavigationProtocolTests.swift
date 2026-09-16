@@ -4399,6 +4399,33 @@ struct NavigationProtocolTests {
             foregroundOnlyClient.backgroundTrackingEnabledHistory.last == false,
             "When-In-Use authorization never enables background delivery"
         )
+
+        var isUnconfiguredDetectionActive = true
+        let unconfiguredDetectionClient = TestLocationManagerClient(
+            authorizationLevel: .denied
+        )
+        let unconfiguredDetectionLocationManager = CurrentLocationManager(
+            locationManager: unconfiguredDetectionClient,
+            applicationIsActive: { isUnconfiguredDetectionActive }
+        )
+        unconfiguredDetectionLocationManager.setRideDetectionArmed(true)
+        assertEqual(
+            unconfiguredDetectionClient.requestWhenInUseAuthorizationCallCount,
+            1,
+            "enabling ride detection requests native location permission automatically"
+        )
+        assertEqual(
+            unconfiguredDetectionClient.startUpdatingLocationCallCount,
+            0,
+            "ride detection waits for the user's native location decision"
+        )
+        isUnconfiguredDetectionActive = false
+        unconfiguredDetectionLocationManager.applicationStateDidChange()
+        assertEqual(
+            unconfiguredDetectionClient.requestWhenInUseAuthorizationCallCount,
+            1,
+            "location permission is not repeatedly requested after arming"
+        )
         isForegroundDetectionActive = false
         foregroundOnlyLocationManager.applicationStateDidChange()
         assertEqual(
@@ -4420,23 +4447,22 @@ struct NavigationProtocolTests {
             isRefreshingDeviceDestinationLocation: false
         ), "a visible map retains current-address reverse geocoding")
 
-        let consentSuite =
-            "RideDetectionLocationConsentTests.\(UUID().uuidString)"
-        guard let consentDefaults = UserDefaults(suiteName: consentSuite) else {
-            assertionFailure("could not create location consent defaults")
+        let defaultSettingsSuite =
+            "RideDetectionDefaultSettingsTests.\(UUID().uuidString)"
+        guard let defaultSettingsDefaults =
+            UserDefaults(suiteName: defaultSettingsSuite) else {
+            assertionFailure("could not create ride detection defaults")
             return
         }
-        consentDefaults.removePersistentDomain(forName: consentSuite)
-        let consentStore = RideDetectionSettingsStore(
-            defaults: consentDefaults
+        defaultSettingsDefaults.removePersistentDomain(forName: defaultSettingsSuite)
+        let defaultSettingsStore = RideDetectionSettingsStore(
+            defaults: defaultSettingsDefaults
         )
-        assert(!consentStore.hasAcknowledgedLocationUse,
-               "ride detection background GPS requires explicit acknowledgement")
-        consentStore.acknowledgeLocationUse()
-        assert(RideDetectionSettingsStore(defaults: consentDefaults)
-            .hasAcknowledgedLocationUse,
-               "ride detection location acknowledgement persists")
-        consentDefaults.removePersistentDomain(forName: consentSuite)
+        assert(defaultSettingsStore.settings.startMode == .ask,
+               "ride detection defaults to Ask to Start")
+        assert(defaultSettingsStore.settings.autoPauseEnabled,
+               "ride detection defaults to Auto-Pause enabled")
+        defaultSettingsDefaults.removePersistentDomain(forName: defaultSettingsSuite)
 
         var idleTimerValues: [Bool] = []
         RideIdleTimerController.update(
@@ -5805,7 +5831,6 @@ struct NavigationProtocolTests {
         ) -> RideDetectionLocationStatus {
             RideDetectionLocationStatusResolver.resolve(
                 startMode: .ask,
-                locationUseAcknowledged: true,
                 isNavigationReady: ready,
                 supportsRideAutomation: true,
                 supportsGPSPositionQualityV1: true,
