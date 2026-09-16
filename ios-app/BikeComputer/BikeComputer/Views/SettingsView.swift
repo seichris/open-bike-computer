@@ -50,6 +50,7 @@ struct SettingsView: View {
         RideDetectionSettingsStore
     @ObservedObject private var rideDiagnosticsRecorder:
         RideDiagnosticsRecorder
+    @ObservedObject private var destinationStore: SavedDestinationStore
     @FocusState private var focusedSavedMapFilename: String?
     @State private var presentedSheet: SettingsSheetDestination?
     @State private var routeImportFeedback: String?
@@ -58,6 +59,7 @@ struct SettingsView: View {
     let currentLocation: CLLocation?
     let isNavigationActive: Bool
     let onRequestLocationAuthorization: () -> Void
+    let onSaveOnlineRoute: (SavedDestination?) -> Void
     let onStartTestNavigation: (String) -> Void
 
     init(
@@ -75,7 +77,9 @@ struct SettingsView: View {
             CyclingSensorDetectionCoordinator? = nil,
         rideDetectionSettingsStore: RideDetectionSettingsStore? = nil,
         rideDiagnosticsRecorder: RideDiagnosticsRecorder? = nil,
+        destinationStore: SavedDestinationStore? = nil,
         onRequestLocationAuthorization: @escaping () -> Void = {},
+        onSaveOnlineRoute: @escaping (SavedDestination?) -> Void = { _ in },
         onStartTestNavigation: @escaping (String) -> Void
     ) {
         let cyclingSensorStore =
@@ -114,6 +118,10 @@ struct SettingsView: View {
         _rideDiagnosticsRecorder = ObservedObject(
             wrappedValue: rideDiagnosticsRecorder ?? RideDiagnosticsRecorder()
         )
+        _destinationStore = ObservedObject(
+            wrappedValue: destinationStore ?? SavedDestinationStore()
+        )
+        self.onSaveOnlineRoute = onSaveOnlineRoute
         self.onStartTestNavigation = onStartTestNavigation
     }
 
@@ -180,6 +188,8 @@ struct SettingsView: View {
                 SavedRoutesSettingsSection(
                     routeLibrary: routeLibrary,
                     stravaCoordinator: stravaIntegrationCoordinator,
+                    destinationStore: destinationStore,
+                    onSaveOnlineRoute: onSaveOnlineRoute,
                     onImportFromStrava: {
                         presentedSheet = .stravaRouteImport
                     },

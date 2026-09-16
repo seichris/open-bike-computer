@@ -712,7 +712,7 @@ struct NavigationProtocolTests {
         testRouteDeviationDetection()
         testReplacementStepSelectionUsesUnambiguousGeometry()
         testCoordinatorPreviewsAndSelectsAlternateRoutes()
-        testCoordinatorStartsSingleRouteWithoutPicker()
+        testCoordinatorRequiresSelectionForSingleRoute()
         testCoordinatorReroutesAndAppliesLatestRoute()
         testCoordinatorReroutesWhenProgressRejectsFarLocation()
         testWorkoutAndNavigationLifecyclesStayIndependent()
@@ -3808,7 +3808,7 @@ struct NavigationProtocolTests {
     }
 
     @MainActor
-    static func testCoordinatorStartsSingleRouteWithoutPicker() {
+    static func testCoordinatorRequiresSelectionForSingleRoute() {
         let suite = "CoordinatorSingleRoute.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -3852,13 +3852,16 @@ struct NavigationProtocolTests {
         )
         factory.tasks[0].succeed(with: [route])
 
-        assert(coordinator.isNavigating, "one returned route starts navigation immediately")
-        assert(coordinator.currentRoute === route, "the only route becomes the active route")
-        assert(coordinator.routeAlternatives.isEmpty, "single-route planning skips the picker")
+        assert(!coordinator.isNavigating, "one returned route waits for user confirmation")
+        assertEqual(coordinator.routeAlternatives.count, 1, "single-route planning still shows the picker")
         assert(
             coordinator.selectedRouteAlternativeID == nil,
-            "single-route planning does not require an explicit selection"
+            "single-route planning requires an explicit selection"
         )
+        coordinator.selectRouteAlternative(coordinator.routeAlternatives[0].id)
+        coordinator.startSelectedRoute()
+        assert(coordinator.isNavigating, "the explicitly selected route starts")
+        assert(coordinator.currentRoute === route, "the selected route becomes active")
     }
 
     @MainActor
@@ -5128,6 +5131,23 @@ struct NavigationProtocolTests {
             latitude: coordinate.latitude,
             longitude: coordinate.longitude,
             "favorite retains its exact coordinate"
+        )
+        let savedRouteID = UUID()
+        assert(
+            restoredStore.addFavorite(
+                droppedPin,
+                savedRouteID: savedRouteID
+            )?.savedRouteID == savedRouteID,
+            "favorite can be linked to its chosen saved route"
+        )
+        let linkedStore = SavedDestinationStore(
+            defaults: defaults,
+            recentLimit: 2
+        )
+        assertEqual(
+            linkedStore.favorite(savedRouteID: savedRouteID)?.name,
+            droppedPin.name,
+            "favorite route link persists and resolves after restart"
         )
 
         restoredStore.addRecent(SavedDestination(name: "Cafe"))
@@ -12219,9 +12239,18 @@ struct NavigationProtocolTests {
         assert(
             source.contains("Text(\"Saved Routes\")") &&
                 source.contains(
-                    "Preview saved routes, navigate offline on this iPhone, or send them to Apple Watch. Offline map tiles are separate."
+                    "Choose an online route to save, preview saved routes, or send supported routes to Apple Watch."
                 ),
             "Saved Routes uses the requested title and explanatory copy"
+        )
+        assert(
+            source.contains("favoriteButton(for: route") &&
+                source.contains("Image(systemName: favorite == nil ? \"star\" : \"star.fill\")") &&
+                source.contains("Label(\"Save an Online Route\"") &&
+                !source.contains("Navigate on iPhone") &&
+                !source.contains("Available offline") &&
+                !source.contains("Apple Maps · Saved on this iPhone"),
+            "Saved Routes merges favorite state and removes obsolete route labels"
         )
         assert(
             source.contains("TextField(\n                \"Route name\"") &&

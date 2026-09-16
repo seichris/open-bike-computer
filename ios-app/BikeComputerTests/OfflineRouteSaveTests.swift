@@ -467,8 +467,9 @@ struct OfflineRouteSaveTests {
         coordinator.stopNavigation()
         coordinator.planNavigation(from: .mapItem(start), to: .mapItem(finish), transportType: RouteTransportTypes.cycling, isTestMode: true)
         factory.tasks[1].succeed(with: [fast])
-        check(coordinator.isNavigating && coordinator.currentRoute === fast && coordinator.routeAlternatives.isEmpty,
-            "Exactly one online result still starts immediately")
+        check(!coordinator.isNavigating && coordinator.routeAlternatives.count == 1 &&
+            coordinator.selectedRouteAlternativeID == nil,
+            "Exactly one online result still waits for route confirmation")
     }
 
     static func selectedMapKitSaving() throws {
@@ -731,8 +732,17 @@ struct OfflineRouteSaveTests {
             panel.contains(".sheet(item: $presentedImport)") &&
             panel.contains("RouteSaveSheet(library: library, draft: draft)"),
             "GPX confirmation is item-driven by stable parent presenters, never a transient Section")
-        check(section.contains("navigationAction?.perform(route)") && section.contains("!routeLibrary.isAvailableOffline(route)"),
-            "Saved rows navigate directly and enforce deletion/expiry eligibility")
+        check(section.contains("favoriteButton(for: route") &&
+            section.contains("Label(\"Save an Online Route\"") &&
+            !section.contains("Navigate on iPhone") &&
+            !section.contains("Available offline") &&
+            !section.contains("Apple Maps · Saved on this iPhone"),
+            "Saved routes merge favorite stars and online saving without obsolete row copy")
+        check(content.contains("if routePlanningPurpose == .navigate") &&
+            content.contains("if routePlanningPurpose == .saveOffline") &&
+            !content.contains("Save this route to follow it later") &&
+            !content.contains("chooseApprovedOfflineRoute"),
+            "Route choice keeps navigation and save-only actions in separate modes")
         check(content.contains("routeLibrary.$offlineNavigationRoutes"), "Active navigation and preview observe deletion admission, not just files")
     }
 }

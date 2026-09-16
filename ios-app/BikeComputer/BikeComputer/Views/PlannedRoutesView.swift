@@ -1,11 +1,13 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import CoreLocation
 
 struct SavedRoutesSettingsSection: View {
     @ObservedObject var routeLibrary: PhoneRouteLibrary
     @ObservedObject var stravaCoordinator: StravaIntegrationCoordinator
+    @ObservedObject var destinationStore: SavedDestinationStore
     @Environment(\.savedRouteMapAction) private var mapAction
-    @Environment(\.savedRouteNavigationAction) private var navigationAction
+    let onSaveOnlineRoute: (SavedDestination?) -> Void
     let onImportFromStrava: () -> Void
     let onConfirmGPX: (OfflineRouteSaveDraft) -> Void
     let importFeedback: String?
@@ -17,6 +19,7 @@ struct SavedRoutesSettingsSection: View {
     var body: some View {
         Section {
             if routeLibrary.routes.isEmpty &&
+                destinationStore.favoriteDestinations.isEmpty &&
                 routeLibrary.expiredStravaBookmarks.isEmpty {
                 Label(
                     "No Saved Routes",
@@ -28,10 +31,22 @@ struct SavedRoutesSettingsSection: View {
                 ForEach(routeLibrary.routes) { route in
                     routeRow(route)
                 }
+                ForEach(unlinkedFavorites) { favorite in
+                    unlinkedFavoriteRow(favorite)
+                }
                 ForEach(routeLibrary.expiredStravaBookmarks) { bookmark in
                     expiredStravaRow(bookmark)
                 }
             }
+
+            Button {
+                finishRenaming()
+                focusedRouteID = nil
+                onSaveOnlineRoute(nil)
+            } label: {
+                Label("Save an Online Route", systemImage: "magnifyingglass")
+            }
+            .accessibilityIdentifier("saveOnlineRoute")
 
             Button {
                 finishRenaming()
@@ -69,9 +84,7 @@ struct SavedRoutesSettingsSection: View {
         } header: {
             Text("Saved Routes")
         } footer: {
-            Text(
-                "Preview saved routes, navigate offline on this iPhone, or send them to Apple Watch. Offline map tiles are separate."
-            )
+            Text("Choose an online route to save, preview saved routes, or send supported routes to Apple Watch.")
         }
         .alert(
             "Saved Route Error",
@@ -138,6 +151,7 @@ struct SavedRoutesSettingsSection: View {
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
+                favoriteButton(for: route, displayName: displayName)
                 routeName(route, displayName: displayName)
 
                 Spacer()
@@ -185,31 +199,6 @@ struct SavedRoutesSettingsSection: View {
                 .accessibilityLabel("Delete \(displayName)")
             }
 
-            HStack {
-                Button {
-                    finishRenaming()
-                    focusedRouteID = nil
-                    do { try navigationAction?.perform(route) }
-                    catch { errorMessage = error.localizedDescription }
-                } label: {
-                    Label("Navigate on iPhone", systemImage: "location.fill")
-                }
-                .buttonStyle(.borderless)
-                .disabled(navigationAction?.isEnabled != true || !routeLibrary.isAvailableOffline(route))
-                .accessibilityLabel("Navigate \(displayName) offline on iPhone")
-                .accessibilityIdentifier("navigateSavedRoute-\(route.id.uuidString)")
-                Spacer()
-                if routeLibrary.isAvailableOffline(route) {
-                    Text("Available offline")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-
-            if route.providerID == RouteProviderPolicyV1.mapKit.providerID {
-                Text("Apple Maps · Saved on this iPhone")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
             if route.providerID == RouteProviderPolicyV1.strava.providerID {
                 stravaAttribution(
                     sourceReference: route.sourceReference,
@@ -224,6 +213,76 @@ struct SavedRoutesSettingsSection: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private var unlinkedFavorites: [SavedDestination] {
+        let installedRouteIDs = Set(routeLibrary.routes.map(\.id))
+        return destinationStore.favoriteDestinations.filter { favorite in
+            guard let routeID = favorite.savedRouteID else { return true }
+            return !installedRouteIDs.contains(routeID)
+        }
+    }
+
+    private func unlinkedFavoriteRow(
+        _ favorite: SavedDestination
+    ) -> some View {
+        HStack(spacing: 12) {
+            Button {
+                destinationStore.removeFavorite(favorite)
+            } label: {
+                Image(systemName: "star.fill")
+                    .foregroundStyle(.yellow)
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Remove \(favorite.name) from favorites")
+
+            Text(favorite.name)
+                .font(.headline)
+                .lineLimit(2)
+
+            Spacer()
+
+            Button("Choose Route") {
+                onSaveOnlineRoute(favorite)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Choose a route for \(favorite.name)")
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func favoriteButton(
+        for route: PlannedRouteSummaryV1,
+        displayName: String
+    ) -> some View {
+        let favorite = destinationStore.favorite(savedRouteID: route.id)
+        return Button {
+            if let favorite {
+                destinationStore.removeFavorite(favorite)
+            } else {
+                destinationStore.addFavorite(
+                    SavedDestination(
+                        name: route.destination.label,
+                        coordinate: CLLocationCoordinate2D(
+                            latitude: route.destination.coordinate.latitude,
+                            longitude: route.destination.coordinate.longitude
+                        )
+                    ),
+                    savedRouteID: route.id
+                )
+            }
+        } label: {
+            Image(systemName: favorite == nil ? "star" : "star.fill")
+                .foregroundStyle(favorite == nil ? Color.secondary : .yellow)
+                .frame(width: 32, height: 32)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(
+            favorite == nil
+                ? "Add \(displayName) to favorites"
+                : "Remove \(displayName) from favorites"
+        )
     }
 
     private func mapPreviewButton(
