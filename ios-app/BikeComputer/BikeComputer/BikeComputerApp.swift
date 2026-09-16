@@ -8,7 +8,9 @@
 import AppIntents
 import Combine
 import CoreLocation
+import HealthKit
 import SwiftUI
+import UIKit
 
 @main
 struct BikeComputerApp: App {

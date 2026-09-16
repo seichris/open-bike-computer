@@ -12,7 +12,7 @@ private final class MemoryRecordingStore: WorkoutRecordingPersisting {
     }
     func save(_ record: WorkoutRecordingRecord) throws {
         if fails { throw WorkoutRecordingStore.StoreError.invalidRecord }
-        precondition(record.isValid)
+        precondition(record.isValid, "Invalid recording reservation: \(record)")
         self.record = record
         saves += 1
     }
@@ -189,6 +189,9 @@ struct WorkoutSessionCoordinatorTests {
         check(!watchCoordinator.requestStart(explicitOwner: .iphone), "Disconnected active Watch blocks phone")
         watch2.emit(id: id2, state: .ended, outcome: .saved)
         let id3 = UUID()
+        watch2.store.attachMirroredSession(at: Date())
+        check(watchCoordinator.record?.phase == .finished && disk2.record?.isValid == true,
+              "Next transport must not corrupt the previous ride's terminal reservation")
         watch2.emit(id: id3, state: .running)
         check(watchCoordinator.record?.sessionID == id3 && watchCoordinator.record?.finishedChoice == nil,
               "Next Watch ride cannot inherit previous terminal disposition")

@@ -526,7 +526,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                 }
                 let samples = batch.compactMap(\.distance)
                 if !samples.isEmpty, !distanceWriteFailed {
-                    do { try await builder.add(samples) }
+                    do { try await builder.addSamples(samples) }
                     catch { distanceWriteFailed = true }
                 }
                 guard generation == expectedGeneration else { return }

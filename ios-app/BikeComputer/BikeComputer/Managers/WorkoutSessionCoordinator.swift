@@ -263,6 +263,14 @@ final class WorkoutSessionCoordinator: ObservableObject {
             catch { persistenceError(); return }
         }
         if var next = record, next.owner == .watch {
+            // Attaching the next mirrored transport can temporarily retain the
+            // previous ride's snapshot/UUID. Keep its terminal tombstone intact
+            // until a validated snapshot supplies the new session identity.
+            if next.phase == .finished,
+               presentation.sessionID == nil || presentation.sessionID == next.sessionID {
+                publishWatch()
+                return
+            }
             if let id = presentation.sessionID, id != next.sessionID {
                 // A newly verified Watch session replaces only Watch presentation.
                 // Never carry a previous ride's terminal disposition into it.
