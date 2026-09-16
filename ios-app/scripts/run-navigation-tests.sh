@@ -59,6 +59,8 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift \
   ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift \
   ios-app/BikeComputer/BikeComputer/Managers/RideDetectionSettingsStore.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutDeviceRelay.swift \
   ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
@@ -135,6 +137,8 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/WatchCyclingSensorObservation.swift \
   ios-app/BikeComputer/WorkoutShared/WatchCyclingSensorObservation+Workout.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
   ios-app/BikeComputer/BikeComputer/Models/CyclingSensorProfile.swift \
   ios-app/BikeComputer/BikeComputer/Managers/CyclingSensorStore.swift \
