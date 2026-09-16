@@ -58,6 +58,8 @@ MetricLabels rideBottomLeft{};
 MetricLabels rideBottomRight{};
 lv_obj_t *rideStartWorkoutHitTarget = nullptr;
 lv_obj_t *rideStartWorkoutButton = nullptr;
+lv_obj_t *rideStartWorkoutIcon = nullptr;
+lv_obj_t *rideStartWorkoutSpinner = nullptr;
 lv_obj_t *rideStartWorkoutLabel = nullptr;
 lv_obj_t *rideAutomationPanel = nullptr;
 lv_obj_t *rideAutomationTitle = nullptr;
@@ -67,6 +69,9 @@ lv_obj_t *rideAutomationActions = nullptr;
 ride_telemetry_layout::Layout rideLayout{};
 ride_telemetry_layout::MetricPlacement rideMetricPlacement{};
 int8_t displayedMetricLayout = -1;
+bool rideStartWorkoutRequestPending = false;
+uint32_t rideStartWorkoutRequestStartedAtMs = 0;
+constexpr uint32_t START_WORKOUT_REQUEST_TIMEOUT_MS = 20000;
 std::array<ConfigurableSlotView,
            screen_configuration_protocol::RIDE_STATS_SLOT_COUNT>
     configurableSlots{};
@@ -603,9 +608,16 @@ void updateConfigurableSlots(
 }
 
 void startWorkoutEvent(lv_event_t *event) {
-  if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
-    bleNavServer.requestWorkoutStart();
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED ||
+      rideStartWorkoutRequestPending) {
+    return;
   }
+  if (!bleNavServer.requestWorkoutStart()) {
+    return;
+  }
+  rideStartWorkoutRequestPending = true;
+  rideStartWorkoutRequestStartedAtMs = millis();
+  updateRideTelemetryEvent(nullptr);
 }
 
 void setStartWorkoutHidden(bool hidden) {
@@ -623,6 +635,16 @@ void setStartWorkoutDisabled(bool disabled) {
   } else {
     lv_obj_clear_state(rideStartWorkoutHitTarget, LV_STATE_DISABLED);
     lv_obj_clear_state(rideStartWorkoutButton, LV_STATE_DISABLED);
+  }
+}
+
+void setStartWorkoutLoading(bool loading) {
+  if (loading) {
+    lv_obj_add_flag(rideStartWorkoutIcon, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(rideStartWorkoutSpinner, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_clear_flag(rideStartWorkoutIcon, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(rideStartWorkoutSpinner, LV_OBJ_FLAG_HIDDEN);
   }
 }
 
@@ -971,6 +993,8 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
   rideLayout = ride_telemetry_layout::makeLayout(TFT_WIDTH, TFT_HEIGHT);
+  rideStartWorkoutRequestPending = false;
+  rideStartWorkoutRequestStartedAtMs = 0;
 
   ridePage = createPage(screen);
   rideStatus = createHeader(ridePage);
@@ -1030,12 +1054,23 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   lv_obj_clear_flag(rideStartWorkoutButton, LV_OBJ_FLAG_EVENT_BUBBLE);
   lv_obj_add_event_cb(rideStartWorkoutButton, startWorkoutEvent,
                       LV_EVENT_CLICKED, nullptr);
-  bike_icon::create(
-      rideStartWorkoutButton,
+  const lv_coord_t startWorkoutIconSize =
       useRoundStartWorkoutContent
           ? ride_telemetry_layout::kRoundStartWorkoutIconSize
-          : ride_telemetry_layout::kStartWorkoutIconSize,
-      0x000000);
+          : ride_telemetry_layout::kStartWorkoutIconSize;
+  rideStartWorkoutIcon =
+      bike_icon::create(rideStartWorkoutButton, startWorkoutIconSize, 0x000000);
+  rideStartWorkoutSpinner = lv_spinner_create(rideStartWorkoutButton);
+  lv_obj_set_size(rideStartWorkoutSpinner, startWorkoutIconSize,
+                  startWorkoutIconSize);
+  lv_spinner_set_anim_params(rideStartWorkoutSpinner, 900, 220);
+  lv_obj_set_style_arc_width(rideStartWorkoutSpinner, 4, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(rideStartWorkoutSpinner, lv_color_hex(0x2D8A50),
+                             LV_PART_MAIN);
+  lv_obj_set_style_arc_width(rideStartWorkoutSpinner, 4, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(rideStartWorkoutSpinner, lv_color_black(),
+                             LV_PART_INDICATOR);
+  lv_obj_add_flag(rideStartWorkoutSpinner, LV_OBJ_FLAG_HIDDEN);
   rideStartWorkoutLabel = lv_label_create(rideStartWorkoutButton);
   lv_obj_set_style_text_font(
       rideStartWorkoutLabel,
@@ -1057,11 +1092,23 @@ void rideTelemetryScr(_lv_obj_t *screen) {
 void updateRideTelemetryEvent(lv_event_t *) {
   const ride_telemetry_presenter::ViewModel model = currentViewModel();
   updateMetricLayout(model);
+  const WorkoutStartRequestPresentation startWorkoutPresentation =
+      bleNavServer.workoutStartRequestPresentation();
+  const uint32_t nowMs = millis();
+  if (rideStartWorkoutRequestPending &&
+      (model.usesWorkout ||
+       startWorkoutPresentation !=
+           WorkoutStartRequestPresentation::StartOnIPhone ||
+       static_cast<uint32_t>(nowMs - rideStartWorkoutRequestStartedAtMs) >=
+           START_WORKOUT_REQUEST_TIMEOUT_MS)) {
+    rideStartWorkoutRequestPending = false;
+  }
+  setStartWorkoutLoading(rideStartWorkoutRequestPending);
   if (rideMetricPlacement.showStartWorkoutButton) {
-    switch (bleNavServer.workoutStartRequestPresentation()) {
+    switch (startWorkoutPresentation) {
     case WorkoutStartRequestPresentation::StartOnIPhone:
       setLabelIfChanged(rideStartWorkoutLabel, "Start Workout");
-      setStartWorkoutDisabled(false);
+      setStartWorkoutDisabled(rideStartWorkoutRequestPending);
       break;
     case WorkoutStartRequestPresentation::StartOnAppleWatch:
       setLabelIfChanged(rideStartWorkoutLabel, "Start on Apple Watch");
