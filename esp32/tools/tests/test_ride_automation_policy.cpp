@@ -1,3 +1,4 @@
+#define RIDE_AUTOMATION_AUTOMATIC_START 1
 #include "../../lib/ride_automation/ride_automation_runtime.hpp"
 #include "../../lib/ride_automation/ride_automation_trace.hpp"
 #include "../../lib/ride_automation/ride_automation_protocol.hpp"

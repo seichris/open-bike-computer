@@ -32,6 +32,10 @@
 #define PERSISTENT_RIDE_DIAGNOSTICS 0
 #endif
 
+#ifndef DETAILED_RIDE_DIAGNOSTICS
+#define DETAILED_RIDE_DIAGNOSTICS 1
+#endif
+
 namespace ride_diagnostics {
 
 bool recordInternal(Level level, const char *category, const char *event,
@@ -123,8 +127,10 @@ std::atomic<uint16_t> maxQueueDepth{0};
 std::atomic<uint16_t> normalQueueCriticalCount{0};
 char activeCapture[48] = {};
 portMUX_TYPE captureMux = portMUX_INITIALIZER_UNLOCKED;
+#if DETAILED_RIDE_DIAGNOSTICS
 std::atomic<bool> detailedCapture{false};
 std::atomic<uint32_t> detailedCaptureDeadlineMs{0};
+#endif
 std::atomic<bool> captureBoundaryPending{false};
 std::atomic<uint32_t> lastMarkerSequence{0};
 char activePath[192] = {};
@@ -1206,7 +1212,9 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
   normalQueueCriticalCount.store(0, std::memory_order_release);
   clockAnchorEmitted.store(false);
   checkpointRequested.store(false);
+#if DETAILED_RIDE_DIAGNOSTICS
   detailedCapture.store(false);
+#endif
   lastMarkerSequence.store(0);
 #if PERSISTENT_RIDE_DIAGNOSTICS
   faultCapsuleGeneration.store(0, std::memory_order_release);
@@ -1271,7 +1279,7 @@ void setStorageRecoveryAllowedProbe(StorageRecoveryAllowedProbe probe) {
 }
 
 void process(uint32_t nowMs) {
-#if PERSISTENT_RIDE_DIAGNOSTICS
+#if PERSISTENT_RIDE_DIAGNOSTICS && DETAILED_RIDE_DIAGNOSTICS
   // The writer task owns file handles. This hook is intentionally tiny so it
   // can be called from the LVGL loop without adding storage latency there.
   const DetailedCaptureLease lease = detailedCaptureLease();
@@ -1448,15 +1456,19 @@ bool markIssue(const char *code, uint32_t markerSequence) {
 bool bindCapture(const char *captureID, bool detailed) {
   if (!validCaptureID(captureID))
     return false;
-#if !defined(RIDE_AUTOMATION_SHADOW)
+#if !defined(RIDE_AUTOMATION_SHADOW) || !DETAILED_RIDE_DIAGNOSTICS
   if (detailed)
     return false;
+#endif
+#if !DETAILED_RIDE_DIAGNOSTICS
+  detailed = false;
 #endif
   char previousCapture[48] = {};
   // The desired capture/mode is session state, not a storage operation. Apply
   // it even while the SD writer is busy or the card is temporarily absent;
   // the first successfully queued record will enforce the pending boundary.
   portENTER_CRITICAL(&captureMux);
+#if DETAILED_RIDE_DIAGNOSTICS
   const bool previousDetailed =
       detailedCapture.load(std::memory_order_relaxed);
   strncpy(previousCapture, activeCapture, sizeof(previousCapture) - 1);
@@ -1467,6 +1479,11 @@ bool bindCapture(const char *captureID, bool detailed) {
       captureID,
       detailed ? control::CaptureMode::Detailed
                : control::CaptureMode::Standard);
+#else
+  strncpy(previousCapture, activeCapture, sizeof(previousCapture) - 1);
+  const bool requiresBoundary =
+      std::strcmp(previousCapture, captureID) != 0;
+#endif
   if (requiresBoundary)
     captureBoundaryPending.store(true, std::memory_order_relaxed);
   strncpy(activeCapture, captureID, sizeof(activeCapture) - 1);
@@ -1474,6 +1491,7 @@ bool bindCapture(const char *captureID, bool detailed) {
   ++captureGeneration;
   if (captureGeneration == 0)
     captureGeneration = 1;
+#if DETAILED_RIDE_DIAGNOSTICS
   const uint32_t nextDetailedDeadline =
       capture_policy::detailedCaptureDeadlineAfterBinding(
           millis(),
@@ -1482,6 +1500,7 @@ bool bindCapture(const char *captureID, bool detailed) {
   detailedCaptureDeadlineMs.store(nextDetailedDeadline,
                                   std::memory_order_relaxed);
   detailedCapture.store(detailed, std::memory_order_relaxed);
+#endif
   const uint32_t previousMarkerSequence = lastMarkerSequence.load();
   lastMarkerSequence.store(control::markerSequenceAfterBinding(
       previousCapture, captureID, previousMarkerSequence));
@@ -1492,8 +1511,12 @@ bool bindCapture(const char *captureID, bool detailed) {
     const bool ready = initializePersistentBootSequenceIfNeeded();
     const bool enqueued = ready && enqueueEventWithProducerLockHeld(
         Level::Info, "transfer", "capture_bound",
-        detailed ? "{\"active\":true}" : "{\"active\":false}", false,
-        0, 0, captureID);
+#if DETAILED_RIDE_DIAGNOSTICS
+        detailed ? "{\"active\":true}" : "{\"active\":false}",
+#else
+        "{\"active\":false}",
+#endif
+        false, 0, 0, captureID);
     xSemaphoreGive(producerMutex);
     if (!enqueued)
       updateFaultCapsule(Level::Warning, "transfer", "capture_bound", false);
@@ -1511,6 +1534,7 @@ bool clearCaptureInternal(const DetailedCaptureLease *expected) {
   // Boundary evidence is durable best-effort, but a contended queue must
   // never leave the matching detailed telemetry active.
   portENTER_CRITICAL(&captureMux);
+#if DETAILED_RIDE_DIAGNOSTICS
   if (expected != nullptr &&
       !capture_policy::detailedCaptureLeaseMatches(
           activeCapture, captureGeneration,
@@ -1520,10 +1544,15 @@ bool clearCaptureInternal(const DetailedCaptureLease *expected) {
     portEXIT_CRITICAL(&captureMux);
     return false;
   }
+#else
+  (void)expected;
+#endif
   strncpy(previousCapture, activeCapture, sizeof(previousCapture) - 1);
   activeCapture[0] = '\0';
+#if DETAILED_RIDE_DIAGNOSTICS
   detailedCaptureDeadlineMs.store(0, std::memory_order_relaxed);
   detailedCapture.store(false, std::memory_order_relaxed);
+#endif
   lastMarkerSequence.store(0, std::memory_order_relaxed);
   ++captureGeneration;
   if (captureGeneration == 0)
@@ -1554,6 +1583,9 @@ bool clearCaptureInternal(const DetailedCaptureLease *expected) {
 void clearCapture() { (void)clearCaptureInternal(nullptr); }
 
 DetailedCaptureLease detailedCaptureLease() {
+#if !DETAILED_RIDE_DIAGNOSTICS
+  return {};
+#else
   DetailedCaptureLease lease;
   portENTER_CRITICAL(&captureMux);
   lease.active = detailedCapture.load(std::memory_order_relaxed);
@@ -1563,17 +1595,26 @@ DetailedCaptureLease detailedCaptureLease() {
   lease.captureId[sizeof(lease.captureId) - 1] = '\0';
   portEXIT_CRITICAL(&captureMux);
   return lease;
+#endif
 }
 
 bool clearCaptureIfMatches(const DetailedCaptureLease &lease) {
+#if !DETAILED_RIDE_DIAGNOSTICS
+  (void)lease;
+  return false;
+#else
   if (!lease.active)
     return false;
   return clearCaptureInternal(&lease);
+#endif
 }
 
 const char *captureId() { return activeCapture; }
 
 bool detailedCaptureEnabled() {
+#if !DETAILED_RIDE_DIAGNOSTICS
+  return false;
+#else
   portENTER_CRITICAL(&captureMux);
   const bool detailed = detailedCapture.load(std::memory_order_relaxed);
   const uint32_t deadline =
@@ -1582,6 +1623,7 @@ bool detailedCaptureEnabled() {
   if (!detailed)
     return false;
   return !capture_policy::detailedCaptureExpired(millis(), deadline);
+#endif
 }
 
 transfer_policy::SealPreparation

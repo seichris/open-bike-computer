@@ -32,8 +32,11 @@ target:
   never selected by the release workflow.
 - `*_PRODUCTION` compiles with `CORE_DEBUG_LEVEL=0`, leaves `DEBUG` undefined,
   and sets `FIRMWARE_DIAGNOSTICS=0`. It does not start USB CDC at application
-  boot and does not wait for a serial host. GitHub firmware releases use these
-  profiles.
+  boot and does not wait for a serial host. It does, however, include the
+  bounded RAUT detector/control path for Watch-GPS Ask-to-Start and automatic
+  pause/resume; it omits the developer-only one-Hz normalized RAUT trace to
+  remain within the dual-OTA image budget. The separate automatic-start rollout
+  remains disabled by default. GitHub firmware releases use these profiles.
 
 Production keeps native USB hardware support (`ARDUINO_USB_MODE=1`) but sets
 `ARDUINO_USB_CDC_ON_BOOT=0`. The application therefore avoids the steady USB
