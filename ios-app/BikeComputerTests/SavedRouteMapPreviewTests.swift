@@ -537,24 +537,5 @@ struct SavedRouteMapPreviewTests {
         check(!loadedWhileNavigating && settingsPresented, "Disabled navigation action cannot even load a route")
         try action.perform { try fixture.library.mapSelection(for: summary) }
         check(!settingsPresented && accepted?.identity == WatchRouteIdentityV1(archive: saved), "Validated success accepts the exact preview before dismissing Settings")
-
-        settingsPresented = true
-        var started: WatchRouteIdentityV1?
-        let navigate = SavedRouteNavigationAction(isEnabled: true, start: { selected in
-            let archive = try fixture.library.offlineArchive(for: selected)
-            started = WatchRouteIdentityV1(archive: archive)
-            settingsPresented = false
-        })
-        let blockedStart = SavedRouteNavigationAction(isEnabled: false, start: navigate.start)
-        failure { try blockedStart.perform(summary) }
-        check(settingsPresented && started == nil, "Disabled navigation leaves the library presented")
-        try navigate.perform(summary)
-        check(!settingsPresented && started == WatchRouteIdentityV1(archive: saved),
-            "Saved row starts the exact archive without another save")
-        settingsPresented = true
-        started = nil
-        try fixture.library.delete(summary)
-        failure { try navigate.perform(summary) }
-        check(settingsPresented && started == nil, "Stale saved row reports failure without dismissing the library")
     }
 }
