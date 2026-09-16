@@ -59,9 +59,7 @@ MetricLabels rideBottomRight{};
 lv_obj_t *rideStartWorkoutHitTarget = nullptr;
 lv_obj_t *rideStartWorkoutButton = nullptr;
 lv_obj_t *rideStartWorkoutIcon = nullptr;
-#if defined(RIDE_AUTOMATION_TRACE)
 lv_obj_t *rideStartWorkoutSpinner = nullptr;
-#endif
 lv_obj_t *rideStartWorkoutLabel = nullptr;
 lv_obj_t *rideAutomationPanel = nullptr;
 lv_obj_t *rideAutomationTitle = nullptr;
@@ -640,7 +638,6 @@ void setStartWorkoutDisabled(bool disabled) {
   }
 }
 
-#if defined(RIDE_AUTOMATION_TRACE)
 void setStartWorkoutLoading(bool loading) {
   if (loading) {
     lv_obj_add_flag(rideStartWorkoutIcon, LV_OBJ_FLAG_HIDDEN);
@@ -650,7 +647,6 @@ void setStartWorkoutLoading(bool loading) {
     lv_obj_add_flag(rideStartWorkoutSpinner, LV_OBJ_FLAG_HIDDEN);
   }
 }
-#endif
 
 void rideDetectedStartEvent(lv_event_t *event) {
   if (lv_event_get_code(event) != LV_EVENT_CLICKED)
@@ -1064,7 +1060,6 @@ void rideTelemetryScr(_lv_obj_t *screen) {
           : ride_telemetry_layout::kStartWorkoutIconSize;
   rideStartWorkoutIcon =
       bike_icon::create(rideStartWorkoutButton, startWorkoutIconSize, 0x000000);
-#if defined(RIDE_AUTOMATION_TRACE)
   rideStartWorkoutSpinner = lv_spinner_create(rideStartWorkoutButton);
   lv_obj_set_size(rideStartWorkoutSpinner, startWorkoutIconSize,
                   startWorkoutIconSize);
@@ -1076,7 +1071,6 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   lv_obj_set_style_arc_color(rideStartWorkoutSpinner, lv_color_black(),
                              LV_PART_INDICATOR);
   lv_obj_add_flag(rideStartWorkoutSpinner, LV_OBJ_FLAG_HIDDEN);
-#endif
   rideStartWorkoutLabel = lv_label_create(rideStartWorkoutButton);
   lv_obj_set_style_text_font(
       rideStartWorkoutLabel,
@@ -1109,9 +1103,7 @@ void updateRideTelemetryEvent(lv_event_t *) {
            START_WORKOUT_REQUEST_TIMEOUT_MS)) {
     rideStartWorkoutRequestPending = false;
   }
-#if defined(RIDE_AUTOMATION_TRACE)
   setStartWorkoutLoading(rideStartWorkoutRequestPending);
-#endif
   if (rideMetricPlacement.showStartWorkoutButton) {
     switch (startWorkoutPresentation) {
     case WorkoutStartRequestPresentation::StartOnIPhone:

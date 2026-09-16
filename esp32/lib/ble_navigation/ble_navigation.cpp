@@ -3788,7 +3788,7 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
                              RIDE_DIAGNOSTICS_CLIENT_VERSION) {
       featureFlags |= device_capabilities_protocol::RIDE_DIAGNOSTICS_FEATURE;
     }
-#if defined(RIDE_AUTOMATION_TRACE)
+#if defined(DETAILED_RIDE_DIAGNOSTICS) && DETAILED_RIDE_DIAGNOSTICS
     if (clientVersion >= device_capabilities_protocol::
                              DETAILED_RIDE_DIAGNOSTICS_CLIENT_VERSION) {
       featureFlags |=

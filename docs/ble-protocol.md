@@ -1266,11 +1266,11 @@ the two timeout pickers and sends ID `38` only after this bit is received.
 The bounded persistent recorder may advertise bit `20` in ordinary and
 production profiles; it never enables USB serial diagnostics or the
 remote-debug service.
-Firmware advertises bit `21` when the optional normalized ride-automation trace
-producer is compiled. Development profiles include it for serial capture;
-production keeps the control path but omits the trace producer to stay within
-the dual-OTA image budget. Detailed capture binding is therefore unavailable
-in production.
+Firmware advertises bit `21` only when detailed ride diagnostics are compiled.
+Development profiles include both detailed diagnostics and the normalized
+ride-automation trace producer; production keeps the control path but omits
+both to stay within the dual-OTA image budget. Detailed capture binding is
+therefore unavailable in production.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
