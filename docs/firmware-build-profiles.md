@@ -32,8 +32,11 @@ target:
   never selected by the release workflow.
 - `*_PRODUCTION` compiles with `CORE_DEBUG_LEVEL=0`, leaves `DEBUG` undefined,
   and sets `FIRMWARE_DIAGNOSTICS=0`. It does not start USB CDC at application
-  boot and does not wait for a serial host. GitHub firmware releases use these
-  profiles.
+  boot and does not wait for a serial host. It does, however, include the
+  bounded RAUT detector/control path for Watch-GPS Ask-to-Start and automatic
+  pause/resume; it omits the developer-only one-Hz normalized RAUT trace to
+  remain within the dual-OTA image budget. The separate automatic-start rollout
+  remains disabled by default. GitHub firmware releases use these profiles.
 
 Production keeps native USB hardware support (`ARDUINO_USB_MODE=1`) but sets
 `ARDUINO_USB_CDC_ON_BOOT=0`. The application therefore avoids the steady USB
@@ -45,7 +48,11 @@ their renderer, automation, and instrumentation code is not constrained by the
 release OTA slot. Production keeps two 3 MiB OTA application partitions. Both
 layouts keep FFat at `0x610000`, so USB-flashing a diagnostic image does not
 relocate or format fallback map and diagnostics data. OTA release artifacts
-continue to use only the production layout.
+continue to use only the production layout. Production builds must retain at
+least 64 KiB in each application slot; the locked build helper rejects an image
+that merely fits but leaves less reserve. The three embedded alert recordings
+are stored as mono PCM and expanded to their original identical-channel stereo
+streams during playback, reclaiming about 83 KiB without changing the audio.
 
 Each production profile keeps the canonical hardware target in firmware
 metadata (`WAVESHARE_AMOLED_175` or `WAVESHARE_AMOLED_206`). The profile suffix

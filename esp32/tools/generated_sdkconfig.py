@@ -36,6 +36,7 @@ FLASH_PLAN_FILENAME = "open-bike-flash-plan.json"
 FLASH_PLAN_PORT_PLACEHOLDER = "__OPEN_BIKE_UPLOAD_PORT__"
 FLASH_PLAN_APP_OFFSET_PLACEHOLDER = "__OPEN_BIKE_APP_OFFSET__"
 FLASH_PLAN_MAX_BYTES = 1024 * 1024
+PRODUCTION_APPLICATION_RESERVE_BYTES = 64 * 1024
 ESP_PARTITION_TABLE_MAX_BYTES = 0xC00
 ESP_PARTITION_ENTRY = struct.Struct("<HBBII16sI")
 ESP_PARTITION_MAGIC = 0x50AA
@@ -1880,6 +1881,17 @@ def _validated_flash_plan(
         ):
             raise GeneratedSdkconfigError(
                 "verified firmware image exceeds its application partition"
+            )
+        if (
+            offset_token == FLASH_PLAN_APP_OFFSET_PLACEHOLDER
+            and environment.endswith("_PRODUCTION")
+            and application_partition_size - size
+            < PRODUCTION_APPLICATION_RESERVE_BYTES
+        ):
+            raise GeneratedSdkconfigError(
+                "verified production firmware image leaves less than the "
+                f"required {PRODUCTION_APPLICATION_RESERVE_BYTES}-byte "
+                "application reserve"
             )
         if offset + size > 0x1_0000_0000:
             raise GeneratedSdkconfigError(

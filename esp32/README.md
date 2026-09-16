@@ -154,13 +154,16 @@ The available production, diagnostics, and test profiles are defined in
 
 ## Internal ride-detection builds
 
-The ordinary Waveshare development profiles compile the detector in shadow
-mode and enable the internal end-to-end RAUT control gate. They can show
+The ordinary Waveshare development and production profiles compile the
+detector and enable the internal end-to-end RAUT control path. They can show
 candidate progress, **Start Ride** / **Not Now**, confirmation progress,
 **Auto-Paused**, separate elapsed/moving time, and actionable iPhone/Watch or
-sensor errors on Ride Stats. The corresponding production profiles omit the
-RAUT capability and control macro until both boards pass the physical
-false-start, recovery, touch/I2C/BLE, and long-run soak matrix.
+sensor errors on Ride Stats. Production retains `CORE_DEBUG_LEVEL=0`,
+`FIRMWARE_DIAGNOSTICS=0`, and USB CDC off. Development profiles also emit the
+one-Hz normalized RAUT trace stream; production omits that trace to fit its
+dual-OTA image budget. The app's separate automatic-start rollout remains
+Ask-to-Start by default. Physical false-start, recovery,
+touch/I2C/BLE, and long-run soak validation is still required on both boards.
 
 Ride detection controls and annotates the Watch-owned HealthKit workout. It
 does not create standalone device recordings or ride history. Synthetic trace

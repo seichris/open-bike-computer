@@ -760,11 +760,11 @@ screen cycling remain unchanged.
 
 ## Ride Automation (`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004`)
 
-Ride automation is an internal-build protocol while the physical false-start,
-recovery, and board-stability gates in
+Ride automation is enabled in the production profiles, while the physical
+false-start, recovery, and board-stability gates in
 `docs/plans/automatic-ride-detection-implementation-plan.md` remain open.
-Production firmware neither advertises CAP2 bit `15` nor runs this control
-path. Manual `WREQ` and workout telemetry remain available.
+Production advertises CAP2 bit `15` and runs the bounded control path. Manual
+`WREQ` and workout telemetry remain available.
 
 The native characteristic carries authenticated notifications and writes on
 ownership-v2 channel `7`. A cached GATT table uses:
@@ -1252,8 +1252,9 @@ navigation characteristic; stream discovery and playback run on the iPhone.
 See [World Radio](world-radio.md) and the bounded codecs in
 `esp32/lib/world_radio/world_radio_protocol.hpp` and
 `ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift`.
-Production builds keep bit `15` clear until the
-ride-detection physical gates pass. Firmware sets bit `16` only in
+Production builds now advertise bit `15` because the RAUT control path is
+enabled; physical ride-detection gates remain outstanding. Firmware sets bit
+`16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
 Firmware sets bit `18` only when `FIRMWARE_DIAGNOSTICS=1`; production builds
 therefore expose neither the snapshot nor experimental profile control. GFX
@@ -1265,9 +1266,11 @@ the two timeout pickers and sends ID `38` only after this bit is received.
 The bounded persistent recorder may advertise bit `20` in ordinary and
 production profiles; it never enables USB serial diagnostics or the
 remote-debug service.
-Firmware advertises bit `21` only when the read-only ride-automation shadow
-producer is compiled. Production firmware keeps it clear, and iOS downgrades
-an otherwise detailed capture binding to standard correlation when it is absent.
+Firmware advertises bit `21` only when detailed ride diagnostics are compiled.
+Development profiles include both detailed diagnostics and the normalized
+ride-automation trace producer; production keeps the control path but omits
+both to stay within the dual-OTA image budget. Detailed capture binding is
+therefore unavailable in production.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
