@@ -65,11 +65,12 @@ final class WorkoutSessionCoordinator: ObservableObject {
     init(
         watch: any WorkoutWatchRecording,
         watchAvailability: any WorkoutRecordingWatchAvailability,
-        persistence: any WorkoutRecordingPersisting = WorkoutRecordingStore(),
+        persistence: (any WorkoutRecordingPersisting)? = nil,
         phone: (any PhoneWorkoutRecording)? = nil
     ) {
         self.watch = watch
         self.watchAvailability = watchAvailability
+        let persistence = persistence ?? WorkoutRecordingStore()
         self.persistence = persistence
         self.phone = phone
         phoneSupported = phone != nil
@@ -80,6 +81,11 @@ final class WorkoutSessionCoordinator: ObservableObject {
                 message: "Bicino cannot read the recording owner. Unlock iPhone and retry recovery before starting a workout.")
         }
         store.recordingOwner = record?.owner ?? .watch
+        installObservers()
+    }
+
+    /// Register callbacks only after every stored property has been initialized.
+    private func installObservers() {
         watch.store.$presentation.sink { [weak self] presentation in
             self?.receiveWatch(presentation)
         }.store(in: &subscriptions)
