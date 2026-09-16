@@ -14,9 +14,11 @@ final class PhoneWatchConnectivityCoordinator: ObservableObject {
     @Published var state = State()
     var onRouteAcknowledgement: ((WatchRouteSyncMessageV1) -> Void)?
     var acceptsDeletion = true
+    var cancelledTransferCount = 1
     private(set) var sideEffects = 0
     private(set) var transferredRouteIDs: [UUID] = []
     private(set) var immediateRouteIDs: [UUID] = []
+    private(set) var cancelledRouteIdentities: [WatchRouteIdentityV1] = []
     func transferRoute(_ record: InstalledNavigationRouteV1) -> UUID? {
         sideEffects += 1
         transferredRouteIDs.append(record.archive.routeID)
@@ -28,7 +30,8 @@ final class PhoneWatchConnectivityCoordinator: ObservableObject {
     }
     func cancelRouteTransfers(_ identity: WatchRouteIdentityV1) -> Int {
         sideEffects += 1
-        return 1
+        cancelledRouteIdentities.append(identity)
+        return cancelledTransferCount
     }
     func requestRouteDeletion(_ identity: WatchRouteIdentityV1) -> UUID? {
         sideEffects += 1
@@ -231,6 +234,7 @@ struct OfflineRouteSaveTests {
         try stravaRetention()
         try boundedArchiveReads()
         try automaticWatchTransfer()
+        try watchTransferExpiryRecovery()
         try pendingDeletionAdmission()
         try independentDeletionRetries()
         try offlineNavigationAndLateDirections()
@@ -776,6 +780,58 @@ struct OfflineRouteSaveTests {
         f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
             operation: .acknowledge, identity: identity, status: .deleted, errorCode: nil))
         check(restarted.routes.isEmpty && f.makeLibrary().routes.isEmpty, "Acknowledged deletion is durable")
+    }
+
+    static func watchTransferExpiryRecovery() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        let summary = try f.library.importGPX(
+            gpx(),
+            fileName: "Watch route.gpx"
+        )
+        let identity = WatchRouteIdentityV1(
+            archive: try f.library.offlineArchive(for: summary)
+        )
+        try f.library.sendToWatch(summary)
+        check(
+            f.library.watchSyncState[identity] == .transferring,
+            "A new Watch route attempt is queued"
+        )
+
+        f.now.addTimeInterval((7 * 24 * 60 * 60) - 1)
+        let beforeDeadline = f.makeLibrary()
+        check(
+            beforeDeadline.watchSyncState[identity] == .transferring,
+            "A pending Watch route remains queued until its full lifetime"
+        )
+
+        f.now.addTimeInterval(2)
+        beforeDeadline.reload()
+        check(
+            beforeDeadline.watchSyncState[identity] ==
+                .rejected("transfer_expired") &&
+                f.watch.cancelledRouteIdentities.last == identity,
+            "A week-old Watch route attempt is cancelled and exposes retry"
+        )
+
+        try beforeDeadline.sendToWatch(summary)
+        f.watch.cancelledTransferCount = 0
+        check(
+            beforeDeadline.cancelSendToWatch(summary) &&
+                beforeDeadline.watchSyncState[identity] ==
+                    .rejected("transfer_cancelled"),
+            "Cancel clears an orphaned attempt and exposes retry"
+        )
+
+        try beforeDeadline.sendToWatch(summary)
+        f.defaults.removeObject(
+            forKey: "watchRoutePendingInstallStartedAt.v1"
+        )
+        let migrated = f.makeLibrary()
+        check(
+            migrated.watchSyncState[identity] ==
+                .rejected("transfer_expired"),
+            "A legacy untimestamped queue is cleared into retry on upgrade"
+        )
     }
 
     static func independentDeletionRetries() throws {
