@@ -17,25 +17,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 2
-      - name: Verify and apply test-only patch
+      - name: Verify and apply recovery callback patch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           test "$GITHUB_REF" = refs/heads/feat/iphone-owned-workouts
-          test "$(git rev-parse HEAD^)" = e1d1c8befc8b630a59f921412116350c30ad4c58
+          test "$(git rev-parse HEAD^)" = 26359f1d466e2d03b54b86436693c085788fdedc
           python3 - <<'PY'
           import base64, hashlib, json, lzma, os, pathlib, subprocess, urllib.request
-          sha = '12fd4059209dc68c509b5af048302b6cc7ad295b'
+          sha = '9ee5fc17053134bb1da69a62c33200597a6c71b4'
           request = urllib.request.Request('https://api.github.com/repos/seichris/open-bike-computer/git/blobs/' + sha, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
           with urllib.request.urlopen(request, timeout=30) as response:
               content = base64.b64decode(json.load(response)['content'])
           assert hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest() == sha
           patch = lzma.decompress(base64.b64decode(content, validate=True))
-          assert hashlib.sha256(patch).hexdigest() == '45e82523c288d88e9570a236d38f4ce0bdb5fcb992a119d300667566ee86043d'
+          assert hashlib.sha256(patch).hexdigest() == '6bd58268ca64438593792169ad6337c3c563ba297231a3db53db54975b71cd99'
           path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'workout.patch'
           path.write_bytes(patch)
           for entry in subprocess.check_output(['git', 'apply', '--numstat', str(path)], text=True).splitlines():
-              assert entry.split('\t', 2)[2] == 'ios-app/BikeComputerTests/WorkoutSessionCoordinatorTests.swift'
+              assert entry.split('\t', 2)[2] in ['ios-app/BikeComputer/BikeComputer/BikeComputerApp.swift', 'docs/iphone-owned-workouts.md']
           subprocess.run(['git', 'apply', '--check', str(path)], check=True)
           subprocess.run(['git', 'apply', '--index', str(path)], check=True)
           PY
@@ -45,7 +45,7 @@ jobs:
           git diff --cached --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'test: use chronological Watch sessions and assert fixture admission'
+          git commit -m 'fix: coalesce workout recovery through supported process and scene callbacks'
           git push origin HEAD:refs/heads/feat/iphone-owned-workouts
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   tests:
@@ -59,3 +59,26 @@ jobs:
           persist-credentials: false
       - name: Ownership, coordinator and existing workout contracts
         run: ios-app/scripts/run-workout-contract-tests.sh
+  build:
+    needs: publish
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.publish.outputs.commit }}
+          persist-credentials: false
+      - name: Build iPhone, Watch and extensions
+        working-directory: ios-app
+        run: |
+          ./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/workout-build" CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/workout-build.log" 2>&1 || {
+            grep -B2 -A4 -E 'error:|BUILD FAILED' "$RUNNER_TEMP/workout-build.log" | cut -c1-700 || true
+            exit 1
+          }
+          tail -20 "$RUNNER_TEMP/workout-build.log"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: workout-native-build-log
+          path: ${{ runner.temp }}/workout-build.log
+          retention-days: 1
