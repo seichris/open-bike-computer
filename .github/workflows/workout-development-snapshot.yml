@@ -1,0 +1,26 @@
+name: Workout development snapshot
+on:
+  push:
+    branches: [feat/iphone-owned-workouts]
+    paths: [.github/workflows/workout-development-snapshot.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Archive tracked implementation sources
+        run: |
+          git archive --format=tar.gz -o "$RUNNER_TEMP/workout-source.tar.gz" HEAD ios-app .github AGENTS.md docs protocol tools/generate_ride_ble_contract.py
+          git rev-parse HEAD > "$RUNNER_TEMP/workout-source-sha.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: workout-development-source
+          path: |
+            ${{ runner.temp }}/workout-source.tar.gz
+            ${{ runner.temp }}/workout-source-sha.txt
+          retention-days: 1
