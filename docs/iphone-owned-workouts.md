@@ -86,8 +86,8 @@ access) does not prove that the save never happened and leaves the ride unresolv
 
 ## Recovery
 
-Cold launch and UIKit's active-workout recovery connection option go through one
-coalesced recovery operation. Native primary sessions must match the phone-owner
+Cold launch and UIKit scene connections go through one coalesced recovery
+operation; no recovery-only scene option or private selector is required. Native primary sessions must match the phone-owner
 metadata and persisted identity. Native mirrored sessions are delivered to the
 original mirror manager. A recovered phone session uses the same associated
 builder, reinstalls its data source/delegates, restores segments, and continues

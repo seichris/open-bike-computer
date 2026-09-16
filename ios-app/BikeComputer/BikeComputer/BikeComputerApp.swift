@@ -330,7 +330,10 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         configurationForConnecting connectingSceneSession: UISceneSession,
         options: UIScene.ConnectionOptions
     ) -> UISceneConfiguration {
-        if #available(iOS 26.0, *), options.shouldHandleActiveWorkoutRecovery {
+        // Recovery is also started at process launch. Coalesce each scene
+        // connection with it instead of depending on a recovery-only UIKit
+        // option absent from some supported SDKs. Never create a new workout.
+        if #available(iOS 26.0, *) {
             workoutSessionCoordinator.retryRecovery()
         }
         return connectingSceneSession.configuration
