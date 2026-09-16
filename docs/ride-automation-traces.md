@@ -1,8 +1,10 @@
 # Ride automation trace format
 
 Ride automation profile changes must be supported by replayable evidence.
-Production firmware remains feature-off. Internal development profiles retain
-shadow traces and may exercise the gated end-to-end control path.
+Production profiles now include the bounded end-to-end RAUT control path;
+internal development profiles retain the same path plus USB/diagnostic
+instrumentation. Physical qualification remains a separate requirement from
+source/build evidence.
 
 ## Privacy and schema
 
@@ -71,7 +73,8 @@ Watch stop and two-second Watch resume without wheel, cadence, power, or IMU.
 
 ## Physical trace gate
 
-Before profile 4 can control a ride in production, collect and label traces for:
+Before treating profile 4 as fully qualified for production, collect and label
+traces for:
 
 - genuine starts with no cycling sensor, cadence, wheel speed, and both;
 - short stops and traffic lights of 10, 30, 90, and 180 seconds;
@@ -82,6 +85,8 @@ Before profile 4 can control a ride in production, collect and label traces for:
 
 For each trace, retain only the normalized evidence above and record false
 starts, false pauses, missed transitions, start latency, pause latency, and
-resume latency. Production firmware must keep the capability and control path
-absent until the physical validation and resource-impact gates in the
-implementation plan pass on both supported Waveshare boards.
+resume latency. The production control capability is now enabled by an explicit
+rollout, but the normalized trace producer remains development-only so the
+production image fits its dual-OTA layout. The physical validation and
+resource-impact gates in the implementation plan still need to pass on both
+supported Waveshare boards.

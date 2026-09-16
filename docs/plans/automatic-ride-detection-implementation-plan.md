@@ -860,8 +860,11 @@ The feature is complete only when all gates pass:
 10. **Privacy**: no raw health, route, or continuous IMU data is uploaded or
     included in ordinary production diagnostics.
 
-Green CI alone is not sufficient. Automatic behavior must remain feature-gated
-until the trace replay and physical-device gates pass.
+Green CI alone is not sufficient. An explicit production rollout now enables
+Ask-to-Start plus automatic pause/resume before these qualification gates are
+complete; automatic start remains separately compile-gated. Treat the trace
+replay and physical-device matrix as outstanding release evidence, not as
+completed by the rollout.
 
 ## Non-goals
 
