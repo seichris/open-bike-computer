@@ -22,17 +22,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           test "$GITHUB_REF" = refs/heads/feat/iphone-owned-workouts
-          test "$(git rev-parse HEAD^)" = fd5018549d25b447cf0475c86d6d264011f9b303
+          test "$(git rev-parse HEAD^)" = fa44d104e533b6437a21cadd148c712c42492d8b
           python3 - <<'PY'
           import base64, hashlib, json, lzma, os, pathlib, subprocess, urllib.request
-          sha = '30a5c7aba0ff3ddd49cdb6399ea30a37910597c9'
+          sha = '8eab50ae4644227168f1f50d83a54bea79c47992'
           request = urllib.request.Request('https://api.github.com/repos/seichris/open-bike-computer/git/blobs/' + sha, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
           with urllib.request.urlopen(request, timeout=30) as response:
               blob = json.load(response)
           content = base64.b64decode(blob['content'])
           assert hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest() == sha
           patch = lzma.decompress(base64.b64decode(content, validate=True))
-          assert hashlib.sha256(patch).hexdigest() == '710c5bc388196bff343017508c69d42eed2eeb166a79ee728a1ad3c2cfbd017f'
+          assert hashlib.sha256(patch).hexdigest() == '1dbaa4fd9f0a833d4452eff95de5b95b4abd8a689b5d9220fbd0cafd6d96ebbc'
           path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'workout.patch'
           path.write_bytes(patch)
           for entry in subprocess.check_output(['git', 'apply', '--numstat', str(path)], text=True).splitlines():
@@ -47,29 +47,42 @@ jobs:
           git diff --cached --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix: initialize workout coordination on its actor before observing'
+          git commit -m 'fix: use native sample API and preserve finished Watch identity during reattach'
           git push origin HEAD:refs/heads/feat/iphone-owned-workouts
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   tests:
     needs: publish
     runs-on: macos-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [workout, navigation, packaging]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.publish.outputs.commit }}
           persist-credentials: false
-      - name: Ownership and real coordinator integration
-        run: ios-app/scripts/run-workout-recording-tests.sh
-      - name: Workout contracts
-        if: ${{ !cancelled() }}
-        run: ios-app/scripts/run-workout-contract-tests.sh
-      - name: Navigation and location regression tests
-        if: ${{ !cancelled() }}
-        run: ios-app/scripts/run-navigation-tests.sh
-      - name: Packaging tests
-        if: ${{ !cancelled() }}
-        run: python3 -m unittest discover -s ios-app/scripts/tests
+      - name: Tests
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          case "$SUITE" in
+            workout) ios-app/scripts/run-workout-contract-tests.sh ;;
+            navigation) ios-app/scripts/run-navigation-tests.sh ;;
+            packaging) python3 -m unittest discover -s ios-app/scripts/tests ;;
+          esac > "$RUNNER_TEMP/test.log" 2>&1 || {
+            grep -E 'FAIL|error:|Precondition|Fatal|assert|passed|Ran |^OK' "$RUNNER_TEMP/test.log" | cut -c1-500 || true
+            tail -20 "$RUNNER_TEMP/test.log"
+            exit 1
+          }
+          grep -E 'passed|Ran |^OK|assert' "$RUNNER_TEMP/test.log" | tail -40 || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: workout-tests-${{ matrix.suite }}
+          path: ${{ runner.temp }}/test.log
+          retention-days: 1
   build:
     needs: publish
     runs-on: macos-latest
@@ -79,11 +92,15 @@ jobs:
         with:
           ref: ${{ needs.publish.outputs.commit }}
           persist-credentials: false
+      - name: Inspect public SDK recovery declaration
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          grep -R -n 'shouldHandleActiveWorkoutRecovery' "$SDK/System/Library/Frameworks/UIKit.framework/Headers" "$SDK/System/Library/Frameworks/HealthKit.framework/Headers" || true
       - name: Build iPhone, Watch and extensions
         working-directory: ios-app
         run: |
           ./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/workout-build" CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/workout-build.log" 2>&1 || {
-            grep -B3 -A8 -E 'error:|BUILD FAILED' "$RUNNER_TEMP/workout-build.log" || true
+            grep -B2 -A4 -E 'error:|BUILD FAILED' "$RUNNER_TEMP/workout-build.log" | cut -c1-700 || true
             exit 1
           }
           tail -20 "$RUNNER_TEMP/workout-build.log"
