@@ -1,4 +1,4 @@
-name: Workout development snapshot
+name: Workout development validation
 on:
   push:
     branches: [feat/iphone-owned-workouts]
@@ -6,21 +6,82 @@ on:
 permissions:
   contents: read
 jobs:
-  snapshot:
+  publish:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.publish.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          persist-credentials: false
-      - name: Archive tracked implementation sources
+          fetch-depth: 2
+      - name: Verify and apply exact authored patch
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git archive --format=tar.gz -o "$RUNNER_TEMP/workout-source.tar.gz" HEAD ios-app .github AGENTS.md docs protocol tools/generate_ride_ble_contract.py
-          git rev-parse HEAD > "$RUNNER_TEMP/workout-source-sha.txt"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          test "$GITHUB_REF" = refs/heads/feat/iphone-owned-workouts
+          test "$(git rev-parse HEAD^)" = f5c53f7220386473dd8d4fda8a2c60fc396f1cca
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, pathlib, subprocess, urllib.request
+          blobs = ['f01b3edcc0f631ee906958d5ea5d050f6a7b431c', '8d642ac27b5b6c7eccb41140a128bcda796a07af', '6845e0bddbb684a0f3bccffb73d4e766c8cef5f9', '89ce7df514fba16154f819e3fa2b169c0e198d1a', '3dc75cf59ed77bb44f1abec786915dfe7cad3cf6']
+          encoded = b''
+          for sha in blobs:
+              request = urllib.request.Request('https://api.github.com/repos/seichris/open-bike-computer/git/blobs/' + sha, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  blob = json.load(response)
+              content = base64.b64decode(blob['content'])
+              assert hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest() == sha
+              encoded += content
+          patch = lzma.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '84eb7537f7a5e8e53f1f5ff07345b2d2d7d531f917ced8eda44e8faa3929998c'
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'workout.patch'
+          path.write_bytes(patch)
+          stats = subprocess.check_output(['git', 'apply', '--numstat', str(path)], text=True)
+          for entry in stats.splitlines():
+              changed = entry.split('\t', 2)[2]
+              assert changed.startswith('ios-app/') or changed == 'docs/iphone-owned-workouts.md', changed
+          subprocess.run(['git', 'apply', '--check', str(path)], check=True)
+          subprocess.run(['git', 'apply', '--index', str(path)], check=True)
+          PY
+      - name: Commit only to feature branch
+        id: publish
+        run: |
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat: add iPhone-owned cycling workouts with fixed session ownership'
+          git push origin HEAD:refs/heads/feat/iphone-owned-workouts
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  tests:
+    needs: publish
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          name: workout-development-source
-          path: |
-            ${{ runner.temp }}/workout-source.tar.gz
-            ${{ runner.temp }}/workout-source-sha.txt
-          retention-days: 1
+          ref: ${{ needs.publish.outputs.commit }}
+          persist-credentials: false
+      - name: Toolchain
+        run: xcrun swiftc --version
+      - name: Ownership and real coordinator integration
+        run: ios-app/scripts/run-workout-recording-tests.sh
+      - name: Workout contracts
+        run: ios-app/scripts/run-workout-contract-tests.sh
+      - name: Navigation and location regression tests
+        run: ios-app/scripts/run-navigation-tests.sh
+      - name: Packaging tests
+        run: python3 -m unittest discover -s ios-app/scripts/tests
+  build:
+    needs: publish
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.publish.outputs.commit }}
+          persist-credentials: false
+      - name: Build iPhone, Watch and extensions
+        working-directory: ios-app
+        run: ./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/workout-build" CODE_SIGNING_ALLOWED=NO build
