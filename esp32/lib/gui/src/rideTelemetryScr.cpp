@@ -56,9 +56,9 @@ int8_t displayedZoneIndex = -2;
 uint8_t displayedZoneCount = 0;
 MetricLabels rideBottomLeft{};
 MetricLabels rideBottomRight{};
+lv_obj_t *rideStartWorkoutHitTarget = nullptr;
 lv_obj_t *rideStartWorkoutButton = nullptr;
 lv_obj_t *rideStartWorkoutLabel = nullptr;
-lv_obj_t *rideDetectionWaitingMessage = nullptr;
 lv_obj_t *rideAutomationPanel = nullptr;
 lv_obj_t *rideAutomationTitle = nullptr;
 lv_obj_t *rideAutomationDetail = nullptr;
@@ -608,6 +608,24 @@ void startWorkoutEvent(lv_event_t *event) {
   }
 }
 
+void setStartWorkoutHidden(bool hidden) {
+  if (hidden) {
+    lv_obj_add_flag(rideStartWorkoutHitTarget, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_clear_flag(rideStartWorkoutHitTarget, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+void setStartWorkoutDisabled(bool disabled) {
+  if (disabled) {
+    lv_obj_add_state(rideStartWorkoutHitTarget, LV_STATE_DISABLED);
+    lv_obj_add_state(rideStartWorkoutButton, LV_STATE_DISABLED);
+  } else {
+    lv_obj_clear_state(rideStartWorkoutHitTarget, LV_STATE_DISABLED);
+    lv_obj_clear_state(rideStartWorkoutButton, LV_STATE_DISABLED);
+  }
+}
+
 void rideDetectedStartEvent(lv_event_t *event) {
   if (lv_event_get_code(event) != LV_EVENT_CLICKED)
     return;
@@ -816,7 +834,7 @@ void updateMetricLayout(const ride_telemetry_presenter::ViewModel &model) {
     displayedMetricLayout = -2;
     rideMetricPlacement = ride_telemetry_layout::makeMetricPlacement(
         rideLayout, ride_telemetry_layout::MetricLayoutMode::Workout);
-    lv_obj_add_flag(rideStartWorkoutButton, LV_OBJ_FLAG_HIDDEN);
+    setStartWorkoutHidden(true);
     return;
   }
   for (ConfigurableSlotView &slot : configurableSlots)
@@ -846,18 +864,20 @@ void updateMetricLayout(const ride_telemetry_presenter::ViewModel &model) {
   positionMetric(rideMoving, rideMetricPlacement.elapsed);
   positionMetric(rideBottomLeft, rideMetricPlacement.bottomLeft);
   positionMetric(rideBottomRight, rideMetricPlacement.bottomRight);
+  lv_obj_set_pos(rideStartWorkoutHitTarget,
+                 rideMetricPlacement.startWorkoutHitTarget.x,
+                 rideMetricPlacement.startWorkoutHitTarget.y);
+  lv_obj_set_size(rideStartWorkoutHitTarget,
+                  rideMetricPlacement.startWorkoutHitTarget.width,
+                  rideMetricPlacement.startWorkoutHitTarget.height);
   lv_obj_set_pos(rideStartWorkoutButton,
-                 rideMetricPlacement.startWorkoutButton.x,
-                 rideMetricPlacement.startWorkoutButton.y);
+                 rideMetricPlacement.startWorkoutButton.x -
+                     rideMetricPlacement.startWorkoutHitTarget.x,
+                 rideMetricPlacement.startWorkoutButton.y -
+                     rideMetricPlacement.startWorkoutHitTarget.y);
   lv_obj_set_size(rideStartWorkoutButton,
                   rideMetricPlacement.startWorkoutButton.width,
                   rideMetricPlacement.startWorkoutButton.height);
-  lv_obj_set_pos(rideDetectionWaitingMessage,
-                 rideMetricPlacement.rideDetectionMessage.x,
-                 rideMetricPlacement.rideDetectionMessage.y);
-  lv_obj_set_size(rideDetectionWaitingMessage,
-                  rideMetricPlacement.rideDetectionMessage.width,
-                  rideMetricPlacement.rideDetectionMessage.height);
 
   if (rideMetricPlacement.showWorkoutOnlyMetrics) {
     lv_obj_clear_flag(rideHeartRate.title, LV_OBJ_FLAG_HIDDEN);
@@ -867,7 +887,7 @@ void updateMetricLayout(const ride_telemetry_presenter::ViewModel &model) {
     lv_obj_clear_flag(rideBottomLeft.value, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(rideBottomRight.title, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(rideBottomRight.value, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(rideStartWorkoutButton, LV_OBJ_FLAG_HIDDEN);
+    setStartWorkoutHidden(true);
     return;
   }
 
@@ -887,7 +907,7 @@ void updateMetricLayout(const ride_telemetry_presenter::ViewModel &model) {
     lv_obj_add_flag(rideBottomRight.title, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(rideBottomRight.value, LV_OBJ_FLAG_HIDDEN);
   }
-  lv_obj_clear_flag(rideStartWorkoutButton, LV_OBJ_FLAG_HIDDEN);
+  setStartWorkoutHidden(false);
 }
 
 ride_telemetry_presenter::ViewModel currentViewModel() {
@@ -927,27 +947,6 @@ void updateStatusLabel(lv_obj_t *label,
     color = lv_color_hex(0x66CCFF);
   }
   lv_obj_set_style_text_color(label, color, 0);
-}
-
-void updateDetectionWaitingMessage(uint32_t nowMs) {
-  bool shouldShow = false;
-#if defined(RIDE_AUTOMATION_SHADOW)
-  const ride_automation_runtime::ConfigurationSnapshot configuration =
-      ride_automation_runtime::configurationSnapshot();
-  const ride_automation_runtime::UiSnapshot automation =
-      ride_automation_runtime::uiSnapshot(nowMs);
-  shouldShow = configuration.startMode != ride_automation::StartMode::Off &&
-               ride_automation_runtime::shouldShowDetectionWaitingMessage(
-                   automation.phase,
-                   rideMetricPlacement.showStartWorkoutButton);
-#else
-  (void)nowMs;
-#endif
-  if (shouldShow) {
-    lv_obj_clear_flag(rideDetectionWaitingMessage, LV_OBJ_FLAG_HIDDEN);
-  } else {
-    lv_obj_add_flag(rideDetectionWaitingMessage, LV_OBJ_FLAG_HIDDEN);
-  }
 }
 
 void updateBottomMetric(
@@ -1005,7 +1004,16 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   rideBottomRight =
       createMetric(ridePage, "Route left", rideLayout.metrics[5]);
 
-  rideStartWorkoutButton = lv_btn_create(ridePage);
+  rideStartWorkoutHitTarget = lv_obj_create(ridePage);
+  lv_obj_remove_style_all(rideStartWorkoutHitTarget);
+  // The visible button remains inset for the round display, while this
+  // transparent parent accepts less precisely calibrated physical taps.
+  lv_obj_add_flag(rideStartWorkoutHitTarget, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(rideStartWorkoutHitTarget, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_event_cb(rideStartWorkoutHitTarget, startWorkoutEvent,
+                      LV_EVENT_CLICKED, nullptr);
+
+  rideStartWorkoutButton = lv_btn_create(rideStartWorkoutHitTarget);
   lv_obj_set_style_radius(rideStartWorkoutButton, 16, 0);
   lv_obj_set_style_bg_color(rideStartWorkoutButton, lv_color_hex(0x66DD88), 0);
   lv_obj_set_style_bg_opa(rideStartWorkoutButton, LV_OPA_COVER, 0);
@@ -1019,6 +1027,7 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   lv_obj_set_flex_flow(rideStartWorkoutButton, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(rideStartWorkoutButton, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(rideStartWorkoutButton, LV_OBJ_FLAG_EVENT_BUBBLE);
   lv_obj_add_event_cb(rideStartWorkoutButton, startWorkoutEvent,
                       LV_EVENT_CLICKED, nullptr);
   bike_icon::create(
@@ -1036,21 +1045,6 @@ void rideTelemetryScr(_lv_obj_t *screen) {
   lv_obj_set_style_text_color(rideStartWorkoutLabel, lv_color_black(), 0);
   lv_label_set_text_static(rideStartWorkoutLabel, "Start Workout");
 
-  rideDetectionWaitingMessage = lv_label_create(ridePage);
-  lv_obj_set_style_text_font(
-      rideDetectionWaitingMessage,
-      useRoundStartWorkoutContent ? &lv_font_montserrat_24
-                                  : &lv_font_montserrat_18,
-      0);
-  lv_obj_set_style_text_color(rideDetectionWaitingMessage,
-                              lv_color_hex(0xBBBBBB), 0);
-  lv_obj_set_style_text_align(rideDetectionWaitingMessage,
-                              LV_TEXT_ALIGN_CENTER, 0);
-  lv_label_set_long_mode(rideDetectionWaitingMessage, LV_LABEL_LONG_WRAP);
-  lv_label_set_text_static(rideDetectionWaitingMessage,
-                           "Waiting for GPS + motion to auto-start ride");
-  lv_obj_add_flag(rideDetectionWaitingMessage, LV_OBJ_FLAG_HIDDEN);
-
   createAutomationPanel(ridePage);
 
   for (std::size_t index = 0; index < configurableSlots.size(); ++index)
@@ -1067,20 +1061,19 @@ void updateRideTelemetryEvent(lv_event_t *) {
     switch (bleNavServer.workoutStartRequestPresentation()) {
     case WorkoutStartRequestPresentation::StartOnIPhone:
       setLabelIfChanged(rideStartWorkoutLabel, "Start Workout");
-      lv_obj_clear_state(rideStartWorkoutButton, LV_STATE_DISABLED);
+      setStartWorkoutDisabled(false);
       break;
     case WorkoutStartRequestPresentation::StartOnAppleWatch:
       setLabelIfChanged(rideStartWorkoutLabel, "Start on Apple Watch");
-      lv_obj_add_state(rideStartWorkoutButton, LV_STATE_DISABLED);
+      setStartWorkoutDisabled(true);
       break;
     case WorkoutStartRequestPresentation::Unavailable:
       setLabelIfChanged(rideStartWorkoutLabel, "Start Workout");
-      lv_obj_add_state(rideStartWorkoutButton, LV_STATE_DISABLED);
+      setStartWorkoutDisabled(true);
       break;
     }
   }
   updateStatusLabel(rideStatus, model);
-  updateDetectionWaitingMessage(millis());
 
   if (model.usesWorkout && screen_configuration::isReady()) {
     updateConfigurableSlots(model);
