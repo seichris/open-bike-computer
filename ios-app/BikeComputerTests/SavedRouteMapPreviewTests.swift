@@ -8,7 +8,12 @@ import UIKit
 // preview factory, and MapView coordinator in this executable.
 @MainActor
 final class PhoneWatchConnectivityCoordinator: ObservableObject {
-    struct State { var isReachable = false }
+    struct State {
+        var isActivated = false
+        var isPaired = false
+        var isWatchAppInstalled = false
+        var isReachable = false
+    }
     @Published var state = State()
     var onRouteAcknowledgement: ((WatchRouteSyncMessageV1) -> Void)?
     private(set) var sideEffects = 0

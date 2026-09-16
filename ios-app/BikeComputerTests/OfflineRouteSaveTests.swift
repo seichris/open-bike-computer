@@ -5,17 +5,26 @@ import MapKit
 
 @MainActor
 final class PhoneWatchConnectivityCoordinator: ObservableObject {
-    struct State { var isReachable = false }
+    struct State {
+        var isActivated = false
+        var isPaired = false
+        var isWatchAppInstalled = false
+        var isReachable = false
+    }
     @Published var state = State()
     var onRouteAcknowledgement: ((WatchRouteSyncMessageV1) -> Void)?
     var acceptsDeletion = true
     private(set) var sideEffects = 0
+    private(set) var transferredRouteIDs: [UUID] = []
+    private(set) var immediateRouteIDs: [UUID] = []
     func transferRoute(_ record: InstalledNavigationRouteV1) -> UUID? {
         sideEffects += 1
+        transferredRouteIDs.append(record.archive.routeID)
         return UUID()
     }
     func sendRouteImmediately(_ record: InstalledNavigationRouteV1) {
         sideEffects += 1
+        immediateRouteIDs.append(record.archive.routeID)
     }
     func cancelRouteTransfers(_ identity: WatchRouteIdentityV1) -> Int {
         sideEffects += 1
@@ -221,6 +230,7 @@ struct OfflineRouteSaveTests {
         try corruptionDeletionAndReplacement()
         try stravaRetention()
         try boundedArchiveReads()
+        try automaticWatchTransfer()
         try pendingDeletionAdmission()
         try independentDeletionRetries()
         try offlineNavigationAndLateDirections()
@@ -619,6 +629,96 @@ struct OfflineRouteSaveTests {
         check(f.makeLibrary().offlineNavigationRoutes.isEmpty, "Rejected archive shapes stay unavailable after restart")
     }
 
+    static func automaticWatchTransfer() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        f.watch.state = .init(
+            isActivated: true,
+            isPaired: true,
+            isWatchAppInstalled: true,
+            isReachable: false
+        )
+
+        let first = try f.library.saveOffline(
+            draft(f),
+            name: "Automatic transfer"
+        ).summary
+        let firstIdentity = WatchRouteIdentityV1(
+            archive: try f.library.offlineArchive(for: first)
+        )
+        check(
+            f.watch.transferredRouteIDs == [first.id] &&
+                f.watch.immediateRouteIDs == [first.id] &&
+                f.library.watchSyncState[firstIdentity] == .transferring,
+            "A Watch-supported offline route is queued automatically"
+        )
+        f.library.reload()
+        check(
+            f.watch.transferredRouteIDs == [first.id],
+            "Reload does not duplicate a pending automatic Watch transfer"
+        )
+        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+            operation: .acknowledge,
+            identity: firstIdentity,
+            status: .ready,
+            errorCode: nil
+        ))
+        f.library.reload()
+        check(
+            f.watch.transferredRouteIDs == [first.id] &&
+                f.library.watchSyncState[firstIdentity] == .ready,
+            "A ready Watch receipt prevents automatic retransmission"
+        )
+
+        let second = try f.library.saveOffline(
+            draft(f, offset: 0.02),
+            name: "Rejected transfer"
+        ).summary
+        let secondIdentity = WatchRouteIdentityV1(
+            archive: try f.library.offlineArchive(for: second)
+        )
+        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+            operation: .acknowledge,
+            identity: secondIdentity,
+            status: .rejected,
+            errorCode: "watch_storage_full"
+        ))
+        f.library.reload()
+        check(
+            f.watch.transferredRouteIDs == [first.id, second.id] &&
+                f.library.watchSyncState[secondIdentity] ==
+                    .rejected("watch_storage_full"),
+            "A rejected automatic transfer stays failed until explicit retry"
+        )
+        let restarted = f.makeLibrary()
+        check(
+            f.watch.transferredRouteIDs == [first.id, second.id] &&
+                restarted.watchSyncState[secondIdentity] ==
+                    .rejected("watch_storage_full"),
+            "A failed automatic transfer remains retryable after restart"
+        )
+        try restarted.sendToWatch(second)
+        check(
+            f.watch.transferredRouteIDs == [first.id, second.id, second.id] &&
+                restarted.watchSyncState[secondIdentity] == .transferring,
+            "The failed-transfer action retries the exact route"
+        )
+        f.defaults.removeObject(forKey: "watchRouteAttemptedInstalls.v1")
+        let migrated = f.makeLibrary()
+        check(
+            f.watch.transferredRouteIDs == [first.id, second.id, second.id] &&
+                migrated.watchSyncState[secondIdentity] == .transferring,
+            "A legacy pending transfer is adopted without duplicate queuing"
+        )
+        f.defaults.set([], forKey: "watchRoutePendingInstalls.v1")
+        let expired = f.makeLibrary()
+        check(
+            f.watch.transferredRouteIDs == [first.id, second.id, second.id] &&
+                expired.watchSyncState[secondIdentity] ==
+                    .rejected("transfer_expired"),
+            "An expired pending attempt becomes failed instead of auto-queuing forever"
+        )
+    }
+
     static func pendingDeletionAdmission() throws {
         let f = Fixture(); defer { f.cleanup() }
         let saved = try f.library.saveOffline(draft(f), name: "Pending deletion")
@@ -738,6 +838,11 @@ struct OfflineRouteSaveTests {
             !section.contains("Available offline") &&
             !section.contains("Apple Maps · Saved on this iPhone"),
             "Saved routes merge favorite stars and online saving without obsolete row copy")
+        check(section.contains("Watch-supported routes are queued automatically") &&
+            section.contains("retrySendButton(route") &&
+            !section.contains("arrow.up.circle") &&
+            !section.contains("cancelSendButton("),
+            "Watch-supported routes auto-queue with only failed-transfer retry UI")
         check(content.contains("if routePlanningPurpose == .navigate") &&
             content.contains("if routePlanningPurpose == .saveOffline") &&
             !content.contains("Save this route to follow it later") &&

@@ -12239,7 +12239,7 @@ struct NavigationProtocolTests {
         assert(
             source.contains("Text(\"Saved Routes\")") &&
                 source.contains(
-                    "Choose an online route to save, preview saved routes, or send supported routes to Apple Watch."
+                    "Choose an online route to save or preview a saved route. Watch-supported routes are queued automatically."
                 ),
             "Saved Routes uses the requested title and explanatory copy"
         )
@@ -12251,6 +12251,12 @@ struct NavigationProtocolTests {
                 !source.contains("Available offline") &&
                 !source.contains("Apple Maps · Saved on this iPhone"),
             "Saved Routes merges favorite state and removes obsolete route labels"
+        )
+        assert(
+            source.contains("retrySendButton(route") &&
+                !source.contains("arrow.up.circle") &&
+                !source.contains("cancelSendButton("),
+            "Saved Routes auto-queues Watch routes and only exposes failed-transfer retry"
         )
         assert(
             source.contains("TextField(\n                \"Route name\"") &&

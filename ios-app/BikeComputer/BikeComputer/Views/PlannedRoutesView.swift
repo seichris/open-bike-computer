@@ -84,7 +84,7 @@ struct SavedRoutesSettingsSection: View {
         } header: {
             Text("Saved Routes")
         } footer: {
-            Text("Choose an online route to save, preview saved routes, or send supported routes to Apple Watch.")
+            Text("Choose an online route to save or preview a saved route. Watch-supported routes are queued automatically.")
         }
         .alert(
             "Saved Route Error",
@@ -289,8 +289,7 @@ struct SavedRoutesSettingsSection: View {
         route: PlannedRouteSummaryV1,
         displayName: String
     ) -> some View {
-        // This is a local read, independent of Watch transfer state. Keep it
-        // beside the Watch upload action so each route's controls stay together.
+        // This is a local read, independent of Watch transfer state.
         Button {
             finishRenaming()
             focusedRouteID = nil
@@ -470,34 +469,22 @@ struct SavedRoutesSettingsSection: View {
                 .frame(width: 32, height: 32)
                 .accessibilityLabel("\(displayName) is saved on Apple Watch")
         case .transferring:
-            cancelSendButton(route, displayName: displayName)
+            EmptyView()
         case .deleting:
             ProgressView()
                 .controlSize(.small)
                 .frame(width: 32, height: 32)
                 .accessibilityLabel("Deleting \(displayName) from Apple Watch")
         case .localOnly:
-            sendButton(
-                route,
-                displayName: displayName,
-                systemImage: "arrow.up.circle",
-                color: .primary
-            )
+            EmptyView()
         case .rejected:
-            sendButton(
-                route,
-                displayName: displayName,
-                systemImage: "arrow.clockwise.circle",
-                color: .red
-            )
+            retrySendButton(route, displayName: displayName)
         }
     }
 
-    private func sendButton(
+    private func retrySendButton(
         _ route: PlannedRouteSummaryV1,
-        displayName: String,
-        systemImage: String,
-        color: Color
+        displayName: String
     ) -> some View {
         Button {
             finishRenaming()
@@ -508,32 +495,12 @@ struct SavedRoutesSettingsSection: View {
                 errorMessage = error.localizedDescription
             }
         } label: {
-            Image(systemName: systemImage)
-                .foregroundStyle(color)
+            Image(systemName: "arrow.clockwise.circle")
+                .foregroundStyle(.red)
                 .frame(width: 32, height: 32)
         }
         .buttonStyle(.borderless)
-        .accessibilityLabel("Send \(displayName) to Apple Watch")
-    }
-
-    private func cancelSendButton(
-        _ route: PlannedRouteSummaryV1,
-        displayName: String
-    ) -> some View {
-        Button(role: .destructive) {
-            finishRenaming()
-            focusedRouteID = nil
-            if !routeLibrary.cancelSendToWatch(route) {
-                errorMessage =
-                    "The queued Watch transfer is no longer cancellable. " +
-                    "Keep the iPhone and Watch nearby so its final status can arrive."
-            }
-        } label: {
-            Image(systemName: "xmark.circle")
-                .frame(width: 32, height: 32)
-        }
-        .buttonStyle(.borderless)
-        .accessibilityLabel("Cancel sending \(displayName) to Apple Watch")
+        .accessibilityLabel("Retry sending \(displayName) to Apple Watch")
     }
 
     private func transientStatus(
