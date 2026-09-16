@@ -233,6 +233,7 @@ struct SettingsView: View {
                             cyclingSensorStore: cyclingSensorStore,
                             cyclingSensorDetectionCoordinator:
                                 cyclingSensorDetectionCoordinator,
+                            rideDiagnosticsRecorder: rideDiagnosticsRecorder,
                             currentLocation: currentLocation,
                             isNavigationActive: isNavigationActive,
                             onStartTestNavigation: { destination in
@@ -242,14 +243,6 @@ struct SettingsView: View {
                         )
                     } label: {
                         Label("Developer Settings", systemImage: "wrench.and.screwdriver")
-                    }
-
-                    NavigationLink {
-                        RideDiagnosticsSettingsView(
-                            recorder: rideDiagnosticsRecorder
-                        )
-                    } label: {
-                        Label("Diagnostics", systemImage: "stethoscope")
                     }
                 }
 
@@ -3549,17 +3542,13 @@ private struct DeveloperSettingsView: View {
     @ObservedObject var cyclingSensorStore: CyclingSensorStore
     @ObservedObject var cyclingSensorDetectionCoordinator:
         CyclingSensorDetectionCoordinator
+    @ObservedObject var rideDiagnosticsRecorder: RideDiagnosticsRecorder
     let currentLocation: CLLocation?
     let isNavigationActive: Bool
     let onStartTestNavigation: (String) -> Void
 
     var body: some View {
         Form {
-            connectionSummary
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 8, trailing: 20))
-
             Section(header: Text("Map Server")) {
                 SettingsValueRow(title: "Service", value: offlineMapManager.serverURLString)
                 Button(action: useProductionMapServer) {
@@ -3571,6 +3560,32 @@ private struct DeveloperSettingsView: View {
                 }
 #endif
             }
+
+            Section {
+                NavigationLink {
+                    RideDiagnosticsSettingsView(
+                        recorder: rideDiagnosticsRecorder
+                    )
+                } label: {
+                    Label("Diagnostics", systemImage: "stethoscope")
+                }
+            }
+
+#if DEBUG
+            RemoteDeviceDebugSettingsSection()
+            RendererBenchmarkReplaySettingsSection(
+                isNavigationActive: isNavigationActive
+            )
+#endif
+            TestNavigationSettingsSection(
+                currentLocation: currentLocation,
+                onStartNavigation: onStartTestNavigation
+            )
+
+            connectionSummary
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 8, trailing: 20))
 
             Section {
                 NavigationLink {
@@ -3622,16 +3637,6 @@ private struct DeveloperSettingsView: View {
             OfflineMapDeviceTransferSettingsSection(manager: offlineMapManager)
             FirmwareUpdateSettingsSection(manager: firmwareUpdateManager)
             DiagnosticsTransferNetworkSettingsSection()
-#if DEBUG
-            RemoteDeviceDebugSettingsSection()
-            RendererBenchmarkReplaySettingsSection(
-                isNavigationActive: isNavigationActive
-            )
-#endif
-            TestNavigationSettingsSection(
-                currentLocation: currentLocation,
-                onStartNavigation: onStartTestNavigation
-            )
 
             Section {
                 HStack {
