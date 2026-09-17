@@ -569,6 +569,13 @@ enum BikeComputerSettingsPresentationPolicy {
         knownDeviceCount > 0
     }
 
+    static func shouldShowSensorManagement(
+        hasEverConnectedBikeComputer: Bool,
+        sensorProfileCount: Int
+    ) -> Bool {
+        hasEverConnectedBikeComputer || sensorProfileCount > 0
+    }
+
     static func title(
         knownDeviceCount: Int,
         isExplicitBikeComputerSetup: Bool
@@ -1234,6 +1241,8 @@ final class BikeComputerDeviceRegistry {
     private enum Keys {
         static let devices = "ble.knownDevices.v2"
         static let activeDeviceID = "ble.activeDeviceID.v2"
+        static let hasEverConnectedBikeComputer =
+            "ble.hasEverConnectedBikeComputer.v1"
         static func provisionalConfirmed(deviceID: String) -> String {
             "ble.provisionalOwnerConfirmed.\(deviceID)"
         }
@@ -1260,6 +1269,9 @@ final class BikeComputerDeviceRegistry {
 #else
         self.credentialStore = credentialStore ?? KeychainDeviceCredentialStore()
 #endif
+        if !devices.isEmpty {
+            defaults.set(true, forKey: Keys.hasEverConnectedBikeComputer)
+        }
     }
 
     var devices: [KnownBikeComputerDevice] {
@@ -1285,6 +1297,10 @@ final class BikeComputerDeviceRegistry {
                 defaults.removeObject(forKey: Keys.activeDeviceID)
             }
         }
+    }
+
+    var hasEverConnectedBikeComputer: Bool {
+        defaults.bool(forKey: Keys.hasEverConnectedBikeComputer)
     }
 
     func installationOwnerID() -> Data? {
@@ -1407,6 +1423,7 @@ final class BikeComputerDeviceRegistry {
         }
         current.append(device)
         devices = current
+        defaults.set(true, forKey: Keys.hasEverConnectedBikeComputer)
         if makeActive || activeDeviceID == nil || replacedActiveAlias ||
             !current.contains(where: { $0.deviceID == activeDeviceID }) {
             activeDeviceID = device.deviceID

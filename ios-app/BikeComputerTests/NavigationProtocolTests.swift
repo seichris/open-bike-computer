@@ -19293,6 +19293,27 @@ struct NavigationProtocolTests {
             "a registered bike computer keeps device screen settings"
         )
         assert(
+            !BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
+                hasEverConnectedBikeComputer: false,
+                sensorProfileCount: 0
+            ),
+            "first-time Bicino setup stays focused on connecting the device"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
+                hasEverConnectedBikeComputer: true,
+                sensorProfileCount: 0
+            ),
+            "sensor setup remains available after a Bicino was connected"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
+                hasEverConnectedBikeComputer: false,
+                sensorProfileCount: 1
+            ),
+            "an existing sensor profile preserves sensor management during migration"
+        )
+        assert(
             !BikeComputerSettingsPresentationPolicy.shouldStartDiscovery(
                 knownDeviceCount: 0,
                 isExplicitBikeComputerSetup: false,
@@ -19722,6 +19743,8 @@ struct NavigationProtocolTests {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let credentials = InMemoryDeviceCredentialStore()
         let registry = BikeComputerDeviceRegistry(defaults: defaults, credentialStore: credentials)
+        assert(!registry.hasEverConnectedBikeComputer,
+               "a fresh registry has not completed Bicino setup")
         let generatedOwnerID = registry.installationOwnerID()
         assertEqual(generatedOwnerID?.count, 16, "registry creates a 128-bit installation owner ID")
         assertEqual(registry.installationOwnerID(), generatedOwnerID, "installation owner ID is stable")
@@ -19751,6 +19774,8 @@ struct NavigationProtocolTests {
         registry.upsert(legacyAlias, makeActive: true)
         registry.upsert(first)
         registry.upsert(second)
+        assert(registry.hasEverConnectedBikeComputer,
+               "registering a Bicino records the durable setup milestone")
         assertEqual(registry.devices.count, 2, "registry supports multiple Bike Computers")
         assert(!registry.devices.contains(where: { $0.isLegacy && $0.peripheralIdentifier == peripheralID }),
                "a stable v2 identity replaces its legacy peripheral alias")
@@ -19791,6 +19816,37 @@ struct NavigationProtocolTests {
         assertEqual(registry.activeDeviceID, second.deviceID, "removing the current device selects the remaining device")
         assertEqual(registry.ownerKey(deviceID: first.deviceID), nil, "deregistering deletes the owner key")
         assertEqual(registry.ownerKey(deviceID: second.deviceID), secondKey, "deregistering one device preserves another device credential")
+        assert(registry.remove(deviceID: second.deviceID),
+               "the final registered device can be removed")
+        assert(registry.devices.isEmpty,
+               "removing the final device empties the current registry")
+        assert(registry.hasEverConnectedBikeComputer,
+               "removing every Bicino preserves the setup milestone")
+        let reloadedRegistry = BikeComputerDeviceRegistry(
+            defaults: defaults,
+            credentialStore: credentials
+        )
+        assert(reloadedRegistry.hasEverConnectedBikeComputer,
+               "the Bicino setup milestone survives registry reload")
+
+        let migrationSuiteName =
+            "DeviceOwnershipMilestoneMigrationTests.\(UUID().uuidString)"
+        let migrationDefaults = UserDefaults(suiteName: migrationSuiteName)!
+        defer {
+            migrationDefaults.removePersistentDomain(
+                forName: migrationSuiteName
+            )
+        }
+        migrationDefaults.set(
+            try! JSONEncoder().encode([first]),
+            forKey: "ble.knownDevices.v2"
+        )
+        let migratedRegistry = BikeComputerDeviceRegistry(
+            defaults: migrationDefaults,
+            credentialStore: InMemoryDeviceCredentialStore()
+        )
+        assert(migratedRegistry.hasEverConnectedBikeComputer,
+               "an existing registered Bicino migrates the setup milestone")
 
         let failureSuiteName = "DeviceOwnershipRemovalFailureTests.\(UUID().uuidString)"
         let failureDefaults = UserDefaults(suiteName: failureSuiteName)!

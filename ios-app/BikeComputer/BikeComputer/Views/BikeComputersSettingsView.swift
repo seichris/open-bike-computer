@@ -38,7 +38,9 @@ struct BikeComputersSettingsView: View {
     var body: some View {
         Form {
             bikeComputerSection
-            sensorProfilesSection
+            if shouldShowSensorManagement {
+                sensorProfilesSection
+            }
 
             if shouldShowExplicitDiscoveryState {
                 Section {
@@ -93,7 +95,9 @@ struct BikeComputersSettingsView: View {
                 }
             }
 
-            sensorConnectionSection
+            if shouldShowSensorManagement {
+                sensorConnectionSection
+            }
 
             if let error = bleManager.pairingError {
                 Section {
@@ -241,6 +245,14 @@ struct BikeComputersSettingsView: View {
             scanPurpose: bleManager.currentScanPurpose,
             isExplicitDiscoveryPending:
                 bleManager.isExplicitDiscoveryPending
+        )
+    }
+
+    private var shouldShowSensorManagement: Bool {
+        BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
+            hasEverConnectedBikeComputer:
+                bleManager.hasEverConnectedBikeComputer,
+            sensorProfileCount: sensorStore.profiles.count
         )
     }
 

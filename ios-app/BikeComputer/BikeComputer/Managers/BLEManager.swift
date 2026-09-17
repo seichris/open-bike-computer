@@ -1040,6 +1040,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var centralStateDescription: String = "unknown"
     @Published var trustedPeripheralDescription: String = "none"
     @Published private(set) var knownDevices: [KnownBikeComputerDevice] = []
+    @Published private(set) var hasEverConnectedBikeComputer = false
     @Published private(set) var discoveredDevices: [DiscoveredBikeComputerDevice] = []
     @Published private(set) var isDiscoveringDevices = false
     @Published private(set) var currentScanPurpose: BLEScanPurpose = .none
@@ -1987,6 +1988,8 @@ class BLEManager: NSObject, ObservableObject {
 
     private func refreshKnownDevices() {
         knownDevices = deviceRegistry.devices
+        hasEverConnectedBikeComputer =
+            deviceRegistry.hasEverConnectedBikeComputer
         observedIdentityMismatchDeviceIDs.formIntersection(
             Set(knownDevices.map(\.deviceID))
         )
